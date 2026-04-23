@@ -11,8 +11,10 @@ Primary files:
 - `otto/merge/state.py`
 - `otto/merge/orchestrator.py`
 - `otto/cli.py`
+- `otto/cli_improve.py`
 - `otto/cli_queue.py`
 - `otto/cli_merge.py`
+- `otto/config.py`
 - `otto/pipeline.py`
 - `otto/checkpoint.py`
 - `otto/manifest.py`
@@ -40,10 +42,12 @@ The converged decision between Codex and Claude is:
   TUI is the human operator interface. Both endure.
 The expensive part is not Textual. The expensive part is normalizing run state across
 queue, merge, and the atomic commands that currently expose only fragments through
-`summary.json`, `checkpoint.json`, `manifest.json`, queue state, and merge state. A
-credible D-v1 is a 6-8 week effort. If we also want deep spec review polish, more
-robust editor integration, and harder multi-process behavior, the realistic budget is
-8-10 weeks.
+`summary.json`, `checkpoint.json`, `manifest.json`, queue state, and merge state. In
+Otto's actual delivery model, that is not a multi-week human-engineer estimate; it is
+roughly `3-5` days of agent dispatch over `2-3` calendar days, with the critical path
+set by gate cycles, real-LLM validation, and reviewer attention rather than raw coding
+throughput. Today already demonstrated roughly `2-3` weeks of human-equivalent work in
+about 10 hours of agent dispatch.
 ## Why This Change Exists
 Otto already has one good operator substrate: queue. `otto/queue/schema.py` separates
 definitions, watcher-owned runtime state, and append-only commands. `otto/queue/runner.py`
@@ -104,7 +108,9 @@ The explicit v1 exclusions are:
 - Keep one canonical record per run even when a domain has richer private state.
 - Preserve domain-local authority. Queue, merge, and atomic commands do not need one
   monolithic writer; they do need one project-global registry that normalizes what they
-  publish.
+  publish for discovery. The registry is the canonical discovery surface, but repair
+  always flows from the domain authority back into the registry, never the other way
+  around.
 - Use append-only commands for cross-process mutations. The TUI should either shell the
   CLI or append a durable command record; it should never mutate runtime state in memory
   and hope the owning process notices.
@@ -142,14 +148,20 @@ otto_logs/
 │       ├── summary.json
 │       ├── checkpoint.json
 │       ├── manifest.json
-│       ├── commands.jsonl              # new: atomic-domain commands
+│       ├── commands/
+│       │   ├── requests.jsonl          # new: atomic-domain commands
+│       │   ├── requests.jsonl.processing
+│       │   └── acks.jsonl
 │       ├── build/
 │       ├── certify/
 │       ├── improve/
 │       └── spec/
 ├── merge/
 │   ├── merge.log
-│   ├── commands.jsonl                  # new: merge-domain commands
+│   ├── commands/
+│   │   ├── requests.jsonl              # new: merge-domain commands
+│   │   ├── requests.jsonl.processing
+│   │   └── acks.jsonl
 │   └── <merge_id>/
 │       └── state.json
 ├── queue/
@@ -180,10 +192,15 @@ def live_runs_dir(project_dir: Path) -> Path
 def live_run_path(project_dir: Path, run_id: str) -> Path
 def run_gc_dir(project_dir: Path) -> Path
 def run_gc_tombstones_jsonl(project_dir: Path) -> Path
-def session_commands(project_dir: Path, run_id: str) -> Path
-def merge_commands(project_dir: Path) -> Path
+def session_commands_dir(project_dir: Path, run_id: str) -> Path
+def session_command_requests(project_dir: Path, run_id: str) -> Path
+def session_command_acks(project_dir: Path, run_id: str) -> Path
+def merge_commands_dir(project_dir: Path) -> Path
+def merge_command_requests(project_dir: Path) -> Path
+def merge_command_acks(project_dir: Path) -> Path
 def queue_state_path(project_dir: Path) -> Path
 def queue_commands_path(project_dir: Path) -> Path
+def queue_command_acks_path(project_dir: Path) -> Path
 ```
 ### Canonical live schema
 The run record should be keyed by the operator's needs, not by one domain's internal
@@ -203,7 +220,9 @@ storage model. Recommended v1 schema:
   "writer": {
     "pid": 12345,
     "pgid": 12345,
-    "writer_id": "atomic:2026-04-22-184533-acde12"
+    "writer_id": "atomic:2026-04-22-184533-acde12",
+    "boot_id": "8f1f0b5c-...",
+    "process_start_time_ns": 1713811533000000000
   },
   "identity": {
     "queue_task_id": null,
@@ -221,7 +240,8 @@ storage model. Recommended v1 schema:
     "heartbeat_at": "2026-04-22T18:45:39Z",
     "finished_at": null,
     "duration_s": 6.2,
-    "heartbeat_interval_s": 2.0
+    "heartbeat_interval_s": 2.0,
+    "heartbeat_seq": 4
   },
   "git": {
     "branch": "build/add-csv-export-2026-04-22",
@@ -247,24 +267,21 @@ storage model. Recommended v1 schema:
     "stories_passed": null,
     "stories_tested": null
   },
-  "capabilities": {
-    "can_cancel": true,
-    "can_resume": true,
-    "can_retry": true,
-    "can_remove": false,
-    "can_cleanup": false,
-    "can_merge": false
-  },
+  "adapter_key": "atomic.build",
   "last_event": "writing checkout logic",
-  "last_applied_command_id": null
+  "version": 4
 }
 ```
 Why this shape:
 - `domain` tells us who owns mutation and heartbeat semantics.
 - `run_type` tells the UI how to label the row.
 - `identity` ties a normalized run back to queue or merge state.
-- `artifacts` give the Detail pane and editor hooks stable paths.
-- `capabilities` let the TUI stay dumb about action legality.
+- `artifacts` give adapters stable roots; they do not try to pre-render every domain's
+  detail panel inside the registry row.
+- `adapter_key` lets the viewer dispatch to per-domain adapters instead of turning the
+  universal model into a god-object.
+- command ack state is deliberately kept out of the live record; it belongs in the
+  command ack journal so replay stays durable and auditable.
 ### Standard status vocabulary
 The registry should map all domains onto one user-facing status set:
 - `queued`
@@ -293,6 +310,56 @@ Queue needs one extra rule: the queue task id is not the run id. A queue task sh
 get a new `run_id` each execution attempt while preserving the stable queue task id under
 `identity.queue_task_id`. Merge should use `merge_id` as `run_id` in v1 because that
 keeps the operator model simple.
+### Queue Attempt Identity
+Plan Gate note (1): this section replaces the prior "new run id per attempt" sentence
+with an explicit watcher-to-child handshake and crash repair contract.
+
+Queue attempts should use watcher-allocated `attempt_run_id`, not child-side allocation.
+That keeps queue attempt identity compatible with queue's single-writer model and avoids
+calling `paths.new_session_id()` from a queue child that does not hold the project lock.
+
+Allocation contract:
+1. The watcher allocates `attempt_run_id` before spawn via a new registry allocator such
+   as `otto/runs/registry.py::allocate_run_id(...)`.
+2. That allocator must not rely on `project_lock(...)`; it should reserve identity with
+   `O_CREAT|O_EXCL` or an equivalent tempdir reservation under
+   `otto_logs/cross-sessions/runs/live/`.
+3. The watcher writes the chosen `attempt_run_id` into queue state before spawn under the
+   task's current attempt record.
+4. During the rollout window, the watcher injects the id into the child via
+   `OTTO_RUN_ID=<attempt_run_id>` only. Environment propagation is the wire format because
+   it crosses version boundaries cleanly; older Click children that do not understand
+   `--run-id` simply ignore the env var and continue allocating their own session id.
+5. Once every atomic child binary supports an explicit `--run-id <attempt_run_id>` flag,
+   the watcher may pass that flag as a clarity/redundancy aid, but `OTTO_RUN_ID` remains
+   the compatibility contract between watcher and child.
+6. Atomic child commands that understand run-id injection should treat the supplied id,
+   whether sourced from `OTTO_RUN_ID` or a future `--run-id`, as authoritative and must
+   not allocate a replacement id when present.
+
+Propagation contract:
+- the queue watcher remains the sole writer of the queue live registry record
+- a child that understands `OTTO_RUN_ID` owns the session directory and writes
+  `summary.json`, `checkpoint.json`, and `manifest.json` using the injected
+  `attempt_run_id`
+- a pre-run-id child keeps current behavior, allocates its own session id, and exposes
+  that actual child id through its normal artifacts
+- the watcher mirrors child progress into the queue-owned live record keyed by the
+  watcher's `attempt_run_id`; if the child allocated a different id, the run record must
+  preserve both the watcher-expected id and the child-actual id and surface a
+  `child predates run-id` warning in detail/status
+
+Crash reconciliation:
+- if the watcher allocates an id but crashes before spawn, the reserved id is left
+  `unclaimed`; a later watcher startup may either reuse the same queued task with a fresh
+  attempt id or GC the abandoned reservation after no child/session artifacts appear
+- if the child starts and writes artifacts but the watcher crashes before mirroring, the
+  restarted watcher adopts the recorded `attempt_run_id` from queue state and rebuilds the
+  queue live record from queue state + child artifacts
+- if queue state says an attempt is running but the child never wrote artifacts and no
+  matching process identity exists, startup repair marks that attempt interrupted per the
+  watcher's existing restart policy and appends history only if a terminal outcome can be
+  proven
 ### Atomicity guarantees
 The registry must preserve queue's current correctness bar:
 - readers see old or new contents, never partial writes
@@ -301,7 +368,7 @@ Concretely:
 - each live record is owned by exactly one writer process
 - live record updates use tempfile + `os.replace(...)`
 - command logs use append + `flock(LOCK_EX)` + `fsync`
-- history appends use the existing append-only helper style
+- history appends use a dedicated durability primitive, not `append_text_log(...)`
 - readers never take write locks
 This is enough for a daemonless v1.
 ### GC policy
@@ -336,6 +403,49 @@ All command files should use the same envelope:
 ```
 Writers should treat `command_id` as an idempotency key. Duplicate command rows are fine.
 Invalid commands should be ignored and logged, not treated as fatal runtime corruption.
+### Durable command protocol
+Plan Gate note (3): this section adds the missing read/apply/ack/replay contract and
+spells out how pending vs lost commands are distinguished after crashes.
+
+Every domain should implement the same durable command lifecycle:
+1. A client appends one envelope to the domain's request log.
+2. The owning writer drains requests by renaming the active request log to
+   `.processing`, then reading from `.processing`.
+3. The writer applies each unacked command idempotently.
+4. The writer durably persists the resulting state mutation first.
+5. Only after the mutation is durable does the writer append an ack row.
+6. The writer may then unlink or compact `.processing`.
+
+Required file layout:
+- queue: keep `.otto-queue-commands.jsonl`, add `.otto-queue-commands.jsonl.processing`,
+  and add `.otto-queue-commands.acks.jsonl`
+- atomic: `otto_logs/sessions/<run_id>/commands/requests.jsonl`,
+  `requests.jsonl.processing`, and `acks.jsonl`
+- merge: `otto_logs/merge/commands/requests.jsonl`, `requests.jsonl.processing`, and
+  `acks.jsonl`
+
+Ack row shape:
+```json
+{
+  "schema_version": 1,
+  "command_id": "cmd-2026-04-22T18:45:39Z-12345-1",
+  "run_id": "2026-04-22-184533-acde12",
+  "acked_at": "2026-04-22T18:45:40Z",
+  "writer_id": "atomic:2026-04-22-184533-acde12",
+  "outcome": "applied",
+  "state_version": 12,
+  "note": null
+}
+```
+
+Replay contract:
+- startup must first drain any leftover `.processing` file before reading new requests
+- startup must load `acks.jsonl` into an in-memory set of acked `command_id`s
+- any command present in `requests.jsonl` or `.processing` without an ack must be replayed
+- replay must be idempotent on `command_id`, so a crash after state mutation but before
+  ack append is safe
+- the TUI should render `pending` when a request row exists without an ack and the writer
+  is still live, and `unacked` when the writer is gone so recovery is operator-visible
 ### Queue domain
 Writer identity:
 - `otto/queue/runner.py` remains the sole writer of `.otto-queue-state.json`
@@ -343,6 +453,7 @@ Writer identity:
 Command file:
 - keep `.otto-queue-commands.jsonl` in v1
 - name it in `otto/paths.py`
+- add a sibling ack journal and preserve queue's existing rename-to-`.processing` drain
 Conflict handling:
 - `cancel`, `remove`, and `resume` remain idempotent
 - invalid commands are ignored with a warning
@@ -351,12 +462,13 @@ Registry mapping:
 - each queue attempt publishes one live run record
 - the record stores both `queue_task_id` and the per-attempt `run_id`
 - retries or resumes create new run ids while preserving queue task identity
+- queue startup repair replays every unacked command before spawning new work
 ### Merge domain
 Writer identity:
 - the process inside `merge_lock(project_dir)` is the sole writer
 - it owns both `otto_logs/merge/<merge-id>/state.json` and the merge run record
 Command file:
-- add `otto_logs/merge/commands.jsonl`
+- add `otto_logs/merge/commands/requests.jsonl` plus `acks.jsonl`
 Supported in-process v1 commands:
 - `cancel`
 Explicitly unsupported in-process v1 merge commands:
@@ -370,7 +482,7 @@ Writer identity:
 - it already owns the session directory
 - it already has natural heartbeat points in the agent loop and checkpoint writes
 Command file:
-- add `otto_logs/sessions/<run_id>/commands.jsonl`
+- add `otto_logs/sessions/<run_id>/commands/requests.jsonl` plus `acks.jsonl`
 Supported in-process v1 commands:
 - `cancel`
 Actions that remain shell-to-CLI rather than in-process mutations:
@@ -403,6 +515,7 @@ storage-coupling that the registry is supposed to remove.
 Every live writer should update:
 - `timing.heartbeat_at`
 - `timing.updated_at`
+- `timing.heartbeat_seq`
 - `last_event` when it has a meaningful short status string
 Registry heartbeat should not depend on log file writes. A build can be quiet in the
 narrative log while still healthy, and merge can sit inside git operations with no
@@ -412,13 +525,36 @@ Recommended defaults:
 - TUI poll interval 500ms while active work exists
 - TUI poll interval 1.5s when idle
 ### Staleness detection
-Staleness should be reader-derived:
+Plan Gate note (4): this replaces the naive wall-clock + `kill(pid, 0)` rule with a
+writer-identity and sequence-based contract that tolerates suspend and clock jumps.
+
+Every writer must persist stable process identity:
+- `writer.pid`
+- `writer.pgid`
+- `writer.process_start_time_ns`
+- `writer.boot_id` when the platform exposes it; otherwise the process start time becomes
+  the identity tie-breaker
+
+Reader rules:
 - if the record is terminal, do nothing
-- if `now - heartbeat_at <= 3 * heartbeat_interval_s`, display the normal status
-- if heartbeat is old but `os.kill(pid, 0)` succeeds, display `LAGGING`
-- if heartbeat is old and the writer PID is gone, display `STALE`
+- clamp negative wall-clock age to `0` so NTP or manual clock rollback never creates
+  synthetic staleness
+- if `heartbeat_seq` advanced since the prior poll, treat the run as healthy regardless of
+  apparent wall-clock skew and reset the local stale timer
+- if the reader observes a suspend or wall-clock jump larger than 30 seconds between polls,
+  enter one grace window of `max(3 * heartbeat_interval_s, 15s)` during which records may
+  show `LAGGING` but not `STALE`
+- display `LAGGING` when the heartbeat is overdue but the same writer identity is still
+  alive, or when the grace window is active
+- display `STALE` only when all of the following are true:
+  1. the record is non-terminal
+  2. `heartbeat_seq` has not advanced for at least
+     `max(3 * heartbeat_interval_s, 15s)` of local monotonic reader time
+  3. the writer identity no longer matches a live process
+
 The persisted file stays unchanged. The TUI renders the overlay. That preserves the
-single-writer rule in a daemonless system.
+single-writer rule in a daemonless system and prevents healthy runs from being labeled
+stale after laptop sleep.
 ### Cleanup
 Because stale is reader-derived, cleanup must be explicit. Allowed paths are:
 - operator uses a remove/cleanup action on a stale terminal-capable record
@@ -426,6 +562,79 @@ Because stale is reader-derived, cleanup must be explicit. Allowed paths are:
 - GC eventually removes old terminal records after history is safely written
 Not allowed:
 - TUI rewriting arbitrary domain state on sight
+## Repair Precedence
+Plan Gate note (5): this section resolves the prior ambiguity about which file wins after
+crash recovery or mixed partial writes.
+
+The registry is the canonical discovery surface for Mission Control. It is not the
+ultimate source of truth for domain semantics. Repair always proceeds from domain truth to
+registry truth using the rules below.
+
+### Queue
+Source of truth:
+- `.otto-queue-state.json`
+
+Secondary:
+- live registry record keyed by `attempt_run_id`
+
+Tertiary:
+- child session artifacts for the injected `attempt_run_id`
+
+Startup repair:
+1. Load queue state.
+2. Drain unacked queue commands and replay them idempotently.
+3. For each task attempt, rebuild or repair the queue live record from queue state.
+4. If queue state says `running` but the child artifacts prove terminal, finalize queue
+   state and history from the proved terminal outcome.
+5. If queue state says `running` and no matching child identity or artifacts exist, mark
+   interrupted/fail per watcher restart policy and update the registry accordingly.
+
+### Atomic build / improve / certify
+Source of truth:
+- session-local durable artifacts in `checkpoint.json`, `manifest.json`, and
+  `summary.json`
+
+Secondary:
+- live registry record
+
+Tertiary:
+- `history.jsonl`
+
+Startup repair:
+1. Recreate or refresh the live registry record from checkpoint + manifest when resuming or
+   when a child restarts.
+2. If checkpoint or summary proves a terminal outcome, that terminal outcome overrides a
+   stale non-terminal live record.
+3. If history exists but the live record is missing, do not recreate live state; history is
+   enough because the run is already terminal.
+
+### Merge
+Source of truth:
+- `otto_logs/merge/<merge_id>/state.json`
+
+Secondary:
+- live registry record
+
+Tertiary:
+- `history.jsonl`
+
+Startup repair:
+1. Load merge state.
+2. Replay unacked merge commands.
+3. Repair the live registry row from merge state.
+4. If merge state is terminal, append or repair history and allow GC of the live record.
+
+### History
+Source of truth:
+- `history.jsonl` is authoritative for the History pane only
+
+Secondary:
+- terminal fields from domain-local state when repairing a missing history row
+
+Repair rule:
+- never let `history.jsonl` rewrite queue state, checkpoint state, or merge state
+- do allow a domain startup repair pass to append a missing terminal history row when the
+  terminal outcome is already proved elsewhere
 ## History
 History is not optional. Mission Control without a history pane would still feel like a
 better queue dashboard, not like a project operator console.
@@ -459,6 +668,24 @@ Recommended v2 row:
   "primary_log_path": "/repo/otto_logs/sessions/.../build/narrative.log"
 }
 ```
+### History Durability
+Plan Gate note (2): this replaces the prior hand-wave about reusing
+`append_history_entry()` with a correctness-grade append primitive.
+
+`otto/history.py` should expose a dedicated append primitive such as
+`append_history_snapshot(...)` with these guarantees:
+- open `history.jsonl` itself in append mode and take `flock(LOCK_EX)` on that file
+- serialize exactly one newline-terminated JSON row per append
+- flush and `fsync` before unlocking
+- return the persisted row including a stable `dedupe_key`
+
+Recommended `dedupe_key`:
+- terminal snapshots: `terminal_snapshot:<run_id>`
+- future non-terminal history events: `<history_kind>:<run_id>:<event_seq>`
+
+This primitive must be strict by default. History is no longer best-effort observability;
+it is part of the correctness path. `append_text_log(...)` remains appropriate for logs,
+not for cross-session history.
 ### Writer rules
 One writer per run should append exactly one terminal snapshot on terminalization:
 - atomic runs append their own snapshot
@@ -475,6 +702,7 @@ No destructive rewrite migration is needed. Readers should be additive and toler
 ### Dedup rules
 Because history is append-only, duplicates will eventually happen. Reader rules should be:
 - primary key is `run_id`
+- prefer the newest row for the same `dedupe_key`
 - prefer the newest `history_kind="terminal_snapshot"` row
 - if both an old summary row and a new snapshot row exist for the same run id, prefer the
   new row
@@ -482,6 +710,35 @@ Because history is append-only, duplicates will eventually happen. Reader rules 
 ## TUI Surface Design
 The TUI should be one screen with three core panes and only short-lived modals for help
 and confirmation.
+### Domain adapters
+Plan Gate note (7): this section keeps the registry narrow and moves type-specific row,
+detail, and action logic behind adapters.
+
+The universal viewer should not treat the registry row as a giant union of every domain's
+UI needs. Instead, add one adapter per `adapter_key` with a minimal interface:
+
+```python
+class MissionControlAdapter(Protocol):
+    def row_label(self, record: RunRecord) -> str: ...
+    def history_summary(self, history_row: HistoryRow) -> str: ...
+    def artifacts(self, record: RunRecord) -> list[ArtifactRef]: ...
+    def legal_actions(self, record: RunRecord) -> list[ActionState]: ...
+    def detail_panel_renderer(self, record: RunRecord) -> DetailModel: ...
+```
+
+Registry responsibility:
+- stable common facts only: identity, status, timing, command label, primary artifact
+  roots, and writer identity
+
+Adapter responsibility:
+- row formatting details
+- history summary text
+- artifact expansion and ordering
+- legal action enable/disable decisions
+- detail panel sections that depend on queue state, checkpoint state, or merge state
+
+That keeps the model additive as new domains arrive and avoids baking queue/merge/atomic
+special cases into one flat viewer object.
 ### Layout
 ```text
 +----------------------+----------------------+----------------------------------+
@@ -612,8 +869,8 @@ No action should require the TUI to mutate domain runtime state directly.
 | Action | Key | Scope | Underlying operation | Failure UX |
 |---|---|---|---|---|
 | Cancel | `c` | live queue task | append queue `cancel` to `.otto-queue-commands.jsonl` | toast + detail banner if writer missing or task not cancellable |
-| Cancel | `c` | live atomic run | append `cancel` to `sessions/<run_id>/commands.jsonl`; fallback `SIGTERM` helper after one heartbeat if unacked | toast + stale warning if writer is gone |
-| Cancel | `c` | live merge run | append `cancel` to `otto_logs/merge/commands.jsonl` | toast + stale warning if merge writer is gone |
+| Cancel | `c` | live atomic run | append `cancel` to `sessions/<run_id>/commands/requests.jsonl`; fallback `SIGTERM` helper after one heartbeat if unacked | toast + stale warning if writer is gone |
+| Cancel | `c` | live merge run | append `cancel` to `otto_logs/merge/commands/requests.jsonl` | toast + stale warning if merge writer is gone |
 | Resume | `r` | interrupted queue task | shell `otto queue resume <task_id>` | modal with stderr; keep row selected |
 | Resume | `r` | interrupted build | shell `otto build --resume` from stored `cwd` | modal with stderr or disabled reason if checkpoint missing |
 | Resume | `r` | interrupted improve | shell `otto improve <subcommand> --resume` from stored `cwd` | modal with stderr |
@@ -636,22 +893,28 @@ Notes:
 - `$EDITOR` is the only editor integration in v1. No embedded editor.
 ## Migration Plan
 The migration should be substrate first, viewer second, mutations third, polish last.
-Doing it in the opposite order mostly creates throwaway UI work.
+Doing it in the opposite order mostly creates throwaway UI work. In Otto's actual
+delivery model, these are agent-dispatch phases, not human-engineer week estimates.
+Expect roughly one day of implementation dispatch per phase plus another `0.5-1` day of
+gate review and real-LLM validation where required.
 ### Phase 1: substrate
 Goal: canonical run registry, universal record format, queue/merge/atomic publishers.
-Estimated effort: 2.0-2.5 weeks.
-Week 1:
+Estimated agent dispatch: `1-2` days.
+Dispatch focus:
 - add path helpers in `otto/paths.py`
 - add `otto/runs/schema.py`
 - add `otto/runs/registry.py`
 - extend `otto/history.py` and `otto/cli_logs.py` for schema-v2 history rows
-- add unit tests for atomic record writes, heartbeat interpretation, and GC
-Week 2:
+- add unit tests for atomic record writes, heartbeat interpretation, repair precedence,
+  and GC
 - retrofit queue runner to publish queue attempt records
 - retrofit merge orchestrator to publish merge records
 - retrofit build/improve/certify startup, heartbeat, and finalize points
-- publish artifact paths and capability flags
+- publish artifact paths, adapter keys, and action metadata inputs
 Files touched:
+- `otto/cli.py`
+- `otto/cli_improve.py`
+- `otto/config.py`
 - `otto/paths.py`
 - `otto/history.py`
 - `otto/cli_logs.py`
@@ -669,12 +932,25 @@ Files touched:
 - new `otto/runs/registry.py`
 - new tests such as `tests/test_run_registry.py`
 Exit criteria:
+Plan Gate note (6): the touched-file inventory now explicitly includes
+`otto/cli_improve.py` and `otto/config.py`, which the prior draft missed.
+
 - every long-running Otto command writes one live registry record
 - every terminal run appends one normalized history row
 - queue runs include both `task_id` and `run_id`
 - merge publishes heartbeat and artifact paths
 - standalone build / improve / certify appear in the registry without queue
 - cross-shell visibility is within 1-2 seconds locally
+- required gate exit: simultaneous registration races cannot produce duplicate run ids or
+  torn live records
+- required gate exit: writer crash after command read but before ack replays idempotently
+  on restart
+- required gate exit: suspend / clock-jump scenarios do not mislabel healthy runs as
+  `STALE`
+- required gate exit: mixed-version upgrade during active work preserves queue execution
+  and discovery
+- required gate exit: history corruption recovery skips malformed lines, preserves later
+  rows, and never rewrites domain truth
 What breaks if Phase 2 ships first:
 - the generic TUI has to read queue state, merge state, checkpoints, manifests, and
   summaries directly
@@ -682,8 +958,8 @@ What breaks if Phase 2 ships first:
 - most of that work gets rewritten once the registry exists
 ### Phase 2: universal viewer
 Goal: one dashboard above the registry; deprecate queue-only internals.
-Estimated effort: 1.0-1.5 weeks.
-Week 3:
+Estimated agent dispatch: `1` day.
+Dispatch focus:
 - add `otto/tui/mission_control_model.py`
 - add `otto/tui/mission_control.py`
 - build the three-pane layout
@@ -707,8 +983,8 @@ What breaks if Phase 3 ships first:
 ### Phase 3: mutations
 Goal: port resume, retry, remove, cleanup, and merge launch into the TUI while the CLI
 remains authoritative.
-Estimated effort: 1.0-1.5 weeks.
-Week 4:
+Estimated agent dispatch: `0.5-1` day.
+Dispatch focus:
 - add `otto/tui/mission_control_actions.py`
 - wire cancel for queue / merge / atomic
 - wire shell-out actions for resume / retry / merge / cleanup
@@ -733,8 +1009,8 @@ What breaks if Phase 4 ships first:
 - the TUI becomes a nicer viewer, but not an operator console
 ### Phase 4: history + editor hooks
 Goal: unified history pane and `$EDITOR` integration.
-Estimated effort: 1.0 week.
-Week 5:
+Estimated agent dispatch: `0.5-1` day.
+Dispatch focus:
 - finalize history schema-v2 writers
 - add history pagination and filtering
 - add artifact selection in Detail metadata
@@ -755,13 +1031,13 @@ What breaks if Phase 5 ships first:
 - we polish the wrong model before the core inspection workflow is complete
 ### Phase 5: polish
 Goal: keyboard discoverability, log search, theming, and refresh hardening.
-Estimated effort: 1.0-1.5 weeks.
-Week 6:
+Estimated agent dispatch: `1` day.
+Dispatch focus:
 - improve help and discoverability
 - add log search
 - add light theming and status color rules
 - performance pass on refresh cadence and file caching
-Optional Week 7 buffer:
+Optional follow-up dispatch:
 - compatibility cleanup for `otto queue dashboard`
 - sharp-edge fixes from nightly scenarios
 Files touched:
@@ -774,7 +1050,104 @@ Exit criteria:
 - log search works
 - refresh remains stable with multiple concurrent runs
 - queue-dashboard users can move over without losing muscle memory
-### Recommended sequence
+## Compatibility During Rollout
+Plan Gate note (8): this section makes mixed-version behavior explicit instead of
+hand-waving rollout safety.
+
+#### Scenario A: old watcher + new viewer
+Meaning:
+- the queue watcher still writes only legacy queue state, but the new Mission Control
+  binary is launched
+
+Acceptance criteria:
+- the viewer still renders queue rows through a queue-only compatibility adapter
+- queue rows clearly indicate `legacy queue mode` and disable cross-domain actions that
+  require registry data
+- no stale or missing-row regression compared with `otto queue dashboard`
+
+Test:
+- launch the old watcher fixture, then open the new viewer and verify queue visibility,
+  cancel behavior, and history fallback
+
+#### Scenario B: new watcher + old child
+Meaning:
+- the upgraded watcher injects `OTTO_RUN_ID`, but a still-old atomic child does not
+  consume it and continues allocating its own session id
+
+Acceptance criteria:
+- the child starts successfully because no unsupported CLI flag is injected
+- the watcher records both its expected `attempt_run_id` and the child's actual
+  self-allocated id in the attempt/run detail
+- the operator sees a clear `child predates run-id` warning explaining why ids differ
+- the task remains inspectable instead of fail-fasting on process launch
+
+Test:
+- run a fixture watcher against an intentionally old child command that allocates its own
+  session id, assert the process launches successfully, and verify the queue detail
+  records both ids plus the compatibility warning
+
+#### Scenario C: new viewer + mixed history rows
+Meaning:
+- existing projects already contain old v1 summary rows while new v2 terminal snapshots
+  are being appended
+
+Acceptance criteria:
+- the History pane reads both shapes
+- duplicate rows collapse by `dedupe_key` / `run_id`
+- old rows never block new snapshots from rendering
+
+Test:
+- seed fixtures with interleaved v1 and v2 history rows and verify paging, filtering, and
+  selection
+
+#### Scenario D: active upgrade during queue work
+Meaning:
+- a watcher restart or binary swap happens while queue tasks are already in flight
+
+Acceptance criteria:
+- in-flight tasks are rediscovered without allocating new attempt ids
+- unacked commands replay cleanly after restart
+- no terminal history row is duplicated
+
+Test:
+- start queue work, append a command, restart into the new watcher, and verify
+  reconciliation and replay
+## Delivery Model And Critical Path
+Plan Gate note (9): this replaces the prior human-estimate framing with the actual
+agent-driven economics of Otto work.
+
+Observed reality:
+- this codebase is implemented by AI agents under human review, not by one engineer
+  hand-coding linearly
+- recent work already demonstrated roughly `2-3` weeks of human-equivalent output in
+  about 10 hours of agent dispatch
+
+Realistic D-v1 dispatch estimates:
+- Phase 1 substrate: `1-2` days of dispatch sessions
+- Phase 2 universal viewer + adapters: `1` day
+- Phase 3 mutations: `0.5-1` day
+- Phase 4 history pane + editor hooks: `0.5-1` day
+- Phase 5 polish: `1` day
+- total: about `3-5` days of agent dispatch over `2-3` calendar days
+
+The real cost is review density:
+- Phase 1 touches every long-running Otto command: `build`, `improve`, `certify`,
+  `queue`, and `merge`
+- every phase should pass both Plan Gate and Implementation Gate before it is considered
+  done
+- real-LLM validation is the irreducible bottleneck: roughly `$5-15` and `10-30` minutes
+  per cycle, with nightly `N1 + N2 + N4 + N8` after the substrate retrofit costing about
+  `$10` and taking about 60 minutes
+- user decisions on open questions or design changes can still stall the lane even when
+  coding throughput is high
+
+Critical path:
+- Phase 1 substrate retrofit has the highest blast radius and must clear Implementation
+  Gate before Phase 2 ships
+- after Phase 1, run the real-LLM nightly on `N1 + N2 + N4 + N8` and require it to pass
+- after that, each remaining phase is roughly one day of agent work plus `0.5-1` day of
+  validation and review
+## Recommended Sequence
 Do not ship viewer first or polish first. Ship in this order:
 1. substrate
 2. universal viewer
@@ -820,6 +1193,20 @@ Mitigation:
 - keep fixture-based tests for old and new history rows
 ## Testing Strategy
 Mission Control needs unit tests, multi-process integration tests, and a real-LLM nightly.
+### Required gate exits
+Plan Gate note (10): these are not optional hardening tasks; they are approval gates for
+the rollout.
+
+- Exit A: simultaneous registration races across atomic CLI startup and queue dispatch do
+  not create duplicate ids, orphaned reservations, or split live rows
+- Exit B: writer crash after command read but before ack leaves a replayable unacked
+  command and converges correctly on restart
+- Exit C: suspend, NTP jump, or laptop sleep does not produce false `STALE` for a healthy
+  writer
+- Exit D: mixed-version upgrade during active work keeps existing work visible and
+  controllable within the declared compatibility envelope
+- Exit E: history corruption recovery skips malformed rows, preserves appendability, and
+  does not invent or overwrite domain truth
 ### Unit tests
 Add focused tests such as:
 - `tests/test_run_registry.py`
@@ -827,21 +1214,29 @@ Add focused tests such as:
 - `tests/test_mission_control_model.py`
 Cover:
 - atomic live-record writes
+- run-id reservation and release
 - schema parsing and additive field tolerance
 - heartbeat age calculation
 - stale overlay derivation
-- capability calculation
+- suspend / clock-jump grace handling
+- legal action calculation via adapters
 - GC and tombstone append
+- history append with `flock` + `fsync`
+- history dedupe by `dedupe_key`
 Extend queue tests to verify:
 - each queue attempt produces a registry record
 - queue `resume` creates a new run id but preserves task id
 - cancel and remove update registry state coherently
+- watcher-allocated `attempt_run_id` is injected into the child and recovered on restart
+- unacked queue commands replay after a crash in the `.processing` window
 Extend atomic tests to verify:
 - build startup writes a live record
 - checkpoint heartbeat refreshes it
 - terminal summary writes one history row
 - interrupted build exposes resume capability
 - standalone certify exposes no resume capability
+- `OTTO_RUN_ID` suppresses child-side allocation for updated children, while older
+  children remain launch-compatible and allocate their own ids
 Extend merge tests to verify:
 - merge startup writes a live record
 - merge heartbeat refreshes it
@@ -858,6 +1253,9 @@ Also cover:
 - one run finishing while others continue
 - stale detection when a child process is killed
 - history append after terminalization
+- queue watcher restart while a command is unacked
+- mixed-version upgrade fixtures during active queue work
+- malformed history line recovery without truncating later good lines
 The registry is the main integration seam. The TUI does not need to be the first place we
 prove runtime coherence.
 ### TUI integration tests
@@ -882,6 +1280,7 @@ Pass criteria:
 - cancel is reflected within 2 seconds
 - history rows exist for terminal runs
 - existing `otto queue dashboard` keybinds still work through the compatibility path
+- required gate exits A-E are green in CI before the phase is called done
 ## Open Questions
 These are real product decisions, not gaps in the substrate recommendation.
 ### What should `otto` with no args do?
@@ -930,3 +1329,19 @@ queue dashboard into the generic viewer instead of growing a second queue-adjace
 Do not spend a release on a transient launcher TUI. That delays the hard work without
 reducing it. The correct migration is to make Otto's runtime coherent first, then put the
 human interface on top of that coherence.
+## Plan Review
+
+### Round 1 — Codex
+- [ISSUE] Queue attempt run_id ownership not designed — fixed: explicit watcher-allocated `attempt_run_id` handshake, child injection, and crash reconciliation (see `Queue Attempt Identity`)
+- [ISSUE] History helper isn't correctness-grade — fixed: new history append primitive specified with `flock` / append-only writes / `fsync` / `dedupe_key` (see `History Durability`)
+- [ISSUE] Command protocol has no ack/replay contract — fixed: request log, `.processing`, ack journal, and startup replay semantics are now specified (see `Durable command protocol`)
+- [ISSUE] Heartbeat/staleness too naive — fixed: `heartbeat_seq`, writer identity, suspend grace rules, and a precise `STALE` definition are now specified (see `Staleness detection`)
+- [ISSUE] No source-of-truth precedence — fixed: per-domain repair order and startup repair rules are now explicit (see `Repair Precedence`)
+- [ISSUE] Migration plan omits files — fixed: `otto/cli_improve.py` and `otto/config.py` were added to the primary file list and Phase 1 touched files
+- [ISSUE] Universal viewer drifting toward god-object — fixed: per-domain adapter interface now owns row/detail/action specialization (see `Domain adapters`)
+- [ISSUE] Backward compat hand-waved — fixed: named rollout scenarios, acceptance criteria, and tests are now specified (see `Compatibility During Rollout`)
+- [ISSUE] Cost estimate used human-engineer framing — fixed: replaced with agent-dispatch estimates, review-density costs, and gate-driven critical path (see `Delivery Model And Critical Path`)
+- [ISSUE] Test plan misses hard cases — fixed: required gate exits now include registration races, unacked replay, suspend false-stale, mixed-version upgrade, and history corruption recovery (see `Required gate exits`)
+
+### Round 2 — Codex
+- [IMPORTANT] Scenario B unrealistic — fixed: rewrote around env-only `OTTO_RUN_ID` propagation; Click children without `--run-id` flag remain compatible by ignoring env or allocating their own ID
