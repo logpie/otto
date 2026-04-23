@@ -290,6 +290,27 @@ def _step_record(label: str, command: base.CommandResult, repo: Path) -> dict[st
     return step
 
 
+def _run_checked_step(
+    label: str,
+    argv: list[str],
+    *,
+    repo: Path,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    base.run_checked(argv, cwd=repo, env=env)
+    return _step_record(
+        label,
+        base.CommandResult(
+            argv=argv,
+            rc=0,
+            duration_s=round(time.monotonic() - started, 1),
+            output="",
+        ),
+        repo,
+    )
+
+
 def _failed_run_result(
     scenario_id: str,
     repo: Path,
@@ -849,6 +870,13 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         if build_step is not None:
             build_step["rc"] = build_rc
             build_step["duration_s"] = round(time.monotonic() - build_started, 1)
+        steps.append(
+            _run_checked_step(
+                "git-checkout-main-after-cancel",
+                ["git", "checkout", "main"],
+                repo=repo,
+            )
+        )
 
         assert watcher_proc is not None
         watcher_rc = watcher_proc.wait(timeout=budget.timeout_for(10 * 60))
@@ -858,6 +886,13 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
             watcher_step["duration_s"] = round(time.monotonic() - watcher_started, 1)
         if watcher_rc != 0:
             raise AssertionError(f"N9 queue watcher exited with rc={watcher_rc}")
+        steps.append(
+            _run_checked_step(
+                "git-checkout-main-before-merge",
+                ["git", "checkout", "main"],
+                repo=repo,
+            )
+        )
 
         merge = base.run_merge(
             repo,
