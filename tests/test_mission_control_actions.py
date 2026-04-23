@@ -4,10 +4,11 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from otto import paths
-from otto.queue.schema import QueueTask, append_task
+from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
 from otto.runs.registry import make_run_record, read_jsonl_rows, write_record
 from otto.tui.adapters import adapter_for_key
 from otto.tui.mission_control_actions import ActionResult, execute_action, execute_merge_all
@@ -449,6 +450,68 @@ def test_queue_cancel_without_task_id_fails_fast(tmp_path: Path) -> None:
 
     assert result.modal_title == "Cancel unavailable"
     assert result.message == "queue task id unknown"
+
+
+def test_legacy_queue_cancel_uses_queue_state_without_live_record(tmp_path: Path, monkeypatch) -> None:
+    append_task(
+        tmp_path,
+        QueueTask(
+            id="legacy-task",
+            command_argv=["build", "legacy task"],
+            added_at="2026-04-23T12:00:00Z",
+            resolved_intent="legacy queue task",
+            branch="build/legacy-task",
+            worktree=".worktrees/legacy-task",
+        ),
+    )
+    write_queue_state(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "legacy-task": {
+                    "status": "running",
+                    "started_at": "2026-04-23T12:00:00Z",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "otto.tui.mission_control_actions.load_live_record",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy cancel should not load live record")),
+    )
+    adapter = adapter_for_key("queue.attempt")
+    record = adapter.legacy_records(
+        tmp_path,
+        datetime(2026, 4, 23, 12, 1, tzinfo=timezone.utc),
+        [],
+    )[0]
+
+    def _run() -> None:
+        rows = []
+        deadline = time.monotonic() + 1.0
+        request_path = paths.queue_commands_path(tmp_path)
+        while not rows and time.monotonic() < deadline:
+            rows = read_jsonl_rows(request_path)
+            if not rows:
+                time.sleep(0.01)
+        assert rows
+        _append_ack_later(
+            paths.queue_command_acks_path(tmp_path),
+            command_id=rows[-1]["command_id"],
+            run_id=record.run_id,
+        )
+
+    waiter = threading.Thread(target=_run, daemon=True)
+    waiter.start()
+    result = execute_action(record, "c", tmp_path)
+    waiter.join(timeout=1.0)
+
+    rows = read_jsonl_rows(paths.queue_commands_path(tmp_path))
+    assert rows[-1]["run_id"] == "queue-compat:legacy-task"
+    assert rows[-1]["args"] == {"task_id": "legacy-task"}
+    assert result.clear_banner is True
 
 
 def test_open_file_uses_editor_env(tmp_path: Path, monkeypatch) -> None:

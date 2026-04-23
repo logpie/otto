@@ -774,7 +774,10 @@ class MissionControlApp(App[int]):
         )
 
     def _execute_merge_all(self) -> ActionResult:
-        return execute_merge_all(self.project_dir)
+        return execute_merge_all(
+            self.project_dir,
+            post_result=lambda result: self.call_from_thread(self._handle_action_result, result),
+        )
 
     def _handle_action_result(self, result: ActionResult) -> None:
         if result.clear_banner:

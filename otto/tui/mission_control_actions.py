@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from otto import paths
-from otto.queue.schema import QueueTask, load_queue
+from otto.queue.runtime import task_display_status
+from otto.queue.schema import QueueTask, load_queue, load_state
 from otto.runs.registry import (
     append_jsonl_row,
     load_command_ack_ids,
@@ -99,11 +100,16 @@ def execute_action(
     )
 
 
-def execute_merge_all(project_dir: Path) -> ActionResult:
+def execute_merge_all(
+    project_dir: Path,
+    *,
+    post_result: Callable[[ActionResult], None] | None = None,
+) -> ActionResult:
     return _launch_process(
         _otto_cli_argv("merge", "--all"),
         cwd=Path(project_dir),
         description="merge all",
+        post_result=post_result,
     )
 
 
@@ -474,18 +480,36 @@ def _cancel_unavailable_result(
     processing_path: Path,
     ack_path: Path,
 ) -> ActionResult | None:
-    try:
-        live_record = load_live_record(project_dir, record.run_id)
-    except FileNotFoundError:
-        return _warning_result("Cancel unavailable", "live run record no longer exists")
-    if is_terminal_status(live_record.status):
-        return _warning_result("Cancel unavailable", f"run already terminal ({live_record.status})")
+    if _is_legacy_queue_compat_record(record):
+        queue_task_id = _queue_task_id(record)
+        if not queue_task_id:
+            return _warning_result("Cancel unavailable", "queue task id unknown")
+        try:
+            _load_queue_task(project_dir, queue_task_id)
+        except ValueError:
+            return _warning_result("Cancel unavailable", "queue task no longer exists")
+        state = load_state(project_dir)
+        task_states = state.get("tasks", {}) if isinstance(state, dict) else {}
+        task_state = task_states.get(queue_task_id) if isinstance(task_states, dict) else None
+        status = task_display_status(task_state)
+        if is_terminal_status(status):
+            return _warning_result("Cancel unavailable", f"task already terminal ({status})")
+    else:
+        try:
+            live_record = load_live_record(project_dir, record.run_id)
+        except FileNotFoundError:
+            return _warning_result("Cancel unavailable", "live run record no longer exists")
+        if is_terminal_status(live_record.status):
+            return _warning_result("Cancel unavailable", f"run already terminal ({live_record.status})")
     acked = load_command_ack_ids(ack_path)
     for path in (request_path, processing_path):
         for row in read_jsonl_rows(path):
-            if str(row.get("run_id") or "") != record.run_id:
-                continue
             if str(row.get("kind") or "") != "cancel":
+                continue
+            if _is_legacy_queue_compat_record(record):
+                if _queue_command_task_id(row) != _queue_task_id(record):
+                    continue
+            elif str(row.get("run_id") or "") != record.run_id:
                 continue
             command_id = str(row.get("command_id") or "")
             if command_id and command_id not in acked:
@@ -509,6 +533,24 @@ def _record_cwd(record: RunRecord) -> Path | None:
 
 def _queue_task_id(record: RunRecord) -> str:
     return str(record.identity.get("queue_task_id") or "").strip()
+
+
+def _queue_command_task_id(row: dict[str, Any]) -> str:
+    args = row.get("args")
+    if isinstance(args, dict):
+        for key in ("task_id", "id"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    value = row.get("id")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _is_legacy_queue_compat_record(record: RunRecord) -> bool:
+    if record.domain != "queue":
+        return False
+    warning = str(record.identity.get("compatibility_warning") or "").strip()
+    return warning == "legacy queue mode" or record.run_id.startswith("queue-compat:")
 
 
 def _improve_subcommand(argv: Any) -> str | None:

@@ -447,3 +447,32 @@ async def test_mission_control_space_selects_multiple_queue_rows_for_merge(tmp_p
         await pilot.pause()
 
     assert calls == [("queue-b", "m", ["task-a", "task-b"])]
+
+
+def test_mission_control_merge_all_forwards_delayed_result(tmp_path: Path, monkeypatch) -> None:
+    app = MissionControlApp(tmp_path)
+    observed: list[ActionResult] = []
+    monkeypatch.setattr(app, "call_from_thread", lambda callback, result: callback(result))
+    monkeypatch.setattr(app, "_handle_action_result", lambda result: observed.append(result))
+
+    def _fake_execute_merge_all(project_dir, *, post_result=None):
+        assert project_dir == tmp_path
+        assert post_result is not None
+        post_result(
+            ActionResult(
+                ok=False,
+                severity="error",
+                modal_title="merge all failed",
+                modal_message="late failure",
+                message="late failure",
+            )
+        )
+        return ActionResult(ok=True, message="merge all launched", refresh=True)
+
+    monkeypatch.setattr("otto.tui.mission_control.execute_merge_all", _fake_execute_merge_all)
+
+    result = app._execute_merge_all()
+
+    assert result.message == "merge all launched"
+    assert observed[0].modal_title == "merge all failed"
+    assert observed[0].modal_message == "late failure"
