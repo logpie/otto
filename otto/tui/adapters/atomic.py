@@ -8,7 +8,7 @@ from pathlib import Path
 from otto.queue.runtime import INTERRUPTED_STATUS
 from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
-from otto.tui.mission_control_actions import make_action
+from otto.tui.mission_control_actions import ActionResult, execute_action, make_action
 from otto.tui.mission_control_model import ArtifactRef, DetailModel, HistoryRow
 
 
@@ -143,6 +143,23 @@ class AtomicMissionControlAdapter:
                 preview="would shell `$EDITOR <selected artifact>`",
             ),
         ]
+
+    def execute(
+        self,
+        record: RunRecord,
+        action_kind: str,
+        project_dir: Path,
+        *,
+        selected_artifact_path: str | None = None,
+        selected_queue_task_ids: list[str] | None = None,
+    ) -> ActionResult:
+        return execute_action(
+            record,
+            action_kind,
+            project_dir,
+            selected_artifact_path=selected_artifact_path,
+            selected_queue_task_ids=selected_queue_task_ids,
+        )
 
     def detail_panel_renderer(self, record) -> DetailModel:
         summary = str(record.intent.get("summary") or "").strip() or record.display_name or record.run_id

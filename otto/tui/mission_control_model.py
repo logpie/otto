@@ -15,7 +15,7 @@ from otto.history import command_family, history_run_id, normalize_command_label
 from otto.runs.history import load_project_history_rows
 from otto.runs.registry import read_live_records
 from otto.runs.schema import RunRecord, is_terminal_status
-from otto.tui.mission_control_actions import ActionState
+from otto.tui.mission_control_actions import ActionResult, ActionState
 
 PaneName = Literal["live", "history", "detail"]
 TypeFilter = Literal["all", "build", "improve", "certify", "merge", "queue"]
@@ -62,6 +62,15 @@ class MissionControlAdapter(Protocol):
     def history_summary(self, history_row: "HistoryRow") -> str: ...
     def artifacts(self, record: RunRecord) -> list[ArtifactRef]: ...
     def legal_actions(self, record: RunRecord, overlay: "StaleOverlay | None") -> list[ActionState]: ...
+    def execute(
+        self,
+        record: RunRecord,
+        action_kind: str,
+        project_dir: Path,
+        *,
+        selected_artifact_path: str | None = None,
+        selected_queue_task_ids: list[str] | None = None,
+    ) -> ActionResult: ...
     def detail_panel_renderer(self, record: RunRecord) -> DetailModel: ...
     def legacy_records(self, project_dir: Path, now: datetime, live_records: list[RunRecord]) -> list[RunRecord]: ...
     def live_overlay(self, record: RunRecord, overlay: "StaleOverlay | None") -> "StaleOverlay | None": ...

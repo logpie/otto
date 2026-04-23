@@ -561,9 +561,15 @@ class Runner:
     def _apply_command(
         self, cmd: dict[str, Any], state: dict[str, Any],
     ) -> None:
-        kind = cmd.get("cmd")
+        kind = str(cmd.get("kind") or cmd.get("cmd") or "").strip()
         tid = cmd.get("id")
-        if not isinstance(tid, str):
+        if not isinstance(tid, str) or not tid:
+            args = cmd.get("args")
+            if isinstance(args, dict):
+                candidate = args.get("task_id") or args.get("id")
+                if isinstance(candidate, str) and candidate:
+                    tid = candidate
+        if not isinstance(tid, str) or not tid:
             logger.warning("command missing/invalid 'id': %r", cmd)
             return
         ts = state["tasks"].setdefault(tid, {"status": "queued"})

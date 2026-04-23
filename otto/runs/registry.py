@@ -168,6 +168,20 @@ def garbage_collect_live_records(
     return removed
 
 
+def cleanup_live_record(project_dir: Path, run_id: str) -> RunRecord:
+    """Remove one terminal live record and append a GC tombstone."""
+    path = paths.live_run_path(project_dir, run_id)
+    with _directory_scan_lock(project_dir, exclusive=True):
+        if not path.exists():
+            raise FileNotFoundError(run_id)
+        record = _read_record_path(path)
+        if not is_terminal_status(record.status):
+            raise ValueError(f"run {run_id} is not terminal")
+        _append_tombstone(project_dir, record)
+        path.unlink(missing_ok=True)
+        return record
+
+
 def current_writer_identity(writer_id: str) -> dict[str, Any]:
     start_time_ns = _PROCESS_START_TIME_NS
     try:

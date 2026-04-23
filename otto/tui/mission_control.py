@@ -9,8 +9,11 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
+from textual.worker import Worker, WorkerState
 from textual.widgets import DataTable, Input, Log, Static
 
+from otto.tui.adapters import adapter_for_key
+from otto.tui.mission_control_actions import ActionResult, execute_merge_all
 from otto.tui.mission_control_model import (
     MissionControlFilters,
     MissionControlModel,
@@ -45,9 +48,8 @@ class HelpModal(ModalScreen[None]):
                         "o: cycle logs",
                         "s: toggle log follow",
                         "Home / End: top / resume follow",
+                        "c / r / R / x / m / M / e: run actions",
                         "?: help",
-                        "",
-                        "Action keys are placeholders in Phase 2; Detail shows what each would do.",
                     ]
                 ),
                 id="help-body",
@@ -88,6 +90,27 @@ class FilterModal(ModalScreen[str | None]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self.dismiss(event.value)
+
+
+class MessageModal(ModalScreen[None]):
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("enter", "close", "Close"),
+        Binding("q", "close", "Close"),
+    ]
+
+    def __init__(self, title: str, message: str) -> None:
+        super().__init__()
+        self._title = title
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        with Container(id="help-modal"):
+            yield Static(self._title, id="filter-title")
+            yield Static(self._message, id="help-body")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
 
 
 class MissionControlApp(App[int]):
@@ -211,12 +234,13 @@ class MissionControlApp(App[int]):
         Binding("s", "toggle_follow", "Toggle Follow", show=False),
         Binding("home", "log_top", "Log Top", show=False),
         Binding("end", "log_bottom", "Log Bottom", show=False),
-        Binding("c", "preview_action('c')", "Cancel", show=False),
-        Binding("r", "preview_action('r')", "Resume", show=False),
-        Binding("R", "preview_action('R')", "Retry", show=False),
-        Binding("x", "preview_action('x')", "Cleanup", show=False),
-        Binding("m", "preview_action('m')", "Merge", show=False),
-        Binding("e", "preview_action('e')", "Edit", show=False),
+        Binding("c", "invoke_action('c')", "Cancel", show=False),
+        Binding("r", "invoke_action('r')", "Resume", show=False),
+        Binding("R", "invoke_action('R')", "Retry", show=False),
+        Binding("x", "invoke_action('x')", "Cleanup", show=False),
+        Binding("m", "invoke_action('m')", "Merge", show=False),
+        Binding("M", "merge_all", "Merge All", show=False),
+        Binding("e", "invoke_action('e')", "Edit", show=False),
         Binding("?", "show_help", "Help", show=False),
         Binding("q", "quit", "Quit", show=False),
     ]
@@ -245,6 +269,7 @@ class MissionControlApp(App[int]):
         self._history_row_ids: list[str] = []
         self._artifact_paths: list[str] = []
         self._filter_return_pane: PaneName = "history"
+        self._action_banner: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="banner")
@@ -372,17 +397,64 @@ class MissionControlApp(App[int]):
         log_widget.scroll_end(animate=False)
         self._render_footer()
 
-    def action_preview_action(self, key: str) -> None:
+    def action_invoke_action(self, key: str) -> None:
         detail = self.model.detail_view(self.state)
         if detail is None:
             self.notify("no selection", severity="warning")
             return
         for action in detail.legal_actions:
             if action.key == key:
-                message = action.preview if action.enabled else (action.reason or action.preview)
-                self.notify(message, severity="information" if action.enabled else "warning")
+                if not action.enabled:
+                    message = action.reason or action.preview
+                    self._action_banner = message
+                    self._render_banner()
+                    self.notify(message, severity="warning")
+                    return
+                self._action_banner = f"{action.label} requested..."
+                self._render_banner()
+                self.run_worker(
+                    lambda: self._execute_detail_action(
+                        detail.record,
+                        action.key,
+                        selected_artifact_path=self._selected_artifact_path(detail) if action.key == "e" else None,
+                        selected_queue_task_ids=self._selected_queue_task_ids(detail, action.key),
+                    ),
+                    name=f"mission-control-action:{action.key}",
+                    group="mission-control-actions",
+                    thread=True,
+                    exit_on_error=False,
+                )
                 return
         self.notify("action unavailable", severity="warning")
+
+    def action_merge_all(self) -> None:
+        self._action_banner = "merge all requested..."
+        self._render_banner()
+        self.run_worker(
+            self._execute_merge_all,
+            name="mission-control-action:M",
+            group="mission-control-actions",
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if not event.worker.name.startswith("mission-control-action:"):
+            return
+        if event.state == WorkerState.SUCCESS and isinstance(event.worker.result, ActionResult):
+            self._handle_action_result(event.worker.result)
+            return
+        if event.state == WorkerState.ERROR:
+            message = str(event.worker.error or "worker failed")
+            self._handle_action_result(
+                ActionResult(
+                    ok=False,
+                    severity="error",
+                    modal_title="Action failed",
+                    modal_message=message,
+                    message=message,
+                )
+            )
 
     def _tick(self) -> None:
         self._refresh_state()
@@ -407,7 +479,7 @@ class MissionControlApp(App[int]):
         self._highlight_panes()
 
     def _render_banner(self) -> None:
-        self.query_one("#banner", Static).update(self.state.last_event_banner or "")
+        self.query_one("#banner", Static).update(self._action_banner or self.state.last_event_banner or "")
 
     def _render_live(self) -> None:
         table = self.query_one("#live-table", DataTable)
@@ -514,7 +586,7 @@ class MissionControlApp(App[int]):
         prefix = "queue compat" if self.queue_compat else "mission control"
         follow = "follow=on" if self._follow_log else "follow=off"
         self.query_one("#footer", Static).update(
-            f"{prefix} | Tab cycle panes | 1/2/3 focus | / filter | ? help | a active | t type | f outcome | o logs | s {follow}"
+            f"{prefix} | Tab cycle panes | 1/2/3 focus | / filter | ? help | a active | t type | f outcome | c/r/R/x/m/M/e actions | o logs | s {follow}"
         )
 
     def _highlight_panes(self) -> None:
@@ -644,5 +716,50 @@ class MissionControlApp(App[int]):
             self._refresh_state()
         self._focus_pane(self._filter_return_pane)
 
+    def _execute_detail_action(
+        self,
+        record,
+        action_kind: str,
+        *,
+        selected_artifact_path: str | None = None,
+        selected_queue_task_ids: list[str] | None = None,
+    ) -> ActionResult:
+        adapter = adapter_for_key(record.adapter_key)
+        return adapter.execute(
+            record,
+            action_kind,
+            self.project_dir,
+            selected_artifact_path=selected_artifact_path,
+            selected_queue_task_ids=selected_queue_task_ids,
+        )
 
-__all__ = ["FilterModal", "HelpModal", "MissionControlApp"]
+    def _execute_merge_all(self) -> ActionResult:
+        return execute_merge_all(self.project_dir)
+
+    def _handle_action_result(self, result: ActionResult) -> None:
+        if result.clear_banner:
+            self._action_banner = None
+        elif result.message:
+            self._action_banner = result.message
+        self._render_banner()
+        if result.message:
+            self.notify(result.message, severity=result.severity)
+        if result.modal_title and result.modal_message:
+            self.push_screen(MessageModal(result.modal_title, result.modal_message))
+        if result.refresh:
+            self._refresh_state()
+
+    def _selected_artifact_path(self, detail) -> str | None:
+        if not detail.artifacts:
+            return None
+        index = min(max(self.state.selection.artifact_index, 0), len(detail.artifacts) - 1)
+        return detail.artifacts[index].path
+
+    def _selected_queue_task_ids(self, detail, key: str) -> list[str] | None:
+        if key != "m":
+            return None
+        task_id = detail.record.identity.get("queue_task_id")
+        return [str(task_id)] if task_id else None
+
+
+__all__ = ["FilterModal", "HelpModal", "MessageModal", "MissionControlApp"]

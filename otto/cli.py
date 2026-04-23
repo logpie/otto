@@ -1986,6 +1986,10 @@ register_improve_commands(main)
 from otto.cli_queue import register_queue_commands
 register_queue_commands(main)
 
+# Cleanup command (Mission Control terminal-record GC)
+from otto.cli_cleanup import register_cleanup_command
+register_cleanup_command(main)
+
 # Merge command (Phase 4 — registered from otto/cli_merge.py)
 from otto.cli_merge import register_merge_command
 register_merge_command(main)
