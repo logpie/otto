@@ -10,6 +10,7 @@ otto improve bugs                                 # find and fix bugs
 otto improve target "latency < 100ms"             # optimize toward a metric
 otto queue build "csv export" && otto queue run   # enqueue + run in parallel worktrees
 otto merge --all                                  # land done branches into main
+otto dashboard                                    # open Mission Control TUI for the project
 ```
 
 ## How it works
@@ -71,6 +72,16 @@ otto merge --all                            # land all done tasks into main
 ```
 
 The watcher spawns each task in `.worktrees/<task-id>/` so they can build, test, and commit in isolation. `otto merge` does Python-driven `git merge --no-ff`; clean merges burn $0. When git can't auto-merge, otto commits all marker-laden merges first, then runs ONE agent session that resolves every conflict globally — full Bash + project test command + cross-branch context. After all branches land, the certifier verifies the merged story union in one call. Its merge-context preamble prunes unaffected stories inline and flags genuine cross-branch contradictions for human review.
+
+**`otto dashboard`** opens **Mission Control** — a persistent 3-pane Textual TUI that's the human operator surface for one project. Live Runs / History / Detail+Logs in one screen, sitting on top of a canonical run registry that normalizes state across `build` / `improve` / `certify` / `queue` / `merge`.
+
+```bash
+otto dashboard                  # open Mission Control
+otto cleanup <run_id>           # remove a stale terminal record
+otto queue dashboard            # legacy alias — opens Mission Control with a queue filter
+```
+
+Cross-process discovery: any `otto build` started in another shell appears in the TUI within 1-2 seconds. Cancel via `c` (durable command envelope, not SIGTERM), resume via `r`, multi-select with `space` then merge with `m`. Open any artifact in `$EDITOR` with `e`. Reader-only TUI — every mutation is either a durable append-only command or a CLI shell-out, so the TUI never corrupts domain state. No daemon — close the TUI when you're done; background CLI runs continue.
 
 ## Why Otto
 
