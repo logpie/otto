@@ -10,14 +10,15 @@ from otto import paths
 from otto.manifest import queue_index_path_for
 from otto.queue.runtime import INTERRUPTED_STATUS, checkpoint_path_for_task, task_display_status
 from otto.queue.schema import load_queue, load_state
-from otto.runs.registry import make_run_record, read_live_records
+from otto.runs.registry import make_run_record
+from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
 from otto.tui.mission_control_actions import make_action
 from otto.tui.mission_control_model import ArtifactRef, DetailModel, HistoryRow
 
 
 class QueueMissionControlAdapter:
-    def legacy_records(self, project_dir: Path, now: datetime):
+    def legacy_records(self, project_dir: Path, now: datetime, live_records: list[RunRecord]):
         try:
             tasks = load_queue(project_dir)
             state = load_state(project_dir)
@@ -27,7 +28,7 @@ class QueueMissionControlAdapter:
         task_states = state.get("tasks", {}) if isinstance(state, dict) else {}
         existing_task_ids = {
             str(record.identity.get("queue_task_id") or "").strip()
-            for record in read_live_records(project_dir)
+            for record in live_records
             if record.domain == "queue"
         }
         records = []

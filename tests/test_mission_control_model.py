@@ -260,6 +260,61 @@ def test_queue_compat_synthesizes_legacy_queue_rows_and_disables_registry_action
     assert actions["e"].reason == "legacy queue mode has no registry-backed artifacts"
 
 
+def test_queue_compat_uses_model_snapshot_for_legacy_dedupe(tmp_path: Path, monkeypatch) -> None:
+    append_task(
+        tmp_path,
+        QueueTask(
+            id="live-task",
+            command_argv=["build", "live task"],
+            added_at="2026-04-23T12:00:00Z",
+            resolved_intent="live queue task",
+            branch="build/live-task",
+            worktree=".worktrees/live-task",
+        ),
+    )
+    write_state(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "live-task": {
+                    "status": "queued",
+                    "started_at": "2026-04-23T12:00:00Z",
+                }
+            },
+        },
+    )
+
+    live_record = make_run_record(
+        project_dir=tmp_path,
+        run_id="run-live-task",
+        domain="queue",
+        run_type="queue",
+        command="build live",
+        display_name="live-task",
+        status="queued",
+        cwd=tmp_path,
+        identity={"queue_task_id": "live-task", "merge_id": None, "parent_run_id": None},
+        intent={"summary": "live queue task"},
+        adapter_key="queue.attempt",
+    )
+    monkeypatch.setattr(
+        "otto.tui.mission_control_model.read_live_records",
+        lambda project_dir: [live_record] if project_dir == tmp_path else [],
+    )
+
+    model = MissionControlModel(
+        tmp_path,
+        queue_compat=True,
+        now_fn=lambda: datetime(2026, 4, 23, 12, 1, tzinfo=timezone.utc),
+    )
+    state = model.initial_state(filters=MissionControlFilters(type_filter="queue"))
+
+    assert [item.record.run_id for item in state.live_runs.items] == ["run-live-task"]
+    assert all(item.record.identity.get("compatibility_warning") != "legacy queue mode" for item in state.live_runs.items)
+
+
 def test_detail_view_uses_adapter_artifact_ordering(tmp_path: Path) -> None:
     run_id = "artifact-run"
     session_dir = paths.session_dir(tmp_path, run_id)

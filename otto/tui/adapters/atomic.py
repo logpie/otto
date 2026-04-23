@@ -6,14 +6,15 @@ from datetime import datetime
 from pathlib import Path
 
 from otto.queue.runtime import INTERRUPTED_STATUS
+from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
 from otto.tui.mission_control_actions import make_action
 from otto.tui.mission_control_model import ArtifactRef, DetailModel, HistoryRow
 
 
 class AtomicMissionControlAdapter:
-    def legacy_records(self, project_dir: Path, now: datetime):
-        del project_dir, now
+    def legacy_records(self, project_dir: Path, now: datetime, live_records: list[RunRecord]):
+        del project_dir, now, live_records
         return []
 
     def live_overlay(self, record, overlay):

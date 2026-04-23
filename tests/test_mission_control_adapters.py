@@ -147,6 +147,7 @@ def test_queue_adapter_owns_legacy_record_and_overlay_compat(tmp_path: Path) -> 
     records = adapter.legacy_records(
         tmp_path,
         datetime(2026, 4, 23, 12, 1, tzinfo=timezone.utc),
+        [],
     )
 
     assert [record.identity["queue_task_id"] for record in records] == ["legacy-task"]
