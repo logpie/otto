@@ -179,6 +179,26 @@ def remove_task(project_dir: Path, task_id: str) -> bool:
             fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
 
+def reorder_tasks(project_dir: Path, prioritized_ids: list[str]) -> None:
+    """Move selected task ids to the front of queue.yml, preserving order."""
+    if not prioritized_ids:
+        return
+    path = queue_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_suffix(".yml.lock")
+    with open(lock, "w") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        try:
+            current = load_queue(project_dir)
+            wanted = set(prioritized_ids)
+            ordered = [task for task in current if task.id in wanted]
+            ordered.sort(key=lambda task: prioritized_ids.index(task.id))
+            remainder = [task for task in current if task.id not in wanted]
+            _write_queue(path, [*ordered, *remainder])
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+
 def _write_queue(path: Path, tasks: list[QueueTask]) -> None:
     """Atomic write of queue.yml."""
     payload = {

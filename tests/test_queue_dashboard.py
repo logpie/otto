@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from textual.widgets import DataTable, Log, Static
+from textual.widgets import DataTable, Log, SelectionList, Static
 
 import otto.cli_queue as cli_queue_module
 import otto.queue.dashboard as dashboard_module
@@ -17,6 +18,7 @@ from otto.queue.dashboard import (
     OverviewScreen,
     QueueApp,
     QueueModel,
+    ResumeSelectionApp,
     TaskDetailScreen,
     _print_dashboard_closed_notice,
 )
@@ -69,23 +71,24 @@ def _write_queue_manifest(
 
 
 def _write_queue_state(repo: Path, tasks: dict[str, dict]) -> None:
+    now = dashboard_module._now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
     write_state(
         repo,
         {
             "schema_version": 1,
             "watcher": {
-                "pid": 123,
-                "pgid": 123,
-                "started_at": "2026-04-21T20:00:00Z",
-                "heartbeat": "2026-04-21T20:00:05Z",
+                "pid": os.getpid(),
+                "pgid": os.getpid(),
+                "started_at": now,
+                "heartbeat": now,
             },
             "tasks": tasks,
         },
     )
 
 
-def _build_app(repo: Path, *, cancel_callback=None) -> QueueApp:
-    return QueueApp(repo, concurrent=2, cancel_callback=cancel_callback)
+def _build_app(repo: Path, *, cancel_callback=None, read_only: bool = False) -> QueueApp:
+    return QueueApp(repo, concurrent=2, cancel_callback=cancel_callback, read_only=read_only)
 
 
 def _log_text(widget: Log) -> str:
@@ -465,7 +468,7 @@ def test_print_dashboard_closed_notice_for_running_tasks() -> None:
     assert printed is True
     assert stream.getvalue() == (
         "Dashboard closed. Watcher continues running in foreground.\n"
-        "2 tasks still running; this command will return when they complete.\n"
+        "2 tasks still running; reopen with `otto queue dashboard` while they complete.\n"
         "Press Ctrl-C to interrupt (twice for immediate stop).\n"
     )
 
@@ -701,12 +704,59 @@ async def test_help_overlay_appears(tmp_path: Path):
     async with app.run_test() as pilot:
         await pilot.pause()
         status = app.screen.query_one("#overview-status", Static)
-        assert "q hide dashboard (watcher continues)" in str(status.content)
+        assert "q hide; reopen with `otto queue dashboard`" in str(status.content)
         await pilot.press("?")
         await pilot.pause()
         assert isinstance(app.screen, HelpModal)
         help_body = app.screen.query_one("#help-body", Static)
-        assert "q: hide dashboard; watcher continues until tasks complete (Ctrl-C to stop)" in str(help_body.content)
+        assert "q: hide dashboard; reopen with `otto queue dashboard`" in str(help_body.content)
+
+
+@pytest.mark.asyncio
+async def test_read_only_viewer_footer_updates_when_watcher_stops(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    _write_narrative(repo, "alpha", "[+0:00] — BUILD starting —\n")
+    _write_queue_state(repo, {"alpha": {"status": "running", "started_at": "2026-04-21T20:00:01Z"}})
+
+    app = _build_app(repo, read_only=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        status = app.screen.query_one("#overview-status", Static)
+        assert "watcher live" in str(status.content)
+        assert "q quit" in str(status.content)
+
+        write_state(
+            repo,
+            {
+                "schema_version": 1,
+                "watcher": None,
+                "tasks": {"alpha": {"status": "interrupted"}},
+            },
+        )
+        await pilot.pause(0.6)
+
+        status = app.screen.query_one("#overview-status", Static)
+        assert "watcher stopped" in str(status.content)
+        assert "1 interrupted" in str(status.content)
+
+
+@pytest.mark.asyncio
+async def test_resume_selection_app_returns_selected_ids(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    tasks = [
+        _queue_task("labels", branch="build/labels", worktree=".worktrees/labels"),
+        _queue_task("due", branch="build/due", worktree=".worktrees/due"),
+    ]
+    app = ResumeSelectionApp(tasks)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.press("space")
+        await pilot.pause()
+        selection = app.query_one("#resume-list", SelectionList)
+        assert selection.selected == ["labels"]
 
 
 @pytest.mark.asyncio

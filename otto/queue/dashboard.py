@@ -28,12 +28,14 @@ from textual.containers import Container
 from textual.driver import Driver
 from textual.drivers.linux_driver import LinuxDriver
 from textual.screen import ModalScreen, Screen
-from textual.widgets import DataTable, Log, Static
+from textual.widgets import DataTable, Log, SelectionList, Static
 
 from otto import paths
 from otto.manifest import queue_index_path_for
+from otto.queue.runtime import task_display_status, watcher_alive as watcher_is_alive
 from otto.queue.runner import Runner, RunnerConfig
 from otto.queue.schema import QueueTask, append_command, load_queue, load_state
+from otto.theme import error_console
 
 logger = logging.getLogger("otto.queue.dashboard")
 
@@ -100,7 +102,7 @@ def _render_dashboard_closed_notice(running_count: int) -> str | None:
     return "\n".join(
         [
             "Dashboard closed. Watcher continues running in foreground.",
-            f"{running_count} {task_label} still running; this command will return when {complete_label}.",
+            f"{running_count} {task_label} still running; reopen with `otto queue dashboard` while {complete_label}.",
             "Press Ctrl-C to interrupt (twice for immediate stop).",
         ]
     )
@@ -188,11 +190,13 @@ class TaskView:
 class QueueSnapshot:
     tasks: list[TaskView]
     watcher: dict[str, Any] | None
+    watcher_alive: bool
     header_elapsed: str
     total_cost_usd: float
     running_count: int
     queued_count: int
     done_count: int
+    interrupted_count: int
     total_count: int
 
     @property
@@ -219,12 +223,13 @@ class QueueModel:
         state = self._load_state_safe()
         state_tasks = state.get("tasks", {}) if isinstance(state.get("tasks"), dict) else {}
         watcher = state.get("watcher") if isinstance(state.get("watcher"), dict) else None
+        watcher_live = watcher_is_alive(state)
         rows: list[TaskView] = []
         total_cost = 0.0
 
         for task in tasks:
             task_state = state_tasks.get(task.id, {}) if isinstance(state_tasks.get(task.id), dict) else {}
-            status = str(task_state.get("status") or "queued")
+            status = task_display_status(task_state)
             manifest = self._read_manifest(task.id)
             narrative_path = self.resolve_narrative_path(task, task_state, manifest)
             manifest_path = self.resolve_manifest_path(task.id, task_state, manifest)
@@ -264,11 +269,13 @@ class QueueModel:
         return QueueSnapshot(
             tasks=rows,
             watcher=watcher,
+            watcher_alive=watcher_live,
             header_elapsed=header_elapsed,
             total_cost_usd=total_cost,
             running_count=sum(1 for row in rows if row.status == "running"),
             queued_count=sum(1 for row in rows if row.status == "queued"),
             done_count=sum(1 for row in rows if row.status == "done"),
+            interrupted_count=sum(1 for row in rows if row.status == "interrupted"),
             total_count=len(rows),
         )
 
@@ -706,16 +713,12 @@ class OverviewScreen(Screen[None]):
         header = self._first_widget("#overview-header", Static)
         if header is not None:
             header.update(
-            f"[bold]otto queue[/bold] · concurrent={self.app.concurrent} · "
+            f"[bold]otto queue[/bold] · {self.app.header_mode_label} · "
             f"{snapshot.header_elapsed} · {_format_cost(snapshot.total_cost_usd)}"
             )
         footer = self._first_widget("#overview-status", Static)
         if footer is not None:
-            footer.update(
-                f"{snapshot.running_count} running · {snapshot.queued_count} queued · "
-                f"{snapshot.done_count} done · {snapshot.total_count} total · "
-                "enter open · y yank · c cancel · ? help · q hide dashboard (watcher continues)"
-            )
+            footer.update(self.app.overview_footer(snapshot))
         self._sync_rows(snapshot.tasks)
 
     def _sync_rows(self, tasks: Sequence[TaskView]) -> None:
@@ -834,10 +837,10 @@ class OverviewScreen(Screen[None]):
                     "k / Up / ↑: move to previous row",
                     "Enter: open task detail",
                     "y: yank selected row to clipboard",
-                    "c: queue cancel for selected running task",
+                    *([] if self.app.read_only else ["c: queue cancel for selected running task"]),
                     "?: open this help",
                     "Esc: close this help overlay",
-                    "q: hide dashboard; watcher continues until tasks complete (Ctrl-C to stop)",
+                    self.app.quit_help_text,
                 ],
             )
         )
@@ -1066,15 +1069,17 @@ class QueueApp(App[int]):
         cancel_callback: Callable[[str], None] | None = None,
         runner: Runner | None = None,
         dashboard_mouse: bool = False,
+        read_only: bool = False,
     ) -> None:
         super().__init__()
         self.project_dir = project_dir
         self.concurrent = concurrent
         self.dashboard_mouse = dashboard_mouse
+        self.read_only = read_only
         self.model = QueueModel(project_dir)
         self.cancel_callback = cancel_callback or (lambda task_id: _append_cancel_command(project_dir, task_id))
         self.runner = runner
-        self.last_snapshot = QueueSnapshot([], None, "-", 0.0, 0, 0, 0, 0)
+        self.last_snapshot = QueueSnapshot([], None, False, "-", 0.0, 0, 0, 0, 0, 0)
         self._recent_cancel_requests: dict[str, float] = {}
 
     def get_driver_class(self) -> type[Driver]:
@@ -1087,9 +1092,35 @@ class QueueApp(App[int]):
         await self.push_screen(OverviewScreen())
 
     def request_shutdown(self) -> None:
-        if self.runner is not None and self.runner.shutdown_level is None:
+        if not self.read_only and self.runner is not None and self.runner.shutdown_level is None:
             self.runner.shutdown_level = "graceful"
         self.exit(0)
+
+    @property
+    def quit_help_text(self) -> str:
+        if self.read_only:
+            return "q: quit dashboard viewer"
+        return "q: hide dashboard; reopen with `otto queue dashboard`"
+
+    @property
+    def header_mode_label(self) -> str:
+        if self.read_only:
+            return "viewer"
+        return f"concurrent={self.concurrent}"
+
+    def overview_footer(self, snapshot: QueueSnapshot) -> str:
+        counts = (
+            f"{snapshot.running_count} running · {snapshot.queued_count} queued · "
+            f"{snapshot.interrupted_count} interrupted · {snapshot.done_count} done · "
+            f"{snapshot.total_count} total"
+        )
+        if self.read_only:
+            watcher_text = "watcher live" if snapshot.watcher_alive else "watcher stopped"
+            return f"{watcher_text} · {counts} · enter open · y yank · ? help · q quit"
+        return (
+            f"{counts} · enter open · y yank · c cancel · ? help · "
+            "q hide; reopen with `otto queue dashboard`"
+        )
 
     def update_snapshot(self, snapshot: QueueSnapshot) -> None:
         self.last_snapshot = snapshot
@@ -1099,6 +1130,9 @@ class QueueApp(App[int]):
                 self._recent_cancel_requests.pop(task_id, None)
 
     def cancel_task(self, task_id: str) -> None:
+        if self.read_only:
+            self.notify("viewer is read-only", severity="warning")
+            return
         current = self.model.resolve_task(task_id)
         if current is None:
             self.notify(f"task {task_id} not found", severity="error")
@@ -1217,3 +1251,101 @@ def run_dashboard(
     runner = Runner(project_dir, runner_config, otto_bin=otto_bin)
     app = QueueApp(project_dir, concurrent=concurrent, runner=runner, dashboard_mouse=dashboard_mouse)
     return asyncio.run(_run_dashboard_async(app, runner, quiet=quiet))
+
+
+class ResumeSelectionApp(App[list[str]]):
+    CSS = """
+    Screen {
+        layout: vertical;
+    }
+
+    #resume-header, #resume-footer {
+        padding: 0 1;
+    }
+
+    #resume-header {
+        color: cyan;
+    }
+
+    #resume-footer {
+        color: green;
+    }
+
+    #resume-list {
+        height: 1fr;
+    }
+    """
+
+    BINDINGS = [
+        Binding("enter", "confirm", "Confirm", show=False),
+        Binding("q", "cancel", "Cancel", show=False),
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, tasks: Sequence[QueueTask]) -> None:
+        super().__init__()
+        self._tasks = list(tasks)
+
+    def compose(self) -> ComposeResult:
+        yield Static(
+            "[bold]Resume Interrupted Tasks[/bold]\n"
+            "Space toggles a task. Enter confirms the selection.",
+            id="resume-header",
+        )
+        yield SelectionList(
+            *[
+                (self._label(task), task.id, True)
+                for task in self._tasks
+            ],
+            id="resume-list",
+        )
+        yield Static("space toggle · enter confirm · q cancel", id="resume-footer")
+
+    def on_mount(self) -> None:
+        self.query_one("#resume-list", SelectionList).focus()
+
+    def action_confirm(self) -> None:
+        selected = list(self.query_one("#resume-list", SelectionList).selected)
+        self.exit(selected)
+
+    def action_cancel(self) -> None:
+        self.exit([])
+
+    @staticmethod
+    def _label(task: QueueTask) -> str:
+        command = " ".join(task.command_argv[:3]).strip()
+        return f"{task.id}  {command}"
+
+
+def select_resume_tasks(project_dir: Path, tasks: Sequence[QueueTask]) -> list[str]:
+    del project_dir
+    if not sys.stdout.isatty() or os.environ.get("OTTO_NO_TUI"):
+        error_console.print(
+            "[error]`otto queue resume --select` requires an interactive terminal.[/error]\n"
+            "  Pass task ids explicitly instead, for example: `otto queue resume labels,due`."
+        )
+        raise SystemExit(2)
+    app = ResumeSelectionApp(tasks)
+    return list(app.run())
+
+
+def run_dashboard_viewer(
+    project_dir: Path,
+    *,
+    dashboard_mouse: bool = False,
+) -> int:
+    """Run the read-only dashboard viewer attached to an active watcher."""
+    snapshot = QueueModel(project_dir).snapshot()
+    if not snapshot.watcher_alive:
+        error_console.print(
+            "[error]No active queue watcher found.[/error]\n"
+            "  Start one with `otto queue run --concurrent N`, then reopen with `otto queue dashboard`."
+        )
+        return 1
+    app = QueueApp(
+        project_dir,
+        concurrent=0,
+        dashboard_mouse=dashboard_mouse,
+        read_only=True,
+    )
+    return int(app.run(mouse=dashboard_mouse) or 0)

@@ -931,6 +931,45 @@ def test_cancel_queued_task_removes_queue_entry(tmp_path: Path):
     assert load_queue(repo) == []
 
 
+def test_resume_command_requeues_interrupted_task(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="resume1",
+        command_argv=["build", "x"],
+        resumable=True,
+        branch="build/resume1",
+        worktree=".worktrees/resume1",
+    ))
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["resume1"] = {
+        "status": "interrupted",
+        "started_at": "2026-04-19T00:00:00Z",
+        "finished_at": "2026-04-19T00:05:00Z",
+        "failure_reason": "interrupted by watcher shutdown; resume available",
+    }
+
+    runner._apply_command({"cmd": "resume", "id": "resume1"}, state)
+
+    assert state["tasks"]["resume1"]["status"] == "queued"
+    assert state["tasks"]["resume1"]["resumed_from_checkpoint"] is True
+    assert state["tasks"]["resume1"]["failure_reason"] is None
+    assert state["tasks"]["resume1"]["finished_at"] is None
+
+
+def test_resume_command_ignores_non_interrupted_task(tmp_path: Path, caplog):
+    repo = init_repo(tmp_path)
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["queued1"] = {"status": "queued"}
+
+    with caplog.at_level("WARNING", logger="otto.queue.runner"):
+        runner._apply_command({"cmd": "resume", "id": "queued1"}, state)
+
+    assert state["tasks"]["queued1"]["status"] == "queued"
+    assert "resume ignored for queued1 in status=queued" in caplog.text
+
+
 def test_remove_command_updates_queue_yml_for_live_task(tmp_path: Path):
     repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
@@ -969,6 +1008,72 @@ def test_remove_done_task_is_noop_with_cleanup_warning(tmp_path: Path, caplog):
     assert state["tasks"]["done1"]["status"] == "done"
     assert [task.id for task in load_queue(repo)] == ["done1"]
     assert "use cleanup" in caplog.text
+
+
+def test_immediate_shutdown_marks_running_task_interrupted(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="build1",
+        command_argv=["build", "x"],
+        resumable=True,
+        branch="build/build1",
+        worktree=".worktrees/build1",
+    ))
+    session_id = "2026-04-22-010203-abc123"
+    _paths.ensure_session_scaffold(repo / ".worktrees" / "build1", session_id)
+    _paths.session_checkpoint(repo / ".worktrees" / "build1", session_id).write_text(
+        json.dumps({"status": "paused", "updated_at": "2026-04-22T01:02:03Z"})
+    )
+    write_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "build1": {
+                    "status": "running",
+                    "started_at": "2026-04-22T01:00:00Z",
+                    "child": {"pid": 999999, "pgid": 999999},
+                },
+            },
+        },
+    )
+
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    runner._kill_all_in_flight()
+
+    updated = load_state(repo)["tasks"]["build1"]
+    assert updated["status"] == "terminating"
+    assert updated["terminal_status"] == "interrupted"
+    assert "resume available" in updated["failure_reason"]
+
+
+def test_immediate_shutdown_preserves_explicit_cancel_terminal_status(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    write_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "build1": {
+                    "status": "terminating",
+                    "started_at": "2026-04-22T01:00:00Z",
+                    "child": {"pid": 999999, "pgid": 999999},
+                    "terminal_status": "cancelled",
+                    "failure_reason": "cancelled by user",
+                },
+            },
+        },
+    )
+
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    runner._kill_all_in_flight()
+
+    updated = load_state(repo)["tasks"]["build1"]
+    assert updated["status"] == "terminating"
+    assert updated["terminal_status"] == "cancelled"
+    assert updated["failure_reason"] == "cancelled by user"
 
 
 def test_spawn_uses_snapshotted_branch_when_intent_matches(tmp_path: Path, monkeypatch):

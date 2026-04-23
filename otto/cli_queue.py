@@ -34,8 +34,16 @@ import click
 from rich.table import Table
 import yaml
 
+from otto import paths
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
+from otto.queue.runtime import (
+    INTERRUPTED_STATUS,
+    checkpoint_path_for_task,
+    task_resume_available,
+    task_display_status,
+    watcher_alive,
+)
 
 
 def _git_worktree_remove(project_dir: Path, wt_path: Path, *, force: bool) -> subprocess.CompletedProcess:
@@ -101,7 +109,7 @@ def _project_dir() -> Path:
 
 def _queue_manifest_pow_html(project_dir: Path, task_id: str, *, status: str) -> str:
     """Return the user-facing PoW HTML path string for a queue task."""
-    manifest_path = project_dir / "otto_logs" / "queue" / task_id / "manifest.json"
+    manifest_path = paths.logs_dir(project_dir) / "queue" / task_id / "manifest.json"
     if not manifest_path.exists():
         return "(missing — see manifest for details)" if status == "done" else "(none yet)"
     try:
@@ -133,7 +141,7 @@ def _install_runner_logging(project_dir: Path, *, quiet: bool) -> None:
         runner_log.removeHandler(h)
     runner_log.setLevel(logging.INFO)
 
-    log_dir = project_dir / "otto_logs" / "queue"
+    log_dir = paths.logs_dir(project_dir) / "queue"
     log_dir.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(log_dir / "watcher.log", mode="a")
     file_handler.setLevel(logging.INFO)
@@ -193,36 +201,6 @@ def _validate_target_args(command: click.Command, argv: list[str]) -> None:
             ctx.close()
 
 
-def _watcher_alive(state: dict[str, Any], *, max_age_s: float = 10.0) -> bool:
-    """Return True iff state.json's watcher heartbeat is fresh (<max_age_s old)."""
-    w = state.get("watcher")
-    if not w:
-        return False
-    pid = w.get("pid")
-    if not isinstance(pid, int):
-        return False
-    if not w.get("started_at"):
-        return False
-    hb = w.get("heartbeat")
-    if not hb:
-        return False
-    try:
-        from datetime import datetime, timezone
-        when = datetime.strptime(hb, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        age = (datetime.now(tz=timezone.utc) - when).total_seconds()
-        if age >= max_age_s:
-            return False
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
-    except Exception:
-        return False
-
-
 def _watcher_is_alive(project_dir: Path, *, max_age_s: float = 10.0) -> bool:
     """Load state.json and return True iff the watcher heartbeat is fresh and live."""
     from otto.queue.schema import load_state
@@ -231,7 +209,7 @@ def _watcher_is_alive(project_dir: Path, *, max_age_s: float = 10.0) -> bool:
         state = load_state(project_dir)
     except Exception:
         return False
-    return _watcher_alive(state, max_age_s=max_age_s)
+    return watcher_alive(state, max_age_s=max_age_s)
 
 
 def _load_queue_or_exit(project_dir: Path):
@@ -255,7 +233,47 @@ def _task_status(project_dir: Path, task_id: str) -> str:
 
     state = load_state(project_dir)
     ts = state.get("tasks", {}).get(task_id, {"status": "queued"})
-    return str(ts.get("status", "queued"))
+    return task_display_status(ts)
+
+
+def _resume_status(project_dir: Path, task) -> tuple[str, str | None]:
+    checkpoint_path = checkpoint_path_for_task(project_dir, task)
+    if not task.resumable:
+        return "n/a", None
+    if checkpoint_path is None:
+        return "no checkpoint", None
+    return "ready", str(checkpoint_path)
+
+
+def _resume_selection_candidates(project_dir: Path) -> list[Any]:
+    tasks = _load_queue_or_exit(project_dir)
+    from otto.queue.schema import load_state
+
+    state = load_state(project_dir)
+    candidates: list[Any] = []
+    for task in tasks:
+        task_state = state.get("tasks", {}).get(task.id, {"status": "queued"})
+        if task_display_status(task_state) != INTERRUPTED_STATUS:
+            continue
+        candidates.append(task)
+    return candidates
+
+
+def _parse_resume_task_args(values: tuple[str, ...]) -> list[str]:
+    task_ids: list[str] = []
+    for value in values:
+        for piece in value.split(","):
+            task_id = piece.strip()
+            if task_id:
+                task_ids.append(task_id)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for task_id in task_ids:
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        ordered.append(task_id)
+    return ordered
 
 
 def _print_added(task_id: str, project_dir: Path) -> None:
@@ -264,7 +282,7 @@ def _print_added(task_id: str, project_dir: Path) -> None:
         state = load_state(project_dir)
     except Exception:
         state = {}
-    if _watcher_alive(state):
+    if watcher_alive(state):
         running = sum(1 for ts in state.get("tasks", {}).values() if ts.get("status") == "running")
         queued_before = sum(
             1 for tid, ts in state.get("tasks", {}).items()
@@ -399,6 +417,28 @@ def register_queue_commands(main: click.Group) -> None:
         \b
             otto queue run --concurrent 3
         """
+
+    @queue.command(context_settings=CONTEXT_SETTINGS)
+    @click.option("--dashboard-mouse", is_flag=True,
+                  help="Enable mouse capture (loses terminal copy in most terminals)")
+    def dashboard(dashboard_mouse: bool) -> None:
+        """Open a read-only queue dashboard for an active watcher.
+
+        \b
+            otto queue dashboard                  # re-open the live queue UI
+            otto queue dashboard --dashboard-mouse
+
+        This viewer never mutates queue state or sends signals. Quit with `q`.
+        """
+        from otto.queue.dashboard import run_dashboard_viewer
+
+        project_dir = _project_dir()
+        sys.exit(
+            run_dashboard_viewer(
+                project_dir,
+                dashboard_mouse=dashboard_mouse,
+            )
+        )
 
     # ---- enqueue: build ----
     @queue.command(
@@ -545,28 +585,38 @@ def register_queue_commands(main: click.Group) -> None:
         table.add_column("ID")
         table.add_column("STATUS")
         table.add_column("MODE")
+        table.add_column("RESUME")
         table.add_column("COST", justify="right")
         table.add_column("DURATION", justify="right")
         table.add_column("BLOCKED-ON")
         any_shown = False
         for t in tasks:
             ts = state.get("tasks", {}).get(t.id, {"status": "queued"})
-            status = ts.get("status", "queued")
+            status = task_display_status(ts)
             if status == "removed" and not show_all:
                 continue
             any_shown = True
             mode = t.command_argv[0] if t.command_argv else "?"
+            resume_status, _resume_path = _resume_status(project_dir, t)
             cost = ts.get("cost_usd")
             cost_s = f"${cost:.2f}" if isinstance(cost, (int, float)) else "—"
             dur = ts.get("duration_s")
             dur_s = f"{dur:.0f}s" if isinstance(dur, (int, float)) else "—"
             after_s = ", ".join(t.after) if t.after else "—"
-            table.add_row(t.id, _color_status(status), mode, cost_s, dur_s, after_s)
+            table.add_row(
+                t.id,
+                _color_status(status),
+                mode,
+                _color_resume_status(status, resume_status),
+                cost_s,
+                dur_s,
+                after_s,
+            )
         if not any_shown:
             console.print("  Queue is empty (all tasks are removed; use --all to show).")
             return
         console.print(table)
-        if not _watcher_alive(state):
+        if not watcher_alive(state):
             console.print("\n  [yellow]Worker is not running.[/yellow] "
                           "Start with: [info]otto queue run --concurrent N[/info]")
 
@@ -587,8 +637,9 @@ def register_queue_commands(main: click.Group) -> None:
             error_console.print(f"[error]No such task: {task_id!r}[/error]")
             sys.exit(2)
         ts = state.get("tasks", {}).get(task_id, {"status": "queued"})
+        display_status = task_display_status(ts)
         console.print(f"\n  [bold]Task:[/bold] {task.id}")
-        console.print(f"  [dim]Status:[/dim] {_color_status(ts.get('status', 'queued'))}")
+        console.print(f"  [dim]Status:[/dim] {_color_status(display_status)}")
         console.print(f"  [dim]Command:[/dim] otto {' '.join(task.command_argv)}")
         if task.resolved_intent:
             console.print(f"  [dim]Intent:[/dim] {rich_escape(task.resolved_intent)}")
@@ -603,6 +654,10 @@ def register_queue_commands(main: click.Group) -> None:
         if task.worktree:
             console.print(f"  [dim]Worktree:[/dim] {task.worktree}")
         console.print(f"  [dim]Resumable:[/dim] {task.resumable}")
+        resume_status, checkpoint_path = _resume_status(project_dir, task)
+        console.print(f"  [dim]Resume status:[/dim] {_color_resume_status(display_status, resume_status)}")
+        if checkpoint_path:
+            console.print(f"  [dim]Checkpoint:[/dim] {checkpoint_path}")
         console.print(f"  [dim]Added at:[/dim] {task.added_at}")
         if ts.get("started_at"):
             console.print(f"  [dim]Started at:[/dim] {ts['started_at']}")
@@ -720,6 +775,111 @@ def register_queue_commands(main: click.Group) -> None:
             f"[error]task {task_id} is {status}; nothing to cancel.[/error]"
         )
         sys.exit(2)
+
+    # ---- resume ----
+    @queue.command(context_settings=CONTEXT_SETTINGS)
+    @click.argument("task_ids", nargs=-1)
+    @click.option("--select", is_flag=True,
+                  help="Pick interrupted tasks from an interactive checkbox list")
+    def resume(task_ids: tuple[str, ...], select: bool) -> None:
+        """Resume interrupted queue tasks.
+
+        \b
+            otto queue resume                  # resume all interrupted tasks
+            otto queue resume labels           # resume one task
+            otto queue resume labels,due       # resume multiple tasks
+            otto queue resume --select         # pick from a checkbox list
+
+        Resumed tasks move to the head of the queue and restart with `--resume`.
+        """
+        from otto.queue.dashboard import select_resume_tasks
+        from otto.queue.schema import append_command, load_state, reorder_tasks
+
+        project_dir = _project_dir()
+        tasks = _load_queue_or_exit(project_dir)
+        tasks_by_id = {task.id: task for task in tasks}
+        state = load_state(project_dir)
+        interrupted_ids = [
+            task.id
+            for task in tasks
+            if task_display_status(state.get("tasks", {}).get(task.id, {})) == INTERRUPTED_STATUS
+        ]
+        if not interrupted_ids:
+            console.print("  No interrupted tasks are waiting to resume.")
+            return
+        resumable_ids = [
+            task_id for task_id in interrupted_ids
+            if task_resume_available(project_dir, tasks_by_id[task_id])
+        ]
+
+        selected_ids = _parse_resume_task_args(task_ids)
+        if select:
+            if not resumable_ids:
+                console.print("  Interrupted tasks exist, but none have a resumable checkpoint.")
+                return
+            selected_ids = select_resume_tasks(
+                project_dir,
+                [
+                    tasks_by_id[task_id]
+                    for task_id in resumable_ids
+                    if task_id in tasks_by_id
+                ],
+            )
+            if not selected_ids:
+                console.print("  Resume selection cancelled.")
+                return
+        elif not selected_ids:
+            selected_ids = list(resumable_ids)
+            if not selected_ids:
+                console.print("  Interrupted tasks exist, but none have a resumable checkpoint.")
+                return
+
+        missing = [task_id for task_id in selected_ids if task_id not in tasks_by_id]
+        if missing:
+            error_console.print(
+                f"[error]Unknown task id(s): {rich_escape(', '.join(missing))}[/error]"
+            )
+            sys.exit(2)
+
+        invalid_status = [
+            task_id for task_id in selected_ids
+            if task_display_status(state.get("tasks", {}).get(task_id, {})) != INTERRUPTED_STATUS
+        ]
+        if invalid_status:
+            error_console.print(
+                "[error]Only interrupted tasks can be resumed.[/error]\n"
+                f"  Not interrupted: {rich_escape(', '.join(invalid_status))}"
+            )
+            sys.exit(2)
+
+        unavailable = [
+            task_id for task_id in selected_ids
+            if not task_resume_available(project_dir, tasks_by_id[task_id])
+        ]
+        if unavailable:
+            error_console.print(
+                "[error]Selected task(s) do not have a resumable checkpoint.[/error]\n"
+                f"  No checkpoint: {rich_escape(', '.join(unavailable))}"
+            )
+            sys.exit(2)
+
+        reorder_tasks(project_dir, selected_ids)
+        for task_id in selected_ids:
+            append_command(project_dir, {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "cmd": "resume",
+                "id": task_id,
+            })
+
+        if _watcher_is_alive(project_dir):
+            console.print(
+                f"  Resuming [info]{', '.join(selected_ids)}[/info]; watcher will re-queue them within ~1s."
+            )
+            return
+        console.print(
+            f"  Marked [info]{', '.join(selected_ids)}[/info] to resume. "
+            "Start the watcher with [info]otto queue run --concurrent N[/info]."
+        )
 
     # ---- cleanup (Phase 6.4) ----
     @queue.command(context_settings=CONTEXT_SETTINGS)
@@ -891,9 +1051,22 @@ def _color_status(status: str) -> str:
         "queued": "yellow",
         "running": "cyan",
         "terminating": "magenta",
+        INTERRUPTED_STATUS: "bright_blue",
         "done": "green",
         "failed": "red",
         "cancelled": "magenta",
         "removed": "dim",
     }
     return f"[{colors.get(status, 'white')}]{status}[/{colors.get(status, 'white')}]"
+
+
+def _color_resume_status(task_status: str, resume_status: str) -> str:
+    if task_status != INTERRUPTED_STATUS:
+        return "[dim]—[/dim]" if resume_status in {"ready", "no checkpoint", "n/a"} else rich_escape(resume_status)
+    colors = {
+        "ready": "green",
+        "no checkpoint": "red",
+        "n/a": "dim",
+    }
+    color = colors.get(resume_status, "white")
+    return f"[{color}]{resume_status}[/{color}]"

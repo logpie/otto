@@ -19,10 +19,10 @@ import time
 from pathlib import Path
 
 # Reserved single-word IDs that would collide with `otto queue` management
-# verbs (ls/show/rm/cancel/run). Refused as task IDs to keep CLI parsing
+# verbs (ls/show/rm/cancel/cleanup/run/dashboard/resume). Refused as task IDs to keep CLI parsing
 # unambiguous. (Plan-parallel.md §5 Step 2.2.)
 RESERVED_TASK_IDS: frozenset[str] = frozenset({
-    "ls", "show", "rm", "cancel", "run",
+    "ls", "show", "rm", "cancel", "cleanup", "run", "dashboard", "resume",
 })
 
 

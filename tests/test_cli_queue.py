@@ -237,6 +237,34 @@ def test_queue_ls_shows_tasks(tmp_path: Path):
     assert "settings-page" in out
 
 
+def test_queue_ls_marks_interrupted_resume_ready(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv export"], cwd=repo)
+    session_id = "2026-04-22-010203-abc123"
+    paths.ensure_session_scaffold(repo / ".worktrees" / "csv-export", session_id)
+    paths.session_checkpoint(repo / ".worktrees" / "csv-export", session_id).write_text(
+        json.dumps({"status": "paused", "updated_at": "2026-04-22T01:02:03Z"})
+    )
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={
+            "csv-export": {
+                "status": "terminating",
+                "terminal_status": "interrupted",
+                "failure_reason": "interrupted by watcher shutdown; resume available",
+            }
+        },
+    )
+
+    code, out, _ = _run(["queue", "ls"], cwd=repo)
+
+    assert code == 0
+    assert "csv-export" in out
+    assert "interrupted" in out
+    assert "ready" in out
+
+
 def test_queue_show_existing_task(tmp_path: Path):
     repo = init_repo(tmp_path)
     _run(["queue", "build", "csv export"], cwd=repo)
@@ -245,6 +273,33 @@ def test_queue_show_existing_task(tmp_path: Path):
     assert "csv-export" in out
     assert "queued" in out
     assert "Resumable: True" in out
+
+
+def test_queue_show_reports_resume_checkpoint_for_interrupted_task(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv export"], cwd=repo)
+    session_id = "2026-04-22-010203-abc123"
+    paths.ensure_session_scaffold(repo / ".worktrees" / "csv-export", session_id)
+    checkpoint_path = paths.session_checkpoint(repo / ".worktrees" / "csv-export", session_id)
+    checkpoint_path.write_text(json.dumps({"status": "paused", "updated_at": "2026-04-22T01:02:03Z"}))
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={
+            "csv-export": {
+                "status": "terminating",
+                "terminal_status": "interrupted",
+                "failure_reason": "interrupted by watcher shutdown; resume available",
+            }
+        },
+    )
+
+    code, out, _ = _run(["queue", "show", "csv-export"], cwd=repo)
+
+    assert code == 0
+    assert "Resume status:" in out
+    assert "ready" in out
+    assert str(checkpoint_path).replace("\n", "") in "".join(out.split())
 
 
 def test_queue_show_reports_proof_of_work_html_path(tmp_path: Path):
@@ -318,8 +373,8 @@ def test_queue_rm_with_watcher_running_appends_command(tmp_path: Path, monkeypat
     _write_watcher_state(
         repo,
         watcher={
-            "pid": 4242,
-            "pgid": 4242,
+            "pid": os.getpid(),
+            "pgid": os.getpid(),
             "started_at": now,
             "heartbeat": now,
         },
@@ -408,8 +463,8 @@ def test_queue_cancel_with_watcher_describes_queued_task(tmp_path: Path, monkeyp
     _write_watcher_state(
         repo,
         watcher={
-            "pid": 4242,
-            "pgid": 4242,
+            "pid": os.getpid(),
+            "pgid": os.getpid(),
             "started_at": now,
             "heartbeat": now,
         },
@@ -430,8 +485,8 @@ def test_queue_cancel_with_watcher_describes_running_task(tmp_path: Path, monkey
     _write_watcher_state(
         repo,
         watcher={
-            "pid": 4242,
-            "pgid": 4242,
+            "pid": os.getpid(),
+            "pgid": os.getpid(),
             "started_at": now,
             "heartbeat": now,
         },
@@ -452,8 +507,8 @@ def test_queue_cancel_with_watcher_reports_terminating_task(tmp_path: Path, monk
     _write_watcher_state(
         repo,
         watcher={
-            "pid": 4242,
-            "pgid": 4242,
+            "pid": os.getpid(),
+            "pgid": os.getpid(),
             "started_at": now,
             "heartbeat": now,
         },
@@ -475,8 +530,8 @@ def test_queue_cancel_with_watcher_refuses_finished_task(tmp_path: Path, monkeyp
     _write_watcher_state(
         repo,
         watcher={
-            "pid": 4242,
-            "pgid": 4242,
+            "pid": os.getpid(),
+            "pgid": os.getpid(),
             "started_at": now,
             "heartbeat": now,
         },
@@ -489,6 +544,116 @@ def test_queue_cancel_with_watcher_refuses_finished_task(tmp_path: Path, monkeyp
     assert code == 2
     assert "task csv is done; nothing to cancel." in out
     assert not (repo / COMMANDS_FILE).exists()
+
+
+def test_queue_dashboard_no_active_watcher_errors(tmp_path: Path):
+    repo = init_repo(tmp_path)
+
+    code, out, _ = _run(["queue", "dashboard"], cwd=repo)
+
+    assert code == 1
+    assert "No active queue watcher found." in out
+    assert "otto queue run --concurrent N" in out
+
+
+def test_queue_dashboard_help_shows_examples(tmp_path: Path):
+    repo = init_repo(tmp_path)
+
+    code, out, _ = _run(["queue", "dashboard", "--help"], cwd=repo)
+
+    assert code == 0
+    assert "otto queue dashboard" in out
+    assert "read-only queue dashboard" in out
+
+
+def test_queue_resume_help_shows_examples(tmp_path: Path):
+    repo = init_repo(tmp_path)
+
+    code, out, _ = _run(["queue", "resume", "--help"], cwd=repo)
+
+    assert code == 0
+    assert "otto queue resume" in out
+    assert "--select" in out
+    assert "labels,due" in out
+
+
+def test_queue_resume_defaults_to_resumable_interrupted_tasks(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "labels"], cwd=repo)
+    _run(["queue", "certify", "release"], cwd=repo)
+    session_id = "2026-04-22-010203-abc123"
+    paths.ensure_session_scaffold(repo / ".worktrees" / "labels", session_id)
+    paths.session_checkpoint(repo / ".worktrees" / "labels", session_id).write_text(
+        json.dumps({"status": "paused", "updated_at": "2026-04-22T01:02:03Z"})
+    )
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={
+            "labels": {
+                "status": "terminating",
+                "terminal_status": "interrupted",
+                "failure_reason": "interrupted by watcher shutdown; resume available",
+            },
+            "release": {"status": "interrupted"},
+        },
+    )
+
+    code, out, _ = _run(["queue", "resume"], cwd=repo)
+
+    assert code == 0
+    assert "Marked labels to resume" in out
+    tasks = load_queue(repo)
+    assert [task.id for task in tasks] == ["labels", "release"]
+    cmds = [json.loads(line) for line in (repo / COMMANDS_FILE).read_text().splitlines() if line.strip()]
+    assert cmds == [{"ts": cmds[0]["ts"], "cmd": "resume", "id": "labels"}]
+
+
+def test_queue_resume_explicit_task_errors_without_checkpoint(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "labels"], cwd=repo)
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={"labels": {"status": "interrupted"}},
+    )
+
+    code, out, _ = _run(["queue", "resume", "labels"], cwd=repo)
+
+    assert code == 2
+    assert "do not have a resumable checkpoint" in out
+
+
+def test_queue_resume_select_uses_picker(monkeypatch, tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "labels"], cwd=repo)
+    _run(["queue", "build", "due"], cwd=repo)
+    for task_id, session_id in [("labels", "2026-04-22-010203-abc123"), ("due", "2026-04-22-010204-def456")]:
+        paths.ensure_session_scaffold(repo / ".worktrees" / task_id, session_id)
+        paths.session_checkpoint(repo / ".worktrees" / task_id, session_id).write_text(
+            json.dumps({"status": "paused", "updated_at": "2026-04-22T01:02:03Z"})
+        )
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={
+            "labels": {"status": "interrupted"},
+            "due": {"status": "interrupted"},
+        },
+    )
+    monkeypatch.setattr(
+        "otto.queue.dashboard.select_resume_tasks",
+        lambda project_dir, tasks: ["due"],
+    )
+
+    code, out, _ = _run(["queue", "resume", "--select"], cwd=repo)
+
+    assert code == 0
+    assert "Marked due to resume" in out
+    tasks = load_queue(repo)
+    assert [task.id for task in tasks] == ["due", "labels"]
+    cmds = [json.loads(line) for line in (repo / COMMANDS_FILE).read_text().splitlines() if line.strip()]
+    assert cmds == [{"ts": cmds[0]["ts"], "cmd": "resume", "id": "due"}]
 
 
 def test_queue_rm_rejects_unknown_task(tmp_path: Path):

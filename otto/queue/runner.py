@@ -37,6 +37,11 @@ from pathlib import Path
 from typing import Any
 
 from otto.manifest import queue_index_path_for
+from otto.queue.runtime import (
+    IN_FLIGHT_STATUSES,
+    INTERRUPTED_STATUS,
+    checkpoint_path_for_task,
+)
 from otto.queue.schema import (
     QueueTask,
     drain_commands,
@@ -49,9 +54,6 @@ from otto.queue.schema import (
 from otto.queue.ids import detect_cycles
 
 logger = logging.getLogger("otto.queue.runner")
-
-
-IN_FLIGHT_STATUSES = {"running", "terminating"}
 
 
 @dataclass
@@ -470,14 +472,8 @@ class Runner:
             # New per-session layout: paused pointer → sessions/<id>/checkpoint.json.
             # Falls back to scanning sessions/*/checkpoint.json if pointer is stale,
             # and to the legacy otto_logs/checkpoint.json for back-compat.
-            from otto import paths as _paths
-            wt = self._worktree_for(task)
-            paused_session = _paths.resolve_pointer(wt, _paths.PAUSED_POINTER)
-            if paused_session is not None:
-                checkpoint_path = paused_session / "checkpoint.json"
-            else:
-                checkpoint_path = _paths.legacy_checkpoint(wt)
-            if checkpoint_path.exists() and policy == "resume":
+            checkpoint_path = checkpoint_path_for_task(self.project_dir, task)
+            if checkpoint_path is not None and policy == "resume":
                 logger.info(
                     "reconciling: re-spawning %s with --resume from %s",
                     tid, checkpoint_path,
@@ -545,6 +541,17 @@ class Runner:
             ts["status"] = "removed"
             ts["finished_at"] = now_iso()
             ts.pop("terminal_status", None)
+        elif kind == "resume":
+            if status != INTERRUPTED_STATUS:
+                logger.warning("resume ignored for %s in status=%s", tid, status)
+                return
+            ts["status"] = "queued"
+            ts["started_at"] = None
+            ts["finished_at"] = None
+            ts["exit_code"] = None
+            ts["child"] = None
+            ts["failure_reason"] = None
+            ts["resumed_from_checkpoint"] = True
         else:
             logger.warning("unknown command kind: %r", kind)
 
@@ -838,15 +845,27 @@ class Runner:
 
     def _kill_all_in_flight(self) -> None:
         state = load_state(self.project_dir)
+        tasks_by_id = {
+            task.id: task for task in self._load_queue_or_empty(context="shutdown interrupt")
+        }
         for tid, ts in state["tasks"].items():
             if ts.get("status") not in IN_FLIGHT_STATUSES:
                 continue
             child = ts.get("child") or {}
             kill_child_safely(child, signal.SIGTERM)
+            final_status = ts.get("terminal_status", "cancelled")
+            reason = ts.get("failure_reason")
+            if ts.get("status") == "running":
+                task = tasks_by_id.get(tid)
+                final_status = INTERRUPTED_STATUS
+                if task is not None and checkpoint_path_for_task(self.project_dir, task) is not None:
+                    reason = "interrupted by watcher shutdown; resume available"
+                else:
+                    reason = "interrupted by watcher shutdown"
             self._mark_terminating(
                 ts,
-                final_status="cancelled",
-                reason="watcher shutdown (immediate)",
+                final_status=final_status,
+                reason=reason,
             )
         self._write_state_or_raise(state)
 
