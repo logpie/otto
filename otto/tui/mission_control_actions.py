@@ -540,7 +540,7 @@ def _cancel_unavailable_result(
 
 
 def _otto_cli_argv(*args: str) -> list[str]:
-    candidate = Path(sys.executable).resolve().with_name("otto")
+    candidate = Path(sys.executable).with_name("otto")
     if candidate.exists():
         return [str(candidate), *args]
     return [sys.executable, "-m", "otto.cli", *args]

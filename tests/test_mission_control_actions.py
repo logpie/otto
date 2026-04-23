@@ -474,6 +474,22 @@ def test_otto_cli_argv_prefers_entrypoint_next_to_python(monkeypatch, tmp_path: 
     assert mission_control_actions._otto_cli_argv("merge", "--all") == [str(fake_otto), "merge", "--all"]
 
 
+def test_otto_cli_argv_prefers_entrypoint_next_to_unresolved_python_symlink(monkeypatch, tmp_path: Path) -> None:
+    real_bin = tmp_path / "real-bin"
+    venv_bin = tmp_path / "venv" / "bin"
+    real_python = real_bin / "python"
+    fake_python = venv_bin / "python"
+    fake_otto = venv_bin / "otto"
+    real_bin.mkdir(parents=True)
+    venv_bin.mkdir(parents=True)
+    real_python.write_text("")
+    fake_otto.write_text("")
+    fake_python.symlink_to(real_python)
+    monkeypatch.setattr(mission_control_actions.sys, "executable", str(fake_python))
+
+    assert mission_control_actions._otto_cli_argv("merge", "--all") == [str(fake_otto), "merge", "--all"]
+
+
 def test_otto_cli_argv_falls_back_to_python_module(monkeypatch, tmp_path: Path) -> None:
     fake_python = tmp_path / "bin" / "python"
     fake_python.parent.mkdir(parents=True)

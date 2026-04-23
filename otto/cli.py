@@ -1993,3 +1993,7 @@ register_cleanup_command(main)
 # Merge command (Phase 4 — registered from otto/cli_merge.py)
 from otto.cli_merge import register_merge_command
 register_merge_command(main)
+
+
+if __name__ == "__main__":
+    main()
