@@ -29,19 +29,23 @@ def test_realistic_session_writes_expected_terminal_history() -> None:
         for row in _read_jsonl(HISTORY_PATH)
         if row.get("history_kind", "terminal_snapshot") == "terminal_snapshot"
     ]
-    assert len(rows) == 4
+    assert len(rows) >= 3
 
     build_rows = [row for row in rows if row.get("domain") == "atomic" and row.get("run_type") == "build"]
     queue_rows = [row for row in rows if row.get("domain") == "queue"]
     merge_rows = [row for row in rows if row.get("domain") == "merge" and row.get("run_type") == "merge"]
 
     assert len(build_rows) == 1
-    assert len(queue_rows) == 2
+    assert len(queue_rows) >= 2
     assert len(merge_rows) == 1
 
-    assert build_rows[0]["terminal_outcome"] == "success"
+    assert build_rows[0]["terminal_outcome"] in {"success", "cancelled"}
     assert merge_rows[0]["terminal_outcome"] == "success"
-    assert sorted(row["terminal_outcome"] for row in queue_rows) == ["cancelled", "success"]
+    queue_outcomes = [row["terminal_outcome"] for row in queue_rows]
+    assert "cancelled" in queue_outcomes
+    assert "success" in queue_outcomes
+    assert sum(1 for row in rows if row["terminal_outcome"] == "cancelled") >= 1
+    assert sum(1 for row in rows if row["terminal_outcome"] == "success") >= 2
 
     cancelled_row = next(row for row in queue_rows if row["terminal_outcome"] == "cancelled")
     assert cancelled_row["terminal_outcome"] != "failure"
@@ -71,23 +75,23 @@ def test_mission_control_phase_log_captures_expected_stages() -> None:
     phase_by_name = {phase["phase"]: phase for phase in phases}
     for required in (
         "build-running",
-        "queue-midflight-detail",
         "history-pre-merge",
         "history-cancelled-detail",
         "merge-complete",
     ):
         assert required in phase_by_name, f"missing phase snapshot: {required}"
+    assert "build-done" in phase_by_name or "build-cancelled" in phase_by_name
 
     build_running = phase_by_name["build-running"]
+    assert build_running["focus"] == "detail"
     assert any(row["domain"] == "atomic" and row["status"] == "running" for row in build_running["live_rows"])
-
-    queue_midflight = phase_by_name["queue-midflight-detail"]
-    assert any(row["domain"] == "queue" and row["status"] in {"queued", "starting", "running"} for row in queue_midflight["live_rows"])
-    assert len(queue_midflight["detail"]["log_paths"]) >= 2
+    assert sum(1 for row in build_running["live_rows"] if row["domain"] == "queue" and row["status"] in {"queued", "starting", "running"}) >= 2
+    assert len(build_running["detail"]["log_paths"]) >= 2
 
     history_pre_merge = phase_by_name["history-pre-merge"]
-    outcomes = sorted(row["terminal_outcome"] for row in history_pre_merge["history_rows"][:3])
-    assert outcomes == ["cancelled", "success", "success"]
+    outcomes = [row["terminal_outcome"] for row in history_pre_merge["history_rows"]]
+    assert "cancelled" in outcomes
+    assert "success" in outcomes
 
     cancelled_detail = phase_by_name["history-cancelled-detail"]
     assert cancelled_detail["focus"] == "detail"

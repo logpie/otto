@@ -28,11 +28,16 @@ def test_n9_is_registered_without_n10() -> None:
 
 
 def test_n9_step_plan_mentions_realistic_operator_session() -> None:
-    steps = OTTO_AS_USER_NIGHTLY.SCENARIO_SPECS["N9"].step_plan
+    spec = OTTO_AS_USER_NIGHTLY.SCENARIO_SPECS["N9"]
+    steps = spec.step_plan
+    assert spec.est_cost_range == "$2.5-$4.5"
+    assert spec.budget_s == 25 * 60
     assert steps[0] == "open Mission Control against ./otto_logs/"
-    assert any("--allow-dirty" in step for step in steps)
+    assert any("--allow-dirty" in step and "GET /tasks endpoint that returns the current task list as JSON." in step for step in steps)
     assert any("--concurrent 2" in step for step in steps)
-    assert any("heartbeat progress" in step for step in steps)
+    assert any("within 5s" in step for step in steps)
+    assert any("within 4s" in step for step in steps)
+    assert any("8 minutes" in step and "presses c" in step for step in steps)
     assert any("presses e" in step for step in steps)
     assert any("not --all" in step for step in steps)
     assert steps[-2:] == [
@@ -117,8 +122,8 @@ def test_verify_n9_checks_realistic_session_and_uses_visible_hidden(
         details={
             "build-live-row-latency-ms": 500,
             "build-finished-naturally": True,
-            "queue-heartbeat-advanced": True,
-            "queue-log-cycled": True,
+            "standalone-heartbeat-advanced": True,
+            "standalone-log-cycled": True,
             "cancel-ack-latency-ms": 300,
             "queue-cancelled-latency-ms": 400,
             "editor-spawn-attempted": True,
@@ -161,14 +166,18 @@ def test_verify_n9_rejects_merge_all(tmp_path: Path) -> None:
         details={
             "build-live-row-latency-ms": 500,
             "build-finished-naturally": True,
-            "queue-heartbeat-advanced": True,
-            "queue-log-cycled": True,
+            "standalone-heartbeat-advanced": True,
+            "standalone-log-cycled": True,
             "cancel-ack-latency-ms": 300,
             "queue-cancelled-latency-ms": 400,
             "editor-spawn-attempted": True,
             "merge-spawn-argv": ["otto", "merge", "--all"],
-            "history-terminal-snapshot-count": 4,
-            "history-terminal-outcomes": {"queue-cancelled": "cancelled"},
+            "history-terminal-snapshot-count": 3,
+            "history-terminal-outcomes": {
+                "queue-cancelled": "cancelled",
+                "queue-success": "success",
+                "merge-run": "success",
+            },
             "cancelled-queue-run-id": "queue-cancelled",
             "history-artifacts-resolve": True,
             "live-records-terminal-after-gc": True,
