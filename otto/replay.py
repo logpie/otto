@@ -24,7 +24,6 @@ from otto.agent import (
     ToolUseBlock,
     UserMessage,
 )
-from otto.costs import coerce_cost_payload
 from otto.logstream import NarrativeFormatter, estimate_phase_costs
 
 
@@ -59,13 +58,12 @@ def _rebuild_message(rec: dict):
         content = [b for b in (_rebuild_block(d) for d in rec.get("blocks", [])) if b is not None]
         return UserMessage(content=content, session_id=sid)
     if t == "result":
-        cost_payload = coerce_cost_payload(rec)
         return ResultMessage(
             subtype=rec.get("subtype", "success") or "success",
             is_error=bool(rec.get("is_error", False)),
             session_id=sid,
             result=rec.get("result"),
-            total_cost_usd=(cost_payload or {}).get("total_cost_usd"),
+            total_cost_usd=rec.get("cost_usd") or rec.get("total_cost_usd"),
             usage=rec.get("usage"),
             structured_output=rec.get("structured_output"),
         )
@@ -102,8 +100,7 @@ def _replay_one(jsonl_path: Path, out_path: Path) -> int:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                cost_payload = coerce_cost_payload(rec)
-                raw_cost = (cost_payload or {}).get("total_cost_usd")
+                raw_cost = rec.get("cost_usd", rec.get("total_cost_usd"))
                 if isinstance(raw_cost, int | float):
                     total_cost_usd = float(raw_cost)
                 # Rewind the formatter's clock so output elapsed matches original.

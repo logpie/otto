@@ -323,7 +323,7 @@ class TestV3PipelinePass:
         # --- PoW (proof-of-work) ---
         certifier_dir = _paths.certify_dir(tmp_git_repo, result.build_id)
         pow_data = json.loads((certifier_dir / "proof-of-work.json").read_text())
-        assert pow_data["schema_version"] == 2
+        assert pow_data["schema_version"] == 1
         assert pow_data["outcome"] == "passed"
         assert pow_data["pipeline_mode"] == "agentic_v3"
         assert pow_data["mode"] == "agentic_v3"
@@ -476,82 +476,6 @@ async def test_agent_mode_summary_includes_estimated_phase_costs_when_usage_is_l
     assert certify_entry["cost_usd"] >= 0
     assert certify_entry["estimated"] is True
     assert certify_entry["rounds"] == 1
-
-
-@pytest.mark.asyncio
-async def test_agent_mode_handles_unknown_total_cost_without_crashing(tmp_git_repo):
-    assistant_messages = [
-        AssistantMessage(
-            content=[TextBlock(text=AGENT_OUTPUT_PASS)],
-            usage={"output_tokens": 30},
-        ),
-    ]
-    with patch(
-        "otto.agent.run_agent_query",
-        side_effect=_make_mock_query(
-            AGENT_OUTPUT_PASS,
-            cost=None,
-            assistant_messages=assistant_messages,
-        ),
-    ):
-        result = await build_agentic_v3("test", tmp_git_repo, {})
-
-    from otto import paths as _paths
-
-    narrative = (_paths.build_dir(tmp_git_repo, result.build_id) / "narrative.log").read_text()
-    summary = json.loads(_paths.session_summary(tmp_git_repo, result.build_id).read_text())
-
-    assert result.passed is True
-    assert result.total_cost == 0.0
-    assert "SUCCESS cost: unknown" in narrative
-    assert "cost_usd" not in summary["breakdown"]["build"]
-    assert "estimated" not in summary["breakdown"]["build"]
-
-
-@pytest.mark.asyncio
-async def test_codex_runs_write_token_based_cost_shape_to_summary_and_pow(tmp_git_repo):
-    async def codex_query(prompt, options, **kwargs):
-        from otto.agent import AssistantMessage, ResultMessage, TextBlock
-
-        on_message = kwargs.get("on_message")
-        usage = {"provider": "codex", "input_tokens": 42000, "output_tokens": 381}
-        if on_message is not None:
-            on_message(AssistantMessage(content=[TextBlock(text=AGENT_OUTPUT_PASS)], usage=usage))
-            on_message(ResultMessage(
-                subtype="success",
-                is_error=False,
-                session_id="codex-session-1",
-                usage=usage,
-            ))
-        result = MagicMock()
-        result.session_id = "codex-session-1"
-        result.subtype = "success"
-        result.is_error = False
-        result.result = None
-        result.total_cost_usd = None
-        result.usage = usage
-        return AGENT_OUTPUT_PASS, None, result
-
-    with patch("otto.agent.run_agent_query", side_effect=codex_query):
-        result = await build_agentic_v3("test", tmp_git_repo, {"provider": "codex"})
-
-    from otto import paths as _paths
-
-    summary = json.loads(_paths.session_summary(tmp_git_repo, result.build_id).read_text())
-    pow_data = json.loads(
-        (_paths.certify_dir(tmp_git_repo, result.build_id) / "proof-of-work.json").read_text()
-    )
-
-    assert summary["cost"] == {
-        "provider": "codex",
-        "total_cost_usd": None,
-        "tokens_in": 42000,
-        "tokens_out": 381,
-        "display": "42,381 tokens",
-    }
-    assert pow_data["schema_version"] == 2
-    assert pow_data["cost"] == summary["cost"]
-    assert pow_data["cost_summary"]["display"] == "Usage: 42,381 tokens"
 
 
 @pytest.mark.asyncio

@@ -31,7 +31,6 @@ from otto.config import (
     resolve_project_dir,
     resolve_certifier_mode,
 )
-from otto.costs import coerce_cost_payload, format_metric_display, format_summary_metric
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
 
@@ -760,37 +759,26 @@ def _spent_line(result: Any, build_duration: float) -> str:
     certify_entry = breakdown.get("certify", {})
     build_seconds = float(build_entry.get("duration_s", build_duration))
     verify_seconds = float(certify_entry.get("duration_s", 0.0))
-    total_cost = getattr(result, "total_cost", None)
-    cost_payload = coerce_cost_payload(
-        getattr(result, "cost", None),
-        total_cost_usd=float(total_cost) if isinstance(total_cost, int | float) and total_cost > 0 else None,
-    )
     line = f"Spent: {_format_elapsed_compact(build_seconds)} building"
     if certify_entry:
         line += f", {_format_elapsed_compact(verify_seconds)} verifying"
 
-    provider = (cost_payload or {}).get("provider")
     phase_costs: list[str] = []
     estimated = False
-    if provider != "codex":
-        for entry in (build_entry, certify_entry):
-            cost = entry.get("cost_usd")
-            if isinstance(cost, int | float):
-                prefix = "~" if entry.get("estimated") is True else ""
-                estimated = estimated or entry.get("estimated") is True
-                phase_costs.append(f"{prefix}${float(cost):.2f}")
+    for entry in (build_entry, certify_entry):
+        cost = entry.get("cost_usd")
+        if isinstance(cost, int | float):
+            prefix = "~" if entry.get("estimated") is True else ""
+            estimated = estimated or entry.get("estimated") is True
+            phase_costs.append(f"{prefix}${float(cost):.2f}")
 
     if phase_costs:
         detail = " / ".join(phase_costs)
         if estimated:
             detail += " estimated"
-        line += f"  ({detail}, total {format_metric_display(cost_payload)})"
+        line += f"  ({detail}, total ${result.total_cost:.2f})"
     else:
-        total_metric = format_summary_metric(cost_payload)
-        if total_metric == "usage: unknown":
-            line += "  (usage: unknown)"
-        else:
-            line += f"  (total {total_metric})"
+        line += f"  (total ${result.total_cost:.2f})"
     return line
 
 
@@ -897,7 +885,7 @@ def _exit_for_lock_busy(exc) -> None:
               default=None, help="Use a pre-written spec file (implies --yes)")
 @click.option("--yes", is_flag=True, help="Auto-approve the generated spec (for CI/scripts)")
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
-@click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
+@click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has local modifications or untracked files")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
 def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, max_turns, model, provider, effort, strict, verbose, debug_unredacted, resume, spec, spec_file, yes, force, allow_dirty, break_lock):
     """Build a product from a natural language intent.

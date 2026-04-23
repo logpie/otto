@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from otto.costs import coerce_cost_payload, format_metric_display
 from otto.logstream import summarize_browser_efficiency
 from otto.redaction import redact_text
 
@@ -33,7 +32,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("otto.certifier")
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 1
 _GENERATOR = "otto certifier"
 
 _MODE_PROFILES: dict[str, dict[str, Any]] = {
@@ -984,27 +983,7 @@ def _show_round_timeline(round_history: list[dict[str, Any]]) -> bool:
     return len(round_history) > 1
 
 
-def _cost_summary(
-    certifier_cost_usd: float,
-    total_cost_usd: float,
-    *,
-    cost_info: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    resolved_cost = coerce_cost_payload(
-        cost_info,
-        total_cost_usd=total_cost_usd if total_cost_usd > 0 else None,
-    )
-    if resolved_cost is not None and resolved_cost.get("provider") == "codex":
-        display = format_metric_display(resolved_cost)
-        if display == "unknown":
-            display = "Usage: unknown"
-        else:
-            display = f"Usage: {display}"
-        return {
-            "display": display,
-            "lines": [display],
-            "certifier_equals_total": True,
-        }
+def _cost_summary(certifier_cost_usd: float, total_cost_usd: float) -> dict[str, Any]:
     certifier = round(float(certifier_cost_usd or 0.0), 2)
     total = round(float(total_cost_usd or 0.0), 2)
     if certifier == total:
@@ -1074,7 +1053,6 @@ def _build_pow_report_data(
     metric_value: str = "",
     metric_met: bool | None = None,
     round_timings: list[tuple[float, float]] | None = None,
-    cost_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from otto import paths
     report_story_limit = 200
@@ -1138,15 +1116,7 @@ def _build_pow_report_data(
         spec_path=str(spec_context.get("spec_path") or ""),
         evidence_dir=evidence_dir,
     )
-    resolved_cost = coerce_cost_payload(
-        cost_info,
-        total_cost_usd=total_cost_usd if total_cost_usd > 0 else None,
-    )
-    cost_summary = _cost_summary(
-        certifier_cost_usd,
-        total_cost_usd,
-        cost_info=resolved_cost,
-    )
+    cost_summary = _cost_summary(certifier_cost_usd, total_cost_usd)
     verdict_label = "PASS with warnings" if outcome == "passed" and counts["warn_count"] > 0 else ("PASS" if outcome == "passed" else "FAIL")
     data = {
         "schema_version": _SCHEMA_VERSION,
@@ -1162,7 +1132,6 @@ def _build_pow_report_data(
         "duration_human": _human_duration(duration_s),
         "certifier_cost_usd": round(float(certifier_cost_usd or 0.0), 4),
         "total_cost_usd": round(float(total_cost_usd or 0.0), 4),
-        "cost": resolved_cost,
         "pipeline_mode": pipeline_mode,
         "mode": pipeline_mode,
         "certifier_mode": certifier_mode,
@@ -1996,10 +1965,6 @@ async def run_agentic_certifier(
         child_session_ids=list(breakdown.get("child_session_ids", []) or []),
         subagent_errors=list(breakdown.get("subagent_errors", []) or []),
     )
-    total_cost_info = coerce_cost_payload(
-        breakdown.get("cost"),
-        total_cost_usd=float(cost) if isinstance(cost, int | float) and cost > 0 else None,
-    )
 
     try:
         certify_rounds_count = len(parsed.certify_rounds) or 1
@@ -2031,7 +1996,6 @@ async def run_agentic_certifier(
             metric_value=parsed.metric_value,
             metric_met=parsed.metric_met,
             round_timings=breakdown.get("round_timings", []),
-            cost_info=total_cost_info,
         )
         _write_pow_report(report_dir, pow_data)
     except Exception as exc:
@@ -2101,7 +2065,6 @@ async def run_agentic_certifier(
             intent=intent,
             command="certify",
             breakdown=breakdown_summary,
-            cost_info=total_cost_info,
         )
 
     return report
