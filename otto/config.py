@@ -564,7 +564,10 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
 
     if dirty_issues:
         try:
-            status = _run_git(project_dir, "status", "--porcelain")
+            # Only surface paths that actually participate in the dirty-tree
+            # refusal. Untracked-only state is tolerated by build/merge
+            # preflight, so don't let it dominate the preview list.
+            status = _run_git(project_dir, "status", "--porcelain", "--untracked-files=no")
             if status.returncode == 0:
                 for line in (status.stdout or "").splitlines():
                     path = line[3:].strip() if len(line) > 3 else line.strip()

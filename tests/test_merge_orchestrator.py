@@ -123,6 +123,22 @@ def test_merge_refuses_when_dirty(tmp_path: Path):
     assert "Commit, stash, or clean" in result.note
 
 
+def test_merge_tolerates_untracked_runtime_ack_journal(tmp_path: Path):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    _make_branch(repo, "feat-a", "a.txt", "A\n")
+    (repo / ".otto-queue-commands.acks.jsonl").write_text('{"command_id":"cmd-1"}\n')
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
+        explicit_ids_or_branches=["feat-a"],
+    ))
+
+    assert result.success is True
+    assert (repo / "a.txt").exists()
+
+
 def test_merge_refuses_unknown_branch(tmp_path: Path):
     repo = _init_repo_with_gitattributes(tmp_path)
     with pytest.raises(ValueError, match="unknown task id or branch"):
@@ -879,9 +895,11 @@ def test_merge_preserves_interrupted_terminal_status(tmp_path: Path, monkeypatch
     monkeypatch.setattr("otto.runs.registry.garbage_collect_live_records", lambda project_dir: [])
     monkeypatch.setattr("otto.merge.orchestrator._repair_merge_history", lambda project_dir: None)
     monkeypatch.setattr("otto.config.agent_provider", lambda config: "claude")
+    monkeypatch.setattr(
+        "otto.config.repo_preflight_issues",
+        lambda project_dir: {"blocking": [], "dirty": [], "dirty_files": []},
+    )
     monkeypatch.setattr("otto.merge.orchestrator.git_ops.current_branch", lambda project_dir: "main")
-    monkeypatch.setattr("otto.merge.orchestrator.git_ops.status_porcelain_entries", lambda project_dir: [])
-    monkeypatch.setattr("otto.merge.orchestrator.git_ops.merge_in_progress", lambda project_dir: False)
     monkeypatch.setattr("otto.merge.orchestrator._resolve_branches", lambda *args, **kwargs: (["feature/a"], {}))
     monkeypatch.setattr("otto.merge.orchestrator.new_merge_id", lambda: "merge-interrupted")
     monkeypatch.setattr("otto.merge.orchestrator.git_ops.head_sha", lambda project_dir: "abc123")
@@ -995,9 +1013,11 @@ def test_merge_stops_publisher_when_body_raises(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr("otto.runs.registry.garbage_collect_live_records", lambda project_dir: [])
     monkeypatch.setattr("otto.merge.orchestrator._repair_merge_history", lambda project_dir: None)
     monkeypatch.setattr("otto.config.agent_provider", lambda config: "claude")
+    monkeypatch.setattr(
+        "otto.config.repo_preflight_issues",
+        lambda project_dir: {"blocking": [], "dirty": [], "dirty_files": []},
+    )
     monkeypatch.setattr("otto.merge.orchestrator.git_ops.current_branch", lambda project_dir: "main")
-    monkeypatch.setattr("otto.merge.orchestrator.git_ops.status_porcelain_entries", lambda project_dir: [])
-    monkeypatch.setattr("otto.merge.orchestrator.git_ops.merge_in_progress", lambda project_dir: False)
     monkeypatch.setattr("otto.merge.orchestrator._resolve_branches", lambda *args, **kwargs: (["feature/a"], {}))
     monkeypatch.setattr("otto.merge.orchestrator.new_merge_id", lambda: "merge-err")
     monkeypatch.setattr("otto.merge.orchestrator.git_ops.head_sha", lambda project_dir: "abc123")

@@ -517,7 +517,7 @@ async def run_merge(
     budget: Any | None = None,
 ) -> MergeRunResult:
     """Main entry. Returns MergeRunResult with success/state/plan."""
-    from otto.config import agent_provider
+    from otto.config import agent_provider, repo_preflight_issues
     from otto.runs.registry import garbage_collect_live_records
 
     _repair_merge_run_records(project_dir)
@@ -531,23 +531,24 @@ async def run_merge(
             success=False, merge_id="", state=MergeState(),
             note=f"must be on {options.target!r}; currently on {cur!r}. Run `git checkout {options.target}` first.",
         )
-    dirty_entries = git_ops.status_porcelain_entries(project_dir)
-    if dirty_entries:
-        preview = ", ".join(dirty_entries[:5])
-        if len(dirty_entries) > 5:
-            preview += f", ... (+{len(dirty_entries) - 5} more)"
+    preflight = repo_preflight_issues(project_dir)
+    problems = [*preflight["blocking"], *preflight["dirty"]]
+    if problems:
+        dirty_files = list(preflight.get("dirty_files", []) or [])
+        preview = ", ".join(dirty_files[:5])
+        if len(dirty_files) > 5:
+            preview += f", ... (+{len(dirty_files) - 5} more)"
+        detail_parts = list(problems)
+        if preview:
+            detail_parts.append(f"affected paths: {preview}")
         return MergeRunResult(
             success=False, merge_id="", state=MergeState(),
             note=(
                 "working tree must be clean before merge "
-                f"(uncommitted changes detected: {preview}). "
-                "Commit, stash, or clean these paths and retry."
+                f"({'; '.join(detail_parts)}). "
+                "Commit, stash, or clean tracked/staged changes, resolve any in-progress "
+                "merge/rebase, and retry."
             ),
-        )
-    if git_ops.merge_in_progress(project_dir):
-        return MergeRunResult(
-            success=False, merge_id="", state=MergeState(),
-            note="a merge is already in progress; resolve or abort it first",
         )
 
     # Optional precondition: bookkeeping merge drivers must be set up

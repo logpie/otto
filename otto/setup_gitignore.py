@@ -42,7 +42,9 @@ OTTO_PATTERNS: tuple[str, ...] = (
     ".otto-queue.lock",
     ".otto-queue-state.json",
     ".otto-queue-commands.jsonl",
+    ".otto-queue-commands.jsonl.processing",
     ".otto-queue-commands.jsonl.lock",
+    ".otto-queue-commands.acks.jsonl",
     # Worktrees the queue spawns
     ".worktrees/",
     # Per-build / per-task logs and proof of work

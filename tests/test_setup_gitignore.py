@@ -36,6 +36,13 @@ def test_ensure_gitignore_adds_common_build_artifacts(tmp_path: Path):
     assert ".pytest_cache/" in text
 
 
+def test_ensure_gitignore_adds_queue_runtime_journals(tmp_path: Path):
+    ensure_gitignore(tmp_path)
+    text = (tmp_path / ".gitignore").read_text()
+    assert ".otto-queue-commands.acks.jsonl" in text
+    assert ".otto-queue-commands.jsonl.processing" in text
+
+
 def test_ensure_gitignore_preserves_existing(tmp_path: Path):
     user_text = "# my project\nbuild/\n*.log\n"
     (tmp_path / ".gitignore").write_text(user_text)

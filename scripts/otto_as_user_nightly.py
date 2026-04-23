@@ -632,21 +632,29 @@ def _capture_mission_control_action_spawns(*, stderr_paths: dict[str, Path] | No
     def _wrapped_popen(argv: Any, *args: Any, **kwargs: Any) -> Any:
         argv_list = [str(part) for part in argv]
         stderr_path: Path | None = None
-        stderr_handle = None
         if stderr_paths:
             for subcommand, candidate_path in stderr_paths.items():
                 if _argv_invokes_otto_subcommand(argv_list, subcommand):
                     stderr_path = candidate_path
                     stderr_path.parent.mkdir(parents=True, exist_ok=True)
-                    stderr_handle = stderr_path.open("w", encoding="utf-8")
-                    kwargs["stderr"] = stderr_handle
                     break
         try:
             proc = real_popen(argv, *args, **kwargs)
         except Exception:
-            if stderr_handle is not None:
-                stderr_handle.close()
             raise
+        if stderr_path is not None and kwargs.get("stderr") == subprocess.PIPE:
+            real_communicate = proc.communicate
+
+            def _wrapped_communicate(*communicate_args: Any, **communicate_kwargs: Any) -> Any:
+                stdout, stderr = real_communicate(*communicate_args, **communicate_kwargs)
+                if stderr:
+                    with stderr_path.open("a", encoding="utf-8") as handle:
+                        handle.write(stderr)
+                        if not stderr.endswith("\n"):
+                            handle.write("\n")
+                return stdout, stderr
+
+            proc.communicate = _wrapped_communicate
         spawns.append(
             {
                 "argv": argv_list,
@@ -654,7 +662,6 @@ def _capture_mission_control_action_spawns(*, stderr_paths: dict[str, Path] | No
                 "pid": getattr(proc, "pid", None),
                 "started_monotonic": time.monotonic(),
                 "stderr_path": stderr_path,
-                "stderr_handle": stderr_handle,
             }
         )
         return proc
@@ -664,11 +671,6 @@ def _capture_mission_control_action_spawns(*, stderr_paths: dict[str, Path] | No
         yield spawns
     finally:
         mission_control_actions.subprocess.Popen = real_popen
-        for spawn in spawns:
-            stderr_handle = spawn.get("stderr_handle")
-            if stderr_handle is not None:
-                stderr_handle.flush()
-                stderr_handle.close()
 
 
 def _terminate_process_group(proc: subprocess.Popen[str] | None) -> None:
@@ -1668,6 +1670,9 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         if build_step["rc"] is None:
             build_step["rc"] = build_proc.wait(timeout=1.0)
             build_step["duration_s"] = round(time.monotonic() - build_started, 1)
+        if build_stderr_handle is not None:
+            build_stderr_handle.flush()
+        _record_stderr_tail(details, "build", build_stderr_path)
         if build_step["rc"] != 0 and details.get("standalone-cancelled-via-pilot") is not True:
             failures.fail(f"phase build-process: N9 standalone build exited with rc={build_step['rc']}")
 
@@ -1684,6 +1689,9 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
             else:
                 watcher_step["rc"] = watcher_proc.poll()
             watcher_step["duration_s"] = round(time.monotonic() - watcher_started, 1)
+        if watcher_stderr_handle is not None:
+            watcher_stderr_handle.flush()
+        _record_stderr_tail(details, "queue-run", watcher_stderr_path)
         if watcher_step["rc"] != 0:
             failures.fail(f"phase queue-process: N9 queue watcher exited with rc={watcher_step['rc']}")
 

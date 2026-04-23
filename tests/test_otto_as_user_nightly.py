@@ -245,12 +245,16 @@ def test_n9_merge_spawn_matcher_accepts_direct_and_module_argv() -> None:
     assert OTTO_AS_USER_NIGHTLY._argv_invokes_otto_subcommand(["true", "intent.txt"], "merge") is False
 
 
-def test_capture_mission_control_action_spawns_redirects_merge_stderr(monkeypatch, tmp_path: Path) -> None:
+def test_capture_mission_control_action_spawns_persists_merge_stderr(monkeypatch, tmp_path: Path) -> None:
     mission_control_actions = importlib.import_module("otto.tui.mission_control_actions")
     calls: list[dict[str, object]] = []
 
     class FakeProc:
         pid = 4242
+        returncode = 1
+
+        def communicate(self):
+            return ("", "merge exploded\ntraceback")
 
     def fake_popen(argv, *args, **kwargs):
         calls.append({"argv": [str(part) for part in argv], "kwargs": kwargs})
@@ -261,11 +265,18 @@ def test_capture_mission_control_action_spawns_redirects_merge_stderr(monkeypatc
 
     stderr_path = tmp_path / "merge-stderr.log"
     with OTTO_AS_USER_NIGHTLY._capture_mission_control_action_spawns(stderr_paths={"merge": stderr_path}) as spawns:
-        mission_control_actions.subprocess.Popen(["otto", "merge", "add-post"], text=True)
+        proc = mission_control_actions.subprocess.Popen(
+            ["otto", "merge", "add-post"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        proc.communicate()
 
     assert calls[0]["argv"] == ["otto", "merge", "add-post"]
-    assert hasattr(calls[0]["kwargs"]["stderr"], "write")
+    assert calls[0]["kwargs"]["stderr"] is subprocess.PIPE
     assert spawns[0]["stderr_path"] == stderr_path
+    assert stderr_path.read_text(encoding="utf-8") == "merge exploded\ntraceback\n"
 
 
 def test_checkout_main_before_merge_step_uses_checked_helper(monkeypatch, tmp_path: Path) -> None:
