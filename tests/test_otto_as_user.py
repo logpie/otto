@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -91,3 +92,49 @@ def test_classify_failure_leaves_real_failures_as_fail(tmp_path: Path) -> None:
     )
 
     assert OTTO_AS_USER.classify_failure(narrative, debug, result) == "FAIL"
+
+
+def test_main_list_includes_u2(capsys) -> None:
+    assert OTTO_AS_USER.main(["--list"]) == 0
+    out = capsys.readouterr().out
+    assert "U2" in out
+    assert "Mission Control basic flow" in out
+
+
+def test_verify_u2_accepts_cancelled_terminal_snapshot(tmp_path: Path) -> None:
+    from otto import paths
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    history_path = paths.history_jsonl(repo)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "history_kind": "terminal_snapshot",
+                "run_id": "build-run",
+                "terminal_outcome": "cancelled",
+                "dedupe_key": "terminal_snapshot:build-run",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cast_path = tmp_path / "recording.cast"
+    cast_path.write_text('{"version": 2}\n[0.0, "o", "frame"]\n', encoding="utf-8")
+    run_result = OTTO_AS_USER.RunResult(
+        scenario_id="U2",
+        returncode=0,
+        started_at="2026-04-23T00:00:00Z",
+        finished_at="2026-04-23T00:00:01Z",
+        duration_s=5.0,
+        recording_path=str(cast_path),
+        repo_path=str(repo),
+        debug_log=str(tmp_path / "debug.log"),
+        details={"ack_latency_ms": 150, "ack_deadline_ms": 4000},
+    )
+
+    verify = OTTO_AS_USER.verify_u2(repo, run_result)
+
+    assert verify.passed is True

@@ -668,11 +668,8 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
     from otto.runs.registry import (
         HEARTBEAT_INTERVAL_S,
         allocate_run_id,
-        append_jsonl_row,
-        load_command_ack_ids,
         load_live_record,
         read_live_records,
-        utc_now_iso,
     )
 
     started = base.now_iso()
@@ -829,51 +826,37 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         )
 
         build_record = load_live_record(repo, build_run_id)
-        heartbeat_s = max(float(build_record.timing.get("heartbeat_interval_s") or HEARTBEAT_INTERVAL_S), 0.1)
-        details["heartbeat-interval-s"] = heartbeat_s
-        command_id = f"{int(time.time() * 1000)}-{os.getpid()}-1"
-        append_jsonl_row(
-            request_path,
-            {
-                "schema_version": 1,
-                "command_id": command_id,
-                "run_id": build_run_id,
-                "domain": build_record.domain,
-                "kind": "cancel",
-                "requested_at": utc_now_iso(),
-                "requested_by": {
-                    "source": "harness",
-                    "pid": os.getpid(),
-                },
-                "args": {},
-            },
+        details["heartbeat-interval-s"] = max(
+            float(build_record.timing.get("heartbeat_interval_s") or HEARTBEAT_INTERVAL_S),
+            0.1,
         )
-        details["cancel-command-appended"] = True
-        base.log_line(f"N9 appended cancel envelope command_id={command_id}")
-
-        ack_started = time.monotonic()
-        ack_deadline_s = max(4.0, 2.0 * heartbeat_s)
-        ack_deadline = ack_started + ack_deadline_s
-        while time.monotonic() < ack_deadline:
-            refresh_live_records()
-            if command_id in load_command_ack_ids(ack_path):
-                break
-            build_rc = build_proc.poll()
-            if build_rc is not None:
+        try:
+            cancel = base.append_cancel_envelope_and_wait_for_ack(
+                repo,
+                build_run_id,
+                proc=build_proc,
+                run_exited_message="N9 standalone build exited before cancel ack arrived",
+                timeout_message="N9 cancel ack did not arrive",
+            )
+        except AssertionError as exc:
+            build_rc = build_proc.poll() if build_proc is not None else None
+            if build_rc is not None and "cancel ack arrived" in str(exc):
                 details["classification_override"] = "INFRA"
                 details["build-finished-before-cancel-ack"] = True
                 details["build-returncode"] = build_rc
                 if build_step is not None and build_step["rc"] is None:
                     build_step["rc"] = build_rc
                     build_step["duration_s"] = round(time.monotonic() - build_started, 1)
-                raise AssertionError("N9 standalone build exited before cancel ack arrived")
-            time.sleep(0.05)
-        else:
-            raise AssertionError(f"N9 cancel ack did not arrive within {ack_deadline_s:.1f}s")
-        ack_latency_ms = int((time.monotonic() - ack_started) * 1000)
-        details["cancel-ack-latency-ms"] = ack_latency_ms
-        details["cancel-ack-deadline-ms"] = int(ack_deadline_s * 1000)
-        base.log_line(f"N9 cancel ack observed after {ack_latency_ms}ms")
+            raise
+        details["cancel-command-appended"] = True
+        details["cancel-request-path"] = cancel["request_path"]
+        details["cancel-ack-path"] = cancel["ack_path"]
+        details["heartbeat-interval-s"] = cancel["heartbeat_interval_s"]
+        details["cancel-command-id"] = cancel["command_id"]
+        details["cancel-ack-latency-ms"] = cancel["ack_latency_ms"]
+        details["cancel-ack-deadline-ms"] = cancel["ack_deadline_ms"]
+        base.log_line(f"N9 appended cancel envelope command_id={cancel['command_id']}")
+        base.log_line(f"N9 cancel ack observed after {cancel['ack_latency_ms']}ms")
 
         assert build_proc is not None
         try:

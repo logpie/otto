@@ -41,7 +41,7 @@ INFRA_RETRY_DELAY_S = 30.0
 INFRA_RETRY_ATTEMPTS = 2
 INFRA_SMOKING_GUN_DURATION_S = 2.0
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
-QUICK_SCENARIOS = ["A1", "A2", "B1", "B3", "C1", "D2"]
+QUICK_SCENARIOS = ["A1", "A2", "B1", "B3", "C1", "D2", "U2"]
 OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
 FAKE_OTTO_BIN = REPO_ROOT / "scripts" / "fake-otto.sh"
 PYTHON_BIN = REPO_ROOT / ".venv" / "bin" / "python"
@@ -77,6 +77,18 @@ def write_json(path: Path, payload: Any) -> None:
 
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        rows.append(json.loads(line))
+    return rows
 
 
 def ensure_parent(path: Path) -> Path:
@@ -861,6 +873,66 @@ def wait_for(predicate: Callable[[], bool], *, timeout_s: float, label: str, int
     raise AssertionError(f"timed out after {timeout_s:.1f}s waiting for {label}")
 
 
+def append_cancel_envelope_and_wait_for_ack(
+    repo: Path,
+    run_id: str,
+    *,
+    proc: subprocess.Popen[str] | None = None,
+    run_exited_message: str,
+    timeout_message: str,
+    poll_interval_s: float = 0.05,
+) -> dict[str, Any]:
+    from otto import paths
+    from otto.runs.registry import (
+        HEARTBEAT_INTERVAL_S,
+        append_jsonl_row,
+        load_command_ack_ids,
+        load_live_record,
+        utc_now_iso,
+    )
+
+    request_path = paths.session_command_requests(repo, run_id)
+    ack_path = paths.session_command_acks(repo, run_id)
+    live_record = load_live_record(repo, run_id)
+    heartbeat_s = max(float(live_record.timing.get("heartbeat_interval_s") or HEARTBEAT_INTERVAL_S), 0.1)
+    command_id = f"{int(time.time() * 1000)}-{os.getpid()}-1"
+    append_jsonl_row(
+        request_path,
+        {
+            "schema_version": 1,
+            "command_id": command_id,
+            "run_id": run_id,
+            "domain": live_record.domain,
+            "kind": "cancel",
+            "requested_at": utc_now_iso(),
+            "requested_by": {
+                "source": "harness",
+                "pid": os.getpid(),
+            },
+            "args": {},
+        },
+    )
+
+    ack_started = time.monotonic()
+    ack_deadline_s = max(4.0, 2.0 * heartbeat_s)
+    ack_deadline = ack_started + ack_deadline_s
+    while time.monotonic() < ack_deadline:
+        if command_id in load_command_ack_ids(ack_path):
+            ack_latency_ms = int((time.monotonic() - ack_started) * 1000)
+            return {
+                "command_id": command_id,
+                "request_path": str(request_path),
+                "ack_path": str(ack_path),
+                "heartbeat_interval_s": heartbeat_s,
+                "ack_latency_ms": ack_latency_ms,
+                "ack_deadline_ms": int(ack_deadline_s * 1000),
+            }
+        if proc is not None and proc.poll() is not None:
+            raise AssertionError(run_exited_message)
+        time.sleep(poll_interval_s)
+    raise AssertionError(f"{timeout_message} within {ack_deadline_s:.1f}s")
+
+
 def interrupt_build_after_checkpoint(
     repo: Path,
     provider: str,
@@ -1577,29 +1649,43 @@ def setup_b4(repo: Path, provider: str) -> None:
 
 
 def run_b4(repo: Path, provider: str) -> RunResult:
-    queue_build(repo, "tail", provider, add_mul_intent("tail", "integer addition", "5"), "--fast")
+    task_id = "tail"
+    if load_queue_state(repo).get("tasks", {}).get(task_id):
+        task_id = f"tail-{int(time.time())}"
+    queue_build(repo, task_id, provider, add_mul_intent("tail", "integer addition", "5"), "--fast")
 
     def actions(session: PtySession) -> dict[str, Any]:
-        wait_for(lambda: load_queue_state(repo).get("tasks", {}).get("tail", {}).get("status") == "running", timeout_s=20, label="tail running")
+        wait_for(
+            lambda: load_queue_state(repo).get("tasks", {}).get(task_id, {}).get("status") == "running",
+            timeout_s=20,
+            label="tail running",
+        )
         session.send("\r")
-        wait_for_screen_text(session, "otto queue", timeout_s=10, label="detail")
-        narrative = next((repo / ".worktrees").glob("tail*/otto_logs/sessions/*/build/narrative.log"))
+        wait_for_screen_text(session, "focus=detail", timeout_s=10, label="detail")
+        narrative = next((repo / ".worktrees").glob(f"{task_id}*/otto_logs/sessions/*/build/narrative.log"))
         before_lines = narrative.read_text().splitlines()
         wait_for(lambda: len(narrative.read_text().splitlines()) > len(before_lines), timeout_s=60, label="tail growth")
         session.send("q")
         rc = session.wait(180.0)
-        return {"watcher_rc": rc, "narrative_path": str(narrative)}
+        return {"watcher_rc": rc, "narrative_path": str(narrative), "task_id": task_id}
 
     details = run_dashboard_session(repo, concurrent=1, actions=actions, extra_flags=["--exit-when-empty"])
     return _base_result(0, **details)
 
 
 def verify_b4(repo: Path, run_result: RunResult) -> VerifyResult:
-    narrative = Path(str(run_result.details.get("narrative_path", "")))
+    del repo
+    narrative_path = str(run_result.details.get("narrative_path", "")).strip()
+    if not narrative_path:
+        return VerifyResult(False, "B4 expected narrative_path in run_result details")
+    narrative = Path(narrative_path)
     assert_exists(narrative, "B4 expected narrative path")
     if len(narrative.read_text().splitlines()) < 4:
         return VerifyResult(False, "B4 expected streamed narrative lines")
-    return VerifyResult(True, "detail tail streamed in real time")
+    raw = strip_ansi(cast_output(Path(run_result.recording_path)))
+    if not all(token in raw for token in ("1. Live Runs", "2. History", "3. Detail + Logs")):
+        return VerifyResult(False, "B4 cast did not show the 3-pane Mission Control layout")
+    return VerifyResult(True, "detail tail streamed in real time inside the 3-pane Mission Control layout")
 
 
 def setup_b5(repo: Path, provider: str) -> None:
@@ -2234,37 +2320,140 @@ def verify_u1(repo: Path, run_result: RunResult) -> VerifyResult:
 
 
 def setup_u2(repo: Path, provider: str) -> None:
-    setup_b3(repo, provider)
+    setup_a1(repo, provider)
 
 
 def run_u2(repo: Path, provider: str) -> RunResult:
-    del provider
+    from otto import paths
+    from otto.runs.registry import allocate_run_id, read_live_records
 
-    def actions(session: PtySession) -> dict[str, Any]:
-        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u2-empty")
-        time.sleep(1.0)
-        session.send("q")
-        rc = session.wait(10.0)
-        if rc is None:
-            raise AssertionError("U2 empty queue dashboard did not exit")
-        return {"watcher_rc": rc}
+    intent = textwrap.dedent(
+        """
+        Build a tiny TODO CLI in Python.
+        Store tasks in tasks.json in the repo root.
+        Support add, list, and done commands with argparse.
+        Keep the implementation minimal and readable.
+        Include pytest coverage for one add/list/done flow.
+        """
+    ).strip()
+    build_run_id = allocate_run_id(repo)
+    build_env = scenario_env(OTTO_RUN_ID=build_run_id)
+    build_argv = [str(OTTO_BIN), "build", "--provider", provider, intent]
+    build_log_path = current_ctx().artifact_dir / "u2-build.log"
+    dashboard_session: PtySession | None = None
+    build_proc: subprocess.Popen[str] | None = None
+    build_handle = None
+    build_rc: int | None = None
 
-    details = run_dashboard_session(
-        repo,
-        concurrent=1,
-        actions=actions,
-        extra_flags=["--dashboard-mouse"],
-    )
-    return _base_result(0, **details)
+    try:
+        build_handle = build_log_path.open("w", encoding="utf-8")
+        build_proc = subprocess.Popen(
+            build_argv,
+            cwd=repo,
+            env=build_env,
+            stdout=build_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            preexec_fn=os.setsid,
+        )
+        dashboard_session = PtySession([str(OTTO_BIN), "dashboard"], cwd=repo, env=current_ctx().env)
+        wait_for(
+            lambda: (paths.session_dir(repo, build_run_id) / "commands").exists(),
+            timeout_s=15,
+            label="u2 command channel",
+            interval_s=0.05,
+        )
+        wait_for(
+            lambda: any(record.run_id == build_run_id for record in read_live_records(repo)),
+            timeout_s=15,
+            label="u2 live record",
+            interval_s=0.05,
+        )
+        live = wait_for_screen_text(dashboard_session, build_run_id, timeout_s=15, label="u2-live")
+        time.sleep(3.0)
+        cancel = append_cancel_envelope_and_wait_for_ack(
+            repo,
+            build_run_id,
+            proc=build_proc,
+            run_exited_message="U2 build exited before cancel ack arrived",
+            timeout_message="U2 cancel ack did not arrive",
+        )
+        assert build_proc is not None
+        build_rc = build_proc.wait(timeout=30.0)
+        wait_for(
+            lambda: any(
+                row.get("run_id") == build_run_id
+                and row.get("history_kind", "terminal_snapshot") == "terminal_snapshot"
+                and row.get("terminal_outcome") == "cancelled"
+                for row in read_jsonl(paths.history_jsonl(repo))
+            ),
+            timeout_s=15,
+            label="u2 cancelled terminal snapshot",
+            interval_s=0.1,
+        )
+        dashboard_session.send("q")
+        dashboard_rc = dashboard_session.wait(10.0)
+        if dashboard_rc is None:
+            raise AssertionError("U2 dashboard did not exit")
+        live_records = read_live_records(repo)
+        if build_handle is not None:
+            build_handle.flush()
+        return _base_result(
+            0,
+            output=build_log_path.read_text(encoding="utf-8"),
+            build_run_id=build_run_id,
+            build_returncode=build_rc,
+            live_record_count=len(live_records),
+            live_screen=live.screen_text,
+            dashboard_rc=dashboard_rc,
+            **cancel,
+        )
+    finally:
+        if dashboard_session is not None:
+            dashboard_session.terminate()
+        if build_handle is not None:
+            build_handle.flush()
+            build_handle.close()
+        if build_proc is not None and build_proc.poll() is None:
+            try:
+                os.killpg(build_proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                build_proc.terminate()
+            try:
+                build_proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(build_proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    build_proc.kill()
+                build_proc.wait(timeout=5.0)
 
 
 def verify_u2(repo: Path, run_result: RunResult) -> VerifyResult:
-    del repo
-    raw = cast_output(Path(run_result.recording_path))
-    matches = mouse_enable_codes(raw)
-    if not matches:
-        return VerifyResult(False, "U2 expected mouse capture enable codes when --dashboard-mouse is passed")
-    return VerifyResult(True, f"dashboard mouse flag emitted enable codes ({', '.join(matches)})")
+    from otto import paths
+
+    ack_latency_ms = run_result.details.get("ack_latency_ms")
+    ack_deadline_ms = run_result.details.get("ack_deadline_ms")
+    if not isinstance(ack_latency_ms, int) or not isinstance(ack_deadline_ms, int) or ack_latency_ms > ack_deadline_ms:
+        return VerifyResult(False, "U2 expected a timely cancel ack")
+    history_rows = [
+        row
+        for row in read_jsonl(paths.history_jsonl(repo))
+        if row.get("history_kind", "terminal_snapshot") == "terminal_snapshot"
+    ]
+    if len(history_rows) != 1:
+        return VerifyResult(False, f"U2 expected exactly one terminal snapshot row, got {len(history_rows)}")
+    row = history_rows[0]
+    if row.get("terminal_outcome") != "cancelled":
+        return VerifyResult(False, f"U2 expected terminal_outcome='cancelled', got {row.get('terminal_outcome')!r}")
+    cast_path = Path(run_result.recording_path)
+    if not cast_path.exists() or cast_path.stat().st_size == 0:
+        return VerifyResult(False, "U2 expected a non-empty recording.cast")
+    return VerifyResult(True, "Mission Control showed the live build, cancel ack landed in time, and history recorded cancelled")
 
 
 def setup_u3(repo: Path, provider: str) -> None:
@@ -2681,7 +2870,7 @@ SCENARIOS: dict[str, Scenario] = {
     "E5": Scenario("E5", "E", "standalone certify --thorough runs the deeper certifier mode", False, 0.45, 180, False, setup_e5, run_e5, verify_e5),
     "E6": Scenario("E6", "E", "queue run handles both --concurrent 1 and --concurrent 10", False, 0.70, 220, False, setup_e6, run_e6, verify_e6),
     "U1": Scenario("U1", "U", "dashboard leaves mouse capture off by default", False, 0.00, 15, True, setup_u1, run_u1, verify_u1),
-    "U2": Scenario("U2", "U", "dashboard enables mouse capture only when --dashboard-mouse is passed", False, 0.00, 15, True, setup_u2, run_u2, verify_u2),
+    "U2": Scenario("U2", "U", "Mission Control basic flow: one live build, cancel ack, cancelled history row, clean quit", True, 0.50, 300, True, setup_u2, run_u2, verify_u2),
     "U3": Scenario("U3", "U", "overview yank copies complete row metadata without truncation", False, 0.00, 15, True, setup_u3, run_u3, verify_u3),
     "U4": Scenario("U4", "U", "detail screen renders full branch and absolute log/manifest paths", False, 0.00, 15, True, setup_u4, run_u4, verify_u4),
     "U5": Scenario("U5", "U", "detail scrolling stays keyboard-only and never enables mouse capture", False, 0.00, 15, True, setup_u5, run_u5, verify_u5),
