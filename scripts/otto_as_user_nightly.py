@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import shutil
 import stat
 import subprocess
@@ -44,6 +46,10 @@ N2_REMEMBER_INTENT = (
 )
 
 N4_BUILD_INTENT = "Add CSV bulk import for tasks."
+
+N9_BUILD_INTENT = "Add GET /tasks endpoint that returns []."
+N9_POST_INTENT = "Add POST /tasks endpoint."
+N9_DELETE_INTENT = "Add DELETE /tasks/<id> endpoint."
 
 N8_RENAME_INTENT = (
     "Rename app/services/billing.py to app/services/payments.py and update all imports."
@@ -143,6 +149,22 @@ SCENARIO_SPECS: dict[str, ScenarioSpec] = {
             f"otto queue build {N8_LOGIC_INTENT!r} --as weekend-logic",
             f"otto queue build {N8_TESTS_INTENT!r} --as payments-tests",
             "otto queue run --concurrent 1 --no-dashboard --exit-when-empty",
+            "otto merge --all --cleanup-on-success",
+            "pytest tests/visible -q --tb=short",
+            "pytest tests/hidden -q --tb=short",
+        ],
+    ),
+    "N9": ScenarioSpec(
+        fixture_dir=FIXTURE_ROOT / "n9_mission_control_workflow",
+        intent_path=FIXTURE_ROOT / "n9_mission_control_workflow" / "intent.md",
+        est_cost_range="$1.5-$2.5",
+        budget_s=20 * 60,
+        step_plan=[
+            f"otto build --provider <provider> {N9_BUILD_INTENT!r} (background, will be cancelled)",
+            f"otto queue build {N9_POST_INTENT!r} --as add-post",
+            f"otto queue build {N9_DELETE_INTENT!r} --as add-delete",
+            "otto queue run --concurrent 1 --no-dashboard --exit-when-empty",
+            "<harness appends cancel envelope to standalone build>",
             "otto merge --all --cleanup-on-success",
             "pytest tests/visible -q --tb=short",
             "pytest tests/hidden -q --tb=short",
@@ -330,6 +352,52 @@ def _visible_and_hidden(repo: Path, run_result: base.RunResult) -> tuple[subproc
     return visible, hidden
 
 
+def _attempt_index_from_debug_log(debug_log: Path) -> int:
+    name = debug_log.name
+    if name == "debug.log":
+        return 1
+    if name == "debug-retry.log":
+        return 2
+    if name.startswith("debug-retry") and name.endswith(".log"):
+        suffix = name.removeprefix("debug-retry").removesuffix(".log")
+        if suffix.isdigit():
+            return int(suffix) + 1
+    return 1
+
+
+def _background_log_path(label: str) -> Path:
+    ctx = base.current_ctx()
+    attempt_index = _attempt_index_from_debug_log(ctx.debug_log)
+    return ctx.artifact_dir / base.attempt_filename(f"{label}.log", attempt_index)
+
+
+def _read_log(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def _terminate_process_group(proc: subprocess.Popen[str] | None) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except OSError:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
 def _build_failure(result: base.RunResult, message: str) -> VerifyResult:
     return VerifyResult(False, f"{message} (rc={result.returncode})")
 
@@ -486,6 +554,11 @@ def setup_n8(repo: Path, provider: str) -> None:
     setup_from_fixture(repo, "N8")
 
 
+def setup_n9(repo: Path, provider: str) -> None:
+    del provider
+    setup_from_fixture(repo, "N9")
+
+
 def run_n8(repo: Path, provider: str) -> base.RunResult:
     started = base.now_iso()
     budget = ScenarioBudget(_fixture_spec("N8").budget_s)
@@ -543,11 +616,246 @@ def verify_n8(repo: Path, run_result: base.RunResult) -> VerifyResult:
     return VerifyResult(True, "N8 merged rename, stale branch logic, and dependent tests into final main")
 
 
+def run_n9(repo: Path, provider: str) -> base.RunResult:
+    from otto import paths
+    from otto.runs.registry import (
+        HEARTBEAT_INTERVAL_S,
+        allocate_run_id,
+        append_jsonl_row,
+        load_command_ack_ids,
+        load_live_record,
+        read_live_records,
+        utc_now_iso,
+    )
+
+    started = base.now_iso()
+    budget = ScenarioBudget(_fixture_spec("N9").budget_s)
+    steps: list[dict[str, Any]] = []
+    details: dict[str, Any] = {
+        "steps": steps,
+        "live-records-discovered-count": 0,
+        "cancel-ack-latency-ms": None,
+        "build-terminated-via-cancel": False,
+    }
+    build_proc: subprocess.Popen[str] | None = None
+    watcher_proc: subprocess.Popen[str] | None = None
+    build_handle = None
+    watcher_handle = None
+    build_log_path = _background_log_path("n9-build")
+    watcher_log_path = _background_log_path("n9-queue-run")
+    outputs: list[str] = []
+    merge_duration_s = 0.0
+    build_step: dict[str, Any] | None = None
+    watcher_step: dict[str, Any] | None = None
+    result_returncode = 1
+
+    try:
+        build_run_id = allocate_run_id(repo)
+        details["build-run-id"] = build_run_id
+        build_argv = [str(base.OTTO_BIN), "build", "--provider", provider, N9_BUILD_INTENT]
+        base.log_line(f"$ {base.shell_join(build_argv)}  # background")
+        build_env = dict(base.current_ctx().env)
+        build_env["OTTO_RUN_ID"] = build_run_id
+        build_handle = build_log_path.open("w", encoding="utf-8")
+        build_started = time.monotonic()
+        build_proc = subprocess.Popen(
+            build_argv,
+            cwd=repo,
+            env=build_env,
+            stdout=build_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            preexec_fn=os.setsid,
+        )
+        build_step = {
+            "label": "build-background",
+            "argv": build_argv,
+            "run_id": build_run_id,
+            "rc": None,
+            "duration_s": None,
+        }
+        steps.append(build_step)
+
+        base.queue_build(repo, "add-post", provider, N9_POST_INTENT)
+        steps.append({"label": "queue-add-post", "rc": 0, "task_id": "add-post"})
+        base.queue_build(repo, "add-delete", provider, N9_DELETE_INTENT)
+        steps.append({"label": "queue-add-delete", "rc": 0, "task_id": "add-delete"})
+
+        watcher_argv = [
+            str(base.OTTO_BIN),
+            "queue",
+            "run",
+            "--concurrent",
+            "1",
+            "--no-dashboard",
+            "--exit-when-empty",
+        ]
+        base.log_line(f"$ {base.shell_join(watcher_argv)}  # background")
+        watcher_handle = watcher_log_path.open("w", encoding="utf-8")
+        watcher_started = time.monotonic()
+        watcher_proc = subprocess.Popen(
+            watcher_argv,
+            cwd=repo,
+            env=base.current_ctx().env,
+            stdout=watcher_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            preexec_fn=os.setsid,
+        )
+        watcher_step = {
+            "label": "queue-run",
+            "argv": watcher_argv,
+            "rc": None,
+            "duration_s": None,
+        }
+        steps.append(watcher_step)
+
+        live_poll_started = time.monotonic()
+        live_deadline = live_poll_started + 2.0
+        discovered_atomic = False
+        discovered_queue_runs: set[str] = set()
+        while time.monotonic() < live_deadline:
+            records = read_live_records(repo)
+            discovered_atomic = any(record.run_id == build_run_id for record in records)
+            discovered_queue_runs = {
+                record.run_id
+                for record in records
+                if record.domain == "queue"
+            }
+            if discovered_atomic and len(discovered_queue_runs) >= 2:
+                break
+            time.sleep(0.05)
+        if not discovered_atomic or len(discovered_queue_runs) < 2:
+            raise AssertionError("N9 expected one atomic and two queue live records within 2s")
+        live_latency_ms = int((time.monotonic() - live_poll_started) * 1000)
+        details["live-records-discovered-count"] = 1 + len(discovered_queue_runs)
+        details["live-records-latency-ms"] = live_latency_ms
+
+        build_record = load_live_record(repo, build_run_id)
+        heartbeat_s = max(float(build_record.timing.get("heartbeat_interval_s") or HEARTBEAT_INTERVAL_S), 0.1)
+        details["heartbeat-interval-s"] = heartbeat_s
+        request_path = paths.session_command_requests(repo, build_run_id)
+        ack_path = paths.session_command_acks(repo, build_run_id)
+        command_id = f"{int(time.time() * 1000)}-{os.getpid()}-1"
+        append_jsonl_row(
+            request_path,
+            {
+                "schema_version": 1,
+                "command_id": command_id,
+                "run_id": build_run_id,
+                "domain": build_record.domain,
+                "kind": "cancel",
+                "requested_at": utc_now_iso(),
+                "requested_by": {
+                    "source": "harness",
+                    "pid": os.getpid(),
+                },
+                "args": {},
+            },
+        )
+
+        ack_started = time.monotonic()
+        ack_deadline_s = max(5.0, 2.0 * heartbeat_s)
+        ack_deadline = ack_started + ack_deadline_s
+        while time.monotonic() < ack_deadline:
+            if command_id in load_command_ack_ids(ack_path):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"N9 cancel ack did not arrive within {ack_deadline_s:.1f}s")
+        ack_latency_ms = int((time.monotonic() - ack_started) * 1000)
+        details["cancel-ack-latency-ms"] = ack_latency_ms
+        details["cancel-ack-deadline-ms"] = int(ack_deadline_s * 1000)
+
+        assert build_proc is not None
+        try:
+            build_rc = build_proc.wait(timeout=min(30.0, budget.timeout_for(60)))
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError("N9 standalone build did not terminate after cancel ack") from exc
+        details["build-terminated-via-cancel"] = True
+        details["build-returncode"] = build_rc
+        if build_step is not None:
+            build_step["rc"] = build_rc
+            build_step["duration_s"] = round(time.monotonic() - build_started, 1)
+
+        assert watcher_proc is not None
+        watcher_rc = watcher_proc.wait(timeout=budget.timeout_for(10 * 60))
+        details["watcher-returncode"] = watcher_rc
+        if watcher_step is not None:
+            watcher_step["rc"] = watcher_rc
+            watcher_step["duration_s"] = round(time.monotonic() - watcher_started, 1)
+        if watcher_rc != 0:
+            raise AssertionError(f"N9 queue watcher exited with rc={watcher_rc}")
+
+        merge = base.run_merge(
+            repo,
+            "--all",
+            "--cleanup-on-success",
+            timeout_s=budget.timeout_for(10 * 60),
+        )
+        merge_duration_s = merge.duration_s
+        steps.append(_step_record("merge", merge, repo))
+        outputs.append(merge.output)
+        result_returncode = merge.rc
+    except Exception as exc:
+        details["error"] = str(exc)
+        result_returncode = 1
+    finally:
+        if build_handle is not None:
+            build_handle.flush()
+            build_handle.close()
+        if watcher_handle is not None:
+            watcher_handle.flush()
+            watcher_handle.close()
+        if build_proc is not None and build_proc.poll() is None:
+            _terminate_process_group(build_proc)
+        if watcher_proc is not None and watcher_proc.poll() is None:
+            _terminate_process_group(watcher_proc)
+        build_output = _read_log(build_log_path)
+        watcher_output = _read_log(watcher_log_path)
+        if build_output:
+            outputs.insert(0, build_output)
+        if watcher_output:
+            outputs.append(watcher_output)
+    return _base_run_result(
+        "N9",
+        repo,
+        started,
+        "\n".join(part for part in outputs if part),
+        float((build_step or {}).get("duration_s") or 0.0)
+        + float((watcher_step or {}).get("duration_s") or 0.0)
+        + merge_duration_s,
+        details,
+        result_returncode,
+    )
+
+
+def verify_n9(repo: Path, run_result: base.RunResult) -> VerifyResult:
+    details = run_result.details
+    if run_result.returncode != 0:
+        return _build_failure(run_result, "N9 mission-control flow failed before verification")
+    if details.get("live-records-discovered-count", 0) < 3:
+        return VerifyResult(False, "N9 did not observe all three live records")
+    ack_latency_ms = details.get("cancel-ack-latency-ms")
+    ack_deadline_ms = details.get("cancel-ack-deadline-ms", 0)
+    if ack_latency_ms is None or ack_latency_ms > ack_deadline_ms:
+        return VerifyResult(False, "N9 cancel ack was missing or late")
+    if details.get("build-terminated-via-cancel") is not True:
+        return VerifyResult(False, "N9 standalone build did not terminate via cancel")
+    visible, hidden = _visible_and_hidden(repo, run_result)
+    if visible.returncode != 0:
+        return VerifyResult(False, "N9 visible tests failed after merge")
+    if hidden.returncode != 0:
+        return VerifyResult(False, "N9 hidden mission-control workflow checks failed after merge")
+    return VerifyResult(True, "N9 observed registry coherence, cancelled the standalone build, and kept merge green")
+
+
 SCENARIOS: dict[str, base.Scenario] = {
     "N1": base.Scenario("N1", "N", "evolving product loop", False, 3.0, 15 * 60, False, setup_n1, run_n1, verify_n1),
     "N2": base.Scenario("N2", "N", "semantic auth merge conflict", False, 2.6, 13 * 60, False, setup_n2, run_n2, verify_n2),
     "N4": base.Scenario("N4", "N", "certifier trap with hidden invariants", False, 1.5, 8 * 60, False, setup_n4, run_n4, verify_n4),
     "N8": base.Scenario("N8", "N", "stale merge context after first graduation", False, 3.8, 20 * 60, False, setup_n8, run_n8, verify_n8),
+    "N9": base.Scenario("N9", "N", "mission control workflow", False, 2.0, 15 * 60, False, setup_n9, run_n9, verify_n9),
     # Weekly-only scenarios (#3, #5, #6, #7) intentionally left out for now.
 }
 
