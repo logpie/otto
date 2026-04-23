@@ -790,6 +790,66 @@ def test_merge_preserves_interrupted_terminal_status(tmp_path: Path, monkeypatch
     assert record.terminal_outcome == "interrupted"
 
 
+def test_merge_startup_repairs_terminal_state_before_registry_gc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from otto.merge.orchestrator import _merge_artifacts
+    from otto.merge.state import write_state
+    from otto.runs.history import read_history_rows
+    from otto.runs.registry import make_run_record, write_record
+
+    merge_id = "merge-repair"
+    state = MergeState(
+        merge_id=merge_id,
+        started_at="2026-04-23T12:00:00Z",
+        finished_at="2026-04-23T12:00:05Z",
+        target="main",
+        target_head_before="abc123",
+        status="cancelled",
+        terminal_outcome="cancelled",
+        note="cancelled by command",
+        branches_in_order=["feature/a"],
+    )
+    write_state(tmp_path, state)
+    stale_record = make_run_record(
+        project_dir=tmp_path,
+        run_id=merge_id,
+        domain="merge",
+        run_type="merge",
+        command="merge",
+        display_name="merge: 1 branch(es)",
+        status="running",
+        identity={"merge_id": merge_id},
+        source={"resumable": False},
+        git={"branch": "main", "worktree": None, "target_branch": "main", "head_sha": "abc123"},
+        intent={"summary": "merge 1 branch(es)", "intent_path": str(tmp_path / "intent.md"), "spec_path": None},
+        artifacts=_merge_artifacts(tmp_path, merge_id),
+        adapter_key="merge.run",
+        last_event="running",
+    )
+    write_record(tmp_path, stale_record)
+
+    monkeypatch.setattr("otto.runs.registry.garbage_collect_live_records", lambda project_dir: [])
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.current_branch", lambda project_dir: "feature/not-main")
+
+    result = asyncio.run(
+        run_merge(
+            project_dir=tmp_path,
+            config={},
+            options=MergeOptions(target="main"),
+        )
+    )
+
+    repaired = load_live_record(tmp_path, merge_id)
+    history_rows = read_history_rows((tmp_path / "otto_logs" / "cross-sessions" / "history.jsonl"))
+    history_row = next(row for row in history_rows if row["run_id"] == merge_id)
+
+    assert result.success is False
+    assert repaired.status == "cancelled"
+    assert repaired.terminal_outcome == "cancelled"
+    assert repaired.timing["finished_at"] == "2026-04-23T12:00:05Z"
+    assert history_row["status"] == "cancelled"
+    assert history_row["terminal_outcome"] == "cancelled"
+
+
 def test_merge_stops_publisher_when_body_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakePublisher:
         def __init__(self) -> None:

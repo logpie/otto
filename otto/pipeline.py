@@ -315,6 +315,12 @@ def _append_session_history(
     )
 
 
+def _repair_atomic_history(project_dir: Path) -> None:
+    from otto.runs.atomic_repair import repair_atomic_history
+
+    repair_atomic_history(project_dir)
+
+
 def _atomic_artifacts(project_dir: Path, run_id: str, *, primary_phase: str) -> dict[str, Any]:
     from otto import paths
 
@@ -538,6 +544,7 @@ async def build_agentic_v3(
     from otto.display import console
     from otto.runs.registry import garbage_collect_live_records
 
+    _repair_atomic_history(project_dir)
     garbage_collect_live_records(project_dir)
 
     # run_id is the unified session_id in the new layout. Older callers
@@ -1353,6 +1360,7 @@ async def run_certify_fix_loop(
     from otto.config import ensure_safe_repo_state
     from otto.runs.registry import garbage_collect_live_records
 
+    _repair_atomic_history(project_dir)
     garbage_collect_live_records(project_dir)
 
     # Unified session_id (was build_id). Allocate if caller didn't provide.

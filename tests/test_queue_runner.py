@@ -452,6 +452,42 @@ def test_refresh_queue_run_records_surfaces_unexpected_update_errors(tmp_path: P
         runner._refresh_queue_run_records([task], state)
 
 
+def test_refresh_queue_run_records_does_not_recreate_gc_deleted_terminal_attempt(tmp_path: Path) -> None:
+    from otto.runs.history import append_history_snapshot
+
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    )
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+    state = {
+        "tasks": {
+            "t1": {
+                "status": "done",
+                "attempt_run_id": "run-123",
+                "child_run_id": "run-123",
+                "child": None,
+                "failure_reason": None,
+                "started_at": "2026-04-23T00:00:00Z",
+                "finished_at": "2026-04-23T00:00:05Z",
+            }
+        }
+    }
+    append_history_snapshot(
+        repo,
+        {"run_id": "run-123", "status": "done", "terminal_outcome": "success"},
+        strict=True,
+    )
+
+    runner._refresh_queue_run_records([task], state)
+
+    assert not _paths.live_run_path(repo, "run-123").exists()
+    assert state["tasks"]["t1"]["history_appended"] is True
+
+
 def test_finalize_queue_attempt_surfaces_unexpected_finalize_errors(tmp_path: Path, monkeypatch) -> None:
     repo = init_repo(tmp_path)
     task = QueueTask(

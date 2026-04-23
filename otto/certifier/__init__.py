@@ -2065,8 +2065,6 @@ def _repair_standalone_certify_history(project_dir: Path) -> None:
     from otto.runs.history import append_history_snapshot, build_terminal_snapshot
     from otto.runs.history import read_history_rows
 
-    if paths.history_jsonl(project_dir).exists():
-        return
     history_rows = read_history_rows(paths.history_jsonl(project_dir))
     seen = {
         str(row.get("dedupe_key") or "")

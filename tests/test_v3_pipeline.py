@@ -966,16 +966,156 @@ async def test_run_agentic_certifier_stops_publisher_when_prompt_setup_raises(tm
     assert publisher.stopped is True
 
 
-def test_repair_standalone_certify_history_skips_scan_when_history_exists(tmp_git_repo, monkeypatch):
+@pytest.mark.asyncio
+async def test_build_startup_repairs_missing_terminal_history_from_summary(tmp_git_repo, monkeypatch):
+    from otto.runs.history import read_history_rows
+
+    class _StopStartup(RuntimeError):
+        pass
+
+    repaired_run_id = "repaired-build"
+    session_dir = _paths.ensure_session_scaffold(tmp_git_repo, repaired_run_id, phase="build")
+    _paths.session_summary(tmp_git_repo, repaired_run_id).write_text(json.dumps({
+        "run_id": repaired_run_id,
+        "command": "build",
+        "intent": "repair missing history",
+        "passed": True,
+        "cost_usd": 1.5,
+        "duration_s": 12.0,
+        "stories_passed": 3,
+        "stories_tested": 3,
+        "rounds": 1,
+        "completed_at": "2026-04-23T12:00:12Z",
+        "branch": "main",
+        "breakdown": {"certify": {"cost_usd": 0.4}},
+    }))
+    (session_dir / "manifest.json").write_text(json.dumps({
+        "run_id": repaired_run_id,
+        "command": "build",
+        "branch": "main",
+        "started_at": "2026-04-23T12:00:00Z",
+        "finished_at": "2026-04-23T12:00:12Z",
+        "cost_usd": 1.5,
+        "duration_s": 12.0,
+    }))
+    _paths.session_checkpoint(tmp_git_repo, repaired_run_id).write_text(json.dumps({
+        "run_id": repaired_run_id,
+        "certifier_mode": "standard",
+    }))
+
+    monkeypatch.setattr(
+        "otto.config.ensure_safe_repo_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(_StopStartup("setup failed")),
+    )
+
+    with pytest.raises(_StopStartup, match="setup failed"):
+        await build_agentic_v3(
+            "test",
+            tmp_git_repo,
+            {},
+            manage_checkpoint=False,
+            record_intent=False,
+            run_id="run-build-stop",
+        )
+
+    repaired = next(
+        row for row in read_history_rows(_paths.history_jsonl(tmp_git_repo))
+        if row["run_id"] == repaired_run_id
+    )
+    assert repaired["command"] == "build"
+    assert repaired["status"] == "done"
+    assert repaired["terminal_outcome"] == "success"
+    assert repaired["certifier_mode"] == "standard"
+    assert repaired["certifier_cost_usd"] == pytest.approx(0.4)
+
+
+@pytest.mark.asyncio
+async def test_run_agentic_certifier_startup_repairs_missing_standalone_history_with_existing_history(
+    tmp_git_repo,
+    monkeypatch,
+):
+    from otto.certifier import run_agentic_certifier
+    from otto.runs.history import append_history_snapshot, read_history_rows
+
+    class _StopPrompt(RuntimeError):
+        pass
+
+    repaired_run_id = "repaired-certify"
+    session_dir = _paths.ensure_session_scaffold(tmp_git_repo, repaired_run_id, phase="certify")
+    _paths.session_summary(tmp_git_repo, repaired_run_id).write_text(json.dumps({
+        "run_id": repaired_run_id,
+        "command": "certify",
+        "intent": "verify release",
+        "passed": False,
+        "cost_usd": 0.9,
+        "duration_s": 5.0,
+        "stories_passed": 1,
+        "stories_tested": 2,
+        "rounds": 1,
+        "completed_at": "2026-04-23T14:00:05Z",
+    }))
+    (session_dir / "manifest.json").write_text(json.dumps({
+        "run_id": repaired_run_id,
+        "command": "certify",
+        "started_at": "2026-04-23T14:00:00Z",
+        "finished_at": "2026-04-23T14:00:05Z",
+        "cost_usd": 0.9,
+        "duration_s": 5.0,
+    }))
+    append_history_snapshot(
+        tmp_git_repo,
+        {"run_id": "existing-build", "status": "done", "terminal_outcome": "success"},
+        strict=True,
+    )
+    publisher = _FakePublisher()
+    monkeypatch.setattr("otto.runs.registry.publisher_for", lambda *args, **kwargs: publisher)
+    monkeypatch.setattr(
+        "otto.certifier._render_certifier_prompt",
+        lambda **kwargs: (_ for _ in ()).throw(_StopPrompt("prompt failed")),
+    )
+
+    with pytest.raises(_StopPrompt, match="prompt failed"):
+        await run_agentic_certifier("test", tmp_git_repo, {}, session_id="run-certify-stop")
+
+    repaired = next(
+        row for row in read_history_rows(_paths.history_jsonl(tmp_git_repo))
+        if row["run_id"] == repaired_run_id
+    )
+    assert repaired["command"] == "certify"
+    assert repaired["status"] == "failed"
+    assert repaired["terminal_outcome"] == "failure"
+
+
+def test_repair_standalone_certify_history_repairs_missing_run_when_history_exists(tmp_git_repo, monkeypatch):
     from otto.certifier import _repair_standalone_certify_history
+    from otto.runs.history import read_history_rows
 
     history_path = _paths.history_jsonl(tmp_git_repo)
     history_path.parent.mkdir(parents=True, exist_ok=True)
     history_path.write_text('{"run_id":"existing","schema_version":2}\n', encoding="utf-8")
-
-    monkeypatch.setattr(
-        "otto.paths.sessions_root",
-        lambda project_dir: (_ for _ in ()).throw(AssertionError("should not scan sessions")),
-    )
+    session_dir = _paths.ensure_session_scaffold(tmp_git_repo, "cert-repair", phase="certify")
+    _paths.session_summary(tmp_git_repo, "cert-repair").write_text(json.dumps({
+        "run_id": "cert-repair",
+        "command": "certify",
+        "intent": "repair",
+        "passed": True,
+        "cost_usd": 0.1,
+        "duration_s": 1.0,
+        "stories_passed": 1,
+        "stories_tested": 1,
+        "rounds": 1,
+        "completed_at": "2026-04-23T15:00:01Z",
+    }))
+    (session_dir / "manifest.json").write_text(json.dumps({
+        "run_id": "cert-repair",
+        "command": "certify",
+        "started_at": "2026-04-23T15:00:00Z",
+        "finished_at": "2026-04-23T15:00:01Z",
+        "cost_usd": 0.1,
+        "duration_s": 1.0,
+    }))
 
     _repair_standalone_certify_history(tmp_git_repo)
+
+    rows = read_history_rows(history_path)
+    assert any(row.get("run_id") == "cert-repair" for row in rows)

@@ -44,8 +44,12 @@ from otto.runs.history import read_history_rows
 from otto.runs.registry import (
     append_command_ack,
     begin_command_drain,
+    finalize_record,
     finish_command_drain,
+    make_run_record,
+    update_record,
     publisher_for,
+    write_record,
 )
 from otto.runs.schema import is_terminal_status
 
@@ -332,6 +336,102 @@ def _append_merge_history(project_dir: Path, state: MergeState) -> None:
     )
 
 
+def _merge_run_artifacts(project_dir: Path, state: MergeState) -> dict[str, Any]:
+    merge_run_dir = paths.merge_dir(project_dir) / state.merge_id
+    artifacts = _merge_artifacts(project_dir, state.merge_id)
+    if state.cert_run_id:
+        cert_session_dir = paths.session_dir(project_dir, state.cert_run_id)
+        artifacts["extra_log_paths"] = [
+            *list(artifacts.get("extra_log_paths") or []),
+            str(paths.session_summary(project_dir, state.cert_run_id)),
+            str(cert_session_dir / "manifest.json"),
+            str(paths.certify_dir(project_dir, state.cert_run_id) / "proof-of-work.html"),
+        ]
+    artifacts["session_dir"] = str(merge_run_dir)
+    return artifacts
+
+
+def _write_merge_run_record(project_dir: Path, state: MergeState, *, status: str) -> None:
+    record = make_run_record(
+        project_dir=project_dir,
+        run_id=state.merge_id,
+        domain="merge",
+        run_type="merge",
+        command="merge",
+        display_name=f"merge: {len(state.branches_in_order)} branch(es)",
+        status=status,
+        cwd=project_dir,
+        writer_id=f"merge:{state.merge_id}",
+        identity={"merge_id": state.merge_id},
+        source={"invoked_via": "cli", "argv": ["merge"], "resumable": False},
+        git={"branch": state.target, "worktree": None, "target_branch": state.target, "head_sha": state.target_head_before},
+        intent={
+            "summary": f"merge {len(state.branches_in_order)} branch(es)",
+            "intent_path": str(paths.project_intent_md(project_dir)),
+            "spec_path": None,
+        },
+        artifacts=_merge_run_artifacts(project_dir, state),
+        adapter_key="merge.run",
+        last_event=str(state.note or status),
+    )
+    record.timing["started_at"] = state.started_at or record.timing.get("started_at")
+    if state.finished_at:
+        record.timing["finished_at"] = state.finished_at
+    write_record(project_dir, record)
+
+
+def _repair_merge_run_records(project_dir: Path) -> None:
+    for state_path in sorted(paths.merge_dir(project_dir).glob("*/state.json")):
+        merge_id = state_path.parent.name
+        try:
+            state = load_state(project_dir, merge_id)
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+            continue
+        status = str(state.status or "running")
+        terminal_status = is_terminal_status(status) and bool(state.finished_at)
+        updates = {
+            "identity": {"merge_id": state.merge_id},
+            "git": {
+                "branch": state.target,
+                "worktree": None,
+                "target_branch": state.target,
+                "head_sha": state.target_head_before,
+            },
+            "intent": {
+                "summary": f"merge {len(state.branches_in_order)} branch(es)",
+                "intent_path": str(paths.project_intent_md(project_dir)),
+                "spec_path": None,
+            },
+            "artifacts": _merge_run_artifacts(project_dir, state),
+            "last_event": str(state.note or status),
+            "timing": {
+                "started_at": state.started_at or None,
+                "finished_at": state.finished_at or None,
+            },
+        }
+        try:
+            if terminal_status:
+                finalize_record(
+                    project_dir,
+                    merge_id,
+                    status=status,
+                    terminal_outcome=state.terminal_outcome or _terminal_outcome_for_status(status),
+                    updates=updates,
+                )
+            else:
+                update_record(project_dir, merge_id, {"status": status, **updates}, heartbeat=True)
+        except FileNotFoundError:
+            _write_merge_run_record(project_dir, state, status="running" if terminal_status else status)
+            if terminal_status:
+                finalize_record(
+                    project_dir,
+                    merge_id,
+                    status=status,
+                    terminal_outcome=state.terminal_outcome or _terminal_outcome_for_status(status),
+                    updates=updates,
+                )
+
+
 def _repair_merge_history(project_dir: Path) -> None:
     history_rows = read_history_rows(paths.history_jsonl(project_dir))
     seen = {
@@ -420,8 +520,9 @@ async def run_merge(
     from otto.config import agent_provider
     from otto.runs.registry import garbage_collect_live_records
 
-    garbage_collect_live_records(project_dir)
+    _repair_merge_run_records(project_dir)
     _repair_merge_history(project_dir)
+    garbage_collect_live_records(project_dir)
 
     # Pre-flight: must be on target, working tree clean
     cur = git_ops.current_branch(project_dir)

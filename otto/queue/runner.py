@@ -1133,6 +1133,12 @@ class Runner:
                     heartbeat=status in IN_FLIGHT_STATUSES,
                 )
             except FileNotFoundError:
+                if (
+                    status in {"done", "failed", "cancelled", "removed", INTERRUPTED_STATUS}
+                    and (ts.get("history_appended") or self._history_snapshot_exists(attempt_run_id))
+                ):
+                    ts["history_appended"] = True
+                    continue
                 self._write_queue_run_record(task, ts, status=status)
 
     def _start_output_pump(self, task_id: str, proc: subprocess.Popen[Any]) -> None:
