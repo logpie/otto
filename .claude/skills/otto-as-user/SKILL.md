@@ -1,6 +1,6 @@
 ---
 name: otto-as-user
-description: Run Otto's CLI and Mission Control TUI as a real user would, against throwaway repos and a real provider. Two tiers: daily (37 short toy scenarios with asciinema recordings, $10-$15 full) and nightly (6 seeded-fixture scenarios with hidden-test oracles, $11-$16 full). Default to daily unless the user explicitly asks for nightly / seeded / real-world coverage.
+description: Run Otto's CLI and Mission Control TUI as a real user would, against throwaway repos and a real provider. Two tiers: daily (37 short toy scenarios with asciinema recordings, $10-$15 full) and nightly (5 seeded-fixture scenarios with hidden-test oracles, $12-$18 full). Default to daily unless the user explicitly asks for nightly / seeded / real-world coverage.
 ---
 
 # Otto As User
@@ -18,7 +18,7 @@ Use this skill when unit tests are not enough and you need a user-level regressi
 | Tier | Harness | Scenarios | Best for | Cost | Wall time |
 |------|---------|-----------|----------|------|-----------|
 | daily | `scripts/otto_as_user.py` | 37 (`A-E`, `U`) | fast CLI/TUI smoke with recordings | `$3-$4` quick, `$10-$15` full | `15m` quick, `60m` full |
-| nightly | `scripts/otto_as_user_nightly.py` | 6 (`N1`, `N2`, `N4`, `N8`, `N9`, `N10`) | seeded fixtures, hidden invariants, real-world regressions | `$11-$16` full | `80-95m` full |
+| nightly | `scripts/otto_as_user_nightly.py` | 5 (`N1`, `N2`, `N4`, `N8`, `N9`) | seeded fixtures, hidden invariants, real-world regressions | `$12-$18` full | `85-100m` full |
 
 If the user says "run otto-as-user" without a qualifier, use daily. If they say "nightly", "seeded", "real-world", or want hidden-oracle coverage, use nightly.
 
@@ -76,8 +76,8 @@ Nightly harness:
 .venv/bin/python scripts/otto_as_user_nightly.py --list
 .venv/bin/python scripts/otto_as_user_nightly.py --dry-run
 .venv/bin/python scripts/otto_as_user_nightly.py --scenario N4
-.venv/bin/python scripts/otto_as_user_nightly.py --scenario N10
-.venv/bin/python scripts/otto_as_user_nightly.py --scenario N1,N2,N4,N8,N9,N10 --scenario-delay 10
+.venv/bin/python scripts/otto_as_user_nightly.py --scenario N9
+.venv/bin/python scripts/otto_as_user_nightly.py --scenario N1,N2,N4,N8,N9 --scenario-delay 10
 ```
 
 - "test with Claude" -> `--provider claude`
@@ -95,8 +95,7 @@ Nightly scenarios:
 - `N2` semantic auth merge: queue two overlapping auth branches, run them, merge them, and verify both flows plus baseline login behavior.
 - `N4` certifier trap: build CSV bulk import from product-language intent only. Hidden tests enforce tenant isolation and idempotency.
 - `N8` stale merge context: three-branch queue around a file rename plus stale edits and tests. Hidden tests ensure the final merge keeps all three intents coherent.
-- `N9` Mission Control workflow: one standalone build is cancelled while two queue tasks run and later merge. This is the substrate-heavy nightly gate for cross-process registry visibility, cancel envelopes, repair coherence, and cleanup behavior under a real LLM run.
-- `N10` Mission Control pilot integration: one standalone build is launched, then the real `MissionControlApp` is driven via Textual `pilot.run_test()` to discover the live row, open Detail, verify running state plus artifacts, and cancel the run. This is the TUI-to-substrate end-to-end gate under a real LLM run.
+- `N9` realistic operator session: open Mission Control, watch one standalone build finish naturally, enqueue two concurrent queue tasks, inspect heartbeat/log updates mid-flight, cancel one queue task via TUI, open History and `$EDITOR` on the cancelled snapshot, then merge the succeeded queue row via `m`. This is the nightly end-to-end gate for real TUI actions, live registry coherence, terminal history integrity, and post-merge artifact preservation under real LLM runs.
 
 Nightly fixtures live under `scripts/fixtures_nightly/<scenario>/` and include `intent.md`, `otto.yaml`, app code, visible tests, hidden tests, and `restore.sh`.
 

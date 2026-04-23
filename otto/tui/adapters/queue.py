@@ -79,6 +79,9 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
             items.append(ArtifactRef.from_path("checkpoint", checkpoint_path))
         if primary_log:
             items.append(ArtifactRef.from_path("primary log", primary_log, kind="log"))
+            messages_path = Path(primary_log).with_name("messages.jsonl")
+            if messages_path.exists():
+                items.append(ArtifactRef.from_path("messages", str(messages_path), kind="log"))
         if worktree:
             items.append(ArtifactRef.from_path("worktree", worktree))
         return items

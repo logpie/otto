@@ -51,6 +51,9 @@ class AtomicMissionControlAdapter(ActionExecutingAdapter):
             items.append(ArtifactRef.from_path("checkpoint", checkpoint_path))
         if primary_log:
             items.append(ArtifactRef.from_path("primary log", primary_log, kind="log"))
+            messages_path = Path(primary_log).with_name("messages.jsonl")
+            if messages_path.exists():
+                items.append(ArtifactRef.from_path("messages", str(messages_path), kind="log"))
         for index, path in enumerate(extra_log_paths, start=1):
             kind = "log" if path.endswith(".log") else "file"
             items.append(ArtifactRef.from_path(f"extra {index}", path, kind=kind))

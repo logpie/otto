@@ -53,7 +53,6 @@ N9_BUILD_INTENT = (
     "predictable error handling, and lightweight OpenAPI-style response "
     "documentation comments while keeping the implementation in-memory."
 )
-N10_BUILD_INTENT = "Add a lightweight GET /tasks endpoint with basic validation for the seeded FastAPI app."
 N9_POST_INTENT = "Add POST /tasks endpoint."
 N9_DELETE_INTENT = "Add DELETE /tasks/<id> endpoint."
 
@@ -163,30 +162,21 @@ SCENARIO_SPECS: dict[str, ScenarioSpec] = {
     "N9": ScenarioSpec(
         fixture_dir=FIXTURE_ROOT / "n9_mission_control_workflow",
         intent_path=FIXTURE_ROOT / "n9_mission_control_workflow" / "intent.md",
-        est_cost_range="$1.7-$2.7",
-        budget_s=20 * 60,
+        est_cost_range="$3-$5",
+        budget_s=35 * 60,
         step_plan=[
-            f"otto build --provider <provider> --allow-dirty {N9_BUILD_INTENT!r} (background, will be cancelled)",
+            "open Mission Control against ./otto_logs/",
+            f"otto build --provider <provider> --allow-dirty {N9_BUILD_INTENT!r}",
+            "<pilot watches the standalone build row appear, opens Detail, and verifies running -> done with artifacts populated>",
             f"otto queue build {N9_POST_INTENT!r} --as add-post",
             f"otto queue build {N9_DELETE_INTENT!r} --as add-delete",
             "otto queue run --concurrent 2 --no-dashboard --exit-when-empty",
-            "<harness appends cancel envelope to standalone build>",
-            "otto merge --all --cleanup-on-success",
+            "<pilot drills into one running queue task, verifies heartbeat progress, and presses o to switch logs>",
+            "<pilot cancels one running queue task via c and waits for cancel ack + cancelled status>",
+            "<pilot opens History, verifies build success + queue success + queue cancelled, and presses e on the cancelled row>",
+            "<pilot selects the succeeded queue row and presses m to run otto merge <task-id> (not --all)>",
             "pytest tests/visible -q --tb=short",
             "pytest tests/hidden -q --tb=short",
-        ],
-    ),
-    "N10": ScenarioSpec(
-        fixture_dir=FIXTURE_ROOT / "n9_mission_control_workflow",
-        intent_path=FIXTURE_ROOT / "n9_mission_control_workflow" / "intent.md",
-        est_cost_range="$0.5-$1.0",
-        budget_s=12 * 60,
-        step_plan=[
-            f"otto build --provider <provider> --allow-dirty {N10_BUILD_INTENT!r} (background, will be cancelled via Mission Control)",
-            "<pilot.run_test drives MissionControlApp against the same repo>",
-            "<pilot waits for the live row, opens Detail, verifies running status + artifacts, presses c>",
-            "assert summary.json status=cancelled and history terminal_snapshot terminal_outcome=cancelled",
-            "pytest tests/visible -q --tb=short",
         ],
     ),
 }
@@ -417,6 +407,124 @@ def _read_log(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _n9_phase_log_path(repo: Path) -> Path:
+    from otto import paths
+
+    return paths.cross_sessions_dir(repo) / "mission-control-pilot-phases.jsonl"
+
+
+def _write_n9_phase_snapshot(app: Any, repo: Path, *, phase: str, note: str | None = None) -> None:
+    path = _n9_phase_log_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    detail = app.model.detail_view(app.state)
+    payload = {
+        "phase": phase,
+        "note": note,
+        "focus": app.state.focus,
+        "selection_run_id": app.state.selection.run_id,
+        "selected_run_ids": sorted(app.state.selected_run_ids),
+        "live_rows": [
+            {
+                "run_id": item.record.run_id,
+                "domain": item.record.domain,
+                "run_type": item.record.run_type,
+                "status": item.record.status,
+                "queue_task_id": item.record.identity.get("queue_task_id"),
+                "merge_id": item.record.identity.get("merge_id"),
+            }
+            for item in app.state.live_runs.items
+        ],
+        "history_rows": [
+            {
+                "run_id": item.row.run_id,
+                "domain": item.row.domain,
+                "run_type": item.row.run_type,
+                "status": item.row.status,
+                "terminal_outcome": item.row.terminal_outcome,
+                "queue_task_id": item.row.queue_task_id,
+                "merge_id": item.row.merge_id,
+            }
+            for item in app.state.history_page.items
+        ],
+        "detail": {
+            "run_id": detail.run_id if detail is not None else None,
+            "status": detail.record.status if detail is not None else None,
+            "selected_log_path": detail.selected_log_path if detail is not None else None,
+            "log_paths": list(detail.log_paths) if detail is not None else [],
+            "artifact_paths": [artifact.path for artifact in detail.artifacts] if detail is not None else [],
+        },
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+
+def _read_terminal_snapshots(repo: Path, run_id: str | None = None) -> list[dict[str, Any]]:
+    from otto import paths
+
+    rows = [
+        row
+        for row in base.read_jsonl(paths.history_jsonl(repo))
+        if str(row.get("history_kind") or "terminal_snapshot") == "terminal_snapshot"
+    ]
+    if run_id is None:
+        return rows
+    return [row for row in rows if str(row.get("run_id") or "") == run_id]
+
+
+def _artifact_paths_resolve(snapshot: dict[str, Any]) -> bool:
+    candidate_keys = ("intent_path", "manifest_path", "summary_path", "primary_log_path")
+    for key in candidate_keys:
+        value = str(snapshot.get(key) or "").strip()
+        if value and not Path(value).exists():
+            return False
+    artifacts = snapshot.get("artifacts")
+    if isinstance(artifacts, dict):
+        for value in artifacts.values():
+            if isinstance(value, str) and value.strip() and not Path(value).exists():
+                return False
+            if isinstance(value, list):
+                for path in value:
+                    if isinstance(path, str) and path.strip() and not Path(path).exists():
+                        return False
+    return True
+
+
+def _n9_overlap_delay_s() -> float:
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return 0.0
+    raw = os.environ.get("OTTO_N9_QUEUE_OVERLAP_DELAY_S", "60").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 60.0
+
+
+@contextmanager
+def _capture_mission_control_action_spawns() -> Any:
+    import otto.tui.mission_control_actions as mission_control_actions
+
+    real_popen = mission_control_actions.subprocess.Popen
+    spawns: list[dict[str, Any]] = []
+
+    def _wrapped_popen(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        proc = real_popen(argv, *args, **kwargs)
+        spawns.append(
+            {
+                "argv": [str(part) for part in argv],
+                "proc": proc,
+                "pid": getattr(proc, "pid", None),
+                "started_monotonic": time.monotonic(),
+            }
+        )
+        return proc
+
+    mission_control_actions.subprocess.Popen = _wrapped_popen
+    try:
+        yield spawns
+    finally:
+        mission_control_actions.subprocess.Popen = real_popen
+
+
 def _terminate_process_group(proc: subprocess.Popen[str] | None) -> None:
     if proc is None or proc.poll() is not None:
         return
@@ -620,12 +728,6 @@ def setup_n9(repo: Path, provider: str) -> None:
     del provider
     setup_from_fixture(repo, "N9")
 
-
-def setup_n10(repo: Path, provider: str) -> None:
-    del provider
-    setup_from_fixture(repo, "N10")
-
-
 def run_n8(repo: Path, provider: str) -> base.RunResult:
     started = base.now_iso()
     budget = ScenarioBudget(_fixture_spec("N8").budget_s)
@@ -683,40 +785,456 @@ def verify_n8(repo: Path, run_result: base.RunResult) -> VerifyResult:
     return VerifyResult(True, "N8 merged rename, stale branch logic, and dependent tests into final main")
 
 
-def run_n9(repo: Path, provider: str) -> base.RunResult:
+async def _drive_n9_mission_control(
+    *,
+    repo: Path,
+    build_run_id: str,
+    build_proc: subprocess.Popen[str],
+    build_started: float,
+    details: dict[str, Any],
+    runtime: dict[str, Any],
+    start_queue_flow: Any,
+    budget: ScenarioBudget,
+    action_spawns: list[dict[str, Any]],
+) -> None:
     from otto import paths
-    from otto.runs.registry import (
-        HEARTBEAT_INTERVAL_S,
-        allocate_run_id,
-        load_live_record,
-        read_live_records,
-    )
+    from otto.runs.registry import load_command_ack_ids
+    from otto.runs.schema import is_terminal_status
+    from otto.tui.mission_control import MissionControlApp
+
+    app = MissionControlApp(repo)
+
+    async def _wait_for(predicate: Any, *, timeout_s: float, message: str, pause_s: float = 0.1) -> Any:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            await pilot.pause(pause_s)
+            value = predicate()
+            if value:
+                return value
+        raise AssertionError(message)
+
+    async def _focus_live_run(run_id: str) -> None:
+        await pilot.press("1")
+        await pilot.pause(0.1)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            live_ids = [item.record.run_id for item in app.state.live_runs.items]
+            if run_id not in live_ids:
+                await pilot.pause(0.1)
+                continue
+            selected = app.state.selection.run_id
+            if selected == run_id:
+                return
+            current_index = live_ids.index(selected) if selected in live_ids else 0
+            target_index = live_ids.index(run_id)
+            key = "down" if target_index >= current_index else "up"
+            for _ in range(abs(target_index - current_index)):
+                await pilot.press(key)
+                await pilot.pause(0.05)
+            if app.state.selection.run_id == run_id:
+                return
+        raise AssertionError(f"N9 could not focus live run {run_id}")
+
+    async def _focus_history_run(run_id: str) -> None:
+        await pilot.press("2")
+        await pilot.pause(0.1)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            history_ids = [item.row.run_id for item in app.state.history_page.items]
+            if run_id not in history_ids:
+                await pilot.pause(0.1)
+                continue
+            selected = app.state.selection.run_id
+            if selected == run_id:
+                return
+            current_index = history_ids.index(selected) if selected in history_ids else 0
+            target_index = history_ids.index(run_id)
+            key = "down" if target_index >= current_index else "up"
+            for _ in range(abs(target_index - current_index)):
+                await pilot.press(key)
+                await pilot.pause(0.05)
+            if app.state.selection.run_id == run_id:
+                return
+        raise AssertionError(f"N9 could not focus history run {run_id}")
+
+    def _detail() -> Any:
+        return app.model.detail_view(app.state)
+
+    def _queue_items() -> dict[str, Any]:
+        return {
+            str(item.record.identity.get("queue_task_id")): item
+            for item in app.state.live_runs.items
+            if item.record.domain == "queue" and item.record.identity.get("queue_task_id")
+        }
+
+    def _history_rows() -> list[Any]:
+        return list(app.state.history_page.items)
+
+    async with app.run_test() as pilot:
+        build_item = await _wait_for(
+            lambda: next((item for item in app.state.live_runs.items if item.record.run_id == build_run_id), None),
+            timeout_s=30.0,
+            message="N9 Mission Control did not show the standalone build row within 30s",
+        )
+        details["build-live-row-latency-ms"] = int((time.monotonic() - build_started) * 1000)
+        if build_item.record.status != "running":
+            build_item = await _wait_for(
+                lambda: next(
+                    (
+                        item
+                        for item in app.state.live_runs.items
+                        if item.record.run_id == build_run_id and item.record.status == "running"
+                    ),
+                    None,
+                ),
+                timeout_s=15.0,
+                message="N9 Mission Control never rendered the standalone build as running",
+            )
+        await _focus_live_run(build_run_id)
+        await pilot.press("enter")
+        await _wait_for(
+            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == build_run_id),
+            timeout_s=5.0,
+            message="N9 standalone build detail view did not open",
+        )
+        await _wait_for(
+            lambda: _detail() is not None and _detail().record.status == "running",
+            timeout_s=10.0,
+            message="N9 standalone build detail never showed status=running",
+        )
+        await _wait_for(
+            lambda: _detail() is not None and len(_detail().artifacts) > 0,
+            timeout_s=15.0,
+            message="N9 standalone build detail never populated artifacts",
+        )
+        _write_n9_phase_snapshot(app, repo, phase="build-running")
+
+        overlap_delay_s = min(_n9_overlap_delay_s(), budget.timeout_for(90))
+        if overlap_delay_s > 0:
+            await pilot.pause(overlap_delay_s)
+
+        start_queue_flow()
+        watcher_started = runtime["watcher_started"]
+        queue_items = await _wait_for(
+            lambda: _queue_items() if len(_queue_items()) >= 2 else None,
+            timeout_s=60.0,
+            message="N9 expected two live queue rows within 60s of starting the watcher",
+        )
+        for task_id, item in queue_items.items():
+            details["queue-run-ids"][task_id] = item.record.run_id
+            details["queue-live-latency-ms"][task_id] = int((time.monotonic() - watcher_started) * 1000)
+
+        inspect_task_id = "add-post" if "add-post" in queue_items else sorted(queue_items)[0]
+        await _focus_live_run(details["queue-run-ids"][inspect_task_id])
+        await pilot.press("enter")
+        await _wait_for(
+            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == details["queue-run-ids"][inspect_task_id]),
+            timeout_s=5.0,
+            message="N9 queue detail view did not open",
+        )
+        queue_detail = await _wait_for(
+            lambda: _detail() if _detail() is not None and not is_terminal_status(_detail().record.status) else None,
+            timeout_s=30.0,
+            message="N9 queue detail never reached an active state",
+        )
+        initial_hb = int(queue_detail.record.timing.get("heartbeat_seq") or 0)
+        heartbeat_interval_s = max(float(queue_detail.record.timing.get("heartbeat_interval_s") or 5.0), 0.1)
+        heartbeat_progress = await _wait_for(
+            lambda: (
+                _detail()
+                if _detail() is not None and int(_detail().record.timing.get("heartbeat_seq") or 0) > initial_hb
+                else None
+            ),
+            timeout_s=max(10.0, 3.0 * heartbeat_interval_s),
+            message="N9 queue heartbeat did not advance while the detail view was open",
+        )
+        details["queue-heartbeat-advanced"] = True
+        details["queue-heartbeat-from"] = initial_hb
+        details["queue-heartbeat-to"] = int(heartbeat_progress.record.timing.get("heartbeat_seq") or 0)
+        if len(queue_detail.log_paths) < 2:
+            raise AssertionError("N9 queue detail did not expose a second log path for `o`")
+        initial_log_path = queue_detail.selected_log_path
+        await pilot.press("o")
+        await _wait_for(
+            lambda: _detail() is not None and _detail().selected_log_path != initial_log_path,
+            timeout_s=5.0,
+            message="N9 `o` did not switch the queue detail to a second log",
+        )
+        details["queue-log-cycled"] = True
+        details["queue-log-before"] = initial_log_path
+        details["queue-log-after"] = _detail().selected_log_path
+        _write_n9_phase_snapshot(app, repo, phase="queue-midflight-detail", note=inspect_task_id)
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+
+        await _wait_for(
+            lambda: build_proc.poll() is not None,
+            timeout_s=budget.timeout_for(12 * 60),
+            message="N9 standalone build did not finish within the scenario budget",
+        )
+        build_finished_at = time.monotonic()
+        build_rc = build_proc.poll()
+        if build_rc != 0:
+            raise AssertionError(f"N9 standalone build exited with rc={build_rc}")
+        await _wait_for(
+            lambda: next(
+                (
+                    item
+                    for item in app.state.live_runs.items
+                    if item.record.run_id == build_run_id and item.record.status == "done"
+                ),
+                None,
+            ),
+            timeout_s=max(app.state.live_runs.refresh_interval_s + 1.0, 2.0),
+            message="N9 Mission Control did not reflect build status=done within one refresh cycle",
+        )
+        details["build-finished-naturally"] = True
+        details["build-live-done-latency-ms"] = int((time.monotonic() - build_finished_at) * 1000)
+        _write_n9_phase_snapshot(app, repo, phase="build-done")
+
+        active_queue_rows = [
+            item
+            for item in app.state.live_runs.items
+            if item.record.domain == "queue" and not is_terminal_status(item.record.status)
+        ]
+        if not active_queue_rows:
+            raise AssertionError("N9 queue rows settled before the standalone build finished")
+        cancel_item = next(
+            (item for item in active_queue_rows if str(item.record.identity.get("queue_task_id")) == "add-delete"),
+            active_queue_rows[0],
+        )
+        cancel_task_id = str(cancel_item.record.identity.get("queue_task_id"))
+        details["cancelled-queue-task-id"] = cancel_task_id
+        details["cancelled-queue-run-id"] = cancel_item.record.run_id
+        await _focus_live_run(cancel_item.record.run_id)
+        await pilot.press("enter")
+        await _wait_for(
+            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == cancel_item.record.run_id),
+            timeout_s=5.0,
+            message="N9 could not reopen queue detail for cancellation",
+        )
+        request_path = paths.session_command_requests(Path(_detail().record.cwd), cancel_item.record.run_id)
+        ack_path = paths.session_command_acks(Path(_detail().record.cwd), cancel_item.record.run_id)
+        pre_ack_ids = set(load_command_ack_ids(ack_path))
+        cancel_pressed_at = time.monotonic()
+        await pilot.press("c")
+        await _wait_for(
+            lambda: set(load_command_ack_ids(ack_path)) - pre_ack_ids,
+            timeout_s=max(15.0, 3.0 * heartbeat_interval_s),
+            message="N9 queue cancel ack did not arrive",
+        )
+        details["cancel-request-path"] = str(request_path)
+        details["cancel-ack-path"] = str(ack_path)
+        details["cancel-ack-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
+        await _wait_for(
+            lambda: (
+                _detail() is not None
+                and _detail().record.run_id == cancel_item.record.run_id
+                and _detail().record.status == "cancelled"
+            ),
+            timeout_s=max(app.state.live_runs.refresh_interval_s + 1.0, 2.0),
+            message="N9 Mission Control detail did not refresh to cancelled within one cycle",
+        )
+        details["queue-cancelled-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
+        details["queue-refresh-window-ms"] = int(max(app.state.live_runs.refresh_interval_s, 0.5) * 1000)
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+
+        watcher_proc = runtime["watcher_proc"]
+        await _wait_for(
+            lambda: watcher_proc.poll() is not None,
+            timeout_s=budget.timeout_for(18 * 60),
+            message="N9 queue watcher did not settle after the cancel",
+        )
+        watcher_rc = watcher_proc.poll()
+        if watcher_rc != 0:
+            raise AssertionError(f"N9 queue watcher exited with rc={watcher_rc}")
+        runtime["watcher_step"]["rc"] = watcher_rc
+        runtime["watcher_step"]["duration_s"] = round(time.monotonic() - watcher_started, 1)
+        details["watcher-returncode"] = watcher_rc
+
+        await _focus_history_run(build_run_id)
+        history_rows = await _wait_for(
+            lambda: _history_rows() if len(_history_rows()) >= 3 else None,
+            timeout_s=20.0,
+            message="N9 History did not show the three terminal rows after queue settlement",
+        )
+        details["history-pre-merge-run-ids"] = [item.row.run_id for item in history_rows[:3]]
+        terminal_outcomes = {item.row.run_id: item.row.terminal_outcome for item in history_rows}
+        details["history-terminal-outcomes-pre-merge"] = terminal_outcomes
+        if build_run_id not in terminal_outcomes or terminal_outcomes[build_run_id] != "success":
+            raise AssertionError("N9 History did not record the standalone build as success")
+        cancelled_history_item = next(
+            (item for item in history_rows if item.row.run_id == details["cancelled-queue-run-id"]),
+            None,
+        )
+        if cancelled_history_item is None or cancelled_history_item.row.terminal_outcome != "cancelled":
+            raise AssertionError("N9 History did not record the cancelled queue row as cancelled")
+        success_history_item = next(
+            (
+                item
+                for item in history_rows
+                if item.row.domain == "queue" and item.row.run_id != details["cancelled-queue-run-id"] and item.row.terminal_outcome == "success"
+            ),
+            None,
+        )
+        if success_history_item is None:
+            raise AssertionError("N9 History did not record a succeeded queue row")
+        details["succeeded-queue-run-id"] = success_history_item.row.run_id
+        details["succeeded-queue-task-id"] = success_history_item.row.queue_task_id
+        _write_n9_phase_snapshot(app, repo, phase="history-pre-merge")
+
+        await _focus_history_run(details["cancelled-queue-run-id"])
+        await pilot.press("enter")
+        await _wait_for(
+            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == details["cancelled-queue-run-id"]),
+            timeout_s=5.0,
+            message="N9 cancelled history detail did not open",
+        )
+        await pilot.press("e")
+        editor_spawn = await _wait_for(
+            lambda: next(
+                (
+                    spawn
+                    for spawn in action_spawns
+                    if spawn["argv"] and Path(spawn["argv"][0]).name == "true"
+                ),
+                None,
+            ),
+            timeout_s=5.0,
+            message="N9 did not attempt to spawn $EDITOR from the cancelled history row",
+        )
+        details["editor-spawn-attempted"] = True
+        details["editor-spawn-argv"] = editor_spawn["argv"]
+        _write_n9_phase_snapshot(app, repo, phase="history-cancelled-detail")
+
+        await _focus_live_run(details["succeeded-queue-run-id"])
+        await pilot.press("space")
+        await _wait_for(
+            lambda: details["succeeded-queue-run-id"] in app.state.selected_run_ids,
+            timeout_s=5.0,
+            message="N9 could not multi-select the succeeded queue row before merge",
+        )
+        await _focus_history_run(details["succeeded-queue-run-id"])
+        merge_requested_at = time.monotonic()
+        await pilot.press("m")
+        merge_spawn = await _wait_for(
+            lambda: next(
+                (
+                    spawn
+                    for spawn in action_spawns
+                    if len(spawn["argv"]) >= 2 and spawn["argv"][1] == "merge"
+                ),
+                None,
+            ),
+            timeout_s=10.0,
+            message="N9 did not spawn a merge process from Mission Control",
+        )
+        if "--all" in merge_spawn["argv"]:
+            raise AssertionError("N9 merge action used `--all` instead of selected queue rows")
+        details["merge-spawn-argv"] = merge_spawn["argv"]
+        merge_proc = merge_spawn["proc"]
+        await _wait_for(
+            lambda: merge_proc.poll() is not None,
+            timeout_s=budget.timeout_for(12 * 60),
+            message="N9 merge did not finish within the scenario budget",
+        )
+        if merge_proc.poll() != 0:
+            raise AssertionError(f"N9 merge process exited with rc={merge_proc.poll()}")
+        merge_step = {
+            "label": "merge-selected",
+            "argv": merge_spawn["argv"],
+            "rc": merge_proc.poll(),
+            "duration_s": round(time.monotonic() - merge_requested_at, 1),
+        }
+        runtime["merge_step"] = merge_step
+        await _wait_for(
+            lambda: next((item for item in _history_rows() if item.row.domain == "merge"), None),
+            timeout_s=20.0,
+            message="N9 History did not record the merge terminal snapshot",
+        )
+        _write_n9_phase_snapshot(app, repo, phase="merge-complete")
+
+
+def run_n9(repo: Path, provider: str) -> base.RunResult:
+    from otto.runs.registry import allocate_run_id, garbage_collect_live_records, read_live_records
 
     started = base.now_iso()
     budget = ScenarioBudget(_fixture_spec("N9").budget_s)
     steps: list[dict[str, Any]] = []
     details: dict[str, Any] = {
         "steps": steps,
-        "live-records-discovered-count": 0,
-        "build_record_latency_ms": None,
-        "queue_record_1_latency_ms": None,
-        "queue_record_2_latency_ms": None,
+        "build-live-row-latency-ms": None,
+        "build-live-done-latency-ms": None,
+        "build-finished-naturally": False,
+        "queue-run-ids": {},
+        "queue-live-latency-ms": {},
+        "queue-heartbeat-advanced": False,
+        "queue-log-cycled": False,
         "cancel-ack-latency-ms": None,
-        "build-terminated-via-cancel": False,
+        "queue-cancelled-latency-ms": None,
+        "editor-spawn-attempted": False,
+        "history-terminal-snapshot-count": 0,
+        "history-artifacts-resolve": False,
+        "live-records-terminal-after-gc": False,
+        "phase-log-path": str(_n9_phase_log_path(repo)),
     }
     build_proc: subprocess.Popen[str] | None = None
-    watcher_proc: subprocess.Popen[str] | None = None
     build_handle = None
     watcher_handle = None
     build_log_path = _background_log_path("n9-build")
     watcher_log_path = _background_log_path("n9-queue-run")
     outputs: list[str] = []
-    merge_duration_s = 0.0
-    build_step: dict[str, Any] | None = None
-    watcher_step: dict[str, Any] | None = None
     result_returncode = 1
+    runtime: dict[str, Any] = {
+        "watcher_proc": None,
+        "watcher_step": None,
+        "watcher_started": None,
+        "merge_step": None,
+    }
+    old_editor = os.environ.get("EDITOR")
+
+    def _start_queue_flow() -> None:
+        if runtime["watcher_proc"] is not None:
+            return
+        base.queue_build(repo, "add-post", provider, N9_POST_INTENT)
+        steps.append({"label": "queue-add-post", "rc": 0, "task_id": "add-post"})
+        base.queue_build(repo, "add-delete", provider, N9_DELETE_INTENT)
+        steps.append({"label": "queue-add-delete", "rc": 0, "task_id": "add-delete"})
+        watcher_argv = [
+            str(base.OTTO_BIN),
+            "queue",
+            "run",
+            "--concurrent",
+            "2",
+            "--no-dashboard",
+            "--exit-when-empty",
+        ]
+        base.log_line(f"$ {base.shell_join(watcher_argv)}  # background")
+        runtime["watcher_started"] = time.monotonic()
+        nonlocal watcher_handle
+        watcher_handle = watcher_log_path.open("w", encoding="utf-8")
+        runtime["watcher_proc"] = subprocess.Popen(
+            watcher_argv,
+            cwd=repo,
+            env=base.current_ctx().env,
+            stdout=watcher_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            preexec_fn=os.setsid,
+        )
+        runtime["watcher_step"] = {
+            "label": "queue-run",
+            "argv": watcher_argv,
+            "rc": None,
+            "duration_s": None,
+        }
+        steps.append(runtime["watcher_step"])
 
     try:
+        phase_log = Path(details["phase-log-path"])
+        if phase_log.exists():
+            phase_log.unlink()
         build_run_id = allocate_run_id(repo)
         details["build-run-id"] = build_run_id
         build_argv = [
@@ -750,194 +1268,65 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         }
         steps.append(build_step)
 
-        base.queue_build(repo, "add-post", provider, N9_POST_INTENT)
-        steps.append({"label": "queue-add-post", "rc": 0, "task_id": "add-post"})
-        base.queue_build(repo, "add-delete", provider, N9_DELETE_INTENT)
-        steps.append({"label": "queue-add-delete", "rc": 0, "task_id": "add-delete"})
+        os.environ["EDITOR"] = "true"
+        with _capture_mission_control_action_spawns() as action_spawns:
+            asyncio.run(
+                _drive_n9_mission_control(
+                    repo=repo,
+                    build_run_id=build_run_id,
+                    build_proc=build_proc,
+                    build_started=build_started,
+                    details=details,
+                    runtime=runtime,
+                    start_queue_flow=_start_queue_flow,
+                    budget=budget,
+                    action_spawns=action_spawns,
+                )
+            )
+            details["action-spawns"] = [
+                {"argv": spawn["argv"], "pid": spawn["pid"]}
+                for spawn in action_spawns
+            ]
 
-        watcher_argv = [
-            str(base.OTTO_BIN),
-            "queue",
-            "run",
-            "--concurrent",
-            "2",
-            "--no-dashboard",
-            "--exit-when-empty",
-        ]
-        base.log_line(f"$ {base.shell_join(watcher_argv)}  # background")
-        watcher_handle = watcher_log_path.open("w", encoding="utf-8")
-        watcher_started = time.monotonic()
-        watcher_proc = subprocess.Popen(
-            watcher_argv,
-            cwd=repo,
-            env=base.current_ctx().env,
-            stdout=watcher_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-            preexec_fn=os.setsid,
-        )
-        watcher_step = {
-            "label": "queue-run",
-            "argv": watcher_argv,
-            "rc": None,
-            "duration_s": None,
+        build_rc = build_proc.wait(timeout=1.0)
+        build_step["rc"] = build_rc
+        build_step["duration_s"] = round(time.monotonic() - build_started, 1)
+        if build_rc != 0:
+            raise AssertionError(f"N9 standalone build exited with rc={build_rc}")
+
+        if runtime["watcher_proc"] is None or runtime["watcher_step"] is None:
+            raise AssertionError("N9 never started the queue watcher")
+        if runtime["watcher_proc"].poll() is None:
+            watcher_rc = runtime["watcher_proc"].wait(timeout=budget.timeout_for(60))
+            runtime["watcher_step"]["rc"] = watcher_rc
+            runtime["watcher_step"]["duration_s"] = round(time.monotonic() - runtime["watcher_started"], 1)
+        if runtime["watcher_step"]["rc"] != 0:
+            raise AssertionError(f"N9 queue watcher exited with rc={runtime['watcher_step']['rc']}")
+        if runtime["merge_step"] is None:
+            raise AssertionError("N9 did not record the selected-row merge step")
+        steps.append(runtime["merge_step"])
+
+        snapshots = _read_terminal_snapshots(repo)
+        details["history-terminal-snapshot-count"] = len(snapshots)
+        details["history-terminal-outcomes"] = {
+            str(row.get("run_id") or ""): str(row.get("terminal_outcome") or "")
+            for row in snapshots
         }
-        steps.append(watcher_step)
+        details["history-artifacts-resolve"] = all(_artifact_paths_resolve(row) for row in snapshots)
 
-        session_dir = paths.session_dir(repo, build_run_id)
-        commands_dir = paths.session_commands_dir(repo, build_run_id)
-        request_path = paths.session_command_requests(repo, build_run_id)
-        ack_path = paths.session_command_acks(repo, build_run_id)
-        build_record_deadline_s = 5.0
-        queue_record_deadline_s = 30.0
-        build_record_deadline = build_started + build_record_deadline_s
-        queue_record_deadline = watcher_started + queue_record_deadline_s
-        session_ready_latency_ms: int | None = None
-        discovered_atomic = False
-        discovered_queue_runs: set[str] = set()
-        queue_record_order: list[str] = []
-
-        def refresh_live_records(now: float | None = None) -> None:
-            nonlocal discovered_atomic
-            if now is None:
-                now = time.monotonic()
-            records = read_live_records(repo)
-            if not discovered_atomic and any(record.run_id == build_run_id for record in records):
-                discovered_atomic = True
-                details["build_record_latency_ms"] = int((now - build_started) * 1000)
-            for record in records:
-                if record.domain != "queue" or record.run_id in discovered_queue_runs:
-                    continue
-                discovered_queue_runs.add(record.run_id)
-                queue_record_order.append(record.run_id)
-                queue_index = len(queue_record_order)
-                if queue_index <= 2:
-                    details[f"queue_record_{queue_index}_latency_ms"] = int((now - watcher_started) * 1000)
-            details["live-records-discovered-count"] = int(discovered_atomic) + len(discovered_queue_runs)
-
-        while time.monotonic() < build_record_deadline:
-            now = time.monotonic()
-            build_rc = build_proc.poll()
-            if build_rc is not None and not session_dir.exists():
-                details["classification_override"] = "INFRA"
-                details["build-finished-before-cancel-ready"] = True
-                details["build-returncode"] = build_rc
-                if build_step is not None:
-                    build_step["rc"] = build_rc
-                    build_step["duration_s"] = round(now - build_started, 1)
-                raise AssertionError("N9 standalone build exited before its cancel channel became ready")
-            refresh_live_records(now)
-            if session_dir.exists() and discovered_atomic:
-                session_ready_latency_ms = int((now - build_started) * 1000)
-                break
-            time.sleep(0.05)
-        else:
-            raise AssertionError(
-                f"N9 expected the standalone build live record within {build_record_deadline_s:.1f}s"
-            )
-        refresh_live_records()
-        details["live-records-latency-ms"] = details["build_record_latency_ms"]
-        details["session-ready-latency-ms"] = session_ready_latency_ms
-        details["cancel-request-path"] = str(request_path)
-        base.log_line(
-            "N9 session ready after "
-            f"{session_ready_latency_ms}ms; commands_dir={commands_dir} "
-            f"queue live records={len(discovered_queue_runs)}"
-        )
-
-        build_record = load_live_record(repo, build_run_id)
-        details["heartbeat-interval-s"] = max(
-            float(build_record.timing.get("heartbeat_interval_s") or HEARTBEAT_INTERVAL_S),
-            0.1,
-        )
-        try:
-            cancel = base.append_cancel_envelope_and_wait_for_ack(
-                repo,
-                build_run_id,
-                proc=build_proc,
-                run_exited_message="N9 standalone build exited before cancel ack arrived",
-                timeout_message="N9 cancel ack did not arrive",
-            )
-        except AssertionError as exc:
-            build_rc = build_proc.poll() if build_proc is not None else None
-            if build_rc is not None and "cancel ack arrived" in str(exc):
-                details["classification_override"] = "INFRA"
-                details["build-finished-before-cancel-ack"] = True
-                details["build-returncode"] = build_rc
-                if build_step is not None and build_step["rc"] is None:
-                    build_step["rc"] = build_rc
-                    build_step["duration_s"] = round(time.monotonic() - build_started, 1)
-            raise
-        details["cancel-command-appended"] = True
-        details["cancel-request-path"] = cancel["request_path"]
-        details["cancel-ack-path"] = cancel["ack_path"]
-        details["heartbeat-interval-s"] = cancel["heartbeat_interval_s"]
-        details["cancel-command-id"] = cancel["command_id"]
-        details["cancel-ack-latency-ms"] = cancel["ack_latency_ms"]
-        details["cancel-ack-deadline-ms"] = cancel["ack_deadline_ms"]
-        base.log_line(f"N9 appended cancel envelope command_id={cancel['command_id']}")
-        base.log_line(f"N9 cancel ack observed after {cancel['ack_latency_ms']}ms")
-
-        assert build_proc is not None
-        try:
-            build_rc = build_proc.wait(timeout=min(30.0, budget.timeout_for(60)))
-        except subprocess.TimeoutExpired as exc:
-            raise AssertionError("N9 standalone build did not terminate after cancel ack") from exc
-        details["build-terminated-via-cancel"] = True
-        details["build-returncode"] = build_rc
-        if build_step is not None:
-            build_step["rc"] = build_rc
-            build_step["duration_s"] = round(time.monotonic() - build_started, 1)
-        steps.append(
-            _run_checked_step(
-                "git-checkout-main-after-cancel",
-                ["git", "checkout", "main"],
-                repo=repo,
-            )
-        )
-
-        while len(discovered_queue_runs) < 2 and time.monotonic() < queue_record_deadline:
-            refresh_live_records()
-            time.sleep(0.05)
-        refresh_live_records()
-        if len(discovered_queue_runs) < 2:
-            missing_queue_records = 2 - len(discovered_queue_runs)
-            raise AssertionError(
-                "N9 queue live records did not all appear within "
-                f"{queue_record_deadline_s:.1f}s of watcher start "
-                f"(missing {missing_queue_records})"
-            )
-
-        assert watcher_proc is not None
-        watcher_rc = watcher_proc.wait(timeout=budget.timeout_for(10 * 60))
-        details["watcher-returncode"] = watcher_rc
-        if watcher_step is not None:
-            watcher_step["rc"] = watcher_rc
-            watcher_step["duration_s"] = round(time.monotonic() - watcher_started, 1)
-        if watcher_rc != 0:
-            raise AssertionError(f"N9 queue watcher exited with rc={watcher_rc}")
-        steps.append(
-            _run_checked_step(
-                "git-checkout-main-before-merge",
-                ["git", "checkout", "main"],
-                repo=repo,
-            )
-        )
-
-        merge = base.run_merge(
-            repo,
-            "--all",
-            "--cleanup-on-success",
-            timeout_s=budget.timeout_for(10 * 60),
-        )
-        merge_duration_s = merge.duration_s
-        steps.append(_step_record("merge", merge, repo))
-        outputs.append(merge.output)
-        result_returncode = merge.rc
+        gc_removed = garbage_collect_live_records(repo, terminal_retention_s=0)
+        details["gc-removed-run-ids"] = gc_removed
+        live_records = read_live_records(repo)
+        details["live-records-terminal-after-gc"] = all(record.status in {"done", "failed", "cancelled", "removed"} for record in live_records)
+        result_returncode = 0
     except Exception as exc:
         details["error"] = str(exc)
         result_returncode = 1
     finally:
+        if old_editor is None:
+            os.environ.pop("EDITOR", None)
+        else:
+            os.environ["EDITOR"] = old_editor
         if build_handle is not None:
             build_handle.flush()
             build_handle.close()
@@ -946,287 +1335,27 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
             watcher_handle.close()
         if build_proc is not None and build_proc.poll() is None:
             details["build-cleanup-forced"] = _wait_then_terminate_process_group(build_proc, wait_s=2.0)
+        watcher_proc = runtime["watcher_proc"]
         if watcher_proc is not None and watcher_proc.poll() is None:
             details["watcher-cleanup-forced"] = _wait_then_terminate_process_group(watcher_proc, wait_s=15.0)
         build_output = _read_log(build_log_path)
         watcher_output = _read_log(watcher_log_path)
         if build_output:
-            outputs.insert(0, build_output)
+            outputs.append(build_output)
         if watcher_output:
             outputs.append(watcher_output)
+
+    total_duration_s = float((steps[0] or {}).get("duration_s") or 0.0)
+    if runtime["watcher_step"] is not None:
+        total_duration_s += float(runtime["watcher_step"].get("duration_s") or 0.0)
+    if runtime["merge_step"] is not None:
+        total_duration_s += float(runtime["merge_step"].get("duration_s") or 0.0)
     return _base_run_result(
         "N9",
         repo,
         started,
         "\n".join(part for part in outputs if part),
-        float((build_step or {}).get("duration_s") or 0.0)
-        + float((watcher_step or {}).get("duration_s") or 0.0)
-        + merge_duration_s,
-        details,
-        result_returncode,
-    )
-
-
-async def _drive_n10_mission_control(
-    *,
-    repo: Path,
-    build_run_id: str,
-    build_proc: subprocess.Popen[str],
-    build_started: float,
-    details: dict[str, Any],
-) -> None:
-    from textual.widgets import DataTable, Static
-
-    from otto.runs.schema import is_terminal_status
-    from otto.tui.mission_control import MissionControlApp
-
-    app = MissionControlApp(repo)
-    async with app.run_test() as pilot:
-        live_deadline = time.monotonic() + 5.0
-        while time.monotonic() < live_deadline:
-            await pilot.pause(0.1)
-            if app.state.selection.run_id == build_run_id:
-                details["tui-live-row-latency-ms"] = int((time.monotonic() - build_started) * 1000)
-                break
-            if any(item.record.run_id == build_run_id for item in app.state.live_runs.items):
-                details["tui-live-row-latency-ms"] = int((time.monotonic() - build_started) * 1000)
-                break
-        else:
-            raise AssertionError("N10 Mission Control did not show the live build row within 5.0s")
-
-        if app.state.selection.run_id != build_run_id:
-            raise AssertionError(
-                f"N10 expected Mission Control to select {build_run_id}, got {app.state.selection.run_id!r}"
-            )
-
-        await pilot.press("enter")
-        await pilot.pause(0.2)
-        if app.state.focus != "detail":
-            raise AssertionError(f"N10 expected detail focus after Enter, got {app.state.focus!r}")
-
-        detail_meta = app.query_one("#detail-meta", Static)
-        artifacts = app.query_one("#detail-artifacts", DataTable)
-        detail_text = str(detail_meta.content)
-        if build_run_id not in detail_text:
-            raise AssertionError("N10 detail pane did not include the running build run_id")
-        if "status: running" not in detail_text.lower():
-            if build_proc.poll() is not None:
-                details["classification_override"] = "INFRA"
-                details["build-finished-before-tui-cancel"] = True
-            raise AssertionError("N10 detail pane did not show status=running before cancel")
-        if artifacts.row_count <= 0:
-            raise AssertionError("N10 detail pane had no selectable artifacts for the running build")
-        details["tui-artifact-count-before-cancel"] = artifacts.row_count
-
-        details["tui-cancel-requested"] = True
-        await pilot.press("c")
-        await pilot.pause(0.2)
-
-        build_exit_deadline = time.monotonic() + 30.0
-        while time.monotonic() < build_exit_deadline:
-            await pilot.pause(0.1)
-            if build_proc.poll() is not None:
-                break
-        else:
-            raise AssertionError("N10 background build did not exit after Mission Control cancel")
-
-        build_exited_at = time.monotonic()
-        cancelled_deadline = time.monotonic() + max(app.state.live_runs.refresh_interval_s * 2.0, 1.5)
-        while time.monotonic() < cancelled_deadline:
-            await pilot.pause(0.1)
-            detail_text = str(app.query_one("#detail-meta", Static).content)
-            selected = next(
-                (item for item in app.state.live_runs.items if item.record.run_id == build_run_id),
-                None,
-            )
-            detail_cancelled = "status: cancelled" in detail_text.lower()
-            selected_cancelled = selected is not None and is_terminal_status(selected.record.status) and selected.record.status == "cancelled"
-            if detail_cancelled or selected_cancelled:
-                details["tui-refresh-window-ms"] = int(max(app.state.live_runs.refresh_interval_s * 2.0, 1.5) * 1000)
-                details["tui-cancelled-latency-ms"] = int((time.monotonic() - build_exited_at) * 1000)
-                details["tui-live-status-after-cancel"] = "cancelled"
-                break
-        else:
-            raise AssertionError("N10 Mission Control did not reflect cancelled state within one refresh window")
-
-def _read_n10_terminal_snapshots(repo: Path, run_id: str) -> list[dict[str, Any]]:
-    from otto import paths
-
-    return [
-        row
-        for row in base.read_jsonl(paths.history_jsonl(repo))
-        if str(row.get("run_id") or "") == run_id
-        and str(row.get("history_kind") or "terminal_snapshot") == "terminal_snapshot"
-    ]
-
-
-def _artifact_paths_resolve(snapshot: dict[str, Any]) -> bool:
-    candidate_keys = ("intent_path", "manifest_path", "summary_path", "primary_log_path")
-    for key in candidate_keys:
-        value = str(snapshot.get(key) or "").strip()
-        if value and not Path(value).exists():
-            return False
-    artifacts = snapshot.get("artifacts")
-    if isinstance(artifacts, dict):
-        for value in artifacts.values():
-            if isinstance(value, str) and value.strip() and not Path(value).exists():
-                return False
-            if isinstance(value, list):
-                for path in value:
-                    if isinstance(path, str) and path.strip() and not Path(path).exists():
-                        return False
-    return True
-
-
-def run_n10(repo: Path, provider: str) -> base.RunResult:
-    from otto import paths
-    from otto.runs.registry import allocate_run_id, garbage_collect_live_records, load_live_record, read_live_records
-
-    started = base.now_iso()
-    budget = ScenarioBudget(_fixture_spec("N10").budget_s)
-    steps: list[dict[str, Any]] = []
-    details: dict[str, Any] = {
-        "steps": steps,
-        "build_record_latency_ms": None,
-        "tui-live-row-latency-ms": None,
-        "tui-artifact-count-before-cancel": 0,
-        "tui-cancel-requested": False,
-        "tui-cancelled-latency-ms": None,
-        "build-terminated-via-cancel": False,
-        "summary-status": None,
-        "history-terminal-outcome": None,
-        "history-artifacts-resolve": False,
-        "live-record-state-after-cancel": None,
-        "gc-removed-run-id": False,
-    }
-    outputs: list[str] = []
-    build_proc: subprocess.Popen[str] | None = None
-    build_handle = None
-    build_step: dict[str, Any] | None = None
-    build_log_path = _background_log_path("n10-build")
-    result_returncode = 1
-
-    try:
-        build_run_id = allocate_run_id(repo)
-        details["build-run-id"] = build_run_id
-        build_argv = [
-            str(base.OTTO_BIN),
-            "build",
-            "--provider",
-            provider,
-            "--allow-dirty",
-            N10_BUILD_INTENT,
-        ]
-        base.log_line(f"$ {base.shell_join(build_argv)}  # background")
-        build_env = dict(base.current_ctx().env)
-        build_env["OTTO_RUN_ID"] = build_run_id
-        build_handle = build_log_path.open("w", encoding="utf-8")
-        build_started = time.monotonic()
-        build_proc = subprocess.Popen(
-            build_argv,
-            cwd=repo,
-            env=build_env,
-            stdout=build_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-            preexec_fn=os.setsid,
-        )
-        build_step = {
-            "label": "build-background",
-            "argv": build_argv,
-            "run_id": build_run_id,
-            "rc": None,
-            "duration_s": None,
-        }
-        steps.append(build_step)
-
-        session_dir = paths.session_dir(repo, build_run_id)
-        live_deadline = build_started + 5.0
-        while time.monotonic() < live_deadline:
-            now = time.monotonic()
-            build_rc = build_proc.poll()
-            live_records = read_live_records(repo)
-            if build_rc is not None and not session_dir.exists() and not any(record.run_id == build_run_id for record in live_records):
-                details["classification_override"] = "INFRA"
-                details["build-returncode"] = build_rc
-                if build_step is not None:
-                    build_step["rc"] = build_rc
-                    build_step["duration_s"] = round(now - build_started, 1)
-                raise AssertionError("N10 standalone build exited before its live record appeared")
-            if session_dir.exists() and any(record.run_id == build_run_id for record in live_records):
-                details["build_record_latency_ms"] = int((now - build_started) * 1000)
-                break
-            time.sleep(0.05)
-        else:
-            raise AssertionError("N10 expected the standalone build live record within 5.0s")
-
-        asyncio.run(
-            _drive_n10_mission_control(
-                repo=repo,
-                build_run_id=build_run_id,
-                build_proc=build_proc,
-                build_started=build_started,
-                details=details,
-            )
-        )
-
-        build_rc = build_proc.wait(timeout=min(5.0, budget.timeout_for(60)))
-        details["build-returncode"] = build_rc
-        details["build-terminated-via-cancel"] = True
-        if build_step is not None:
-            build_step["rc"] = build_rc
-            build_step["duration_s"] = round(time.monotonic() - build_started, 1)
-
-        summary_path = paths.session_summary(repo, build_run_id)
-        if not summary_path.exists():
-            raise AssertionError(f"N10 expected cancelled summary.json at {summary_path}")
-        summary = base.read_json(summary_path)
-        details["summary-path"] = str(summary_path)
-        details["summary-status"] = summary.get("status")
-
-        snapshots = _read_n10_terminal_snapshots(repo, build_run_id)
-        details["history-terminal-snapshot-count"] = len(snapshots)
-        snapshot = snapshots[-1] if snapshots else None
-        if snapshot is None:
-            raise AssertionError(f"N10 expected a terminal_snapshot history row for {build_run_id}")
-        details["history-terminal-outcome"] = snapshot.get("terminal_outcome")
-        details["history-snapshot-dedupe-key"] = snapshot.get("dedupe_key")
-        details["history-artifacts-resolve"] = _artifact_paths_resolve(snapshot)
-        if len(snapshots) != 1:
-            raise AssertionError(
-                f"N10 expected exactly one terminal_snapshot row for {build_run_id}, got {len(snapshots)}"
-            )
-
-        live_record_state = "missing"
-        try:
-            live_record = load_live_record(repo, build_run_id)
-        except FileNotFoundError:
-            live_record = None
-        if live_record is not None:
-            live_record_state = str(live_record.status)
-        details["live-record-state-after-cancel"] = live_record_state
-
-        gc_removed = garbage_collect_live_records(repo, terminal_retention_s=0)
-        details["gc-removed-run-id"] = build_run_id in gc_removed
-        result_returncode = 0
-    except Exception as exc:
-        details["error"] = str(exc)
-        result_returncode = 1
-    finally:
-        if build_handle is not None:
-            build_handle.flush()
-            build_handle.close()
-        if build_proc is not None and build_proc.poll() is None:
-            details["build-cleanup-forced"] = _wait_then_terminate_process_group(build_proc, wait_s=2.0)
-        build_output = _read_log(build_log_path)
-        if build_output:
-            outputs.append(build_output)
-    return _base_run_result(
-        "N10",
-        repo,
-        started,
-        "\n".join(part for part in outputs if part),
-        float((build_step or {}).get("duration_s") or 0.0),
+        total_duration_s,
         details,
         result_returncode,
     )
@@ -1235,69 +1364,40 @@ def run_n10(repo: Path, provider: str) -> base.RunResult:
 def verify_n9(repo: Path, run_result: base.RunResult) -> VerifyResult:
     details = run_result.details
     if run_result.returncode != 0:
-        return _build_failure(run_result, "N9 mission-control flow failed before verification")
-    build_record_latency_ms = details.get("build_record_latency_ms")
-    if build_record_latency_ms is None or build_record_latency_ms > 5000:
-        return VerifyResult(False, "N9 standalone build live record was missing or late")
-    queue_record_1_latency_ms = details.get("queue_record_1_latency_ms")
-    if queue_record_1_latency_ms is None or queue_record_1_latency_ms > 30000:
-        return VerifyResult(False, "N9 first queue live record was missing or late")
-    queue_record_2_latency_ms = details.get("queue_record_2_latency_ms")
-    if queue_record_2_latency_ms is None or queue_record_2_latency_ms > 30000:
-        return VerifyResult(False, "N9 second queue live record was missing or late")
-    ack_latency_ms = details.get("cancel-ack-latency-ms")
-    ack_deadline_ms = details.get("cancel-ack-deadline-ms", 0)
-    if ack_latency_ms is None or ack_latency_ms > ack_deadline_ms:
-        return VerifyResult(False, "N9 cancel ack was missing or late")
-    if details.get("build-terminated-via-cancel") is not True:
-        return VerifyResult(False, "N9 standalone build did not terminate via cancel")
+        return _build_failure(run_result, "N9 realistic Mission Control session failed before verification")
+    if details.get("build-live-row-latency-ms") is None or details.get("build-live-row-latency-ms") > 30000:
+        return VerifyResult(False, "N9 Mission Control did not surface the standalone build row in time")
+    if details.get("build-finished-naturally") is not True:
+        return VerifyResult(False, "N9 standalone build did not finish naturally")
+    if details.get("queue-heartbeat-advanced") is not True:
+        return VerifyResult(False, "N9 queue heartbeat did not advance while Detail was open")
+    if details.get("queue-log-cycled") is not True:
+        return VerifyResult(False, "N9 did not switch queue logs with `o`")
+    if details.get("cancel-ack-latency-ms") is None:
+        return VerifyResult(False, "N9 queue cancel never received an ack")
+    if details.get("queue-cancelled-latency-ms") is None:
+        return VerifyResult(False, "N9 Mission Control never refreshed the cancelled queue row")
+    if details.get("editor-spawn-attempted") is not True:
+        return VerifyResult(False, "N9 did not attempt to spawn $EDITOR from History")
+    merge_argv = details.get("merge-spawn-argv") or []
+    if not merge_argv or "--all" in merge_argv:
+        return VerifyResult(False, "N9 merge was not launched from selected queue rows")
+    if details.get("history-terminal-snapshot-count") != 4:
+        return VerifyResult(False, "N9 expected four terminal history snapshots after merge")
+    terminal_outcomes = details.get("history-terminal-outcomes") or {}
+    cancelled_run_id = details.get("cancelled-queue-run-id")
+    if not cancelled_run_id or terminal_outcomes.get(cancelled_run_id) != "cancelled":
+        return VerifyResult(False, "N9 cancelled queue row was not recorded as terminal_outcome=cancelled")
+    if details.get("history-artifacts-resolve") is not True:
+        return VerifyResult(False, "N9 terminal history rows referenced missing artifacts")
+    if details.get("live-records-terminal-after-gc") is not True:
+        return VerifyResult(False, "N9 left non-terminal live records after cleanup")
     visible, hidden = _visible_and_hidden(repo, run_result)
     if visible.returncode != 0:
-        return VerifyResult(False, "N9 visible tests failed after merge")
+        return VerifyResult(False, "N9 visible tests failed after the realistic operator session")
     if hidden.returncode != 0:
-        return VerifyResult(False, "N9 hidden mission-control workflow checks failed after merge")
-    return VerifyResult(True, "N9 observed registry coherence, cancelled the standalone build, and kept merge green")
-
-
-def verify_n10(repo: Path, run_result: base.RunResult) -> VerifyResult:
-    details = run_result.details
-    if run_result.returncode != 0:
-        return _build_failure(run_result, "N10 Mission Control pilot flow failed before verification")
-    if details.get("build_record_latency_ms") is None or details.get("build_record_latency_ms") > 5000:
-        return VerifyResult(False, "N10 standalone build live record was missing or late")
-    if details.get("tui-live-row-latency-ms") is None or details.get("tui-live-row-latency-ms") > 5000:
-        return VerifyResult(False, "N10 Mission Control did not show the live row within 5s")
-    if details.get("tui-artifact-count-before-cancel", 0) <= 0:
-        return VerifyResult(False, "N10 detail pane had no artifacts before cancel")
-    if details.get("build-terminated-via-cancel") is not True:
-        return VerifyResult(False, "N10 background build did not terminate via Mission Control cancel")
-    if details.get("summary-status") != "cancelled":
-        return VerifyResult(False, "N10 cancelled build summary.json did not report status=cancelled")
-    if details.get("history-terminal-snapshot-count") != 1:
-        return VerifyResult(False, "N10 expected exactly one terminal history snapshot")
-    if details.get("history-terminal-outcome") != "cancelled":
-        return VerifyResult(False, "N10 history snapshot did not report terminal_outcome=cancelled")
-    if details.get("history-artifacts-resolve") is not True:
-        return VerifyResult(False, "N10 history snapshot referenced missing artifact paths")
-    if details.get("tui-cancelled-latency-ms") is None:
-        return VerifyResult(False, "N10 Mission Control never reflected the cancelled status")
-    if (
-        details.get("tui-refresh-window-ms") is not None
-        and details.get("tui-cancelled-latency-ms") > details.get("tui-refresh-window-ms")
-    ):
-        return VerifyResult(False, "N10 Mission Control did not refresh to cancelled within one refresh window")
-    live_record_state = details.get("live-record-state-after-cancel")
-    if live_record_state not in {"missing", "cancelled"}:
-        return VerifyResult(False, "N10 live record was neither GC-removed nor marked cancelled")
-    visible = _run_pytest(
-        repo,
-        "tests/visible",
-        Path(run_result.debug_log).parent,
-        _attempt_index_from_run_result(run_result),
-    )
-    if visible.returncode != 0:
-        return VerifyResult(False, "N10 visible tests failed after Mission Control cancel flow")
-    return VerifyResult(True, "N10 drove Mission Control via pilot, cancelled the live build, and kept the fixture green")
+        return VerifyResult(False, "N9 hidden realistic-session checks failed after merge")
+    return VerifyResult(True, "N9 drove a realistic Mission Control operator session and kept the substrate coherent")
 
 
 SCENARIOS: dict[str, base.Scenario] = {
@@ -1305,8 +1405,7 @@ SCENARIOS: dict[str, base.Scenario] = {
     "N2": base.Scenario("N2", "N", "semantic auth merge conflict", False, 2.6, 13 * 60, False, setup_n2, run_n2, verify_n2),
     "N4": base.Scenario("N4", "N", "certifier trap with hidden invariants", False, 1.5, 8 * 60, False, setup_n4, run_n4, verify_n4),
     "N8": base.Scenario("N8", "N", "stale merge context after first graduation", False, 3.8, 20 * 60, False, setup_n8, run_n8, verify_n8),
-    "N9": base.Scenario("N9", "N", "mission control workflow", False, 2.0, 15 * 60, False, setup_n9, run_n9, verify_n9),
-    "N10": base.Scenario("N10", "N", "mission control pilot integration", False, 0.8, 12 * 60, False, setup_n10, run_n10, verify_n10),
+    "N9": base.Scenario("N9", "N", "realistic operator session", False, 4.0, 35 * 60, False, setup_n9, run_n9, verify_n9),
     # Weekly-only scenarios (#3, #5, #6, #7) intentionally left out for now.
 }
 
