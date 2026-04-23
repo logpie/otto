@@ -30,6 +30,11 @@ def test_n9_is_registered_without_n10() -> None:
 def test_n9_step_plan_mentions_realistic_operator_session() -> None:
     spec = OTTO_AS_USER_NIGHTLY.SCENARIO_SPECS["N9"]
     steps = spec.step_plan
+    queue_cancel_idx = next(i for i, step in enumerate(steps) if "presses c while both queue tasks are still running" in step)
+    other_queue_finish_idx = next(i for i, step in enumerate(steps) if "other queue task to finish naturally" in step)
+    standalone_settle_idx = next(i for i, step in enumerate(steps) if "8 minutes" in step and "presses c" in step)
+    merge_evidence_idx = next(i for i, step in enumerate(steps) if "merge evidence" in step and "30s" in step)
+
     assert spec.est_cost_range == "$2.5-$4.5"
     assert spec.budget_s == 25 * 60
     assert steps[0] == "open Mission Control against ./otto_logs/"
@@ -37,7 +42,7 @@ def test_n9_step_plan_mentions_realistic_operator_session() -> None:
     assert any("--concurrent 2" in step for step in steps)
     assert any("within 5s" in step for step in steps)
     assert any("within 4s" in step for step in steps)
-    assert any("8 minutes" in step and "presses c" in step for step in steps)
+    assert queue_cancel_idx < other_queue_finish_idx < standalone_settle_idx < merge_evidence_idx
     assert any("presses e" in step for step in steps)
     assert any("not --all" in step for step in steps)
     assert steps[-2:] == [

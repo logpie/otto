@@ -171,10 +171,12 @@ SCENARIO_SPECS: dict[str, ScenarioSpec] = {
             "otto queue run --concurrent 2 --no-dashboard --exit-when-empty",
             "<pilot waits for both queue live rows within 30s so three live records overlap>",
             "<pilot drills into the standalone Detail row, verifies heartbeat progress within 4s, and presses o to switch logs>",
+            "<pilot immediately drills into one queue row, presses c while both queue tasks are still running, and waits for cancel history + cancelled status>",
+            "<pilot waits up to 3 minutes for the other queue task to finish naturally>",
             "<pilot waits up to 8 minutes for the standalone run and presses c if it is still running>",
-            "<pilot cancels one running queue task via c and waits for cancel ack + cancelled status while the other queue task finishes naturally>",
             "<pilot opens History, verifies terminal snapshots, drills into the cancelled row, and presses e>",
             "<pilot selects the succeeded queue row and presses m to run otto merge <task-id> (not --all)>",
+            "<pilot waits up to 30s for merge evidence (spawn, live row, or history row)>",
             "pytest tests/visible -q --tb=short",
             "pytest tests/hidden -q --tb=short",
         ],
@@ -813,11 +815,16 @@ async def _drive_n9_mission_control(
                 return value
         raise AssertionError(message)
 
-    def _cancelled_terminal_snapshot_for_queue_task(task_id: str, *, run_id: str | None = None) -> dict[str, Any] | None:
+    def _terminal_snapshot_for_queue_task(
+        task_id: str,
+        *,
+        outcome: str,
+        run_id: str | None = None,
+    ) -> dict[str, Any] | None:
         for row in reversed(_read_terminal_snapshots(repo)):
             if str(row.get("queue_task_id") or "") != task_id:
                 continue
-            if str(row.get("terminal_outcome") or "") != "cancelled":
+            if str(row.get("terminal_outcome") or "") != outcome:
                 continue
             if run_id is not None and str(row.get("run_id") or "") != run_id:
                 continue
@@ -985,6 +992,98 @@ async def _drive_n9_mission_control(
         details["standalone-log-after"] = _detail().selected_log_path
         _write_n9_phase_snapshot(app, repo, phase="build-running")
 
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+
+        active_queue_rows = [
+            item
+            for item in app.state.live_runs.items
+            if item.record.domain == "queue" and not is_terminal_status(item.record.status)
+        ]
+        if len(active_queue_rows) < 2:
+            raise AssertionError("N9 queue rows settled before Pilot could cancel one while both were live")
+        cancel_item = next(
+            (item for item in active_queue_rows if str(item.record.identity.get("queue_task_id")) == "add-delete"),
+            active_queue_rows[0],
+        )
+        cancel_task_id = str(cancel_item.record.identity.get("queue_task_id"))
+        other_queue_item = next(
+            item for item in active_queue_rows if item.record.run_id != cancel_item.record.run_id
+        )
+        other_queue_task_id = str(other_queue_item.record.identity.get("queue_task_id"))
+        details["other-queue-task-id"] = other_queue_task_id
+        details["other-queue-run-id"] = other_queue_item.record.run_id
+        details["cancelled-queue-task-id"] = cancel_task_id
+        details["cancelled-queue-run-id"] = cancel_item.record.run_id
+        await _focus_live_run(cancel_item.record.run_id)
+        await pilot.press("enter")
+        await _wait_for(
+            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == cancel_item.record.run_id),
+            timeout_s=5.0,
+            message="N9 could not reopen queue detail for cancellation",
+        )
+        heartbeat_interval_s = max(float(_detail().record.timing.get("heartbeat_interval_s") or 5.0), 0.1)
+        cancel_pressed_at = time.monotonic()
+        await pilot.press("c")
+        cancelled_snapshot = await _wait_for(
+            lambda: _terminal_snapshot_for_queue_task(
+                cancel_task_id,
+                outcome="cancelled",
+                run_id=cancel_item.record.run_id,
+            ),
+            timeout_s=max(8.0, 4.0 * heartbeat_interval_s),
+            message="N9 queue cancel was not recorded in history",
+        )
+        details["queue-cancel-history-path"] = str(history_path)
+        details["queue-cancel-history-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
+        details["queue-cancel-history-run-id"] = str(cancelled_snapshot.get("run_id") or "")
+        await _wait_for(
+            lambda: (
+                _detail() is not None
+                and _detail().record.run_id == cancel_item.record.run_id
+                and _detail().record.status == "cancelled"
+            ),
+            timeout_s=max(app.state.live_runs.refresh_interval_s + 1.0, 2.0),
+            message="N9 Mission Control detail did not refresh to cancelled within one cycle",
+        )
+        details["queue-cancelled-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
+        details["queue-refresh-window-ms"] = int(max(app.state.live_runs.refresh_interval_s, 0.5) * 1000)
+        _write_n9_phase_snapshot(app, repo, phase="queue-cancelled")
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+
+        other_queue_snapshot = await _wait_for(
+            lambda: _terminal_snapshot_for_queue_task(
+                other_queue_task_id,
+                outcome="success",
+                run_id=other_queue_item.record.run_id,
+            ),
+            timeout_s=budget.timeout_for(3 * 60),
+            message="N9 other queue task did not finish naturally within 3 minutes",
+        )
+        details["other-queue-terminal-outcome"] = str(other_queue_snapshot.get("terminal_outcome") or "")
+        _write_n9_phase_snapshot(app, repo, phase="queue-success")
+
+        watcher_proc = runtime["watcher_proc"]
+        await _wait_for(
+            lambda: watcher_proc.poll() is not None,
+            timeout_s=budget.timeout_for(60),
+            message="N9 queue watcher did not settle after the cancel",
+        )
+        watcher_rc = watcher_proc.poll()
+        if watcher_rc != 0:
+            raise AssertionError(f"N9 queue watcher exited with rc={watcher_rc}")
+        runtime["watcher_step"]["rc"] = watcher_rc
+        runtime["watcher_step"]["duration_s"] = round(time.monotonic() - watcher_started, 1)
+        details["watcher-returncode"] = watcher_rc
+
+        await _focus_live_run(build_run_id)
+        await pilot.press("enter")
+        await _wait_for(
+            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == build_run_id),
+            timeout_s=5.0,
+            message="N9 standalone build detail could not be reopened after queue settlement",
+        )
         build_finished_naturally = await _wait_until(
             lambda: build_proc.poll() is not None,
             timeout_s=8 * 60.0,
@@ -1047,68 +1146,6 @@ async def _drive_n9_mission_control(
 
         await pilot.press("escape")
         await pilot.pause(0.2)
-
-        active_queue_rows = [
-            item
-            for item in app.state.live_runs.items
-            if item.record.domain == "queue" and not is_terminal_status(item.record.status)
-        ]
-        if not active_queue_rows:
-            raise AssertionError("N9 queue rows settled before the standalone build finished")
-        cancel_item = next(
-            (item for item in active_queue_rows if str(item.record.identity.get("queue_task_id")) == "add-delete"),
-            active_queue_rows[0],
-        )
-        cancel_task_id = str(cancel_item.record.identity.get("queue_task_id"))
-        details["cancelled-queue-task-id"] = cancel_task_id
-        details["cancelled-queue-run-id"] = cancel_item.record.run_id
-        await _focus_live_run(cancel_item.record.run_id)
-        await pilot.press("enter")
-        await _wait_for(
-            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == cancel_item.record.run_id),
-            timeout_s=5.0,
-            message="N9 could not reopen queue detail for cancellation",
-        )
-        heartbeat_interval_s = max(float(_detail().record.timing.get("heartbeat_interval_s") or 5.0), 0.1)
-        cancel_pressed_at = time.monotonic()
-        await pilot.press("c")
-        cancelled_snapshot = await _wait_for(
-            lambda: _cancelled_terminal_snapshot_for_queue_task(
-                cancel_task_id,
-                run_id=cancel_item.record.run_id,
-            ),
-            timeout_s=max(8.0, 4.0 * heartbeat_interval_s),
-            message="N9 queue cancel was not recorded in history",
-        )
-        details["queue-cancel-history-path"] = str(history_path)
-        details["queue-cancel-history-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
-        details["queue-cancel-history-run-id"] = str(cancelled_snapshot.get("run_id") or "")
-        await _wait_for(
-            lambda: (
-                _detail() is not None
-                and _detail().record.run_id == cancel_item.record.run_id
-                and _detail().record.status == "cancelled"
-            ),
-            timeout_s=max(app.state.live_runs.refresh_interval_s + 1.0, 2.0),
-            message="N9 Mission Control detail did not refresh to cancelled within one cycle",
-        )
-        details["queue-cancelled-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
-        details["queue-refresh-window-ms"] = int(max(app.state.live_runs.refresh_interval_s, 0.5) * 1000)
-        await pilot.press("escape")
-        await pilot.pause(0.2)
-
-        watcher_proc = runtime["watcher_proc"]
-        await _wait_for(
-            lambda: watcher_proc.poll() is not None,
-            timeout_s=budget.timeout_for(18 * 60),
-            message="N9 queue watcher did not settle after the cancel",
-        )
-        watcher_rc = watcher_proc.poll()
-        if watcher_rc != 0:
-            raise AssertionError(f"N9 queue watcher exited with rc={watcher_rc}")
-        runtime["watcher_step"]["rc"] = watcher_rc
-        runtime["watcher_step"]["duration_s"] = round(time.monotonic() - watcher_started, 1)
-        details["watcher-returncode"] = watcher_rc
 
         await _focus_history_run(build_run_id)
         history_rows = await _wait_for(
@@ -1227,7 +1264,7 @@ async def _drive_n9_mission_control(
                     None,
                 )
             ),
-            timeout_s=10.0,
+            timeout_s=30.0,
             message="N9 did not trigger a merge from Mission Control",
         )
         merge_spawn_argv = merge_signal.get("argv") or []
