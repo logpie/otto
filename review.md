@@ -394,3 +394,25 @@ APPROVED. No remaining critical issues.
 Codex authored all fixes during the gate via `mcp__codex__codex`
 workspace-write sessions, per CLAUDE.md's "Codex fixes Codex-found
 bugs" rule.
+
+## Implementation Gate — 2026-04-23 — Phase 1 (substrate) — TUI Mission Control
+
+### Round 1 — Codex
+- [CRITICAL] Dual-writer race on live/<run_id>.json (queue watcher + atomic child) — fixed by Codex (atomic skips registry when OTTO_INTERNAL_QUEUE_RUNNER=1)
+- [CRITICAL] Cancel acks written before durable state mutation — fixed by Codex (drain → persist → ack ordering)
+- [IMPORTANT] Pre-merge cancel finalized registry without writing merge state — fixed by Codex
+- [IMPORTANT] Cancel polling missing in certify; merge only polled once — fixed by Codex
+- [IMPORTANT] Mixed-version compat (Exit D) not implemented — fixed by Codex
+- [IMPORTANT] History writes best-effort — fixed by Codex
+- [IMPORTANT] terminal_outcome schema drift (failed vs failure) — fixed by Codex
+- [IMPORTANT] RunPublisher heartbeat-finalize race — fixed by Codex
+- [NOTE] Hardcoded otto_logs/sessions literal — fixed by Codex
+
+### Round 2 — Codex
+- [IMPORTANT] History repair appended before queue state durable — fixed by Codex
+- [IMPORTANT] Atomic cancel polling cadence (20s vs 2s) — fixed by Codex
+
+### Round 3 — Codex re-reviewed Round 2 fixes
+- APPROVED. No new issues.
+
+Final state: 790 tests passing. Commits 0ea657fb5, fb24488c5, 4f194f71e.
