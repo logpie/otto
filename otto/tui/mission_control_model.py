@@ -104,10 +104,14 @@ class HistoryRow:
     cost_usd: float | None
     duration_s: float | None
     resumable: bool
+    session_dir: str | None
+    intent_path: str | None
+    spec_path: str | None
     manifest_path: str | None
     summary_path: str | None
     checkpoint_path: str | None
     primary_log_path: str | None
+    extra_log_paths: list[str]
     dedupe_key: str
     history_kind: str
     adapter_key: str
@@ -659,10 +663,14 @@ def _normalize_history_row(raw: dict[str, Any]) -> HistoryRow | None:
         cost_usd=_coerce_float(raw.get("cost_usd")),
         duration_s=_coerce_float(raw.get("duration_s")),
         resumable=bool(raw.get("resumable", True)),
-        manifest_path=_string_or_none(raw.get("manifest_path")),
-        summary_path=_string_or_none(raw.get("summary_path")),
-        checkpoint_path=_string_or_none(raw.get("checkpoint_path")),
-        primary_log_path=_string_or_none(raw.get("primary_log_path")),
+        session_dir=_history_artifact_path(raw, "session_dir"),
+        intent_path=_string_or_none((raw.get("intent") or {}).get("intent_path")) if isinstance(raw.get("intent"), dict) else _string_or_none(raw.get("intent_path")),
+        spec_path=_string_or_none((raw.get("intent") or {}).get("spec_path")) if isinstance(raw.get("intent"), dict) else _string_or_none(raw.get("spec_path")),
+        manifest_path=_history_artifact_path(raw, "manifest_path"),
+        summary_path=_history_artifact_path(raw, "summary_path"),
+        checkpoint_path=_history_artifact_path(raw, "checkpoint_path"),
+        primary_log_path=_history_artifact_path(raw, "primary_log_path"),
+        extra_log_paths=_history_extra_log_paths(raw),
         dedupe_key=_string_or_none(raw.get("dedupe_key")) or f"terminal_snapshot:{run_id}",
         history_kind=_string_or_none(raw.get("history_kind")) or "terminal_snapshot",
         adapter_key=_adapter_key_for_history(domain=domain, run_type=run_type),
@@ -698,14 +706,14 @@ def _history_row_to_record(project_dir: Path, row: HistoryRow) -> RunRecord:
             "heartbeat_seq": 0,
         },
         git={"branch": row.branch, "worktree": row.worktree, "target_branch": None, "head_sha": None},
-        intent={"summary": row.intent, "intent_path": None, "spec_path": None},
+        intent={"summary": row.intent, "intent_path": row.intent_path, "spec_path": row.spec_path},
         artifacts={
-            "session_dir": str(project_dir.resolve(strict=False)),
+            "session_dir": row.session_dir,
             "manifest_path": row.manifest_path,
             "checkpoint_path": row.checkpoint_path,
             "summary_path": row.summary_path,
             "primary_log_path": row.primary_log_path,
-            "extra_log_paths": [],
+            "extra_log_paths": list(row.extra_log_paths),
         },
         metrics={"cost_usd": row.cost_usd},
         adapter_key=row.adapter_key,
@@ -742,6 +750,27 @@ def _history_matches_query(row: HistoryRow, query: str) -> bool:
         if part
     ).lower()
     return needle in haystack
+
+
+def _history_artifact_path(raw: dict[str, Any], key: str) -> str | None:
+    artifacts = raw.get("artifacts")
+    if isinstance(artifacts, dict):
+        value = _string_or_none(artifacts.get(key))
+        if value:
+            return value
+    return _string_or_none(raw.get(key))
+
+
+def _history_extra_log_paths(raw: dict[str, Any]) -> list[str]:
+    artifacts = raw.get("artifacts")
+    if isinstance(artifacts, dict):
+        value = artifacts.get("extra_log_paths")
+        if isinstance(value, list):
+            return [str(path).strip() for path in value if str(path).strip()]
+    value = raw.get("extra_log_paths")
+    if isinstance(value, list):
+        return [str(path).strip() for path in value if str(path).strip()]
+    return []
 
 
 def _history_outcome(row: HistoryRow) -> OutcomeFilter:

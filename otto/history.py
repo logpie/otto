@@ -61,6 +61,9 @@ def append_history_entry(project_dir: Path, entry: dict[str, Any]) -> dict[str, 
     payload.setdefault("terminal_outcome", "success" if payload.get("passed") else "failure")
     payload.setdefault("finished_at", payload.get("timestamp"))
     payload.setdefault("started_at", payload.get("started_at"))
+    payload.setdefault("intent_path", payload.get("intent_path"))
+    payload.setdefault("spec_path", payload.get("spec_path"))
+    payload.setdefault("session_dir", payload.get("session_dir"))
     payload.setdefault("queue_task_id", payload.get("queue_task_id"))
     payload.setdefault("merge_id", payload.get("merge_id"))
     payload.setdefault("branch", payload.get("branch"))
@@ -68,7 +71,20 @@ def append_history_entry(project_dir: Path, entry: dict[str, Any]) -> dict[str, 
     payload.setdefault("resumable", payload.get("resumable", True))
     payload.setdefault("manifest_path", payload.get("manifest_path"))
     payload.setdefault("summary_path", payload.get("summary_path"))
+    payload.setdefault("checkpoint_path", payload.get("checkpoint_path"))
     payload.setdefault("primary_log_path", payload.get("primary_log_path"))
+    payload.setdefault("extra_log_paths", list(payload.get("extra_log_paths") or []))
+    payload.setdefault(
+        "artifacts",
+        {
+            "session_dir": payload.get("session_dir"),
+            "manifest_path": payload.get("manifest_path"),
+            "checkpoint_path": payload.get("checkpoint_path"),
+            "summary_path": payload.get("summary_path"),
+            "primary_log_path": payload.get("primary_log_path"),
+            "extra_log_paths": list(payload.get("extra_log_paths") or []),
+        },
+    )
     return append_history_snapshot(project_dir, payload, strict=True)
 
 

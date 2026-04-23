@@ -88,11 +88,8 @@ class QueueMissionControlAdapter:
         queue_task_id = str(record.identity.get("queue_task_id") or "").strip()
         warning = str(record.identity.get("compatibility_warning") or "").strip()
         checkpoint_path = str(record.artifacts.get("checkpoint_path") or "").strip()
-        primary_log = str(record.artifacts.get("primary_log_path") or "").strip()
-        has_artifact = any(
-            str(record.artifacts.get(key) or "").strip()
-            for key in ("manifest_path", "summary_path", "checkpoint_path")
-        )
+        log_paths = [artifact.path for artifact in self.artifacts(record) if artifact.kind == "log"]
+        has_artifact = bool(self.artifacts(record))
         argv = record.source.get("argv")
         argv_preview = " ".join(str(part) for part in (argv or []))
         legacy_logs_reason = "legacy queue mode has no registry-backed log view"
@@ -199,13 +196,13 @@ class QueueMissionControlAdapter:
             make_action(
                 "o",
                 "open logs",
-                enabled=bool(primary_log) and warning != "legacy queue mode",
+                enabled=bool(log_paths) and warning != "legacy queue mode",
                 reason=(
                     legacy_logs_reason
                     if warning == "legacy queue mode"
-                    else None if primary_log else "no log path available"
+                    else None if log_paths else "no log path available"
                 ),
-                preview="would cycle available log views" if primary_log else "no logs to cycle",
+                preview="would cycle available log views" if log_paths else "no logs to cycle",
             ),
             make_action(
                 "e",

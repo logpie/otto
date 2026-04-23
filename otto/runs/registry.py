@@ -170,6 +170,11 @@ def garbage_collect_live_records(
     return removed
 
 
+def gc_terminal_records(project_dir: Path) -> list[str]:
+    """Best-effort startup GC for old terminal live records."""
+    return garbage_collect_live_records(project_dir)
+
+
 def cleanup_live_record(project_dir: Path, run_id: str) -> RunRecord:
     """Remove one terminal live record and append a GC tombstone."""
     path = paths.live_run_path(project_dir, run_id)

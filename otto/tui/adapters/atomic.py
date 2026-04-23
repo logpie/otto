@@ -58,11 +58,8 @@ class AtomicMissionControlAdapter:
 
     def legal_actions(self, record, overlay):
         checkpoint_path = str(record.artifacts.get("checkpoint_path") or "").strip()
-        primary_log = str(record.artifacts.get("primary_log_path") or "").strip()
-        has_artifact = any(
-            str(record.artifacts.get(key) or "").strip()
-            for key in ("manifest_path", "summary_path", "checkpoint_path")
-        )
+        log_paths = [artifact.path for artifact in self.artifacts(record) if artifact.kind == "log"]
+        has_artifact = bool(self.artifacts(record))
         argv = record.source.get("argv")
         argv_preview = " ".join(str(part) for part in (argv or []))
         cleanup_enabled = is_terminal_status(record.status) and writer_identity_gone_or_stale(record.writer)
@@ -139,9 +136,9 @@ class AtomicMissionControlAdapter:
             make_action(
                 "o",
                 "open logs",
-                enabled=bool(primary_log),
-                reason=None if primary_log else "no log path available",
-                preview="would cycle available log views" if primary_log else "no logs to cycle",
+                enabled=bool(log_paths),
+                reason=None if log_paths else "no log path available",
+                preview="would cycle available log views" if log_paths else "no logs to cycle",
             ),
             make_action(
                 "e",

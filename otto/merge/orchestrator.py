@@ -285,25 +285,56 @@ def _persist_merge_terminal_state(
 
 
 def _append_merge_history(project_dir: Path, state: MergeState) -> None:
-    from otto.history import append_history_entry
+    from otto.runs.history import append_history_snapshot
 
-    append_history_entry(
+    merge_run_dir = paths.merge_dir(project_dir) / state.merge_id
+    extra_artifacts: list[str] = []
+    if state.cert_run_id:
+        cert_session_dir = paths.session_dir(project_dir, state.cert_run_id)
+        extra_artifacts.extend(
+            [
+                str(paths.session_summary(project_dir, state.cert_run_id)),
+                str(cert_session_dir / "manifest.json"),
+                str(paths.certify_dir(project_dir, state.cert_run_id) / "proof-of-work.html"),
+            ]
+        )
+    append_history_snapshot(
         project_dir,
         {
             "run_id": state.merge_id,
+            "build_id": state.merge_id,
             "domain": "merge",
             "run_type": "merge",
             "command": "merge",
             "intent": f"merge {len(state.branches_in_order)} branch(es)",
+            "intent_path": str(paths.project_intent_md(project_dir)),
+            "spec_path": None,
             "passed": state.status == "done",
             "status": state.status,
             "terminal_outcome": state.terminal_outcome,
+            "started_at": state.started_at or None,
+            "finished_at": state.finished_at or _now_iso(),
             "merge_id": state.merge_id,
+            "branch": None,
+            "worktree": None,
+            "resumable": False,
+            "session_dir": str(merge_run_dir),
             "manifest_path": None,
+            "checkpoint_path": None,
             "summary_path": None,
             "primary_log_path": str(paths.merge_dir(project_dir) / "merge.log"),
+            "extra_log_paths": [str(merge_run_dir / "state.json"), *extra_artifacts],
+            "artifacts": {
+                "session_dir": str(merge_run_dir),
+                "manifest_path": None,
+                "checkpoint_path": None,
+                "summary_path": None,
+                "primary_log_path": str(paths.merge_dir(project_dir) / "merge.log"),
+                "extra_log_paths": [str(merge_run_dir / "state.json"), *extra_artifacts],
+            },
             "timestamp": state.finished_at or _now_iso(),
         },
+        strict=True,
     )
 
 
@@ -393,7 +424,9 @@ async def run_merge(
 ) -> MergeRunResult:
     """Main entry. Returns MergeRunResult with success/state/plan."""
     from otto.config import agent_provider
+    from otto.runs.registry import gc_terminal_records
 
+    gc_terminal_records(project_dir)
     _repair_merge_history(project_dir)
 
     # Pre-flight: must be on target, working tree clean

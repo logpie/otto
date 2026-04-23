@@ -33,17 +33,25 @@ class MergeMissionControlAdapter:
         primary_log = str(record.artifacts.get("primary_log_path") or "").strip()
         session_dir = str(record.artifacts.get("session_dir") or "").strip()
         state_path = str((Path(session_dir) / "state.json").resolve(strict=False)) if session_dir else ""
+        extra_log_paths = [str(path).strip() for path in record.artifacts.get("extra_log_paths") or [] if str(path).strip()]
         if state_path:
             items.append(_artifact("state", state_path))
         if primary_log:
             items.append(_artifact("merge log", primary_log, kind="log"))
+        extra_index = 1
+        for path in extra_log_paths:
+            if path == state_path:
+                continue
+            kind = "log" if path.endswith(".log") else "file"
+            items.append(_artifact(f"extra {extra_index}", path, kind=kind))
+            extra_index += 1
         return items
 
     def legal_actions(self, record, overlay):
         argv = record.source.get("argv")
         argv_preview = " ".join(str(part) for part in (argv or []))
-        primary_log = str(record.artifacts.get("primary_log_path") or "").strip()
-        state_path = str(record.artifacts.get("session_dir") or "").strip()
+        log_paths = [artifact.path for artifact in self.artifacts(record) if artifact.kind == "log"]
+        has_artifact = bool(self.artifacts(record))
         cleanup_enabled = is_terminal_status(record.status) and writer_identity_gone_or_stale(record.writer)
         return [
             make_action(
@@ -101,15 +109,15 @@ class MergeMissionControlAdapter:
             make_action(
                 "o",
                 "open logs",
-                enabled=bool(primary_log),
-                reason=None if primary_log else "no log path available",
-                preview="would cycle available log views" if primary_log else "no logs to cycle",
+                enabled=bool(log_paths),
+                reason=None if log_paths else "no log path available",
+                preview="would cycle available log views" if log_paths else "no logs to cycle",
             ),
             make_action(
                 "e",
                 "open file",
-                enabled=bool(state_path),
-                reason=None if state_path else "no selectable artifact",
+                enabled=has_artifact,
+                reason=None if has_artifact else "no selectable artifact",
                 preview="would shell `$EDITOR <selected artifact>`",
             ),
         ]

@@ -250,17 +250,43 @@ def _append_session_history(
     total_cost_usd: float,
     certifier_cost_usd: float,
     rounds: int,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    branch: str | None = None,
+    worktree: str | None = None,
+    spec_path: str | None = None,
 ) -> None:
-    from otto.history import append_history_entry
+    from otto import paths
+    from otto.history import command_family, normalize_command_label
+    from otto.runs.history import append_history_snapshot
 
     passed_count, failed_count, warn_count = _history_story_counts(stories)
-    append_history_entry(
+    run_type = command_family(command)
+    primary_phase = "certify" if run_type == "certify" else "improve" if run_type == "improve" else "build"
+    session_dir = paths.session_dir(project_dir, run_id)
+    normalized_command = normalize_command_label(command)
+    resolved_spec_path = str(spec_path or "").strip() or None
+    artifacts = {
+        "session_dir": str(session_dir),
+        "manifest_path": str(session_dir / "manifest.json"),
+        "checkpoint_path": None if run_type == "certify" else str(paths.session_checkpoint(project_dir, run_id)),
+        "summary_path": str(paths.session_summary(project_dir, run_id)),
+        "primary_log_path": str(session_dir / primary_phase / "narrative.log"),
+        "extra_log_paths": [],
+    }
+    append_history_snapshot(
         project_dir,
         {
             "run_id": run_id,
-            "command": command,
+            "build_id": run_id,
+            "domain": "atomic",
+            "run_type": run_type,
+            "command": normalized_command,
             "certifier_mode": certifier_mode,
+            "mode": certifier_mode,
             "intent": intent[:200],
+            "intent_path": str(paths.session_intent(project_dir, run_id)),
+            "spec_path": resolved_spec_path,
             "passed": passed,
             "stories_passed": passed_count + warn_count,
             "stories_tested": len(stories),
@@ -271,7 +297,21 @@ def _append_session_history(
             "cost_usd": float(total_cost_usd),
             "certifier_cost_usd": float(certifier_cost_usd),
             "duration_s": duration_s,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "timestamp": finished_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "branch": branch or _current_branch_name(project_dir),
+            "worktree": worktree,
+            "resumable": run_type != "certify",
+            "session_dir": artifacts["session_dir"],
+            "manifest_path": artifacts["manifest_path"],
+            "summary_path": artifacts["summary_path"],
+            "checkpoint_path": artifacts["checkpoint_path"],
+            "primary_log_path": artifacts["primary_log_path"],
+            "extra_log_paths": list(artifacts["extra_log_paths"]),
+            "artifacts": artifacts,
         },
+        strict=True,
     )
 
 
@@ -301,11 +341,13 @@ def _atomic_publisher(
     command: str,
     intent: str,
     primary_phase: str,
+    spec_path: str | None = None,
     cwd: Path | None = None,
 ) -> Any:
     if not _atomic_registry_enabled():
         return None
 
+    from otto import paths
     from otto.runs.registry import RunPublisher, make_run_record
 
     command_label = command.replace(".", " ")
@@ -334,7 +376,11 @@ def _atomic_publisher(
             "target_branch": None,
             "head_sha": _current_head_sha(project_dir),
         },
-        intent={"summary": intent[:200], "intent_path": str(project_dir / "intent.md"), "spec_path": None},
+        intent={
+            "summary": intent[:200],
+            "intent_path": str(paths.session_intent(project_dir, run_id)),
+            "spec_path": str(spec_path or "").strip() or None,
+        },
         artifacts=_atomic_artifacts(project_dir, run_id, primary_phase=primary_phase),
         adapter_key=f"atomic.{command_label.split(' ', 1)[0] or 'build'}",
         last_event="starting",
@@ -351,10 +397,10 @@ def _finalize_atomic_publisher(
     stories_passed: int,
     stories_tested: int,
     last_event: str,
-) -> None:
+) -> Any:
     if publisher is None:
-        return
-    publisher.finalize(
+        return None
+    return publisher.finalize(
         status="done" if passed else "failed",
         terminal_outcome="success" if passed else "failure",
         updates={
@@ -503,6 +549,9 @@ async def build_agentic_v3(
     from otto import paths
     from otto.config import ensure_safe_repo_state, validate_certifier_mode
     from otto.display import console
+    from otto.runs.registry import gc_terminal_records
+
+    gc_terminal_records(project_dir)
 
     # run_id is the unified session_id in the new layout. Older callers
     # (e.g. some tests) may omit it; allocate one locally in that case so
@@ -526,6 +575,7 @@ async def build_agentic_v3(
             command=command,
             intent=intent,
             primary_phase="build",
+            spec_path=str(config.get("_spec_path") or "").strip() or None,
         )
         if publisher is not None:
             publisher.__enter__()
@@ -1046,20 +1096,7 @@ async def build_agentic_v3(
         except Exception as exc:
             logger.warning("Failed to write session report: %s", exc)
 
-    _append_session_history(
-        project_dir,
-        run_id=build_id,
-        command=command,
-        certifier_mode=certifier_mode,
-        intent=intent,
-        stories=story_results,
-        passed=passed,
-        duration_s=total_duration,
-        total_cost_usd=total_run_cost,
-        certifier_cost_usd=certifier_cost,
-        rounds=max(len(certify_rounds), 1),
-    )
-    _finalize_atomic_publisher(
+    final_record = _finalize_atomic_publisher(
         publisher,
         passed=passed,
         total_cost=total_run_cost,
@@ -1068,6 +1105,25 @@ async def build_agentic_v3(
         stories_tested=stories_tested,
         last_event="completed" if passed else "failed",
     )
+    if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1":
+        _append_session_history(
+            project_dir,
+            run_id=build_id,
+            command=command,
+            certifier_mode=certifier_mode,
+            intent=intent,
+            stories=story_results,
+            passed=passed,
+            duration_s=total_duration,
+            total_cost_usd=total_run_cost,
+            certifier_cost_usd=certifier_cost,
+            rounds=max(len(certify_rounds), 1),
+            started_at=final_record.timing.get("started_at") if final_record is not None else None,
+            finished_at=final_record.timing.get("finished_at") if final_record is not None else None,
+            branch=final_record.git.get("branch") if final_record is not None else None,
+            worktree=final_record.git.get("worktree") if final_record is not None else None,
+            spec_path=str(config.get("_spec_path") or "").strip() or None,
+        )
 
     # Record cross-run memory (only if certification produced stories)
     if story_results and not skip_qa:
@@ -1304,6 +1360,9 @@ async def run_certify_fix_loop(
     from otto.checkpoint import write_checkpoint as _write_cp
     from otto import paths as _paths
     from otto.config import ensure_safe_repo_state
+    from otto.runs.registry import gc_terminal_records
+
+    gc_terminal_records(project_dir)
 
     # Unified session_id (was build_id). Allocate if caller didn't provide.
     build_id = session_id or os.environ.get("OTTO_RUN_ID", "").strip()
@@ -1319,6 +1378,7 @@ async def run_certify_fix_loop(
         command=command,
         intent=intent,
         primary_phase="improve",
+        spec_path=str(config.get("_spec_path") or "").strip() or None,
     )
     if publisher is not None:
         publisher.__enter__()
@@ -1949,20 +2009,7 @@ async def run_certify_fix_loop(
         breakdown=split_breakdown or None,
         runtime_path=runtime_path,
     )
-    _append_session_history(
-        project_dir,
-        run_id=build_id,
-        command=command,
-        certifier_mode=certifier_mode,
-        intent=intent,
-        stories=last_stories,
-        passed=passed,
-        duration_s=round(resume_duration + (time.monotonic() - loop_start), 1),
-        total_cost_usd=total_cost,
-        certifier_cost_usd=certify_phase_cost,
-        rounds=actual_rounds,
-    )
-    _finalize_atomic_publisher(
+    final_record = _finalize_atomic_publisher(
         publisher,
         passed=passed,
         total_cost=total_cost,
@@ -1971,6 +2018,25 @@ async def run_certify_fix_loop(
         stories_tested=len(journeys),
         last_event="completed" if passed else "failed",
     )
+    if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1":
+        _append_session_history(
+            project_dir,
+            run_id=build_id,
+            command=command,
+            certifier_mode=certifier_mode,
+            intent=intent,
+            stories=last_stories,
+            passed=passed,
+            duration_s=round(resume_duration + (time.monotonic() - loop_start), 1),
+            total_cost_usd=total_cost,
+            certifier_cost_usd=certify_phase_cost,
+            rounds=actual_rounds,
+            started_at=final_record.timing.get("started_at") if final_record is not None else None,
+            finished_at=final_record.timing.get("finished_at") if final_record is not None else None,
+            branch=final_record.git.get("branch") if final_record is not None else None,
+            worktree=final_record.git.get("worktree") if final_record is not None else None,
+            spec_path=str(config.get("_spec_path") or "").strip() or None,
+        )
 
     return BuildResult(
         passed=passed,

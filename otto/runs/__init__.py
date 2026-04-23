@@ -8,6 +8,7 @@ from otto.runs.registry import (
     finish_command_drain,
     finalize_record,
     garbage_collect_live_records,
+    gc_terminal_records,
     load_command_ack_ids,
     read_live_records,
     update_record,
@@ -27,5 +28,6 @@ __all__ = [
     "finalize_record",
     "read_live_records",
     "garbage_collect_live_records",
+    "gc_terminal_records",
     "load_command_ack_ids",
 ]

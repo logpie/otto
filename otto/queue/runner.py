@@ -60,6 +60,7 @@ from otto.queue.ids import detect_cycles
 from otto.runs.registry import (
     allocate_run_id,
     finalize_record,
+    gc_terminal_records,
     make_run_record,
     update_record,
     write_record,
@@ -328,6 +329,7 @@ class Runner:
     def _begin_run(self) -> None:
         self._lock_fh = acquire_lock(self.project_dir)
         self._install_signal_handlers()
+        gc_terminal_records(self.project_dir)
         self._reconcile_on_startup()
         self._update_watcher_state()
 
@@ -988,6 +990,69 @@ class Runner:
             "extra_log_paths": [],
         }
 
+    def _queue_intent_path(self, task: QueueTask, ts: dict[str, Any]) -> str | None:
+        session_run_id = str(ts.get("child_run_id") or ts.get("attempt_run_id") or "").strip()
+        if not session_run_id:
+            return None
+        return str(paths.session_intent(self._worktree_for(task), session_run_id))
+
+    def _queue_spec_path(self, task: QueueTask, ts: dict[str, Any]) -> str | None:
+        session_run_id = str(ts.get("child_run_id") or ts.get("attempt_run_id") or "").strip()
+        if session_run_id:
+            session_spec = paths.session_dir(self._worktree_for(task), session_run_id) / "spec.md"
+            if session_spec.exists():
+                return str(session_spec)
+        spec_path = str(task.spec_file_path or "").strip()
+        return spec_path or None
+
+    def _append_queue_history_snapshot(
+        self,
+        task: QueueTask,
+        ts: dict[str, Any],
+        *,
+        run_id: str,
+        status: str,
+        terminal_outcome: str | None,
+    ) -> None:
+        from otto.history import normalize_command_label
+        from otto.runs.history import append_history_snapshot
+
+        artifacts = self._queue_run_artifacts(task, ts)
+        wt_path = self._worktree_for(task)
+        append_history_snapshot(
+            self.project_dir,
+            {
+                "run_id": run_id,
+                "build_id": run_id,
+                "domain": "queue",
+                "run_type": "queue",
+                "command": normalize_command_label(" ".join(task.command_argv[:2]) if task.command_argv else "queue"),
+                "queue_task_id": task.id,
+                "intent": (task.resolved_intent or task.id)[:200],
+                "intent_path": self._queue_intent_path(task, ts),
+                "spec_path": self._queue_spec_path(task, ts),
+                "passed": status == "done",
+                "status": status,
+                "terminal_outcome": terminal_outcome,
+                "started_at": str(ts.get("started_at") or "") or None,
+                "finished_at": str(ts.get("finished_at") or now_iso()) or now_iso(),
+                "cost_usd": float(ts.get("cost_usd") or 0.0),
+                "duration_s": float(ts.get("duration_s") or 0.0),
+                "branch": task.branch,
+                "worktree": str(wt_path.resolve(strict=False)) if task.worktree else None,
+                "resumable": bool(task.resumable),
+                "session_dir": artifacts.get("session_dir"),
+                "manifest_path": artifacts.get("manifest_path"),
+                "summary_path": artifacts.get("summary_path"),
+                "checkpoint_path": artifacts.get("checkpoint_path"),
+                "primary_log_path": artifacts.get("primary_log_path"),
+                "extra_log_paths": list(artifacts.get("extra_log_paths") or []),
+                "artifacts": artifacts,
+                "timestamp": str(ts.get("finished_at") or now_iso()),
+            },
+            strict=True,
+        )
+
     def _write_queue_run_record(self, task: QueueTask, ts: dict[str, Any], *, status: str) -> None:
         self._reconcile_task_identity(task, ts)
         attempt_run_id = self._queue_record_run_id(ts)
@@ -1019,7 +1084,11 @@ class Runner:
                 "resumable": bool(task.resumable),
             },
             git={"branch": task.branch, "worktree": task.worktree, "target_branch": None, "head_sha": None},
-            intent={"summary": task.resolved_intent or task.id, "intent_path": None, "spec_path": task.spec_file_path},
+            intent={
+                "summary": task.resolved_intent or task.id,
+                "intent_path": self._queue_intent_path(task, ts),
+                "spec_path": self._queue_spec_path(task, ts),
+            },
             artifacts=self._queue_run_artifacts(task, ts),
             metrics={"cost_usd": ts.get("cost_usd"), "stories_passed": None, "stories_tested": None},
             adapter_key="queue.attempt",
@@ -1269,26 +1338,12 @@ class Runner:
                 )
             except Exception as exc:
                 logger.debug("failed to finalize queue run record for %s: %s", task_id, exc)
-        from otto.history import append_history_entry
-
-        append_history_entry(
-            self.project_dir,
-            {
-                "run_id": attempt_run_id,
-                "domain": "queue",
-                "run_type": "queue",
-                "command": " ".join(task.command_argv[:2]) if task.command_argv else "queue",
-                "queue_task_id": task_id,
-                "intent": (task.resolved_intent or task_id)[:200],
-                "passed": status == "done",
-                "status": status,
-                "terminal_outcome": terminal_outcome,
-                "cost_usd": float(ts.get("cost_usd") or 0.0),
-                "duration_s": float(ts.get("duration_s") or 0.0),
-                "manifest_path": ts.get("manifest_path"),
-                "primary_log_path": self._queue_run_artifacts(task, ts).get("primary_log_path"),
-                "timestamp": ts.get("finished_at") or now_iso(),
-            },
+        self._append_queue_history_snapshot(
+            task,
+            ts,
+            run_id=attempt_run_id,
+            status=status,
+            terminal_outcome=terminal_outcome,
         )
         ts["history_appended"] = True
 

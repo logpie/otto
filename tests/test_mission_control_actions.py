@@ -534,6 +534,24 @@ def test_open_file_uses_editor_env(tmp_path: Path, monkeypatch) -> None:
     assert _FakePopen.calls[-1]["argv"] == ["vim", "-f", str(artifact_path)]
 
 
+def test_open_file_requires_editor_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("EDITOR", raising=False)
+    record = _record(
+        tmp_path,
+        run_id="build-run",
+        domain="atomic",
+        run_type="build",
+        status="failed",
+        adapter_key="atomic.build",
+    )
+
+    result = execute_action(record, "e", tmp_path, selected_artifact_path=str(tmp_path / "summary.json"))
+
+    assert result.ok is False
+    assert result.modal_title == "Editor launch failed"
+    assert result.modal_message == "EDITOR is not set"
+
+
 def test_long_running_subprocess_reports_late_failure(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakeLongRunningPopen)
     observed: list[ActionResult] = []

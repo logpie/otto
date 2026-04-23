@@ -319,10 +319,10 @@ def _execute_open_editor(
         return _error_result("Editor launch failed", "no selectable artifact")
     editor = os.environ.get("EDITOR", "").strip()
     if not editor:
-        return _error_result("Editor launch failed", "$EDITOR is not set")
+        return _error_result("Editor launch failed", "EDITOR is not set")
     editor_argv = shlex.split(editor)
     if not editor_argv:
-        return _error_result("Editor launch failed", "$EDITOR is empty")
+        return _error_result("Editor launch failed", "EDITOR is not set")
     del record
     return _launch_process(
         [*editor_argv, selected_artifact_path],

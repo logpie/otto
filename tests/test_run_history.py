@@ -7,6 +7,11 @@ from unittest.mock import patch
 
 from otto import paths
 from otto.history import append_history_entry
+from otto.merge.orchestrator import _append_merge_history
+from otto.merge.state import MergeState
+from otto.pipeline import _append_session_history
+from otto.queue.runner import Runner, RunnerConfig
+from otto.queue.schema import QueueTask
 from otto.runs.history import append_history_snapshot, load_project_history_rows, read_history_rows
 
 
@@ -140,3 +145,112 @@ def test_cli_history_loader_threads_limit_hint(tmp_path: Path) -> None:
         _load_history_entries(tmp_path, limit_hint=17)
 
     assert loader.call_args.kwargs["limit_hint"] == 17
+
+
+def test_terminal_history_writers_emit_v2_snapshots_for_all_domains(tmp_path: Path) -> None:
+    _append_session_history(
+        tmp_path,
+        run_id="build-run",
+        command="build",
+        certifier_mode="thorough",
+        intent="build feature",
+        stories=[],
+        passed=True,
+        duration_s=12.3,
+        total_cost_usd=0.11,
+        certifier_cost_usd=0.01,
+        rounds=1,
+        started_at="2026-04-23T12:00:00Z",
+        finished_at="2026-04-23T12:00:12Z",
+        branch="build/feature",
+        spec_path=str(paths.session_dir(tmp_path, "build-run") / "spec.md"),
+    )
+    _append_session_history(
+        tmp_path,
+        run_id="improve-run",
+        command="improve bugs",
+        certifier_mode="fast",
+        intent="fix regressions",
+        stories=[],
+        passed=False,
+        duration_s=7.0,
+        total_cost_usd=0.22,
+        certifier_cost_usd=0.05,
+        rounds=2,
+        started_at="2026-04-23T12:10:00Z",
+        finished_at="2026-04-23T12:10:07Z",
+        branch="improve/bugs",
+    )
+    _append_session_history(
+        tmp_path,
+        run_id="certify-run",
+        command="certify",
+        certifier_mode="standard",
+        intent="verify release",
+        stories=[],
+        passed=True,
+        duration_s=3.4,
+        total_cost_usd=0.33,
+        certifier_cost_usd=0.33,
+        rounds=1,
+        started_at="2026-04-23T12:20:00Z",
+        finished_at="2026-04-23T12:20:03Z",
+        branch="main",
+    )
+
+    runner = Runner(tmp_path, RunnerConfig(), otto_bin="otto")
+    task = QueueTask(
+        id="task-1",
+        command_argv=["build", "queued work"],
+        resolved_intent="queued work",
+        branch="build/task-1",
+        worktree=".worktrees/task-1",
+        resumable=True,
+    )
+    runner._append_queue_history_snapshot(
+        task,
+        {
+            "attempt_run_id": "queue-run",
+            "child_run_id": "queue-run",
+            "started_at": "2026-04-23T12:30:00Z",
+            "finished_at": "2026-04-23T12:30:09Z",
+            "cost_usd": 0.44,
+            "duration_s": 9.0,
+        },
+        run_id="queue-run",
+        status="done",
+        terminal_outcome="success",
+    )
+
+    _append_merge_history(
+        tmp_path,
+        MergeState(
+            merge_id="merge-run",
+            started_at="2026-04-23T12:40:00Z",
+            finished_at="2026-04-23T12:40:15Z",
+            status="failed",
+            terminal_outcome="failure",
+            target="main",
+            branches_in_order=["feature/a", "feature/b"],
+        ),
+    )
+
+    rows = read_history_rows(paths.history_jsonl(tmp_path))
+    by_run_id = {row["run_id"]: row for row in rows}
+
+    assert set(by_run_id) == {"build-run", "improve-run", "certify-run", "queue-run", "merge-run"}
+    assert all(row["schema_version"] == 2 for row in rows)
+    assert all(row["history_kind"] == "terminal_snapshot" for row in rows)
+    assert all(row["dedupe_key"] == f"terminal_snapshot:{row['run_id']}" for row in rows)
+
+    assert by_run_id["build-run"]["artifacts"]["primary_log_path"].endswith("/build-run/build/narrative.log")
+    assert by_run_id["build-run"]["intent_path"].endswith("/build-run/intent.txt")
+    assert by_run_id["build-run"]["spec_path"].endswith("/build-run/spec.md")
+    assert by_run_id["improve-run"]["artifacts"]["primary_log_path"].endswith("/improve-run/improve/narrative.log")
+    assert by_run_id["certify-run"]["mode"] == "standard"
+    assert by_run_id["certify-run"]["artifacts"]["checkpoint_path"] is None
+    assert by_run_id["queue-run"]["domain"] == "queue"
+    assert by_run_id["queue-run"]["queue_task_id"] == "task-1"
+    assert by_run_id["queue-run"]["artifacts"]["primary_log_path"].endswith("/queue-run/build/narrative.log")
+    assert by_run_id["merge-run"]["domain"] == "merge"
+    assert by_run_id["merge-run"]["artifacts"]["extra_log_paths"][0].endswith("/merge-run/state.json")

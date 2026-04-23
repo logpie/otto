@@ -15,6 +15,22 @@ from otto.tui.mission_control_actions import ActionResult
 from otto.tui.mission_control_model import MissionControlFilters
 
 
+class _EditorPopen:
+    calls: list[list[str]] = []
+
+    def __init__(self, argv, *, cwd, stdout, stderr, text) -> None:
+        del cwd, stdout, stderr, text
+        type(self).calls.append(list(argv))
+        self.returncode = 0
+        self.pid = 5150
+
+    def poll(self):
+        return self.returncode
+
+    def communicate(self):
+        return ("", "")
+
+
 def _write_live_record(repo: Path, *, run_id: str, run_type: str, status: str, primary_log: Path, extra_logs: list[str] | None = None, queue_task_id: str | None = None, pid: int | None = None) -> None:
     record = make_run_record(
         project_dir=repo,
@@ -476,3 +492,172 @@ def test_mission_control_merge_all_forwards_delayed_result(tmp_path: Path, monke
     assert result.message == "merge all launched"
     assert observed[0].modal_title == "merge all failed"
     assert observed[0].modal_message == "late failure"
+
+
+@pytest.mark.asyncio
+async def test_mission_control_history_filters_and_paging_keybinds(tmp_path: Path) -> None:
+    repo = tmp_path
+    for index in range(60):
+        append_history_entry(
+            repo,
+            {
+                "run_id": f"build-{index:02d}",
+                "command": "build",
+                "intent": f"build row {index}",
+                "passed": True,
+                "status": "done",
+                "terminal_outcome": "success",
+                "timestamp": f"2026-04-23T12:{index % 60:02d}:00Z",
+            },
+        )
+    for index in range(5):
+        append_history_entry(
+            repo,
+            {
+                "run_id": f"queue-{index:02d}",
+                "domain": "queue",
+                "run_type": "queue",
+                "command": "queue",
+                "intent": f"queue row {index}",
+                "passed": False,
+                "status": "failed",
+                "terminal_outcome": "failure",
+                "timestamp": f"2026-04-23T13:{index:02d}:00Z",
+            },
+        )
+    for index in range(3):
+        append_history_entry(
+            repo,
+            {
+                "run_id": f"improve-{index:02d}",
+                "command": "improve bugs",
+                "intent": f"interrupted row {index}",
+                "passed": False,
+                "status": "interrupted",
+                "terminal_outcome": "interrupted",
+                "timestamp": f"2026-04-23T14:{index:02d}:00Z",
+            },
+        )
+    for index in range(2):
+        append_history_entry(
+            repo,
+            {
+                "run_id": f"merge-{index:02d}",
+                "domain": "merge",
+                "run_type": "merge",
+                "command": "merge",
+                "intent": f"cancelled row {index}",
+                "passed": False,
+                "status": "cancelled",
+                "terminal_outcome": "cancelled",
+                "timestamp": f"2026-04-23T15:{index:02d}:00Z",
+            },
+        )
+
+    app = MissionControlApp(repo)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.state.history_page.total_rows == 70
+        assert app.state.history_page.page == 0
+
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert app.state.history_page.page == 0
+
+        await pilot.press("2")
+        await pilot.pause()
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert app.state.history_page.page == 1
+
+        await pilot.press("pageup")
+        await pilot.pause()
+        assert app.state.history_page.page == 0
+
+        await pilot.press("]")
+        await pilot.pause()
+        assert app.state.history_page.page == 1
+
+        await pilot.press("[")
+        await pilot.pause()
+        assert app.state.history_page.page == 0
+
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.state.filters.outcome_filter == "success"
+        assert app.state.history_page.total_rows == 60
+
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.state.filters.outcome_filter == "failed"
+        assert app.state.history_page.total_rows == 5
+
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.state.filters.outcome_filter == "interrupted"
+        assert app.state.history_page.total_rows == 3
+
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.state.filters.outcome_filter == "cancelled"
+        assert app.state.history_page.total_rows == 2
+
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.state.filters.outcome_filter == "all"
+        assert app.state.history_page.total_rows == 70
+
+        await pilot.press("t")
+        await pilot.pause()
+        assert app.state.filters.type_filter == "build"
+        assert app.state.history_page.total_rows == 60
+
+
+@pytest.mark.asyncio
+async def test_mission_control_detail_artifact_selection_launches_editor_for_selected_row(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    summary_path = paths.session_summary(repo, "build-failed")
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text("{}")
+    primary_log = paths.build_dir(repo, "build-failed") / "narrative.log"
+    primary_log.parent.mkdir(parents=True, exist_ok=True)
+    primary_log.write_text("failed\n")
+
+    record = make_run_record(
+        project_dir=repo,
+        run_id="build-failed",
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="build failed",
+        status="failed",
+        cwd=repo,
+        artifacts={"summary_path": str(summary_path), "primary_log_path": str(primary_log)},
+        adapter_key="atomic.build",
+    )
+    write_record(repo, record)
+
+    monkeypatch.setenv("EDITOR", "vim -f")
+    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _EditorPopen)
+    _EditorPopen.calls.clear()
+
+    app = MissionControlApp(repo)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("3")
+        await pilot.pause()
+
+        artifacts = app.query_one("#detail-artifacts", DataTable)
+        assert artifacts.row_count == 2
+        assert app.state.selection.artifact_index == 0
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.state.selection.artifact_index == 1
+
+        await pilot.press("e")
+        await pilot.pause()
+
+    assert _EditorPopen.calls[-1] == ["vim", "-f", str(primary_log)]

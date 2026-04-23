@@ -12,6 +12,7 @@ from textual.screen import ModalScreen
 from textual.worker import Worker, WorkerState
 from textual.widgets import DataTable, Input, Log, Static
 
+from otto.runs.registry import gc_terminal_records
 from otto.tui.adapters import adapter_for_key
 from otto.tui.mission_control_actions import ActionResult, execute_merge_all
 from otto.tui.mission_control_model import (
@@ -228,10 +229,10 @@ class MissionControlApp(App[int]):
         Binding("t", "cycle_type_filter", "Type Filter", show=False),
         Binding("f", "cycle_outcome_filter", "Outcome Filter", show=False),
         Binding("/", "open_query_filter", "Query Filter", show=False),
-        Binding("[", "history_prev_page", "Prev Page", show=False),
-        Binding("]", "history_next_page", "Next Page", show=False),
-        Binding("pageup", "history_prev_page", "Prev Page", show=False),
-        Binding("pagedown", "history_next_page", "Next Page", show=False),
+        Binding("[", "history_prev_page", "Prev Page", show=False, priority=True),
+        Binding("]", "history_next_page", "Next Page", show=False, priority=True),
+        Binding("pageup", "history_prev_page", "Prev Page", show=False, priority=True),
+        Binding("pagedown", "history_next_page", "Next Page", show=False, priority=True),
         Binding("o", "cycle_logs", "Cycle Logs", show=False),
         Binding("s", "toggle_follow", "Toggle Follow", show=False),
         Binding("home", "log_top", "Log Top", show=False),
@@ -292,6 +293,8 @@ class MissionControlApp(App[int]):
         yield Static("", id="footer")
 
     def on_mount(self) -> None:
+        gc_terminal_records(self.project_dir)
+        self.state = self.model.refresh(self.state)
         self._configure_tables()
         self._render_state()
         self._schedule_refresh()
@@ -341,6 +344,9 @@ class MissionControlApp(App[int]):
             self._move_artifact_cursor(-1)
 
     def action_open_detail(self) -> None:
+        if self.state.focus == "detail":
+            self.action_invoke_action("e")
+            return
         self._focus_pane("detail")
 
     def action_toggle_selected(self) -> None:
@@ -377,10 +383,14 @@ class MissionControlApp(App[int]):
         self.push_screen(FilterModal(self.state.filters.query), self._apply_query_filter)
 
     def action_history_prev_page(self) -> None:
+        if self.state.focus != "history":
+            return
         self.model.previous_history_page(self.state)
         self._refresh_state()
 
     def action_history_next_page(self) -> None:
+        if self.state.focus != "history":
+            return
         self.model.next_history_page(self.state)
         self._refresh_state()
 

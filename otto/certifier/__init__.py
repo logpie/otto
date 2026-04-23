@@ -2063,7 +2063,7 @@ def _write_pow_report(output_dir: Path, report: dict[str, Any]) -> None:
 
 def _repair_standalone_certify_history(project_dir: Path) -> None:
     from otto import paths
-    from otto.history import append_history_entry
+    from otto.runs.history import append_history_snapshot
     from otto.runs.history import read_history_rows
 
     history_rows = read_history_rows(paths.history_jsonl(project_dir))
@@ -2089,12 +2089,18 @@ def _repair_standalone_certify_history(project_dir: Path) -> None:
         dedupe_key = f"terminal_snapshot:{run_id}"
         if dedupe_key in seen:
             continue
-        append_history_entry(
+        session_dir = paths.session_dir(project_dir, run_id)
+        append_history_snapshot(
             project_dir,
             {
                 "run_id": run_id,
+                "build_id": run_id,
+                "domain": "atomic",
+                "run_type": "certify",
                 "command": "certify",
                 "intent": str(summary.get("intent") or "")[:200],
+                "intent_path": str(paths.session_intent(project_dir, run_id)),
+                "spec_path": str(session_dir / "spec.md") if (session_dir / "spec.md").exists() else None,
                 "passed": bool(summary.get("passed")),
                 "stories_passed": int(summary.get("stories_passed") or 0),
                 "stories_tested": int(summary.get("stories_tested") or 0),
@@ -2104,9 +2110,28 @@ def _repair_standalone_certify_history(project_dir: Path) -> None:
                 "certify_rounds": int(summary.get("rounds") or 0),
                 "status": "done" if bool(summary.get("passed")) else "failed",
                 "terminal_outcome": "success" if bool(summary.get("passed")) else "failure",
+                "started_at": None,
+                "finished_at": str(summary.get("completed_at") or "") or None,
+                "branch": str(summary.get("branch") or "") or None,
+                "worktree": None,
+                "resumable": False,
+                "session_dir": str(session_dir),
+                "manifest_path": str(session_dir / "manifest.json"),
                 "summary_path": str(summary_path),
+                "checkpoint_path": None,
+                "primary_log_path": str(paths.certify_dir(project_dir, run_id) / "narrative.log"),
+                "extra_log_paths": [str(paths.certify_dir(project_dir, run_id) / "proof-of-work.html")],
+                "artifacts": {
+                    "session_dir": str(session_dir),
+                    "manifest_path": str(session_dir / "manifest.json"),
+                    "checkpoint_path": None,
+                    "summary_path": str(summary_path),
+                    "primary_log_path": str(paths.certify_dir(project_dir, run_id) / "narrative.log"),
+                    "extra_log_paths": [str(paths.certify_dir(project_dir, run_id) / "proof-of-work.html")],
+                },
                 "timestamp": str(summary.get("completed_at") or ""),
             },
+            strict=True,
         )
         seen.add(dedupe_key)
 
@@ -2153,6 +2178,9 @@ async def run_agentic_certifier(
 
     config = config or {}
     start_time = time.monotonic()
+    from otto.runs.registry import gc_terminal_records
+
+    gc_terminal_records(project_dir)
     if merge_context is None and write_history:
         _repair_standalone_certify_history(project_dir)
 
@@ -2218,7 +2246,11 @@ async def run_agentic_certifier(
                     "resumable": False,
                 },
                 git={"branch": _current_branch_name(project_dir), "worktree": None, "target_branch": None, "head_sha": _current_head_sha(project_dir)},
-                intent={"summary": intent[:200], "intent_path": str(project_dir / "intent.md"), "spec_path": None},
+                intent={
+                    "summary": intent[:200],
+                    "intent_path": str(paths.session_intent(project_dir, run_id)),
+                    "spec_path": str(config.get("_spec_path") or "").strip() or None,
+                },
                 artifacts={
                     "session_dir": str(paths.session_dir(project_dir, run_id)),
                     "manifest_path": str(paths.session_dir(project_dir, run_id) / "manifest.json"),
@@ -2352,23 +2384,6 @@ async def run_agentic_certifier(
         cost=float(cost or 0),
     )
 
-    if write_history:
-        from otto.pipeline import _append_session_history
-
-        _append_session_history(
-            project_dir,
-            run_id=run_id,
-            command="certify",
-            certifier_mode=mode,
-            intent=intent,
-            stories=story_results,
-            passed=passed,
-            duration_s=total_duration,
-            total_cost_usd=float(cost or 0),
-            certifier_cost_usd=float(cost or 0),
-            rounds=certify_rounds_count,
-        )
-
     if write_session_summary:
         from otto.pipeline import _write_session_summary
 
@@ -2394,8 +2409,9 @@ async def run_agentic_certifier(
             breakdown=breakdown_summary,
         )
 
+    final_record = None
     if publisher is not None:
-        publisher.finalize(
+        final_record = publisher.finalize(
             status="done" if passed else "failed",
             terminal_outcome="success" if passed else "failure",
             updates={
@@ -2406,6 +2422,31 @@ async def run_agentic_certifier(
                 },
                 "last_event": "completed" if passed else "failed",
             },
+        )
+    if (
+        write_history
+        and merge_context is None
+        and os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1"
+    ):
+        from otto.pipeline import _append_session_history
+
+        _append_session_history(
+            project_dir,
+            run_id=run_id,
+            command="certify",
+            certifier_mode=mode,
+            intent=intent,
+            stories=story_results,
+            passed=passed,
+            duration_s=total_duration,
+            total_cost_usd=float(cost or 0),
+            certifier_cost_usd=float(cost or 0),
+            rounds=certify_rounds_count,
+            started_at=final_record.timing.get("started_at") if final_record is not None else None,
+            finished_at=final_record.timing.get("finished_at") if final_record is not None else None,
+            branch=final_record.git.get("branch") if final_record is not None else None,
+            worktree=final_record.git.get("worktree") if final_record is not None else None,
+            spec_path=str(config.get("_spec_path") or "").strip() or None,
         )
 
     return report
