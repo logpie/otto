@@ -161,13 +161,13 @@ SCENARIO_SPECS: dict[str, ScenarioSpec] = {
     "N9": ScenarioSpec(
         fixture_dir=FIXTURE_ROOT / "n9_mission_control_workflow",
         intent_path=FIXTURE_ROOT / "n9_mission_control_workflow" / "intent.md",
-        est_cost_range="$1.5-$2.5",
+        est_cost_range="$1.7-$2.7",
         budget_s=20 * 60,
         step_plan=[
             f"otto build --provider <provider> --allow-dirty {N9_BUILD_INTENT!r} (background, will be cancelled)",
             f"otto queue build {N9_POST_INTENT!r} --as add-post",
             f"otto queue build {N9_DELETE_INTENT!r} --as add-delete",
-            "otto queue run --concurrent 1 --no-dashboard --exit-when-empty",
+            "otto queue run --concurrent 2 --no-dashboard --exit-when-empty",
             "<harness appends cancel envelope to standalone build>",
             "otto merge --all --cleanup-on-success",
             "pytest tests/visible -q --tb=short",
@@ -743,7 +743,7 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
             "queue",
             "run",
             "--concurrent",
-            "1",
+            "2",
             "--no-dashboard",
             "--exit-when-empty",
         ]
