@@ -9,7 +9,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Log, Static
+from textual.widgets import DataTable, Input, Log, Static
 
 from otto.tui.mission_control_model import (
     MissionControlFilters,
@@ -40,6 +40,7 @@ class HelpModal(ModalScreen[None]):
                         "a: toggle active-only live rows",
                         "t: cycle type filter",
                         "f: cycle history outcome filter",
+                        "/: substring history filter",
                         "[ / ]: history page",
                         "o: cycle logs",
                         "s: toggle log follow",
@@ -54,6 +55,39 @@ class HelpModal(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+class FilterModal(ModalScreen[str | None]):
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "apply", "Apply"),
+    ]
+
+    def __init__(self, initial_value: str) -> None:
+        super().__init__()
+        self._initial_value = initial_value
+
+    def compose(self) -> ComposeResult:
+        with Container(id="filter-modal"):
+            yield Static("History Filter", id="filter-title")
+            yield Input(
+                value=self._initial_value,
+                placeholder="intent, branch, task id, run id",
+                id="filter-input",
+            )
+            yield Static("Enter apply / Esc cancel", id="filter-help")
+
+    def on_mount(self) -> None:
+        self.query_one("#filter-input", Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_apply(self) -> None:
+        self.dismiss(self.query_one("#filter-input", Input).value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value)
 
 
 class MissionControlApp(App[int]):
@@ -131,6 +165,24 @@ class MissionControlApp(App[int]):
         padding: 1 2;
         background: $surface;
     }
+
+    #filter-modal {
+        width: 60;
+        height: auto;
+        border: round $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+
+    #filter-title {
+        color: $accent;
+        padding-bottom: 1;
+    }
+
+    #filter-help {
+        color: $text-muted;
+        padding-top: 1;
+    }
     """
 
     BINDINGS = [
@@ -150,6 +202,7 @@ class MissionControlApp(App[int]):
         Binding("a", "toggle_active_only", "Active Only", show=False),
         Binding("t", "cycle_type_filter", "Type Filter", show=False),
         Binding("f", "cycle_outcome_filter", "Outcome Filter", show=False),
+        Binding("/", "open_query_filter", "Query Filter", show=False),
         Binding("[", "history_prev_page", "Prev Page", show=False),
         Binding("]", "history_next_page", "Next Page", show=False),
         Binding("pageup", "history_prev_page", "Prev Page", show=False),
@@ -180,7 +233,7 @@ class MissionControlApp(App[int]):
         self.project_dir = Path(project_dir)
         self.dashboard_mouse = dashboard_mouse
         self.queue_compat = queue_compat
-        self.model = MissionControlModel(self.project_dir)
+        self.model = MissionControlModel(self.project_dir, queue_compat=queue_compat)
         self.state: MissionControlState = self.model.initial_state(
             filters=initial_filters or MissionControlFilters(),
             focus="live",
@@ -191,6 +244,7 @@ class MissionControlApp(App[int]):
         self._live_row_ids: list[str] = []
         self._history_row_ids: list[str] = []
         self._artifact_paths: list[str] = []
+        self._filter_return_pane: PaneName = "history"
 
     def compose(self) -> ComposeResult:
         yield Static("", id="banner")
@@ -276,6 +330,10 @@ class MissionControlApp(App[int]):
     def action_cycle_outcome_filter(self) -> None:
         self.model.cycle_outcome_filter(self.state)
         self._refresh_state()
+
+    def action_open_query_filter(self) -> None:
+        self._filter_return_pane = self.state.focus if self.state.focus in {"live", "history"} else self.state.selection.origin_pane
+        self.push_screen(FilterModal(self.state.filters.query), self._apply_query_filter)
 
     def action_history_prev_page(self) -> None:
         self.model.previous_history_page(self.state)
@@ -438,12 +496,14 @@ class MissionControlApp(App[int]):
         )
 
     def _render_status(self) -> None:
+        query = self.state.filters.query or "-"
         self.query_one("#status-bar", Static).update(
             " | ".join(
                 [
                     f"focus={self.state.focus}",
                     f"type={self.state.filters.type_filter}",
                     f"active_only={'on' if self.state.filters.active_only else 'off'}",
+                    f"query={query}",
                     f"history={self.state.history_page.page + 1}/{self.state.history_page.total_pages}",
                     f"rows={self.state.live_runs.total_count} live, {self.state.history_page.total_rows} history",
                 ]
@@ -454,7 +514,7 @@ class MissionControlApp(App[int]):
         prefix = "queue compat" if self.queue_compat else "mission control"
         follow = "follow=on" if self._follow_log else "follow=off"
         self.query_one("#footer", Static).update(
-            f"{prefix} | Tab cycle panes | 1/2/3 focus | ? help | a active | t type | f outcome | o logs | s {follow}"
+            f"{prefix} | Tab cycle panes | 1/2/3 focus | / filter | ? help | a active | t type | f outcome | o logs | s {follow}"
         )
 
     def _highlight_panes(self) -> None:
@@ -485,6 +545,8 @@ class MissionControlApp(App[int]):
         return panes[(idx + delta) % len(panes)]
 
     def _focus_pane(self, pane: PaneName) -> None:
+        if pane == "detail" and self.state.focus in {"live", "history"}:
+            self.state.selection.origin_pane = self.state.focus
         self.state.focus = pane
         if pane == "live":
             self.query_one("#live-table", DataTable).focus()
@@ -575,5 +637,12 @@ class MissionControlApp(App[int]):
         if self._follow_log:
             log_widget.scroll_end(animate=False)
 
+    def _apply_query_filter(self, value: str | None) -> None:
+        if value is not None:
+            self.state.filters.query = value.strip()
+            self.state.filters.history_page = 0
+            self._refresh_state()
+        self._focus_pane(self._filter_return_pane)
 
-__all__ = ["HelpModal", "MissionControlApp"]
+
+__all__ = ["FilterModal", "HelpModal", "MissionControlApp"]

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from otto import paths
 from otto.history import append_history_entry
+from otto.queue.schema import QueueTask, append_task, write_state
 from otto.runs.registry import finalize_record, make_run_record, update_record, write_record
 from otto.tui.mission_control_model import MissionControlFilters, MissionControlModel
 
@@ -155,6 +156,108 @@ def test_history_pagination_and_dedup(tmp_path: Path) -> None:
     state.filters.history_page = 1
     state = model.refresh(state)
     assert len(state.history_page.items) == 5
+
+
+def test_history_merges_v1_v2_and_archived_sources_before_pagination(tmp_path: Path) -> None:
+    append_history_entry(
+        tmp_path,
+        {
+            "run_id": "shared-run",
+            "command": "build",
+            "intent": "new snapshot wins",
+            "passed": True,
+            "status": "done",
+            "terminal_outcome": "success",
+            "timestamp": "2026-04-23T12:03:00Z",
+        },
+    )
+    append_history_entry(
+        tmp_path,
+        {
+            "run_id": "new-run",
+            "command": "improve bugs",
+            "intent": "new timeline row",
+            "passed": True,
+            "status": "done",
+            "terminal_outcome": "success",
+            "timestamp": "2026-04-23T12:04:00Z",
+        },
+    )
+
+    legacy_path = tmp_path / "otto_logs" / "run-history.jsonl"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text(
+        "\n".join(
+            [
+                '{"build_id":"shared-run","timestamp":"2026-04-23T12:01:00Z","intent":"legacy duplicate"}',
+                '{"build_id":"legacy-run","timestamp":"2026-04-23T12:02:00Z","intent":"legacy row"}',
+            ]
+        )
+        + "\n"
+    )
+
+    archive_dir = tmp_path / "otto_logs.pre-restructure.2026-04-22T230000Z"
+    archive_dir.mkdir()
+    (archive_dir / paths.LEGACY_RUN_HISTORY).write_text(
+        '{"build_id":"archived-run","timestamp":"2026-04-23T12:00:00Z","intent":"archived row"}\n'
+    )
+
+    model = MissionControlModel(tmp_path)
+    state = model.initial_state()
+
+    assert state.history_page.total_rows == 4
+    assert [item.row.run_id for item in state.history_page.items] == [
+        "new-run",
+        "shared-run",
+        "legacy-run",
+        "archived-run",
+    ]
+    assert state.history_page.items[1].summary == "new snapshot wins"
+
+
+def test_queue_compat_synthesizes_legacy_queue_rows_and_disables_registry_actions(tmp_path: Path) -> None:
+    append_task(
+        tmp_path,
+        QueueTask(
+            id="legacy-task",
+            command_argv=["build", "legacy task"],
+            added_at="2026-04-23T12:00:00Z",
+            resolved_intent="legacy queue task",
+            branch="build/legacy-task",
+            worktree=".worktrees/legacy-task",
+        ),
+    )
+    write_state(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "legacy-task": {
+                    "status": "queued",
+                    "started_at": "2026-04-23T12:00:00Z",
+                }
+            },
+        },
+    )
+
+    model = MissionControlModel(
+        tmp_path,
+        queue_compat=True,
+        now_fn=lambda: datetime(2026, 4, 23, 12, 1, tzinfo=timezone.utc),
+    )
+    state = model.initial_state(filters=MissionControlFilters(type_filter="queue"))
+    detail = model.detail_view(state)
+
+    assert [item.display_id for item in state.live_runs.items] == ["legacy-task"]
+    assert detail is not None
+    assert detail.record.identity["compatibility_warning"] == "legacy queue mode"
+    actions = {action.key: action for action in detail.legal_actions}
+    assert actions["c"].enabled is True
+    assert actions["o"].enabled is False
+    assert actions["o"].reason == "legacy queue mode has no registry-backed log view"
+    assert actions["e"].enabled is False
+    assert actions["e"].reason == "legacy queue mode has no registry-backed artifacts"
 
 
 def test_detail_view_uses_adapter_artifact_ordering(tmp_path: Path) -> None:

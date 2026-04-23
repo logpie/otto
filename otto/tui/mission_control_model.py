@@ -12,8 +12,11 @@ from typing import Any, Callable, Literal, Protocol
 
 from otto import paths
 from otto.history import command_family, history_run_id, normalize_command_label
-from otto.runs.history import read_history_rows
-from otto.runs.registry import read_live_records
+from otto.manifest import queue_index_path_for
+from otto.queue.runtime import checkpoint_path_for_task, task_display_status
+from otto.queue.schema import QueueTask, load_queue, load_state
+from otto.runs.history import load_project_history_rows
+from otto.runs.registry import make_run_record, read_live_records
 from otto.runs.schema import RunRecord, is_terminal_status
 from otto.tui.mission_control_actions import ActionState
 
@@ -268,12 +271,14 @@ class MissionControlModel:
         project_dir: Path,
         *,
         history_page_size: int = 50,
+        queue_compat: bool = False,
         now_fn: Callable[[], datetime] | None = None,
         monotonic_fn: Callable[[], float] | None = None,
         process_probe: Callable[[dict[str, Any]], bool] | None = None,
     ) -> None:
         self.project_dir = Path(project_dir)
         self.history_page_size = history_page_size
+        self.queue_compat = queue_compat
         self._now_fn = now_fn or _utc_now
         self._monotonic_fn = monotonic_fn or time.monotonic
         self._process_probe = process_probe or _writer_process_matches
@@ -310,16 +315,16 @@ class MissionControlModel:
         monotonic_now = self._monotonic_fn()
         self._detect_suspend(now, monotonic_now)
 
-        live_records = read_live_records(self.project_dir)
+        live_records = self._load_live_records(now)
         live_items = self._build_live_items(live_records, filters, now, monotonic_now)
         live_view = LiveRunsView(
             items=live_items,
             total_count=len(live_items),
             active_count=sum(1 for item in live_items if not is_terminal_status(item.record.status)),
-            refresh_interval_s=0.5 if any(not is_terminal_status(record.status) for record in live_records) else 1.5,
+            refresh_interval_s=0.5 if any(not is_terminal_status(item.record.status) for item in live_items) else 1.5,
         )
 
-        history_rows = self._dedupe_history_rows(read_history_rows(paths.history_jsonl(self.project_dir)))
+        history_rows = self._dedupe_history_rows(load_project_history_rows(self.project_dir))
         history_items = self._build_history_items(history_rows, filters)
         total_rows = len(history_items)
         total_pages = max(1, (total_rows + self.history_page_size - 1) // self.history_page_size) if total_rows else 1
@@ -410,6 +415,33 @@ class MissionControlModel:
         if detail is None or detail.selected_log_path is None:
             return None
         return Path(detail.selected_log_path)
+
+    def _load_live_records(self, now: datetime) -> list[RunRecord]:
+        records = read_live_records(self.project_dir)
+        if not self.queue_compat:
+            return records
+        return self._merge_legacy_queue_records(records, now)
+
+    def _merge_legacy_queue_records(self, records: list[RunRecord], now: datetime) -> list[RunRecord]:
+        try:
+            tasks = load_queue(self.project_dir)
+            state = load_state(self.project_dir)
+        except Exception:
+            return records
+
+        records_by_task_id = {
+            str(record.identity.get("queue_task_id") or "").strip(): record
+            for record in records
+            if record.domain == "queue" and str(record.identity.get("queue_task_id") or "").strip()
+        }
+        merged = list(records)
+        task_states = state.get("tasks", {}) if isinstance(state, dict) else {}
+        for task in tasks:
+            if task.id in records_by_task_id:
+                continue
+            task_state = task_states.get(task.id) if isinstance(task_states, dict) else None
+            merged.append(_legacy_queue_record(self.project_dir, task, task_state, now))
+        return merged
 
     def _build_live_items(
         self,
@@ -521,7 +553,7 @@ class MissionControlModel:
         for item in state.history_page.items:
             if item.row.run_id == run_id:
                 return item.row
-        rows = self._dedupe_history_rows(read_history_rows(paths.history_jsonl(self.project_dir)))
+        rows = self._dedupe_history_rows(load_project_history_rows(self.project_dir))
         for row in rows:
             if row.run_id == run_id:
                 return row
@@ -541,6 +573,9 @@ class MissionControlModel:
         now: datetime,
         monotonic_now: float,
     ) -> StaleOverlay | None:
+        if str(record.identity.get("compatibility_warning") or "").strip() == "legacy queue mode":
+            self._stale_trackers.pop(record.run_id, None)
+            return None
         if is_terminal_status(record.status):
             self._stale_trackers.pop(record.run_id, None)
             return None
@@ -677,6 +712,75 @@ def _history_row_to_record(project_dir: Path, row: HistoryRow) -> RunRecord:
         adapter_key=row.adapter_key,
         last_event=row.terminal_outcome or row.status,
     )
+
+
+def _legacy_queue_record(
+    project_dir: Path,
+    task: QueueTask,
+    task_state: dict[str, Any] | None,
+    now: datetime,
+) -> RunRecord:
+    state = task_state if isinstance(task_state, dict) else {}
+    status = task_display_status(state)
+    session_run_id = str(state.get("child_run_id") or state.get("attempt_run_id") or "").strip()
+    worktree_path = (project_dir / task.worktree).resolve(strict=False) if task.worktree else project_dir.resolve(strict=False)
+    session_root = paths.sessions_root(worktree_path)
+    session_dir = paths.session_dir(worktree_path, session_run_id) if session_run_id else session_root
+    checkpoint_path = checkpoint_path_for_task(project_dir, task)
+    queue_manifest = queue_index_path_for(project_dir, task.id)
+    child_manifest = session_dir / "manifest.json" if session_run_id else None
+    primary_log_path = paths.build_dir(worktree_path, session_run_id) / "narrative.log" if session_run_id else None
+    started_at = _string_or_none(state.get("started_at")) or _string_or_none(task.added_at) or now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    finished_at = _string_or_none(state.get("finished_at")) if is_terminal_status(status) else None
+    updated_at = finished_at or _string_or_none(state.get("started_at")) or started_at
+    record = make_run_record(
+        project_dir=project_dir,
+        run_id=session_run_id or f"queue-compat:{task.id}",
+        domain="queue",
+        run_type="queue",
+        command=" ".join(task.command_argv[:2]) if task.command_argv else "queue",
+        display_name=f"{task.id}: legacy queue mode",
+        status=status,
+        cwd=worktree_path,
+        identity={
+            "queue_task_id": task.id,
+            "merge_id": None,
+            "parent_run_id": None,
+            "child_run_id": session_run_id or None,
+            "expected_child_run_id": str(state.get("attempt_run_id") or "").strip() or None,
+            "compatibility_warning": "legacy queue mode",
+        },
+        source={
+            "invoked_via": "queue",
+            "argv": list(task.command_argv),
+            "resumable": bool(task.resumable),
+        },
+        git={"branch": task.branch, "worktree": task.worktree, "target_branch": None, "head_sha": None},
+        intent={"summary": task.resolved_intent or task.id, "intent_path": None, "spec_path": task.spec_file_path},
+        artifacts={
+            "session_dir": str(session_dir),
+            "manifest_path": str(child_manifest.resolve(strict=False)) if child_manifest and child_manifest.exists() else None,
+            "checkpoint_path": str(checkpoint_path.resolve(strict=False)) if checkpoint_path is not None else None,
+            "summary_path": str(paths.session_summary(worktree_path, session_run_id).resolve(strict=False)) if session_run_id else None,
+            "primary_log_path": str(primary_log_path.resolve(strict=False)) if primary_log_path and primary_log_path.exists() else None,
+            "extra_log_paths": [],
+            "queue_manifest_path": str(queue_manifest.resolve(strict=False)) if queue_manifest is not None else None,
+        },
+        metrics={"cost_usd": _coerce_float(state.get("cost_usd"))},
+        adapter_key="queue.attempt",
+        last_event=str(state.get("failure_reason") or "legacy queue mode"),
+    )
+    record.writer = {}
+    record.timing.update({
+        "started_at": started_at,
+        "updated_at": updated_at,
+        "heartbeat_at": updated_at,
+        "finished_at": finished_at,
+        "duration_s": _coerce_float(state.get("duration_s")),
+        "heartbeat_interval_s": 60.0,
+        "heartbeat_seq": 0,
+    })
+    return record
 
 
 def _history_preference_key(row: HistoryRow) -> tuple[int, float]:

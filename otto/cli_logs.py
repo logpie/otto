@@ -1,7 +1,6 @@
 """Otto CLI — history command for build log inspection."""
 
 import json
-import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -10,14 +9,9 @@ import click
 
 from otto.display import CONTEXT_SETTINGS, console, format_cost, format_duration, rich_escape
 from otto.config import require_git, resolve_project_dir
-from otto.history import command_family, history_run_id, normalize_command_label, tail_jsonl_entries
+from otto.history import command_family, normalize_command_label
 from otto import paths
-
-logger = logging.getLogger("otto.cli_logs")
-
-# Legacy history path — still READ for upgrade safety; new writes go to
-# otto_logs/cross-sessions/history.jsonl via paths.py.
-LEGACY_HISTORY_FILE = "otto_logs/run-history.jsonl"
+from otto.runs.history import load_project_history_rows
 
 
 def _is_merge_cert_session(project_dir: Path, run_id: str) -> bool:
@@ -34,104 +28,8 @@ def _is_merge_cert_session(project_dir: Path, run_id: str) -> bool:
 
 
 def _load_history_entries(project_dir: Path, *, limit_hint: int = 50) -> list[dict]:
-    """Read history entries from new, legacy, and archived sources.
-
-    Preserves chronological order (append-only); de-dups by run_id/session_id/build_id.
-    """
-    sources: list[Path] = [
-        paths.history_jsonl(project_dir),
-        project_dir / LEGACY_HISTORY_FILE,
-    ]
-    for archive in paths.archived_pre_restructure_dirs(project_dir):
-        sources.append(archive / paths.LEGACY_RUN_HISTORY)
-
-    entries: list[tuple[tuple[float, int, int], int, int, dict]] = []
-    for source_index, src in enumerate(sources):
-        if not src.exists():
-            continue
-        try:
-            fallback_ts = src.stat().st_mtime
-        except OSError:
-            fallback_ts = 0.0
-        for line_index, line in tail_jsonl_entries(src, limit=limit_hint):
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            entries.append((
-                _history_sort_key(
-                    entry,
-                    fallback_ts=fallback_ts,
-                    source_index=source_index,
-                    line_index=line_index,
-                ),
-                source_index,
-                line_index,
-                entry,
-            ))
-    selected = _dedupe_history_entries(entries)
-    selected.sort(key=lambda item: item[0])
-    return [entry for _, _, _, entry in selected]
-
-
-def _dedupe_history_entries(
-    entries: list[tuple[tuple[float, int, int], int, int, dict]],
-) -> list[tuple[tuple[float, int, int], int, int, dict]]:
-    selected: list[tuple[tuple[float, int, int], int, int, dict]] = []
-    selected_keys: set[tuple[str, str]] = set()
-    selected_no_command_run_ids: set[str] = set()
-    selected_command_run_ids: set[str] = set()
-
-    def preference(item: tuple[tuple[float, int, int], int, int, dict]) -> tuple[int, int, float, int]:
-        sort_key, source_index, line_index, entry = item
-        is_snapshot = (
-            entry.get("schema_version") == 2
-            and entry.get("history_kind") == "terminal_snapshot"
-        )
-        return (1 if is_snapshot else 0, -source_index, sort_key[0], line_index)
-
-    for item in sorted(entries, key=preference, reverse=True):
-        _, _, _, entry = item
-        run_id = history_run_id(entry)
-        raw_command = str(entry.get("command") or "").strip()
-        command = normalize_command_label(raw_command) if raw_command else ""
-        dedupe_key = str(entry.get("dedupe_key") or "").strip()
-        key = ("dedupe", dedupe_key) if dedupe_key else ("run-command", f"{run_id}:{command}")
-        if key in selected_keys:
-            continue
-        if run_id and not command and run_id in selected_command_run_ids:
-            continue
-        if run_id and command and run_id in selected_no_command_run_ids:
-            continue
-        selected.append(item)
-        selected_keys.add(key)
-        if run_id and command:
-            selected_command_run_ids.add(run_id)
-        elif run_id:
-            selected_no_command_run_ids.add(run_id)
-    return selected
-
-
-def _history_sort_key(
-    entry: dict,
-    *,
-    fallback_ts: float,
-    source_index: int,
-    line_index: int,
-) -> tuple[float, int, int]:
-    ts = entry.get("timestamp") or entry.get("started_at") or entry.get("updated_at")
-    if isinstance(ts, str) and ts:
-        try:
-            return (
-                datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp(),
-                source_index,
-                line_index,
-            )
-        except ValueError:
-            logger.warning("Unparseable history timestamp %r; falling back to file mtime", ts)
-    else:
-        logger.warning("Missing history timestamp; falling back to file mtime")
-    return (fallback_ts, source_index, line_index)
+    del limit_hint
+    return load_project_history_rows(project_dir)
 
 
 def register_history_command(main: click.Group) -> None:

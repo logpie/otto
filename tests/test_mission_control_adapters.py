@@ -6,6 +6,7 @@ from pathlib import Path
 from otto import paths
 from otto.merge.state import MergeState, write_state
 from otto.runs.registry import make_run_record
+from otto.tui.mission_control_model import StaleOverlay
 from otto.tui.adapters import adapter_for_key
 
 
@@ -44,9 +45,13 @@ def test_atomic_adapter_orders_artifacts_and_formats_summary(tmp_path: Path) -> 
 
     adapter = adapter_for_key("atomic.build")
     labels = [artifact.label for artifact in adapter.artifacts(record)]
+    actions = {action.key: action for action in adapter.legal_actions(record, None)}
 
     assert labels == ["intent", "spec", "manifest", "summary", "checkpoint", "primary log", "extra 1"]
     assert adapter.row_label(record) == "export csv"
+    assert actions["r"].enabled is False
+    assert actions["r"].reason == "run is not interrupted"
+    assert actions["o"].enabled is True
 
 
 def test_queue_adapter_includes_queue_manifest_and_merge_action_preview(tmp_path: Path) -> None:
@@ -80,6 +85,36 @@ def test_queue_adapter_includes_queue_manifest_and_merge_action_preview(tmp_path
     assert "otto merge queue-task" in actions["m"].preview
 
 
+def test_queue_adapter_legacy_mode_disables_registry_dependent_actions(tmp_path: Path) -> None:
+    record = make_run_record(
+        project_dir=tmp_path,
+        run_id="queue-compat:legacy-task",
+        domain="queue",
+        run_type="queue",
+        command="build legacy",
+        display_name="legacy-task",
+        status="queued",
+        cwd=tmp_path,
+        identity={
+            "queue_task_id": "legacy-task",
+            "merge_id": None,
+            "parent_run_id": None,
+            "compatibility_warning": "legacy queue mode",
+        },
+        source={"argv": ["build", "legacy task"], "resumable": True},
+        adapter_key="queue.attempt",
+    )
+
+    adapter = adapter_for_key("queue.attempt")
+    actions = {action.key: action for action in adapter.legal_actions(record, None)}
+
+    assert actions["c"].enabled is True
+    assert actions["o"].enabled is False
+    assert actions["o"].reason == "legacy queue mode has no registry-backed log view"
+    assert actions["e"].enabled is False
+    assert actions["e"].reason == "legacy queue mode has no registry-backed artifacts"
+
+
 def test_merge_adapter_renders_state_details(tmp_path: Path) -> None:
     merge_id = "merge-123"
     state = MergeState(
@@ -111,6 +146,11 @@ def test_merge_adapter_renders_state_details(tmp_path: Path) -> None:
 
     adapter = adapter_for_key("merge.run")
     detail = adapter.detail_panel_renderer(record)
+    actions = {action.key: action for action in adapter.legal_actions(record, StaleOverlay("stale", "STALE", "writer unavailable", False))}
 
     assert "branches: 2" in detail.summary_lines
     assert "note: resolving conflicts" in detail.summary_lines
+    assert actions["c"].enabled is False
+    assert actions["c"].reason == "writer unavailable (stale overlay)"
+    assert actions["r"].enabled is False
+    assert actions["r"].reason == "merge --resume is deferred"

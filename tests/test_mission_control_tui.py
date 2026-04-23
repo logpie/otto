@@ -4,9 +4,11 @@ import os
 from pathlib import Path
 
 import pytest
-from textual.widgets import DataTable, Log, Static
+from textual.widgets import DataTable, Input, Log, Static
 
 from otto import paths
+from otto.history import append_history_entry
+from otto.queue.schema import QueueTask, append_task, write_state
 from otto.runs.registry import make_run_record, update_record, write_record
 from otto.tui.mission_control import MissionControlApp
 from otto.tui.mission_control_model import MissionControlFilters
@@ -117,3 +119,134 @@ async def test_mission_control_focus_selection_logs_and_queue_compat_filter(tmp_
         live = queue_app.query_one("#live-table", DataTable)
         assert live.row_count == 1
         assert queue_app.state.filters.type_filter == "queue"
+
+
+@pytest.mark.asyncio
+async def test_mission_control_queue_compat_renders_legacy_rows(tmp_path: Path) -> None:
+    repo = tmp_path
+    append_task(
+        repo,
+        QueueTask(
+            id="legacy-task",
+            command_argv=["build", "legacy task"],
+            added_at="2026-04-23T12:00:00Z",
+            resolved_intent="legacy queue task",
+            branch="build/legacy-task",
+            worktree=".worktrees/legacy-task",
+        ),
+    )
+    write_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "legacy-task": {
+                    "status": "queued",
+                    "started_at": "2026-04-23T12:00:00Z",
+                }
+            },
+        },
+    )
+
+    app = MissionControlApp(repo, initial_filters=MissionControlFilters(type_filter="queue"), queue_compat=True)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        live = app.query_one("#live-table", DataTable)
+        detail_meta = app.query_one("#detail-meta", Static)
+        detail_actions = app.query_one("#detail-actions", Static)
+
+        assert live.row_count == 1
+        assert "legacy queue mode" in str(detail_meta.content)
+        assert "open logs: disabled (legacy queue mode has no registry-backed log view)" in str(detail_actions.content)
+
+
+@pytest.mark.asyncio
+async def test_mission_control_return_to_origin_uses_current_list_pane(tmp_path: Path) -> None:
+    repo = tmp_path
+    build_log = paths.build_dir(repo, "build-run") / "narrative.log"
+    build_log.parent.mkdir(parents=True, exist_ok=True)
+    build_log.write_text("build primary\n")
+    _write_live_record(repo, run_id="build-run", run_type="build", status="running", primary_log=build_log)
+    append_history_entry(
+        repo,
+        {
+            "run_id": "history-run",
+            "command": "build",
+            "intent": "history row",
+            "passed": True,
+            "status": "done",
+            "terminal_outcome": "success",
+            "timestamp": "2026-04-23T12:00:00Z",
+        },
+    )
+
+    app = MissionControlApp(repo)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.state.selection.origin_pane == "live"
+
+        await pilot.press("2")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.state.focus == "detail"
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.state.focus == "history"
+
+
+@pytest.mark.asyncio
+async def test_mission_control_query_filter_modal_applies_and_cancels(tmp_path: Path) -> None:
+    repo = tmp_path
+    append_history_entry(
+        repo,
+        {
+            "run_id": "keep-run",
+            "command": "build",
+            "intent": "keep me",
+            "passed": True,
+            "status": "done",
+            "terminal_outcome": "success",
+            "timestamp": "2026-04-23T12:00:00Z",
+        },
+    )
+    append_history_entry(
+        repo,
+        {
+            "run_id": "drop-run",
+            "command": "build",
+            "intent": "drop me",
+            "passed": True,
+            "status": "done",
+            "terminal_outcome": "success",
+            "timestamp": "2026-04-23T12:01:00Z",
+        },
+    )
+
+    app = MissionControlApp(repo)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("2")
+        await pilot.pause()
+
+        await pilot.press("slash")
+        await pilot.pause()
+        app.screen.query_one("#filter-input", Input).value = "x"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.state.filters.query == ""
+
+        await pilot.press("slash")
+        await pilot.pause()
+        app.screen.query_one("#filter-input", Input).value = "keep"
+        app.screen.action_apply()
+        await pilot.pause()
+
+        history = app.query_one("#history-table", DataTable)
+        assert app.state.filters.query == "keep"
+        assert history.row_count == 1
