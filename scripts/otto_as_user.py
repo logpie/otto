@@ -13,6 +13,7 @@ import signal
 import struct
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import textwrap
 import time
@@ -49,6 +50,19 @@ LOCAL_ASCIINEMA = REPO_ROOT / ".venv" / "bin" / "asciinema"
 ASCIINEMA_SHIM = REPO_ROOT / "scripts" / "asciinema_shim.py"
 INFRA_COLOR = "\033[2;33m"
 ANSI_RESET = "\033[0m"
+REAL_OTTO_HELP_MARKER = "build and certify software products"
+OTTO_SHADOWED_ERROR = (
+    "ERROR: cc-autonomous Otto CLI is shadowed in venv. Reinstall with: "
+    "`uv pip install -e . --python .venv/bin/python --reinstall-package otto`"
+)
+PACKAGING_INTENT_RE = re.compile(
+    r"\b("
+    r"pyproject(?:\.toml)?|setup\.py|setup\.cfg|editable install|install -e|pip install|"
+    r"python package|publish(?:able)? package|console[_ -]?script|entry point|wheel|sdist|"
+    r"package manager|poetry|hatch(?:ling)?|setuptools|build backend"
+    r")\b",
+    re.IGNORECASE,
+)
 
 FailureClassification = Literal["INFRA", "FAIL"]
 ScenarioStatus = Literal["PASS", "FAIL", "INFRA"]
@@ -276,6 +290,51 @@ def install_asciinema() -> Path:
     )
 
 
+def harness_python_bin() -> Path:
+    return PYTHON_BIN if PYTHON_BIN.exists() else Path(sys.executable)
+
+
+def python_site_packages(python_bin: Path) -> Path:
+    if python_bin.resolve(strict=False) == Path(sys.executable).resolve(strict=False):
+        return Path(sysconfig.get_path("purelib"))
+    result = subprocess.run(
+        [str(python_bin), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to resolve site-packages for {python_bin}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    return Path(result.stdout.strip())
+
+
+def otto_shadow_preview() -> str:
+    try:
+        result = subprocess.run(
+            [str(OTTO_BIN), "--help"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    combined = "\n".join(
+        line for line in ((result.stdout or "") + (result.stderr or "")).splitlines()[:5] if line.strip()
+    )
+    return strip_ansi(combined)
+
+
+def ensure_real_otto_cli() -> None:
+    preview = otto_shadow_preview()
+    if REAL_OTTO_HELP_MARKER not in preview:
+        raise SystemExit(OTTO_SHADOWED_ERROR)
+
+
 def run_checked(argv: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
     result = subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True)
     if result.returncode != 0:
@@ -318,6 +377,24 @@ def commit_all(repo: Path, message: str) -> None:
     status = git(repo, "status", "--porcelain")
     if status.strip():
         run_checked(["git", "commit", "-q", "-m", message], cwd=repo)
+
+
+def should_warn_packaging_intent(intent: str) -> bool:
+    normalized = intent.lower()
+    if PACKAGING_INTENT_RE.search(intent):
+        return True
+    return "build a python cli" in normalized and "script" not in normalized
+
+
+def maybe_warn_packaging_intent(intent: str) -> None:
+    if not should_warn_packaging_intent(intent):
+        return
+    ctx = current_ctx()
+    venv_path = ctx.isolated_venv or (ctx.artifact_dir / ".scenario-venv")
+    log_line(
+        "[isolation] packaging-like Python intent detected; "
+        f"editable installs are isolated to {venv_path}"
+    )
 
 
 def write_otto_yaml(
@@ -788,16 +865,22 @@ class ExecutionContext:
     provider: str
     debug_log: Path
     recording_path: Path
+    isolated_venv: Path | None = field(default=None, repr=False)
+    prepended_path_entries: list[Path] = field(default_factory=list, repr=False)
 
     @property
     def env(self) -> dict[str, str]:
-        path_parts = []
+        path_parts = [str(entry) for entry in self.prepended_path_entries if entry.exists()]
         if OTTO_BIN.parent.exists():
             path_parts.append(str(OTTO_BIN.parent))
         path_parts.append(os.environ.get("PATH", ""))
         env = dict(os.environ)
         env["PATH"] = os.pathsep.join(path_parts)
         env["TERM"] = env.get("TERM", "xterm-256color")
+        if self.isolated_venv is not None:
+            env["VIRTUAL_ENV"] = str(self.isolated_venv)
+            env["OTTO_AS_USER_SCENARIO_VENV"] = str(self.isolated_venv)
+        env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
         return env
 
 
@@ -808,6 +891,68 @@ def current_ctx() -> ExecutionContext:
     if EXECUTION_CONTEXT is None:
         raise RuntimeError("execution context not initialized")
     return EXECUTION_CONTEXT
+
+
+def is_otto_site_entry(path: Path) -> bool:
+    name = path.name.lower()
+    return (
+        name == "otto"
+        or name.startswith("otto-")
+        or name.startswith("otto.")
+        or name.startswith("__editable__.otto")
+    )
+
+
+def mirror_non_otto_site_packages(source: Path, target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    for entry in source.iterdir():
+        if is_otto_site_entry(entry):
+            continue
+        link_path = target / entry.name
+        if link_path.exists() or link_path.is_symlink():
+            continue
+        link_path.symlink_to(entry)
+
+
+def write_pytest_launcher(bindir: Path, python_bin: Path) -> None:
+    for launcher_name in ("pytest", "py.test"):
+        launcher = bindir / launcher_name
+        launcher.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"exec {shlex.quote(str(python_bin))} -m pytest \"$@\"\n"
+        )
+        launcher.chmod(0o755)
+
+
+def prepare_scenario_isolation(ctx: ExecutionContext) -> None:
+    python_bin = harness_python_bin()
+    venv_dir = ctx.artifact_dir / ".scenario-venv"
+    scenario_python = venv_dir / "bin" / "python"
+    if not scenario_python.exists():
+        run_checked([str(python_bin), "-m", "venv", str(venv_dir)], cwd=REPO_ROOT)
+    host_site = python_site_packages(python_bin)
+    scenario_site = python_site_packages(scenario_python)
+    mirror_non_otto_site_packages(host_site, scenario_site)
+    write_pytest_launcher(venv_dir / "bin", scenario_python)
+    install_env = dict(os.environ)
+    install_env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+    run_checked(
+        [
+            str(scenario_python),
+            "-m",
+            "pip",
+            "install",
+            "-e",
+            str(REPO_ROOT),
+            "--no-deps",
+            "--force-reinstall",
+        ],
+        cwd=REPO_ROOT,
+        env=install_env,
+    )
+    ctx.isolated_venv = venv_dir
+    ctx.prepended_path_entries = [venv_dir / "bin"]
 
 
 def log_line(text: str) -> None:
@@ -918,6 +1063,7 @@ def assert_exists(path: Path, message: str) -> None:
 
 
 def queue_build(repo: Path, task_id: str, provider: str, intent: str, *extra_inner: str) -> None:
+    maybe_warn_packaging_intent(intent)
     argv = [
         str(OTTO_BIN),
         "queue",
@@ -1388,6 +1534,8 @@ def _base_result(returncode: int, output: str = "", **details: Any) -> RunResult
 
 
 def run_build(repo: Path, provider: str, *args: str, timeout_s: float = 1200) -> CommandResult:
+    for arg in args:
+        maybe_warn_packaging_intent(arg)
     return run_streaming(
         [str(OTTO_BIN), "build", "--provider", provider, *args],
         cwd=repo,
@@ -3151,6 +3299,7 @@ def internal_run_scenario(
         recording_path=artifact_dir / recording_name,
     )
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    prepare_scenario_isolation(EXECUTION_CONTEXT)
     try:
         result = scenario.run(repo_path, provider)
     except Exception as exc:
@@ -3362,6 +3511,7 @@ def main(argv: list[str]) -> int:
         if len(argv) not in {5, 6}:
             raise SystemExit("usage: _internal-run <scenario> <repo> <artifact_dir> <provider> [attempt_index]")
         attempt_index = int(argv[5]) if len(argv) == 6 else 1
+        ensure_real_otto_cli()
         return internal_run_scenario(argv[1], Path(argv[2]), Path(argv[3]), argv[4], attempt_index)
 
     args = parse_args(argv)
@@ -3371,6 +3521,7 @@ def main(argv: list[str]) -> int:
     if args.scenario_delay < 0:
         raise SystemExit("--scenario-delay must be >= 0")
 
+    ensure_real_otto_cli()
     scenarios = select_scenarios(mode=args.mode, scenario_csv=args.scenario, group_csv=args.group)
     asciinema_bin = install_asciinema()
     run_id = utc_run_id()

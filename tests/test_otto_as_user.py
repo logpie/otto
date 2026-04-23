@@ -101,6 +101,19 @@ def test_main_list_includes_u2(capsys) -> None:
     assert "Mission Control basic flow" in out
 
 
+def test_ensure_real_otto_cli_accepts_real_help(monkeypatch) -> None:
+    monkeypatch.setattr(OTTO_AS_USER, "otto_shadow_preview", lambda: "Otto -- build and certify software products\n")
+
+    OTTO_AS_USER.ensure_real_otto_cli()
+
+
+def test_ensure_real_otto_cli_rejects_shadowed_help(monkeypatch) -> None:
+    monkeypatch.setattr(OTTO_AS_USER, "otto_shadow_preview", lambda: "Otto -- a tiny task tracker\n")
+
+    with pytest.raises(SystemExit, match="shadowed in venv"):
+        OTTO_AS_USER.ensure_real_otto_cli()
+
+
 def test_verify_u2_accepts_cancelled_terminal_snapshot(tmp_path: Path) -> None:
     from otto import paths
 
@@ -379,3 +392,8 @@ def test_run_d5_forces_fingerprint_gate_before_cross_command_check(monkeypatch, 
         ("bugs", ("--resume", "--force")),
         ("bugs", ("--resume", "--force", "--force-cross-command-resume")),
     ]
+
+
+def test_should_warn_packaging_intent_flags_package_builds() -> None:
+    assert OTTO_AS_USER.should_warn_packaging_intent("Build a Python package with pyproject.toml and a console script.")
+    assert not OTTO_AS_USER.should_warn_packaging_intent("Build a Python CLI script hello.py.")
