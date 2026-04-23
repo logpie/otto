@@ -67,6 +67,18 @@ def test_main_dry_run_supports_each_core_scenario(capsys) -> None:
         assert "provider: claude" in out
 
 
+def test_n9_merge_spawn_matcher_accepts_direct_and_module_argv() -> None:
+    assert OTTO_AS_USER_NIGHTLY._argv_invokes_otto_subcommand(["otto", "merge", "add-post"], "merge") is True
+    assert (
+        OTTO_AS_USER_NIGHTLY._argv_invokes_otto_subcommand(
+            [sys.executable, "-m", "otto.cli", "merge", "add-post"],
+            "merge",
+        )
+        is True
+    )
+    assert OTTO_AS_USER_NIGHTLY._argv_invokes_otto_subcommand(["true", "intent.txt"], "merge") is False
+
+
 def test_record_one_scenario_honors_classification_override(monkeypatch, tmp_path: Path) -> None:
     scenario = OTTO_AS_USER_NIGHTLY.SCENARIOS["N9"]
     run_result = OTTO_AS_USER_NIGHTLY.base.RunResult(

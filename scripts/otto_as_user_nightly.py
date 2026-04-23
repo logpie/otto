@@ -501,6 +501,14 @@ def _n9_overlap_delay_s() -> float:
         return 60.0
 
 
+def _argv_invokes_otto_subcommand(argv: list[str], subcommand: str) -> bool:
+    if len(argv) >= 2 and argv[1] == subcommand:
+        return True
+    if len(argv) >= 4 and argv[1:4] == ["-m", "otto.cli", subcommand]:
+        return True
+    return False
+
+
 @contextmanager
 def _capture_mission_control_action_spawns() -> Any:
     import otto.tui.mission_control_actions as mission_control_actions
@@ -885,6 +893,9 @@ async def _drive_n9_mission_control(
             if item.record.domain == "queue" and item.record.identity.get("queue_task_id")
         }
 
+    def _live_run_item(run_id: str) -> Any:
+        return next((item for item in app.state.live_runs.items if item.record.run_id == run_id), None)
+
     def _history_rows() -> list[Any]:
         return list(app.state.history_page.items)
 
@@ -1203,25 +1214,55 @@ async def _drive_n9_mission_control(
         _write_n9_phase_snapshot(app, repo, phase="history-cancelled-detail")
 
         await _focus_live_run(details["succeeded-queue-run-id"])
+        focused_live_item = await _wait_for(
+            lambda: (
+                _live_run_item(details["succeeded-queue-run-id"])
+                if app.state.focus == "live"
+                and app.state.selection.run_id == details["succeeded-queue-run-id"]
+                else None
+            ),
+            timeout_s=5.0,
+            message="N9 could not restore focus to the succeeded queue row in Live before merge",
+        )
+        if focused_live_item.record.status != "done":
+            raise AssertionError(
+                f"N9 expected the merge candidate to remain done in Live, got status={focused_live_item.record.status!r}"
+            )
+        if str(focused_live_item.record.identity.get("queue_task_id") or "") != details["succeeded-queue-task-id"]:
+            raise AssertionError("N9 focused the wrong queue row before merge")
+        details["merge-focus-run-id"] = focused_live_item.record.run_id
+        details["merge-focus-task-id"] = str(focused_live_item.record.identity.get("queue_task_id") or "")
+        _write_n9_phase_snapshot(app, repo, phase="live-pre-merge-focus")
+
         await pilot.press("space")
-        await _wait_for(
-            lambda: details["succeeded-queue-run-id"] in app.state.selected_run_ids,
+        selected_run_ids_after_space = await _wait_for(
+            lambda: (
+                sorted(app.state.selected_run_ids)
+                if details["succeeded-queue-run-id"] in app.state.selected_run_ids
+                else None
+            ),
             timeout_s=5.0,
             message="N9 could not multi-select the succeeded queue row before merge",
         )
+        details["merge-selected-run-ids-after-space"] = selected_run_ids_after_space
         await _wait_for(
             lambda: (
                 app.state.focus == "live"
                 and app.state.selection.run_id == details["succeeded-queue-run-id"]
-                and (_detail() is not None and _detail().run_id == details["succeeded-queue-run-id"])
+                and (_live_run_item(details["succeeded-queue-run-id"]) is not None)
+                and _live_run_item(details["succeeded-queue-run-id"]).record.status == "done"
             ),
             timeout_s=5.0,
             message="N9 lost the succeeded queue row before issuing merge",
         )
+        _write_n9_phase_snapshot(app, repo, phase="live-merge-row-selected")
+
         preexisting_merge_history_ids = {item.row.run_id for item in _merge_history_rows()}
         preexisting_merge_live_ids = {record.run_id for record in _merge_live_records()}
+        preexisting_action_spawn_count = len(action_spawns)
         merge_requested_at = time.monotonic()
         await pilot.press("m")
+        _write_n9_phase_snapshot(app, repo, phase="merge-requested")
         merge_signal = await _wait_for(
             lambda: (
                 next(
@@ -1232,8 +1273,8 @@ async def _drive_n9_mission_control(
                             "proc": spawn["proc"],
                             "run_id": None,
                         }
-                        for spawn in action_spawns
-                        if len(spawn["argv"]) >= 2 and spawn["argv"][1] == "merge"
+                        for spawn in action_spawns[preexisting_action_spawn_count:]
+                        if _argv_invokes_otto_subcommand(spawn["argv"], "merge")
                     ),
                     None,
                 )
