@@ -9,11 +9,11 @@ from otto.queue.runtime import INTERRUPTED_STATUS
 from otto.runs.registry import writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
-from otto.tui.mission_control_actions import ActionResult, execute_action, make_action
+from otto.tui.mission_control_actions import ActionExecutingAdapter, make_action
 from otto.tui.mission_control_model import ArtifactRef, DetailModel, HistoryRow
 
 
-class AtomicMissionControlAdapter:
+class AtomicMissionControlAdapter(ActionExecutingAdapter):
     def legacy_records(self, project_dir: Path, now: datetime, live_records: list[RunRecord]):
         del project_dir, now, live_records
         return []
@@ -40,20 +40,20 @@ class AtomicMissionControlAdapter:
         extra_log_paths = [str(path).strip() for path in record.artifacts.get("extra_log_paths") or [] if str(path).strip()]
 
         if intent_path:
-            items.append(_artifact("intent", intent_path))
+            items.append(ArtifactRef.from_path("intent", intent_path))
         if spec_path:
-            items.append(_artifact("spec", spec_path))
+            items.append(ArtifactRef.from_path("spec", spec_path))
         if manifest_path:
-            items.append(_artifact("manifest", manifest_path))
+            items.append(ArtifactRef.from_path("manifest", manifest_path))
         if summary_path:
-            items.append(_artifact("summary", summary_path))
+            items.append(ArtifactRef.from_path("summary", summary_path))
         if checkpoint_path:
-            items.append(_artifact("checkpoint", checkpoint_path))
+            items.append(ArtifactRef.from_path("checkpoint", checkpoint_path))
         if primary_log:
-            items.append(_artifact("primary log", primary_log, kind="log"))
+            items.append(ArtifactRef.from_path("primary log", primary_log, kind="log"))
         for index, path in enumerate(extra_log_paths, start=1):
             kind = "log" if path.endswith(".log") else "file"
-            items.append(_artifact(f"extra {index}", path, kind=kind))
+            items.append(ArtifactRef.from_path(f"extra {index}", path, kind=kind))
         return items
 
     def legal_actions(self, record, overlay):
@@ -149,25 +149,6 @@ class AtomicMissionControlAdapter:
             ),
         ]
 
-    def execute(
-        self,
-        record: RunRecord,
-        action_kind: str,
-        project_dir: Path,
-        *,
-        selected_artifact_path: str | None = None,
-        selected_queue_task_ids: list[str] | None = None,
-        post_result=None,
-    ) -> ActionResult:
-        return execute_action(
-            record,
-            action_kind,
-            project_dir,
-            selected_artifact_path=selected_artifact_path,
-            selected_queue_task_ids=selected_queue_task_ids,
-            post_result=post_result,
-        )
-
     def detail_panel_renderer(self, record) -> DetailModel:
         summary = str(record.intent.get("summary") or "").strip() or record.display_name or record.run_id
         lines = [
@@ -177,8 +158,3 @@ class AtomicMissionControlAdapter:
             f"resumable: {'yes' if bool(record.source.get('resumable')) else 'no'}",
         ]
         return DetailModel(title=f"{record.run_type}: {summary}", summary_lines=lines)
-
-
-def _artifact(label: str, path: str, *, kind: str = "file") -> ArtifactRef:
-    candidate = Path(path)
-    return ArtifactRef(label=label, path=path, kind=kind, exists=candidate.exists())

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -14,13 +14,13 @@ from typing import Any, Callable, Literal, Protocol
 from otto import paths
 from otto.history import command_family, history_run_id, normalize_command_label
 from otto.runs.history import load_project_history_rows
-from otto.runs.registry import load_live_record, read_live_records, writer_identity_matches_live_process
+from otto.runs.registry import HEARTBEAT_INTERVAL_S, load_live_record, read_live_records, writer_identity_matches_live_process
 from otto.runs.schema import RunRecord, is_terminal_status
 from otto.tui.mission_control_actions import ActionResult, ActionState
 
 PaneName = Literal["live", "history", "detail"]
 TypeFilter = Literal["all", "build", "improve", "certify", "merge", "queue"]
-OutcomeFilter = Literal["all", "success", "failed", "interrupted", "cancelled"]
+OutcomeFilter = Literal["all", "success", "failed", "interrupted", "cancelled", "removed", "other"]
 
 _TERMINAL_ESCAPE_RE = re.compile(
     r"\x1b\[[0-9;?]*[ -/]*[@-~]"
@@ -29,8 +29,10 @@ _TERMINAL_ESCAPE_RE = re.compile(
 )
 _LOG_UNAVAILABLE_PLACEHOLDER = "<log file no longer available>"
 _TYPE_FILTERS: tuple[TypeFilter, ...] = ("all", "build", "improve", "certify", "merge", "queue")
-_OUTCOME_FILTERS: tuple[OutcomeFilter, ...] = ("all", "success", "failed", "interrupted", "cancelled")
+_OUTCOME_FILTERS: tuple[OutcomeFilter, ...] = ("all", "success", "failed", "interrupted", "cancelled", "removed")
 _DEFAULT_LIVE_RECORDS_LOADER = read_live_records
+logger = logging.getLogger("otto.tui.mission_control_model")
+_WARNED_UNKNOWN_HISTORY_OUTCOMES: set[str] = set()
 _STATUS_PRIORITY = {
     "running": 0,
     "starting": 0,
@@ -51,6 +53,11 @@ class ArtifactRef:
     path: str
     kind: str = "file"
     exists: bool = True
+
+    @classmethod
+    def from_path(cls, label: str, path: str, *, kind: str = "file") -> "ArtifactRef":
+        candidate = Path(path)
+        return cls(label=label, path=path, kind=kind, exists=candidate.exists())
 
 
 @dataclass(slots=True)
@@ -663,7 +670,7 @@ class MissionControlModel:
             self._stale_trackers.pop(record.run_id, None)
             return None
 
-        heartbeat_interval_s = max(_coerce_float(record.timing.get("heartbeat_interval_s")) or 2.0, 0.1)
+        heartbeat_interval_s = max(_coerce_float(record.timing.get("heartbeat_interval_s")) or HEARTBEAT_INTERVAL_S, 0.1)
         stale_threshold_s = max(3.0 * heartbeat_interval_s, 15.0)
         heartbeat_seq = int(record.timing.get("heartbeat_seq") or 0)
         writer_identity = _writer_identity(record.writer)
@@ -742,7 +749,7 @@ def _normalize_history_row(raw: dict[str, Any]) -> HistoryRow | None:
         worktree=_string_or_none(raw.get("worktree")),
         cost_usd=_coerce_float(raw.get("cost_usd")),
         duration_s=_coerce_float(raw.get("duration_s")),
-        resumable=bool(raw.get("resumable", True)),
+        resumable=bool(raw.get("resumable", False)),
         session_dir=_history_artifact_path(raw, "session_dir"),
         intent_path=_string_or_none((raw.get("intent") or {}).get("intent_path")) if isinstance(raw.get("intent"), dict) else _string_or_none(raw.get("intent_path")),
         spec_path=_string_or_none((raw.get("intent") or {}).get("spec_path")) if isinstance(raw.get("intent"), dict) else _string_or_none(raw.get("spec_path")),
@@ -782,7 +789,7 @@ def _history_row_to_record(project_dir: Path, row: HistoryRow) -> RunRecord:
             "heartbeat_at": row.finished_at or row.timestamp,
             "finished_at": row.finished_at or row.timestamp,
             "duration_s": row.duration_s,
-            "heartbeat_interval_s": 2.0,
+            "heartbeat_interval_s": HEARTBEAT_INTERVAL_S,
             "heartbeat_seq": 0,
         },
         git={"branch": row.branch, "worktree": row.worktree, "target_branch": None, "head_sha": None},
@@ -861,7 +868,14 @@ def _history_outcome(row: HistoryRow) -> OutcomeFilter:
         return "failed"
     if outcome == "interrupted":
         return "interrupted"
-    return "cancelled"
+    if outcome == "removed":
+        return "removed"
+    if outcome == "cancelled":
+        return "cancelled"
+    if outcome not in _WARNED_UNKNOWN_HISTORY_OUTCOMES:
+        logger.warning("unknown history outcome for %s: %s", row.run_id, outcome or "<empty>")
+        _WARNED_UNKNOWN_HISTORY_OUTCOMES.add(outcome)
+    return "other"
 
 
 def _elapsed_seconds(record: RunRecord, now: datetime) -> float | None:
@@ -913,13 +927,6 @@ def _writer_identity(writer: dict[str, Any]) -> tuple[Any, ...]:
 
 def _writer_process_matches(writer: dict[str, Any]) -> bool:
     return writer_identity_matches_live_process(writer)
-
-
-def _boot_id() -> str:
-    try:
-        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
 
 
 def _truncate(text: str, limit: int = 88) -> str:

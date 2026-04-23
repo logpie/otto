@@ -73,12 +73,6 @@ MERGE_DIR_NAME = "merge"
 LEGACY_CHECKPOINT = "checkpoint.json"
 LEGACY_RUN_HISTORY = "run-history.jsonl"
 LEGACY_CERTIFIER_MEMORY = "certifier-memory.jsonl"
-LEGACY_RUNS_DIR = "runs"
-LEGACY_BUILDS_DIR = "builds"
-LEGACY_CERTIFIER_DIR = "certifier"
-LEGACY_IMPROVE_DIR = "improve"
-LEGACY_ROUNDS_DIR = "rounds"
-LEGACY_IMPROVEMENT_REPORT = "improvement-report.md"
 
 
 def logs_dir(project_dir: Path) -> Path:

@@ -18,6 +18,7 @@ from otto import paths
 from otto.queue.runtime import task_display_status
 from otto.queue.schema import QueueTask, load_queue, load_state
 from otto.runs.registry import (
+    HEARTBEAT_INTERVAL_S,
     append_jsonl_row,
     load_command_ack_ids,
     load_live_record,
@@ -48,6 +49,27 @@ class ActionResult:
     modal_message: str | None = None
     refresh: bool = False
     clear_banner: bool = False
+
+
+class ActionExecutingAdapter:
+    def execute(
+        self,
+        record: RunRecord,
+        action_kind: str,
+        project_dir: Path,
+        *,
+        selected_artifact_path: str | None = None,
+        selected_queue_task_ids: list[str] | None = None,
+        post_result: Callable[[ActionResult], None] | None = None,
+    ) -> ActionResult:
+        return execute_action(
+            record,
+            action_kind,
+            project_dir,
+            selected_artifact_path=selected_artifact_path,
+            selected_queue_task_ids=selected_queue_task_ids,
+            post_result=post_result,
+        )
 
 
 def make_action(
@@ -142,8 +164,8 @@ def _execute_cancel(record: RunRecord, project_dir: Path) -> ActionResult:
         "args": args,
     }
     append_jsonl_row(request_path, envelope)
-    heartbeat_s = max(float(record.timing.get("heartbeat_interval_s") or 2.0), 0.1)
-    deadline = time.monotonic() + heartbeat_s
+    heartbeat_s = max(float(record.timing.get("heartbeat_interval_s") or HEARTBEAT_INTERVAL_S), 0.1)
+    deadline = time.monotonic() + max(4.0, 2.0 * heartbeat_s)
     while time.monotonic() < deadline:
         if command_id in load_command_ack_ids(ack_path):
             return ActionResult(ok=True, refresh=True, clear_banner=True)

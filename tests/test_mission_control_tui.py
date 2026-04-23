@@ -695,6 +695,11 @@ async def test_mission_control_history_filters_and_paging_keybinds(tmp_path: Pat
 
         await pilot.press("f")
         await pilot.pause()
+        assert app.state.filters.outcome_filter == "removed"
+        assert app.state.history_page.total_rows == 0
+
+        await pilot.press("f")
+        await pilot.pause()
         assert app.state.filters.outcome_filter == "all"
         assert app.state.history_page.total_rows == 70
 

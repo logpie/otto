@@ -435,6 +435,49 @@ def test_refresh_repairs_mixed_version_child_with_expected_attempt_run_id(tmp_pa
     assert record["artifacts"]["session_dir"].endswith("/legacy-child-123")
 
 
+def test_refresh_queue_run_records_surfaces_unexpected_update_errors(tmp_path: Path, monkeypatch) -> None:
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    )
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+    state = {"tasks": {"t1": {"status": "running", "attempt_run_id": "run-123", "child": None, "failure_reason": None}}}
+
+    monkeypatch.setattr(runner_module, "update_record", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        runner._refresh_queue_run_records([task], state)
+
+
+def test_finalize_queue_attempt_surfaces_unexpected_finalize_errors(tmp_path: Path, monkeypatch) -> None:
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    )
+    append_task(repo, task)
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+    ts = {
+        "status": "done",
+        "attempt_run_id": "run-123",
+        "child": None,
+        "failure_reason": None,
+        "started_at": "2026-04-23T00:00:00Z",
+        "finished_at": "2026-04-23T00:00:05Z",
+    }
+
+    monkeypatch.setattr(Runner, "_history_snapshot_exists", lambda self, run_id: False)
+    monkeypatch.setattr(runner_module, "finalize_record", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        runner._finalize_queue_attempt("t1", ts)
+
+
 def test_runner_respects_concurrent_cap(tmp_path: Path):
     repo = init_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=0.5)

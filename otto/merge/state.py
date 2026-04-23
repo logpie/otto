@@ -18,7 +18,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from otto import paths
 

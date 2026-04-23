@@ -58,9 +58,10 @@ from otto.queue.schema import (
 )
 from otto.queue.ids import detect_cycles
 from otto.runs.registry import (
+    HEARTBEAT_INTERVAL_S,
     allocate_run_id,
     finalize_record,
-    gc_terminal_records,
+    garbage_collect_live_records,
     make_run_record,
     update_record,
     write_record,
@@ -77,7 +78,7 @@ class RunnerConfig:
     worktree_dir: str = ".worktrees"
     on_watcher_restart: str = "resume"   # resume | fail
     poll_interval_s: float = 2.0
-    heartbeat_interval_s: float = 5.0
+    heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S
     # Per-task wall-clock timeout. A hung child (agent stuck in a bash
     # `wait` for an unkilled background process, infinite loop, etc.)
     # would otherwise occupy its concurrency slot forever. None disables.
@@ -329,7 +330,7 @@ class Runner:
     def _begin_run(self) -> None:
         self._lock_fh = acquire_lock(self.project_dir)
         self._install_signal_handlers()
-        gc_terminal_records(self.project_dir)
+        garbage_collect_live_records(self.project_dir)
         self._reconcile_on_startup()
         self._update_watcher_state()
 
@@ -1014,42 +1015,39 @@ class Runner:
         status: str,
         terminal_outcome: str | None,
     ) -> None:
-        from otto.history import normalize_command_label
-        from otto.runs.history import append_history_snapshot
+        from otto.runs.history import append_history_snapshot, build_terminal_snapshot
 
         artifacts = self._queue_run_artifacts(task, ts)
         wt_path = self._worktree_for(task)
         append_history_snapshot(
             self.project_dir,
-            {
-                "run_id": run_id,
-                "build_id": run_id,
-                "domain": "queue",
-                "run_type": "queue",
-                "command": normalize_command_label(" ".join(task.command_argv[:2]) if task.command_argv else "queue"),
-                "queue_task_id": task.id,
-                "intent": (task.resolved_intent or task.id)[:200],
-                "intent_path": self._queue_intent_path(task, ts),
-                "spec_path": self._queue_spec_path(task, ts),
-                "passed": status == "done",
-                "status": status,
-                "terminal_outcome": terminal_outcome,
-                "started_at": str(ts.get("started_at") or "") or None,
-                "finished_at": str(ts.get("finished_at") or now_iso()) or now_iso(),
-                "cost_usd": float(ts.get("cost_usd") or 0.0),
-                "duration_s": float(ts.get("duration_s") or 0.0),
-                "branch": task.branch,
-                "worktree": str(wt_path.resolve(strict=False)) if task.worktree else None,
-                "resumable": bool(task.resumable),
-                "session_dir": artifacts.get("session_dir"),
-                "manifest_path": artifacts.get("manifest_path"),
-                "summary_path": artifacts.get("summary_path"),
-                "checkpoint_path": artifacts.get("checkpoint_path"),
-                "primary_log_path": artifacts.get("primary_log_path"),
-                "extra_log_paths": list(artifacts.get("extra_log_paths") or []),
-                "artifacts": artifacts,
-                "timestamp": str(ts.get("finished_at") or now_iso()),
-            },
+            build_terminal_snapshot(
+                run_id=run_id,
+                domain="queue",
+                run_type="queue",
+                command=" ".join(task.command_argv[:2]) if task.command_argv else "queue",
+                intent_meta={
+                    "summary": (task.resolved_intent or task.id)[:200],
+                    "intent_path": self._queue_intent_path(task, ts),
+                    "spec_path": self._queue_spec_path(task, ts),
+                },
+                status=status,
+                terminal_outcome=terminal_outcome,
+                timing={
+                    "started_at": str(ts.get("started_at") or "") or None,
+                    "finished_at": str(ts.get("finished_at") or now_iso()) or now_iso(),
+                    "timestamp": str(ts.get("finished_at") or now_iso()),
+                    "duration_s": float(ts.get("duration_s") or 0.0),
+                },
+                metrics={"cost_usd": float(ts.get("cost_usd") or 0.0)},
+                git={
+                    "branch": task.branch,
+                    "worktree": str(wt_path.resolve(strict=False)) if task.worktree else None,
+                },
+                source={"resumable": bool(task.resumable)},
+                identity={"queue_task_id": task.id},
+                artifacts=artifacts,
+            ),
             strict=True,
         )
 
@@ -1100,6 +1098,7 @@ class Runner:
                 "pgid": child.get("pgid"),
                 "process_start_time_ns": child.get("start_time_ns"),
             })
+        record.timing["heartbeat_interval_s"] = self.config.heartbeat_interval_s
         write_record(self.project_dir, record)
 
     def _refresh_queue_run_records(self, tasks: list[QueueTask], state: dict[str, Any]) -> None:
@@ -1126,17 +1125,15 @@ class Runner:
                             "expected_child_run_id": str(ts.get("attempt_run_id") or "").strip() or None,
                             "compatibility_warning": ts.get("compatibility_warning"),
                         },
+                        "timing": {"heartbeat_interval_s": self.config.heartbeat_interval_s},
                         "artifacts": self._queue_run_artifacts(task, ts),
                         "metrics": {"cost_usd": ts.get("cost_usd")},
                         "last_event": str(ts.get("failure_reason") or status),
                     },
                     heartbeat=status in IN_FLIGHT_STATUSES,
                 )
-            except Exception:
-                try:
-                    self._write_queue_run_record(task, ts, status=status)
-                except Exception as exc:
-                    logger.debug("failed to refresh queue run record for %s: %s", task_id, exc)
+            except FileNotFoundError:
+                self._write_queue_run_record(task, ts, status=status)
 
     def _start_output_pump(self, task_id: str, proc: subprocess.Popen[Any]) -> None:
         stdout = getattr(proc, "stdout", None)
@@ -1322,22 +1319,21 @@ class Runner:
                 status=status,
                 terminal_outcome=terminal_outcome,
                 updates={
+                    "timing": {"heartbeat_interval_s": self.config.heartbeat_interval_s},
                     "artifacts": self._queue_run_artifacts(task, ts),
                     "metrics": {"cost_usd": ts.get("cost_usd")},
                     "last_event": str(ts.get("failure_reason") or status),
                 },
             )
-        except Exception:
-            try:
-                self._write_queue_run_record(task, ts, status=status)
-                finalize_record(
-                    self.project_dir,
-                    attempt_run_id,
-                    status=status,
-                    terminal_outcome=terminal_outcome,
-                )
-            except Exception as exc:
-                logger.debug("failed to finalize queue run record for %s: %s", task_id, exc)
+        except FileNotFoundError:
+            self._write_queue_run_record(task, ts, status=status)
+            finalize_record(
+                self.project_dir,
+                attempt_run_id,
+                status=status,
+                terminal_outcome=terminal_outcome,
+                updates={"timing": {"heartbeat_interval_s": self.config.heartbeat_interval_s}},
+            )
         self._append_queue_history_snapshot(
             task,
             ts,

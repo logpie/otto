@@ -31,7 +31,6 @@ from otto.runs.registry import append_jsonl_row, read_jsonl_rows, utc_now_iso
 QUEUE_FILE = ".otto-queue.yml"
 STATE_FILE = ".otto-queue-state.json"
 COMMANDS_FILE = ".otto-queue-commands.jsonl"
-COMMAND_ACKS_FILE = ".otto-queue-commands.acks.jsonl"
 LOCK_FILE = ".otto-queue.lock"
 
 QUEUE_SCHEMA_VERSION = 1

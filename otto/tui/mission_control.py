@@ -16,7 +16,7 @@ from textual.strip import Strip
 from textual.worker import Worker, WorkerState
 from textual.widgets import DataTable, Input, Log, Static
 
-from otto.runs.registry import gc_terminal_records
+from otto.runs.registry import garbage_collect_live_records
 from otto.theme import (
     MISSION_CONTROL_THEME,
     mission_control_banner_style,
@@ -33,6 +33,9 @@ from otto.tui.mission_control_model import (
 )
 
 
+# Search highlighting currently depends on Textual's private Log internals.
+# Keep the Textual dependency pinned to the 8.x line until this widget is
+# rewritten against a public extension hook.
 class SearchableLog(Log):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -358,7 +361,7 @@ class MissionControlApp(App[int]):
         yield Static("", id="footer")
 
     def on_mount(self) -> None:
-        gc_terminal_records(self.project_dir)
+        garbage_collect_live_records(self.project_dir)
         self.state = self.model.refresh(self.state)
         self._configure_tables()
         self._render_state()

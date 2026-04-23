@@ -59,6 +59,74 @@ def append_history_snapshot(
     return payload
 
 
+def build_terminal_snapshot(
+    *,
+    run_id: str,
+    domain: str,
+    run_type: str,
+    command: str,
+    intent_meta: dict[str, Any],
+    status: str,
+    terminal_outcome: str | None,
+    timing: dict[str, Any] | None = None,
+    metrics: dict[str, Any] | None = None,
+    git: dict[str, Any] | None = None,
+    artifacts: dict[str, Any] | None = None,
+    source: dict[str, Any] | None = None,
+    identity: dict[str, Any] | None = None,
+    extra_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from otto.history import normalize_command_label
+
+    resolved_run_id = str(run_id).strip()
+    if not resolved_run_id:
+        raise ValueError("terminal snapshot requires run_id")
+    timing = dict(timing or {})
+    metrics = dict(metrics or {})
+    git = dict(git or {})
+    source = dict(source or {})
+    identity = dict(identity or {})
+    normalized_artifacts = _normalize_artifacts(artifacts)
+    finished_at = _string_or_none(timing.get("finished_at"))
+    snapshot = {
+        "run_id": resolved_run_id,
+        "build_id": resolved_run_id,
+        "domain": str(domain or "").strip(),
+        "run_type": str(run_type or "").strip(),
+        "command": normalize_command_label(command),
+        "intent": _string_or_none(intent_meta.get("summary")) or "",
+        "intent_path": _string_or_none(intent_meta.get("intent_path")),
+        "spec_path": _string_or_none(intent_meta.get("spec_path")),
+        "passed": str(status or "").strip() == "done",
+        "status": str(status or "").strip(),
+        "terminal_outcome": _string_or_none(terminal_outcome),
+        "started_at": _string_or_none(timing.get("started_at")),
+        "finished_at": finished_at,
+        "timestamp": _string_or_none(timing.get("timestamp")) or finished_at or utc_now_iso(),
+        "branch": _string_or_none(git.get("branch")),
+        "worktree": _string_or_none(git.get("worktree")),
+        "resumable": bool(source.get("resumable", False)),
+        "session_dir": normalized_artifacts["session_dir"],
+        "manifest_path": normalized_artifacts["manifest_path"],
+        "summary_path": normalized_artifacts["summary_path"],
+        "checkpoint_path": normalized_artifacts["checkpoint_path"],
+        "primary_log_path": normalized_artifacts["primary_log_path"],
+        "extra_log_paths": list(normalized_artifacts["extra_log_paths"]),
+        "artifacts": normalized_artifacts,
+        "cost_usd": _float_or_none(metrics.get("cost_usd")),
+        "duration_s": _float_or_none(timing.get("duration_s")),
+    }
+    queue_task_id = _string_or_none(identity.get("queue_task_id"))
+    if queue_task_id:
+        snapshot["queue_task_id"] = queue_task_id
+    merge_id = _string_or_none(identity.get("merge_id"))
+    if merge_id:
+        snapshot["merge_id"] = merge_id
+    for key, value in dict(extra_fields or {}).items():
+        snapshot[key] = value
+    return snapshot
+
+
 def read_history_rows(path: Path) -> list[dict[str, Any]]:
     """Read tolerant JSONL rows, skipping malformed lines."""
     rows: list[dict[str, Any]] = []
@@ -103,6 +171,39 @@ def load_project_history_rows(project_dir: Path, *, limit_hint: int | None = Non
     selected = _dedupe_history_entries(_flatten_history_entries(loaded_sources))
     selected.sort(key=lambda item: item[0])
     return [entry for _, _, _, entry in selected]
+
+
+def _normalize_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:
+    data = dict(artifacts or {})
+    extra_log_paths = data.get("extra_log_paths")
+    if not isinstance(extra_log_paths, list):
+        extra_log_paths = []
+    return {
+        "session_dir": _string_or_none(data.get("session_dir")),
+        "manifest_path": _string_or_none(data.get("manifest_path")),
+        "checkpoint_path": _string_or_none(data.get("checkpoint_path")),
+        "summary_path": _string_or_none(data.get("summary_path")),
+        "primary_log_path": _string_or_none(data.get("primary_log_path")),
+        "extra_log_paths": [
+            str(path).strip()
+            for path in extra_log_paths
+            if str(path).strip()
+        ],
+    }
+
+
+def _string_or_none(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class _LoadedHistorySource:

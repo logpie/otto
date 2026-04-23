@@ -14,7 +14,7 @@ from otto.tui.mission_control import MissionControlApp
 @pytest.mark.asyncio
 async def test_dashboard_startup_calls_registry_gc(tmp_path: Path, monkeypatch) -> None:
     calls: list[Path] = []
-    monkeypatch.setattr("otto.tui.mission_control.gc_terminal_records", lambda project_dir: calls.append(project_dir) or [])
+    monkeypatch.setattr("otto.tui.mission_control.garbage_collect_live_records", lambda project_dir: calls.append(project_dir) or [])
 
     app = MissionControlApp(tmp_path)
 
@@ -26,7 +26,7 @@ async def test_dashboard_startup_calls_registry_gc(tmp_path: Path, monkeypatch) 
 
 def test_queue_runner_startup_calls_registry_gc(tmp_path: Path, monkeypatch) -> None:
     calls: list[Path] = []
-    monkeypatch.setattr("otto.queue.runner.gc_terminal_records", lambda project_dir: calls.append(project_dir) or [])
+    monkeypatch.setattr("otto.queue.runner.garbage_collect_live_records", lambda project_dir: calls.append(project_dir) or [])
     monkeypatch.setattr("otto.queue.runner.acquire_lock", lambda project_dir: object())
     monkeypatch.setattr(Runner, "_install_signal_handlers", lambda self: None)
     monkeypatch.setattr(Runner, "_reconcile_on_startup", lambda self: None)
@@ -41,7 +41,7 @@ def test_queue_runner_startup_calls_registry_gc(tmp_path: Path, monkeypatch) -> 
 @pytest.mark.asyncio
 async def test_atomic_build_startup_calls_registry_gc(tmp_path: Path, monkeypatch) -> None:
     calls: list[Path] = []
-    monkeypatch.setattr("otto.runs.registry.gc_terminal_records", lambda project_dir: calls.append(project_dir) or [])
+    monkeypatch.setattr("otto.runs.registry.garbage_collect_live_records", lambda project_dir: calls.append(project_dir) or [])
 
     class _StopStartup(RuntimeError):
         pass
@@ -63,7 +63,7 @@ async def test_atomic_build_startup_calls_registry_gc(tmp_path: Path, monkeypatc
 
 def test_merge_startup_calls_registry_gc(tmp_path: Path, monkeypatch) -> None:
     calls: list[Path] = []
-    monkeypatch.setattr("otto.runs.registry.gc_terminal_records", lambda project_dir: calls.append(project_dir) or [])
+    monkeypatch.setattr("otto.runs.registry.garbage_collect_live_records", lambda project_dir: calls.append(project_dir) or [])
     monkeypatch.setattr("otto.merge.orchestrator._repair_merge_history", lambda project_dir: None)
     monkeypatch.setattr("otto.merge.orchestrator.git_ops.current_branch", lambda project_dir: "feature/not-target")
 

@@ -15,7 +15,7 @@ import pytest
 
 from otto.agent import AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock
 from otto import paths as _paths
-from otto.pipeline import _ack_atomic_cancel_commands, _commit_artifacts, build_agentic_v3
+from otto.pipeline import _ack_atomic_cancel_commands, _commit_artifacts, build_agentic_v3, run_certify_fix_loop
 from otto.runs.registry import HEARTBEAT_INTERVAL_S, append_jsonl_row
 from tests.conftest import make_mock_query as _make_mock_query
 
@@ -908,3 +908,74 @@ class TestEmptyIntent:
         runner = CliRunner()
         result = runner.invoke(main, ["build", bad_intent])
         assert result.exit_code == 2
+
+
+class _FakePublisher:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def __enter__(self):
+        return self
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def update(self, updates):
+        return updates
+
+    def finalize(self, **kwargs):
+        raise AssertionError("finalize should not run")
+
+
+@pytest.mark.asyncio
+async def test_build_agentic_v3_stops_publisher_when_setup_raises(tmp_git_repo, monkeypatch):
+    publisher = _FakePublisher()
+    monkeypatch.setattr("otto.pipeline._atomic_publisher", lambda **kwargs: publisher)
+    monkeypatch.setattr("otto.config.ensure_safe_repo_state", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("setup failed")))
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        await build_agentic_v3("test", tmp_git_repo, {}, run_id="run-build-stop")
+
+    assert publisher.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_run_certify_fix_loop_stops_publisher_when_setup_raises(tmp_git_repo, monkeypatch):
+    publisher = _FakePublisher()
+    monkeypatch.setattr("otto.pipeline._atomic_publisher", lambda **kwargs: publisher)
+    monkeypatch.setattr("otto.config.ensure_safe_repo_state", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("setup failed")))
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        await run_certify_fix_loop("test", tmp_git_repo, {}, session_id="run-improve-stop")
+
+    assert publisher.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_run_agentic_certifier_stops_publisher_when_prompt_setup_raises(tmp_git_repo, monkeypatch):
+    from otto.certifier import run_agentic_certifier
+
+    publisher = _FakePublisher()
+    monkeypatch.setattr("otto.runs.registry.publisher_for", lambda *args, **kwargs: publisher)
+    monkeypatch.setattr("otto.certifier._repair_standalone_certify_history", lambda project_dir: None)
+    monkeypatch.setattr("otto.certifier._render_certifier_prompt", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("prompt failed")))
+
+    with pytest.raises(RuntimeError, match="prompt failed"):
+        await run_agentic_certifier("test", tmp_git_repo, {}, session_id="run-certify-stop")
+
+    assert publisher.stopped is True
+
+
+def test_repair_standalone_certify_history_skips_scan_when_history_exists(tmp_git_repo, monkeypatch):
+    from otto.certifier import _repair_standalone_certify_history
+
+    history_path = _paths.history_jsonl(tmp_git_repo)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text('{"run_id":"existing","schema_version":2}\n', encoding="utf-8")
+
+    monkeypatch.setattr(
+        "otto.paths.sessions_root",
+        lambda project_dir: (_ for _ in ()).throw(AssertionError("should not scan sessions")),
+    )
+
+    _repair_standalone_certify_history(tmp_git_repo)

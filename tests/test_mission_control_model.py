@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from otto import paths
 from otto.history import append_history_entry
 from otto.queue.schema import QueueTask, append_task, write_state
 from otto.runs.registry import finalize_record, make_run_record, update_record, write_record
+import otto.tui.mission_control_model as mission_control_model
 from otto.tui.mission_control_model import MissionControlFilters, MissionControlModel
 
 
@@ -102,17 +104,28 @@ def test_stale_overlay_derivation_uses_grace_window_and_dead_writer(tmp_path: Pa
     assert state.live_runs.items[0].overlay is not None
     assert state.live_runs.items[0].overlay.label == "LAGGING"
 
-    update_record(tmp_path, "lagger", heartbeat=True, updates={"last_event": "still alive"})
+    update_record(
+        tmp_path,
+        "lagger",
+        heartbeat=False,
+        updates={
+            "last_event": "still alive",
+            "timing": {
+                "updated_at": "2026-04-23T12:00:03Z",
+                "heartbeat_at": "2026-04-23T12:00:03Z",
+                "heartbeat_seq": 2,
+            },
+        },
+    )
     state = model.refresh(state)
     assert state.live_runs.items[0].overlay is None
 
-    clock.tick(seconds=40)
+    clock.tick(seconds=10)
     model._process_probe = lambda writer: False
     state = model.refresh(state)
-    assert state.live_runs.items[0].overlay is not None
-    assert state.live_runs.items[0].overlay.label == "LAGGING"
+    assert state.live_runs.items[0].overlay is None
 
-    clock.tick(seconds=16)
+    clock.tick(seconds=6)
     state = model.refresh(state)
     assert state.live_runs.items[0].overlay is not None
     assert state.live_runs.items[0].overlay.label == "STALE"
@@ -405,3 +418,104 @@ def test_selection_preservation_across_live_to_history_transition(tmp_path: Path
     assert state.selection.run_id == "transient"
     assert state.selection.origin_pane == "history"
     assert all(item.record.run_id != "transient" for item in state.live_runs.items)
+
+
+def test_history_rows_default_missing_resumable_to_false(tmp_path: Path) -> None:
+    history_path = paths.history_jsonl(tmp_path)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "history_kind": "terminal_snapshot",
+                "dedupe_key": "terminal_snapshot:legacy-run",
+                "run_id": "legacy-run",
+                "command": "build",
+                "status": "done",
+                "terminal_outcome": "success",
+                "timestamp": "2026-04-23T12:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    model = MissionControlModel(tmp_path)
+    state = model.initial_state()
+
+    assert state.history_page.items[0].row.resumable is False
+
+
+def test_history_outcome_removed_filters_correctly(tmp_path: Path) -> None:
+    append_history_entry(
+        tmp_path,
+        {
+            "run_id": "removed-run",
+            "command": "build",
+            "intent": "removed task",
+            "status": "removed",
+            "terminal_outcome": "removed",
+            "passed": False,
+            "timestamp": "2026-04-23T12:00:00Z",
+        },
+    )
+    append_history_entry(
+        tmp_path,
+        {
+            "run_id": "cancelled-run",
+            "command": "build",
+            "intent": "cancelled task",
+            "status": "cancelled",
+            "terminal_outcome": "cancelled",
+            "passed": False,
+            "timestamp": "2026-04-23T12:01:00Z",
+        },
+    )
+
+    model = MissionControlModel(tmp_path)
+    state = model.initial_state(filters=MissionControlFilters(outcome_filter="removed"))
+
+    assert [item.row.run_id for item in state.history_page.items] == ["removed-run"]
+    assert model.cycle_outcome_filter(state).filters.outcome_filter == "all"
+
+
+def test_history_unknown_outcome_buckets_to_other_and_warns_once(caplog) -> None:
+    mission_control_model._WARNED_UNKNOWN_HISTORY_OUTCOMES.clear()
+    row = mission_control_model.HistoryRow(
+        run_id="mystery-run",
+        domain="atomic",
+        run_type="build",
+        command="build",
+        status="mystery",
+        terminal_outcome="mystery",
+        timestamp="2026-04-23T12:00:00Z",
+        started_at=None,
+        finished_at=None,
+        queue_task_id=None,
+        merge_id=None,
+        intent="mystery",
+        branch=None,
+        worktree=None,
+        cost_usd=None,
+        duration_s=None,
+        resumable=False,
+        session_dir=None,
+        intent_path=None,
+        spec_path=None,
+        manifest_path=None,
+        summary_path=None,
+        checkpoint_path=None,
+        primary_log_path=None,
+        extra_log_paths=[],
+        dedupe_key="terminal_snapshot:mystery-run",
+        history_kind="terminal_snapshot",
+        adapter_key="atomic.build",
+    )
+
+    with caplog.at_level("WARNING"):
+        assert mission_control_model._history_outcome(row) == "other"
+        assert mission_control_model._history_outcome(row) == "other"
+
+    assert [record.message for record in caplog.records if "unknown history outcome" in record.message] == [
+        "unknown history outcome for mystery-run: mystery"
+    ]

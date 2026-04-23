@@ -13,11 +13,11 @@ from otto.queue.schema import load_queue, load_state
 from otto.runs.registry import make_run_record, writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
-from otto.tui.mission_control_actions import ActionResult, execute_action, make_action
+from otto.tui.mission_control_actions import ActionExecutingAdapter, make_action
 from otto.tui.mission_control_model import ArtifactRef, DetailModel, HistoryRow
 
 
-class QueueMissionControlAdapter:
+class QueueMissionControlAdapter(ActionExecutingAdapter):
     def legacy_records(self, project_dir: Path, now: datetime, live_records: list[RunRecord]):
         try:
             tasks = load_queue(project_dir)
@@ -63,24 +63,24 @@ class QueueMissionControlAdapter:
         primary_log = str(record.artifacts.get("primary_log_path") or "").strip()
 
         if intent_path:
-            items.append(_artifact("intent", intent_path))
+            items.append(ArtifactRef.from_path("intent", intent_path))
         if spec_path:
-            items.append(_artifact("spec", spec_path))
+            items.append(ArtifactRef.from_path("spec", spec_path))
         queue_task_id = str(record.identity.get("queue_task_id") or "").strip()
         if queue_task_id:
             queue_manifest = queue_index_path_for(Path(record.project_dir), queue_task_id)
             if queue_manifest is not None:
-                items.append(_artifact("queue manifest", str(queue_manifest.resolve(strict=False))))
+                items.append(ArtifactRef.from_path("queue manifest", str(queue_manifest.resolve(strict=False))))
         if manifest_path:
-            items.append(_artifact("manifest", manifest_path))
+            items.append(ArtifactRef.from_path("manifest", manifest_path))
         if summary_path:
-            items.append(_artifact("summary", summary_path))
+            items.append(ArtifactRef.from_path("summary", summary_path))
         if checkpoint_path:
-            items.append(_artifact("checkpoint", checkpoint_path))
+            items.append(ArtifactRef.from_path("checkpoint", checkpoint_path))
         if primary_log:
-            items.append(_artifact("primary log", primary_log, kind="log"))
+            items.append(ArtifactRef.from_path("primary log", primary_log, kind="log"))
         if worktree:
-            items.append(_artifact("worktree", worktree))
+            items.append(ArtifactRef.from_path("worktree", worktree))
         return items
 
     def legal_actions(self, record, overlay):
@@ -217,30 +217,12 @@ class QueueMissionControlAdapter:
             ),
         ]
 
-    def execute(
-        self,
-        record: RunRecord,
-        action_kind: str,
-        project_dir: Path,
-        *,
-        selected_artifact_path: str | None = None,
-        selected_queue_task_ids: list[str] | None = None,
-        post_result=None,
-    ) -> ActionResult:
-        return execute_action(
-            record,
-            action_kind,
-            project_dir,
-            selected_artifact_path=selected_artifact_path,
-            selected_queue_task_ids=selected_queue_task_ids,
-            post_result=post_result,
-        )
-
     def detail_panel_renderer(self, record) -> DetailModel:
         task_id = str(record.identity.get("queue_task_id") or record.run_id)
         summary = str(record.intent.get("summary") or "").strip() or task_id
         lines = [
             f"task: {task_id}",
+            f"intent: {summary}",
             f"branch: {record.git.get('branch') or '-'}",
             f"worktree: {_queue_worktree(record) or '-'}",
             f"child run: {record.identity.get('child_run_id') or record.identity.get('expected_child_run_id') or '-'}",
@@ -333,6 +315,7 @@ def _legacy_queue_record(project_dir, task, task_state, now):
         "heartbeat_at": updated_at,
         "finished_at": finished_at,
         "duration_s": _coerce_float(state.get("duration_s")),
+        # Legacy queue compatibility rows are stale snapshots with no live writer.
         "heartbeat_interval_s": 60.0,
         "heartbeat_seq": 0,
     })
@@ -346,8 +329,3 @@ def _coerce_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
-
-
-def _artifact(label: str, path: str, *, kind: str = "file") -> ArtifactRef:
-    candidate = Path(path)
-    return ArtifactRef(label=label, path=path, kind=kind, exists=candidate.exists())

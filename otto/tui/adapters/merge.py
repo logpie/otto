@@ -9,11 +9,11 @@ from otto.merge.state import load_state
 from otto.runs.registry import writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
-from otto.tui.mission_control_actions import ActionResult, execute_action, make_action
+from otto.tui.mission_control_actions import ActionExecutingAdapter, make_action
 from otto.tui.mission_control_model import ArtifactRef, DetailModel, HistoryRow
 
 
-class MergeMissionControlAdapter:
+class MergeMissionControlAdapter(ActionExecutingAdapter):
     def legacy_records(self, project_dir: Path, now: datetime, live_records: list[RunRecord]):
         del project_dir, now, live_records
         return []
@@ -35,15 +35,15 @@ class MergeMissionControlAdapter:
         state_path = str((Path(session_dir) / "state.json").resolve(strict=False)) if session_dir else ""
         extra_log_paths = [str(path).strip() for path in record.artifacts.get("extra_log_paths") or [] if str(path).strip()]
         if state_path:
-            items.append(_artifact("state", state_path))
+            items.append(ArtifactRef.from_path("state", state_path))
         if primary_log:
-            items.append(_artifact("merge log", primary_log, kind="log"))
+            items.append(ArtifactRef.from_path("merge log", primary_log, kind="log"))
         extra_index = 1
         for path in extra_log_paths:
             if path == state_path:
                 continue
             kind = "log" if path.endswith(".log") else "file"
-            items.append(_artifact(f"extra {extra_index}", path, kind=kind))
+            items.append(ArtifactRef.from_path(f"extra {extra_index}", path, kind=kind))
             extra_index += 1
         return items
 
@@ -122,25 +122,6 @@ class MergeMissionControlAdapter:
             ),
         ]
 
-    def execute(
-        self,
-        record: RunRecord,
-        action_kind: str,
-        project_dir: Path,
-        *,
-        selected_artifact_path: str | None = None,
-        selected_queue_task_ids: list[str] | None = None,
-        post_result=None,
-    ) -> ActionResult:
-        return execute_action(
-            record,
-            action_kind,
-            project_dir,
-            selected_artifact_path=selected_artifact_path,
-            selected_queue_task_ids=selected_queue_task_ids,
-            post_result=post_result,
-        )
-
     def detail_panel_renderer(self, record) -> DetailModel:
         merge_id = str(record.identity.get("merge_id") or record.run_id)
         lines = [
@@ -157,8 +138,3 @@ class MergeMissionControlAdapter:
             if state.note:
                 lines.append(f"note: {state.note}")
         return DetailModel(title=f"merge: {merge_id}", summary_lines=lines)
-
-
-def _artifact(label: str, path: str, *, kind: str = "file") -> ArtifactRef:
-    candidate = Path(path)
-    return ArtifactRef(label=label, path=path, kind=kind, exists=candidate.exists())

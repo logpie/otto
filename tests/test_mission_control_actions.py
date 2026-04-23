@@ -197,6 +197,33 @@ def test_cancel_falls_back_to_sigterm_after_one_heartbeat(tmp_path: Path, monkey
     assert "cancel unacked" in str(result.message)
 
 
+def test_cancel_waits_at_least_four_seconds_before_fallback(tmp_path: Path, monkeypatch) -> None:
+    record = _record(
+        tmp_path,
+        run_id="atomic-run",
+        domain="atomic",
+        run_type="build",
+        status="running",
+        adapter_key="atomic.build",
+    )
+    record.timing["heartbeat_interval_s"] = 0.05
+    clock = {"now": 0.0}
+    fallback_at: list[float] = []
+
+    monkeypatch.setattr("otto.tui.mission_control_actions.load_command_ack_ids", lambda path: set())
+    monkeypatch.setattr("otto.tui.mission_control_actions.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("otto.tui.mission_control_actions.time.sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    monkeypatch.setattr(
+        "otto.tui.mission_control_actions._send_sigterm_fallback",
+        lambda record: (fallback_at.append(clock["now"]) or False, None),
+    )
+
+    result = execute_action(record, "c", tmp_path)
+
+    assert fallback_at and fallback_at[0] >= 4.0
+    assert result.message == "cancel request is still pending with no fallback process group"
+
+
 def test_cancel_skips_sigterm_for_stale_writer_identity(tmp_path: Path, monkeypatch) -> None:
     record = _record(
         tmp_path,

@@ -42,12 +42,12 @@ from otto.merge.state import (
 from otto.merge.stories import collect_stories_from_branches, dedupe_stories, find_manifest_for_branch
 from otto.runs.history import read_history_rows
 from otto.runs.registry import (
-    RunPublisher,
     append_command_ack,
     begin_command_drain,
     finish_command_drain,
-    make_run_record,
+    publisher_for,
 )
+from otto.runs.schema import is_terminal_status
 
 logger = logging.getLogger("otto.merge.orchestrator")
 
@@ -285,7 +285,7 @@ def _persist_merge_terminal_state(
 
 
 def _append_merge_history(project_dir: Path, state: MergeState) -> None:
-    from otto.runs.history import append_history_snapshot
+    from otto.runs.history import append_history_snapshot, build_terminal_snapshot
 
     merge_run_dir = paths.merge_dir(project_dir) / state.merge_id
     extra_artifacts: list[str] = []
@@ -300,31 +300,26 @@ def _append_merge_history(project_dir: Path, state: MergeState) -> None:
         )
     append_history_snapshot(
         project_dir,
-        {
-            "run_id": state.merge_id,
-            "build_id": state.merge_id,
-            "domain": "merge",
-            "run_type": "merge",
-            "command": "merge",
-            "intent": f"merge {len(state.branches_in_order)} branch(es)",
-            "intent_path": str(paths.project_intent_md(project_dir)),
-            "spec_path": None,
-            "passed": state.status == "done",
-            "status": state.status,
-            "terminal_outcome": state.terminal_outcome,
-            "started_at": state.started_at or None,
-            "finished_at": state.finished_at or _now_iso(),
-            "merge_id": state.merge_id,
-            "branch": None,
-            "worktree": None,
-            "resumable": False,
-            "session_dir": str(merge_run_dir),
-            "manifest_path": None,
-            "checkpoint_path": None,
-            "summary_path": None,
-            "primary_log_path": str(paths.merge_dir(project_dir) / "merge.log"),
-            "extra_log_paths": [str(merge_run_dir / "state.json"), *extra_artifacts],
-            "artifacts": {
+        build_terminal_snapshot(
+            run_id=state.merge_id,
+            domain="merge",
+            run_type="merge",
+            command="merge",
+            intent_meta={
+                "summary": f"merge {len(state.branches_in_order)} branch(es)",
+                "intent_path": str(paths.project_intent_md(project_dir)),
+                "spec_path": None,
+            },
+            status=state.status,
+            terminal_outcome=state.terminal_outcome,
+            timing={
+                "started_at": state.started_at or None,
+                "finished_at": state.finished_at or _now_iso(),
+                "timestamp": state.finished_at or _now_iso(),
+            },
+            source={"resumable": False},
+            identity={"merge_id": state.merge_id},
+            artifacts={
                 "session_dir": str(merge_run_dir),
                 "manifest_path": None,
                 "checkpoint_path": None,
@@ -332,8 +327,7 @@ def _append_merge_history(project_dir: Path, state: MergeState) -> None:
                 "primary_log_path": str(paths.merge_dir(project_dir) / "merge.log"),
                 "extra_log_paths": [str(merge_run_dir / "state.json"), *extra_artifacts],
             },
-            "timestamp": state.finished_at or _now_iso(),
-        },
+        ),
         strict=True,
     )
 
@@ -424,9 +418,9 @@ async def run_merge(
 ) -> MergeRunResult:
     """Main entry. Returns MergeRunResult with success/state/plan."""
     from otto.config import agent_provider
-    from otto.runs.registry import gc_terminal_records
+    from otto.runs.registry import garbage_collect_live_records
 
-    gc_terminal_records(project_dir)
+    garbage_collect_live_records(project_dir)
     _repair_merge_history(project_dir)
 
     # Pre-flight: must be on target, working tree clean
@@ -498,69 +492,68 @@ async def run_merge(
         outcomes=[],
     )
     write_state(project_dir, state)
-    publisher = RunPublisher(
-        project_dir,
-        make_run_record(
-            project_dir=project_dir,
-            run_id=merge_id,
-            domain="merge",
-            run_type="merge",
-            command="merge",
-            display_name=f"merge: {len(branches)} branch(es)",
-            status="running",
-            cwd=project_dir,
-            identity={"queue_task_id": None, "merge_id": merge_id, "parent_run_id": None},
-            source={"invoked_via": "cli", "argv": list(sys.argv[1:]), "resumable": False},
-            git={"branch": cur, "worktree": None, "target_branch": options.target, "head_sha": target_head_before},
-            intent={"summary": f"merge {len(branches)} branch(es)", "intent_path": str(project_dir / "intent.md"), "spec_path": None},
-            artifacts=_merge_artifacts(project_dir, merge_id),
-            adapter_key="merge.run",
-            last_event="starting",
-        ),
+    publisher = publisher_for(
+        "merge",
+        "merge",
+        "merge",
+        project_dir=project_dir,
+        run_id=merge_id,
+        intent=f"merge {len(branches)} branch(es)",
+        display_name=f"merge: {len(branches)} branch(es)",
+        cwd=project_dir,
+        identity={"merge_id": merge_id},
+        source={"resumable": False},
+        git={"branch": cur, "worktree": None, "target_branch": options.target, "head_sha": target_head_before},
+        intent_meta={"intent_path": str(project_dir / "intent.md"), "spec_path": None},
+        artifacts=_merge_artifacts(project_dir, merge_id),
+        adapter_key="merge.run",
     )
     publisher.__enter__()
 
-    logger.info("merge %s starting: target=%s, branches=%s", merge_id, options.target, branches)
-    if _drain_merge_cancel_commands(project_dir, merge_id, state):
-        result = MergeRunResult(
-            success=False,
-            merge_id=merge_id,
-            state=state,
-            note="merge cancelled before start",
-        )
-    else:
-        result = await _run_consolidated_agentic_merge(
-            project_dir=project_dir,
-            config=config,
-            options=options,
-            state=state,
-            merge_id=merge_id,
-            branches=branches,
-            queue_lookup=queue_lookup,
-            target_head_before=target_head_before,
-            budget=budget,
-        )
+    try:
+        logger.info("merge %s starting: target=%s, branches=%s", merge_id, options.target, branches)
+        if _drain_merge_cancel_commands(project_dir, merge_id, state):
+            result = MergeRunResult(
+                success=False,
+                merge_id=merge_id,
+                state=state,
+                note="merge cancelled before start",
+            )
+        else:
+            result = await _run_consolidated_agentic_merge(
+                project_dir=project_dir,
+                config=config,
+                options=options,
+                state=state,
+                merge_id=merge_id,
+                branches=branches,
+                queue_lookup=queue_lookup,
+                target_head_before=target_head_before,
+                budget=budget,
+            )
 
-    final_status = result.state.status
-    if final_status not in {"done", "failed", "cancelled"}:
-        final_status = "done" if result.success else "failed"
-        _persist_merge_terminal_state(
-            project_dir,
-            result.state,
+        final_status = result.state.status
+        if not is_terminal_status(final_status):
+            final_status = "done" if result.success else "failed"
+            _persist_merge_terminal_state(
+                project_dir,
+                result.state,
+                status=final_status,
+                note=result.note or ("completed" if result.success else "failed"),
+            )
+
+        publisher.finalize(
             status=final_status,
-            note=result.note or ("completed" if result.success else "failed"),
+            terminal_outcome=result.state.terminal_outcome,
+            updates={
+                "artifacts": _merge_artifacts(project_dir, merge_id),
+                "last_event": result.note or result.state.note or final_status,
+            },
         )
-
-    publisher.finalize(
-        status=final_status,
-        terminal_outcome=result.state.terminal_outcome,
-        updates={
-            "artifacts": _merge_artifacts(project_dir, merge_id),
-            "last_event": result.note or result.state.note or final_status,
-        },
-    )
-    _append_merge_history(project_dir, result.state)
-    return result
+        _append_merge_history(project_dir, result.state)
+        return result
+    finally:
+        publisher.stop()
 
 
 def _update_consolidated_conflict_outcomes(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
 import tempfile
 import threading
 import time
@@ -170,11 +171,6 @@ def garbage_collect_live_records(
     return removed
 
 
-def gc_terminal_records(project_dir: Path) -> list[str]:
-    """Best-effort startup GC for old terminal live records."""
-    return garbage_collect_live_records(project_dir)
-
-
 def cleanup_live_record(project_dir: Path, run_id: str) -> RunRecord:
     """Remove one terminal live record and append a GC tombstone."""
     path = paths.live_run_path(project_dir, run_id)
@@ -316,6 +312,69 @@ def make_run_record(
         metrics=dict(metrics or {}),
         adapter_key=adapter_key or f"{domain}.{run_type}",
         last_event=last_event,
+    )
+
+
+def publisher_for(
+    domain: str,
+    run_type: str,
+    command: str,
+    *,
+    project_dir: Path,
+    run_id: str,
+    intent: str,
+    display_name: str | None = None,
+    cwd: Path | None = None,
+    identity: dict[str, Any] | None = None,
+    source: dict[str, Any] | None = None,
+    git: dict[str, Any] | None = None,
+    intent_meta: dict[str, Any] | None = None,
+    artifacts: dict[str, Any] | None = None,
+    metrics: dict[str, Any] | None = None,
+    adapter_key: str | None = None,
+    last_event: str = "starting",
+    heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S,
+) -> "RunPublisher":
+    from otto.history import normalize_command_label
+
+    command_label = normalize_command_label(command)
+    record = make_run_record(
+        project_dir=project_dir,
+        run_id=run_id,
+        domain=domain,
+        run_type=run_type,
+        command=command,
+        display_name=display_name or f"{command_label}: {intent[:80]}".strip(),
+        status="running",
+        cwd=cwd or project_dir,
+        identity={
+            "queue_task_id": os.environ.get("OTTO_QUEUE_TASK_ID"),
+            "merge_id": None,
+            "parent_run_id": None,
+            **dict(identity or {}),
+        },
+        source={
+            "invoked_via": "queue" if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1" else "cli",
+            "argv": list(sys.argv[1:]),
+            "resumable": run_type != "certify" and domain != "merge",
+            **dict(source or {}),
+        },
+        git=dict(git or {}),
+        intent={
+            "summary": intent[:200],
+            "intent_path": None,
+            "spec_path": None,
+            **dict(intent_meta or {}),
+        },
+        artifacts=dict(artifacts or {}),
+        metrics=dict(metrics or {}),
+        adapter_key=adapter_key or f"{domain}.{run_type}",
+        last_event=last_event,
+    )
+    return RunPublisher(
+        project_dir,
+        record,
+        heartbeat_interval_s=heartbeat_interval_s,
     )
 
 

@@ -1236,7 +1236,6 @@ def _build_pow_report_data(
     generated_dt = datetime.now(timezone.utc)
     generated_iso = generated_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     generated_local = generated_dt.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    profile = _mode_profile(certifier_mode)
     all_stories = [_normalize_story(story, certifier_mode) for story in story_results]
     hidden_story_count = max(0, len(all_stories) - report_story_limit)
     visible_stories = all_stories[:report_story_limit]
@@ -2063,9 +2062,11 @@ def _write_pow_report(output_dir: Path, report: dict[str, Any]) -> None:
 
 def _repair_standalone_certify_history(project_dir: Path) -> None:
     from otto import paths
-    from otto.runs.history import append_history_snapshot
+    from otto.runs.history import append_history_snapshot, build_terminal_snapshot
     from otto.runs.history import read_history_rows
 
+    if paths.history_jsonl(project_dir).exists():
+        return
     history_rows = read_history_rows(paths.history_jsonl(project_dir))
     seen = {
         str(row.get("dedupe_key") or "")
@@ -2092,36 +2093,27 @@ def _repair_standalone_certify_history(project_dir: Path) -> None:
         session_dir = paths.session_dir(project_dir, run_id)
         append_history_snapshot(
             project_dir,
-            {
-                "run_id": run_id,
-                "build_id": run_id,
-                "domain": "atomic",
-                "run_type": "certify",
-                "command": "certify",
-                "intent": str(summary.get("intent") or "")[:200],
-                "intent_path": str(paths.session_intent(project_dir, run_id)),
-                "spec_path": str(session_dir / "spec.md") if (session_dir / "spec.md").exists() else None,
-                "passed": bool(summary.get("passed")),
-                "stories_passed": int(summary.get("stories_passed") or 0),
-                "stories_tested": int(summary.get("stories_tested") or 0),
-                "cost_usd": float(summary.get("cost_usd") or 0.0),
-                "certifier_cost_usd": float(summary.get("cost_usd") or 0.0),
-                "duration_s": float(summary.get("duration_s") or 0.0),
-                "certify_rounds": int(summary.get("rounds") or 0),
-                "status": "done" if bool(summary.get("passed")) else "failed",
-                "terminal_outcome": "success" if bool(summary.get("passed")) else "failure",
-                "started_at": None,
-                "finished_at": str(summary.get("completed_at") or "") or None,
-                "branch": str(summary.get("branch") or "") or None,
-                "worktree": None,
-                "resumable": False,
-                "session_dir": str(session_dir),
-                "manifest_path": str(session_dir / "manifest.json"),
-                "summary_path": str(summary_path),
-                "checkpoint_path": None,
-                "primary_log_path": str(paths.certify_dir(project_dir, run_id) / "narrative.log"),
-                "extra_log_paths": [str(paths.certify_dir(project_dir, run_id) / "proof-of-work.html")],
-                "artifacts": {
+            build_terminal_snapshot(
+                run_id=run_id,
+                domain="atomic",
+                run_type="certify",
+                command="certify",
+                intent_meta={
+                    "summary": str(summary.get("intent") or "")[:200],
+                    "intent_path": str(paths.session_intent(project_dir, run_id)),
+                    "spec_path": str(session_dir / "spec.md") if (session_dir / "spec.md").exists() else None,
+                },
+                status="done" if bool(summary.get("passed")) else "failed",
+                terminal_outcome="success" if bool(summary.get("passed")) else "failure",
+                timing={
+                    "finished_at": str(summary.get("completed_at") or "") or None,
+                    "timestamp": str(summary.get("completed_at") or ""),
+                    "duration_s": float(summary.get("duration_s") or 0.0),
+                },
+                metrics={"cost_usd": float(summary.get("cost_usd") or 0.0)},
+                git={"branch": str(summary.get("branch") or "") or None},
+                source={"resumable": False},
+                artifacts={
                     "session_dir": str(session_dir),
                     "manifest_path": str(session_dir / "manifest.json"),
                     "checkpoint_path": None,
@@ -2129,8 +2121,14 @@ def _repair_standalone_certify_history(project_dir: Path) -> None:
                     "primary_log_path": str(paths.certify_dir(project_dir, run_id) / "narrative.log"),
                     "extra_log_paths": [str(paths.certify_dir(project_dir, run_id) / "proof-of-work.html")],
                 },
-                "timestamp": str(summary.get("completed_at") or ""),
-            },
+                extra_fields={
+                    "passed": bool(summary.get("passed")),
+                    "stories_passed": int(summary.get("stories_passed") or 0),
+                    "stories_tested": int(summary.get("stories_tested") or 0),
+                    "certifier_cost_usd": float(summary.get("cost_usd") or 0.0),
+                    "certify_rounds": int(summary.get("rounds") or 0),
+                },
+            ),
             strict=True,
         )
         seen.add(dedupe_key)
@@ -2178,9 +2176,9 @@ async def run_agentic_certifier(
 
     config = config or {}
     start_time = time.monotonic()
-    from otto.runs.registry import gc_terminal_records
+    from otto.runs.registry import garbage_collect_live_records
 
-    gc_terminal_records(project_dir)
+    garbage_collect_live_records(project_dir)
     if merge_context is None and write_history:
         _repair_standalone_certify_history(project_dir)
 
@@ -2222,234 +2220,224 @@ async def run_agentic_certifier(
         and os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1"
     ):
         from otto.pipeline import _current_branch_name, _current_head_sha
-        from otto.runs.registry import RunPublisher, make_run_record
+        from otto.runs.registry import publisher_for
 
-        publisher = RunPublisher(
-            project_dir,
-            make_run_record(
-                project_dir=project_dir,
-                run_id=run_id,
-                domain="atomic",
-                run_type="certify",
-                command="certify",
-                display_name=f"certify: {intent[:80]}".strip(),
-                status="running",
-                cwd=project_dir,
-                identity={
-                    "queue_task_id": os.environ.get("OTTO_QUEUE_TASK_ID"),
-                    "merge_id": None,
-                    "parent_run_id": None,
-                },
-                source={
-                    "invoked_via": "queue" if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1" else "cli",
-                    "argv": list(sys.argv[1:]),
-                    "resumable": False,
-                },
-                git={"branch": _current_branch_name(project_dir), "worktree": None, "target_branch": None, "head_sha": _current_head_sha(project_dir)},
-                intent={
-                    "summary": intent[:200],
-                    "intent_path": str(paths.session_intent(project_dir, run_id)),
-                    "spec_path": str(config.get("_spec_path") or "").strip() or None,
-                },
-                artifacts={
-                    "session_dir": str(paths.session_dir(project_dir, run_id)),
-                    "manifest_path": str(paths.session_dir(project_dir, run_id) / "manifest.json"),
-                    "checkpoint_path": None,
-                    "summary_path": str(paths.session_summary(project_dir, run_id)),
-                    "primary_log_path": str(report_dir / "narrative.log"),
-                    "extra_log_paths": [str(report_dir / "proof-of-work.html")],
-                },
-                adapter_key="atomic.certify",
-                last_event="starting",
-            ),
+        publisher = publisher_for(
+            "atomic",
+            "certify",
+            "certify",
+            project_dir=project_dir,
+            run_id=run_id,
+            intent=intent,
+            display_name=f"certify: {intent[:80]}".strip(),
+            cwd=project_dir,
+            source={"resumable": False},
+            git={"branch": _current_branch_name(project_dir), "worktree": None, "target_branch": None, "head_sha": _current_head_sha(project_dir)},
+            intent_meta={
+                "intent_path": str(paths.session_intent(project_dir, run_id)),
+                "spec_path": str(config.get("_spec_path") or "").strip() or None,
+            },
+            artifacts={
+                "session_dir": str(paths.session_dir(project_dir, run_id)),
+                "manifest_path": str(paths.session_dir(project_dir, run_id) / "manifest.json"),
+                "checkpoint_path": None,
+                "summary_path": str(paths.session_summary(project_dir, run_id)),
+                "primary_log_path": str(report_dir / "narrative.log"),
+                "extra_log_paths": [str(report_dir / "proof-of-work.html")],
+            },
+            adapter_key="atomic.certify",
         )
         publisher.__enter__()
 
-    prompt = _render_certifier_prompt(
-        mode=mode,
-        intent=intent,
-        evidence_dir=evidence_dir,
-        focus=focus,
-        target=target,
-        stories=stories,
-        merge_context=merge_context,
-        project_dir=project_dir,
-        run_id=run_id,
-        prior_session_ids=prior_session_ids,
-    )
-
-    from otto.memory import inject_memory
-
-    prompt = inject_memory(prompt, project_dir, config)
-    options = make_agent_options(project_dir, config, agent_type="certifier")
-
-    logger.info("Running agentic certifier on %s", project_dir)
-    timeout = budget.for_call() if budget is not None else None
-    from otto.pipeline import _make_atomic_heartbeat_callback, _make_atomic_terminal_callback
-    terminal_callback = _make_atomic_terminal_callback(project_dir, run_id, console.print)
-    heartbeat_callback = _make_atomic_heartbeat_callback(project_dir, run_id)
-
-    text, cost, agent_session_id, breakdown = await run_agent_with_timeout(
-        prompt,
-        options,
-        log_dir=report_dir,
-        phase_name="CERTIFY",
-        timeout=timeout,
-        project_dir=project_dir,
-        on_terminal_event=terminal_callback,
-        on_heartbeat=heartbeat_callback,
-        verbose=verbose,
-    )
-
-    total_duration = round(time.monotonic() - start_time, 1)
-    parsed = parse_certifier_markers(text or "", certifier_mode=mode)
-    if not parsed.stories and not parsed.verdict_seen:
-        raise MalformedCertifierOutputError(
-            "Certifier produced no structured output — see narrative.log"
-        )
-    story_results = [_normalize_story_result(s) for s in compact_story_results(parsed.stories)]
-    has_failures = any(_story_verdict(story) == "FAIL" for story in story_results)
-    passed = parsed.verdict_pass and not has_failures and bool(story_results)
-    target_mode = mode == "target" or bool(target) or bool(config.get("_target"))
-    if target_mode:
-        passed = passed and parsed.metric_met is True
-    outcome = CertificationOutcome.PASSED if passed else CertificationOutcome.FAILED
-
-    report = CertificationReport(
-        outcome=outcome,
-        cost_usd=float(cost or 0),
-        duration_s=total_duration,
-        story_results=story_results,
-        metric_value=parsed.metric_value,
-        metric_met=parsed.metric_met,
-        run_id=run_id,
-        diagnosis=parsed.diagnosis,
-        child_session_ids=list(breakdown.get("child_session_ids", []) or []),
-        subagent_errors=list(breakdown.get("subagent_errors", []) or []),
-    )
-
     try:
-        certify_rounds_count = len(parsed.certify_rounds) or 1
-        pow_data = _build_pow_report_data(
-            project_dir=project_dir,
-            report_dir=report_dir,
-            log_dir=report_dir,
-            run_id=run_id,
-            session_id=agent_session_id,
-            pipeline_mode="agentic_certifier",
-            certifier_mode=mode,
-            outcome=outcome.value,
-            story_results=story_results,
-            diagnosis=parsed.diagnosis,
-            certify_rounds=parsed.certify_rounds,
-            duration_s=total_duration,
-            certifier_cost_usd=float(cost or 0),
-            total_cost_usd=float(cost or 0),
+        prompt = _render_certifier_prompt(
+            mode=mode,
             intent=intent,
-            options=options,
             evidence_dir=evidence_dir,
-            stories_tested=parsed.stories_tested,
-            stories_passed=parsed.stories_passed,
-            coverage_observed=parsed.coverage_observed,
-            coverage_gaps=parsed.coverage_gaps,
-            coverage_emitted=(
-                parsed.coverage_observed_emitted or parsed.coverage_gaps_emitted
-            ),
+            focus=focus,
+            target=target,
+            stories=stories,
+            merge_context=merge_context,
+            project_dir=project_dir,
+            run_id=run_id,
+            prior_session_ids=prior_session_ids,
+        )
+
+        from otto.memory import inject_memory
+
+        prompt = inject_memory(prompt, project_dir, config)
+        options = make_agent_options(project_dir, config, agent_type="certifier")
+
+        logger.info("Running agentic certifier on %s", project_dir)
+        timeout = budget.for_call() if budget is not None else None
+        from otto.pipeline import _make_atomic_heartbeat_callback, _make_atomic_terminal_callback
+        terminal_callback = _make_atomic_terminal_callback(project_dir, run_id, console.print)
+        heartbeat_callback = _make_atomic_heartbeat_callback(project_dir, run_id)
+
+        text, cost, agent_session_id, breakdown = await run_agent_with_timeout(
+            prompt,
+            options,
+            log_dir=report_dir,
+            phase_name="CERTIFY",
+            timeout=timeout,
+            project_dir=project_dir,
+            on_terminal_event=terminal_callback,
+            on_heartbeat=heartbeat_callback,
+            verbose=verbose,
+        )
+
+        total_duration = round(time.monotonic() - start_time, 1)
+        parsed = parse_certifier_markers(text or "", certifier_mode=mode)
+        if not parsed.stories and not parsed.verdict_seen:
+            raise MalformedCertifierOutputError(
+                "Certifier produced no structured output — see narrative.log"
+            )
+        story_results = [_normalize_story_result(s) for s in compact_story_results(parsed.stories)]
+        has_failures = any(_story_verdict(story) == "FAIL" for story in story_results)
+        passed = parsed.verdict_pass and not has_failures and bool(story_results)
+        target_mode = mode == "target" or bool(target) or bool(config.get("_target"))
+        if target_mode:
+            passed = passed and parsed.metric_met is True
+        outcome = CertificationOutcome.PASSED if passed else CertificationOutcome.FAILED
+
+        report = CertificationReport(
+            outcome=outcome,
+            cost_usd=float(cost or 0),
+            duration_s=total_duration,
+            story_results=story_results,
             metric_value=parsed.metric_value,
             metric_met=parsed.metric_met,
-            round_timings=breakdown.get("round_timings", []),
-        )
-        _write_pow_report(report_dir, pow_data)
-    except Exception as exc:
-        logger.warning("Failed to write PoW report: %s", exc)
-        certify_rounds_count = len(parsed.certify_rounds) or 1
-
-    logger.info(
-        "Agentic certifier done: %s, %d/%d stories, %.1fs, $%.3f",
-        outcome.value,
-        parsed.stories_passed,
-        parsed.stories_tested,
-        total_duration,
-        float(cost or 0),
-    )
-
-    from otto.memory import record_run
-
-    record_run(
-        project_dir,
-        run_id=run_id,
-        command="certify",
-        certifier_mode=mode,
-        stories=story_results,
-        cost=float(cost or 0),
-    )
-
-    if write_session_summary:
-        from otto.pipeline import _write_session_summary
-
-        breakdown_summary = {
-            "certify": {
-                "duration_s": total_duration,
-                "cost_usd": float(cost or 0.0),
-                "rounds": certify_rounds_count,
-            }
-        }
-        _write_session_summary(
-            project_dir,
-            run_id,
-            verdict=outcome.value,
-            passed=passed,
-            cost=float(cost or 0),
-            duration=total_duration,
-            stories_passed=parsed.stories_passed,
-            stories_tested=parsed.stories_tested,
-            rounds=certify_rounds_count,
-            intent=intent,
-            command="certify",
-            breakdown=breakdown_summary,
+            run_id=run_id,
+            diagnosis=parsed.diagnosis,
+            child_session_ids=list(breakdown.get("child_session_ids", []) or []),
+            subagent_errors=list(breakdown.get("subagent_errors", []) or []),
         )
 
-    final_record = None
-    if publisher is not None:
-        final_record = publisher.finalize(
-            status="done" if passed else "failed",
-            terminal_outcome="success" if passed else "failure",
-            updates={
-                "metrics": {
-                    "cost_usd": float(cost or 0),
-                    "stories_passed": parsed.stories_passed,
-                    "stories_tested": parsed.stories_tested,
-                },
-                "last_event": "completed" if passed else "failed",
-            },
-        )
-    if (
-        write_history
-        and merge_context is None
-        and os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1"
-    ):
-        from otto.pipeline import _append_session_history
+        try:
+            certify_rounds_count = len(parsed.certify_rounds) or 1
+            pow_data = _build_pow_report_data(
+                project_dir=project_dir,
+                report_dir=report_dir,
+                log_dir=report_dir,
+                run_id=run_id,
+                session_id=agent_session_id,
+                pipeline_mode="agentic_certifier",
+                certifier_mode=mode,
+                outcome=outcome.value,
+                story_results=story_results,
+                diagnosis=parsed.diagnosis,
+                certify_rounds=parsed.certify_rounds,
+                duration_s=total_duration,
+                certifier_cost_usd=float(cost or 0),
+                total_cost_usd=float(cost or 0),
+                intent=intent,
+                options=options,
+                evidence_dir=evidence_dir,
+                stories_tested=parsed.stories_tested,
+                stories_passed=parsed.stories_passed,
+                coverage_observed=parsed.coverage_observed,
+                coverage_gaps=parsed.coverage_gaps,
+                coverage_emitted=(
+                    parsed.coverage_observed_emitted or parsed.coverage_gaps_emitted
+                ),
+                metric_value=parsed.metric_value,
+                metric_met=parsed.metric_met,
+                round_timings=breakdown.get("round_timings", []),
+            )
+            _write_pow_report(report_dir, pow_data)
+        except Exception as exc:
+            logger.warning("Failed to write PoW report: %s", exc)
+            certify_rounds_count = len(parsed.certify_rounds) or 1
 
-        _append_session_history(
+        logger.info(
+            "Agentic certifier done: %s, %d/%d stories, %.1fs, $%.3f",
+            outcome.value,
+            parsed.stories_passed,
+            parsed.stories_tested,
+            total_duration,
+            float(cost or 0),
+        )
+
+        from otto.memory import record_run
+
+        record_run(
             project_dir,
             run_id=run_id,
             command="certify",
             certifier_mode=mode,
-            intent=intent,
             stories=story_results,
-            passed=passed,
-            duration_s=total_duration,
-            total_cost_usd=float(cost or 0),
-            certifier_cost_usd=float(cost or 0),
-            rounds=certify_rounds_count,
-            started_at=final_record.timing.get("started_at") if final_record is not None else None,
-            finished_at=final_record.timing.get("finished_at") if final_record is not None else None,
-            branch=final_record.git.get("branch") if final_record is not None else None,
-            worktree=final_record.git.get("worktree") if final_record is not None else None,
-            spec_path=str(config.get("_spec_path") or "").strip() or None,
+            cost=float(cost or 0),
         )
 
-    return report
+        if write_session_summary:
+            from otto.pipeline import _write_session_summary
+
+            breakdown_summary = {
+                "certify": {
+                    "duration_s": total_duration,
+                    "cost_usd": float(cost or 0.0),
+                    "rounds": certify_rounds_count,
+                }
+            }
+            _write_session_summary(
+                project_dir,
+                run_id,
+                verdict=outcome.value,
+                passed=passed,
+                cost=float(cost or 0),
+                duration=total_duration,
+                stories_passed=parsed.stories_passed,
+                stories_tested=parsed.stories_tested,
+                rounds=certify_rounds_count,
+                intent=intent,
+                command="certify",
+                breakdown=breakdown_summary,
+            )
+
+        final_record = None
+        if publisher is not None:
+            final_record = publisher.finalize(
+                status="done" if passed else "failed",
+                terminal_outcome="success" if passed else "failure",
+                updates={
+                    "metrics": {
+                        "cost_usd": float(cost or 0),
+                        "stories_passed": parsed.stories_passed,
+                        "stories_tested": parsed.stories_tested,
+                    },
+                    "last_event": "completed" if passed else "failed",
+                },
+            )
+        if (
+            write_history
+            and merge_context is None
+            and os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1"
+        ):
+            from otto.pipeline import _append_session_history
+
+            _append_session_history(
+                project_dir,
+                run_id=run_id,
+                command="certify",
+                certifier_mode=mode,
+                intent=intent,
+                stories=story_results,
+                passed=passed,
+                duration_s=total_duration,
+                total_cost_usd=float(cost or 0),
+                certifier_cost_usd=float(cost or 0),
+                rounds=certify_rounds_count,
+                started_at=final_record.timing.get("started_at") if final_record is not None else None,
+                finished_at=final_record.timing.get("finished_at") if final_record is not None else None,
+                branch=final_record.git.get("branch") if final_record is not None else None,
+                worktree=final_record.git.get("worktree") if final_record is not None else None,
+                spec_path=str(config.get("_spec_path") or "").strip() or None,
+            )
+
+        return report
+    finally:
+        if publisher is not None:
+            publisher.stop()
 
 
 def _generate_agentic_html_pow(

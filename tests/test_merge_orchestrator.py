@@ -22,6 +22,7 @@ from otto.merge import conflict_agent
 from otto.merge.orchestrator import (
     MergeOptions,
     MergeAlreadyRunning,
+    MergeRunResult,
     _run_post_merge_verification,
     _graduate_merged_task_sessions,
     merge_lock,
@@ -30,6 +31,7 @@ from otto.merge.orchestrator import (
 from otto.merge import git_ops
 from otto.merge.state import MergeState, find_latest_merge_id, load_state
 from otto.queue.schema import QueueTask, append_task
+from otto.runs.registry import load_live_record
 from tests._helpers import init_repo
 
 
@@ -745,3 +747,90 @@ def test_intent_md_union_merge_no_conflict(tmp_path: Path):
     assert "A's intent" in final
     assert "B's intent" in final
     assert "<<<<<<<" not in final
+
+
+def test_merge_preserves_interrupted_terminal_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("otto.runs.registry.garbage_collect_live_records", lambda project_dir: [])
+    monkeypatch.setattr("otto.merge.orchestrator._repair_merge_history", lambda project_dir: None)
+    monkeypatch.setattr("otto.config.agent_provider", lambda config: "claude")
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.current_branch", lambda project_dir: "main")
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.status_porcelain_entries", lambda project_dir: [])
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.merge_in_progress", lambda project_dir: False)
+    monkeypatch.setattr("otto.merge.orchestrator._resolve_branches", lambda *args, **kwargs: (["feature/a"], {}))
+    monkeypatch.setattr("otto.merge.orchestrator.new_merge_id", lambda: "merge-interrupted")
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.head_sha", lambda project_dir: "abc123")
+    monkeypatch.setattr("otto.merge.orchestrator._drain_merge_cancel_commands", lambda *args, **kwargs: False)
+
+    async def _fake_merge(**kwargs):
+        state = kwargs["state"]
+        state.status = "interrupted"
+        state.terminal_outcome = "interrupted"
+        state.finished_at = "2026-04-23T12:00:10Z"
+        return MergeRunResult(
+            success=False,
+            merge_id=kwargs["merge_id"],
+            state=state,
+            note="paused for resume",
+        )
+
+    monkeypatch.setattr("otto.merge.orchestrator._run_consolidated_agentic_merge", _fake_merge)
+
+    result = asyncio.run(
+        run_merge(
+            project_dir=tmp_path,
+            config={},
+            options=MergeOptions(target="main"),
+            explicit_ids_or_branches=["feature/a"],
+        )
+    )
+
+    record = load_live_record(tmp_path, "merge-interrupted")
+    assert result.state.status == "interrupted"
+    assert record.status == "interrupted"
+    assert record.terminal_outcome == "interrupted"
+
+
+def test_merge_stops_publisher_when_body_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakePublisher:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def __enter__(self):
+            return self
+
+        def stop(self) -> None:
+            self.stopped = True
+
+        def finalize(self, **kwargs):
+            raise AssertionError("finalize should not run")
+
+    publisher = _FakePublisher()
+
+    monkeypatch.setattr("otto.runs.registry.garbage_collect_live_records", lambda project_dir: [])
+    monkeypatch.setattr("otto.merge.orchestrator._repair_merge_history", lambda project_dir: None)
+    monkeypatch.setattr("otto.config.agent_provider", lambda config: "claude")
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.current_branch", lambda project_dir: "main")
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.status_porcelain_entries", lambda project_dir: [])
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.merge_in_progress", lambda project_dir: False)
+    monkeypatch.setattr("otto.merge.orchestrator._resolve_branches", lambda *args, **kwargs: (["feature/a"], {}))
+    monkeypatch.setattr("otto.merge.orchestrator.new_merge_id", lambda: "merge-err")
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.head_sha", lambda project_dir: "abc123")
+    monkeypatch.setattr("otto.merge.orchestrator._drain_merge_cancel_commands", lambda *args, **kwargs: False)
+    monkeypatch.setattr("otto.merge.orchestrator.publisher_for", lambda *args, **kwargs: publisher)
+
+    async def _boom(**kwargs):
+        raise RuntimeError("merge exploded")
+
+    monkeypatch.setattr("otto.merge.orchestrator._run_consolidated_agentic_merge", _boom)
+
+    with pytest.raises(RuntimeError, match="merge exploded"):
+        asyncio.run(
+            run_merge(
+                project_dir=tmp_path,
+                config={},
+                options=MergeOptions(target="main"),
+                explicit_ids_or_branches=["feature/a"],
+            )
+        )
+
+    assert publisher.stopped is True
