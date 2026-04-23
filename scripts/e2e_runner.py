@@ -537,7 +537,13 @@ def scenario_b13_explicit_branch_arg(results: list[Result]) -> None:
         finally:
             w.stop()
         # Use the branch name directly (no --all)
-        r = repo.otto("merge", "build/only-2026-04-20", "--no-certify")
+        branches = [
+            line.strip()
+            for line in repo.git("branch", "--format=%(refname:short)").stdout.splitlines()
+        ]
+        branch = next((b for b in branches if b.startswith("build/only-")), None)
+        assert branch, f"missing build/only branch in {branches!r}"
+        r = repo.otto("merge", branch, "--no-certify")
         out = (r.stdout or "") + (r.stderr or "")
         assert r.returncode == 0, f"explicit-branch merge failed: {out!r}"
         assert "merge complete" in out.lower(), f"missing complete: {out!r}"

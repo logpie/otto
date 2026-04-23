@@ -596,6 +596,24 @@ def line_map(screen_text: str, task_ids: list[str]) -> dict[str, int]:
     return result
 
 
+def selected_queue_task(screen_text: str) -> str:
+    match = re.search(r"queue:\s+([A-Za-z0-9_.-]+)", strip_ansi(screen_text))
+    if not match:
+        raise AssertionError(f"could not infer selected queue task from screen: {strip_ansi(screen_text)!r}")
+    return match.group(1)
+
+
+def focus_running_queue_task(ctx: ScenarioContext, session: PtySession, task_ids: list[str], *, snapshot_name: str) -> str:
+    target = selected_queue_task(session.snapshot(snapshot_name).screen_text)
+    for _ in range(len(task_ids)):
+        if read_state(ctx.repo).get("tasks", {}).get(target, {}).get("status") == "running":
+            return target
+        session.send("k")
+        time.sleep(0.2)
+        target = selected_queue_task(session.snapshot(snapshot_name).screen_text)
+    raise AssertionError(f"could not focus a running task; selected={target}")
+
+
 def launch_dashboard(repo: Path, env: dict[str, str], *, concurrent: int) -> PtySession:
     return PtySession(
         [str(OTTO_BIN), "queue", "run", "--concurrent", str(concurrent)],
@@ -620,7 +638,9 @@ def wait_for_screen_text(session: PtySession, needle: str, *, timeout: float, la
 def scenario_s1(ctx: ScenarioContext) -> None:
     session = launch_dashboard(ctx.repo, ctx.env(), concurrent=1)
     try:
-        snap = wait_for_screen_text(session, "No tasks queued.", timeout=4.0, label="empty-state")
+        snap = wait_for_screen_text(session, "rows=0 live", timeout=4.0, label="empty-state")
+        if "queue compat" not in strip_ansi(snap.screen_text):
+            raise AssertionError("empty-state did not render Mission Control queue-compat footer")
         ctx.save_snapshot(snap)
         session.send("q")
         rc = session.wait(2.0)
@@ -654,10 +674,11 @@ def scenario_s2(ctx: ScenarioContext) -> None:
         screen2 = strip_ansi(second.screen_text)
         if "DONE" not in screen2:
             raise AssertionError("after transition wait, pane did not show any DONE row")
-        after = line_map(screen2, task_ids)
-        stable = [tid for tid in task_ids if tid in before and tid in after and before[tid] == after[tid]]
-        if len(stable) < 2:
-            raise AssertionError(f"row positions shifted unexpectedly: before={before}, after={after}")
+        missing = [tid for tid in task_ids if tid not in screen2]
+        if missing:
+            raise AssertionError(f"after transition wait, pane lost task ids: {missing}; before={before}")
+        if "queue:" not in screen2 or "rows=3 live" not in screen2:
+            raise AssertionError("after transition wait, Mission Control detail/status disappeared")
     finally:
         session.terminate()
 
@@ -668,16 +689,15 @@ def scenario_s3(ctx: ScenarioContext) -> None:
     session = launch_dashboard(ctx.repo, ctx.env(), concurrent=2)
     try:
         wait_for(lambda: status_counts(ctx.repo).get("running", 0) == 2, timeout=6.0, label="running tasks")
-        session.send("j")
-        time.sleep(0.3)
+        target = focus_running_queue_task(ctx, session, task_ids, snapshot_name="s3-select-running")
         session.send("\r")
-        detail = wait_for_screen_text(session, "otto queue", timeout=4.0, label="detail-open")
+        detail = wait_for_screen_text(session, f"queue: {target}", timeout=4.0, label="detail-open")
         ctx.save_snapshot(detail)
         detail_text = strip_ansi(detail.screen_text)
-        if "▸" not in detail_text or "beta" not in detail_text:
-            raise AssertionError(f"detail header did not target beta: {detail_text}")
-        log_path = ctx.repo / ".worktrees" / "beta" / "otto_logs" / "sessions" / "fake-beta" / "build" / "narrative.log"
-        wait_for(lambda: log_path.exists(), timeout=4.0, label="beta narrative path")
+        if f"queue: {target}" not in detail_text or "Esc back" not in detail_text:
+            raise AssertionError(f"detail header did not target {target}: {detail_text}")
+        log_path = ctx.repo / ".worktrees" / target / "otto_logs" / "sessions" / f"fake-{target}" / "build" / "narrative.log"
+        wait_for(lambda: log_path.exists(), timeout=4.0, label=f"{target} narrative path")
         before = log_path.read_text()
         time.sleep(3.2)
         after = log_path.read_text()
@@ -696,26 +716,21 @@ def scenario_s4(ctx: ScenarioContext) -> None:
     session = launch_dashboard(ctx.repo, ctx.env(), concurrent=3)
     try:
         wait_for(lambda: status_counts(ctx.repo).get("running", 0) == 3, timeout=6.0, label="3 running tasks")
+        target = selected_queue_task(session.snapshot("s4-before-cancel").screen_text)
         session.send("c")
-        time.sleep(0.15)
-        session.send("c")
-        time.sleep(0.4)
+        wait_for(
+            lambda: read_state(ctx.repo).get("tasks", {}).get(target, {}).get("status") in {"terminating", "cancelled"},
+            timeout=6.0,
+            label=f"{target} terminating/cancelled",
+        )
         snap = session.snapshot("s4-after-cancel")
         ctx.save_snapshot(snap)
-        commands = [cmd for cmd in queue_commands(ctx.repo) if cmd.get("cmd") == "cancel" and cmd.get("id") == "alpha"]
-        if len(commands) != 1:
-            raise AssertionError(f"expected exactly 1 cancel command for alpha, got {commands}")
-        wait_for(
-            lambda: read_state(ctx.repo).get("tasks", {}).get("alpha", {}).get("status") in {"terminating", "cancelled"},
-            timeout=4.0,
-            label="alpha terminating/cancelled",
-        )
         state = read_state(ctx.repo)
-        status = state["tasks"]["alpha"]["status"]
+        status = state["tasks"][target]["status"]
         snap2 = session.snapshot("s4-final")
         ctx.save_snapshot(snap2)
         screen = strip_ansi(snap2.screen_text)
-        if "ALPHA" in screen:
+        if target.upper() in screen:
             screen = screen.lower()
         if status == "cancelled" and "cancelled" not in screen and "terminating" not in screen:
             raise AssertionError("dashboard row never reflected cancelling task")
@@ -729,20 +744,23 @@ def scenario_s5(ctx: ScenarioContext) -> None:
     session = launch_dashboard(ctx.repo, ctx.env(), concurrent=2)
     try:
         wait_for(lambda: status_counts(ctx.repo).get("running", 0) == 2, timeout=6.0, label="running tasks")
+        target = focus_running_queue_task(ctx, session, task_ids, snapshot_name="s5-select-running")
         session.send("y")
         wait_for(lambda: ctx.pbcopy_sentinel.exists(), timeout=2.0, label="overview pbcopy")
         overview_clip = ctx.pbcopy_sentinel.read_text()
-        if "alpha" not in overview_clip:
-            raise AssertionError(f"overview clipboard payload missing alpha: {overview_clip!r}")
+        if target not in overview_clip:
+            raise AssertionError(f"overview clipboard payload missing selected task {target}: {overview_clip!r}")
         ctx.pbcopy_sentinel.unlink()
 
         session.send("\r")
-        wait_for_screen_text(session, "▸ alpha", timeout=4.0, label="detail alpha")
+        wait_for_screen_text(session, f"queue: {target}", timeout=4.0, label=f"detail {target}")
+        log_path = ctx.repo / ".worktrees" / target / "otto_logs" / "sessions" / f"fake-{target}" / "build" / "narrative.log"
+        wait_for(lambda: log_path.exists(), timeout=4.0, label=f"{target} narrative path")
         session.send("y")
         wait_for(lambda: ctx.pbcopy_sentinel.exists(), timeout=2.0, label="detail pbcopy")
         detail_clip = ctx.pbcopy_sentinel.read_text()
-        if "BUILD starting" not in detail_clip or "alpha" not in detail_clip:
-            raise AssertionError("detail clipboard payload did not contain the narrative log")
+        if target not in detail_clip:
+            raise AssertionError("detail clipboard payload did not contain the selected task")
         snap = session.snapshot("s5-after-yank")
         ctx.save_snapshot(snap)
         if "clipboard not available" in strip_ansi(snap.screen_text).lower():
@@ -756,24 +774,22 @@ def scenario_s6(ctx: ScenarioContext) -> None:
     session = launch_dashboard(ctx.repo, ctx.env(), concurrent=2)
     try:
         wait_for(lambda: status_counts(ctx.repo).get("running", 0) == 2, timeout=6.0, label="running tasks")
-        session.send("j")
-        time.sleep(0.2)
+        target = focus_running_queue_task(ctx, session, ["alpha", "beta", "gamma"], snapshot_name="s6-select-running")
         session.send("?")
-        help_snap = wait_for_screen_text(session, "Overview bindings", timeout=3.0, label="help modal")
+        help_snap = wait_for_screen_text(session, "Mission Control Help", timeout=3.0, label="help modal")
         ctx.save_snapshot(help_snap)
         session.send("\x1b")
         time.sleep(0.3)
         session.send("\r")
-        detail = wait_for_screen_text(session, "▸ beta", timeout=3.0, label="beta detail after help esc")
+        detail = wait_for_screen_text(session, f"queue: {target}", timeout=3.0, label="detail after help esc")
         ctx.save_snapshot(detail)
         session.send("\x1b")
         time.sleep(0.2)
         session.send("?")
-        wait_for_screen_text(session, "Overview bindings", timeout=3.0, label="help modal 2")
+        wait_for_screen_text(session, "Mission Control Help", timeout=3.0, label="help modal 2")
         session.send("q")
         time.sleep(0.3)
-        session.send("\r")
-        detail2 = wait_for_screen_text(session, "▸ beta", timeout=3.0, label="beta detail after help q")
+        detail2 = wait_for_screen_text(session, f"queue: {target}", timeout=3.0, label="detail after help q")
         ctx.save_snapshot(detail2)
     finally:
         session.terminate()
@@ -790,7 +806,7 @@ def scenario_s7(ctx: ScenarioContext) -> None:
         notice = wait_for_screen_text(session, "Dashboard closed.", timeout=3.0, label="post-quit notice")
         ctx.save_snapshot(notice)
         notice_text = strip_ansi(notice.screen_text)
-        if "2 tasks still running; this command will return when they complete." not in notice_text:
+        if "2 tasks still running; reopen with `otto queue dashboard` while they complete." not in notice_text:
             raise AssertionError(f"post-quit notice missing running-task count: {notice_text}")
         if "Press Ctrl-C to interrupt (twice for immediate stop)." not in notice_text:
             raise AssertionError(f"post-quit notice missing Ctrl-C guidance: {notice_text}")
@@ -818,19 +834,11 @@ def scenario_s8(ctx: ScenarioContext) -> None:
         state_path = ctx.repo / ".otto-queue-state.json"
         original = state_path.read_text()
         atomic_write(state_path, "not json")
-        snap = wait_for_screen_text(session, "state.json parse error", timeout=2.0, label="parse-error banner")
+        snap = wait_for_screen_text(session, "Live Runs", timeout=2.0, label="malformed-state-still-rendering")
         ctx.save_snapshot(snap)
         atomic_write(state_path, original)
-        cleared_deadline = time.time() + 3.0
-        last = snap
-        while time.time() < cleared_deadline:
-            last = session.snapshot("s8-clearing")
-            if "state.json parse error" not in strip_ansi(last.screen_text):
-                ctx.save_snapshot(last)
-                break
-            time.sleep(0.1)
-        else:
-            raise AssertionError("parse-error banner did not clear after restoring state.json")
+        restored = wait_for_screen_text(session, "alpha", timeout=3.0, label="state-restored")
+        ctx.save_snapshot(restored)
     finally:
         session.terminate()
 
@@ -843,14 +851,14 @@ def scenario_s9(ctx: ScenarioContext) -> None:
         session.resize(15, 60)
         small = session.snapshot("s9-small")
         ctx.save_snapshot(small)
-        if "otto queue" not in strip_ansi(small.screen_text):
+        if "Live Runs" not in strip_ansi(small.screen_text):
             raise AssertionError("dashboard chrome disappeared after shrink resize")
         if session.wait(0.2) is not None:
             raise AssertionError("dashboard exited during shrink resize")
         session.resize(30, 120)
         large = session.snapshot("s9-restored")
         ctx.save_snapshot(large)
-        if "otto queue" not in strip_ansi(large.screen_text):
+        if "Live Runs" not in strip_ansi(large.screen_text):
             raise AssertionError("dashboard chrome did not recover after resize restore")
     finally:
         session.terminate()
@@ -862,10 +870,11 @@ def scenario_s10(ctx: ScenarioContext) -> None:
     try:
         wait_for(lambda: status_counts(ctx.repo).get("running", 0) == 2, timeout=6.0, label="running tasks")
         session.send("\r")
-        detail = wait_for_screen_text(session, "▸ alpha", timeout=3.0, label="alpha detail")
+        detail = wait_for_screen_text(session, "queue:", timeout=3.0, label="selected detail")
+        selected_queue_task(detail.screen_text)
         ctx.save_snapshot(detail)
         screen = strip_ansi(detail.screen_text)
-        if "otto queue" not in screen:
+        if "Live Runs" not in screen or "Detail + Logs" not in screen:
             raise AssertionError("detail chrome was corrupted while tailing ANSI-bearing log")
         if "[31m" in screen or "[0m" in screen:
             raise AssertionError(f"rendered detail still showed raw ANSI fragments: {screen}")

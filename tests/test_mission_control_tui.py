@@ -140,6 +140,68 @@ async def test_mission_control_focus_selection_logs_and_queue_compat_filter(tmp_
 
 
 @pytest.mark.asyncio
+async def test_mission_control_yank_copies_untruncated_metadata_and_detail_log(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    capture_path = tmp_path / "clipboard.txt"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    pbcopy = bindir / "pbcopy"
+    pbcopy.write_text(f"#!/usr/bin/env bash\nset -euo pipefail\ncat > {capture_path}\n")
+    pbcopy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH', '')}")
+
+    primary_log = paths.build_dir(repo, "queue-copy-run") / "narrative.log"
+    primary_log.parent.mkdir(parents=True, exist_ok=True)
+    primary_log.write_text("BUILD starting\nSTORY_RESULT: copied PASS\n")
+    queue_manifest = repo / "otto_logs" / "queue" / "copy-task" / "manifest.json"
+    queue_manifest.parent.mkdir(parents=True, exist_ok=True)
+    queue_manifest.write_text("{}\n")
+
+    record = make_run_record(
+        project_dir=repo,
+        run_id="queue-copy-run",
+        domain="queue",
+        run_type="queue",
+        command="queue build",
+        display_name="queue copy",
+        status="running",
+        cwd=repo,
+        identity={"queue_task_id": "copy-task"},
+        source={"argv": ["otto", "queue", "build", "copy"]},
+        git={"branch": "build/copy-task-2026-04-23"},
+        intent={"summary": "copy the full selected row"},
+        artifacts={
+            "primary_log_path": str(primary_log),
+            "manifest_path": str(queue_manifest),
+        },
+        adapter_key="queue.attempt",
+        last_event="copy row",
+    )
+    write_record(repo, record)
+
+    app = MissionControlApp(repo)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        payload = capture_path.read_text()
+        assert "copy-task" in payload
+        assert "build/copy-task-2026-04-23" in payload
+        assert str(queue_manifest) in payload
+        assert "/otto_logs/" in payload
+        assert "..." not in payload
+
+        capture_path.unlink()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+    assert "STORY_RESULT: copied PASS" in capture_path.read_text()
+
+
+@pytest.mark.asyncio
 async def test_mission_control_queue_compat_renders_legacy_rows(tmp_path: Path) -> None:
     repo = tmp_path
     append_task(
@@ -292,6 +354,21 @@ async def test_mission_control_help_modal_opens_and_closes(tmp_path: Path) -> No
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, HelpModal)
+
+
+@pytest.mark.asyncio
+async def test_mission_control_empty_state_names_entry_points(tmp_path: Path) -> None:
+    app = MissionControlApp(tmp_path, initial_filters=MissionControlFilters(type_filter="queue"), queue_compat=True)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        detail = str(app.query_one("#detail-meta", Static).content)
+        assert "No runs yet." in detail
+        assert "otto build" in detail
+        assert "otto improve bugs" in detail
+        assert "otto certify" in detail
+        assert "otto queue build" in detail
 
 
 @pytest.mark.asyncio

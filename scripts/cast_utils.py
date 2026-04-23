@@ -9,8 +9,9 @@ from typing import Callable, Iterator
 import pyte
 
 
-MOUSE_ENABLE_RE = re.compile(r"\x1b\[\?100\d+h")
-MOUSE_DISABLE_RE = re.compile(r"\x1b\[\?100\d+l")
+MOUSE_MODES_RE = r"(?:1000|1001|1002|1003|1005|1006|1015)"
+MOUSE_ENABLE_RE = re.compile(rf"\x1b\[\?{MOUSE_MODES_RE}h")
+MOUSE_DISABLE_RE = re.compile(rf"\x1b\[\?{MOUSE_MODES_RE}l")
 CURSOR_HIDE = "\x1b[?25l"
 CURSOR_SHOW = "\x1b[?25h"
 

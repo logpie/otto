@@ -19,6 +19,7 @@ assert SPEC is not None and SPEC.loader is not None
 OTTO_AS_USER = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = OTTO_AS_USER
 SPEC.loader.exec_module(OTTO_AS_USER)
+CAST_UTILS = __import__("cast_utils")
 
 
 def make_run_result(
@@ -254,6 +255,13 @@ def test_verify_b3_accepts_mission_control_zero_row_footer(tmp_path: Path) -> No
     verify = OTTO_AS_USER.verify_b3(repo, run_result)
 
     assert verify.passed is True
+
+
+def test_mouse_capture_helpers_ignore_focus_tracking() -> None:
+    raw = "\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[?1004l\x1b[?1000l\x1b[?1006l"
+
+    assert CAST_UTILS.mouse_enable_codes(raw) == ["\x1b[?1000h", "\x1b[?1006h"]
+    assert CAST_UTILS.mouse_disable_codes(raw) == ["\x1b[?1000l", "\x1b[?1006l"]
 
 
 def test_verify_b2_accepts_cancelled_terminal_history(tmp_path: Path) -> None:

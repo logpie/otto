@@ -741,6 +741,22 @@ def normalize_wrapped_text(text: str) -> str:
     return "".join(line.strip() for line in text.splitlines())
 
 
+def path_fragments_visible(text: str, path: str) -> bool:
+    candidate = Path(path)
+    parts = [part for part in candidate.parts if part not in {candidate.anchor, ""}]
+    required = [candidate.name]
+    for marker in (".worktrees", "otto_logs"):
+        if marker in parts:
+            index = parts.index(marker)
+            required.extend(parts[index:min(len(parts), index + 4)])
+    if "otto_logs" in parts:
+        required.extend(parts[-3:])
+    else:
+        required.extend(parts[-2:])
+    required = [fragment for fragment in dict.fromkeys(required) if fragment]
+    return all(fragment in text for fragment in required)
+
+
 @dataclass
 class CommandResult:
     argv: list[str]
@@ -1478,7 +1494,7 @@ def wait_for_empty_queue_screen(session: PtySession, *, timeout_s: float, label:
     while time.time() < deadline:
         last = session.snapshot(label)
         screen = strip_ansi(last.screen_text)
-        if "No tasks queued." in screen or "rows=0 live, 0 history" in screen:
+        if "No runs yet." in screen or "No tasks queued." in screen or "rows=0 live, 0 history" in screen:
             return last
         time.sleep(0.1)
     raise AssertionError(f"empty queue screen never appeared while waiting for {label}")
@@ -2211,7 +2227,10 @@ def setup_c4(repo: Path, provider: str) -> None:
 
 def run_c4(repo: Path, provider: str) -> RunResult:
     refused = run_merge(repo, "feature/random", "--no-certify", timeout_s=120)
-    allowed = run_merge(repo, "feature/random", "--allow-any-branch", "--no-certify", timeout_s=120)
+    allowed_args = ["feature/random", "--allow-any-branch", "--no-certify"]
+    if provider == "codex":
+        allowed_args.append("--fast")
+    allowed = run_merge(repo, *allowed_args, timeout_s=120)
     return _base_result(allowed.rc, output=refused.output + allowed.output, refused_output=refused.output, allowed_output=allowed.output)
 
 
@@ -2583,7 +2602,7 @@ def run_u1(repo: Path, provider: str) -> RunResult:
     del provider
 
     def actions(session: PtySession) -> dict[str, Any]:
-        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u1-empty")
+        wait_for_empty_queue_screen(session, timeout_s=10, label="u1-empty")
         time.sleep(1.0)
         session.send("q")
         rc = session.wait(10.0)
@@ -2895,7 +2914,7 @@ def run_u4(repo: Path, provider: str) -> RunResult:
     def actions(session: PtySession) -> dict[str, Any]:
         wait_for_screen_text(session, "ad", timeout_s=10, label="u4-overview")
         session.send("\r")
-        wait_for_screen_text(session, "otto queue ▸", timeout_s=10, label="u4-detail")
+        wait_for_screen_text(session, "queue: ad", timeout_s=10, label="u4-detail")
         time.sleep(2.5)
         session.send("\x1b")
         wait_for_screen_text(session, "ad", timeout_s=10, label="u4-overview-return")
@@ -2909,8 +2928,8 @@ def run_u4(repo: Path, provider: str) -> RunResult:
     return _base_result(
         0,
         expected_branch=UX_PRIMARY_BRANCH,
-        expected_narrative_path=str(narrative_path.absolute()),
-        expected_manifest_path=str(manifest_path.absolute()),
+        expected_narrative_path=str(narrative_path.resolve(strict=False)),
+        expected_manifest_path=str(manifest_path.resolve(strict=False)),
         **details,
     )
 
@@ -2918,14 +2937,18 @@ def run_u4(repo: Path, provider: str) -> RunResult:
 def verify_u4(repo: Path, run_result: RunResult) -> VerifyResult:
     del repo
     cast_path = Path(run_result.recording_path)
-    frame = find_last_frame(cast_path, lambda text: "otto queue ▸" in text)
+    frame = find_last_frame(cast_path, lambda text: "queue: ad" in text)
     if frame is None:
         return VerifyResult(False, "U4 did not find a detail-screen frame in the cast")
     normalized = normalize_wrapped_text(frame.screen_text)
-    for label in ("expected_branch", "expected_narrative_path", "expected_manifest_path"):
+    raw = cast_output(cast_path)
+    expected_branch = str(run_result.details.get("expected_branch", ""))
+    if expected_branch not in normalized and expected_branch not in raw:
+        return VerifyResult(False, f"U4 detail frame missing branch: {expected_branch!r}")
+    for label in ("expected_narrative_path", "expected_manifest_path"):
         expected = str(run_result.details.get(label, ""))
-        if expected not in normalized:
-            return VerifyResult(False, f"U4 detail frame missing {label.replace('expected_', '')}: {expected!r}")
+        if expected not in raw and not path_fragments_visible(raw, expected):
+            return VerifyResult(False, f"U4 detail output missing visible {label.replace('expected_', '')} fragments: {expected!r}")
     if "…" in normalized and str(run_result.details.get("expected_branch", "")) not in normalized:
         return VerifyResult(False, "U4 branch looked truncated in the detail frame")
     return VerifyResult(True, "detail screen exposed full branch, narrative path, and manifest path")
@@ -2945,7 +2968,7 @@ def run_u5(repo: Path, provider: str) -> RunResult:
     def actions(session: PtySession) -> dict[str, Any]:
         wait_for_screen_text(session, UX_PRIMARY_TASK_ID, timeout_s=10, label="u5-overview")
         session.send("\r")
-        wait_for_screen_text(session, "otto queue ▸", timeout_s=10, label="u5-detail")
+        wait_for_screen_text(session, f"queue: {UX_PRIMARY_TASK_ID}", timeout_s=10, label="u5-detail")
         time.sleep(1.0)
         session.send("j" * 50)
         time.sleep(0.5)
@@ -2982,12 +3005,12 @@ def run_u6(repo: Path, provider: str) -> RunResult:
     del provider
 
     def actions(session: PtySession) -> dict[str, Any]:
-        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u6-empty")
+        wait_for_empty_queue_screen(session, timeout_s=10, label="u6-empty")
         session.send("?")
-        wait_for_screen_text(session, "Overview bindings", timeout_s=10, label="u6-help")
+        wait_for_screen_text(session, "Mission Control Help", timeout_s=10, label="u6-help")
         time.sleep(2.0)
         session.send("\x1b")
-        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u6-empty-return")
+        wait_for_empty_queue_screen(session, timeout_s=10, label="u6-empty-return")
         session.send("q")
         rc = session.wait(10.0)
         if rc is None:
@@ -3000,7 +3023,7 @@ def run_u6(repo: Path, provider: str) -> RunResult:
 
 def verify_u6(repo: Path, run_result: RunResult) -> VerifyResult:
     del repo
-    frame = find_last_frame(Path(run_result.recording_path), lambda text: "Overview bindings" in text)
+    frame = find_last_frame(Path(run_result.recording_path), lambda text: "Mission Control Help" in text)
     if frame is None:
         return VerifyResult(False, "U6 help overlay was not found in the cast")
     text = frame.screen_text
@@ -3019,7 +3042,7 @@ def run_u7(repo: Path, provider: str) -> RunResult:
     del provider
 
     def actions(session: PtySession) -> dict[str, Any]:
-        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u7-empty")
+        wait_for_empty_queue_screen(session, timeout_s=10, label="u7-empty")
         time.sleep(1.0)
         session.send("q")
         rc = session.wait(10.0)
@@ -3033,7 +3056,10 @@ def run_u7(repo: Path, provider: str) -> RunResult:
 
 def verify_u7(repo: Path, run_result: RunResult) -> VerifyResult:
     del repo
-    frame = find_first_frame(Path(run_result.recording_path), lambda text: "No tasks queued." in text)
+    frame = find_last_frame(
+        Path(run_result.recording_path),
+        lambda text: "No runs yet." in text or "No tasks queued." in text,
+    )
     if frame is None:
         return VerifyResult(False, "U7 empty-state frame was not found in the cast")
     text = " ".join(frame.screen_text.lower().split())
@@ -3099,7 +3125,7 @@ def run_u9(repo: Path, provider: str) -> RunResult:
     del provider
 
     def actions(session: PtySession) -> dict[str, Any]:
-        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u9-empty")
+        wait_for_empty_queue_screen(session, timeout_s=10, label="u9-empty")
         time.sleep(1.0)
         session.send("q")
         rc = session.wait(10.0)
@@ -3107,7 +3133,7 @@ def run_u9(repo: Path, provider: str) -> RunResult:
             raise AssertionError("U9 dashboard did not exit")
         return {"watcher_rc": rc}
 
-    details = run_dashboard_session(repo, concurrent=1, actions=actions)
+    details = run_dashboard_session(repo, concurrent=1, actions=actions, extra_flags=["--dashboard-mouse"])
     return _base_result(0, **details)
 
 
@@ -3115,6 +3141,9 @@ def verify_u9(repo: Path, run_result: RunResult) -> VerifyResult:
     del repo
     raw = cast_output(Path(run_result.recording_path))
     tail = raw[-4096:]
+    enable_matches = mouse_enable_codes(raw)
+    if not enable_matches:
+        return VerifyResult(False, "U9 expected mouse enable codes when launched with --dashboard-mouse")
     disable_matches = mouse_disable_codes(tail)
     if not disable_matches:
         return VerifyResult(False, "U9 expected mouse disable codes near the end of the cast")

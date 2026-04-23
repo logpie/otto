@@ -1,5 +1,6 @@
 """Tests for provider-aware agent execution."""
 
+import asyncio
 
 import pytest
 
@@ -16,6 +17,7 @@ from otto.agent import (
     query,
     run_agent_query,
     run_agent_with_timeout,
+    _terminate_provider_process,
 )
 from otto.markers import parse_certifier_markers
 
@@ -58,6 +60,36 @@ class _FakeProcess:
 
     def kill(self) -> None:
         pass
+
+
+class _SlowWaitProcess:
+    def __init__(self):
+        self.returncode: int | None = None
+        self.signals: list[str] = []
+
+    async def wait(self) -> int:
+        await asyncio.sleep(60)
+        return self.returncode or 0
+
+    def terminate(self) -> None:
+        self.signals.append("term")
+
+    def kill(self) -> None:
+        self.signals.append("kill")
+        self.returncode = -9
+
+
+@pytest.mark.asyncio
+async def test_provider_process_cleanup_kills_again_when_wait_is_cancelled():
+    process = _SlowWaitProcess()
+
+    task = asyncio.create_task(_terminate_provider_process(process, grace_s=30.0))
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert process.signals == ["term", "kill"]
 
 
 @pytest.mark.asyncio

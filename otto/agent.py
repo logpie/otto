@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import signal
 import traceback
 from collections import deque
 from dataclasses import dataclass, field
@@ -1187,9 +1188,50 @@ async def _query_codex(
                 usage=None,
             )
     finally:
-        if process.returncode is None:
+        await _terminate_provider_process(process)
+
+
+async def _terminate_provider_process(process: Any, *, grace_s: float = 2.0) -> None:
+    if getattr(process, "returncode", None) is not None:
+        return
+
+    _signal_provider_process(process, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=grace_s)
+        return
+    except asyncio.TimeoutError:
+        _signal_provider_process(process, signal.SIGKILL)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=grace_s)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            return
+    except asyncio.CancelledError:
+        _signal_provider_process(process, signal.SIGKILL)
+        raise
+
+
+def _signal_provider_process(process: Any, sig: signal.Signals) -> None:
+    pid = getattr(process, "pid", None)
+    if isinstance(pid, int):
+        try:
+            os.killpg(pid, sig)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    try:
+        if sig == signal.SIGKILL:
             process.kill()
-            await process.wait()
+        else:
+            process.terminate()
+    except AttributeError:
+        try:
+            process.kill()
+        except Exception:
+            return
+    except ProcessLookupError:
+        return
 
 
 async def query(

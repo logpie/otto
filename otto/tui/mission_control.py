@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 from rich.cells import cell_len
@@ -308,6 +310,7 @@ class MissionControlApp(App[int]):
         Binding("m", "invoke_action('m')", "Merge", show=False),
         Binding("M", "merge_all", "Merge All", show=False),
         Binding("e", "invoke_action('e')", "Edit", show=False),
+        Binding("y", "yank", "Copy", show=False),
         Binding("?", "show_help", "Help", show=False),
         Binding("q", "quit", "Quit", show=False),
     ]
@@ -591,6 +594,17 @@ class MissionControlApp(App[int]):
             exit_on_error=False,
         )
 
+    def action_yank(self) -> None:
+        payload = self._clipboard_payload()
+        if not payload:
+            self.notify("nothing to copy", severity="warning")
+            return
+        ok, message = _copy_to_clipboard(payload)
+        self._action_banner = message
+        self._banner_severity = "success" if ok else "warning"
+        self._render_banner()
+        self.notify(message, severity="information" if ok else "warning")
+
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if not event.worker.name.startswith("mission-control-action:"):
             return
@@ -694,7 +708,10 @@ class MissionControlApp(App[int]):
         self._artifact_paths = []
 
         if detail is None:
-            meta.update("No selection.")
+            if self.state.live_runs.total_count == 0 and self.state.history_page.total_rows == 0:
+                meta.update(_empty_state_text())
+            else:
+                meta.update("No selection.")
             actions.update("")
             self.query_one("#detail-log", SearchableLog).clear()
             return
@@ -718,13 +735,27 @@ class MissionControlApp(App[int]):
             meta_text.append(f" ({detail.overlay.reason})")
         meta_text.append("\n")
         meta_text.append(f"type: {detail.record.run_type}\n")
+        branch = str(detail.record.git.get("branch") or "").strip()
+        worktree = str(detail.record.git.get("worktree") or "").strip()
+        if branch:
+            meta_text.append(f"branch: {branch}\n")
+        if worktree:
+            meta_text.append(f"worktree: {worktree}\n")
+        meta_text.append("log:\n")
+        for path_line in _detail_path_lines(detail.selected_log_path or "-"):
+            meta_text.append(f"{path_line}\n")
+        if detail.artifacts:
+            meta_text.append("\nartifacts:\n")
+            for artifact in detail.artifacts:
+                meta_text.append(f"{artifact.label}:\n")
+                for path_line in _detail_path_lines(artifact.path):
+                    meta_text.append(f"{path_line}\n")
         meta_text.append(f"started: {started}\n")
         meta_text.append(f"finished: {finished}\n")
         meta_text.append(f"duration: {duration if duration is not None else '-'}\n")
         meta_text.append(f"cost: {cost if cost is not None else '-'}\n")
         for line in detail.detail.summary_lines:
             meta_text.append(f"{line}\n")
-        meta_text.append(f"log: {detail.selected_log_path or '-'}")
         meta.update(meta_text)
         for artifact in detail.artifacts:
             artifacts.add_row(artifact.label, artifact.path, "yes" if artifact.exists else "no")
@@ -975,6 +1006,17 @@ class MissionControlApp(App[int]):
         task_id = detail.record.identity.get("queue_task_id")
         return [str(task_id)] if task_id else None
 
+    def _clipboard_payload(self) -> str | None:
+        detail = self.model.detail_view(self.state)
+        if detail is None:
+            return None
+        if self.state.focus == "detail" and detail.selected_log_path:
+            try:
+                return Path(detail.selected_log_path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        return _detail_clipboard_payload(detail)
+
     def _advance_log_search(self, delta: int) -> None:
         if self.state.focus != "detail":
             return
@@ -1081,6 +1123,7 @@ def _help_text() -> str:
             "/ or Ctrl-F opens substring search for the current log when Detail has focus.",
             "n jumps to the next log search match. N jumps to the previous match.",
             "Log search highlights every match and uses a stronger highlight for the current match.",
+            "y copies the selected row metadata from Live/History, or the current log from Detail.",
             "",
             "Actions",
             "c cancel, r resume, R retry, x cleanup, m merge selected queue item(s), M merge all done queue items, e open the selected artifact or log.",
@@ -1104,6 +1147,40 @@ def _help_text() -> str:
     )
 
 
+def _empty_state_text() -> str:
+    return "\n".join(
+        [
+            "No runs yet.",
+            "",
+            'Start with `otto build "..."` for new product work.',
+            'Use `otto improve bugs "..."` for existing defects.',
+            "Run `otto certify` to inspect an existing app.",
+            'Queue parallel work with `otto queue build <task-id> "..."`.',
+        ]
+    )
+
+
+def _detail_path_lines(path: str, *, max_width: int = 34) -> list[str]:
+    if len(path) <= max_width:
+        return [path]
+    parts = Path(path).parts
+    if not parts:
+        return [path]
+    lines: list[str] = []
+    current = parts[0]
+    for part in parts[1:]:
+        separator = "" if current.endswith("/") else "/"
+        candidate = f"{current}{separator}{part}" if current else part
+        if current and len(candidate) > max_width:
+            lines.append(current)
+            current = f"/{part}" if path.startswith("/") else part
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
 def _find_substring_spans(text: str, query: str) -> list[tuple[int, int]]:
     needle = query.casefold().strip()
     if not needle:
@@ -1117,3 +1194,71 @@ def _find_substring_spans(text: str, query: str) -> list[tuple[int, int]]:
             return spans
         spans.append((index, index + len(needle)))
         start = index + len(needle)
+
+
+def _copy_to_clipboard(text: str) -> tuple[bool, str]:
+    commands = (
+        ("pbcopy",),
+        ("wl-copy",),
+        ("xclip", "-selection", "clipboard"),
+    )
+    for command in commands:
+        executable = shutil.which(command[0])
+        if executable is None:
+            continue
+        try:
+            result = subprocess.run(
+                [executable, *command[1:]],
+                input=text,
+                text=True,
+                capture_output=True,
+                timeout=3.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"clipboard copy failed: {exc}"
+        if result.returncode == 0:
+            return True, "copied to clipboard"
+        stderr = (result.stderr or result.stdout or "").strip()
+        return False, f"clipboard copy failed: {stderr or command[0]}"
+    return False, "clipboard not available"
+
+
+def _detail_clipboard_payload(detail) -> str:
+    record = detail.record
+    lines = [
+        detail.detail.title,
+        f"run_id: {record.run_id}",
+        f"status: {record.status}",
+        f"type: {record.run_type}",
+        f"domain: {record.domain}",
+        f"command: {record.command}",
+        f"display_name: {record.display_name}",
+        f"project_dir: {record.project_dir}",
+        f"cwd: {record.cwd}",
+        f"last_event: {record.last_event}",
+    ]
+    if record.terminal_outcome:
+        lines.append(f"terminal_outcome: {record.terminal_outcome}")
+    for section_name, section in (
+        ("identity", record.identity),
+        ("source", record.source),
+        ("timing", record.timing),
+        ("git", record.git),
+        ("intent", record.intent),
+        ("metrics", record.metrics),
+    ):
+        if not isinstance(section, dict) or not section:
+            continue
+        for key in sorted(section):
+            value = section.get(key)
+            if value is not None and value != "":
+                lines.append(f"{section_name}.{key}: {value}")
+    for line in detail.detail.summary_lines:
+        lines.append(line)
+    for artifact in detail.artifacts:
+        lines.append(f"artifact.{artifact.label}: {artifact.path}")
+        lines.append(f"artifact.{artifact.label}.exists: {'yes' if artifact.exists else 'no'}")
+    if detail.selected_log_path:
+        lines.append(f"selected_log: {detail.selected_log_path}")
+    return "\n".join(lines).rstrip() + "\n"

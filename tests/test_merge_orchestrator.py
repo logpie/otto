@@ -828,6 +828,28 @@ def test_graduate_skips_collision_and_preserves_worktree(tmp_path: Path):
     subprocess.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repo, check=True)
 
 
+def test_graduate_removes_worktree_when_queue_session_is_missing(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    worktree = _create_worktree(repo, "task-3")
+    _seed_queue_task(repo, task_id="task-3", worktree=worktree)
+
+    run_id = "2026-04-21-030405-missing"
+    queue_manifest = repo / "otto_logs" / "queue" / "task-3" / "manifest.json"
+    queue_manifest.parent.mkdir(parents=True, exist_ok=True)
+    queue_manifest.write_text(json.dumps({
+        "run_id": run_id,
+        "queue_task_id": "task-3",
+        "checkpoint_path": None,
+        "proof_of_work_path": None,
+        "extra": {},
+        "mirror_of": str((worktree / "otto_logs" / "sessions" / run_id / "manifest.json").resolve()),
+    }, indent=2))
+
+    _graduate_merged_task_sessions(repo, {"build/task-3": "task-3"})
+
+    assert not worktree.exists()
+
+
 def test_merge_lock_refuses_second_holder(tmp_path: Path):
     repo = init_repo(tmp_path)
     script = """

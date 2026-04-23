@@ -769,6 +769,7 @@ def _graduate_merged_task_sessions(
         if not wt_path.exists():
             continue
         step = "preserve queue artifacts"
+        remove_worktree = False
         try:
             preserve_queue_session_artifacts(
                 project_dir,
@@ -779,28 +780,36 @@ def _graduate_merged_task_sessions(
                 refuse_existing_destination=True,
                 strict=True,
             )
-            step = "remove worktree"
-            r = subprocess.run(
-                ["git", "worktree", "remove", "--force", str(wt_path)],
-                cwd=project_dir, capture_output=True, text=True, check=False,
-            )
-            if r.returncode != 0:
-                logger.warning(
-                    "cleanup-on-success: git worktree remove failed for %s: %s",
-                    task_id, (r.stderr or "").strip(),
-                )
-                continue
-            graduated.append(task_id)
+            remove_worktree = True
         except FileExistsError as exc:
             logger.warning(
                 "cleanup-on-success: graduation skipped for %s; destination exists: %s",
                 task_id, exc,
             )
+        except (FileNotFoundError, ValueError) as exc:
+            logger.warning(
+                "cleanup-on-success: queue artifacts unavailable for %s; removing worktree anyway: %s",
+                task_id, exc,
+            )
+            remove_worktree = True
         except Exception as exc:
             logger.warning(
                 "cleanup-on-success: graduation failed for %s at step=%s: %s",
                 task_id, step, exc,
             )
+        if not remove_worktree:
+            continue
+        r = subprocess.run(
+            ["git", "worktree", "remove", "--force", str(wt_path)],
+            cwd=project_dir, capture_output=True, text=True, check=False,
+        )
+        if r.returncode != 0:
+            logger.warning(
+                "cleanup-on-success: git worktree remove failed for %s: %s",
+                task_id, (r.stderr or "").strip(),
+            )
+            continue
+        graduated.append(task_id)
     if graduated:
         logger.info("cleanup-on-success: graduated and removed worktrees for %s", graduated)
 
