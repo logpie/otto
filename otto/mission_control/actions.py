@@ -128,7 +128,7 @@ def execute_merge_all(
     post_result: Callable[[ActionResult], None] | None = None,
 ) -> ActionResult:
     return _launch_process(
-        _otto_cli_argv("merge", "--fast", "--all"),
+        _otto_cli_argv("merge", "--fast", "--no-certify", "--all"),
         cwd=Path(project_dir),
         description="merge all",
         post_result=post_result,
@@ -324,7 +324,7 @@ def _execute_merge_selected(
     if not task_ids:
         return _error_result("Merge failed", "queue task id missing")
     return _launch_process(
-        _otto_cli_argv("merge", "--fast", *task_ids),
+        _otto_cli_argv("merge", "--fast", "--no-certify", *task_ids),
         cwd=project_dir,
         description=f"merge {' '.join(task_ids)}",
         post_result=post_result,
@@ -445,6 +445,7 @@ def _launch_process(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
     except OSError as exc:
         return _error_result(f"{description} failed", str(exc))

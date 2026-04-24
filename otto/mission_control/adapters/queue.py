@@ -186,7 +186,7 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
                 preview=(
                     "cannot target queue merge"
                     if not task_id
-                    else f"would shell `otto merge --fast {task_id}`"
+                    else f"would shell `otto merge --fast --no-certify {task_id}`"
                 ),
             ),
             make_action(
@@ -194,7 +194,7 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
                 "merge all",
                 enabled=True,
                 reason=None,
-                preview="would shell `otto merge --fast --all`",
+                preview="would shell `otto merge --fast --no-certify --all`",
             ),
             make_action(
                 "o",

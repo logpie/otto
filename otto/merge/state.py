@@ -17,6 +17,7 @@ import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 from otto import paths
 
@@ -131,5 +132,5 @@ def find_latest_merge_id(project_dir: Path) -> str | None:
 
 
 def new_merge_id() -> str:
-    """Human-readable merge id: merge-<timestamp>-<pid>."""
-    return f"merge-{int(time.time())}-{os.getpid()}"
+    """Human-readable merge id with per-run entropy."""
+    return f"merge-{int(time.time())}-{os.getpid()}-{uuid4().hex[:8]}"

@@ -71,6 +71,16 @@ button:disabled {
   background: var(--accent-strong);
 }
 
+.danger-button {
+  border-color: var(--red);
+  background: var(--red);
+  color: white;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #991b1b;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
@@ -602,7 +612,8 @@ tbody tr.selected {
   z-index: 20;
 }
 
-.job-dialog {
+.job-dialog,
+.confirm-dialog {
   width: min(560px, calc(100vw - 28px));
   max-height: calc(100vh - 28px);
   overflow: auto;
@@ -615,16 +626,28 @@ tbody tr.selected {
   box-shadow: var(--shadow);
 }
 
+.confirm-dialog {
+  width: min(440px, calc(100vw - 28px));
+}
+
 .job-dialog header,
-.job-dialog footer {
+.job-dialog footer,
+.confirm-dialog header,
+.confirm-dialog footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 
-.job-dialog h2 {
+.job-dialog h2,
+.confirm-dialog h2 {
   font-size: 16px;
+}
+
+.confirm-dialog p {
+  margin: 0;
+  color: var(--muted);
 }
 
 .field-grid {

@@ -26,6 +26,7 @@ class _FakePopen:
         stdout,
         stderr,
         text,
+        start_new_session,
     ) -> None:
         type(self).calls.append(
             {
@@ -34,6 +35,7 @@ class _FakePopen:
                 "stdout": stdout,
                 "stderr": stderr,
                 "text": text,
+                "start_new_session": start_new_session,
             }
         )
         self.returncode = 0
@@ -55,8 +57,9 @@ class _FakeLongRunningPopen:
         stdout,
         stderr,
         text,
+        start_new_session,
     ) -> None:
-        del argv, cwd, stdout, stderr, text
+        del argv, cwd, stdout, stderr, text, start_new_session
         self.returncode = None
         self.pid = 4343
 
@@ -467,8 +470,10 @@ def test_merge_selected_and_all_shell_out(tmp_path: Path, monkeypatch) -> None:
     execute_action(record, "m", tmp_path, selected_queue_task_ids=["task-1", "task-2"])
     execute_merge_all(tmp_path)
 
-    assert _FakePopen.calls[0]["argv"][-4:] == ["merge", "--fast", "task-1", "task-2"]
-    assert _FakePopen.calls[1]["argv"][-3:] == ["merge", "--fast", "--all"]
+    assert _FakePopen.calls[0]["argv"][-5:] == ["merge", "--fast", "--no-certify", "task-1", "task-2"]
+    assert _FakePopen.calls[1]["argv"][-4:] == ["merge", "--fast", "--no-certify", "--all"]
+    assert _FakePopen.calls[0]["start_new_session"] is True
+    assert _FakePopen.calls[1]["start_new_session"] is True
 
 
 def test_otto_cli_argv_prefers_entrypoint_next_to_python(monkeypatch, tmp_path: Path) -> None:

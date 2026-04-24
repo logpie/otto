@@ -25,6 +25,14 @@ interface ToastState {
   severity: "information" | "warning" | "error";
 }
 
+interface ConfirmState {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  tone?: "primary" | "danger";
+  onConfirm: () => Promise<void>;
+}
+
 interface Filters {
   type: RunTypeFilter;
   outcome: OutcomeFilter;
@@ -52,6 +60,8 @@ export function App() {
   const [jobOpen, setJobOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [confirmPending, setConfirmPending] = useState(false);
   const logOffsetRef = useRef(0);
 
   const showToast = useCallback((message: string, severity: ToastState["severity"] = "information") => {
@@ -59,6 +69,23 @@ export function App() {
     setToast({message, severity});
     window.setTimeout(() => setToast(null), 3200);
   }, []);
+
+  const requestConfirm = useCallback((next: ConfirmState) => {
+    setConfirm(next);
+  }, []);
+
+  const executeConfirmedAction = useCallback(async () => {
+    if (!confirm || confirmPending) return;
+    setConfirmPending(true);
+    try {
+      await confirm.onConfirm();
+      setConfirm(null);
+    } catch (error) {
+      showToast(errorMessage(error), "error");
+    } finally {
+      setConfirmPending(false);
+    }
+  }, [confirm, confirmPending, showToast]);
 
   const refresh = useCallback(async () => {
     setRefreshStatus("refreshing");
@@ -128,18 +155,25 @@ export function App() {
       showToast(mergeBlockedText(data.landing), "error");
       return;
     }
-    if (!window.confirm(message)) return;
-    try {
-      const result = await api<ActionResult>(`/api/runs/${encodeURIComponent(runId)}/actions/${action}`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      showToast(result.message || `${action} requested`, result.ok ? "information" : "warning");
-      await refresh();
-    } catch (error) {
-      showToast(errorMessage(error), "error");
-    }
-  }, [data?.landing, refresh, showToast]);
+    requestConfirm({
+      title: action === "merge" ? "Merge task" : `${capitalize(action)} run`,
+      body: message,
+      confirmLabel: action === "merge" ? "Merge task" : capitalize(action),
+      tone: ["cancel", "cleanup"].includes(action) ? "danger" : "primary",
+      onConfirm: async () => {
+        try {
+          const result = await api<ActionResult>(`/api/runs/${encodeURIComponent(runId)}/actions/${action}`, {
+            method: "POST",
+            body: JSON.stringify({}),
+          });
+          showToast(result.message || `${action} requested`, result.ok ? "information" : "warning");
+          await refresh();
+        } catch (error) {
+          showToast(errorMessage(error), "error");
+        }
+      },
+    });
+  }, [data?.landing, refresh, requestConfirm, showToast]);
 
   const mergeReadyTasks = useCallback(async () => {
     const landing = data?.landing;
@@ -152,15 +186,47 @@ export function App() {
       showToast("No merge-ready tasks", "warning");
       return;
     }
-    if (!window.confirm(`Merge ${ready} ready task${ready === 1 ? "" : "s"} into ${landing?.target || "main"}?`)) return;
-    try {
-      const result = await api<ActionResult>("/api/actions/merge-all", {method: "POST", body: "{}"});
-      showToast(result.message || "merge all requested", result.ok ? "information" : "warning");
-      await refresh();
-    } catch (error) {
-      showToast(errorMessage(error), "error");
+    requestConfirm({
+      title: "Merge ready tasks",
+      body: `Merge ${ready} ready task${ready === 1 ? "" : "s"} into ${landing?.target || "main"}?`,
+      confirmLabel: ready === 1 ? "Merge 1 task" : `Merge ${ready} tasks`,
+      onConfirm: async () => {
+        try {
+          const result = await api<ActionResult>("/api/actions/merge-all", {method: "POST", body: "{}"});
+          showToast(result.message || "merge all requested", result.ok ? "information" : "warning");
+          await refresh();
+        } catch (error) {
+          showToast(errorMessage(error), "error");
+        }
+      },
+    });
+  }, [data?.landing, refresh, requestConfirm, showToast]);
+
+  const runWatcherAction = useCallback(async (action: "start" | "stop") => {
+    const execute = async () => {
+      try {
+        const result = await api<ActionResult | {message?: string}>(`/api/watcher/${action}`, {
+          method: "POST",
+          body: action === "start" ? JSON.stringify({concurrent: 2}) : "{}",
+        });
+        showToast(result.message || `watcher ${action} requested`);
+        await refresh();
+      } catch (error) {
+        showToast(errorMessage(error), "error");
+      }
+    };
+    if (action === "stop") {
+      requestConfirm({
+        title: "Stop watcher",
+        body: "Stop the queue watcher? Running tasks will be interrupted.",
+        confirmLabel: "Stop watcher",
+        tone: "danger",
+        onConfirm: execute,
+      });
+      return;
     }
-  }, [data?.landing, refresh, showToast]);
+    await execute();
+  }, [refresh, requestConfirm, showToast]);
 
   const loadArtifact = useCallback(async (index: number) => {
     if (!selectedRunId) return;
@@ -191,8 +257,8 @@ export function App() {
         </div>
         <ProjectMeta project={project} watcher={watcher} active={active} />
         <button className="primary" type="button" onClick={() => setJobOpen(true)}>New job</button>
-        <button type="button" disabled={Boolean(watcher?.alive)} onClick={() => void watcherAction("start", showToast, refresh)}>Start watcher</button>
-        <button type="button" disabled={!watcher?.alive} onClick={() => void watcherAction("stop", showToast, refresh)}>Stop watcher</button>
+        <button type="button" disabled={Boolean(watcher?.alive)} onClick={() => void runWatcherAction("start")}>Start watcher</button>
+        <button type="button" disabled={!watcher?.alive} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
         <button type="button" disabled={!canMerge(landing)} title={mergeButtonTitle(landing)} onClick={() => void mergeReadyTasks()}>
           {landing?.counts.ready ? `Merge ${landing.counts.ready} ready` : "Merge ready"}
         </button>
@@ -245,6 +311,16 @@ export function App() {
             await refresh();
           }}
           onError={(message) => showToast(message, "error")}
+        />
+      )}
+      {confirm && (
+        <ConfirmDialog
+          confirm={confirm}
+          pending={confirmPending}
+          onCancel={() => {
+            if (!confirmPending) setConfirm(null);
+          }}
+          onConfirm={() => void executeConfirmedAction()}
         />
       )}
       {toast && <div id="toast" className={`visible toast-${toast.severity}`} role="status" aria-live="polite">{toast.message}</div>}
@@ -773,18 +849,30 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
   );
 }
 
-async function watcherAction(action: "start" | "stop", showToast: (message: string, severity?: ToastState["severity"]) => void, refresh: () => Promise<void>) {
-  if (action === "stop" && !window.confirm("Stop the queue watcher? Running tasks will be interrupted.")) return;
-  try {
-    const result = await api<ActionResult | {message?: string}>(`/api/watcher/${action}`, {
-      method: "POST",
-      body: action === "start" ? JSON.stringify({concurrent: 2}) : "{}",
-    });
-    showToast(result.message || `watcher ${action} requested`);
-    await refresh();
-  } catch (error) {
-    showToast(errorMessage(error), "error");
-  }
+function ConfirmDialog({confirm, pending, onCancel, onConfirm}: {
+  confirm: ConfirmState;
+  pending: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const confirmClass = confirm.tone === "danger" ? "danger-button" : "primary";
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmHeading">
+        <header>
+          <h2 id="confirmHeading">{confirm.title}</h2>
+          <button type="button" aria-label="Close" disabled={pending} onClick={onCancel}>x</button>
+        </header>
+        <p>{confirm.body}</p>
+        <footer>
+          <button type="button" disabled={pending} onClick={onCancel}>Cancel</button>
+          <button className={confirmClass} type="button" disabled={pending} onClick={onConfirm}>
+            {pending ? "Working" : confirm.confirmLabel}
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
 }
 
 function visibleRunIds(data: StateResponse): Set<string> {
@@ -813,7 +901,7 @@ function workflowHealth(data: StateResponse | null): {
   watcherLabel: string;
   watcherTone: "neutral" | "success" | "warning";
 } {
-  const active = data?.live.active_count || 0;
+  const active = activeCount(data?.watcher);
   const failedHistory = (data?.history.items || []).filter((item) => ["failed", "cancelled", "interrupted"].includes(item.status)).length;
   const staleLive = (data?.live.items || []).filter((item) => item.display_status === "stale").length;
   const needsAttention = failedHistory + staleLive;
@@ -880,6 +968,10 @@ function shortText(value: string, maxLength: number): string {
   const text = value.replace(/\s+/g, " ").trim();
   if (text.length <= maxLength) return text;
   return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function capitalize(value: string): string {
+  return value ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : value;
 }
 
 function errorMessage(error: unknown): string {

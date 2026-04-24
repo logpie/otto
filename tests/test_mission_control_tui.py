@@ -21,8 +21,8 @@ pytestmark = pytest.mark.tui
 class _EditorPopen:
     calls: list[list[str]] = []
 
-    def __init__(self, argv, *, cwd, stdout, stderr, text) -> None:
-        del cwd, stdout, stderr, text
+    def __init__(self, argv, *, cwd, stdout, stderr, text, start_new_session) -> None:
+        del cwd, stdout, stderr, text, start_new_session
         type(self).calls.append(list(argv))
         self.returncode = 0
         self.pid = 5150

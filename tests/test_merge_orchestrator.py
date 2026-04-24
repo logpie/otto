@@ -32,7 +32,7 @@ from otto.merge.orchestrator import (
 )
 from otto.merge import git_ops
 from otto.merge.state import MergeState, find_latest_merge_id, load_state
-from otto.queue.schema import QueueTask, append_task
+from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
 from otto.runs.history import append_history_snapshot, read_history_rows
 from otto.runs.registry import load_live_record
 from tests._helpers import init_repo
@@ -274,6 +274,26 @@ def test_codex_provider_allowed_in_fast_mode(tmp_path: Path):
     assert [o.status for o in result.state.outcomes] == ["merged", "agent_giveup"]
     assert git_ops.merge_in_progress(repo)
     git_ops.merge_abort(repo)
+
+
+def test_fast_mode_clean_merge_skips_certification(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    _make_branch(repo, "feat-a", "a.txt", "A\n")
+
+    async def fail_if_certifier_runs(*args, **kwargs):
+        raise AssertionError("fast merge must not run post-merge certification")
+
+    monkeypatch.setattr(orchestrator_module, "_run_post_merge_verification", fail_if_certifier_runs)
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_codex_provider(),
+        options=MergeOptions(target="main", fast=True, allow_any_branch=True),
+        explicit_ids_or_branches=["feat-a"],
+    ))
+
+    assert result.success is True
+    assert "cert skipped per --fast" in result.note
+    assert (repo / "a.txt").read_text() == "A\n"
 
 
 def test_conflict_agent_cleans_new_untracked_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -670,6 +690,71 @@ def test_find_latest_merge_id(tmp_path: Path):
     assert result1.success
     latest = find_latest_merge_id(repo)
     assert latest == result1.merge_id
+
+
+def test_merge_all_skips_queue_tasks_already_merged_by_prior_run(tmp_path: Path):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    _make_branch(repo, "feat-a", "a.txt", "A\n")
+    _make_branch(repo, "feat-b", "b.txt", "B\n")
+    append_task(
+        repo,
+        QueueTask(
+            id="task-a",
+            command_argv=["build", "task-a"],
+            added_at="2026-04-23T00:00:00Z",
+            branch="feat-a",
+            worktree=".worktrees/task-a",
+        ),
+    )
+    append_task(
+        repo,
+        QueueTask(
+            id="task-b",
+            command_argv=["build", "task-b"],
+            added_at="2026-04-23T00:00:00Z",
+            branch="feat-b",
+            worktree=".worktrees/task-b",
+        ),
+    )
+    subprocess.run(["git", "add", ".otto-queue.yml"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed queue"], cwd=repo, check=True)
+    write_queue_state(
+        repo,
+        {
+            "watcher": None,
+            "tasks": {
+                "task-a": {"status": "done"},
+                "task-b": {"status": "done"},
+            },
+        },
+    )
+
+    first = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main", no_certify=True),
+        explicit_ids_or_branches=["task-a"],
+    ))
+    assert first.success, first.note
+
+    second = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main", no_certify=True),
+        all_done_queue_tasks=True,
+    ))
+
+    assert second.success, second.note
+    assert second.state.branches_in_order == ["feat-b"]
+    assert [outcome.branch for outcome in second.state.outcomes] == ["feat-b"]
+
+    with pytest.raises(ValueError, match="no unmerged done branches to merge"):
+        asyncio.run(run_merge(
+            project_dir=repo,
+            config=_config_no_bookkeeping(),
+            options=MergeOptions(target="main", no_certify=True),
+            all_done_queue_tasks=True,
+        ))
 
 
 # ---------- session graduation + merge lock ----------

@@ -435,7 +435,7 @@ def test_web_merge_action_uses_fast_merge_and_reports_immediate_failure(tmp_path
     assert response.status_code == 200
     assert response.json()["ok"] is False
     assert "merge failed" in response.json()["message"]
-    assert calls[0][-3:] == ["merge", "--fast", "hello-web"]
+    assert calls[0][-4:] == ["merge", "--fast", "--no-certify", "hello-web"]
 
 
 def test_web_state_includes_watcher_status(tmp_path: Path) -> None:

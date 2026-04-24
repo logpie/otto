@@ -148,6 +148,7 @@ def _resolve_branches(
     """
     branches: list[str] = []
     lookup: dict[str, str] = {}
+    already_merged_done: list[tuple[str, str]] = []
 
     if explicit_ids_or_branches:
         # Either queue task ids or raw branch names
@@ -186,8 +187,16 @@ def _resolve_branches(
             tid for tid, ts in state.get("tasks", {}).items()
             if ts.get("status") == "done"
         }
+        already_merged = _previously_merged_branches(project_dir)
         for t in tasks:
-            if t.id in done_ids and t.branch and t.branch not in branches:
+            if t.id in done_ids and t.branch and t.branch in already_merged:
+                already_merged_done.append((t.id, t.branch))
+                continue
+            if (
+                t.id in done_ids
+                and t.branch
+                and t.branch not in branches
+            ):
                 branches.append(t.branch)
                 lookup[t.branch] = t.id
 
@@ -196,6 +205,16 @@ def _resolve_branches(
         # with commits, list them in the error so the user can salvage via
         # explicit-branch merge instead of seeing a generic "no branches".
         if all_done_queue_tasks:
+            if already_merged_done:
+                preview = ", ".join(
+                    f"{task_id} ({branch})" for task_id, branch in already_merged_done[:5]
+                )
+                if len(already_merged_done) > 5:
+                    preview += f", ... (+{len(already_merged_done) - 5} more)"
+                raise ValueError(
+                    "no unmerged done branches to merge; already merged: "
+                    f"{preview}"
+                )
             non_done_with_branch = [
                 (tid, ts.get("status"), t.branch)
                 for tid, ts in state.get("tasks", {}).items()
@@ -219,6 +238,19 @@ def _resolve_branches(
             "task ids or branch names)"
         )
     return (branches, lookup)
+
+
+def _previously_merged_branches(project_dir: Path) -> set[str]:
+    merged: set[str] = set()
+    for state_path in sorted(paths.merge_dir(project_dir).glob("*/state.json")):
+        try:
+            state = load_state(project_dir, state_path.parent.name)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        for outcome in state.outcomes:
+            if outcome.status in {"merged", "conflict_resolved"}:
+                merged.add(outcome.branch)
+    return merged
 
 
 def _looks_like_atomic_mode_branch(branch: str) -> bool:
@@ -1072,13 +1104,15 @@ async def _run_consolidated_agentic_merge(
                 merge_id=merge_id,
                 note="merge cancelled after clean merge phase",
             )
-        # Continue to post-merge certification if not --no-certify
-        if options.no_certify:
+        # --fast is documented as pure git/no LLM, so it must not fall
+        # through into post-merge certification.
+        if options.fast or options.no_certify:
             if options.cleanup_on_success:
                 _graduate_merged_task_sessions(project_dir, queue_lookup)
+            reason = "--fast" if options.fast else "--no-certify"
             return MergeRunResult(
                 success=True, merge_id=merge_id, state=state,
-                note="all clean merges, cert skipped per --no-certify",
+                note=f"all clean merges, cert skipped per {reason}",
             )
         # Run cert phase
         result = await _run_post_merge_verification(
@@ -1279,10 +1313,12 @@ async def _run_consolidated_agentic_merge(
     state.paused_branch = None
     write_state(project_dir, state)
 
-    # Phase 4: post-merge certification (unless --no-certify)
-    if options.no_certify:
+    # Phase 4: post-merge certification (unless disabled). --fast cannot
+    # reach conflict-agent resolution, but keep this guard defensive.
+    if options.fast or options.no_certify:
         if options.cleanup_on_success:
             _graduate_merged_task_sessions(project_dir, queue_lookup)
+        reason = "--fast" if options.fast else "--no-certify"
         return MergeRunResult(
             success=True, merge_id=merge_id, state=state,
             source_pow_paths=_resolve_source_pow_paths(
@@ -1291,7 +1327,7 @@ async def _run_consolidated_agentic_merge(
                 queue_lookup=queue_lookup,
             ),
             note=(
-                "cert skipped per --no-certify"
+                f"cert skipped per {reason}"
                 + (
                     f"; secondary edits: {', '.join(sorted(attempt.edited_secondary_files))}"
                     if attempt.edited_secondary_files

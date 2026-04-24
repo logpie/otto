@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from otto.merge.state import MERGE_STATE_SCHEMA_VERSION, load_state
+from otto.merge.state import MERGE_STATE_SCHEMA_VERSION, load_state, new_merge_id
 
 
 def test_load_state_drops_unknown_top_level_keys(tmp_path: Path):
@@ -30,3 +30,9 @@ def test_load_state_drops_unknown_top_level_keys(tmp_path: Path):
     assert loaded.target == "main"
     assert len(loaded.outcomes) == 1
     assert loaded.outcomes[0].branch == "feat-a"
+
+
+def test_new_merge_id_is_unique_within_one_process_tick() -> None:
+    ids = {new_merge_id() for _ in range(1000)}
+
+    assert len(ids) == 1000
