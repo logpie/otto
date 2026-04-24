@@ -149,6 +149,19 @@ class TestLoadConfig:
         assert "Invalid queue.concurrent" in caplog.text
         assert "Invalid queue.bookkeeping_files" in caplog.text
 
+    @pytest.mark.parametrize("bad_concurrent", [0, -1])
+    def test_warns_and_falls_back_for_non_positive_queue_concurrency(
+        self, tmp_bare_git_repo, caplog, bad_concurrent: int
+    ):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"queue": {"concurrent": bad_concurrent}}))
+
+        with caplog.at_level("WARNING", logger="otto.config"):
+            cfg = load_config(config_path)
+
+        assert cfg["queue"]["concurrent"] == DEFAULT_CONFIG["queue"]["concurrent"]
+        assert "Invalid queue.concurrent" in caplog.text
+
     def test_load_config_does_not_mutate_default_queue(self, tmp_bare_git_repo):
         """Loading + mutating a config must not leak into DEFAULT_CONFIG."""
         cfg = load_config(tmp_bare_git_repo / "otto.yaml")

@@ -30,10 +30,6 @@ from otto.config import checkpoint_fingerprint
 
 logger = logging.getLogger("otto.checkpoint")
 
-# Legacy top-level checkpoint path. Still READ (for upgrade safety). Never
-# written by new code.
-LEGACY_CHECKPOINT_FILE = "otto_logs/checkpoint.json"
-
 POST_INITIAL_BUILD_PHASES = frozenset({"certify", "fix", "round_complete"})
 # Phases that belong to the new spec-gate pre-build flow. Treated specially
 # for --force / --resume semantics: clearing or overwriting them without

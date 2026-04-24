@@ -368,7 +368,7 @@ Concretely:
 - each live record is owned by exactly one writer process
 - live record updates use tempfile + `os.replace(...)`
 - command logs use append + `flock(LOCK_EX)` + `fsync`
-- history appends use a dedicated durability primitive, not `append_text_log(...)`
+- history appends use a dedicated durability primitive, not best-effort log writes
 - readers never take write locks
 This is enough for a daemonless v1.
 ### GC policy
@@ -684,7 +684,7 @@ Recommended `dedupe_key`:
 - future non-terminal history events: `<history_kind>:<run_id>:<event_seq>`
 
 This primitive must be strict by default. History is no longer best-effort observability;
-it is part of the correctness path. `append_text_log(...)` remains appropriate for logs,
+it is part of the correctness path. Log helpers remain appropriate for diagnostic logs,
 not for cross-session history.
 ### Writer rules
 One writer per run should append exactly one terminal snapshot on terminalization:

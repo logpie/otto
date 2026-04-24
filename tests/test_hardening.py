@@ -15,6 +15,7 @@ import pytest
 
 from otto.pipeline import build_agentic_v3, BuildResult
 from otto.testing import _subprocess_env
+from tests._helpers import write_test_pow_report
 from tests.conftest import make_mock_query as _make_mock_query
 from tests.test_spec import MINIMAL_VALID
 
@@ -1609,12 +1610,10 @@ class TestSpecTimeoutTolerance:
 
 class TestProofOfWorkRendering:
     def test_html_renders_explicit_absence_notes_for_visual_evidence_and_diagnosis(self, tmp_path):
-        from otto.certifier import _generate_agentic_html_pow
-
         evidence_dir = tmp_path / "evidence"
         evidence_dir.mkdir()
 
-        _generate_agentic_html_pow(
+        write_test_pow_report(
             tmp_path,
             [{
                 "story_id": "smoke",
@@ -1754,9 +1753,7 @@ class TestProofOfWorkRendering:
         assert "Did not resize the window" in html
 
     def test_html_surfaces_methodology_caveat_for_ui_story(self, tmp_path):
-        from otto.certifier import _generate_agentic_html_pow
-
-        _generate_agentic_html_pow(
+        write_test_pow_report(
             tmp_path,
             [{
                 "story_id": "add-card",
@@ -1780,9 +1777,7 @@ class TestProofOfWorkRendering:
         assert "UI event handlers were not verified" in html
 
     def test_html_avoids_inline_onclick_for_evidence(self, tmp_path):
-        from otto.certifier import _generate_agentic_html_pow
-
-        _generate_agentic_html_pow(
+        write_test_pow_report(
             tmp_path,
             [{
                 "story_id": "story'quoted",

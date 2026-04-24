@@ -337,6 +337,8 @@ def publisher_for(
 ) -> "RunPublisher":
     from otto.history import normalize_command_label
 
+    from otto.queue.runtime import is_queue_runner_child
+
     command_label = normalize_command_label(command)
     record = make_run_record(
         project_dir=project_dir,
@@ -354,7 +356,7 @@ def publisher_for(
             **dict(identity or {}),
         },
         source={
-            "invoked_via": "queue" if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1" else "cli",
+            "invoked_via": "queue" if is_queue_runner_child() else "cli",
             "argv": list(sys.argv[1:]),
             "resumable": run_type != "certify" and domain != "merge",
             **dict(source or {}),

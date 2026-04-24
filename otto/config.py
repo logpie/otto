@@ -705,7 +705,7 @@ def _normalize_queue_overrides(
 def _queue_value_is_valid(key: str, value: Any) -> bool:
     """Return True when a known queue key has the expected type."""
     if key == "concurrent":
-        return isinstance(value, int) and not isinstance(value, bool)
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 1
     if key == "worktree_dir":
         return isinstance(value, str)
     if key == "on_watcher_restart":
@@ -1069,8 +1069,9 @@ def create_config(project_dir: Path) -> Path:
     exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude_path.read_text() if exclude_path.exists() else ""
-    entries = ["otto_logs/", "otto.lock", ".otto-queue.yml", ".otto-queue-state.json",
-               ".otto-queue-commands.jsonl", ".otto-queue.lock", ".worktrees/"]
+    from otto.setup_gitignore import OTTO_PATTERNS
+
+    entries = [*OTTO_PATTERNS, "otto.lock"]
     to_add = [e for e in entries if e not in existing]
     if to_add:
         with open(exclude_path, "a") as f:

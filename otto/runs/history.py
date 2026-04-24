@@ -151,7 +151,7 @@ def load_project_history_rows(project_dir: Path, *, limit_hint: int | None = Non
     """Merge v2, legacy, and archived history rows into one deduped timeline."""
     sources = [
         paths.history_jsonl(project_dir),
-        paths.logs_dir(project_dir) / paths.LEGACY_RUN_HISTORY,
+        paths.legacy_run_history_jsonl(project_dir),
         *(archive / paths.LEGACY_RUN_HISTORY for archive in paths.archived_pre_restructure_dirs(project_dir)),
     ]
     if limit_hint is None or limit_hint <= 0:

@@ -16,6 +16,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from otto import paths
+
 logger = logging.getLogger("otto.merge.stories")
 
 
@@ -77,14 +79,14 @@ def find_manifest_for_branch(
     # Queue mode
     task_id = queue_task_lookup.get(branch)
     if task_id:
-        p = project_dir / "otto_logs" / "queue" / task_id / "manifest.json"
+        p = paths.queue_manifest_path(project_dir, task_id)
         if p.exists():
             try:
                 return json.loads(p.read_text())
             except json.JSONDecodeError:
                 pass
     # Atomic mode (new per-session layout): scan otto_logs/sessions/*/manifest.json
-    sessions = project_dir / "otto_logs" / "sessions"
+    sessions = paths.sessions_root(project_dir)
     if sessions.exists():
         for run_dir in sessions.iterdir():
             if not run_dir.is_dir():
@@ -99,8 +101,7 @@ def find_manifest_for_branch(
             if m.get("branch") == branch:
                 return m
     # Legacy atomic mode: scan otto_logs/builds/*/manifest.json + certifier/*
-    for legacy in (project_dir / "otto_logs" / "builds",
-                   project_dir / "otto_logs" / "certifier"):
+    for legacy in (paths.legacy_builds_dir(project_dir), paths.legacy_certifier_dir(project_dir)):
         if not legacy.exists():
             continue
         for run_dir in legacy.iterdir():

@@ -25,7 +25,7 @@ def _rounds_dir(project_dir: Path, session_id: str | None) -> Path:
     top-level otto_logs/rounds/ if session_id is not provided (legacy callers)."""
     if session_id:
         return paths.improve_dir(project_dir, session_id) / "rounds"
-    return project_dir / "otto_logs" / "rounds"
+    return paths.legacy_rounds_dir(project_dir)
 
 
 def _current_state_path(project_dir: Path, session_id: str | None) -> Path:

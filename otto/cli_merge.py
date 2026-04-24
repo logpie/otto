@@ -19,6 +19,7 @@ from pathlib import Path
 
 import click
 
+from otto import paths
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
 
@@ -32,7 +33,7 @@ def _install_merge_logging(project_dir: Path) -> None:
 
     Idempotent: removes any prior `_otto_merge_handler` we added.
     """
-    log_dir = project_dir / "otto_logs" / "merge"
+    log_dir = paths.merge_dir(project_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     parent = logging.getLogger("otto.merge")
     parent.setLevel(logging.INFO)
@@ -74,8 +75,6 @@ def register_merge_command(main: click.Group) -> None:
                   help="Verify the full merged story union; don't allow per-story skips")
     @click.option("--fast", is_flag=True,
                   help="Pure git merge; bail on first conflict (no LLM)")
-    @click.option("--resume", is_flag=True,
-                  help="Deferred; reserved for future merge resume support")
     @click.option("--cleanup-on-success", is_flag=True,
                   help="Remove worktrees of merged tasks on successful merge")
     @click.option("--allow-any-branch", is_flag=True,
@@ -87,7 +86,6 @@ def register_merge_command(main: click.Group) -> None:
         no_certify: bool,
         full_verify: bool,
         fast: bool,
-        resume: bool,
         cleanup_on_success: bool,
         allow_any_branch: bool,
     ) -> None:
@@ -128,14 +126,6 @@ def register_merge_command(main: click.Group) -> None:
             first_touch_bookkeeping(project_dir, config)
         except Exception:
             pass  # non-fatal; downstream precondition checks will surface a clearer error
-
-        if resume:
-            error_console.print(
-                "[yellow]--resume support deferred to a follow-up.[/yellow]\n"
-                "  Workaround: complete your conflict resolution and `git merge --continue`,\n"
-                "  then run a fresh `otto merge` for any remaining branches."
-            )
-            sys.exit(2)
 
         target_branch = target or str(config.get("default_branch", "main"))
         opts = MergeOptions(

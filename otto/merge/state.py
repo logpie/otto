@@ -6,9 +6,7 @@
 - per-branch outcome
 - optional manual-follow-up hints if the consolidated resolver fails
 
-`otto merge --resume` is still deferred, so the file is currently for
-reporting, debugging, and post-mortem inspection rather than active
-continuation.
+The file is used for reporting, debugging, and post-mortem inspection.
 """
 
 from __future__ import annotations
@@ -69,7 +67,6 @@ class MergeState:
     # Manual follow-up hints if the merge stops after a consolidated failure:
     paused_at_index: int | None = None        # index into branches_in_order
     paused_branch: str | None = None
-    paused_branch_head: str | None = None     # reserved for future resume support
     paused_stage: str | None = None           # currently only "manual_fix_required"
     # Final verification:
     cert_run_id: str | None = None

@@ -8,8 +8,8 @@ Otto now has one merge strategy:
 
 Bookkeeping conflicts (`intent.md`, `otto.yaml`) are handled by git's
 union/ours merge drivers; the Python loop only handles real code/content
-conflicts. `--resume` is still deferred, so `state.json` is informative
-bookkeeping rather than an active continuation contract.
+conflicts. `state.json` is informative bookkeeping for reporting and
+manual follow-up after a stopped merge.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import logging
 import os
 import re
 import subprocess
-import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -944,7 +943,7 @@ async def _run_consolidated_agentic_merge(
 
     On any unrecoverable failure (e.g., agent leaves markers, edits out
     of scope), the merge bails. State.json records which branches still
-    need manual follow-up; `--resume` itself is still deferred.
+    need manual follow-up.
     """
     from otto.merge.conflict_agent import (
         ConsolidatedConflictContext,
@@ -1126,7 +1125,6 @@ async def _run_consolidated_agentic_merge(
             else None
         )
         state.paused_branch = unresolved_branches[0] if unresolved_branches else None
-        state.paused_branch_head = None
         write_state(project_dir, state)
         return MergeRunResult(
             success=False,
@@ -1191,7 +1189,6 @@ async def _run_consolidated_agentic_merge(
             else None
         )
         state.paused_branch = unresolved_branches[0] if unresolved_branches else None
-        state.paused_branch_head = None
         write_state(project_dir, state)
         return MergeRunResult(
             success=False, merge_id=merge_id, state=state,
@@ -1219,7 +1216,6 @@ async def _run_consolidated_agentic_merge(
             else None
         )
         state.paused_branch = unresolved_branches[0] if unresolved_branches else None
-        state.paused_branch_head = None
         write_state(project_dir, state)
         return MergeRunResult(
             success=False, merge_id=merge_id, state=state,
@@ -1243,7 +1239,6 @@ async def _run_consolidated_agentic_merge(
             else None
         )
         state.paused_branch = unresolved_branches[0] if unresolved_branches else None
-        state.paused_branch_head = None
         write_state(project_dir, state)
         return MergeRunResult(
             success=False, merge_id=merge_id, state=state,
@@ -1272,7 +1267,6 @@ async def _run_consolidated_agentic_merge(
     state.paused_stage = None
     state.paused_at_index = None
     state.paused_branch = None
-    state.paused_branch_head = None
     write_state(project_dir, state)
 
     # Phase 4: post-merge certification (unless --no-certify)

@@ -229,8 +229,7 @@ def test_merge_adapter_renders_state_details(tmp_path: Path) -> None:
     assert "note: resolving conflicts" in detail.summary_lines
     assert actions["c"].enabled is False
     assert actions["c"].reason == "writer unavailable (stale overlay)"
-    assert actions["r"].enabled is False
-    assert actions["r"].reason == "merge --resume is deferred"
+    assert "r" not in actions
 
 
 def test_atomic_and_merge_cleanup_wait_for_writer_finalization(tmp_path: Path, monkeypatch) -> None:

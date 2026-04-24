@@ -7,6 +7,7 @@ __pycache__/
 otto_logs/
 otto.lock
 intent.md
+!scripts/fixtures_nightly/*/intent.md
 build-journal.md
 current-state.md
 
@@ -26,7 +27,9 @@ summary.json
 .otto-queue.lock
 .otto-queue-state.json
 .otto-queue-commands.jsonl
+.otto-queue-commands.jsonl.processing
 .otto-queue-commands.jsonl.lock
+.otto-queue-commands.acks.jsonl
 .watcher.log
 
 # Behavioral E2E artifacts (per-run, kept for forensics)
@@ -36,4 +39,3 @@ bench-results/demo/
 
 # Free-form log scratch dir (per-session, not for git)
 logs/
-

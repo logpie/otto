@@ -210,7 +210,7 @@ def _execute_resume(
             post_result=post_result,
         )
     if record.domain == "merge":
-        return _error_result("Resume unavailable", "merge --resume is deferred")
+        return _warning_result("Action unavailable", "merge runs do not support resume")
     if record.run_type == "certify":
         return _error_result("Resume unavailable", "standalone certify has no resume path")
     cwd = _record_cwd(record)

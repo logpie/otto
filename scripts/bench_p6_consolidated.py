@@ -28,13 +28,8 @@ from bench_runner import (
     OTTO_BIN,
     RESULTS_DIR,
     bench_p6_inventory_cli,
-    collect_metrics,
     log,
-    otto_run,
     queue_state,
-    start_watcher,
-    stop_watcher,
-    wait_for_all_done,
 )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -162,7 +163,7 @@ class TestSpecHash:
         assert spec_hash("a\nb\n") != spec_hash("a\nc\n")
 
     def test_empty_stable(self):
-        assert spec_hash("") == spec_hash("")
+        assert spec_hash("") == hashlib.sha256(b"").hexdigest()
 
 
 class TestFormatSpecSection:
@@ -218,7 +219,9 @@ class TestRenderPromptSpec:
         from otto.prompts import render_prompt
         r = render_prompt("spec-light.md", intent="foo")  # no spec_path
         # spec_path renders empty without KeyError
-        assert r
+        assert "foo" in r
+        assert "{spec_path}" not in r
+        assert "{prior_spec_section}" not in r
 
     def test_build_md_accepts_spec_section(self):
         from otto.prompts import render_prompt

@@ -79,7 +79,7 @@ Files modified: `otto/cli.py`, `otto/cli_improve.py`, `otto/cli_setup.py`, `otto
 Bug Hunter, Dead Code Hunter, Dedup Hunter, AI Slop Hunter dispatched simultaneously.
 
 **Findings: 3 CRITICAL + 12 IMPORTANT + several MINOR.** All fixed by Codex (workspace-write call):
-- CRITICAL: lock-mismatch race in drain_commands ↔ append_command (data loss); unhandled `_tick` exception orphans children; `_otto_bin` dead nonsense code
+- CRITICAL: lock-mismatch race in the legacy command-drain path (data loss); unhandled `_tick` exception orphans children; `_otto_bin` dead nonsense code
 - IMPORTANT: `bookkeeping_files` field unused; `on_status_update` dead hook; `policy=ask` stub; cycle log spam; `os.waitstatus_to_exitcode` dead hasattr; ChildProcessError fake-success; unused dataclasses (TaskChildState/TaskState/WatcherState); `--in-worktree` duplication carried from Phase 1; intent-resolution snapshot timing asymmetric between queue improve vs certify
 
 Test count after cleanup: 339 → 345 (+6 tests added by Codex).

@@ -34,6 +34,16 @@ def test_merge_all_with_malformed_queue_yml_returns_cli_error(tmp_path: Path):
     assert "no branches to merge" in out
 
 
+def test_merge_resume_option_is_not_registered(tmp_path: Path):
+    repo = init_repo(tmp_path)
+
+    code, out = _run(["merge", "--resume"], cwd=repo)
+
+    assert code == 2
+    assert "No such option" in out
+    assert "deferred" not in out.lower()
+
+
 def test_merge_summary_uses_warning_icon_for_merged_with_markers(
     tmp_path: Path,
     monkeypatch,

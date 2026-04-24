@@ -62,6 +62,15 @@ def test_main_list_succeeds(capsys) -> None:
     assert "N10" not in out
 
 
+def test_all_registered_scenario_intents_exist() -> None:
+    missing = [
+        f"{scenario_id}: {spec.intent_path}"
+        for scenario_id, spec in OTTO_AS_USER_NIGHTLY.SCENARIO_SPECS.items()
+        if not spec.intent_path.exists()
+    ]
+    assert missing == []
+
+
 def test_main_dry_run_supports_each_core_scenario(capsys) -> None:
     for scenario_id in ("N1", "N2", "N4", "N8", "N9"):
         assert OTTO_AS_USER_NIGHTLY.main(["--dry-run", "--scenario", scenario_id]) == 0

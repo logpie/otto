@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
-import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from otto import paths

@@ -24,6 +24,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from otto import paths
+
 QUEUE_TASK_ENV = "OTTO_QUEUE_TASK_ID"
 QUEUE_PROJECT_DIR_ENV = "OTTO_QUEUE_PROJECT_DIR"
 QUEUE_TASK_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:-\d+)?$")
@@ -74,7 +76,7 @@ def queue_index_path_for(project_dir: Path, task_id: str | None) -> Path | None:
     if not task_id:
         return None
     task_id = _validate_queue_task_id(task_id)
-    return project_dir / "otto_logs" / "queue" / task_id / "manifest.json"
+    return paths.queue_manifest_path(project_dir, task_id)
 
 
 def _validate_queue_task_id(queue_task_id: str) -> str:

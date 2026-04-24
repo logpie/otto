@@ -7,7 +7,6 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from otto import paths
 from otto.redaction import redact_text
 from otto.runs.history import append_history_snapshot
 

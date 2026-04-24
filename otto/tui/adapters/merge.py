@@ -68,13 +68,6 @@ class MergeMissionControlAdapter(ActionExecutingAdapter):
                 preview=f"would append merge cancel for {record.run_id}",
             ),
             make_action(
-                "r",
-                "resume",
-                enabled=False,
-                reason="merge --resume is deferred",
-                preview="would shell `otto merge --resume` once supported",
-            ),
-            make_action(
                 "R",
                 "retry",
                 enabled=is_terminal_status(record.status) and isinstance(argv, list) and bool(argv) and bool(str(record.cwd or "").strip()),

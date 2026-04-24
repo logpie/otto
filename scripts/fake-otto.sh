@@ -37,10 +37,13 @@ fi
 
 # Make a real change + commit (so merge has something to merge)
 if [ -z "${FAKE_OTTO_NO_COMMIT:-}" ] && [ -d .git ] || git rev-parse --git-dir >/dev/null 2>&1; then
+  TASK_TOKEN="${OTTO_QUEUE_TASK_ID:-unknown}"
   TOUCH_PATH="${FAKE_OTTO_TOUCH:-fake-otto-output.txt}"
+  TOUCH_PATH="${TOUCH_PATH//\{task_id\}/$TASK_TOKEN}"
   # Default TEXT is task-id-suffixed so two parallel runs DO produce
   # distinct content → real merge conflicts (not coincidental no-ops).
-  TOUCH_TEXT="${FAKE_OTTO_TOUCH_TEXT:-from-${OTTO_QUEUE_TASK_ID:-unknown}-$(date +%s%N)}"
+  TOUCH_TEXT="${FAKE_OTTO_TOUCH_TEXT:-from-${TASK_TOKEN}-$(date +%s%N)}"
+  TOUCH_TEXT="${TOUCH_TEXT//\{task_id\}/$TASK_TOKEN}"
   mkdir -p "$(dirname "$TOUCH_PATH")"
   echo "$TOUCH_TEXT" >> "$TOUCH_PATH"
   # Append to intent.md too so the union merge driver gets exercised

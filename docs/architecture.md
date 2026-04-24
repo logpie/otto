@@ -170,16 +170,18 @@ otto improve bugs "error handling" -n 5
               └────────┬───────────────────────────┘
                        │  (read by watcher every poll)
                        ▼
-              ┌─────────────────────────┐
-              │  otto queue run         │  ← foreground process (tmux pane)
-              │  Runner._tick():        │
-              │    drain_commands()     │
-              │    load_queue()         │
-              │    apply_command(...)   │
-              │    enforce_timeouts()   │
-              │    reap_children()      │
-              │    dispatch_new()       │
-              └────────┬────────────────┘
+              ┌────────────────────────────┐
+              │  otto queue run            │  ← foreground process (tmux pane)
+              │  Runner._tick():           │
+              │    begin_command_drain()   │
+              │    load_queue()            │
+              │    apply_command(...)      │
+              │    persist state + acks     │
+              │    finish_command_drain()  │
+              │    enforce_timeouts()      │
+              │    reap_children()         │
+              │    dispatch_new()          │
+              └────────┬───────────────────┘
                        │  (Popen with PGID for safe cleanup)
               ┌────────▼─────────────────────────────────────┐
               │  Spawned otto subprocesses (concurrent ≤ N)  │
