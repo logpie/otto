@@ -1,0 +1,4 @@
+interface:
+  display_name: "Otto As User"
+  short_description: "Run Otto CLI and TUI as a user"
+  default_prompt: "Use $otto-as-user to run the smallest real Otto as-user scenario set that verifies this change."

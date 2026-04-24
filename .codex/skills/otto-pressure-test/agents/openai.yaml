@@ -1,0 +1,4 @@
+interface:
+  display_name: "Otto Pressure Test"
+  short_description: "Deep Otto bug hunt and E2E audit"
+  default_prompt: "Use $otto-pressure-test to run a multi-round Otto bug hunt, fix important failures, and document the E2E evidence."
