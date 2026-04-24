@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -19,6 +20,8 @@ from otto.merge import git_ops
 from otto.merge.state import load_state as load_merge_state
 from otto.mission_control.actions import _otto_cli_argv
 from otto.mission_control.actions import execute_action, execute_merge_all
+from otto.mission_control.events import append_event
+from otto.mission_control.events import events_status
 from otto.mission_control.model import (
     DetailView,
     MissionControlFilters,
@@ -34,10 +37,15 @@ from otto.mission_control.serializers import (
 )
 from otto.mission_control.runtime import runtime_status as build_runtime_status
 from otto.mission_control.runtime import watcher_health
+from otto.mission_control.supervisor import record_watcher_launch
+from otto.mission_control.supervisor import record_watcher_stop
+from otto.mission_control.supervisor import read_supervisor
 from otto.queue.enqueue import enqueue_task
 from otto.queue.runtime import IN_FLIGHT_STATUSES, task_display_status, watcher_alive
 from otto.queue.runner import child_is_alive
 from otto.queue.schema import load_queue, load_state as load_queue_state
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MissionControlServiceError(ValueError):
@@ -70,12 +78,14 @@ class MissionControlService:
         payload["watcher"] = watcher
         payload["landing"] = landing
         payload["runtime"] = self.runtime_status(watcher=watcher, landing=landing)
+        payload["events"] = self.events(limit=50)
         return payload
 
     def detail(self, run_id: str, filters: MissionControlFilters | None = None) -> dict[str, Any]:
         detail = self._detail_view(run_id, filters)
         payload = serialize_detail(detail)
         payload["review_packet"] = _review_packet(self.project_dir, detail)
+        _apply_landing_context(self.project_dir, payload, detail)
         return payload
 
     def logs(
@@ -142,6 +152,10 @@ class MissionControlService:
             raise MissionControlServiceError(reason, status_code=409)
         if key == "m":
             _ensure_merge_unblocked(self.project_dir)
+            merge_info = _detail_merge_info(self.project_dir, detail)
+            if merge_info is not None:
+                target = str(merge_info.get("target") or _merge_target(self.project_dir))
+                raise MissionControlServiceError(f"Already merged into {target}.", status_code=409)
 
         selected_artifact_path = None
         if key == "e":
@@ -150,20 +164,57 @@ class MissionControlService:
                 raise MissionControlServiceError("artifact index out of range", status_code=404)
             selected_artifact_path = str(self._validated_artifact_path(detail.artifacts[index].path))
 
+        event_action = _event_action_name(key, label=legal[key].label, domain=detail.record.domain)
         result = execute_action(
             detail.record,
             key,
             self.project_dir,
             selected_artifact_path=selected_artifact_path,
             selected_queue_task_ids=selected_queue_task_ids,
+            post_result=lambda item: self._record_async_action_result(
+                kind=f"run.{event_action}.completed",
+                result=item,
+                run_id=detail.run_id,
+                task_id=_optional_str(detail.record.identity.get("queue_task_id")),
+                details={"action": event_action, "display_status": detail.record.status},
+            ),
         )
-        return serialize_action_result(result)
+        payload = serialize_action_result(result)
+        self._record_event(
+            kind=f"run.{event_action}",
+            severity=_event_severity(payload),
+            message=payload.get("message") or f"{event_action} requested",
+            run_id=detail.run_id,
+            task_id=_optional_str(detail.record.identity.get("queue_task_id")),
+            details={
+                "ok": payload.get("ok"),
+                "action": event_action,
+                "display_status": detail.record.status,
+            },
+        )
+        return payload
 
     def merge_all(self) -> dict[str, Any]:
         _ensure_merge_unblocked(self.project_dir)
-        return serialize_action_result(execute_merge_all(self.project_dir))
+        payload = serialize_action_result(
+            execute_merge_all(
+                self.project_dir,
+                post_result=lambda item: self._record_async_action_result(
+                    kind="merge.all.completed",
+                    result=item,
+                    details={"action": "merge-all"},
+                ),
+            )
+        )
+        self._record_event(
+            kind="merge.all",
+            severity=_event_severity(payload),
+            message=payload.get("message") or "merge ready tasks requested",
+            details={"ok": payload.get("ok")},
+        )
+        return payload
 
-    def watcher_status(self) -> dict[str, Any]:
+    def watcher_status(self, *, probe_lock: bool = True) -> dict[str, Any]:
         try:
             state = load_queue_state(self.project_dir)
         except Exception:
@@ -189,7 +240,7 @@ class MissionControlService:
             status = _queue_display_status(raw if isinstance(raw, dict) else None, state)
             counts[status] = counts.get(status, 0) + 1
         watcher = state.get("watcher") if isinstance(state, dict) else None
-        health = watcher_health(self.project_dir, state if isinstance(state, dict) else {})
+        health = watcher_health(self.project_dir, state if isinstance(state, dict) else {}, probe_lock=probe_lock)
         return {
             "alive": health["state"] == "running",
             "watcher": watcher if isinstance(watcher, dict) else None,
@@ -207,8 +258,8 @@ class MissionControlService:
         except Exception:
             state = {"tasks": {}}
         task_states = state.get("tasks", {}) if isinstance(state, dict) else {}
-        merged_by_branch = _merged_branch_index(self.project_dir)
         target = _merge_target(self.project_dir)
+        merged_by_branch = _merged_branch_index(self.project_dir, target)
         preflight = _merge_preflight(self.project_dir)
 
         items: list[dict[str, Any]] = []
@@ -251,9 +302,14 @@ class MissionControlService:
                 "stories_passed": _number_from_mapping(raw_state, "stories_passed"),
                 "stories_tested": _number_from_mapping(raw_state, "stories_tested"),
             }
-            changed_files = _branch_changed_files(self.project_dir, branch, target)
-            item["changed_file_count"] = len(changed_files)
-            item["changed_files"] = changed_files[:8]
+            diff = (
+                _branch_diff(self.project_dir, branch, target)
+                if queue_status not in {"queued", "starting", "running", "terminating"}
+                else {"files": [], "error": None}
+            )
+            item["changed_file_count"] = len(diff["files"])
+            item["changed_files"] = diff["files"][:8]
+            item["diff_error"] = diff["error"]
             items.append(item)
 
         return {
@@ -276,14 +332,35 @@ class MissionControlService:
             landing=landing or self.landing_status(),
         )
 
+    def events(self, *, limit: int = 80) -> dict[str, Any]:
+        return events_status(self.project_dir, limit=limit)
+
     def start_watcher(self, *, concurrent: int | None = None, exit_when_empty: bool = False) -> dict[str, Any]:
         status = self.watcher_status()
         if status["alive"]:
-            return {"ok": True, "message": "watcher already running", "refresh": True, "watcher": status}
+            payload = {"ok": True, "message": "watcher already running", "refresh": True, "watcher": status}
+            self._record_event(
+                kind="watcher.start.skipped",
+                severity="info",
+                message=payload["message"],
+                details={"state": status.get("health", {}).get("state")},
+            )
+            return payload
+        health = status.get("health") if isinstance(status.get("health"), dict) else {}
+        if health.get("state") != "stopped":
+            message = str(health.get("next_action") or "Stop the stale watcher before starting another one.")
+            self._record_event(
+                kind="watcher.start.blocked",
+                severity="warning",
+                message=message,
+                details={"state": health.get("state"), "blocking_pid": health.get("blocking_pid")},
+            )
+            raise MissionControlServiceError(message, status_code=409)
+        concurrent_value = max(1, int(concurrent or 3))
         argv = [
             *_otto_cli_argv("queue", "run", "--no-dashboard"),
             "--concurrent",
-            str(max(1, int(concurrent or 3))),
+            str(concurrent_value),
         ]
         if exit_when_empty:
             argv.append("--exit-when-empty")
@@ -303,35 +380,70 @@ class MissionControlService:
                     env=env,
                     start_new_session=True,
                 )
+                supervisor = self._record_watcher_launch(
+                    watcher_pid=proc.pid,
+                    argv=argv,
+                    log_path=log_path,
+                    concurrent=concurrent_value,
+                    exit_when_empty=exit_when_empty,
+                )
         except OSError as exc:
+            self._record_event(
+                kind="watcher.start.failed",
+                severity="error",
+                message=f"watcher failed to start: {exc}",
+                details={"argv": argv, "log_path": str(log_path)},
+            )
             raise MissionControlServiceError(f"watcher failed to start: {exc}", status_code=500) from exc
 
         for _ in range(20):
             if proc.poll() is not None:
                 tail = _tail_text(log_path)
+                self._record_event(
+                    kind="watcher.start.failed",
+                    severity="error",
+                    message=f"watcher exited immediately with {proc.returncode}",
+                    details={"pid": proc.pid, "returncode": proc.returncode, "tail": tail, "log_path": str(log_path)},
+                )
                 raise MissionControlServiceError(
                     f"watcher exited immediately with {proc.returncode}: {tail}",
                     status_code=500,
                 )
-            fresh = self.watcher_status()
+            fresh = self.watcher_status(probe_lock=False)
             if fresh["alive"]:
-                return {
+                payload = {
                     "ok": True,
                     "message": "watcher started",
                     "refresh": True,
                     "watcher": fresh,
                     "log_path": str(log_path),
                     "pid": proc.pid,
+                    "supervisor": supervisor,
                 }
+                self._record_event(
+                    kind="watcher.started",
+                    severity="success",
+                    message=payload["message"],
+                    details={"pid": proc.pid, "concurrent": concurrent_value, "log_path": str(log_path)},
+                )
+                return payload
             time.sleep(0.1)
-        return {
+        payload = {
             "ok": True,
             "message": "watcher launch requested",
             "refresh": True,
             "watcher": self.watcher_status(),
             "log_path": str(log_path),
             "pid": proc.pid,
+            "supervisor": supervisor,
         }
+        self._record_event(
+            kind="watcher.launch.requested",
+            severity="info",
+            message=payload["message"],
+            details={"pid": proc.pid, "concurrent": concurrent_value, "log_path": str(log_path)},
+        )
+        return payload
 
     def stop_watcher(self) -> dict[str, Any]:
         status = self.watcher_status()
@@ -342,15 +454,54 @@ class MissionControlService:
         if not health and (not isinstance(pid, int) or pid <= 0) and isinstance(watcher, dict):
             pid = watcher.get("pid")
         if not isinstance(pid, int) or pid <= 0:
-            return {"ok": True, "message": "watcher is not running", "refresh": True, "watcher": status}
+            payload = {"ok": True, "message": "watcher is not running", "refresh": True, "watcher": status}
+            self._record_event(
+                kind="watcher.stop.skipped",
+                severity="info",
+                message=payload["message"],
+                details={"state": health.get("state")},
+            )
+            return payload
+        identity_issue = _watcher_stop_identity_issue(self.project_dir, pid, health)
+        if identity_issue is not None:
+            self._record_event(
+                kind="watcher.stop.blocked",
+                severity="error",
+                message=identity_issue,
+                details={"pid": pid, "state": health.get("state")},
+            )
+            raise MissionControlServiceError(identity_issue, status_code=409)
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
-            return {"ok": True, "message": "watcher already stopped", "refresh": True, "watcher": self.watcher_status()}
+            payload = {"ok": True, "message": "watcher already stopped", "refresh": True, "watcher": self.watcher_status()}
+            self._record_event(
+                kind="watcher.stop.skipped",
+                severity="info",
+                message=payload["message"],
+                details={"pid": pid, "state": health.get("state")},
+            )
+            return payload
         except PermissionError as exc:
+            self._record_event(
+                kind="watcher.stop.failed",
+                severity="error",
+                message=f"watcher stop denied: {exc}",
+                details={"pid": pid, "state": health.get("state")},
+            )
             raise MissionControlServiceError(f"watcher stop denied: {exc}", status_code=403) from exc
         message = "stale watcher stop requested" if health.get("state") == "stale" else "watcher stop requested"
-        return {"ok": True, "message": message, "refresh": True, "watcher": self.watcher_status()}
+        supervisor = self._record_watcher_stop(target_pid=pid, reason=message)
+        payload = {"ok": True, "message": message, "refresh": True, "watcher": self.watcher_status()}
+        if supervisor is not None:
+            payload["supervisor"] = supervisor
+        self._record_event(
+            kind="watcher.stop.requested",
+            severity="warning" if health.get("state") == "stale" else "info",
+            message=message,
+            details={"pid": pid, "state": health.get("state")},
+        )
+        return payload
 
     def enqueue(self, command: str, payload: dict[str, Any]) -> dict[str, Any]:
         command = command.strip().lower()
@@ -410,13 +561,27 @@ class MissionControlService:
         else:
             raise MissionControlServiceError("unsupported queue command", status_code=404)
 
-        return {
+        response = {
             "ok": True,
             "message": f"queued {result.task.id}",
             "task": asdict(result.task),
             "warnings": result.warnings,
             "refresh": True,
         }
+        self._record_event(
+            kind=f"queue.{command}",
+            severity="warning" if result.warnings else "success",
+            message=response["message"],
+            task_id=result.task.id,
+            details={
+                "command": command,
+                "branch": result.task.branch,
+                "worktree": result.task.worktree,
+                "after": result.task.after,
+                "warnings": result.warnings,
+            },
+        )
+        return response
 
     def _state(self, filters: MissionControlFilters | None) -> MissionControlState:
         return self.model.initial_state(filters=filters or MissionControlFilters())
@@ -454,6 +619,88 @@ class MissionControlService:
             exists=True,
         )
 
+    def _record_event(
+        self,
+        *,
+        kind: str,
+        message: str,
+        severity: str = "info",
+        run_id: str | None = None,
+        task_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            append_event(
+                self.project_dir,
+                kind=kind,
+                message=message,
+                severity=severity,
+                run_id=run_id,
+                task_id=task_id,
+                details=details,
+            )
+        except Exception as exc:
+            LOGGER.warning("mission control event write failed: %s", exc)
+            return
+
+    def _record_async_action_result(
+        self,
+        *,
+        kind: str,
+        result: Any,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        payload = serialize_action_result(result)
+        merged_details = dict(details or {})
+        merged_details["ok"] = payload.get("ok")
+        self._record_event(
+            kind=kind,
+            severity=_event_severity(payload),
+            message=payload.get("message") or kind,
+            run_id=run_id,
+            task_id=task_id,
+            details=merged_details,
+        )
+
+    def _record_watcher_launch(
+        self,
+        *,
+        watcher_pid: int,
+        argv: list[str],
+        log_path: Path,
+        concurrent: int,
+        exit_when_empty: bool,
+    ) -> dict[str, Any] | None:
+        try:
+            return record_watcher_launch(
+                self.project_dir,
+                watcher_pid=watcher_pid,
+                argv=argv,
+                log_path=log_path,
+                concurrent=concurrent,
+                exit_when_empty=exit_when_empty,
+            )
+        except Exception as exc:
+            self._record_event(
+                kind="supervisor.write.failed",
+                severity="warning",
+                message=f"watcher supervisor metadata was not written: {exc}",
+            )
+            return None
+
+    def _record_watcher_stop(self, *, target_pid: int, reason: str) -> dict[str, Any] | None:
+        try:
+            return record_watcher_stop(self.project_dir, target_pid=target_pid, reason=reason)
+        except Exception as exc:
+            self._record_event(
+                kind="supervisor.write.failed",
+                severity="warning",
+                message=f"watcher supervisor stop metadata was not written: {exc}",
+            )
+            return None
+
 
 def filters_from_params(
     *,
@@ -481,20 +728,30 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
     display_status = "stale" if detail.overlay is not None and detail.overlay.level == "stale" else record.status
     target = str(record.git.get("target_branch") or _merge_target(project_dir))
     branch = _optional_str(record.git.get("branch"))
-    changed_files = _branch_changed_files(project_dir, branch, target)
+    merge_info = _detail_merge_info(project_dir, detail)
+    merged = merge_info is not None
+    diff = _branch_diff(project_dir, branch, target)
+    changed_files = diff["files"]
     return {
-        "headline": _review_headline(record, display_status),
-        "status": display_status,
+        "headline": f"Already merged into {target}" if merged else _review_headline(record, display_status),
+        "status": "merged" if merged else display_status,
         "summary": _optional_str(record.intent.get("summary")) or record.display_name or record.run_id,
-        "next_action": _suggested_next_action(display_status, detail.legal_actions, detail.overlay),
+        "next_action": (
+            {"label": "No action", "action_key": None, "enabled": False, "reason": f"Already merged into {target}."}
+            if merged
+            else _suggested_next_action(display_status, detail.legal_actions, detail.overlay)
+        ),
         "certification": _certification_summary(record),
         "changes": {
             "branch": branch,
             "target": target,
+            "merged": merged,
+            "merge_id": merge_info.get("merge_id") if merge_info else None,
             "file_count": len(changed_files),
             "files": changed_files[:12],
             "truncated": len(changed_files) > 12,
             "diff_command": f"git diff {target}...{branch}" if branch and branch != target else None,
+            "diff_error": diff["error"],
         },
         "evidence": [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)],
         "failure": _failure_summary(record, detail.overlay),
@@ -550,6 +807,32 @@ def _suggested_next_action(
             }
     reason = overlay.reason if overlay is not None else "No safe action is currently enabled."
     return {"label": "No action", "action_key": None, "enabled": False, "reason": reason}
+
+
+def _apply_landing_context(project_dir: Path, payload: dict[str, Any], detail: DetailView) -> None:
+    merge_info = _detail_merge_info(project_dir, detail)
+    if merge_info is None:
+        payload["landing_state"] = None
+        return
+    target = str(merge_info.get("target") or _merge_target(project_dir))
+    payload["landing_state"] = "merged"
+    payload["merge_info"] = merge_info
+    for action in payload.get("legal_actions", []):
+        if isinstance(action, dict) and action.get("key") == "m":
+            action["enabled"] = False
+            action["reason"] = f"Already merged into {target}."
+            action["preview"] = f"Already merged into {target}."
+
+
+def _detail_merge_info(project_dir: Path, detail: DetailView) -> dict[str, Any] | None:
+    branch = _optional_str(detail.record.git.get("branch"))
+    if not branch:
+        return None
+    target = str(detail.record.git.get("target_branch") or _merge_target(project_dir))
+    info = _merged_branch_index(project_dir, target).get(branch)
+    if info is None:
+        return None
+    return {**info, "target": target}
 
 
 def _certification_summary(record: Any) -> dict[str, Any]:
@@ -625,6 +908,48 @@ def _action_key(action: str) -> str:
     return mapping.get(action, action)
 
 
+def _event_action_name(key: str, *, label: str | None = None, domain: str | None = None) -> str:
+    if key == "R":
+        normalized = str(label or "").strip().lower()
+        if normalized == "retry" or domain in {"atomic", "merge"}:
+            return "retry"
+        return "requeue"
+    return {
+        "c": "cancel",
+        "r": "resume",
+        "x": "cleanup",
+        "m": "merge",
+        "e": "open",
+    }.get(key, key)
+
+
+def _event_severity(payload: dict[str, Any]) -> str:
+    if payload.get("ok") is False:
+        return "error"
+    value = str(payload.get("severity") or "").strip().lower()
+    if value == "information":
+        return "info"
+    if value in {"error", "warning", "info", "success"}:
+        return value
+    return "success"
+
+
+def _watcher_stop_identity_issue(project_dir: Path, pid: int, health: dict[str, Any]) -> str | None:
+    lock_pid = _int_or_none(health.get("lock_pid"))
+    if lock_pid == pid:
+        return None
+    supervisor, supervisor_error = read_supervisor(project_dir)
+    supervisor_pid = _int_or_none(supervisor.get("watcher_pid") if supervisor else None)
+    if supervisor_pid == pid:
+        return None
+    if supervisor_error:
+        return f"Refusing to stop watcher pid {pid}; supervisor metadata is unreadable: {supervisor_error}"
+    return (
+        f"Refusing to stop pid {pid}; Mission Control could not verify that it owns the watcher. "
+        "Use a terminal if this process must be stopped manually."
+    )
+
+
 def _merge_target(project_dir: Path) -> str:
     try:
         cfg = load_config(project_dir / "otto.yaml")
@@ -669,15 +994,19 @@ def _ensure_merge_unblocked(project_dir: Path) -> None:
     )
 
 
-def _merged_branch_index(project_dir: Path) -> dict[str, dict[str, Any]]:
+def _merged_branch_index(project_dir: Path, target: str) -> dict[str, dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     for state_path in sorted(paths.merge_dir(project_dir).glob("*/state.json")):
         try:
             state = load_merge_state(project_dir, state_path.parent.name)
         except Exception:
             continue
+        if str(state.target or "") != target:
+            continue
         for outcome in state.outcomes:
             if outcome.status not in {"merged", "conflict_resolved"}:
+                continue
+            if outcome.merge_commit and not _merge_commit_reachable(project_dir, outcome.merge_commit, target):
                 continue
             merged[outcome.branch] = {
                 "merge_id": state.merge_id,
@@ -687,15 +1016,25 @@ def _merged_branch_index(project_dir: Path) -> dict[str, dict[str, Any]]:
     return merged
 
 
-def _branch_changed_files(project_dir: Path, branch: str | None, target: str) -> list[str]:
+def _merge_commit_reachable(project_dir: Path, merge_commit: str, target: str) -> bool:
+    result = git_ops.run_git(project_dir, "merge-base", "--is-ancestor", merge_commit, target)
+    return result.returncode == 0
+
+
+def _branch_diff(project_dir: Path, branch: str | None, target: str) -> dict[str, Any]:
     branch = str(branch or "").strip()
     target = str(target or "").strip()
     if not branch or not target or branch == target:
-        return []
-    try:
-        return sorted(git_ops.files_in_branch_diff(project_dir, branch, target))
-    except Exception:
-        return []
+        return {"files": [], "error": None}
+    result = git_ops.run_git(project_dir, "diff", "--name-only", f"{target}...{branch}")
+    if not result.ok:
+        detail = (result.stderr or result.stdout or f"git diff exited {result.returncode}").strip()
+        return {"files": [], "error": detail}
+    return {"files": sorted(line for line in result.stdout.splitlines() if line), "error": None}
+
+
+def _branch_changed_files(project_dir: Path, branch: str | None, target: str) -> list[str]:
+    return list(_branch_diff(project_dir, branch, target)["files"])
 
 
 def _landing_collisions(project_dir: Path, ready_tasks: list[Any], target: str) -> list[dict[str, Any]]:
@@ -706,10 +1045,7 @@ def _landing_collisions(project_dir: Path, ready_tasks: list[Any], target: str) 
         branch = str(getattr(task, "branch", "") or "").strip()
         if not branch:
             continue
-        try:
-            files_by_id[task.id] = set(git_ops.files_in_branch_diff(project_dir, branch, target))
-        except Exception:
-            files_by_id[task.id] = set()
+        files_by_id[task.id] = set(_branch_diff(project_dir, branch, target)["files"])
     collisions: list[dict[str, Any]] = []
     ids = [task.id for task in ready_tasks if task.id in files_by_id]
     for index, left in enumerate(ids):

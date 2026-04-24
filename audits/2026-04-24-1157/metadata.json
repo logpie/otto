@@ -1,0 +1,12 @@
+{
+  "stamp": "2026-04-24-1157",
+  "target": "otto/mission_control otto/web tests/test_web_mission_control.py tests/test_mission_control_*.py",
+  "tests": "tests/test_web_mission_control.py tests/test_mission_control_model.py tests/test_mission_control_integration.py",
+  "mode": "fix",
+  "hunters": "parallel-subagents",
+  "rounds_requested": 2,
+  "gate_cmd": "uv run pytest tests/test_web_mission_control.py -q",
+  "sweep_cmd": "uv run pytest tests/test_web_mission_control.py tests/test_mission_control_model.py tests/test_mission_control_integration.py -q",
+  "worktree": "/Users/yuxuan/work/cc-autonomous/.worktrees/codex-provider-i2p",
+  "branch": "fix/codex-provider-i2p"
+}

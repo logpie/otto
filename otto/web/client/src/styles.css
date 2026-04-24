@@ -296,7 +296,7 @@ textarea {
 
 .tables {
   display: grid;
-  grid-template-rows: minmax(190px, auto) minmax(220px, 0.9fr) minmax(220px, 0.8fr);
+  grid-template-rows: minmax(190px, auto) minmax(190px, 0.75fr) minmax(170px, 0.55fr) minmax(220px, 0.8fr);
   gap: 14px;
   min-height: 0;
 }
@@ -461,6 +461,82 @@ tbody tr {
 tbody tr:hover,
 tbody tr.selected {
   background: #e8f3f1;
+}
+
+.timeline-panel {
+  min-height: 170px;
+}
+
+.timeline-list {
+  min-height: 0;
+  overflow: auto;
+}
+
+.timeline-item {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: start;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.timeline-item > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.timeline-item strong,
+.timeline-item span,
+.timeline-item time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-item strong {
+  font-size: 13px;
+}
+
+.timeline-item span,
+.timeline-item time,
+.timeline-empty,
+.timeline-warning {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.timeline-severity {
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.event-success .timeline-severity {
+  color: var(--green);
+}
+
+.event-info .timeline-severity {
+  color: var(--blue);
+}
+
+.event-warning .timeline-severity {
+  color: var(--amber);
+}
+
+.event-error .timeline-severity {
+  color: var(--red);
+}
+
+.timeline-empty,
+.timeline-warning {
+  padding: 10px;
+}
+
+.timeline-warning {
+  border-bottom: 1px solid #f4d58d;
+  background: #fff8e1;
+  color: #713f12;
 }
 
 .status-running,

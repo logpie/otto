@@ -4,6 +4,8 @@ import json
 import os
 import signal
 import subprocess
+import time
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,6 +13,8 @@ from fastapi.testclient import TestClient
 
 from otto import paths
 from otto.merge.state import BranchOutcome, MergeState, write_state as write_merge_state
+from otto.mission_control.events import append_event, events_path
+from otto.mission_control.supervisor import record_watcher_launch
 from otto.queue.runner import acquire_lock
 from otto.queue.schema import QueueTask, append_task, load_queue, write_state as write_queue_state
 from otto.runs.history import append_history_snapshot, build_terminal_snapshot
@@ -158,7 +162,7 @@ def test_web_state_marks_abandoned_live_runs_stale_not_active(tmp_path: Path) ->
     assert row["display_status"] == "stale"
     assert row["active"] is False
     assert row["elapsed_display"] == "-"
-    assert row["cost_display"] != "…"
+    assert row["cost_display"] == "1.2K in / 56 out"
     assert row["last_event"] == "heartbeat stalled and writer identity is gone"
 
     detail = client.get("/api/runs/stale-web").json()
@@ -216,6 +220,45 @@ def test_web_state_marks_abandoned_legacy_queue_runs_stale(tmp_path: Path) -> No
     assert actions["c"]["enabled"] is False
     assert actions["x"]["label"] == "remove"
     assert actions["x"]["enabled"] is True
+
+
+def test_web_state_marks_abandoned_starting_queue_runs_stale(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="starting-task",
+            command_argv=["build", "starting task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="starting task",
+            branch="build/starting-task",
+            worktree=".worktrees/starting-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "starting-task": {
+                    "status": "starting",
+                    "attempt_run_id": "starting-task-run",
+                    "started_at": "2026-04-24T00:00:00Z",
+                    "child": None,
+                }
+            },
+        },
+    )
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+
+    row = state["live"]["items"][0]
+    assert row["run_id"] == "starting-task-run"
+    assert row["display_status"] == "stale"
+    assert row["active"] is False
+    assert state["watcher"]["counts"]["stale"] == 1
 
 
 def test_web_keeps_failed_queue_tasks_inspectable_for_requeue(tmp_path: Path) -> None:
@@ -336,6 +379,151 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     assert by_id["merged-task"]["landing_state"] == "merged"
     assert by_id["merged-task"]["merge_id"] == "merge-merged"
 
+    detail = TestClient(create_app(repo)).get("/api/runs/run-merged").json()
+    actions = {action["key"]: action for action in detail["legal_actions"]}
+    assert detail["landing_state"] == "merged"
+    assert detail["review_packet"]["headline"] == "Already merged into main"
+    assert detail["review_packet"]["next_action"]["enabled"] is False
+    assert actions["m"]["enabled"] is False
+    assert actions["m"]["reason"] == "Already merged into main."
+
+
+def test_web_merge_action_rejects_already_merged_task(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    record = make_run_record(
+        project_dir=repo,
+        run_id="run-merged",
+        domain="queue",
+        run_type="queue",
+        command="build merged",
+        display_name="merged-task",
+        status="done",
+        cwd=repo,
+        identity={"queue_task_id": "merged-task"},
+        git={"branch": "build/merged-task"},
+        intent={"summary": "merged"},
+        adapter_key="queue.attempt",
+    )
+    write_record(repo, record)
+    write_merge_state(
+        repo,
+        MergeState(
+            merge_id="merge-merged",
+            started_at="2026-04-24T00:00:00Z",
+            finished_at="2026-04-24T00:01:00Z",
+            target="main",
+            status="done",
+            terminal_outcome="success",
+            branches_in_order=["build/merged-task"],
+            outcomes=[BranchOutcome(branch="build/merged-task", status="merged")],
+        ),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr("otto.mission_control.service.execute_action", lambda *args, **kwargs: calls.append("called"))
+    monkeypatch.setattr(
+        "otto.mission_control.service._merge_preflight",
+        lambda project_dir: {"merge_blocked": False, "merge_blockers": [], "dirty_files": []},
+    )
+
+    response = TestClient(create_app(repo)).post("/api/runs/run-merged/actions/merge", json={})
+
+    assert response.status_code == 409
+    assert response.json()["message"] == "Already merged into main."
+    assert calls == []
+
+
+def test_web_landing_ignores_merge_state_for_different_target(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="ready-task",
+            command_argv=["build", "ready task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="ready task",
+            branch="build/ready-task",
+            worktree=".worktrees/ready-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {"ready-task": {"status": "done", "attempt_run_id": "run-ready"}},
+        },
+    )
+    write_merge_state(
+        repo,
+        MergeState(
+            merge_id="merge-other-target",
+            started_at="2026-04-24T00:00:00Z",
+            finished_at="2026-04-24T00:01:00Z",
+            target="release",
+            status="done",
+            terminal_outcome="success",
+            branches_in_order=["build/ready-task"],
+            outcomes=[BranchOutcome(branch="build/ready-task", status="merged")],
+        ),
+    )
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+
+    assert state["landing"]["target"] == "main"
+    assert state["landing"]["counts"]["ready"] == 1
+    assert state["landing"]["items"][0]["landing_state"] == "ready"
+
+
+def test_web_landing_ignores_unreachable_merge_commit(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    subprocess.run(["git", "checkout", "-q", "-b", "build/ready-task"], cwd=repo, check=True)
+    (repo / "feature.txt").write_text("ready\n", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add feature"], cwd=repo, check=True)
+    branch_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+    append_task(
+        repo,
+        QueueTask(
+            id="ready-task",
+            command_argv=["build", "ready task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="ready task",
+            branch="build/ready-task",
+            worktree=".worktrees/ready-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {"ready-task": {"status": "done", "attempt_run_id": "run-ready"}},
+        },
+    )
+    write_merge_state(
+        repo,
+        MergeState(
+            merge_id="merge-unreachable",
+            started_at="2026-04-24T00:00:00Z",
+            finished_at="2026-04-24T00:01:00Z",
+            target="main",
+            status="done",
+            terminal_outcome="success",
+            branches_in_order=["build/ready-task"],
+            outcomes=[BranchOutcome(branch="build/ready-task", status="merged", merge_commit=branch_sha)],
+        ),
+    )
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+
+    assert state["landing"]["counts"]["ready"] == 1
+    assert state["landing"]["counts"]["merged"] == 0
+    assert state["landing"]["items"][0]["landing_state"] == "ready"
+
 
 def test_web_landing_and_detail_show_review_packet_changed_files(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -387,6 +575,36 @@ def test_web_landing_and_detail_show_review_packet_changed_files(tmp_path: Path)
     assert packet["changes"]["files"] == ["feature.txt"]
     assert packet["changes"]["diff_command"] == "git diff main...build/ready-task"
     assert packet["next_action"]["label"] == "merge selected"
+
+
+def test_web_landing_surfaces_diff_errors(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="ready-task",
+            command_argv=["build", "ready task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="ready task",
+            branch="build/missing",
+            worktree=".worktrees/ready-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {"ready-task": {"status": "done", "attempt_run_id": "run-ready"}},
+        },
+    )
+    client = TestClient(create_app(repo))
+    state = client.get("/api/state").json()
+    detail = client.get("/api/runs/run-ready").json()
+
+    assert "build/missing" in state["landing"]["items"][0]["diff_error"]
+    assert "build/missing" in detail["review_packet"]["changes"]["diff_error"]
 
 
 def test_web_landing_target_preserves_detected_branch_path(tmp_path: Path) -> None:
@@ -532,6 +750,91 @@ def test_web_queue_build_enqueues_without_click_context(tmp_path: Path) -> None:
     assert matching["live"]["items"][0]["queue_task_id"] == "saved-searches"
 
 
+def test_web_landing_does_not_show_diff_errors_for_queued_future_branches(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="queued-task",
+            command_argv=["build", "queued task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="queued task",
+            branch="build/queued-task",
+            worktree=".worktrees/queued-task",
+        ),
+    )
+    write_queue_state(repo, {"schema_version": 1, "watcher": None, "tasks": {}})
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+    item = state["landing"]["items"][0]
+
+    assert item["queue_status"] == "queued"
+    assert item["diff_error"] is None
+    assert item["changed_file_count"] == 0
+
+
+def test_web_records_queue_events_and_exposes_operator_timeline(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    client = TestClient(create_app(repo))
+    response = client.post(
+        "/api/queue/build",
+        json={
+            "intent": "add saved searches",
+            "as": "saved-searches",
+            "extra_args": ["--provider", "codex", "--effort", "high"],
+        },
+    )
+
+    assert response.status_code == 200
+    state = client.get("/api/state").json()
+    event = state["events"]["items"][0]
+    assert state["events"]["total_count"] == 1
+    assert event["kind"] == "queue.build"
+    assert event["severity"] == "success"
+    assert event["task_id"] == "saved-searches"
+    assert event["message"] == "queued saved-searches"
+
+    endpoint = client.get("/api/events?limit=1").json()
+    assert endpoint["items"] == state["events"]["items"][:1]
+    assert endpoint["path"].endswith("otto_logs/mission-control/events.jsonl")
+
+
+def test_web_events_endpoint_reports_malformed_rows_without_breaking_state(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    path = events_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('not-json\n{"schema_version":[],"message":"old event"}\n', encoding="utf-8")
+    append_event(repo, kind="watcher.stop.skipped", message="watcher is not running")
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+
+    assert state["events"]["malformed_count"] == 1
+    assert state["events"]["total_count"] == 2
+    assert state["events"]["items"][0]["message"] == "watcher is not running"
+
+
+def test_web_events_tail_preserves_boundary_aligned_rows(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    monkeypatch.setattr("otto.mission_control.events.MAX_EVENT_TAIL_BYTES", 120)
+    path = events_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    first = json.dumps({"schema_version": 1, "event_id": "a", "message": "first", "kind": "test", "severity": "info"})
+    second = json.dumps({"schema_version": 1, "event_id": "b", "message": "second", "kind": "test", "severity": "info"})
+    path.write_text(first + "\n" + second + "\n", encoding="utf-8")
+    monkeypatch.setattr("otto.mission_control.events.MAX_EVENT_TAIL_BYTES", len(second) + 1)
+
+    events = TestClient(create_app(repo)).get("/api/events").json()
+
+    assert events["truncated"] is True
+    assert events["items"][0]["message"] == "second"
+    assert events["total_count"] == 1
+
+
 def test_web_history_detail_recovers_provider_from_manifest_argv(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -643,12 +946,70 @@ def test_web_merge_action_uses_fast_merge_and_reports_immediate_failure(tmp_path
         lambda project_dir: {"merge_blocked": False, "merge_blockers": [], "dirty_files": []},
     )
 
-    response = TestClient(create_app(repo)).post("/api/runs/queue-done/actions/merge", json={})
+    client = TestClient(create_app(repo))
+    response = client.post("/api/runs/queue-done/actions/merge", json={})
 
     assert response.status_code == 200
     assert response.json()["ok"] is False
     assert "merge failed" in response.json()["message"]
-    assert calls[0][-4:] == ["merge", "--fast", "--no-certify", "hello-web"]
+    assert any(call[-4:] == ["merge", "--fast", "--no-certify", "hello-web"] for call in calls)
+    event = client.get("/api/events").json()["items"][0]
+    assert event["kind"] == "run.merge"
+    assert event["severity"] == "error"
+    assert event["run_id"] == "queue-done"
+
+
+def test_web_merge_action_records_late_background_failure(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    record = make_run_record(
+        project_dir=repo,
+        run_id="queue-done",
+        domain="queue",
+        run_type="queue",
+        command="build hello",
+        display_name="hello-web",
+        status="done",
+        cwd=repo,
+        identity={"queue_task_id": "hello-web"},
+        git={"branch": "build/hello-web"},
+        intent={"summary": "hello"},
+        adapter_key="queue.attempt",
+    )
+    write_record(repo, record)
+    completed = threading.Event()
+
+    class _LateFailedPopen:
+        pid = 23456
+        returncode = None
+
+        def __init__(self, argv, **kwargs) -> None:
+            pass
+
+        def poll(self):
+            return None
+
+        def communicate(self):
+            self.returncode = 1
+            completed.set()
+            return "", "late merge failed"
+
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _LateFailedPopen)
+    monkeypatch.setattr(
+        "otto.mission_control.service._merge_preflight",
+        lambda project_dir: {"merge_blocked": False, "merge_blockers": [], "dirty_files": []},
+    )
+
+    client = TestClient(create_app(repo))
+    response = client.post("/api/runs/queue-done/actions/merge", json={})
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert completed.wait(2)
+    events = client.get("/api/events").json()["items"]
+    completion = next(event for event in events if event["kind"] == "run.merge.completed")
+    assert completion["severity"] == "error"
+    assert completion["message"] == "late merge failed"
 
 
 def test_web_state_includes_watcher_status(tmp_path: Path) -> None:
@@ -661,6 +1022,9 @@ def test_web_state_includes_watcher_status(tmp_path: Path) -> None:
     assert state["watcher"]["counts"]["queued"] == 0
     assert state["watcher"]["health"]["state"] == "stopped"
     assert state["runtime"]["status"] == "healthy"
+    assert state["runtime"]["supervisor"]["mode"] == "local-single-user"
+    assert state["runtime"]["supervisor"]["can_start"] is True
+    assert state["runtime"]["supervisor"]["can_stop"] is False
 
 
 def test_web_runtime_surfaces_state_and_command_recovery_issues(tmp_path: Path) -> None:
@@ -722,6 +1086,76 @@ def test_web_can_stop_stale_but_live_watcher_process(tmp_path: Path, monkeypatch
 
     assert response.status_code == 200
     assert response.json()["message"] == "stale watcher stop requested"
+    assert signals == [(pid, signal.SIGTERM)]
+
+
+def test_web_refuses_to_stop_unverified_live_watcher_pid(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    pid = os.getpid()
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": {"pid": pid, "pgid": pid, "started_at": now, "heartbeat": now},
+            "tasks": {},
+        },
+    )
+    signals: list[tuple[int, int]] = []
+
+    def fake_kill(target_pid: int, sig: int) -> None:
+        if sig == 0:
+            return
+        signals.append((target_pid, sig))
+
+    monkeypatch.setattr("otto.queue.runtime.os.kill", fake_kill)
+    monkeypatch.setattr("otto.mission_control.runtime.os.kill", fake_kill)
+    monkeypatch.setattr("otto.mission_control.service.os.kill", fake_kill)
+
+    response = TestClient(create_app(repo)).post("/api/watcher/stop", json={})
+
+    assert response.status_code == 409
+    assert "could not verify" in response.json()["message"]
+    assert signals == []
+
+
+def test_web_allows_stop_for_supervised_live_watcher_pid(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    pid = os.getpid()
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": {"pid": pid, "pgid": pid, "started_at": now, "heartbeat": now},
+            "tasks": {},
+        },
+    )
+    record_watcher_launch(
+        repo,
+        watcher_pid=pid,
+        argv=["otto", "queue", "run"],
+        log_path=paths.logs_dir(repo) / "web" / "watcher.log",
+        concurrent=1,
+        exit_when_empty=False,
+    )
+    signals: list[tuple[int, int]] = []
+
+    def fake_kill(target_pid: int, sig: int) -> None:
+        if sig == 0:
+            return
+        signals.append((target_pid, sig))
+
+    monkeypatch.setattr("otto.queue.runtime.os.kill", fake_kill)
+    monkeypatch.setattr("otto.mission_control.runtime.os.kill", fake_kill)
+    monkeypatch.setattr("otto.mission_control.service.os.kill", fake_kill)
+
+    response = TestClient(create_app(repo)).post("/api/watcher/stop", json={})
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "watcher stop requested"
     assert signals == [(pid, signal.SIGTERM)]
 
 
@@ -793,6 +1227,33 @@ def test_web_reports_held_queue_lock_as_stale_runtime(tmp_path: Path) -> None:
     assert state["watcher"]["health"]["state"] == "stale"
     assert state["watcher"]["health"]["lock_pid"] == os.getpid()
     assert state["watcher"]["health"]["blocking_pid"] == os.getpid()
+    assert state["runtime"]["supervisor"]["can_start"] is False
+    assert state["runtime"]["supervisor"]["can_stop"] is True
+    assert state["runtime"]["supervisor"]["stop_target_pid"] == os.getpid()
+
+
+def test_web_start_watcher_blocks_when_runtime_is_stale(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    lock = acquire_lock(repo)
+    calls: list[str] = []
+
+    class _UnexpectedPopen:
+        def __init__(self, argv, **kwargs) -> None:
+            calls.append("called")
+
+    monkeypatch.setattr("otto.mission_control.service.subprocess.Popen", _UnexpectedPopen)
+    try:
+        client = TestClient(create_app(repo))
+        response = client.post("/api/watcher/start", json={"concurrent": 2})
+    finally:
+        lock.close()
+
+    assert response.status_code == 409
+    assert "Stop the stale watcher" in response.json()["message"]
+    assert calls == []
+    event = client.get("/api/events").json()["items"][0]
+    assert event["kind"] == "watcher.start.blocked"
 
 
 def test_web_start_watcher_launches_background_process(tmp_path: Path, monkeypatch) -> None:
@@ -818,9 +1279,76 @@ def test_web_start_watcher_launches_background_process(tmp_path: Path, monkeypat
 
     assert response.status_code == 200
     assert response.json()["message"] == "watcher launch requested"
+    events = client.get("/api/events").json()["items"]
+    assert events[0]["kind"] == "watcher.launch.requested"
+    assert events[0]["details"]["pid"] == 12345
     argv = calls[0]["argv"]
     assert "queue" in argv
     assert "run" in argv
     assert "--no-dashboard" in argv
     assert "--exit-when-empty" in argv
     assert calls[0]["kwargs"]["cwd"] == str(repo.resolve())
+
+
+def test_web_start_watcher_reports_started_when_state_becomes_alive(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    pid = os.getpid()
+
+    class _FakePopen:
+        returncode = None
+
+        def __init__(self, argv, **kwargs) -> None:
+            self.pid = pid
+
+        def poll(self):
+            return None
+
+    def fake_sleep(_seconds: float) -> None:
+        now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        write_queue_state(
+            repo,
+            {
+                "schema_version": 1,
+                "watcher": {"pid": pid, "pgid": pid, "started_at": now, "heartbeat": now},
+                "tasks": {},
+            },
+        )
+
+    monkeypatch.setattr("otto.mission_control.service.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("otto.mission_control.service.time.sleep", fake_sleep)
+
+    client = TestClient(create_app(repo))
+    response = client.post("/api/watcher/start", json={"concurrent": 2})
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "watcher started"
+    assert response.json()["supervisor"]["watcher_pid"] == pid
+    event = client.get("/api/events").json()["items"][0]
+    assert event["kind"] == "watcher.started"
+
+
+def test_web_start_watcher_records_immediate_failure(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    class _FailedPopen:
+        pid = 12345
+        returncode = 42
+
+        def __init__(self, argv, **kwargs) -> None:
+            pass
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr("otto.mission_control.service.subprocess.Popen", _FailedPopen)
+
+    client = TestClient(create_app(repo))
+    response = client.post("/api/watcher/start", json={"concurrent": 2})
+
+    assert response.status_code == 500
+    assert "watcher exited immediately with 42" in response.json()["message"]
+    event = client.get("/api/events").json()["items"][0]
+    assert event["kind"] == "watcher.start.failed"
+    assert event["severity"] == "error"

@@ -12,6 +12,7 @@ import type {
   LandingState,
   LiveRunItem,
   LogsResponse,
+  MissionEvent,
   OutcomeFilter,
   QueueResult,
   RunDetail,
@@ -23,6 +24,12 @@ import type {
 interface ToastState {
   message: string;
   severity: "information" | "warning" | "error";
+}
+
+interface ResultBannerState {
+  title: string;
+  body: string;
+  severity: ToastState["severity"];
 }
 
 interface ConfirmState {
@@ -60,9 +67,15 @@ export function App() {
   const [jobOpen, setJobOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
+  const [resultBanner, setResultBanner] = useState<ResultBannerState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [confirmPending, setConfirmPending] = useState(false);
   const logOffsetRef = useRef(0);
+  const selectedRunIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    selectedRunIdRef.current = selectedRunId;
+  }, [selectedRunId]);
 
   const showToast = useCallback((message: string, severity: ToastState["severity"] = "information") => {
     if (severity === "error") setLastError(message);
@@ -72,6 +85,16 @@ export function App() {
 
   const requestConfirm = useCallback((next: ConfirmState) => {
     setConfirm(next);
+  }, []);
+
+  const selectRun = useCallback((runId: string) => {
+    if (runId !== selectedRunIdRef.current) {
+      setDetail(null);
+      setLogText("");
+      setArtifactContent(null);
+      setSelectedArtifactIndex(null);
+    }
+    setSelectedRunId(runId);
   }, []);
 
   const executeConfirmedAction = useCallback(async () => {
@@ -88,10 +111,11 @@ export function App() {
   }, [confirm, confirmPending, showToast]);
 
   const loadLogs = useCallback(async (runId: string, reset = false) => {
-    if (showingArtifacts) return;
+    if (showingArtifacts && !reset) return;
     const offset = reset ? 0 : logOffsetRef.current;
     try {
       const logs = await api<LogsResponse>(`/api/runs/${encodeURIComponent(runId)}/logs?offset=${offset}`);
+      if (selectedRunIdRef.current !== runId) return;
       if (reset) setLogText("");
       if (logs.text) {
         setLogText((current) => `${reset ? "" : current}${logs.text}`);
@@ -106,6 +130,7 @@ export function App() {
   const refreshDetail = useCallback(async (runId: string, resetLogs = false) => {
     const params = stateQueryParams(filters).toString();
     const nextDetail = await api<RunDetail>(`/api/runs/${encodeURIComponent(runId)}?${params}`);
+    if (selectedRunIdRef.current !== runId) return;
     setDetail(nextDetail);
     if (resetLogs) {
       await loadLogs(runId, true);
@@ -148,6 +173,7 @@ export function App() {
       setArtifactContent(null);
       return;
     }
+    setDetail(null);
     logOffsetRef.current = 0;
     setLogText("");
     setArtifactContent(null);
@@ -187,8 +213,8 @@ export function App() {
             method: "POST",
             body: JSON.stringify({}),
           });
-          showToast(result.message || `${action} requested`, result.ok ? "information" : "warning");
-          await refresh();
+          handleActionResult(result, `${action} requested`, showToast, setResultBanner);
+          if (result.refresh !== false) await refresh();
         } catch (error) {
           showToast(errorMessage(error), "error");
         }
@@ -214,8 +240,8 @@ export function App() {
       onConfirm: async () => {
         try {
           const result = await api<ActionResult>("/api/actions/merge-all", {method: "POST", body: "{}"});
-          showToast(result.message || "merge all requested", result.ok ? "information" : "warning");
-          await refresh();
+          handleActionResult(result, "merge all requested", showToast, setResultBanner);
+          if (result.refresh !== false) await refresh();
         } catch (error) {
           showToast(errorMessage(error), "error");
         }
@@ -253,6 +279,7 @@ export function App() {
     if (!selectedRunId) return;
     setSelectedArtifactIndex(index);
     setShowingArtifacts(true);
+    setArtifactContent(null);
     try {
       const content = await api<ArtifactContentResponse>(`/api/runs/${encodeURIComponent(selectedRunId)}/artifacts/${index}/content`);
       setArtifactContent(content);
@@ -278,8 +305,8 @@ export function App() {
         </div>
         <ProjectMeta project={project} watcher={watcher} active={active} />
         <button className="primary" type="button" onClick={() => setJobOpen(true)}>New job</button>
-        <button type="button" disabled={!canStartWatcher(watcher)} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
-        <button type="button" disabled={!canStopWatcher(watcher)} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
+        <button type="button" disabled={!canStartWatcher(data)} title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
+        <button type="button" disabled={!canStopWatcher(data)} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
         <button type="button" disabled={!canMerge(landing)} title={mergeButtonTitle(landing)} onClick={() => void mergeReadyTasks()}>
           {landing?.counts.ready ? `Merge ${landing.counts.ready} ready` : "Merge ready"}
         </button>
@@ -287,18 +314,25 @@ export function App() {
 
       <main className="workspace">
         <Toolbar filters={filters} refreshStatus={refreshStatus} onChange={setFilters} onRefresh={() => void refresh()} />
-        <OperationalOverview data={data} lastError={lastError} onDismissError={() => setLastError(null)} />
+        <OperationalOverview
+          data={data}
+          lastError={lastError}
+          resultBanner={resultBanner}
+          onDismissError={() => setLastError(null)}
+          onDismissResult={() => setResultBanner(null)}
+        />
         <section className="grid">
           <div className="tables">
             <LandingQueue
               landing={landing}
               selectedRunId={selectedRunId}
-              onSelect={setSelectedRunId}
+              onSelect={selectRun}
               onMergeReady={() => void mergeReadyTasks()}
               onMergeRun={(runId) => void runActionForRun(runId, "merge", "Merge this task?")}
             />
-            <LiveRuns items={data?.live.items || []} selectedRunId={selectedRunId} onSelect={setSelectedRunId} />
-            <History items={data?.history.items || []} totalRows={data?.history.total_rows || 0} selectedRunId={selectedRunId} onSelect={setSelectedRunId} />
+            <LiveRuns items={data?.live.items || []} selectedRunId={selectedRunId} onSelect={selectRun} />
+            <EventTimeline events={data?.events} />
+            <History items={data?.history.items || []} totalRows={data?.history.total_rows || 0} selectedRunId={selectedRunId} onSelect={selectRun} />
           </div>
           <RunDetailPanel
             detail={detail}
@@ -307,7 +341,7 @@ export function App() {
             showingArtifacts={showingArtifacts}
             selectedArtifactIndex={selectedArtifactIndex}
             artifactContent={artifactContent}
-            onRunAction={(action, label) => selectedRunId && void runActionForRun(selectedRunId, action, actionConfirmationBody(action, label), label)}
+            onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
             onShowLogs={() => {
               setShowingArtifacts(false);
               setArtifactContent(null);
@@ -356,7 +390,7 @@ function ProjectMeta({project, watcher, active}: {project: StateResponse["projec
     <dl className="project-meta" aria-label="Project metadata">
       <MetaItem label="Project" value={project?.name || "-"} />
       <MetaItem label="Branch" value={project?.branch || "-"} />
-      <MetaItem label="State" value={project?.dirty ? "dirty" : "clean"} />
+      <MetaItem label="State" value={!project ? "unknown" : project.dirty ? "dirty" : "clean"} />
       <MetaItem label="Watcher" value={watcherSummary(watcher)} />
       <MetaItem label="Heartbeat" value={health?.heartbeat_age_s === null || health?.heartbeat_age_s === undefined ? "-" : `${Math.round(health.heartbeat_age_s)}s ago`} />
       <MetaItem label="Active" value={String(active)} />
@@ -396,6 +430,7 @@ function Toolbar({filters, refreshStatus, onChange, onRefresh}: {
             <option value="interrupted">Interrupted</option>
             <option value="cancelled">Cancelled</option>
             <option value="removed">Removed</option>
+            <option value="other">Other</option>
           </select>
         </label>
         <label className="search-label">Search
@@ -424,7 +459,13 @@ function Toolbar({filters, refreshStatus, onChange, onRefresh}: {
   );
 }
 
-function OperationalOverview({data, lastError, onDismissError}: {data: StateResponse | null; lastError: string | null; onDismissError: () => void}) {
+function OperationalOverview({data, lastError, resultBanner, onDismissError, onDismissResult}: {
+  data: StateResponse | null;
+  lastError: string | null;
+  resultBanner: ResultBannerState | null;
+  onDismissError: () => void;
+  onDismissResult: () => void;
+}) {
   const health = workflowHealth(data);
   return (
     <section className="overview" aria-label="Mission overview">
@@ -441,6 +482,13 @@ function OperationalOverview({data, lastError, onDismissError}: {data: StateResp
           <strong>Last error</strong>
           <span>{lastError}</span>
           <button type="button" onClick={onDismissError}>Dismiss</button>
+        </div>
+      )}
+      {resultBanner && (
+        <div className={`status-banner ${resultBanner.severity === "error" ? "error" : "warning"}`}>
+          <strong>{resultBanner.title}</strong>
+          <span>{resultBanner.body}</span>
+          <button type="button" onClick={onDismissResult}>Dismiss</button>
         </div>
       )}
       {data?.runtime.issues.length ? <RuntimeWarnings data={data} /> : null}
@@ -574,7 +622,14 @@ function LandingRow({item, selected, mergeBlocked, onSelect, onMergeRun}: {
 }) {
   const canMergeRow = item.landing_state === "ready" && Boolean(item.run_id) && !mergeBlocked;
   return (
-    <tr className={selected ? "selected" : ""} onClick={() => item.run_id && onSelect(item.run_id)}>
+    <tr
+      className={selected ? "selected" : ""}
+      role="button"
+      tabIndex={item.run_id ? 0 : -1}
+      aria-selected={selected}
+      onClick={() => item.run_id && onSelect(item.run_id)}
+      onKeyDown={(event) => item.run_id && selectOnKeyboard(event, () => onSelect(item.run_id as string))}
+    >
       <td><span className={`landing-chip landing-${item.landing_state || "blocked"}`}>{item.label || item.landing_state}</span></td>
       <td title={item.summary || ""}>
         <strong>{item.task_id || "-"}</strong>
@@ -616,7 +671,15 @@ function LiveRuns({items, selectedRunId, onSelect}: {items: LiveRunItem[]; selec
           </thead>
           <tbody>
             {items.length ? items.map((item) => (
-              <tr key={item.run_id} className={item.run_id === selectedRunId ? "selected" : ""} onClick={() => onSelect(item.run_id)}>
+              <tr
+                key={item.run_id}
+                className={item.run_id === selectedRunId ? "selected" : ""}
+                role="button"
+                tabIndex={0}
+                aria-selected={item.run_id === selectedRunId}
+                onClick={() => onSelect(item.run_id)}
+                onKeyDown={(event) => selectOnKeyboard(event, () => onSelect(item.run_id))}
+              >
                 <td className={`status-${item.display_status}`} title={item.overlay?.reason || item.display_status}>{item.display_status.toUpperCase()}</td>
                 <td title={item.run_id}>{item.display_id || item.run_id}</td>
                 <td title={item.branch_task || ""}>{item.branch_task || "-"}</td>
@@ -654,7 +717,15 @@ function History({items, totalRows, selectedRunId, onSelect}: {items: HistoryIte
           </thead>
           <tbody>
             {items.length ? items.map((item) => (
-              <tr key={item.run_id} className={item.run_id === selectedRunId ? "selected" : ""} onClick={() => onSelect(item.run_id)}>
+              <tr
+                key={item.run_id}
+                className={item.run_id === selectedRunId ? "selected" : ""}
+                role="button"
+                tabIndex={0}
+                aria-selected={item.run_id === selectedRunId}
+                onClick={() => onSelect(item.run_id)}
+                onKeyDown={(event) => selectOnKeyboard(event, () => onSelect(item.run_id))}
+              >
                 <td className={`status-${(item.terminal_outcome || item.status || "").toLowerCase()}`}>{item.outcome_display || "-"}</td>
                 <td title={item.run_id}>{item.queue_task_id || item.run_id}</td>
                 <td title={item.summary || ""}>{item.summary || "-"}</td>
@@ -666,6 +737,39 @@ function History({items, totalRows, selectedRunId, onSelect}: {items: HistoryIte
             )}
           </tbody>
         </table>
+      </div>
+    </section>
+  );
+}
+
+function EventTimeline({events}: {events: StateResponse["events"] | undefined}) {
+  const items = events?.items || [];
+  const malformed = events?.malformed_count || 0;
+  return (
+    <section className="panel timeline-panel" aria-labelledby="timelineHeading">
+      <div className="panel-heading">
+        <div>
+          <h2 id="timelineHeading">Operator Timeline</h2>
+          <p className="panel-subtitle">{timelineSubtitle(events)}</p>
+        </div>
+        <span className="pill">{events?.total_count || 0}</span>
+      </div>
+      <div className="timeline-list" role="list">
+        {malformed > 0 && (
+          <div className="timeline-warning">Ignored {malformed} malformed event row{malformed === 1 ? "" : "s"}.</div>
+        )}
+        {items.length ? items.map((event) => (
+          <div className={`timeline-item event-${event.severity}`} key={event.event_id || `${event.created_at}-${event.message}`} role="listitem">
+            <span className="timeline-severity">{event.severity}</span>
+            <div>
+              <strong title={event.message}>{event.message}</strong>
+              <span>{eventTargetLine(event)}</span>
+            </div>
+            <time dateTime={event.created_at}>{formatEventTime(event.created_at)}</time>
+          </div>
+        )) : (
+          <div className="timeline-empty">No operator events yet.</div>
+        )}
       </div>
     </section>
   );
@@ -754,6 +858,7 @@ function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]
         <ReviewMetric label="Evidence" value={`${packet.evidence.filter((item) => item.exists).length}/${packet.evidence.length}`} />
       </div>
       {packet.failure && <div className="review-note danger">{packet.failure.reason || "failure recorded"}</div>}
+      {packet.changes.diff_error && <div className="review-note danger">{packet.changes.diff_error}</div>}
       {packet.changes.files.length > 0 && (
         <ul className="review-files">
           {packet.changes.files.map((path) => <li key={path}>{path}</li>)}
@@ -979,12 +1084,12 @@ function activeCount(watcher?: WatcherInfo): number {
   return Number(counts.running || 0) + Number(counts.starting || 0) + Number(counts.terminating || 0);
 }
 
-function canStartWatcher(watcher?: WatcherInfo): boolean {
-  return (watcher?.health.state || "stopped") === "stopped";
+function canStartWatcher(data?: StateResponse | null): boolean {
+  return Boolean(data?.runtime.supervisor.can_start);
 }
 
-function canStopWatcher(watcher?: WatcherInfo): boolean {
-  return Boolean(watcher?.health.blocking_pid);
+function canStopWatcher(data?: StateResponse | null): boolean {
+  return Boolean(data?.runtime.supervisor.can_stop);
 }
 
 function watcherSummary(watcher?: WatcherInfo): string {
@@ -1006,6 +1111,19 @@ function workflowHealth(data: StateResponse | null): {
   runtimeLabel: string;
   runtimeTone: "neutral" | "warning" | "danger";
 } {
+  if (!data) {
+    return {
+      active: 0,
+      needsAttention: 0,
+      ready: 0,
+      repositoryLabel: "unknown",
+      repositoryTone: "warning",
+      watcherLabel: "unknown",
+      watcherTone: "warning",
+      runtimeLabel: "loading",
+      runtimeTone: "warning",
+    };
+  }
   const active = activeCount(data?.watcher);
   const attentionKeys = new Set<string>();
   for (const item of data?.history.items || []) {
@@ -1032,6 +1150,43 @@ function workflowHealth(data: StateResponse | null): {
   const runtimeLabel = runtimeIssues ? `${runtimeIssues} issue${runtimeIssues === 1 ? "" : "s"}` : "healthy";
   const runtimeTone = runtimeHasError ? "danger" : runtimeIssues ? "warning" : "neutral";
   return {active, needsAttention, ready, repositoryLabel, repositoryTone, watcherLabel, watcherTone, runtimeLabel, runtimeTone};
+}
+
+function selectOnKeyboard(event: {key: string; preventDefault: () => void}, onSelect: () => void) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  onSelect();
+}
+
+function handleActionResult(
+  result: ActionResult,
+  fallback: string,
+  showToast: (message: string, severity?: ToastState["severity"]) => void,
+  setResultBanner: (banner: ResultBannerState | null) => void,
+) {
+  const severity = actionToastSeverity(result);
+  const message = result.message || fallback;
+  if (result.clear_banner) {
+    setResultBanner(null);
+  }
+  if (result.ok && !result.modal_title && !result.modal_message) {
+    setResultBanner(null);
+  }
+  if (result.modal_title || result.modal_message) {
+    setResultBanner({
+      title: result.modal_title || (severity === "error" ? "Action failed" : "Action result"),
+      body: result.modal_message || message,
+      severity,
+    });
+  }
+  showToast(message, severity);
+}
+
+function actionToastSeverity(result: ActionResult): ToastState["severity"] {
+  const severity = String(result.severity || "").toLowerCase();
+  if (severity === "error") return "error";
+  if (severity === "warning") return "warning";
+  return result.ok ? "information" : "warning";
 }
 
 function isAttentionStatus(status: string | null | undefined): boolean {
@@ -1091,15 +1246,38 @@ function proofLine(item: LandingItem): string {
 }
 
 function changeLine(item: LandingItem): string {
+  if (item.diff_error) return "diff error";
   const count = Number(item.changed_file_count || 0);
   if (!count) return "-";
   return `${count} file${count === 1 ? "" : "s"}`;
 }
 
 function changeListTitle(item: LandingItem): string {
+  if (item.diff_error) return item.diff_error;
   if (!item.changed_files.length) return "";
   const suffix = item.changed_file_count > item.changed_files.length ? `\n+${item.changed_file_count - item.changed_files.length} more` : "";
   return `${item.changed_files.join("\n")}${suffix}`;
+}
+
+function timelineSubtitle(events?: StateResponse["events"]): string {
+  if (!events || !events.total_count) return "Queue, watcher, merge, and recovery actions appear here.";
+  const malformed = events.malformed_count ? ` / ${events.malformed_count} malformed` : "";
+  const scope = events.truncated ? "scanned recent log" : String(events.total_count);
+  return `Recent ${Math.min(events.items.length, events.limit)} of ${scope}${malformed}.`;
+}
+
+function eventTargetLine(event: MissionEvent): string {
+  const target = [event.task_id ? `task ${event.task_id}` : "", event.run_id ? `run ${event.run_id}` : ""]
+    .filter(Boolean)
+    .join(" / ");
+  return [event.kind, target].filter(Boolean).join(" - ") || "-";
+}
+
+function formatEventTime(value: string): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
 }
 
 function actionLabelForLanding(item: LandingItem): string {

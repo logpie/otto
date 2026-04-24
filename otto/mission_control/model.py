@@ -29,7 +29,7 @@ _TERMINAL_ESCAPE_RE = re.compile(
 )
 _LOG_UNAVAILABLE_PLACEHOLDER = "<log file no longer available>"
 _TYPE_FILTERS: tuple[TypeFilter, ...] = ("all", "build", "improve", "certify", "merge", "queue")
-_OUTCOME_FILTERS: tuple[OutcomeFilter, ...] = ("all", "success", "failed", "interrupted", "cancelled", "removed")
+_OUTCOME_FILTERS: tuple[OutcomeFilter, ...] = ("all", "success", "failed", "interrupted", "cancelled", "removed", "other")
 _DEFAULT_LIVE_RECORDS_LOADER = read_live_records
 logger = logging.getLogger("otto.mission_control.model")
 _WARNED_UNKNOWN_HISTORY_OUTCOMES: set[str] = set()

@@ -1,5 +1,5 @@
 export type RunTypeFilter = "all" | "build" | "improve" | "certify" | "merge" | "queue";
-export type OutcomeFilter = "all" | "success" | "failed" | "interrupted" | "cancelled" | "removed";
+export type OutcomeFilter = "all" | "success" | "failed" | "interrupted" | "cancelled" | "removed" | "other";
 export type JobCommand = "build" | "improve" | "certify";
 export type ImproveSubcommand = "bugs" | "feature" | "target";
 
@@ -65,7 +65,46 @@ export interface RuntimeStatus {
     commands: RuntimeFileStatus;
     processing: RuntimeFileStatus;
   };
+  supervisor: RuntimeSupervisor;
   issues: RuntimeIssue[];
+}
+
+export interface RuntimeSupervisor {
+  mode: string;
+  path: string;
+  metadata: Record<string, unknown> | null;
+  metadata_error: string | null;
+  supervised_pid: number | null;
+  matches_blocking_pid: boolean;
+  can_start: boolean;
+  can_stop: boolean;
+  start_blocked_reason: string | null;
+  stop_target_pid: number | null;
+  watcher_log_path: string;
+  web_log_exists: boolean;
+  queue_lock_holder_pid: number | null;
+}
+
+export interface MissionEvent {
+  schema_version: number;
+  event_id: string;
+  created_at: string;
+  kind: string;
+  severity: "error" | "warning" | "info" | "success" | string;
+  message: string;
+  run_id: string | null;
+  task_id: string | null;
+  actor: Record<string, unknown>;
+  details: Record<string, unknown>;
+}
+
+export interface EventsState {
+  path: string;
+  items: MissionEvent[];
+  total_count: number;
+  malformed_count: number;
+  limit: number;
+  truncated: boolean;
 }
 
 export interface LandingCounts {
@@ -100,6 +139,7 @@ export interface LandingItem {
   stories_tested: number | null;
   changed_file_count: number;
   changed_files: string[];
+  diff_error: string | null;
 }
 
 export interface LandingState {
@@ -206,6 +246,8 @@ export interface RunDetail extends RunSummary {
   selected_log_path: string | null;
   legal_actions: ActionState[];
   review_packet: ReviewPacket;
+  landing_state: string | null;
+  merge_info?: Record<string, unknown> | null;
   record: Record<string, unknown>;
 }
 
@@ -228,10 +270,13 @@ export interface ReviewPacket {
   changes: {
     branch: string | null;
     target: string;
+    merged: boolean;
+    merge_id: string | null;
     file_count: number;
     files: string[];
     truncated: boolean;
     diff_command: string | null;
+    diff_error: string | null;
   };
   evidence: ArtifactRef[];
   failure: {
@@ -244,6 +289,7 @@ export interface StateResponse {
   project: ProjectInfo;
   watcher: WatcherInfo;
   runtime: RuntimeStatus;
+  events: EventsState;
   landing: LandingState;
   live: {
     items: LiveRunItem[];

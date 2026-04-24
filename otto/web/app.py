@@ -106,6 +106,10 @@ def create_app(project_dir: Path, *, queue_compat: bool = True) -> FastAPI:
     def runtime_status() -> dict[str, Any]:
         return service.runtime_status()
 
+    @app.get("/api/events")
+    def events(limit: int = Query(80, ge=1, le=500)) -> dict[str, Any]:
+        return service.events(limit=limit)
+
     @app.post("/api/watcher/start")
     def watcher_start(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
         return service.start_watcher(

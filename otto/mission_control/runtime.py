@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from otto import paths
+from otto.mission_control.supervisor import read_supervisor
+from otto.mission_control.supervisor import supervisor_path
 from otto.queue.runtime import watcher_alive
 from otto.queue.schema import (
     commands_path,
@@ -67,6 +69,7 @@ def runtime_status(
 
     health = watcher.get("health") if isinstance(watcher.get("health"), dict) else {}
     watcher_state = str(health.get("state") or "stopped")
+    supervisor = _supervisor_status(project_dir, health, watcher_state)
     counts = watcher.get("counts") if isinstance(watcher.get("counts"), dict) else {}
     queued_count = int(counts.get("queued") or 0)
     attention_count = sum(int(counts.get(status) or 0) for status in ("failed", "interrupted", "stale"))
@@ -159,16 +162,17 @@ def runtime_status(
             "commands": commands_file,
             "processing": processing_file,
         },
+        "supervisor": supervisor,
         "issues": issues,
     }
 
 
-def watcher_health(project_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
+def watcher_health(project_dir: Path, state: dict[str, Any], *, probe_lock: bool = True) -> dict[str, Any]:
     watcher = state.get("watcher") if isinstance(state, dict) else None
     watcher = watcher if isinstance(watcher, dict) else {}
     watcher_pid = _int_or_none(watcher.get("pid"))
     watcher_process_alive = _pid_alive(watcher_pid)
-    lock_pid = _queue_lock_holder_pid(project_dir)
+    lock_pid = _queue_lock_holder_pid(project_dir) if probe_lock else None
     lock_process_alive = _pid_alive(lock_pid)
     heartbeat_age_s = _heartbeat_age_s(watcher.get("heartbeat"))
     running = watcher_alive(state)
@@ -203,6 +207,28 @@ def _runtime_issue(severity: str, label: str, detail: str, next_action: str) -> 
         "label": label,
         "detail": detail,
         "next_action": next_action,
+    }
+
+
+def _supervisor_status(project_dir: Path, health: dict[str, Any], watcher_state: str) -> dict[str, Any]:
+    log_path = Path(str(health.get("log_path") or paths.logs_dir(project_dir) / "web" / "watcher.log"))
+    blocking_pid = _int_or_none(health.get("blocking_pid"))
+    metadata, metadata_error = read_supervisor(project_dir)
+    supervised_pid = _int_or_none(metadata.get("watcher_pid") if metadata else None)
+    return {
+        "mode": "local-single-user",
+        "path": str(supervisor_path(project_dir).resolve(strict=False)),
+        "metadata": metadata,
+        "metadata_error": metadata_error,
+        "supervised_pid": supervised_pid,
+        "matches_blocking_pid": bool(blocking_pid and supervised_pid == blocking_pid),
+        "can_start": watcher_state == "stopped",
+        "can_stop": bool(blocking_pid and (health.get("lock_pid") == blocking_pid or supervised_pid == blocking_pid)),
+        "start_blocked_reason": None if watcher_state == "stopped" else str(health.get("next_action") or ""),
+        "stop_target_pid": blocking_pid,
+        "watcher_log_path": str(log_path.resolve(strict=False)),
+        "web_log_exists": log_path.exists(),
+        "queue_lock_holder_pid": _int_or_none(health.get("lock_pid")),
     }
 
 

@@ -1,0 +1,4 @@
+
+> otto-web-client@0.1.0 web:typecheck
+> tsc -p otto/web/client/tsconfig.json --noEmit
+

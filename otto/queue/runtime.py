@@ -16,7 +16,7 @@ from otto import paths
 from otto.queue.schema import QueueTask
 
 INTERRUPTED_STATUS = "interrupted"
-IN_FLIGHT_STATUSES = {"running", "terminating"}
+IN_FLIGHT_STATUSES = {"starting", "running", "terminating"}
 
 _QUEUE_RUNNER_CHILD = False
 
