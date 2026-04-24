@@ -251,7 +251,10 @@ def register_merge_command(main: click.Group) -> None:
                         if rat:
                             console.print(f"      [dim]{rich_escape(rat)}[/dim]")
         else:
-            console.print(f"  [red bold]Merge incomplete[/red bold] (id: {result.merge_id})")
+            if result.merge_id:
+                console.print(f"  [red bold]Merge incomplete[/red bold] (id: {result.merge_id})")
+            else:
+                console.print("  [red bold]Merge blocked[/red bold]")
             console.print(f"  {rich_escape(result.note)}")
 
         sys.exit(0 if result.success else 1)

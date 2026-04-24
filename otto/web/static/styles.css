@@ -279,6 +279,16 @@ h2 {
   padding-left: 18px;
 }
 
+.landing-warnings p {
+  margin: 5px 0 0;
+}
+
+.landing-warnings > div + div {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #f4d58d;
+}
+
 .landing-chip {
   display: inline-flex;
   align-items: center;

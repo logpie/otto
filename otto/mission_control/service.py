@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.config import load_config
+from otto.config import repo_preflight_issues
 from otto.config import resolve_intent_for_enqueue
 from otto import paths
 from otto.merge import git_ops
@@ -129,6 +130,8 @@ class MissionControlService:
         if not legal[key].enabled:
             reason = legal[key].reason or "action disabled"
             raise MissionControlServiceError(reason, status_code=409)
+        if key == "m":
+            _ensure_merge_unblocked(self.project_dir)
 
         selected_artifact_path = None
         if key == "e":
@@ -147,6 +150,7 @@ class MissionControlService:
         return serialize_action_result(result)
 
     def merge_all(self) -> dict[str, Any]:
+        _ensure_merge_unblocked(self.project_dir)
         return serialize_action_result(execute_merge_all(self.project_dir))
 
     def watcher_status(self) -> dict[str, Any]:
@@ -193,6 +197,7 @@ class MissionControlService:
         task_states = state.get("tasks", {}) if isinstance(state, dict) else {}
         merged_by_branch = _merged_branch_index(self.project_dir)
         target = _merge_target(self.project_dir)
+        preflight = _merge_preflight(self.project_dir)
 
         items: list[dict[str, Any]] = []
         ready_tasks: list[Any] = []
@@ -241,6 +246,7 @@ class MissionControlService:
             "items": items,
             "counts": counts,
             "collisions": _landing_collisions(self.project_dir, ready_tasks, target),
+            **preflight,
         }
 
     def start_watcher(self, *, concurrent: int | None = None, exit_when_empty: bool = False) -> dict[str, Any]:
@@ -459,6 +465,42 @@ def _merge_target(project_dir: Path) -> str:
     except Exception:
         cfg = {}
     return str(cfg.get("default_branch") or "main")
+
+
+def _merge_preflight(project_dir: Path) -> dict[str, Any]:
+    try:
+        issues = repo_preflight_issues(project_dir)
+    except Exception as exc:
+        return {
+            "merge_blocked": True,
+            "merge_blockers": [f"merge preflight failed: {exc}"],
+            "dirty_files": [],
+        }
+    blockers = [*issues.get("blocking", []), *issues.get("dirty", [])]
+    return {
+        "merge_blocked": bool(blockers),
+        "merge_blockers": blockers,
+        "dirty_files": list(issues.get("dirty_files", []) or []),
+    }
+
+
+def _ensure_merge_unblocked(project_dir: Path) -> None:
+    preflight = _merge_preflight(project_dir)
+    if not preflight["merge_blocked"]:
+        return
+    blockers = "; ".join(preflight["merge_blockers"]) or "repository is not merge-ready"
+    dirty_files = list(preflight.get("dirty_files", []) or [])
+    suffix = ""
+    if dirty_files:
+        suffix = f" Affected paths: {', '.join(dirty_files[:5])}"
+        if len(dirty_files) > 5:
+            suffix += f", ... (+{len(dirty_files) - 5} more)"
+        suffix += "."
+    raise MissionControlServiceError(
+        f"Merge blocked by local repository state: {blockers}.{suffix} "
+        "Commit, stash, or revert these project changes before merging.",
+        status_code=409,
+    )
 
 
 def _merged_branch_index(project_dir: Path) -> dict[str, dict[str, Any]]:

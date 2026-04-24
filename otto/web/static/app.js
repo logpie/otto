@@ -144,12 +144,17 @@ function renderLanding(landing) {
   const merged = Number(counts.merged || 0);
   const blocked = Number(counts.blocked || 0);
   const target = landing?.target || "main";
-  els.landingSummary.textContent = landingSummaryText(ready, merged, blocked, target);
-  els.mergeAllButton.disabled = ready === 0;
-  els.landingMergeButton.disabled = ready === 0;
+  const mergeBlocked = Boolean(landing?.merge_blocked);
+  const mergeEnabled = ready > 0 && !mergeBlocked;
+  els.landingSummary.textContent = landingSummaryText(ready, merged, blocked, target, mergeBlocked);
+  els.mergeAllButton.disabled = !mergeEnabled;
+  els.landingMergeButton.disabled = !mergeEnabled;
+  const mergeTitle = mergeBlocked ? "Commit, stash, or revert local project changes before merging." : "";
+  els.mergeAllButton.title = mergeTitle;
+  els.landingMergeButton.title = mergeTitle;
   els.mergeAllButton.textContent = ready ? `Merge ${ready} ready` : "Merge ready";
   els.landingMergeButton.textContent = ready ? `Merge ${ready} ready` : "Merge ready";
-  renderLandingWarnings(landing?.collisions || [], target);
+  renderLandingWarnings(landing || {}, target);
   if (!items.length) {
     els.landingRows.innerHTML = `
       <tr>
@@ -161,7 +166,7 @@ function renderLanding(landing) {
   els.landingRows.innerHTML = items.map((item) => {
     const stateName = item.landing_state || "blocked";
     const proof = proofLine(item);
-    const canMerge = stateName === "ready" && item.run_id;
+    const canMerge = stateName === "ready" && item.run_id && !mergeBlocked;
     return `
       <tr data-run-id="${escapeAttr(item.run_id || "")}" class="${item.run_id === state.selectedRunId ? "selected" : ""}">
         <td><span class="landing-chip landing-${escapeAttr(stateName)}">${escapeHtml(item.label || stateName)}</span></td>
@@ -172,7 +177,7 @@ function renderLanding(landing) {
         <td title="${escapeAttr(item.branch || "")}">${escapeHtml(item.branch || "-")}</td>
         <td title="${escapeAttr(proof)}">${escapeHtml(proof)}</td>
         <td>
-          <button type="button" data-landing-action="merge" data-run-id="${escapeAttr(item.run_id || "")}" ${canMerge ? "" : "disabled"}>
+          <button type="button" data-landing-action="merge" data-run-id="${escapeAttr(item.run_id || "")}" title="${escapeAttr(mergeTitle)}" ${canMerge ? "" : "disabled"}>
             ${escapeHtml(actionLabelForLanding(item))}
           </button>
         </td>
@@ -193,20 +198,41 @@ function renderLanding(landing) {
   });
 }
 
-function renderLandingWarnings(collisions, target) {
-  if (!collisions.length) {
+function renderLandingWarnings(landing, target) {
+  const collisions = landing?.collisions || [];
+  const blockers = landing?.merge_blockers || [];
+  const dirtyFiles = landing?.dirty_files || [];
+  if (!collisions.length && !blockers.length) {
     els.landingWarnings.classList.add("hidden");
     els.landingWarnings.innerHTML = "";
     return;
   }
   els.landingWarnings.classList.remove("hidden");
+  const blockerHtml = blockers.length ? `
+    <div class="landing-blocker">
+      <strong>Merge blocked by local repository state</strong>
+      <p>${escapeHtml(blockers.join("; "))}. Commit, stash, or revert these project changes before merging.</p>
+      ${dirtyFiles.length ? `
+        <ul>
+          ${dirtyFiles.slice(0, 6).map((path) => `<li>${escapeHtml(path)}</li>`).join("")}
+          ${dirtyFiles.length > 6 ? `<li>+${dirtyFiles.length - 6} more</li>` : ""}
+        </ul>
+      ` : ""}
+    </div>
+  ` : "";
+  const collisionHtml = collisions.length ? `
+    <div>
+      <strong>${collisions.length} overlap${collisions.length === 1 ? "" : "s"} before merging into ${escapeHtml(target)}</strong>
+      <ul>
+        ${collisions.slice(0, 4).map((collision) => `
+          <li>${escapeHtml(collision.left)} vs ${escapeHtml(collision.right)}: ${escapeHtml(collision.files.join(", "))}${collision.file_count > collision.files.length ? ` (+${collision.file_count - collision.files.length} more)` : ""}</li>
+        `).join("")}
+      </ul>
+    </div>
+  ` : "";
   els.landingWarnings.innerHTML = `
-    <strong>${collisions.length} overlap${collisions.length === 1 ? "" : "s"} before merging into ${escapeHtml(target)}</strong>
-    <ul>
-      ${collisions.slice(0, 4).map((collision) => `
-        <li>${escapeHtml(collision.left)} vs ${escapeHtml(collision.right)}: ${escapeHtml(collision.files.join(", "))}${collision.file_count > collision.files.length ? ` (+${collision.file_count - collision.files.length} more)` : ""}</li>
-      `).join("")}
-    </ul>
+    ${blockerHtml}
+    ${collisionHtml}
   `;
 }
 
@@ -290,11 +316,18 @@ async function loadDetail(runId, {keepLog = false} = {}) {
 
 function renderActions(actions) {
   const visible = actions.filter((action) => !["o", "e", "M"].includes(action.key));
-  els.actionBar.innerHTML = visible.map((action) => `
-    <button type="button" data-action="${escapeAttr(actionName(action.key))}" ${action.enabled ? "" : "disabled"} title="${escapeAttr(action.reason || action.preview || "")}">
-      ${escapeHtml(action.label)}
-    </button>
-  `).join("");
+  const mergeBlocked = Boolean(state.landing?.merge_blocked);
+  els.actionBar.innerHTML = visible.map((action) => {
+    const disabled = !action.enabled || (action.key === "m" && mergeBlocked);
+    const title = action.key === "m" && mergeBlocked
+      ? "Commit, stash, or revert local project changes before merging."
+      : action.reason || action.preview || "";
+    return `
+      <button type="button" data-action="${escapeAttr(actionName(action.key))}" ${disabled ? "disabled" : ""} title="${escapeAttr(title)}">
+        ${escapeHtml(action.label)}
+      </button>
+    `;
+  }).join("");
   els.actionBar.querySelectorAll("button").forEach((button) => {
     button.addEventListener("click", () => runAction(button.dataset.action));
   });
@@ -430,13 +463,14 @@ function actionName(key) {
   return {c: "cancel", r: "resume", R: "retry", x: "cleanup", m: "merge", M: "merge-all"}[key] || key;
 }
 
-function landingSummaryText(ready, merged, blocked, target) {
+function landingSummaryText(ready, merged, blocked, target, mergeBlocked) {
   if (!ready && !merged && !blocked) return "Queue work appears here when tasks start or finish.";
   const parts = [];
   if (ready) parts.push(`${ready} ready to merge`);
   if (merged) parts.push(`${merged} already merged`);
   if (blocked) parts.push(`${blocked} not ready`);
-  return `${parts.join(" / ")} into ${target}.`;
+  const summary = `${parts.join(" / ")} into ${target}.`;
+  return mergeBlocked ? `${summary} Merge blocked by local changes.` : summary;
 }
 
 function proofLine(item) {
@@ -486,6 +520,12 @@ function shortText(value, maxLength) {
 els.refreshButton.addEventListener("click", refresh);
 async function mergeReadyTasks() {
   const ready = Number(state.landing?.counts?.ready || 0);
+  if (state.landing?.merge_blocked) {
+    const files = state.landing?.dirty_files || [];
+    const suffix = files.length ? `: ${files.slice(0, 3).join(", ")}` : "";
+    toast(`Merge blocked by local changes${suffix}`, "error");
+    return;
+  }
   if (!ready) {
     toast("No merge-ready tasks");
     return;

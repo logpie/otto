@@ -213,6 +213,57 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     assert by_id["merged-task"]["merge_id"] == "merge-merged"
 
 
+def test_web_landing_blocks_merge_when_project_has_tracked_changes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="ready-task",
+            command_argv=["build", "ready task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="ready task",
+            branch="build/ready-task",
+            worktree=".worktrees/ready-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "ready-task": {
+                    "status": "done",
+                    "attempt_run_id": "run-ready",
+                    "stories_passed": 1,
+                    "stories_tested": 1,
+                },
+            },
+        },
+    )
+    (repo / "README.md").write_text("# web\n\nlocal runtime state\n", encoding="utf-8")
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+
+    assert state["landing"]["counts"]["ready"] == 1
+    assert state["landing"]["merge_blocked"] is True
+    assert "working tree has unstaged changes" in state["landing"]["merge_blockers"]
+    assert state["landing"]["dirty_files"] == ["README.md"]
+
+
+def test_web_merge_all_rejects_dirty_project_before_launch(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "README.md").write_text("# web\n\nlocal runtime state\n", encoding="utf-8")
+
+    response = TestClient(create_app(repo)).post("/api/actions/merge-all", json={})
+
+    assert response.status_code == 409
+    assert "Merge blocked by local repository state" in response.json()["message"]
+    assert "README.md" in response.json()["message"]
+
+
 def test_web_artifact_content_rejects_paths_outside_project(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -374,6 +425,10 @@ def test_web_merge_action_uses_fast_merge_and_reports_immediate_failure(tmp_path
             return "", "merge failed"
 
     monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FailedPopen)
+    monkeypatch.setattr(
+        "otto.mission_control.service._merge_preflight",
+        lambda project_dir: {"merge_blocked": False, "merge_blockers": [], "dirty_files": []},
+    )
 
     response = TestClient(create_app(repo)).post("/api/runs/queue-done/actions/merge", json={})
 
