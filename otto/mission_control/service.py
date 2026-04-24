@@ -10,8 +10,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from otto.config import load_config
 from otto.config import resolve_intent_for_enqueue
 from otto import paths
+from otto.merge import git_ops
+from otto.merge.state import load_state as load_merge_state
 from otto.mission_control.actions import _otto_cli_argv
 from otto.mission_control.actions import execute_action, execute_merge_all
 from otto.mission_control.model import (
@@ -29,7 +32,7 @@ from otto.mission_control.serializers import (
 )
 from otto.queue.enqueue import enqueue_task
 from otto.queue.runtime import task_display_status, watcher_alive
-from otto.queue.schema import load_queue, load_state
+from otto.queue.schema import load_queue, load_state as load_queue_state
 
 
 class MissionControlServiceError(ValueError):
@@ -58,6 +61,7 @@ class MissionControlService:
         state = self._state(filters)
         payload = serialize_state(self.project_dir, state)
         payload["watcher"] = self.watcher_status()
+        payload["landing"] = self.landing_status()
         return payload
 
     def detail(self, run_id: str, filters: MissionControlFilters | None = None) -> dict[str, Any]:
@@ -147,7 +151,7 @@ class MissionControlService:
 
     def watcher_status(self) -> dict[str, Any]:
         try:
-            state = load_state(self.project_dir)
+            state = load_queue_state(self.project_dir)
         except Exception:
             state = {"watcher": None, "tasks": {}}
         try:
@@ -175,6 +179,68 @@ class MissionControlService:
             "alive": watcher_alive(state) if isinstance(state, dict) else False,
             "watcher": watcher if isinstance(watcher, dict) else None,
             "counts": counts,
+        }
+
+    def landing_status(self) -> dict[str, Any]:
+        try:
+            tasks = load_queue(self.project_dir)
+        except Exception:
+            tasks = []
+        try:
+            state = load_queue_state(self.project_dir)
+        except Exception:
+            state = {"tasks": {}}
+        task_states = state.get("tasks", {}) if isinstance(state, dict) else {}
+        merged_by_branch = _merged_branch_index(self.project_dir)
+        target = _merge_target(self.project_dir)
+
+        items: list[dict[str, Any]] = []
+        ready_tasks: list[Any] = []
+        counts = {"ready": 0, "merged": 0, "blocked": 0, "total": 0}
+        for task in tasks:
+            raw_state = task_states.get(task.id) if isinstance(task_states, dict) else None
+            queue_status = task_display_status(raw_state if isinstance(raw_state, dict) else None)
+            branch = str(task.branch or "").strip()
+            merge_info = merged_by_branch.get(branch)
+            if merge_info is not None:
+                landing_state = "merged"
+                label = "Merged"
+                counts["merged"] += 1
+            elif queue_status == "done" and branch:
+                landing_state = "ready"
+                label = "Ready to merge"
+                counts["ready"] += 1
+                ready_tasks.append(task)
+            else:
+                landing_state = "blocked"
+                label = _blocked_landing_label(queue_status, branch)
+                counts["blocked"] += 1
+
+            counts["total"] += 1
+            item = {
+                "task_id": task.id,
+                "run_id": _task_run_id(raw_state),
+                "branch": branch or None,
+                "worktree": task.worktree,
+                "summary": task.resolved_intent or _task_intent(task.command_argv),
+                "queue_status": queue_status,
+                "landing_state": landing_state,
+                "label": label,
+                "merge_id": merge_info.get("merge_id") if merge_info else None,
+                "merge_status": merge_info.get("status") if merge_info else None,
+                "merge_run_status": merge_info.get("merge_run_status") if merge_info else None,
+                "duration_s": _number_from_mapping(raw_state, "duration_s"),
+                "cost_usd": _number_from_mapping(raw_state, "cost_usd"),
+                "stories_passed": _number_from_mapping(raw_state, "stories_passed"),
+                "stories_tested": _number_from_mapping(raw_state, "stories_tested"),
+            }
+            items.append(item)
+
+        return {
+            "target": target,
+            "items": items,
+            "counts": counts,
+            "collisions": _landing_collisions(self.project_dir, ready_tasks, target),
         }
 
     def start_watcher(self, *, concurrent: int | None = None, exit_when_empty: bool = False) -> dict[str, Any]:
@@ -385,6 +451,93 @@ def _action_key(action: str) -> str:
         "open": "e",
     }
     return mapping.get(action, action)
+
+
+def _merge_target(project_dir: Path) -> str:
+    try:
+        cfg = load_config(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
+    except Exception:
+        cfg = {}
+    return str(cfg.get("default_branch") or "main")
+
+
+def _merged_branch_index(project_dir: Path) -> dict[str, dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for state_path in sorted(paths.merge_dir(project_dir).glob("*/state.json")):
+        try:
+            state = load_merge_state(project_dir, state_path.parent.name)
+        except Exception:
+            continue
+        for outcome in state.outcomes:
+            if outcome.status not in {"merged", "conflict_resolved"}:
+                continue
+            merged[outcome.branch] = {
+                "merge_id": state.merge_id,
+                "status": outcome.status,
+                "merge_run_status": state.status,
+            }
+    return merged
+
+
+def _landing_collisions(project_dir: Path, ready_tasks: list[Any], target: str) -> list[dict[str, Any]]:
+    if len(ready_tasks) < 2:
+        return []
+    files_by_id: dict[str, set[str]] = {}
+    for task in ready_tasks:
+        branch = str(getattr(task, "branch", "") or "").strip()
+        if not branch:
+            continue
+        try:
+            files_by_id[task.id] = set(git_ops.files_in_branch_diff(project_dir, branch, target))
+        except Exception:
+            files_by_id[task.id] = set()
+    collisions: list[dict[str, Any]] = []
+    ids = [task.id for task in ready_tasks if task.id in files_by_id]
+    for index, left in enumerate(ids):
+        for right in ids[index + 1:]:
+            common = sorted(files_by_id[left] & files_by_id[right])
+            if not common:
+                continue
+            collisions.append(
+                {
+                    "left": left,
+                    "right": right,
+                    "files": common[:6],
+                    "file_count": len(common),
+                }
+            )
+    return collisions
+
+
+def _task_run_id(raw_state: Any) -> str | None:
+    if isinstance(raw_state, dict):
+        value = raw_state.get("attempt_run_id")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _task_intent(argv: Any) -> str | None:
+    if isinstance(argv, list) and len(argv) > 1 and isinstance(argv[1], str):
+        return argv[1]
+    return None
+
+
+def _blocked_landing_label(queue_status: str, branch: str) -> str:
+    if not branch:
+        return "No branch"
+    if queue_status in {"queued", "starting", "running", "terminating"}:
+        return "Still running"
+    if queue_status in {"failed", "cancelled", "interrupted"}:
+        return "Needs attention"
+    return "Not ready"
+
+
+def _number_from_mapping(raw_state: Any, key: str) -> int | float | None:
+    if not isinstance(raw_state, dict):
+        return None
+    value = raw_state.get(key)
+    return value if isinstance(value, (int, float)) else None
 
 
 def _required_str(value: Any, field: str) -> str:

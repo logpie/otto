@@ -6,6 +6,7 @@ const state = {
   refreshTimer: null,
   showingArtifacts: false,
   selectedArtifactIndex: null,
+  landing: null,
 };
 
 const els = {
@@ -17,6 +18,10 @@ const els = {
   queueCounts: document.querySelector("#queueCounts"),
   liveCount: document.querySelector("#liveCount"),
   historyCount: document.querySelector("#historyCount"),
+  landingSummary: document.querySelector("#landingSummary"),
+  landingRows: document.querySelector("#landingRows"),
+  landingWarnings: document.querySelector("#landingWarnings"),
+  landingMergeButton: document.querySelector("#landingMergeButton"),
   liveRows: document.querySelector("#liveRows"),
   historyRows: document.querySelector("#historyRows"),
   detailBody: document.querySelector("#detailBody"),
@@ -79,11 +84,13 @@ async function refresh() {
     const data = await api(`/api/state?${params().toString()}`);
     renderProject(data.project);
     renderWatcher(data.watcher);
+    renderLanding(data.landing);
     renderLive(data.live);
     renderHistory(data.history.items, data.history.total_rows);
     scheduleRefresh(data.live.refresh_interval_s);
     const visibleIds = new Set([
       ...data.live.items.map((item) => item.run_id),
+      ...(data.landing?.items || []).map((item) => item.run_id).filter(Boolean),
       ...data.history.items.map((item) => item.run_id),
     ]);
     if ((!state.selectedRunId || !visibleIds.has(state.selectedRunId)) && data.live.items.length) {
@@ -127,6 +134,80 @@ function renderWatcher(watcher) {
   els.queueCounts.textContent = `queued ${counts.queued || 0} / active ${active} / done ${counts.done || 0}`;
   els.startWatcherButton.disabled = Boolean(watcher?.alive);
   els.stopWatcherButton.disabled = !watcher?.alive;
+}
+
+function renderLanding(landing) {
+  state.landing = landing || null;
+  const items = landing?.items || [];
+  const counts = landing?.counts || {};
+  const ready = Number(counts.ready || 0);
+  const merged = Number(counts.merged || 0);
+  const blocked = Number(counts.blocked || 0);
+  const target = landing?.target || "main";
+  els.landingSummary.textContent = landingSummaryText(ready, merged, blocked, target);
+  els.mergeAllButton.disabled = ready === 0;
+  els.landingMergeButton.disabled = ready === 0;
+  els.mergeAllButton.textContent = ready ? `Merge ${ready} ready` : "Merge ready";
+  els.landingMergeButton.textContent = ready ? `Merge ${ready} ready` : "Merge ready";
+  renderLandingWarnings(landing?.collisions || [], target);
+  if (!items.length) {
+    els.landingRows.innerHTML = `
+      <tr>
+        <td colspan="5" class="empty-cell">No queued work yet.</td>
+      </tr>
+    `;
+    return;
+  }
+  els.landingRows.innerHTML = items.map((item) => {
+    const stateName = item.landing_state || "blocked";
+    const proof = proofLine(item);
+    const canMerge = stateName === "ready" && item.run_id;
+    return `
+      <tr data-run-id="${escapeAttr(item.run_id || "")}" class="${item.run_id === state.selectedRunId ? "selected" : ""}">
+        <td><span class="landing-chip landing-${escapeAttr(stateName)}">${escapeHtml(item.label || stateName)}</span></td>
+        <td title="${escapeAttr(item.summary || "")}">
+          <strong>${escapeHtml(item.task_id || "-")}</strong>
+          <span class="landing-subtext">${escapeHtml(shortText(item.summary || "", 96))}</span>
+        </td>
+        <td title="${escapeAttr(item.branch || "")}">${escapeHtml(item.branch || "-")}</td>
+        <td title="${escapeAttr(proof)}">${escapeHtml(proof)}</td>
+        <td>
+          <button type="button" data-landing-action="merge" data-run-id="${escapeAttr(item.run_id || "")}" ${canMerge ? "" : "disabled"}>
+            ${escapeHtml(actionLabelForLanding(item))}
+          </button>
+        </td>
+      </tr>
+    `;
+  }).join("");
+  els.landingRows.querySelectorAll("tr[data-run-id]").forEach((row) => {
+    row.addEventListener("click", () => {
+      if (row.dataset.runId) selectRun(row.dataset.runId);
+    });
+  });
+  els.landingRows.querySelectorAll("button[data-landing-action='merge']").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const runId = button.dataset.runId;
+      if (runId) runActionForRun(runId, "merge", "Merge this task?");
+    });
+  });
+}
+
+function renderLandingWarnings(collisions, target) {
+  if (!collisions.length) {
+    els.landingWarnings.classList.add("hidden");
+    els.landingWarnings.innerHTML = "";
+    return;
+  }
+  els.landingWarnings.classList.remove("hidden");
+  els.landingWarnings.innerHTML = `
+    <strong>${collisions.length} overlap${collisions.length === 1 ? "" : "s"} before merging into ${escapeHtml(target)}</strong>
+    <ul>
+      ${collisions.slice(0, 4).map((collision) => `
+        <li>${escapeHtml(collision.left)} vs ${escapeHtml(collision.right)}: ${escapeHtml(collision.files.join(", "))}${collision.file_count > collision.files.length ? ` (+${collision.file_count - collision.files.length} more)` : ""}</li>
+      `).join("")}
+    </ul>
+  `;
 }
 
 function renderLive(live) {
@@ -208,7 +289,7 @@ async function loadDetail(runId, {keepLog = false} = {}) {
 }
 
 function renderActions(actions) {
-  const visible = actions.filter((action) => !["o", "e"].includes(action.key));
+  const visible = actions.filter((action) => !["o", "e", "M"].includes(action.key));
   els.actionBar.innerHTML = visible.map((action) => `
     <button type="button" data-action="${escapeAttr(actionName(action.key))}" ${action.enabled ? "" : "disabled"} title="${escapeAttr(action.reason || action.preview || "")}">
       ${escapeHtml(action.label)}
@@ -281,9 +362,14 @@ async function loadArtifact(index) {
 
 async function runAction(action) {
   if (!state.selectedRunId) return;
-  if (!confirm(`Run ${action}?`)) return;
+  await runActionForRun(state.selectedRunId, action, `Run ${action}?`);
+}
+
+async function runActionForRun(runId, action, message) {
+  if (!runId) return;
+  if (!confirm(message || `Run ${action}?`)) return;
   try {
-    const data = await api(`/api/runs/${encodeURIComponent(state.selectedRunId)}/actions/${action}`, {
+    const data = await api(`/api/runs/${encodeURIComponent(runId)}/actions/${action}`, {
       method: "POST",
       body: JSON.stringify({}),
     });
@@ -344,6 +430,29 @@ function actionName(key) {
   return {c: "cancel", r: "resume", R: "retry", x: "cleanup", m: "merge", M: "merge-all"}[key] || key;
 }
 
+function landingSummaryText(ready, merged, blocked, target) {
+  if (!ready && !merged && !blocked) return "Queue work appears here when tasks start or finish.";
+  const parts = [];
+  if (ready) parts.push(`${ready} ready to merge`);
+  if (merged) parts.push(`${merged} already merged`);
+  if (blocked) parts.push(`${blocked} not ready`);
+  return `${parts.join(" / ")} into ${target}.`;
+}
+
+function proofLine(item) {
+  const passed = Number(item.stories_passed || 0);
+  const tested = Number(item.stories_tested || 0);
+  if (tested) return `${passed}/${tested} stories`;
+  if (item.queue_status) return item.queue_status;
+  return "-";
+}
+
+function actionLabelForLanding(item) {
+  if (item.landing_state === "merged") return "Merged";
+  if (item.landing_state === "ready") return "Merge";
+  return item.queue_status || "Blocked";
+}
+
 function isTerminal(status) {
   return ["done", "failed", "cancelled", "removed", "interrupted"].includes(status);
 }
@@ -368,9 +477,20 @@ function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#096;");
 }
 
+function shortText(value, maxLength) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
 els.refreshButton.addEventListener("click", refresh);
-els.mergeAllButton.addEventListener("click", async () => {
-  if (!confirm("Merge all done queue tasks?")) return;
+async function mergeReadyTasks() {
+  const ready = Number(state.landing?.counts?.ready || 0);
+  if (!ready) {
+    toast("No merge-ready tasks");
+    return;
+  }
+  if (!confirm(`Merge ${ready} ready task${ready === 1 ? "" : "s"} into ${state.landing?.target || "main"}?`)) return;
   try {
     const data = await api("/api/actions/merge-all", {method: "POST", body: "{}"});
     toast(data.message || "merge all requested");
@@ -378,7 +498,9 @@ els.mergeAllButton.addEventListener("click", async () => {
   } catch (error) {
     toast(error.message, "error");
   }
-});
+}
+els.mergeAllButton.addEventListener("click", mergeReadyTasks);
+els.landingMergeButton.addEventListener("click", mergeReadyTasks);
 els.newJobButton.addEventListener("click", () => els.jobDialog.showModal());
 els.startWatcherButton.addEventListener("click", async () => {
   try {

@@ -8,7 +8,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from otto import paths
-from otto.queue.schema import load_queue
+from otto.merge.state import BranchOutcome, MergeState, write_state as write_merge_state
+from otto.queue.schema import QueueTask, append_task, load_queue, write_state as write_queue_state
 from otto.runs.history import append_history_snapshot, build_terminal_snapshot
 from otto.runs.registry import make_run_record, update_record, write_record
 from otto.web.app import create_app
@@ -139,6 +140,77 @@ def test_web_state_marks_abandoned_live_runs_stale_not_active(tmp_path: Path) ->
     actions = {action["key"]: action for action in detail["legal_actions"]}
     assert actions["c"]["enabled"] is False
     assert actions["x"]["enabled"] is True
+
+
+def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="ready-task",
+            command_argv=["build", "ready task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="ready task",
+            branch="build/ready-task",
+            worktree=".worktrees/ready-task",
+        ),
+    )
+    append_task(
+        repo,
+        QueueTask(
+            id="merged-task",
+            command_argv=["build", "merged task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="merged task",
+            branch="build/merged-task",
+            worktree=".worktrees/merged-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "ready-task": {
+                    "status": "done",
+                    "attempt_run_id": "run-ready",
+                    "stories_passed": 2,
+                    "stories_tested": 2,
+                },
+                "merged-task": {
+                    "status": "done",
+                    "attempt_run_id": "run-merged",
+                    "stories_passed": 1,
+                    "stories_tested": 1,
+                },
+            },
+        },
+    )
+    write_merge_state(
+        repo,
+        MergeState(
+            merge_id="merge-merged",
+            started_at="2026-04-24T00:00:00Z",
+            finished_at="2026-04-24T00:01:00Z",
+            target="main",
+            status="done",
+            terminal_outcome="success",
+            branches_in_order=["build/merged-task"],
+            outcomes=[BranchOutcome(branch="build/merged-task", status="merged")],
+        ),
+    )
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+
+    assert state["landing"]["counts"] == {"ready": 1, "merged": 1, "blocked": 0, "total": 2}
+    by_id = {item["task_id"]: item for item in state["landing"]["items"]}
+    assert by_id["ready-task"]["landing_state"] == "ready"
+    assert by_id["ready-task"]["run_id"] == "run-ready"
+    assert by_id["ready-task"]["stories_passed"] == 2
+    assert by_id["merged-task"]["landing_state"] == "merged"
+    assert by_id["merged-task"]["merge_id"] == "merge-merged"
 
 
 def test_web_artifact_content_rejects_paths_outside_project(tmp_path: Path) -> None:

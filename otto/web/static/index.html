@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Otto Mission Control</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=landing-ui-2">
   </head>
   <body>
     <div class="app-shell">
@@ -27,7 +27,7 @@
         <button id="newJobButton" class="primary" type="button">New job</button>
         <button id="startWatcherButton" type="button">Start watcher</button>
         <button id="stopWatcherButton" type="button">Stop watcher</button>
-        <button id="mergeAllButton" type="button">Merge all</button>
+        <button id="mergeAllButton" type="button">Merge ready</button>
       </aside>
 
       <main class="workspace">
@@ -69,6 +69,31 @@
 
         <section class="grid">
           <div class="tables">
+            <section class="panel landing-panel" aria-labelledby="landingHeading">
+              <div class="panel-heading">
+                <div>
+                  <h2 id="landingHeading">Landing Queue</h2>
+                  <p id="landingSummary" class="panel-subtitle">No queue tasks yet.</p>
+                </div>
+                <button id="landingMergeButton" class="primary" type="button">Merge ready</button>
+              </div>
+              <div id="landingWarnings" class="landing-warnings hidden"></div>
+              <div class="table-wrap">
+                <table id="landingTable">
+                  <thead>
+                    <tr>
+                      <th>Landing</th>
+                      <th>Task</th>
+                      <th>Branch</th>
+                      <th>Proof</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="landingRows"></tbody>
+                </table>
+              </div>
+            </section>
+
             <section class="panel" aria-labelledby="liveHeading">
               <div class="panel-heading">
                 <h2 id="liveHeading">Live Runs</h2>
@@ -188,6 +213,6 @@
     </dialog>
 
     <div id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/static/app.js"></script>
+    <script type="module" src="/static/app.js?v=landing-ui-2"></script>
   </body>
 </html>
