@@ -389,7 +389,8 @@ def test_requeue_reconstructs_queue_cli_from_stored_task_definition(tmp_path: Pa
     assert argv[-9:] == ["queue", "build", "ship it", "--after", "base-task", "--as", "task-1", "--", "--fast"]
 
 
-def test_requeue_reports_task_id_collision_modal(tmp_path: Path, monkeypatch) -> None:
+def test_requeue_deduplicates_existing_queue_task_id(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     monkeypatch.setattr(
         "otto.mission_control.actions._load_queue_task",
         lambda project_dir, task_id: QueueTask(
@@ -403,6 +404,7 @@ def test_requeue_reports_task_id_collision_modal(tmp_path: Path, monkeypatch) ->
         "otto.mission_control.actions.load_queue",
         lambda project_dir: [QueueTask(id="task-1", command_argv=["build", "ship it"], added_at="2026-04-23T12:00:00Z")],
     )
+    _FakePopen.calls.clear()
     record = _record(
         tmp_path,
         run_id="queue-run",
@@ -415,8 +417,9 @@ def test_requeue_reports_task_id_collision_modal(tmp_path: Path, monkeypatch) ->
 
     result = execute_action(record, "R", tmp_path)
 
-    assert result.modal_title == "Requeue failed"
-    assert result.message == "task task-1 already exists — pick a new id or remove the existing first"
+    assert result.ok is True
+    assert result.message == "requeue task-1 as task-1-2 finished"
+    assert _FakePopen.calls[-1]["argv"][-5:] == ["queue", "build", "ship it", "--as", "task-1-2"]
 
 
 def test_remove_queued_task_calls_queue_rm(tmp_path: Path, monkeypatch) -> None:
@@ -431,6 +434,25 @@ def test_remove_queued_task_calls_queue_rm(tmp_path: Path, monkeypatch) -> None:
         adapter_key="queue.attempt",
         queue_task_id="task-1",
     )
+
+    execute_action(record, "x", tmp_path)
+
+    assert _FakePopen.calls[-1]["argv"][-3:] == ["queue", "rm", "task-1"]
+
+
+def test_remove_abandoned_legacy_queue_task_calls_queue_rm(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
+    _FakePopen.calls.clear()
+    record = _record(
+        tmp_path,
+        run_id="queue-run",
+        domain="queue",
+        run_type="queue",
+        status="running",
+        adapter_key="queue.attempt",
+        queue_task_id="task-1",
+    )
+    record.identity["compatibility_warning"] = "legacy queue mode"
 
     execute_action(record, "x", tmp_path)
 

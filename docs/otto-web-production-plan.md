@@ -54,7 +54,8 @@ internal queue/run/merge model.
 - TypeScript foundation: done in `6bcf89c3d`.
 - Product UX pass: implemented.
 - Real E2E: completed against `/tmp/otto-web-e2e-kanban`.
-- Code-health release pass: pending.
+- Code-health release pass: completed locally in
+  `audits/2026-04-24-0821/round-1`.
 
 ## Implementation Notes
 
@@ -115,6 +116,24 @@ internal queue/run/merge model.
    - Fix: merge ids now include a short random suffix and have a uniqueness
      regression test.
 
+8. Failed queue rows could not be requeued from Mission Control.
+   - Symptom: clicking `Requeue` on a failed queue task did not create a new
+     task because the original queue id still existed.
+   - Fix: requeue now derives a retry id such as `failed-feature-2` and launches
+     the reconstructed queue command with that id.
+
+9. Abandoned legacy queue rows could look active forever.
+   - Symptom: an old running queue task with no live watcher stayed in the
+     landing/live surfaces as running and was not safely removable.
+   - Fix: legacy queue records now preserve child writer identity, accept stale
+     overlays, show `Needs attention`, and remove through `otto queue rm`.
+
+10. Queue failures were undercounted in the overview.
+    - Symptom: `Needs attention` could show `0` even while the landing queue
+      contained failed work.
+    - Fix: the overview now counts failed/cancelled/interrupted/stale items
+      across landing, live, and history with de-duplication.
+
 ## Real E2E Evidence
 
 - Project: `/tmp/otto-web-e2e-kanban`, a real FastAPI mini-kanban app generated
@@ -139,6 +158,10 @@ internal queue/run/merge model.
   - Stale merge cleanup.
   - Artifact/log detail browsing.
   - Dirty-project merge-blocking path on `/tmp/otto-greenfield-kanban`.
+  - Existing Otto repo copy intake, filters, provider/effort display, queued
+    task removal, watcher start/stop, and CLI queue parity.
+  - Failure-lab dirty blocker, branch collision warning, failed-row requeue
+    affordance, and attention count.
 
 ## Remaining Product Gaps
 

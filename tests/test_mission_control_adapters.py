@@ -190,6 +190,9 @@ def test_queue_adapter_owns_legacy_record_and_overlay_compat(tmp_path: Path) -> 
     assert [record.identity["queue_task_id"] for record in records] == ["legacy-task"]
     assert records[0].identity["compatibility_warning"] == "legacy queue mode"
     assert adapter.live_overlay(records[0], StaleOverlay("stale", "STALE", "writer unavailable", False)) is None
+    records[0].status = "running"
+    overlay = StaleOverlay("stale", "STALE", "writer unavailable", False)
+    assert adapter.live_overlay(records[0], overlay) is overlay
 
 
 def test_merge_adapter_renders_state_details(tmp_path: Path, monkeypatch) -> None:

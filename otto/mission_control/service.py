@@ -32,7 +32,8 @@ from otto.mission_control.serializers import (
     serialize_state,
 )
 from otto.queue.enqueue import enqueue_task
-from otto.queue.runtime import task_display_status, watcher_alive
+from otto.queue.runtime import IN_FLIGHT_STATUSES, task_display_status, watcher_alive
+from otto.queue.runner import child_is_alive
 from otto.queue.schema import load_queue, load_state as load_queue_state
 
 
@@ -176,7 +177,7 @@ class MissionControlService:
         }
         for task in tasks:
             raw = task_states.get(task.id) if isinstance(task_states, dict) else None
-            status = task_display_status(raw if isinstance(raw, dict) else None)
+            status = _queue_display_status(raw if isinstance(raw, dict) else None, state)
             counts[status] = counts.get(status, 0) + 1
         watcher = state.get("watcher") if isinstance(state, dict) else None
         return {
@@ -204,7 +205,7 @@ class MissionControlService:
         counts = {"ready": 0, "merged": 0, "blocked": 0, "total": 0}
         for task in tasks:
             raw_state = task_states.get(task.id) if isinstance(task_states, dict) else None
-            queue_status = task_display_status(raw_state if isinstance(raw_state, dict) else None)
+            queue_status = _queue_display_status(raw_state if isinstance(raw_state, dict) else None, state)
             branch = str(task.branch or "").strip()
             merge_info = merged_by_branch.get(branch)
             if merge_info is not None:
@@ -392,7 +393,8 @@ class MissionControlService:
         return self.model.initial_state(filters=filters or MissionControlFilters())
 
     def _detail_view(self, run_id: str, filters: MissionControlFilters | None) -> DetailView:
-        state = self._state(filters)
+        del filters
+        state = self._state(MissionControlFilters())
         state.selection = SelectionState(run_id=run_id)
         detail = self.model.detail_view(state)
         if detail is None:
@@ -565,12 +567,26 @@ def _task_intent(argv: Any) -> str | None:
     return None
 
 
+def _queue_display_status(raw_state: dict[str, Any] | None, queue_state: dict[str, Any]) -> str:
+    status = task_display_status(raw_state)
+    if status not in IN_FLIGHT_STATUSES:
+        return status
+    if watcher_alive(queue_state):
+        return status
+    child = raw_state.get("child") if isinstance(raw_state, dict) else None
+    if isinstance(child, dict) and child_is_alive(child):
+        return status
+    return "stale"
+
+
 def _blocked_landing_label(queue_status: str, branch: str) -> str:
     if not branch:
         return "No branch"
-    if queue_status in {"queued", "starting", "running", "terminating"}:
-        return "Still running"
-    if queue_status in {"failed", "cancelled", "interrupted"}:
+    if queue_status == "queued":
+        return "Queued"
+    if queue_status in {"starting", "running", "terminating"}:
+        return "In progress"
+    if queue_status in {"failed", "cancelled", "interrupted", "stale"}:
         return "Needs attention"
     return "Not ready"
 

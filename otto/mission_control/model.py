@@ -543,7 +543,12 @@ class MissionControlModel:
         cutoff = now.timestamp() - 300.0
         for record in records:
             retention_time = _parse_iso(record.timing.get("finished_at") or record.timing.get("updated_at"))
-            if is_terminal_status(record.status) and retention_time is not None and retention_time.timestamp() < cutoff:
+            if (
+                is_terminal_status(record.status)
+                and retention_time is not None
+                and retention_time.timestamp() < cutoff
+                and not _retain_terminal_live_record(record)
+            ):
                 continue
             if filters.type_filter != "all" and record.run_type != filters.type_filter:
                 continue
@@ -704,6 +709,8 @@ class MissionControlModel:
             return StaleOverlay("lagging", "LAGGING", "reader grace window after suspend/clock jump", writer_alive)
         if wall_age_s > heartbeat_interval_s and writer_alive:
             return StaleOverlay("lagging", "LAGGING", "heartbeat overdue but writer still alive", True)
+        if wall_age_s >= stale_threshold_s and not writer_alive:
+            return StaleOverlay("stale", "STALE", "heartbeat stalled and writer identity is gone", False)
         if (monotonic_now - tracker.last_progress_monotonic) >= stale_threshold_s and not writer_alive:
             return StaleOverlay("stale", "STALE", "heartbeat stalled and writer identity is gone", False)
         return None
@@ -779,6 +786,14 @@ def _normalize_history_row(raw: dict[str, Any]) -> HistoryRow | None:
 
 def _live_item_is_active(item: LiveRunItem) -> bool:
     return _status_is_effectively_active(item.record.status, item.overlay)
+
+
+def _retain_terminal_live_record(record: RunRecord) -> bool:
+    return (
+        record.domain == "queue"
+        and str(record.identity.get("compatibility_warning") or "").strip() == "legacy queue mode"
+        and record.status in {"failed", "cancelled", "interrupted"}
+    )
 
 
 def _status_is_effectively_active(status: str | None, overlay: StaleOverlay | None) -> bool:

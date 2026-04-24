@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from otto import paths
-from otto.queue.runtime import task_display_status
+from otto.queue.runtime import IN_FLIGHT_STATUSES, task_display_status
 from otto.queue.schema import QueueTask, load_queue, load_state
 from otto.runs.registry import (
     HEARTBEAT_INTERVAL_S,
@@ -24,6 +24,7 @@ from otto.runs.registry import (
     load_live_record,
     read_jsonl_rows,
     utc_now_iso,
+    writer_identity_gone_or_stale,
     writer_identity_matches_live_process,
 )
 from otto.runs.schema import RunRecord, is_terminal_status
@@ -250,16 +251,16 @@ def _execute_retry(
             task = _load_queue_task(project_dir, queue_task_id)
         except ValueError as exc:
             return _error_result("Requeue failed", str(exc))
-        argv = _reconstruct_queue_command(task, existing_task_ids={t.id for t in load_queue(project_dir)})
-        if argv is None:
-            return _warning_result(
-                "Requeue failed",
-                f"task {queue_task_id} already exists — pick a new id or remove the existing first",
-            )
+        existing_task_ids = {t.id for t in load_queue(project_dir)}
+        retry_task_id = _dedup_queue_retry_task_id(task.id, existing_task_ids)
+        argv = _reconstruct_queue_command(task, retry_task_id=retry_task_id)
+        description = f"requeue {queue_task_id}"
+        if retry_task_id != queue_task_id:
+            description = f"{description} as {retry_task_id}"
         return _launch_process(
             argv,
             cwd=project_dir,
-            description=f"requeue {queue_task_id}",
+            description=description,
             post_result=post_result,
         )
 
@@ -287,7 +288,7 @@ def _execute_remove_or_cleanup(
         task_id = _queue_task_id(record)
         if not task_id:
             return _error_result("Queue action failed", "queue task id missing")
-        if record.status == "queued":
+        if record.status == "queued" or _legacy_queue_task_can_be_removed(record):
             return _launch_process(
                 _otto_cli_argv("queue", "rm", task_id),
                 cwd=project_dir,
@@ -306,6 +307,14 @@ def _execute_remove_or_cleanup(
         cwd=project_dir,
         description=f"cleanup {record.run_id}",
         post_result=post_result,
+    )
+
+
+def _legacy_queue_task_can_be_removed(record: RunRecord) -> bool:
+    return (
+        _is_legacy_queue_compat_record(record)
+        and record.status in IN_FLIGHT_STATUSES
+        and writer_identity_gone_or_stale(record.writer)
     )
 
 
@@ -389,7 +398,16 @@ def _load_queue_task(project_dir: Path, task_id: str) -> QueueTask:
     raise ValueError(f"queue task definition missing for {task_id}")
 
 
-def _reconstruct_queue_command(task: QueueTask, *, existing_task_ids: set[str]) -> list[str] | None:
+def _dedup_queue_retry_task_id(task_id: str, existing_task_ids: set[str]) -> str:
+    if task_id not in existing_task_ids:
+        return task_id
+    suffix = 2
+    while f"{task_id}-{suffix}" in existing_task_ids:
+        suffix += 1
+    return f"{task_id}-{suffix}"
+
+
+def _reconstruct_queue_command(task: QueueTask, *, retry_task_id: str) -> list[str]:
     command_argv = list(task.command_argv)
     if not command_argv:
         raise ValueError("queue task argv missing")
@@ -421,9 +439,7 @@ def _reconstruct_queue_command(task: QueueTask, *, existing_task_ids: set[str]) 
 
     for after_id in task.after:
         args.extend(["--after", after_id])
-    if task.id in existing_task_ids:
-        return None
-    args.extend(["--as", task.id])
+    args.extend(["--as", retry_task_id])
     if passthrough:
         args.append("--")
         args.extend(passthrough)

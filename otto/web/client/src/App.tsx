@@ -1,5 +1,5 @@
 import {FormEvent, useCallback, useEffect, useRef, useState} from "react";
-import {api, buildQueuePayload, stateQueryParams} from "./api";
+import {ApiError, api, buildQueuePayload, stateQueryParams} from "./api";
 import type {
   ActionResult,
   ActionState,
@@ -87,30 +87,6 @@ export function App() {
     }
   }, [confirm, confirmPending, showToast]);
 
-  const refresh = useCallback(async () => {
-    setRefreshStatus("refreshing");
-    try {
-      const next = await api<StateResponse>(`/api/state?${stateQueryParams(filters).toString()}`);
-      setData(next);
-      setLastError(null);
-      setSelectedRunId((current) => {
-        const visible = visibleRunIds(next);
-        if (current && visible.has(current)) return current;
-        return next.live.items[0]?.run_id || next.landing.items.find((item) => item.run_id)?.run_id || next.history.items[0]?.run_id || null;
-      });
-      setRefreshStatus("idle");
-    } catch (error) {
-      setRefreshStatus("error");
-      showToast(errorMessage(error), "error");
-    }
-  }, [filters, showToast]);
-
-  useEffect(() => {
-    void refresh();
-    const interval = window.setInterval(() => void refresh(), refreshIntervalMs(data));
-    return () => window.clearInterval(interval);
-  }, [refresh, data?.live.refresh_interval_s]);
-
   const loadLogs = useCallback(async (runId: string, reset = false) => {
     if (showingArtifacts) return;
     const offset = reset ? 0 : logOffsetRef.current;
@@ -122,9 +98,48 @@ export function App() {
       }
       logOffsetRef.current = logs.next_offset || offset;
     } catch (error) {
+      if (detailWasRemoved(error)) return;
       showToast(errorMessage(error), "error");
     }
   }, [showingArtifacts, showToast]);
+
+  const refreshDetail = useCallback(async (runId: string, resetLogs = false) => {
+    const params = stateQueryParams(filters).toString();
+    const nextDetail = await api<RunDetail>(`/api/runs/${encodeURIComponent(runId)}?${params}`);
+    setDetail(nextDetail);
+    if (resetLogs) {
+      await loadLogs(runId, true);
+    }
+  }, [filters, loadLogs]);
+
+  const refresh = useCallback(async () => {
+    setRefreshStatus("refreshing");
+    try {
+      const next = await api<StateResponse>(`/api/state?${stateQueryParams(filters).toString()}`);
+      setData(next);
+      setLastError(null);
+      const visible = visibleRunIds(next);
+      if (selectedRunId && visible.has(selectedRunId)) {
+        void refreshDetail(selectedRunId).catch((error) => {
+          if (!detailWasRemoved(error)) showToast(errorMessage(error), "error");
+        });
+      }
+      setSelectedRunId((current) => {
+        if (current && visible.has(current)) return current;
+        return next.live.items[0]?.run_id || next.landing.items.find((item) => item.run_id)?.run_id || next.history.items[0]?.run_id || null;
+      });
+      setRefreshStatus("idle");
+    } catch (error) {
+      setRefreshStatus("error");
+      showToast(errorMessage(error), "error");
+    }
+  }, [filters, refreshDetail, selectedRunId, showToast]);
+
+  useEffect(() => {
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), refreshIntervalMs(data));
+    return () => window.clearInterval(interval);
+  }, [refresh, data?.live.refresh_interval_s]);
 
   useEffect(() => {
     if (!selectedRunId) {
@@ -137,12 +152,17 @@ export function App() {
     setLogText("");
     setArtifactContent(null);
     setSelectedArtifactIndex(null);
-    const params = stateQueryParams(filters).toString();
-    api<RunDetail>(`/api/runs/${encodeURIComponent(selectedRunId)}?${params}`)
-      .then(setDetail)
-      .then(() => loadLogs(selectedRunId, true))
-      .catch((error) => showToast(errorMessage(error), "error"));
-  }, [filters, loadLogs, selectedRunId, showToast]);
+    refreshDetail(selectedRunId, true).catch((error) => {
+      if (detailWasRemoved(error)) {
+        setSelectedRunId(null);
+        setDetail(null);
+        setLogText("");
+        setArtifactContent(null);
+        return;
+      }
+      showToast(errorMessage(error), "error");
+    });
+  }, [refreshDetail, selectedRunId, showToast]);
 
   useEffect(() => {
     if (!selectedRunId || showingArtifacts) return;
@@ -150,15 +170,16 @@ export function App() {
     return () => window.clearInterval(interval);
   }, [loadLogs, selectedRunId, showingArtifacts]);
 
-  const runActionForRun = useCallback(async (runId: string, action: string, message: string) => {
+  const runActionForRun = useCallback(async (runId: string, action: string, message: string, label?: string) => {
     if (action === "merge" && data?.landing.merge_blocked) {
       showToast(mergeBlockedText(data.landing), "error");
       return;
     }
+    const actionLabel = capitalize(label || action);
     requestConfirm({
-      title: action === "merge" ? "Merge task" : `${capitalize(action)} run`,
+      title: action === "merge" ? "Merge task" : `${actionLabel} run`,
       body: message,
-      confirmLabel: action === "merge" ? "Merge task" : capitalize(action),
+      confirmLabel: action === "merge" ? "Merge task" : actionLabel,
       tone: ["cancel", "cleanup"].includes(action) ? "danger" : "primary",
       onConfirm: async () => {
         try {
@@ -286,7 +307,7 @@ export function App() {
             showingArtifacts={showingArtifacts}
             selectedArtifactIndex={selectedArtifactIndex}
             artifactContent={artifactContent}
-            onRunAction={(action) => selectedRunId && void runActionForRun(selectedRunId, action, `Run ${action}?`)}
+            onRunAction={(action, label) => selectedRunId && void runActionForRun(selectedRunId, action, actionConfirmationBody(action, label), label)}
             onShowLogs={() => {
               setShowingArtifacts(false);
               setArtifactContent(null);
@@ -631,7 +652,7 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
   showingArtifacts: boolean;
   selectedArtifactIndex: number | null;
   artifactContent: ArtifactContentResponse | null;
-  onRunAction: (action: string) => void;
+  onRunAction: (action: string, label?: string) => void;
   onShowLogs: () => void;
   onShowArtifacts: () => void;
   onLoadArtifact: (index: number) => void;
@@ -700,7 +721,7 @@ function DetailLine({line}: {line: string}) {
   );
 }
 
-function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]; mergeBlocked: boolean; onRunAction: (action: string) => void}) {
+function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]; mergeBlocked: boolean; onRunAction: (action: string, label?: string) => void}) {
   const visible = actions.filter((action) => !["o", "e", "M"].includes(action.key));
   return (
     <div className="action-bar">
@@ -709,7 +730,7 @@ function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]
         const disabled = !action.enabled || (action.key === "m" && mergeBlocked);
         const title = action.key === "m" && mergeBlocked ? "Commit, stash, or revert local project changes before merging." : action.reason || action.preview || "";
         return (
-          <button key={action.key} type="button" disabled={disabled} title={title} onClick={() => onRunAction(name)}>
+          <button key={action.key} type="button" disabled={disabled} title={title} onClick={() => onRunAction(name, action.label)}>
             {action.label}
           </button>
         );
@@ -902,9 +923,17 @@ function workflowHealth(data: StateResponse | null): {
   watcherTone: "neutral" | "success" | "warning";
 } {
   const active = activeCount(data?.watcher);
-  const failedHistory = (data?.history.items || []).filter((item) => ["failed", "cancelled", "interrupted"].includes(item.status)).length;
-  const staleLive = (data?.live.items || []).filter((item) => item.display_status === "stale").length;
-  const needsAttention = failedHistory + staleLive;
+  const attentionKeys = new Set<string>();
+  for (const item of data?.history.items || []) {
+    if (isAttentionStatus(item.status)) attentionKeys.add(item.queue_task_id || item.run_id);
+  }
+  for (const item of data?.live.items || []) {
+    if (isAttentionStatus(item.display_status)) attentionKeys.add(item.queue_task_id || item.run_id);
+  }
+  for (const item of data?.landing.items || []) {
+    if (isAttentionStatus(item.queue_status)) attentionKeys.add(item.task_id);
+  }
+  const needsAttention = attentionKeys.size;
   const ready = data?.landing.counts.ready || 0;
   const repositoryLabel = data?.landing.merge_blocked
     ? "blocked"
@@ -915,6 +944,10 @@ function workflowHealth(data: StateResponse | null): {
   const watcherLabel = data?.watcher.alive ? "running" : "stopped";
   const watcherTone = data?.watcher.alive ? "success" : ready || active ? "warning" : "neutral";
   return {active, needsAttention, ready, repositoryLabel, repositoryTone, watcherLabel, watcherTone};
+}
+
+function isAttentionStatus(status: string | null | undefined): boolean {
+  return ["failed", "cancelled", "interrupted", "stale"].includes(String(status || "").toLowerCase());
 }
 
 function canMerge(landing?: LandingState): boolean {
@@ -950,6 +983,17 @@ function actionName(key: string): string {
   return {c: "cancel", r: "resume", R: "retry", x: "cleanup", m: "merge", M: "merge-all"}[key] || key;
 }
 
+function actionConfirmationBody(action: string, label?: string): string {
+  const normalized = (label || action).toLowerCase();
+  if (action === "cancel") return "Cancel this run?";
+  if (action === "merge") return "Merge this task?";
+  if (normalized === "remove") return "Remove this queue task?";
+  if (normalized === "cleanup") return "Clean up this run?";
+  if (normalized === "requeue") return "Requeue this task?";
+  if (normalized === "resume") return "Resume this run?";
+  return `${capitalize(normalized)} this run?`;
+}
+
 function proofLine(item: LandingItem): string {
   const passed = Number(item.stories_passed || 0);
   const tested = Number(item.stories_tested || 0);
@@ -977,4 +1021,8 @@ function capitalize(value: string): string {
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error || "Unknown error");
+}
+
+function detailWasRemoved(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
 }

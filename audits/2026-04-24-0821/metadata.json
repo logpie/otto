@@ -1,0 +1,15 @@
+{
+  "stamp": "2026-04-24-0821",
+  "target": "otto/mission_control otto/web tests",
+  "tests": "tests",
+  "mode": "fix",
+  "hunters": "local",
+  "rounds_requested": 1,
+  "file_count": 197,
+  "gate_cmd": "uv run pytest -x -q",
+  "sweep_cmd": "uv run pytest -q --maxfail=10",
+  "frontend_cmds": [
+    "npm run web:typecheck",
+    "npm run web:build"
+  ]
+}

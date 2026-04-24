@@ -8,7 +8,7 @@ from pathlib import Path
 
 from otto import paths
 from otto.manifest import queue_index_path_for
-from otto.queue.runtime import INTERRUPTED_STATUS, checkpoint_path_for_task, task_display_status
+from otto.queue.runtime import IN_FLIGHT_STATUSES, INTERRUPTED_STATUS, checkpoint_path_for_task, task_display_status
 from otto.queue.schema import load_queue, load_state
 from otto.runs.registry import make_run_record, writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
@@ -41,6 +41,8 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
 
     def live_overlay(self, record, overlay):
         if str(record.identity.get("compatibility_warning") or "").strip() == "legacy queue mode":
+            if record.status in IN_FLIGHT_STATUSES:
+                return overlay
             return None
         return overlay
 
@@ -97,7 +99,12 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
         argv_preview = " ".join(str(part) for part in (argv or []))
         legacy_logs_reason = "legacy queue mode has no registry-backed log view"
         legacy_artifacts_reason = "legacy queue mode has no registry-backed artifacts"
-        cleanup_enabled = record.status == "queued" or (is_terminal_status(record.status) and writer_identity_gone_or_stale(record.writer))
+        stale_overlay = overlay is not None and overlay.level == "stale"
+        cleanup_enabled = (
+            record.status == "queued"
+            or stale_overlay
+            or (is_terminal_status(record.status) and writer_identity_gone_or_stale(record.writer))
+        )
         cleanup_reason = (
             None
             if cleanup_enabled
@@ -163,12 +170,12 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
             ),
             make_action(
                 "x",
-                "remove" if record.status == "queued" else "cleanup",
+                "remove" if record.status == "queued" or stale_overlay else "cleanup",
                 enabled=cleanup_enabled,
                 reason=cleanup_reason,
                 preview=(
                     f"would shell `otto queue rm {task_id}`"
-                    if record.status == "queued"
+                    if record.status == "queued" or stale_overlay
                     else f"would shell queue cleanup for {task_id}"
                 ),
             ),
@@ -311,7 +318,16 @@ def _legacy_queue_record(project_dir, task, task_state, now):
         adapter_key="queue.attempt",
         last_event=str(state.get("failure_reason") or "legacy queue mode"),
     )
-    record.writer = {}
+    child = state.get("child") if isinstance(state.get("child"), dict) else {}
+    writer: dict[str, object] = {}
+    if isinstance(child, dict):
+        writer = {
+            "pid": child.get("pid"),
+            "pgid": child.get("pgid"),
+            "process_start_time_ns": child.get("start_time_ns"),
+            "writer_id": f"queue:{task.id}",
+        }
+    record.writer = writer
     record.timing.update({
         "started_at": started_at,
         "updated_at": updated_at,

@@ -94,6 +94,19 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     assert '"passed"' in content["content"]
 
 
+def test_web_run_detail_is_not_hidden_by_list_filters(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write_run(repo)
+
+    client = TestClient(create_app(repo))
+
+    detail = client.get("/api/runs/build-web?type=merge&query=no-match").json()
+
+    assert detail["run_id"] == "build-web"
+    assert detail["title"].startswith("build:")
+
+
 def test_web_state_marks_abandoned_live_runs_stale_not_active(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -140,6 +153,101 @@ def test_web_state_marks_abandoned_live_runs_stale_not_active(tmp_path: Path) ->
     actions = {action["key"]: action for action in detail["legal_actions"]}
     assert actions["c"]["enabled"] is False
     assert actions["x"]["enabled"] is True
+
+
+def test_web_state_marks_abandoned_legacy_queue_runs_stale(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="stale-task",
+            command_argv=["build", "stale task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="stale task",
+            branch="build/stale-task",
+            worktree=".worktrees/stale-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "stale-task": {
+                    "status": "running",
+                    "attempt_run_id": "stale-task-run",
+                    "started_at": "2026-04-24T00:00:00Z",
+                    "child": {"pid": 999999, "pgid": 999999},
+                }
+            },
+        },
+    )
+
+    client = TestClient(create_app(repo))
+    state = client.get("/api/state").json()
+
+    row = state["live"]["items"][0]
+    assert row["run_id"] == "stale-task-run"
+    assert row["status"] == "running"
+    assert row["display_status"] == "stale"
+    assert row["active"] is False
+    assert state["watcher"]["counts"]["stale"] == 1
+    landing = {item["task_id"]: item for item in state["landing"]["items"]}
+    assert landing["stale-task"]["queue_status"] == "stale"
+    assert landing["stale-task"]["label"] == "Needs attention"
+
+    detail = client.get("/api/runs/stale-task-run").json()
+    actions = {action["key"]: action for action in detail["legal_actions"]}
+    assert actions["c"]["enabled"] is False
+    assert actions["x"]["label"] == "remove"
+    assert actions["x"]["enabled"] is True
+
+
+def test_web_keeps_failed_queue_tasks_inspectable_for_requeue(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="failed-task",
+            command_argv=["build", "failed task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="failed task",
+            branch="build/failed-task",
+            worktree=".worktrees/failed-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "failed-task": {
+                    "status": "failed",
+                    "attempt_run_id": "failed-task-run",
+                    "started_at": "2026-04-24T00:00:00Z",
+                    "finished_at": "2026-04-24T00:01:00Z",
+                    "failure_reason": "old failure",
+                }
+            },
+        },
+    )
+
+    client = TestClient(create_app(repo))
+    state = client.get("/api/state").json()
+
+    assert [(item["display_id"], item["display_status"]) for item in state["live"]["items"]] == [("failed-task", "failed")]
+    assert state["live"]["active_count"] == 0
+    assert state["landing"]["items"][0]["run_id"] == "failed-task-run"
+
+    detail = client.get("/api/runs/failed-task-run").json()
+    actions = {action["key"]: action for action in detail["legal_actions"]}
+    assert detail["display_status"] == "failed"
+    assert actions["R"]["label"] == "requeue"
+    assert actions["R"]["enabled"] is True
 
 
 def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
