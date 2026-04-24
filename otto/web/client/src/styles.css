@@ -218,7 +218,7 @@ textarea {
 
 .overview-strip {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -276,6 +276,24 @@ textarea {
   color: #7f1d1d;
 }
 
+.status-banner.warning {
+  border: 1px solid #f4d58d;
+  background: #fff8e1;
+  color: #713f12;
+}
+
+.runtime-banner span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-backlog {
+  color: inherit;
+  opacity: 0.78;
+}
+
 .tables {
   display: grid;
   grid-template-rows: minmax(190px, auto) minmax(220px, 0.9fr) minmax(220px, 0.8fr);
@@ -299,7 +317,7 @@ textarea {
 
 .detail {
   display: grid;
-  grid-template-rows: auto auto auto minmax(180px, 1fr);
+  grid-template-rows: auto auto auto auto minmax(180px, 1fr);
   overflow: hidden;
 }
 
@@ -510,6 +528,85 @@ tbody tr.selected {
   flex-wrap: wrap;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.review-packet {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #f8fafc;
+}
+
+.review-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.review-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.review-head strong,
+.review-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.review-head span,
+.review-grid span,
+.review-note,
+.review-files {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.review-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.review-grid div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.review-grid strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-note {
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #7f1d1d;
+}
+
+.review-files {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 84px;
+  overflow: auto;
+}
+
+.review-packet code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #334155;
 }
 
 .detail-tabs {

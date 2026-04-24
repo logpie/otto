@@ -278,8 +278,8 @@ export function App() {
         </div>
         <ProjectMeta project={project} watcher={watcher} active={active} />
         <button className="primary" type="button" onClick={() => setJobOpen(true)}>New job</button>
-        <button type="button" disabled={Boolean(watcher?.alive)} onClick={() => void runWatcherAction("start")}>Start watcher</button>
-        <button type="button" disabled={!watcher?.alive} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
+        <button type="button" disabled={!canStartWatcher(watcher)} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
+        <button type="button" disabled={!canStopWatcher(watcher)} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
         <button type="button" disabled={!canMerge(landing)} title={mergeButtonTitle(landing)} onClick={() => void mergeReadyTasks()}>
           {landing?.counts.ready ? `Merge ${landing.counts.ready} ready` : "Merge ready"}
         </button>
@@ -351,12 +351,14 @@ export function App() {
 
 function ProjectMeta({project, watcher, active}: {project: StateResponse["project"] | undefined; watcher: WatcherInfo | undefined; active: number}) {
   const counts = watcher?.counts || {};
+  const health = watcher?.health;
   return (
     <dl className="project-meta" aria-label="Project metadata">
       <MetaItem label="Project" value={project?.name || "-"} />
       <MetaItem label="Branch" value={project?.branch || "-"} />
       <MetaItem label="State" value={project?.dirty ? "dirty" : "clean"} />
-      <MetaItem label="Watcher" value={watcher?.alive ? `running pid ${watcher.watcher?.pid || "-"}` : "stopped"} />
+      <MetaItem label="Watcher" value={watcherSummary(watcher)} />
+      <MetaItem label="Heartbeat" value={health?.heartbeat_age_s === null || health?.heartbeat_age_s === undefined ? "-" : `${Math.round(health.heartbeat_age_s)}s ago`} />
       <MetaItem label="Active" value={String(active)} />
       <MetaItem label="Queue" value={`queued ${counts.queued || 0} / active ${active} / done ${counts.done || 0}`} />
     </dl>
@@ -432,6 +434,7 @@ function OperationalOverview({data, lastError, onDismissError}: {data: StateResp
         <OverviewMetric label="Ready" value={String(health.ready)} tone={health.ready ? "success" : "neutral"} />
         <OverviewMetric label="Repository" value={health.repositoryLabel} tone={health.repositoryTone} />
         <OverviewMetric label="Watcher" value={health.watcherLabel} tone={health.watcherTone} />
+        <OverviewMetric label="Runtime" value={health.runtimeLabel} tone={health.runtimeTone} />
       </div>
       {lastError && (
         <div className="status-banner error">
@@ -440,6 +443,7 @@ function OperationalOverview({data, lastError, onDismissError}: {data: StateResp
           <button type="button" onClick={onDismissError}>Dismiss</button>
         </div>
       )}
+      {data?.runtime.issues.length ? <RuntimeWarnings data={data} /> : null}
     </section>
   );
 }
@@ -449,6 +453,26 @@ function OverviewMetric({label, value, tone}: {label: string; value: string; ton
     <div className={`overview-metric tone-${tone}`}>
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function RuntimeWarnings({data}: {data: StateResponse}) {
+  const top = data.runtime.issues.slice(0, 3);
+  const bannerTone = top.some((issue) => issue.severity === "error") ? "error" : "warning";
+  const backlog = data.runtime.command_backlog;
+  const suffix = [
+    backlog.pending ? `${backlog.pending} pending` : "",
+    backlog.processing ? `${backlog.processing} processing` : "",
+    backlog.malformed ? `${backlog.malformed} malformed` : "",
+  ].filter(Boolean).join(" / ");
+  return (
+    <div className={`status-banner ${bannerTone} runtime-banner`}>
+      <strong>Runtime</strong>
+      <span title={top.map((issue) => `${issue.label}: ${issue.detail}`).join("\n")}>
+        {top.map((issue) => `${issue.label}: ${issue.next_action}`).join(" | ")}
+      </span>
+      <span className="runtime-backlog">{suffix || data.runtime.status}</span>
     </div>
   );
 }
@@ -480,6 +504,7 @@ function LandingQueue({landing, selectedRunId, onSelect, onMergeReady, onMergeRu
               <th>Landing</th>
               <th>Task</th>
               <th>Branch</th>
+              <th>Changes</th>
               <th>Proof</th>
               <th>Action</th>
             </tr>
@@ -495,7 +520,7 @@ function LandingQueue({landing, selectedRunId, onSelect, onMergeReady, onMergeRu
                 onMergeRun={onMergeRun}
               />
             )) : (
-              <tr><td colSpan={5} className="empty-cell">No queued work yet.</td></tr>
+              <tr><td colSpan={6} className="empty-cell">No queued work yet.</td></tr>
             )}
           </tbody>
         </table>
@@ -556,6 +581,7 @@ function LandingRow({item, selected, mergeBlocked, onSelect, onMergeRun}: {
         <span className="landing-subtext">{shortText(item.summary || "", 96)}</span>
       </td>
       <td title={item.branch || ""}>{item.branch || "-"}</td>
+      <td title={changeListTitle(item)}>{changeLine(item)}</td>
       <td title={proofLine(item)}>{proofLine(item)}</td>
       <td>
         <button type="button" disabled={!canMergeRow} title={mergeBlocked ? mergeButtonTitle({merge_blocked: true} as LandingState) : ""} onClick={(event) => {
@@ -679,6 +705,7 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
               {detail.summary_lines.map((line, index) => <DetailLine key={`${line}-${index}`} line={line} />)}
             </dl>
           </div>
+          <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} />
           <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
           <div className="detail-tabs">
             <button className={`tab ${!showingArtifacts ? "active" : ""}`} type="button" onClick={onShowLogs}>Logs</button>
@@ -701,6 +728,45 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
       )}
     </aside>
   );
+}
+
+function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]; onRunAction: (action: string, label?: string) => void}) {
+  const action = packet.next_action;
+  return (
+    <section className="review-packet" aria-label="Review packet">
+      <div className="review-head">
+        <div>
+          <strong>{packet.headline}</strong>
+          <span>{packet.summary}</span>
+        </div>
+        <button
+          type="button"
+          disabled={!action.enabled || !action.action_key}
+          title={action.reason || ""}
+          onClick={() => action.action_key && onRunAction(actionName(action.action_key), action.label)}
+        >
+          {action.label}
+        </button>
+      </div>
+      <div className="review-grid">
+        <ReviewMetric label="Stories" value={storiesLine(packet)} />
+        <ReviewMetric label="Changes" value={packet.changes.file_count ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}` : "-"} />
+        <ReviewMetric label="Evidence" value={`${packet.evidence.filter((item) => item.exists).length}/${packet.evidence.length}`} />
+      </div>
+      {packet.failure && <div className="review-note danger">{packet.failure.reason || "failure recorded"}</div>}
+      {packet.changes.files.length > 0 && (
+        <ul className="review-files">
+          {packet.changes.files.map((path) => <li key={path}>{path}</li>)}
+          {packet.changes.truncated && <li>more files not shown</li>}
+        </ul>
+      )}
+      {packet.changes.diff_command && <code>{packet.changes.diff_command}</code>}
+    </section>
+  );
+}
+
+function ReviewMetric({label, value}: {label: string; value: string}) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function DetailLine({line}: {line: string}) {
@@ -913,6 +979,22 @@ function activeCount(watcher?: WatcherInfo): number {
   return Number(counts.running || 0) + Number(counts.starting || 0) + Number(counts.terminating || 0);
 }
 
+function canStartWatcher(watcher?: WatcherInfo): boolean {
+  return (watcher?.health.state || "stopped") === "stopped";
+}
+
+function canStopWatcher(watcher?: WatcherInfo): boolean {
+  return Boolean(watcher?.health.blocking_pid);
+}
+
+function watcherSummary(watcher?: WatcherInfo): string {
+  const health = watcher?.health;
+  if (!health) return "stopped";
+  if (health.state === "running") return `running pid ${health.blocking_pid || "-"}`;
+  if (health.state === "stale") return `stale pid ${health.blocking_pid || "-"}`;
+  return "stopped";
+}
+
 function workflowHealth(data: StateResponse | null): {
   active: number;
   needsAttention: number;
@@ -921,6 +1003,8 @@ function workflowHealth(data: StateResponse | null): {
   repositoryTone: "neutral" | "warning" | "danger";
   watcherLabel: string;
   watcherTone: "neutral" | "success" | "warning";
+  runtimeLabel: string;
+  runtimeTone: "neutral" | "warning" | "danger";
 } {
   const active = activeCount(data?.watcher);
   const attentionKeys = new Set<string>();
@@ -941,9 +1025,13 @@ function workflowHealth(data: StateResponse | null): {
     ? "dirty"
     : "clean";
   const repositoryTone = data?.landing.merge_blocked ? "danger" : data?.project.dirty ? "warning" : "neutral";
-  const watcherLabel = data?.watcher.alive ? "running" : "stopped";
-  const watcherTone = data?.watcher.alive ? "success" : ready || active ? "warning" : "neutral";
-  return {active, needsAttention, ready, repositoryLabel, repositoryTone, watcherLabel, watcherTone};
+  const watcherLabel = data?.watcher.health.state || "stopped";
+  const watcherTone = data?.watcher.health.state === "running" ? "success" : ready || active || data?.watcher.health.state === "stale" ? "warning" : "neutral";
+  const runtimeIssues = data?.runtime.issues.length || 0;
+  const runtimeHasError = Boolean(data?.runtime.issues.some((issue) => issue.severity === "error"));
+  const runtimeLabel = runtimeIssues ? `${runtimeIssues} issue${runtimeIssues === 1 ? "" : "s"}` : "healthy";
+  const runtimeTone = runtimeHasError ? "danger" : runtimeIssues ? "warning" : "neutral";
+  return {active, needsAttention, ready, repositoryLabel, repositoryTone, watcherLabel, watcherTone, runtimeLabel, runtimeTone};
 }
 
 function isAttentionStatus(status: string | null | undefined): boolean {
@@ -1002,10 +1090,28 @@ function proofLine(item: LandingItem): string {
   return "-";
 }
 
+function changeLine(item: LandingItem): string {
+  const count = Number(item.changed_file_count || 0);
+  if (!count) return "-";
+  return `${count} file${count === 1 ? "" : "s"}`;
+}
+
+function changeListTitle(item: LandingItem): string {
+  if (!item.changed_files.length) return "";
+  const suffix = item.changed_file_count > item.changed_files.length ? `\n+${item.changed_file_count - item.changed_files.length} more` : "";
+  return `${item.changed_files.join("\n")}${suffix}`;
+}
+
 function actionLabelForLanding(item: LandingItem): string {
   if (item.landing_state === "merged") return "Merged";
   if (item.landing_state === "ready") return "Merge";
   return item.queue_status || "Blocked";
+}
+
+function storiesLine(packet: RunDetail["review_packet"]): string {
+  const tested = Number(packet.certification.stories_tested || 0);
+  const passed = Number(packet.certification.stories_passed || 0);
+  return tested ? `${passed}/${tested}` : "-";
 }
 
 function shortText(value: string, maxLength: number): string {

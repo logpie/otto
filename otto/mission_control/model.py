@@ -434,6 +434,14 @@ class MissionControlModel:
                 return item.record, item.overlay, "live"
         row = self._find_history_row(state, state.selection.run_id)
         if row is None:
+            now = _utc_now()
+            monotonic_now = time.monotonic()
+            for record in self._load_live_records(now):
+                if record.run_id != state.selection.run_id:
+                    continue
+                adapter = self._adapter_for_key(record.adapter_key or _adapter_key_for_record(record))
+                overlay = adapter.live_overlay(record, self._derive_overlay(record, now, monotonic_now))
+                return record, overlay, "live"
             return None, None, "live"
         return _history_row_to_record(self.project_dir, row), None, "history"
 

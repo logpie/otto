@@ -314,7 +314,11 @@ def _legacy_queue_record(project_dir, task, task_state, now):
             "extra_log_paths": [],
             "queue_manifest_path": str(queue_manifest.resolve(strict=False)) if queue_manifest is not None else None,
         },
-        metrics={"cost_usd": _coerce_float(state.get("cost_usd"))},
+        metrics={
+            "cost_usd": _coerce_float(state.get("cost_usd")),
+            "stories_passed": _coerce_float(state.get("stories_passed")),
+            "stories_tested": _coerce_float(state.get("stories_tested")),
+        },
         adapter_key="queue.attempt",
         last_event=str(state.get("failure_reason") or "legacy queue mode"),
     )

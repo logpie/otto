@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -31,6 +32,8 @@ from otto.mission_control.serializers import (
     serialize_detail,
     serialize_state,
 )
+from otto.mission_control.runtime import runtime_status as build_runtime_status
+from otto.mission_control.runtime import watcher_health
 from otto.queue.enqueue import enqueue_task
 from otto.queue.runtime import IN_FLIGHT_STATUSES, task_display_status, watcher_alive
 from otto.queue.runner import child_is_alive
@@ -62,12 +65,18 @@ class MissionControlService:
     def state(self, filters: MissionControlFilters | None = None) -> dict[str, Any]:
         state = self._state(filters)
         payload = serialize_state(self.project_dir, state)
-        payload["watcher"] = self.watcher_status()
-        payload["landing"] = self.landing_status()
+        watcher = self.watcher_status()
+        landing = self.landing_status()
+        payload["watcher"] = watcher
+        payload["landing"] = landing
+        payload["runtime"] = self.runtime_status(watcher=watcher, landing=landing)
         return payload
 
     def detail(self, run_id: str, filters: MissionControlFilters | None = None) -> dict[str, Any]:
-        return serialize_detail(self._detail_view(run_id, filters))
+        detail = self._detail_view(run_id, filters)
+        payload = serialize_detail(detail)
+        payload["review_packet"] = _review_packet(self.project_dir, detail)
+        return payload
 
     def logs(
         self,
@@ -180,10 +189,12 @@ class MissionControlService:
             status = _queue_display_status(raw if isinstance(raw, dict) else None, state)
             counts[status] = counts.get(status, 0) + 1
         watcher = state.get("watcher") if isinstance(state, dict) else None
+        health = watcher_health(self.project_dir, state if isinstance(state, dict) else {})
         return {
-            "alive": watcher_alive(state) if isinstance(state, dict) else False,
+            "alive": health["state"] == "running",
             "watcher": watcher if isinstance(watcher, dict) else None,
             "counts": counts,
+            "health": health,
         }
 
     def landing_status(self) -> dict[str, Any]:
@@ -240,6 +251,9 @@ class MissionControlService:
                 "stories_passed": _number_from_mapping(raw_state, "stories_passed"),
                 "stories_tested": _number_from_mapping(raw_state, "stories_tested"),
             }
+            changed_files = _branch_changed_files(self.project_dir, branch, target)
+            item["changed_file_count"] = len(changed_files)
+            item["changed_files"] = changed_files[:8]
             items.append(item)
 
         return {
@@ -249,6 +263,18 @@ class MissionControlService:
             "collisions": _landing_collisions(self.project_dir, ready_tasks, target),
             **preflight,
         }
+
+    def runtime_status(
+        self,
+        *,
+        watcher: dict[str, Any] | None = None,
+        landing: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return build_runtime_status(
+            self.project_dir,
+            watcher=watcher or self.watcher_status(),
+            landing=landing or self.landing_status(),
+        )
 
     def start_watcher(self, *, concurrent: int | None = None, exit_when_empty: bool = False) -> dict[str, Any]:
         status = self.watcher_status()
@@ -310,18 +336,21 @@ class MissionControlService:
     def stop_watcher(self) -> dict[str, Any]:
         status = self.watcher_status()
         watcher = status.get("watcher")
-        if not status.get("alive") or not isinstance(watcher, dict):
-            return {"ok": True, "message": "watcher is not running", "refresh": True, "watcher": status}
-        pid = watcher.get("pid")
+        raw_health = status.get("health")
+        health = raw_health if isinstance(raw_health, dict) else {}
+        pid = health.get("blocking_pid")
+        if not health and (not isinstance(pid, int) or pid <= 0) and isinstance(watcher, dict):
+            pid = watcher.get("pid")
         if not isinstance(pid, int) or pid <= 0:
-            raise MissionControlServiceError("watcher pid unavailable", status_code=409)
+            return {"ok": True, "message": "watcher is not running", "refresh": True, "watcher": status}
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             return {"ok": True, "message": "watcher already stopped", "refresh": True, "watcher": self.watcher_status()}
         except PermissionError as exc:
             raise MissionControlServiceError(f"watcher stop denied: {exc}", status_code=403) from exc
-        return {"ok": True, "message": "watcher stop requested", "refresh": True, "watcher": self.watcher_status()}
+        message = "stale watcher stop requested" if health.get("state") == "stale" else "watcher stop requested"
+        return {"ok": True, "message": message, "refresh": True, "watcher": self.watcher_status()}
 
     def enqueue(self, command: str, payload: dict[str, Any]) -> dict[str, Any]:
         command = command.strip().lower()
@@ -447,6 +476,141 @@ def filters_from_params(
     )
 
 
+def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
+    record = detail.record
+    display_status = "stale" if detail.overlay is not None and detail.overlay.level == "stale" else record.status
+    target = str(record.git.get("target_branch") or _merge_target(project_dir))
+    branch = _optional_str(record.git.get("branch"))
+    changed_files = _branch_changed_files(project_dir, branch, target)
+    return {
+        "headline": _review_headline(record, display_status),
+        "status": display_status,
+        "summary": _optional_str(record.intent.get("summary")) or record.display_name or record.run_id,
+        "next_action": _suggested_next_action(display_status, detail.legal_actions, detail.overlay),
+        "certification": _certification_summary(record),
+        "changes": {
+            "branch": branch,
+            "target": target,
+            "file_count": len(changed_files),
+            "files": changed_files[:12],
+            "truncated": len(changed_files) > 12,
+            "diff_command": f"git diff {target}...{branch}" if branch and branch != target else None,
+        },
+        "evidence": [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)],
+        "failure": _failure_summary(record, detail.overlay),
+    }
+
+
+def _review_headline(record: Any, display_status: str) -> str:
+    if display_status == "done":
+        return "Ready for review"
+    if display_status == "failed":
+        return "Failed; review evidence and requeue or remove"
+    if display_status == "stale":
+        return "Stale; stop or remove the orphaned work"
+    if display_status in {"running", "starting", "queued"}:
+        return "In progress"
+    if display_status == "interrupted":
+        return "Interrupted; resume or requeue"
+    summary = _optional_str(record.intent.get("summary")) if hasattr(record, "intent") else None
+    return summary or str(display_status or "Run detail")
+
+
+def _suggested_next_action(
+    display_status: str,
+    actions: list[Any],
+    overlay: Any,
+) -> dict[str, Any]:
+    by_key = {action.key: action for action in actions}
+    preferred = {
+        "failed": ["R", "x"],
+        "interrupted": ["r", "R", "x"],
+        "stale": ["x", "c"],
+        "done": ["m", "x"],
+        "running": ["c"],
+        "starting": ["c"],
+        "queued": ["x"],
+    }.get(display_status, [])
+    for key in preferred:
+        action = by_key.get(key)
+        if action is not None and action.enabled:
+            return {
+                "label": action.label,
+                "action_key": action.key,
+                "enabled": True,
+                "reason": action.preview,
+            }
+    for action in actions:
+        if action.enabled:
+            return {
+                "label": action.label,
+                "action_key": action.key,
+                "enabled": True,
+                "reason": action.preview,
+            }
+    reason = overlay.reason if overlay is not None else "No safe action is currently enabled."
+    return {"label": "No action", "action_key": None, "enabled": False, "reason": reason}
+
+
+def _certification_summary(record: Any) -> dict[str, Any]:
+    summary = _summary_for_record(record)
+    metrics = getattr(record, "metrics", {}) if isinstance(getattr(record, "metrics", {}), dict) else {}
+    stories_tested = _int_or_none(metrics.get("stories_tested"))
+    stories_passed = _int_or_none(metrics.get("stories_passed"))
+    if isinstance(summary, dict):
+        stories_tested = stories_tested if stories_tested is not None else _int_or_none(summary.get("stories_tested"))
+        stories_passed = stories_passed if stories_passed is not None else _int_or_none(summary.get("stories_passed"))
+        if stories_tested is None:
+            stories_tested = _int_or_none(summary.get("stories_total_count"))
+    return {
+        "stories_passed": stories_passed,
+        "stories_tested": stories_tested,
+        "passed": (
+            stories_passed is not None
+            and stories_tested is not None
+            and stories_tested > 0
+            and stories_passed >= stories_tested
+        ),
+        "summary_path": _optional_str(getattr(record, "artifacts", {}).get("summary_path")),
+    }
+
+
+def _summary_for_record(record: Any) -> dict[str, Any] | None:
+    artifacts = getattr(record, "artifacts", {}) if isinstance(getattr(record, "artifacts", {}), dict) else {}
+    candidates = [
+        artifacts.get("summary_path"),
+        Path(str(artifacts.get("session_dir"))) / "summary.json" if artifacts.get("session_dir") else None,
+    ]
+    for candidate in candidates:
+        text = _optional_str(candidate)
+        if not text:
+            continue
+        value = _read_json_object(Path(text).expanduser())
+        if value is not None:
+            return value
+    return None
+
+
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _failure_summary(record: Any, overlay: Any) -> dict[str, Any] | None:
+    status = str(getattr(record, "status", "") or "")
+    overlay_reason = overlay.reason if overlay is not None else None
+    last_event = _optional_str(getattr(record, "last_event", None))
+    if status not in {"failed", "cancelled", "interrupted"} and not overlay_reason:
+        return None
+    return {
+        "reason": overlay_reason or last_event or status,
+        "last_event": last_event,
+    }
+
+
 def _action_key(action: str) -> str:
     mapping = {
         "cancel": "c",
@@ -523,6 +687,17 @@ def _merged_branch_index(project_dir: Path) -> dict[str, dict[str, Any]]:
     return merged
 
 
+def _branch_changed_files(project_dir: Path, branch: str | None, target: str) -> list[str]:
+    branch = str(branch or "").strip()
+    target = str(target or "").strip()
+    if not branch or not target or branch == target:
+        return []
+    try:
+        return sorted(git_ops.files_in_branch_diff(project_dir, branch, target))
+    except Exception:
+        return []
+
+
 def _landing_collisions(project_dir: Path, ready_tasks: list[Any], target: str) -> list[dict[str, Any]]:
     if len(ready_tasks) < 2:
         return []
@@ -596,6 +771,15 @@ def _number_from_mapping(raw_state: Any, key: str) -> int | float | None:
         return None
     value = raw_state.get(key)
     return value if isinstance(value, (int, float)) else None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return None
 
 
 def _required_str(value: Any, field: str) -> str:

@@ -1,0 +1,10 @@
+{
+  "stamp": "2026-04-24-mission-control-runtime-web",
+  "target": "otto/mission_control, otto/web, tests/test_web_mission_control.py",
+  "tests": "tests/test_web_mission_control.py tests/test_mission_control_model.py tests/test_mission_control_integration.py; full pytest",
+  "mode": "fix",
+  "hunters": "local",
+  "rounds_requested": 1,
+  "test_cmd": "uv run pytest -q --maxfail=10",
+  "notes": "Local-only code-health pass because no explicit subagent delegation was requested in this turn."
+}

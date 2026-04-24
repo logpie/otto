@@ -15,6 +15,57 @@ export interface WatcherInfo {
   alive: boolean;
   watcher: {pid?: number | null} | null;
   counts: Record<string, number>;
+  health: WatcherHealth;
+}
+
+export interface WatcherHealth {
+  state: "running" | "stale" | "stopped" | string;
+  blocking_pid: number | null;
+  watcher_pid: number | null;
+  watcher_process_alive: boolean;
+  lock_pid: number | null;
+  lock_process_alive: boolean;
+  heartbeat: string | null;
+  heartbeat_age_s: number | null;
+  started_at: string | null;
+  log_path: string;
+  next_action: string;
+}
+
+export interface RuntimeIssue {
+  severity: "error" | "warning" | "info" | string;
+  label: string;
+  detail: string;
+  next_action: string;
+}
+
+export interface RuntimeFileStatus {
+  path: string;
+  exists: boolean;
+  size_bytes: number | null;
+  mtime: string | null;
+  error: string | null;
+  line_count?: number;
+  malformed_count?: number;
+}
+
+export interface RuntimeStatus {
+  status: "healthy" | "attention" | string;
+  generated_at: string;
+  queue_tasks: number | null;
+  state_tasks: number | null;
+  command_backlog: {
+    pending: number;
+    processing: number;
+    malformed: number;
+  };
+  files: {
+    queue: RuntimeFileStatus;
+    state: RuntimeFileStatus;
+    commands: RuntimeFileStatus;
+    processing: RuntimeFileStatus;
+  };
+  issues: RuntimeIssue[];
 }
 
 export interface LandingCounts {
@@ -47,6 +98,8 @@ export interface LandingItem {
   cost_usd: number | null;
   stories_passed: number | null;
   stories_tested: number | null;
+  changed_file_count: number;
+  changed_files: string[];
 }
 
 export interface LandingState {
@@ -143,7 +196,7 @@ export interface ArtifactRef {
 export interface RunDetail extends RunSummary {
   display_status: string;
   active: boolean;
-  source: Record<string, unknown>;
+  source: "live" | "history" | string;
   title: string;
   summary_lines: string[];
   overlay: Overlay | null;
@@ -152,12 +205,45 @@ export interface RunDetail extends RunSummary {
   selected_log_index: number;
   selected_log_path: string | null;
   legal_actions: ActionState[];
+  review_packet: ReviewPacket;
   record: Record<string, unknown>;
+}
+
+export interface ReviewPacket {
+  headline: string;
+  status: string;
+  summary: string;
+  next_action: {
+    label: string;
+    action_key: string | null;
+    enabled: boolean;
+    reason: string | null;
+  };
+  certification: {
+    stories_passed: number | null;
+    stories_tested: number | null;
+    passed: boolean;
+    summary_path: string | null;
+  };
+  changes: {
+    branch: string | null;
+    target: string;
+    file_count: number;
+    files: string[];
+    truncated: boolean;
+    diff_command: string | null;
+  };
+  evidence: ArtifactRef[];
+  failure: {
+    reason: string | null;
+    last_event: string | null;
+  } | null;
 }
 
 export interface StateResponse {
   project: ProjectInfo;
   watcher: WatcherInfo;
+  runtime: RuntimeStatus;
   landing: LandingState;
   live: {
     items: LiveRunItem[];

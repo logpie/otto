@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from otto import paths
 from otto.merge.state import BranchOutcome, MergeState, write_state as write_merge_state
+from otto.queue.runner import acquire_lock
 from otto.queue.schema import QueueTask, append_task, load_queue, write_state as write_queue_state
 from otto.runs.history import append_history_snapshot, build_terminal_snapshot
 from otto.runs.registry import make_run_record, update_record, write_record
@@ -259,6 +262,8 @@ def test_web_keeps_failed_queue_tasks_inspectable_for_requeue(tmp_path: Path) ->
     assert detail["display_status"] == "failed"
     assert actions["R"]["label"] == "requeue"
     assert actions["R"]["enabled"] is True
+    assert detail["review_packet"]["next_action"]["label"] == "requeue"
+    assert detail["review_packet"]["failure"]["reason"] == "old failure"
 
 
 def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
@@ -330,6 +335,58 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     assert by_id["ready-task"]["stories_passed"] == 2
     assert by_id["merged-task"]["landing_state"] == "merged"
     assert by_id["merged-task"]["merge_id"] == "merge-merged"
+
+
+def test_web_landing_and_detail_show_review_packet_changed_files(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    subprocess.run(["git", "checkout", "-q", "-b", "build/ready-task"], cwd=repo, check=True)
+    (repo / "feature.txt").write_text("ready\n", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add feature"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+    append_task(
+        repo,
+        QueueTask(
+            id="ready-task",
+            command_argv=["build", "ready task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="ready task",
+            branch="build/ready-task",
+            worktree=".worktrees/ready-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "ready-task": {
+                    "status": "done",
+                    "attempt_run_id": "run-ready",
+                    "stories_passed": 1,
+                    "stories_tested": 1,
+                },
+            },
+        },
+    )
+
+    client = TestClient(create_app(repo))
+    state = client.get("/api/state").json()
+    item = state["landing"]["items"][0]
+
+    assert item["changed_file_count"] == 1
+    assert item["changed_files"] == ["feature.txt"]
+
+    detail = client.get("/api/runs/run-ready").json()
+    packet = detail["review_packet"]
+    assert packet["headline"] == "Ready for review"
+    assert packet["certification"]["stories_passed"] == 1
+    assert packet["certification"]["stories_tested"] == 1
+    assert packet["changes"]["files"] == ["feature.txt"]
+    assert packet["changes"]["diff_command"] == "git diff main...build/ready-task"
+    assert packet["next_action"]["label"] == "merge selected"
 
 
 def test_web_landing_target_preserves_detected_branch_path(tmp_path: Path) -> None:
@@ -602,6 +659,140 @@ def test_web_state_includes_watcher_status(tmp_path: Path) -> None:
     state = client.get("/api/state").json()
     assert state["watcher"]["alive"] is False
     assert state["watcher"]["counts"]["queued"] == 0
+    assert state["watcher"]["health"]["state"] == "stopped"
+    assert state["runtime"]["status"] == "healthy"
+
+
+def test_web_runtime_surfaces_state_and_command_recovery_issues(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / ".otto-queue.yml").write_text("schema_version: [\n", encoding="utf-8")
+    paths.queue_commands_processing_path(repo).write_text(
+        json.dumps({"command_id": "cmd-1", "run_id": "run-1"}) + "\n",
+        encoding="utf-8",
+    )
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+    labels = [issue["label"] for issue in state["runtime"]["issues"]]
+
+    assert state["runtime"]["status"] == "attention"
+    assert state["runtime"]["command_backlog"]["processing"] == 1
+    assert "Queue file unreadable" in labels
+    assert "Command drain is unfinished" in labels
+
+
+def test_web_can_stop_stale_but_live_watcher_process(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    pid = os.getpid()
+    lock = acquire_lock(repo)
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": {
+                "pid": pid,
+                "pgid": pid,
+                "started_at": "2026-04-24T00:00:00Z",
+                "heartbeat": "2026-04-24T00:00:00Z",
+            },
+            "tasks": {},
+        },
+    )
+    signals: list[tuple[int, int]] = []
+
+    def fake_kill(target_pid: int, sig: int) -> None:
+        if sig == 0:
+            return
+        signals.append((target_pid, sig))
+
+    monkeypatch.setattr("otto.mission_control.runtime.os.kill", fake_kill)
+    monkeypatch.setattr("otto.mission_control.service.os.kill", fake_kill)
+
+    try:
+        client = TestClient(create_app(repo))
+        state = client.get("/api/state").json()
+        assert state["watcher"]["alive"] is False
+        assert state["watcher"]["health"]["state"] == "stale"
+        assert state["watcher"]["health"]["blocking_pid"] == pid
+
+        response = client.post("/api/watcher/stop", json={})
+    finally:
+        lock.close()
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "stale watcher stop requested"
+    assert signals == [(pid, signal.SIGTERM)]
+
+
+def test_web_does_not_stop_stale_watcher_pid_without_held_lock(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    pid = os.getpid()
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": {
+                "pid": pid,
+                "pgid": pid,
+                "started_at": "2026-04-24T00:00:00Z",
+                "heartbeat": "2026-04-24T00:00:00Z",
+            },
+            "tasks": {},
+        },
+    )
+    signals: list[tuple[int, int]] = []
+
+    def fake_kill(target_pid: int, sig: int) -> None:
+        if sig == 0:
+            return
+        signals.append((target_pid, sig))
+
+    monkeypatch.setattr("otto.mission_control.runtime.os.kill", fake_kill)
+    monkeypatch.setattr("otto.mission_control.service.os.kill", fake_kill)
+
+    client = TestClient(create_app(repo))
+    state = client.get("/api/state").json()
+    assert state["watcher"]["health"]["state"] == "stopped"
+    assert state["watcher"]["health"]["watcher_pid"] == pid
+    assert state["watcher"]["health"]["blocking_pid"] is None
+
+    response = client.post("/api/watcher/stop", json={})
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "watcher is not running"
+    assert signals == []
+
+
+def test_web_ignores_unheld_queue_lock_pid(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    lock = acquire_lock(repo)
+    lock.close()
+
+    client = TestClient(create_app(repo))
+    state = client.get("/api/state").json()
+
+    assert state["watcher"]["health"]["state"] == "stopped"
+    assert state["watcher"]["health"]["lock_pid"] is None
+    assert state["watcher"]["health"]["blocking_pid"] is None
+
+
+def test_web_reports_held_queue_lock_as_stale_runtime(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    lock = acquire_lock(repo)
+    try:
+        client = TestClient(create_app(repo))
+        state = client.get("/api/state").json()
+    finally:
+        lock.close()
+
+    assert state["watcher"]["alive"] is False
+    assert state["watcher"]["health"]["state"] == "stale"
+    assert state["watcher"]["health"]["lock_pid"] == os.getpid()
+    assert state["watcher"]["health"]["blocking_pid"] == os.getpid()
 
 
 def test_web_start_watcher_launches_background_process(tmp_path: Path, monkeypatch) -> None:
