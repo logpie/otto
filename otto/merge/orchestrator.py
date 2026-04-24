@@ -419,7 +419,7 @@ def _repair_merge_run_records(project_dir: Path) -> None:
                     updates=updates,
                 )
             else:
-                update_record(project_dir, merge_id, {"status": status, **updates}, heartbeat=True)
+                update_record(project_dir, merge_id, {"status": status, **updates}, heartbeat=False)
         except FileNotFoundError:
             _write_merge_run_record(project_dir, state, status="running" if terminal_status else status)
             if terminal_status:

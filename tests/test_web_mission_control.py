@@ -130,6 +130,9 @@ def test_web_state_marks_abandoned_live_runs_stale_not_active(tmp_path: Path) ->
     assert row["status"] == "running"
     assert row["display_status"] == "stale"
     assert row["active"] is False
+    assert row["elapsed_display"] == "-"
+    assert row["cost_display"] != "…"
+    assert row["last_event"] == "heartbeat stalled and writer identity is gone"
 
     detail = client.get("/api/runs/stale-web").json()
     assert detail["display_status"] == "stale"

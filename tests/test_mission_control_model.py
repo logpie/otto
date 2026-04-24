@@ -142,6 +142,9 @@ def test_stale_live_runs_are_not_counted_as_active(tmp_path: Path) -> None:
 
     assert state.live_runs.items[0].overlay is not None
     assert state.live_runs.items[0].overlay.label == "STALE"
+    assert state.live_runs.items[0].elapsed_display == "-"
+    assert state.live_runs.items[0].cost_display == "-"
+    assert state.live_runs.items[0].event == "heartbeat stalled and writer identity is gone"
     assert state.live_runs.active_count == 0
     assert state.live_runs.refresh_interval_s == 1.5
 

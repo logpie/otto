@@ -554,9 +554,10 @@ class MissionControlModel:
             overlay = adapter.live_overlay(record, self._derive_overlay(record, now, monotonic_now))
             if filters.active_only and not _status_is_effectively_active(record.status, overlay):
                 continue
-            elapsed_s = _elapsed_seconds(record, now)
+            elapsed_s = _elapsed_seconds(record, now, overlay)
             cost_usd = _coerce_float(record.metrics.get("cost_usd"))
             token_usage = _record_token_usage(record)
+            effectively_active = _status_is_effectively_active(record.status, overlay)
             items.append(
                 LiveRunItem(
                     record=record,
@@ -566,8 +567,8 @@ class MissionControlModel:
                     elapsed_s=elapsed_s,
                     elapsed_display=_format_elapsed(elapsed_s),
                     cost_usd=cost_usd,
-                    cost_display=_format_usage(cost_usd, token_usage, pending=record.status in {"running", "starting", "terminating"}),
-                    event=_truncate(_strip_terminal_escapes(record.last_event or "-"), 96),
+                    cost_display=_format_usage(cost_usd, token_usage, pending=effectively_active),
+                    event=_live_event(record, overlay),
                     row_label=row_label,
                 )
             )
@@ -958,7 +959,9 @@ def _history_outcome(row: HistoryRow) -> OutcomeFilter:
     return "other"
 
 
-def _elapsed_seconds(record: RunRecord, now: datetime) -> float | None:
+def _elapsed_seconds(record: RunRecord, now: datetime, overlay: StaleOverlay | None = None) -> float | None:
+    if overlay is not None and overlay.level == "stale":
+        return None
     duration = _coerce_float(record.timing.get("duration_s"))
     if duration is not None and is_terminal_status(record.status):
         return duration
@@ -969,6 +972,12 @@ def _elapsed_seconds(record: RunRecord, now: datetime) -> float | None:
     if finished_at is not None:
         return max(0.0, (finished_at - started_at).total_seconds())
     return max(0.0, (now - started_at).total_seconds())
+
+
+def _live_event(record: RunRecord, overlay: StaleOverlay | None) -> str:
+    if overlay is not None and overlay.level == "stale":
+        return _truncate(overlay.reason, 96)
+    return _truncate(_strip_terminal_escapes(record.last_event or "-"), 96)
 
 
 def _adapter_key_for_record(record: RunRecord) -> str:
