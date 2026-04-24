@@ -11,7 +11,7 @@ from pathlib import Path
 
 from otto import paths
 from otto.queue.schema import QueueTask, append_task
-from otto.tui.mission_control_model import MissionControlModel
+from otto.mission_control.model import MissionControlModel
 from tests._helpers import init_repo
 
 

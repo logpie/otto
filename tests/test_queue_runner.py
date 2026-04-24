@@ -224,6 +224,41 @@ exit {exit_code}
     return fake
 
 
+def _tick_until(
+    runner: Runner,
+    repo: Path,
+    predicate,
+    *,
+    timeout_s: float = 1.0,
+    interval_s: float = 0.02,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_s
+    state = load_state(repo)
+    while time.monotonic() < deadline:
+        runner._tick()
+        state = load_state(repo)
+        if predicate(state):
+            return state
+        time.sleep(interval_s)
+    raise AssertionError(f"condition not met before timeout; state={state!r}")
+
+
+def _tick_until_task_status(
+    runner: Runner,
+    repo: Path,
+    task_id: str,
+    statuses: set[str],
+    *,
+    timeout_s: float = 1.0,
+) -> dict[str, Any]:
+    return _tick_until(
+        runner,
+        repo,
+        lambda state: state["tasks"].get(task_id, {}).get("status") in statuses,
+        timeout_s=timeout_s,
+    )
+
+
 def _child_snapshot(proc: subprocess.Popen[Any], *, cwd: str, argv: list[str]) -> dict[str, Any]:
     import psutil
 
@@ -318,10 +353,7 @@ def test_runner_dispatches_and_reaps_a_simple_task(tmp_path: Path):
         # Task should be running now
         state = load_state(repo)
         assert state["tasks"]["t1"]["status"] == "running"
-        # Wait for the fake to finish (sleep 0.1)
-        time.sleep(1.5)
-        runner._tick()
-        state = load_state(repo)
+        state = _tick_until_task_status(runner, repo, "t1", {"done"})
         assert state["tasks"]["t1"]["status"] == "done", \
             f"expected done, got {state['tasks']['t1']!r}"
         assert state["tasks"]["t1"]["cost_usd"] == 0.42
@@ -342,9 +374,7 @@ def test_runner_marks_failed_when_no_manifest(tmp_path: Path):
     runner._lock_fh = acquire_lock(repo)
     try:
         runner._tick()
-        time.sleep(1.0)
-        runner._tick()
-        state = load_state(repo)
+        state = _tick_until_task_status(runner, repo, "t1", {"failed"})
         assert state["tasks"]["t1"]["status"] == "failed"
         assert "no manifest" in state["tasks"]["t1"]["failure_reason"]
     finally:
@@ -363,9 +393,7 @@ def test_runner_marks_failed_on_nonzero_exit(tmp_path: Path):
     runner._lock_fh = acquire_lock(repo)
     try:
         runner._tick()
-        time.sleep(1.0)
-        runner._tick()
-        state = load_state(repo)
+        state = _tick_until_task_status(runner, repo, "t1", {"failed"})
         assert state["tasks"]["t1"]["status"] == "failed"
         assert "exit_code=1" in state["tasks"]["t1"]["failure_reason"]
     finally:
@@ -516,7 +544,7 @@ def test_finalize_queue_attempt_surfaces_unexpected_finalize_errors(tmp_path: Pa
 
 def test_runner_respects_concurrent_cap(tmp_path: Path):
     repo = init_repo(tmp_path)
-    fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=0.5)
+    fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=0.2)
     for i in range(3):
         append_task(repo, QueueTask(
             id=f"t{i}", command_argv=["build", str(i)],
@@ -533,12 +561,12 @@ def test_runner_respects_concurrent_cap(tmp_path: Path):
         # Untouched tasks aren't in state.json yet — they're "queued" by absence.
         assert len(state["tasks"]) == 2, \
             f"expected only 2 tasks in state (dispatched), got {len(state['tasks'])}"
-        time.sleep(2.0)
-        runner._tick()
-        runner._tick()
-        time.sleep(2.0)
-        runner._tick()
-        state = load_state(repo)
+        state = _tick_until(
+            runner,
+            repo,
+            lambda current: sum(1 for ts in current["tasks"].values() if ts.get("status") == "done") == 3,
+            timeout_s=2.0,
+        )
         done = sum(1 for ts in state["tasks"].values() if ts.get("status") == "done")
         assert done == 3, f"expected all done, got: {state['tasks']!r}"
     finally:
@@ -603,11 +631,8 @@ def test_runner_cascades_failure_through_after_chain(tmp_path: Path):
         runner._tick()
         state = load_state(repo)
         assert state["tasks"]["a"]["status"] == "running"
-        # Wait for a to die
-        time.sleep(0.5)
-        # Tick 2: reap a (failed); cascade-fail b (since a failed)
-        runner._tick()
-        state = load_state(repo)
+        # Tick until a is reaped; b cascades failed once a fails.
+        state = _tick_until_task_status(runner, repo, "a", {"failed"})
         assert state["tasks"]["a"]["status"] == "failed"
         assert state["tasks"]["b"]["status"] == "failed"
         assert "dependency 'a'" in state["tasks"]["b"]["failure_reason"]
@@ -641,9 +666,7 @@ def test_runner_blocks_task_with_unsatisfied_after(tmp_path: Path):
         assert state["tasks"]["a"]["status"] == "running"
         # b not yet dispatched → not in state.json yet
         assert "b" not in state["tasks"]
-        time.sleep(1.5)
-        runner._tick()
-        state = load_state(repo)
+        state = _tick_until_task_status(runner, repo, "a", {"done"})
         assert state["tasks"]["a"]["status"] == "done"
         # Now b should dispatch
         runner._tick()
@@ -679,7 +702,7 @@ exit 0
         concurrent=1,
         poll_interval_s=0.1,
         heartbeat_interval_s=0.5,
-        task_timeout_s=2.0,  # 2 second timeout — well under the 60s sleep
+        task_timeout_s=0.1,
     )
     runner = Runner(repo, cfg, otto_bin=str(fake))
     runner._lock_fh = acquire_lock(repo)
@@ -687,8 +710,9 @@ exit 0
         runner._tick()
         # Task should be running
         assert load_state(repo)["tasks"]["hang"]["status"] == "running"
-        # Wait past the 2s timeout
-        time.sleep(3.0)
+        state = load_state(repo)
+        state["tasks"]["hang"]["started_at"] = "2000-01-01T00:00:00Z"
+        write_state(repo, state)
         runner._tick()  # should observe the timeout and SIGTERM the child
         ts = load_state(repo)["tasks"]["hang"]
         # Status should have transitioned to terminating (or already past it)
@@ -696,10 +720,8 @@ exit 0
             f"expected transition from running, got {ts['status']!r}"
         assert "timed out" in (ts.get("failure_reason") or ""), \
             f"expected 'timed out' in reason, got {ts.get('failure_reason')!r}"
-        # Wait for child to die + reaper to finalize
-        time.sleep(3.0)
-        runner._tick()
-        ts2 = load_state(repo)["tasks"]["hang"]
+        state = _tick_until_task_status(runner, repo, "hang", {"failed"})
+        ts2 = state["tasks"]["hang"]
         assert ts2["status"] == "failed", f"expected failed, got {ts2['status']!r}"
     finally:
         runner._lock_fh.close()
@@ -708,7 +730,7 @@ exit 0
 def test_runner_does_not_timeout_task_under_limit(tmp_path: Path):
     """A short-lived task must NOT be killed if it finishes before timeout."""
     repo = init_repo(tmp_path)
-    fake = _make_fake_otto(tmp_path, exit_code=0, sleep=0.2)
+    fake = _make_fake_otto(tmp_path, exit_code=0, sleep=0.05)
     append_task(repo, QueueTask(
         id="quick", command_argv=["build", "x"],
         branch="build/q-x", worktree=".worktrees/quick",
@@ -722,9 +744,8 @@ def test_runner_does_not_timeout_task_under_limit(tmp_path: Path):
     runner._lock_fh = acquire_lock(repo)
     try:
         runner._tick()
-        time.sleep(1.5)
-        runner._tick()
-        ts = load_state(repo)["tasks"]["quick"]
+        state = _tick_until_task_status(runner, repo, "quick", {"done"})
+        ts = state["tasks"]["quick"]
         assert ts["status"] == "done", f"expected done, got {ts['status']!r}"
         assert "timed out" not in (ts.get("failure_reason") or "")
     finally:
@@ -734,7 +755,7 @@ def test_runner_does_not_timeout_task_under_limit(tmp_path: Path):
 def test_runner_task_timeout_disabled_when_none(tmp_path: Path):
     """task_timeout_s=None disables the enforcement entirely (escape hatch)."""
     repo = init_repo(tmp_path)
-    fake = _make_fake_otto(tmp_path, exit_code=0, sleep=0.2)
+    fake = _make_fake_otto(tmp_path, exit_code=0, sleep=0.05)
     append_task(repo, QueueTask(
         id="t", command_argv=["build", "x"],
         branch="build/t-x", worktree=".worktrees/t",
@@ -747,9 +768,8 @@ def test_runner_task_timeout_disabled_when_none(tmp_path: Path):
     runner._lock_fh = acquire_lock(repo)
     try:
         runner._tick()
-        time.sleep(1.5)
-        runner._tick()
-        ts = load_state(repo)["tasks"]["t"]
+        state = _tick_until_task_status(runner, repo, "t", {"done"})
+        ts = state["tasks"]["t"]
         assert ts["status"] == "done"
     finally:
         runner._lock_fh.close()

@@ -368,8 +368,8 @@ class MissionControlModel:
         live_view = LiveRunsView(
             items=live_items,
             total_count=len(live_items),
-            active_count=sum(1 for item in live_items if not is_terminal_status(item.record.status)),
-            refresh_interval_s=0.5 if any(not is_terminal_status(item.record.status) for item in live_items) else 1.5,
+            active_count=sum(1 for item in live_items if _live_item_is_active(item)),
+            refresh_interval_s=0.5 if any(_live_item_is_active(item) for item in live_items) else 1.5,
         )
 
         history_rows = self._dedupe_history_rows(load_project_history_rows(self.project_dir))
@@ -545,8 +545,6 @@ class MissionControlModel:
             retention_time = _parse_iso(record.timing.get("finished_at") or record.timing.get("updated_at"))
             if is_terminal_status(record.status) and retention_time is not None and retention_time.timestamp() < cutoff:
                 continue
-            if filters.active_only and is_terminal_status(record.status):
-                continue
             if filters.type_filter != "all" and record.run_type != filters.type_filter:
                 continue
             adapter = self._adapter_for_key(record.adapter_key or _adapter_key_for_record(record))
@@ -554,6 +552,8 @@ class MissionControlModel:
             if filters.query and not _live_record_matches_query(record, row_label, filters.query):
                 continue
             overlay = adapter.live_overlay(record, self._derive_overlay(record, now, monotonic_now))
+            if filters.active_only and not _status_is_effectively_active(record.status, overlay):
+                continue
             elapsed_s = _elapsed_seconds(record, now)
             cost_usd = _coerce_float(record.metrics.get("cost_usd"))
             token_usage = _record_token_usage(record)
@@ -678,21 +678,28 @@ class MissionControlModel:
         stale_threshold_s = max(3.0 * heartbeat_interval_s, 15.0)
         heartbeat_seq = int(record.timing.get("heartbeat_seq") or 0)
         writer_identity = _writer_identity(record.writer)
+        heartbeat_at = _parse_iso(record.timing.get("heartbeat_at"))
+        wall_age_s = max(0.0, (now - heartbeat_at).total_seconds()) if heartbeat_at is not None else 0.0
+        writer_alive: bool | None = None
         tracker = self._stale_trackers.get(record.run_id)
         progressed = tracker is None or heartbeat_seq > tracker.heartbeat_seq or writer_identity != tracker.writer_identity
         if progressed:
             tracker = _StaleTracker(heartbeat_seq, writer_identity, monotonic_now)
             self._stale_trackers[record.run_id] = tracker
+            if wall_age_s >= stale_threshold_s:
+                writer_alive = self._process_probe(record.writer)
+                if not writer_alive:
+                    return StaleOverlay("stale", "STALE", "heartbeat stalled and writer identity is gone", False)
+                if wall_age_s > heartbeat_interval_s:
+                    return StaleOverlay("lagging", "LAGGING", "heartbeat overdue but writer still alive", True)
             return None
 
-        heartbeat_at = _parse_iso(record.timing.get("heartbeat_at"))
-        wall_age_s = max(0.0, (now - heartbeat_at).total_seconds()) if heartbeat_at is not None else 0.0
         writer_alive = self._process_probe(record.writer)
         grace_active = (
             self._suspend_started_monotonic is not None
             and (monotonic_now - self._suspend_started_monotonic) < stale_threshold_s
         )
-        if grace_active and wall_age_s > heartbeat_interval_s:
+        if grace_active and wall_age_s > heartbeat_interval_s and writer_alive:
             return StaleOverlay("lagging", "LAGGING", "reader grace window after suspend/clock jump", writer_alive)
         if wall_age_s > heartbeat_interval_s and writer_alive:
             return StaleOverlay("lagging", "LAGGING", "heartbeat overdue but writer still alive", True)
@@ -767,6 +774,18 @@ def _normalize_history_row(raw: dict[str, Any]) -> HistoryRow | None:
         adapter_key=_adapter_key_for_history(domain=domain, run_type=run_type),
         raw=dict(raw),
     )
+
+
+def _live_item_is_active(item: LiveRunItem) -> bool:
+    return _status_is_effectively_active(item.record.status, item.overlay)
+
+
+def _status_is_effectively_active(status: str | None, overlay: StaleOverlay | None) -> bool:
+    if is_terminal_status(status):
+        return False
+    if overlay is not None and overlay.level == "stale":
+        return False
+    return True
 
 
 def _history_row_to_record(project_dir: Path, row: HistoryRow) -> RunRecord:

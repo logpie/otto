@@ -8,8 +8,8 @@ from otto import paths
 from otto.merge.state import MergeState, write_state
 from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
 from otto.runs.registry import make_run_record
-from otto.tui.mission_control_model import StaleOverlay
-from otto.tui.adapters import adapter_for_key
+from otto.mission_control.model import StaleOverlay
+from otto.mission_control.adapters import adapter_for_key
 
 
 def test_atomic_adapter_orders_artifacts_and_formats_summary(tmp_path: Path) -> None:
@@ -112,7 +112,7 @@ def test_queue_adapter_disables_cancel_without_task_id_and_cleanup_while_writer_
         identity={"queue_task_id": None, "merge_id": None, "parent_run_id": None},
         adapter_key="queue.attempt",
     )
-    monkeypatch.setattr("otto.tui.adapters.queue.writer_identity_gone_or_stale", lambda writer: False)
+    monkeypatch.setattr("otto.mission_control.adapters.queue.writer_identity_gone_or_stale", lambda writer: False)
 
     adapter = adapter_for_key("queue.attempt")
     done_actions = {action.key: action for action in adapter.legal_actions(record, None)}
@@ -192,7 +192,7 @@ def test_queue_adapter_owns_legacy_record_and_overlay_compat(tmp_path: Path) -> 
     assert adapter.live_overlay(records[0], StaleOverlay("stale", "STALE", "writer unavailable", False)) is None
 
 
-def test_merge_adapter_renders_state_details(tmp_path: Path) -> None:
+def test_merge_adapter_renders_state_details(tmp_path: Path, monkeypatch) -> None:
     merge_id = "merge-123"
     state = MergeState(
         merge_id=merge_id,
@@ -220,6 +220,7 @@ def test_merge_adapter_renders_state_details(tmp_path: Path) -> None:
         artifacts={"session_dir": str(paths.merge_dir(tmp_path) / merge_id), "primary_log_path": str(merge_log)},
         adapter_key="merge.run",
     )
+    monkeypatch.setattr("otto.mission_control.adapters.merge.writer_identity_gone_or_stale", lambda writer: True)
 
     adapter = adapter_for_key("merge.run")
     detail = adapter.detail_panel_renderer(record)
@@ -231,6 +232,7 @@ def test_merge_adapter_renders_state_details(tmp_path: Path) -> None:
     assert actions["c"].reason == "writer unavailable (stale overlay)"
     assert actions["r"].enabled is False
     assert actions["r"].reason == "merge --resume is deferred"
+    assert actions["x"].enabled is True
 
 
 def test_atomic_and_merge_cleanup_wait_for_writer_finalization(tmp_path: Path, monkeypatch) -> None:
@@ -257,8 +259,8 @@ def test_atomic_and_merge_cleanup_wait_for_writer_finalization(tmp_path: Path, m
         identity={"merge_id": "merge-run", "queue_task_id": None, "parent_run_id": None},
         adapter_key="merge.run",
     )
-    monkeypatch.setattr("otto.tui.adapters.atomic.writer_identity_gone_or_stale", lambda writer: False)
-    monkeypatch.setattr("otto.tui.adapters.merge.writer_identity_gone_or_stale", lambda writer: False)
+    monkeypatch.setattr("otto.mission_control.adapters.atomic.writer_identity_gone_or_stale", lambda writer: False)
+    monkeypatch.setattr("otto.mission_control.adapters.merge.writer_identity_gone_or_stale", lambda writer: False)
 
     atomic_actions = {action.key: action for action in adapter_for_key("atomic.build").legal_actions(atomic, None)}
     merge_actions = {action.key: action for action in adapter_for_key("merge.run").legal_actions(merge, None)}

@@ -167,10 +167,16 @@ def resolve_queue_task_verify_status(
 ) -> str | None:
     deadline = time.monotonic() + max(history_timeout_s, 0.0)
     snapshot = history_snapshot
+    task = {}
+    if isinstance(state, dict):
+        task = state.get("tasks", {}).get(task_id, {})
+    state_status = verifier_status_from_queue_task(task)
     while True:
         status = verifier_status_from_terminal_snapshot(snapshot)
         if status is not None:
             return status
+        if state_status in {"done", "failed", "cancelled", "removed", "interrupted"}:
+            return state_status
         snapshot = queue_terminal_snapshot(repo, task_id)
         status = verifier_status_from_terminal_snapshot(snapshot)
         if status is not None:
@@ -179,12 +185,8 @@ def resolve_queue_task_verify_status(
             break
         time.sleep(interval_s)
 
-    task = {}
-    if isinstance(state, dict):
-        task = state.get("tasks", {}).get(task_id, {})
-    status = verifier_status_from_queue_task(task)
-    if status is not None:
-        return status
+    if state_status is not None:
+        return state_status
     live_task = load_queue_state(repo).get("tasks", {}).get(task_id, {})
     return verifier_status_from_queue_task(live_task)
 

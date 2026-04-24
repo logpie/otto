@@ -65,7 +65,8 @@ class AtomicMissionControlAdapter(ActionExecutingAdapter):
         has_artifact = bool(self.artifacts(record))
         argv = record.source.get("argv")
         argv_preview = " ".join(str(part) for part in (argv or []))
-        cleanup_enabled = is_terminal_status(record.status) and writer_identity_gone_or_stale(record.writer)
+        stale_overlay = overlay is not None and overlay.level == "stale"
+        cleanup_enabled = (is_terminal_status(record.status) or stale_overlay) and writer_identity_gone_or_stale(record.writer)
         return [
             make_action(
                 "c",
@@ -131,7 +132,7 @@ class AtomicMissionControlAdapter(ActionExecutingAdapter):
                     None
                     if cleanup_enabled
                     else "run is still active"
-                    if not is_terminal_status(record.status)
+                    if not is_terminal_status(record.status) and not stale_overlay
                     else "writer still alive — wait for finalization"
                 ),
                 preview=f"would clean terminal artifacts for {record.run_id}",

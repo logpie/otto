@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -9,7 +10,7 @@ from fastapi.testclient import TestClient
 from otto import paths
 from otto.queue.schema import load_queue
 from otto.runs.history import append_history_snapshot, build_terminal_snapshot
-from otto.runs.registry import make_run_record, write_record
+from otto.runs.registry import make_run_record, update_record, write_record
 from otto.web.app import create_app
 
 
@@ -90,6 +91,51 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     summary = next(item for item in artifacts if item["label"] == "summary")
     content = client.get(f"/api/runs/build-web/artifacts/{summary['index']}/content").json()
     assert '"passed"' in content["content"]
+
+
+def test_web_state_marks_abandoned_live_runs_stale_not_active(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write_run(repo, run_id="stale-web")
+    heartbeat_at = "2026-04-24T00:00:00Z"
+    update_record(
+        repo,
+        "stale-web",
+        heartbeat=False,
+        updates={
+            "writer": {"pid": 999999, "pgid": 999999, "writer_id": "dead"},
+            "timing": {
+                "started_at": heartbeat_at,
+                "updated_at": heartbeat_at,
+                "heartbeat_at": heartbeat_at,
+                "heartbeat_interval_s": 2.0,
+                "heartbeat_seq": 1,
+            },
+        },
+    )
+    app = create_app(repo)
+    clock = {"now": datetime(2026, 4, 24, tzinfo=timezone.utc), "monotonic": 0.0}
+    app.state.service.model._now_fn = lambda: clock["now"]
+    app.state.service.model._monotonic_fn = lambda: clock["monotonic"]
+    client = TestClient(app)
+
+    client.get("/api/state")
+    clock["now"] += timedelta(seconds=16)
+    clock["monotonic"] += 16
+    state = client.get("/api/state").json()
+
+    row = state["live"]["items"][0]
+    assert state["live"]["active_count"] == 0
+    assert state["live"]["refresh_interval_s"] == 1.5
+    assert row["status"] == "running"
+    assert row["display_status"] == "stale"
+    assert row["active"] is False
+
+    detail = client.get("/api/runs/stale-web").json()
+    assert detail["display_status"] == "stale"
+    actions = {action["key"]: action for action in detail["legal_actions"]}
+    assert actions["c"]["enabled"] is False
+    assert actions["x"]["enabled"] is True
 
 
 def test_web_artifact_content_rejects_paths_outside_project(tmp_path: Path) -> None:

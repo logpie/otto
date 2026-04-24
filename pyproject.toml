@@ -38,3 +38,7 @@ include = ["otto*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "strict"
+addopts = ["-m", "not tui"]
+markers = [
+    "tui: legacy Textual TUI tests; excluded from the default suite because Mission Control is moving to web",
+]

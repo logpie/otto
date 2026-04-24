@@ -1,0 +1,9 @@
+{
+  "stamp": "2026-04-23-2328",
+  "target": "tests/",
+  "tests": "tests/",
+  "mode": "fix",
+  "hunters": "local",
+  "rounds_requested": 1,
+  "test_cmd": "uv run --extra dev python -m pytest -q"
+}

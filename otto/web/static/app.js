@@ -79,7 +79,7 @@ async function refresh() {
     const data = await api(`/api/state?${params().toString()}`);
     renderProject(data.project);
     renderWatcher(data.watcher);
-    renderLive(data.live.items);
+    renderLive(data.live);
     renderHistory(data.history.items, data.history.total_rows);
     scheduleRefresh(data.live.refresh_interval_s);
     const visibleIds = new Set([
@@ -129,19 +129,23 @@ function renderWatcher(watcher) {
   els.stopWatcherButton.disabled = !watcher?.alive;
 }
 
-function renderLive(items) {
-  els.activeCount.textContent = String(items.filter((item) => !isTerminal(item.status)).length);
+function renderLive(live) {
+  const items = live?.items || [];
+  els.activeCount.textContent = String(live?.active_count ?? items.filter((item) => item.active ?? !isTerminal(item.status)).length);
   els.liveCount.textContent = String(items.length);
-  els.liveRows.innerHTML = items.map((item) => `
+  els.liveRows.innerHTML = items.map((item) => {
+    const displayStatus = item.display_status || item.status || "-";
+    const statusTitle = item.overlay?.reason || displayStatus;
+    return `
     <tr data-run-id="${escapeAttr(item.run_id)}" class="${item.run_id === state.selectedRunId ? "selected" : ""}">
-      <td class="status-${escapeAttr(item.status)}">${escapeHtml(item.status.toUpperCase())}</td>
+      <td class="status-${escapeAttr(displayStatus)}" title="${escapeAttr(statusTitle)}">${escapeHtml(displayStatus.toUpperCase())}</td>
       <td title="${escapeAttr(item.run_id)}">${escapeHtml(item.display_id || item.run_id)}</td>
       <td title="${escapeAttr(item.branch_task || "")}">${escapeHtml(item.branch_task || "-")}</td>
       <td>${escapeHtml(item.elapsed_display || "-")}</td>
       <td>${escapeHtml(item.cost_display || "-")}</td>
       <td title="${escapeAttr(item.last_event || "")}">${escapeHtml(item.last_event || "-")}</td>
     </tr>
-  `).join("");
+  `}).join("");
   els.liveRows.querySelectorAll("tr").forEach((row) => {
     row.addEventListener("click", () => selectRun(row.dataset.runId));
   });
@@ -179,7 +183,7 @@ async function loadDetail(runId, {keepLog = false} = {}) {
   try {
     const detail = await api(`/api/runs/${encodeURIComponent(runId)}?${params().toString()}`);
     state.detail = detail;
-    els.detailStatus.textContent = detail.status || "-";
+    els.detailStatus.textContent = detail.display_status || detail.status || "-";
     els.detailBody.classList.remove("empty");
     els.detailBody.innerHTML = `
       <h3>${escapeHtml(detail.title || detail.run_id)}</h3>

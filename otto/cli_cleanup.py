@@ -1,4 +1,4 @@
-"""Thin cleanup CLI for terminal non-queue Mission Control records."""
+"""Thin cleanup CLI for terminal or abandoned non-queue Mission Control records."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def register_cleanup_command(main: click.Group) -> None:
     @main.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("run_id")
     def cleanup(run_id: str) -> None:
-        """Remove one terminal live Mission Control record."""
+        """Remove one terminal or abandoned live Mission Control record."""
         from otto.runs.registry import cleanup_live_record
 
         project_dir = Path.cwd()

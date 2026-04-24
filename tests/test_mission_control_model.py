@@ -8,8 +8,8 @@ from otto import paths
 from otto.history import append_history_entry
 from otto.queue.schema import QueueTask, append_task, write_state
 from otto.runs.registry import finalize_record, make_run_record, update_record, write_record
-import otto.tui.mission_control_model as mission_control_model
-from otto.tui.mission_control_model import MissionControlFilters, MissionControlModel
+import otto.mission_control.model as mission_control_model
+from otto.mission_control.model import MissionControlFilters, MissionControlModel
 
 
 class _Clock:
@@ -129,6 +129,25 @@ def test_stale_overlay_derivation_uses_grace_window_and_dead_writer(tmp_path: Pa
     state = model.refresh(state)
     assert state.live_runs.items[0].overlay is not None
     assert state.live_runs.items[0].overlay.label == "STALE"
+
+
+def test_stale_live_runs_are_not_counted_as_active(tmp_path: Path) -> None:
+    clock = _Clock(datetime(2026, 4, 23, 12, 0, tzinfo=timezone.utc))
+    _record(tmp_path, run_id="abandoned-merge", run_type="merge", status="running", updated_at="2026-04-23T12:00:00Z")
+    model = MissionControlModel(tmp_path, now_fn=clock.now, monotonic_fn=lambda: clock.monotonic, process_probe=lambda writer: False)
+
+    state = model.initial_state()
+    clock.tick(seconds=16)
+    state = model.refresh(state)
+
+    assert state.live_runs.items[0].overlay is not None
+    assert state.live_runs.items[0].overlay.label == "STALE"
+    assert state.live_runs.active_count == 0
+    assert state.live_runs.refresh_interval_s == 1.5
+
+    state.filters.active_only = True
+    state = model.refresh(state)
+    assert state.live_runs.items == []
 
 
 def test_history_pagination_and_dedup(tmp_path: Path) -> None:
@@ -313,7 +332,7 @@ def test_queue_compat_uses_model_snapshot_for_legacy_dedupe(tmp_path: Path, monk
         adapter_key="queue.attempt",
     )
     monkeypatch.setattr(
-        "otto.tui.mission_control_model.read_live_records",
+        "otto.mission_control.model.read_live_records",
         lambda project_dir: [live_record] if project_dir == tmp_path else [],
     )
 

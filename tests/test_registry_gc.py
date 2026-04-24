@@ -8,11 +8,13 @@ import pytest
 from otto.merge.orchestrator import MergeOptions, run_merge
 from otto.pipeline import build_agentic_v3
 from otto.queue.runner import Runner, RunnerConfig
-from otto.tui.mission_control import MissionControlApp
 
 
+@pytest.mark.tui
 @pytest.mark.asyncio
 async def test_dashboard_startup_calls_registry_gc(tmp_path: Path, monkeypatch) -> None:
+    from otto.tui.mission_control import MissionControlApp
+
     calls: list[Path] = []
     monkeypatch.setattr("otto.tui.mission_control.garbage_collect_live_records", lambda project_dir: calls.append(project_dir) or [])
 

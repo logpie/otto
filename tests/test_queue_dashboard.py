@@ -13,6 +13,8 @@ from otto.queue.dashboard import (
 from otto.queue.schema import QueueTask
 from tests._helpers import init_repo
 
+pytestmark = pytest.mark.tui
+
 
 def _queue_task(task_id: str, *, branch: str, worktree: str, command: str = "build") -> QueueTask:
     return QueueTask(

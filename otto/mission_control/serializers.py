@@ -71,8 +71,11 @@ def serialize_state(project_dir: Path, state: MissionControlState) -> dict[str, 
 
 def serialize_live_item(item: LiveRunItem) -> dict[str, Any]:
     record = item.record
+    display_status = _display_status(record.status, item.overlay)
     return {
         **_record_summary(record),
+        "display_status": display_status,
+        "active": _is_effectively_active(record.status, item.overlay),
         "display_id": item.display_id,
         "branch_task": item.branch_task,
         "elapsed_s": item.elapsed_s,
@@ -115,6 +118,8 @@ def serialize_detail(detail: DetailView) -> dict[str, Any]:
     record = detail.record
     return {
         **_record_summary(record),
+        "display_status": _display_status(record.status, detail.overlay),
+        "active": _is_effectively_active(record.status, detail.overlay),
         "source": detail.source,
         "title": detail.detail.title,
         "summary_lines": list(detail.detail.summary_lines),
@@ -169,6 +174,20 @@ def serialize_overlay(overlay: StaleOverlay | None) -> dict[str, Any] | None:
         "reason": overlay.reason,
         "writer_alive": overlay.writer_alive,
     }
+
+
+def _display_status(status: str | None, overlay: StaleOverlay | None) -> str:
+    if overlay is not None and overlay.level == "stale":
+        return "stale"
+    return str(status or "")
+
+
+def _is_effectively_active(status: str | None, overlay: StaleOverlay | None) -> bool:
+    if str(status or "") in {"done", "failed", "cancelled", "removed", "interrupted"}:
+        return False
+    if overlay is not None and overlay.level == "stale":
+        return False
+    return True
 
 
 def _record_summary(record: RunRecord) -> dict[str, Any]:

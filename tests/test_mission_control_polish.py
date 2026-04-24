@@ -6,7 +6,7 @@ from pathlib import Path
 
 from otto import paths
 from otto.runs.registry import make_run_record, update_record, write_record
-from otto.tui.mission_control_model import MissionControlModel
+from otto.mission_control.model import MissionControlModel
 
 
 def _write_running_record(project_dir: Path, *, run_id: str) -> None:

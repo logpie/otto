@@ -246,7 +246,7 @@ def test_n9_merge_spawn_matcher_accepts_direct_and_module_argv() -> None:
 
 
 def test_capture_mission_control_action_spawns_persists_merge_stderr(monkeypatch, tmp_path: Path) -> None:
-    mission_control_actions = importlib.import_module("otto.tui.mission_control_actions")
+    mission_control_actions = importlib.import_module("otto.mission_control.actions")
     calls: list[dict[str, object]] = []
 
     class FakeProc:

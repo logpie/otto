@@ -15,6 +15,8 @@ from otto.tui.mission_control import HelpModal, MissionControlApp, SearchableLog
 from otto.tui.mission_control_actions import ActionResult
 from otto.tui.mission_control_model import MissionControlFilters
 
+pytestmark = pytest.mark.tui
+
 
 class _EditorPopen:
     calls: list[list[str]] = []

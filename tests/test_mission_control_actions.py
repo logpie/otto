@@ -7,12 +7,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import otto.tui.mission_control_actions as mission_control_actions
+import otto.mission_control.actions as mission_control_actions
 from otto import paths
 from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
 from otto.runs.registry import make_run_record, read_jsonl_rows, write_record
-from otto.tui.adapters import adapter_for_key
-from otto.tui.mission_control_actions import ActionResult, execute_action, execute_merge_all
+from otto.mission_control.adapters import adapter_for_key
+from otto.mission_control.actions import ActionResult, execute_action, execute_merge_all
 
 
 class _FakePopen:
@@ -187,9 +187,13 @@ def test_cancel_falls_back_to_sigterm_after_one_heartbeat(tmp_path: Path, monkey
         adapter_key="atomic.build",
     )
     record.timing["heartbeat_interval_s"] = 0.05
+    clock = {"now": 0.0}
     sent: list[tuple[int, int]] = []
-    monkeypatch.setattr("otto.tui.mission_control_actions.writer_identity_matches_live_process", lambda writer: True)
-    monkeypatch.setattr("otto.tui.mission_control_actions.os.killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    monkeypatch.setattr("otto.mission_control.actions.load_command_ack_ids", lambda path: set())
+    monkeypatch.setattr("otto.mission_control.actions.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("otto.mission_control.actions.time.sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    monkeypatch.setattr("otto.mission_control.actions.writer_identity_matches_live_process", lambda writer: True)
+    monkeypatch.setattr("otto.mission_control.actions.os.killpg", lambda pgid, sig: sent.append((pgid, sig)))
 
     result = execute_action(record, "c", tmp_path)
 
@@ -211,11 +215,11 @@ def test_cancel_waits_at_least_four_seconds_before_fallback(tmp_path: Path, monk
     clock = {"now": 0.0}
     fallback_at: list[float] = []
 
-    monkeypatch.setattr("otto.tui.mission_control_actions.load_command_ack_ids", lambda path: set())
-    monkeypatch.setattr("otto.tui.mission_control_actions.time.monotonic", lambda: clock["now"])
-    monkeypatch.setattr("otto.tui.mission_control_actions.time.sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    monkeypatch.setattr("otto.mission_control.actions.load_command_ack_ids", lambda path: set())
+    monkeypatch.setattr("otto.mission_control.actions.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("otto.mission_control.actions.time.sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
     monkeypatch.setattr(
-        "otto.tui.mission_control_actions._send_sigterm_fallback",
+        "otto.mission_control.actions._send_sigterm_fallback",
         lambda record: (fallback_at.append(clock["now"]) or False, None),
     )
 
@@ -235,9 +239,13 @@ def test_cancel_skips_sigterm_for_stale_writer_identity(tmp_path: Path, monkeypa
         adapter_key="atomic.build",
     )
     record.timing["heartbeat_interval_s"] = 0.05
+    clock = {"now": 0.0}
     sent: list[tuple[int, int]] = []
-    monkeypatch.setattr("otto.tui.mission_control_actions.writer_identity_matches_live_process", lambda writer: False)
-    monkeypatch.setattr("otto.tui.mission_control_actions.os.killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    monkeypatch.setattr("otto.mission_control.actions.load_command_ack_ids", lambda path: set())
+    monkeypatch.setattr("otto.mission_control.actions.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("otto.mission_control.actions.time.sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    monkeypatch.setattr("otto.mission_control.actions.writer_identity_matches_live_process", lambda writer: False)
+    monkeypatch.setattr("otto.mission_control.actions.os.killpg", lambda pgid, sig: sent.append((pgid, sig)))
 
     result = execute_action(record, "c", tmp_path)
 
@@ -293,7 +301,7 @@ def test_cancel_rejects_duplicate_pending_cancel_before_append(tmp_path: Path) -
 
 
 def test_resume_queue_calls_queue_resume_subprocess(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     _FakePopen.calls.clear()
     record = _record(
         tmp_path,
@@ -312,7 +320,7 @@ def test_resume_queue_calls_queue_resume_subprocess(tmp_path: Path, monkeypatch)
 
 
 def test_resume_build_uses_record_cwd(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     _FakePopen.calls.clear()
     record = _record(
         tmp_path,
@@ -331,7 +339,7 @@ def test_resume_build_uses_record_cwd(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_retry_uses_stored_source_argv(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     _FakePopen.calls.clear()
     record = _record(
         tmp_path,
@@ -349,9 +357,9 @@ def test_retry_uses_stored_source_argv(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_requeue_reconstructs_queue_cli_from_stored_task_definition(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     monkeypatch.setattr(
-        "otto.tui.mission_control_actions._load_queue_task",
+        "otto.mission_control.actions._load_queue_task",
         lambda project_dir, task_id: QueueTask(
             id=task_id,
             command_argv=["build", "ship it", "--fast"],
@@ -360,7 +368,7 @@ def test_requeue_reconstructs_queue_cli_from_stored_task_definition(tmp_path: Pa
             resolved_intent="ship it",
         ),
     )
-    monkeypatch.setattr("otto.tui.mission_control_actions.load_queue", lambda project_dir: [])
+    monkeypatch.setattr("otto.mission_control.actions.load_queue", lambda project_dir: [])
     _FakePopen.calls.clear()
     record = _record(
         tmp_path,
@@ -380,7 +388,7 @@ def test_requeue_reconstructs_queue_cli_from_stored_task_definition(tmp_path: Pa
 
 def test_requeue_reports_task_id_collision_modal(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "otto.tui.mission_control_actions._load_queue_task",
+        "otto.mission_control.actions._load_queue_task",
         lambda project_dir, task_id: QueueTask(
             id=task_id,
             command_argv=["build", "ship it"],
@@ -389,7 +397,7 @@ def test_requeue_reports_task_id_collision_modal(tmp_path: Path, monkeypatch) ->
         ),
     )
     monkeypatch.setattr(
-        "otto.tui.mission_control_actions.load_queue",
+        "otto.mission_control.actions.load_queue",
         lambda project_dir: [QueueTask(id="task-1", command_argv=["build", "ship it"], added_at="2026-04-23T12:00:00Z")],
     )
     record = _record(
@@ -409,7 +417,7 @@ def test_requeue_reports_task_id_collision_modal(tmp_path: Path, monkeypatch) ->
 
 
 def test_remove_queued_task_calls_queue_rm(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     _FakePopen.calls.clear()
     record = _record(
         tmp_path,
@@ -427,7 +435,7 @@ def test_remove_queued_task_calls_queue_rm(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_cleanup_terminal_atomic_run_calls_cleanup_cli(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     _FakePopen.calls.clear()
     record = _record(
         tmp_path,
@@ -444,7 +452,7 @@ def test_cleanup_terminal_atomic_run_calls_cleanup_cli(tmp_path: Path, monkeypat
 
 
 def test_merge_selected_and_all_shell_out(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     _FakePopen.calls.clear()
     record = _record(
         tmp_path,
@@ -548,7 +556,7 @@ def test_legacy_queue_cancel_uses_queue_state_without_live_record(tmp_path: Path
         },
     )
     monkeypatch.setattr(
-        "otto.tui.mission_control_actions.load_live_record",
+        "otto.mission_control.actions.load_live_record",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy cancel should not load live record")),
     )
     adapter = adapter_for_key("queue.attempt")
@@ -586,7 +594,7 @@ def test_legacy_queue_cancel_uses_queue_state_without_live_record(tmp_path: Path
 
 def test_open_file_uses_editor_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("EDITOR", "vim -f")
-    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     _FakePopen.calls.clear()
     record = _record(
         tmp_path,
@@ -623,7 +631,7 @@ def test_open_file_requires_editor_env(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_long_running_subprocess_reports_late_failure(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakeLongRunningPopen)
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakeLongRunningPopen)
     observed: list[ActionResult] = []
     ready = threading.Event()
     record = _record(
@@ -658,7 +666,7 @@ def test_disabled_action_reason_surfaces_without_execution(tmp_path: Path, monke
         called = True
         raise AssertionError("subprocess should not run")
 
-    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _unexpected)
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _unexpected)
     record = _record(
         tmp_path,
         run_id="certify-run",
