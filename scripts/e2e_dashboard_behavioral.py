@@ -28,7 +28,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from otto import paths
 from otto.queue.schema import QueueTask, append_task
 from otto.tui.mission_control import MissionControlApp
-from otto.tui.mission_control_model import MissionControlFilters
+from otto.mission_control.model import MissionControlFilters
 
 
 def log(msg: str) -> None:

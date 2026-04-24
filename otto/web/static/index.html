@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Otto Mission Control</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">O</div>
+          <div>
+            <h1>Otto</h1>
+            <p>Mission Control</p>
+          </div>
+        </div>
+        <dl class="project-meta" aria-label="Project metadata">
+          <div><dt>Project</dt><dd id="projectName">-</dd></div>
+          <div><dt>Branch</dt><dd id="projectBranch">-</dd></div>
+          <div><dt>State</dt><dd id="projectDirty">-</dd></div>
+          <div><dt>Watcher</dt><dd id="watcherState">stopped</dd></div>
+          <div><dt>Active</dt><dd id="activeCount">0</dd></div>
+          <div><dt>Queue</dt><dd id="queueCounts">-</dd></div>
+        </dl>
+        <button id="newJobButton" class="primary" type="button">New job</button>
+        <button id="startWatcherButton" type="button">Start watcher</button>
+        <button id="stopWatcherButton" type="button">Stop watcher</button>
+        <button id="mergeAllButton" type="button">Merge all</button>
+      </aside>
+
+      <main class="workspace">
+        <header class="toolbar">
+          <div class="filters" aria-label="Run filters">
+            <label>Type
+              <select id="typeFilter">
+                <option value="all">All</option>
+                <option value="build">Build</option>
+                <option value="improve">Improve</option>
+                <option value="certify">Certify</option>
+                <option value="merge">Merge</option>
+                <option value="queue">Queue</option>
+              </select>
+            </label>
+            <label>Outcome
+              <select id="outcomeFilter">
+                <option value="all">All</option>
+                <option value="success">Success</option>
+                <option value="failed">Failed</option>
+                <option value="interrupted">Interrupted</option>
+                <option value="cancelled">Cancelled</option>
+                <option value="removed">Removed</option>
+              </select>
+            </label>
+            <label class="search-label">Search
+              <input id="queryInput" type="search" placeholder="run, task, branch">
+            </label>
+            <label class="check-label">
+              <input id="activeOnly" type="checkbox">
+              Active
+            </label>
+          </div>
+          <div class="toolbar-actions">
+            <span id="refreshStatus" class="muted">idle</span>
+            <button id="refreshButton" type="button">Refresh</button>
+          </div>
+        </header>
+
+        <section class="grid">
+          <div class="tables">
+            <section class="panel" aria-labelledby="liveHeading">
+              <div class="panel-heading">
+                <h2 id="liveHeading">Live Runs</h2>
+                <span id="liveCount" class="pill">0</span>
+              </div>
+              <div class="table-wrap">
+                <table id="liveTable">
+                  <thead>
+                    <tr>
+                      <th>Status</th>
+                      <th>Run</th>
+                      <th>Branch / Task</th>
+                      <th>Elapsed</th>
+                      <th>Usage</th>
+                      <th>Event</th>
+                    </tr>
+                  </thead>
+                  <tbody id="liveRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel" aria-labelledby="historyHeading">
+              <div class="panel-heading">
+                <h2 id="historyHeading">History</h2>
+                <span id="historyCount" class="pill">0</span>
+              </div>
+              <div class="table-wrap">
+                <table id="historyTable">
+                  <thead>
+                    <tr>
+                      <th>Outcome</th>
+                      <th>Run</th>
+                      <th>Summary</th>
+                      <th>Duration</th>
+                      <th>Usage</th>
+                    </tr>
+                  </thead>
+                  <tbody id="historyRows"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <aside class="detail" aria-labelledby="detailHeading">
+            <div class="panel-heading">
+              <h2 id="detailHeading">Run Detail</h2>
+              <span id="detailStatus" class="pill">-</span>
+            </div>
+            <div id="detailBody" class="detail-body empty">Select a run.</div>
+            <div id="actionBar" class="action-bar"></div>
+            <div class="detail-tabs">
+              <button id="logsTab" class="tab active" type="button">Logs</button>
+              <button id="artifactsTab" class="tab" type="button">Artifacts</button>
+            </div>
+            <pre id="logPane" class="log-pane"></pre>
+            <div id="artifactPane" class="artifact-pane hidden"></div>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="jobDialog">
+      <form id="jobForm" method="dialog">
+        <header>
+          <h2>New queue job</h2>
+          <button id="closeJobDialog" type="button" aria-label="Close">x</button>
+        </header>
+        <label>Command
+          <select id="jobCommand">
+            <option value="build">Build</option>
+            <option value="improve">Improve</option>
+            <option value="certify">Certify</option>
+          </select>
+        </label>
+        <label id="improveModeField" class="hidden">Improve mode
+          <select id="improveSubcommand">
+            <option value="bugs">Bugs</option>
+            <option value="feature">Feature</option>
+            <option value="target">Target</option>
+          </select>
+        </label>
+        <label>Intent / focus
+          <textarea id="jobIntent" rows="4" placeholder="Describe the requested outcome"></textarea>
+        </label>
+        <label>Task id
+          <input id="jobTaskId" type="text" placeholder="optional">
+        </label>
+        <label>Provider
+          <select id="jobProvider">
+            <option value="">Inherit</option>
+            <option value="codex">Codex</option>
+            <option value="claude">Claude</option>
+          </select>
+        </label>
+        <label>Model
+          <input id="jobModel" type="text" placeholder="provider default">
+        </label>
+        <label>Reasoning effort
+          <select id="jobEffort">
+            <option value="">Inherit</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="max">Max</option>
+          </select>
+        </label>
+        <label class="check-label">
+          <input id="jobFast" type="checkbox" checked>
+          Fast mode
+        </label>
+        <footer>
+          <span id="jobStatus" class="muted"></span>
+          <button class="primary" type="submit">Queue job</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

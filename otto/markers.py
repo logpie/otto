@@ -14,7 +14,7 @@ from typing import Any
 # Template placeholder story IDs that should be skipped
 _PLACEHOLDER_IDS = {"", "(id)", "<story_id>", "<id>", "id"}
 _STORY_RESULT_RE = re.compile(
-    r"^STORY_RESULT:\s*(\S+?)\s*\|\s*(PASS|FAIL|WARN|SKIPPED|FLAG_FOR_HUMAN)\s*\|\s*(.*)$"
+    r"^STORY_RESULT:\s*(.*?)\s*\|\s*(PASS|FAIL|WARN|SKIPPED|FLAG_FOR_HUMAN)\s*\|\s*(.*)$"
 )
 _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\s*$")
 _ALL_CAPS_MARKER_RE = re.compile(r"^[A-Z][A-Z0-9_ ]*:\s*.*$")

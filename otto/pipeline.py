@@ -2254,7 +2254,6 @@ def _commit_artifacts(project_dir: Path) -> None:
     """Commit otto artifacts (intent.md, etc.) so agents see them."""
     git_timeout = 30  # seconds — prevent hang on locked repo
     files_to_stage = ["intent.md", "otto.yaml"]
-    files_to_stage = ["intent.md", "otto.yaml"]
     if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1":
         from otto.config import DEFAULT_CONFIG, load_config
 
@@ -2264,6 +2263,7 @@ def _commit_artifacts(project_dir: Path) -> None:
             DEFAULT_CONFIG["queue"]["bookkeeping_files"],
         )
         files_to_stage = [path for path in files_to_stage if path not in set(bookkeeping_files)]
+    files_to_stage = [path for path in files_to_stage if (project_dir / path).exists()]
     if not files_to_stage:
         return
     try:

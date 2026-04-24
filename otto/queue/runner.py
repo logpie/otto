@@ -158,6 +158,54 @@ def _session_id_from_artifact_path(path: Path | None) -> str | None:
     return session_id or None
 
 
+def _int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_json(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _summary_path_from_manifest(manifest: dict[str, Any]) -> Path | None:
+    for key in ("summary_path",):
+        value = manifest.get(key)
+        if isinstance(value, str) and value.strip():
+            return Path(value).expanduser()
+    checkpoint = manifest.get("checkpoint_path")
+    if isinstance(checkpoint, str) and checkpoint.strip():
+        return Path(checkpoint).expanduser().with_name("summary.json")
+    mirror = manifest.get("mirror_of")
+    if isinstance(mirror, str) and mirror.strip():
+        return Path(mirror).expanduser().with_name("summary.json")
+    return None
+
+
+def _token_usage_from_summary(summary: dict[str, Any]) -> dict[str, int]:
+    totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+    breakdown = summary.get("breakdown")
+    if not isinstance(breakdown, dict):
+        return {}
+    for phase in breakdown.values():
+        if not isinstance(phase, dict):
+            continue
+        for key in totals:
+            value = _int_or_none(phase.get(key))
+            if value is not None:
+                totals[key] += value
+    return {key: value for key, value in totals.items() if value}
+
+
 # ---------- PID-reuse-safe child validation ----------
 
 def child_is_alive(child: dict[str, Any]) -> bool:
@@ -1006,6 +1054,36 @@ class Runner:
         spec_path = str(task.spec_file_path or "").strip()
         return spec_path or None
 
+    def _queue_metrics(self, ts: dict[str, Any]) -> dict[str, Any]:
+        metrics: dict[str, Any] = {
+            "cost_usd": ts.get("cost_usd"),
+            "stories_passed": ts.get("stories_passed"),
+            "stories_tested": ts.get("stories_tested"),
+        }
+        metrics.update(self._queue_usage_fields(ts))
+        return metrics
+
+    def _queue_usage_fields(self, ts: dict[str, Any]) -> dict[str, int]:
+        fields: dict[str, int] = {}
+        for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+            value = _int_or_none(ts.get(key))
+            if value is not None:
+                fields[key] = value
+        return fields
+
+    def _record_summary_usage(self, ts: dict[str, Any], manifest: dict[str, Any]) -> None:
+        summary_path = _summary_path_from_manifest(manifest)
+        summary = _read_json(summary_path) if summary_path is not None else None
+        if not isinstance(summary, dict):
+            return
+        usage = _token_usage_from_summary(summary)
+        for key, value in usage.items():
+            ts[key] = value
+        for key in ("stories_passed", "stories_tested"):
+            value = _int_or_none(summary.get(key))
+            if value is not None:
+                ts[key] = value
+
     def _append_queue_history_snapshot(
         self,
         task: QueueTask,
@@ -1039,7 +1117,7 @@ class Runner:
                     "timestamp": str(ts.get("finished_at") or now_iso()),
                     "duration_s": float(ts.get("duration_s") or 0.0),
                 },
-                metrics={"cost_usd": float(ts.get("cost_usd") or 0.0)},
+                metrics=self._queue_metrics(ts),
                 git={
                     "branch": task.branch,
                     "worktree": str(wt_path.resolve(strict=False)) if task.worktree else None,
@@ -1047,6 +1125,7 @@ class Runner:
                 source={"resumable": bool(task.resumable)},
                 identity={"queue_task_id": task.id},
                 artifacts=artifacts,
+                extra_fields=self._queue_usage_fields(ts),
             ),
             strict=True,
         )
@@ -1088,7 +1167,7 @@ class Runner:
                 "spec_path": self._queue_spec_path(task, ts),
             },
             artifacts=self._queue_run_artifacts(task, ts),
-            metrics={"cost_usd": ts.get("cost_usd"), "stories_passed": None, "stories_tested": None},
+            metrics=self._queue_metrics(ts),
             adapter_key="queue.attempt",
             last_event=str(ts.get("failure_reason") or status),
         )
@@ -1127,7 +1206,7 @@ class Runner:
                         },
                         "timing": {"heartbeat_interval_s": self.config.heartbeat_interval_s},
                         "artifacts": self._queue_run_artifacts(task, ts),
-                        "metrics": {"cost_usd": ts.get("cost_usd")},
+                        "metrics": self._queue_metrics(ts),
                         "last_event": str(ts.get("failure_reason") or status),
                     },
                     heartbeat=status in IN_FLIGHT_STATUSES,
@@ -1285,6 +1364,7 @@ class Runner:
         ts["manifest_path"] = str(manifest_p)
         ts["cost_usd"] = manifest.get("cost_usd")
         ts["duration_s"] = manifest.get("duration_s")
+        self._record_summary_usage(ts, manifest)
         manifest_exit_status = str(manifest.get("exit_status") or "success")
 
         if exit_code not in (None, 0):
@@ -1327,7 +1407,7 @@ class Runner:
                 updates={
                     "timing": {"heartbeat_interval_s": self.config.heartbeat_interval_s},
                     "artifacts": self._queue_run_artifacts(task, ts),
-                    "metrics": {"cost_usd": ts.get("cost_usd")},
+                    "metrics": self._queue_metrics(ts),
                     "last_event": str(ts.get("failure_reason") or status),
                 },
             )

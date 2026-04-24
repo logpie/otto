@@ -218,6 +218,38 @@ def dashboard(dashboard_mouse: bool) -> None:
     sys.exit(int(app.run(mouse=dashboard_mouse) or 0))
 
 
+@main.command("web", context_settings=CONTEXT_SETTINGS)
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address.")
+@click.option("--port", default=8765, show_default=True, type=int, help="Bind port.")
+@click.option("--open/--no-open", "open_browser", default=True, show_default=True,
+              help="Open the browser after the server starts.")
+@click.option("--allow-remote", is_flag=True,
+              help="Allow binding to a non-localhost address.")
+def web_command(host: str, port: int, open_browser: bool, allow_remote: bool) -> None:
+    """Open local web Mission Control for this project."""
+    if host not in {"127.0.0.1", "localhost", "::1"} and not allow_remote:
+        error_console.print(
+            "[error]Refusing to bind web Mission Control outside localhost without --allow-remote.[/error]"
+        )
+        sys.exit(2)
+
+    from threading import Timer
+    import webbrowser
+
+    import uvicorn
+
+    from otto.web.app import create_app
+
+    project_dir = Path.cwd()
+    app = create_app(project_dir)
+    url_host = "localhost" if host in {"127.0.0.1", "::1"} else host
+    url = f"http://{url_host}:{port}/"
+    console.print(f"  Web Mission Control: [info]{rich_escape(url)}[/info]")
+    if open_browser:
+        Timer(0.8, lambda: webbrowser.open(url)).start()
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
 def _load_yaml_raw(config_path: Path) -> dict[str, Any]:
     if not config_path.exists():
         return {}

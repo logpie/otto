@@ -315,83 +315,28 @@ def _enqueue(
     explicit_intent: str | None = None,
 ) -> None:
     """The shared path for `otto queue build|improve|certify`."""
-    from otto.branching import compute_branch_name
-    from otto.config import load_config
-    from otto.queue.ids import generate_task_id, validate_after_refs
-    from otto.queue.schema import QueueTask, append_task, load_queue
+    from otto.queue.enqueue import enqueue_task
+
     project_dir = _project_dir()
-
-    # Reject user-supplied --resume in the args (watcher is sole resume injector,
-    # per Codex round 3 finding)
-    if "--resume" in raw_args:
-        error_console.print(
-            "[error]--resume is not allowed in queued commands.[/error]\n"
-            "  The queue runner injects --resume automatically when it respawns "
-            "a task after a watcher restart."
-        )
-        sys.exit(2)
-
-    # First-touch init: idempotent setup of .gitignore + .gitattributes for
-    # users who skipped `otto setup`. Without this, `otto merge` later fails
-    # its working_tree_clean and bookkeeping-driver preconditions.
-    config = load_config(project_dir / "otto.yaml")
     try:
-        from otto.config import first_touch_bookkeeping
-        first_touch_bookkeeping(project_dir, config)
-    except Exception as exc:
-        from otto.theme import error_console as _err
-        _err.print(f"[yellow]warning: bookkeeping setup skipped: {exc}[/yellow]")
-
-    existing = load_queue(project_dir)
-    existing_ids = [t.id for t in existing]
-
-    if explicit_intent is not None and _looks_like_flag(explicit_intent):
-        error_console.print(
-            f"[error]Intent looks like a CLI flag ({rich_escape(explicit_intent)!r}), not a description.[/error]\n"
-            "  Did you forget to quote the intent? Examples:\n"
-            "    otto queue build \"add csv export\" --as csv\n"
-            "    otto queue build \"add csv export\" --as csv -- --fast --rounds 3\n"
-            "  Note: intent must come BEFORE `--`. Anything after `--` is passed through to the inner otto build."
+        result = enqueue_task(
+            project_dir,
+            command=command,
+            raw_args=raw_args,
+            intent=intent,
+            after=after,
+            explicit_as=explicit_as,
+            resumable=resumable,
+            focus=focus,
+            target=target,
+            explicit_intent=explicit_intent,
         )
-        sys.exit(2)
-
-    try:
-        task_id = generate_task_id(
-            intent=intent, command=command,
-            existing_ids=existing_ids, explicit_as=explicit_as,
-        )
-        if after:
-            validate_after_refs(
-                after=after, self_id=task_id, all_ids=existing_ids,
-            )
     except ValueError as exc:
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(2)
-
-    # Compose full argv: [<command>, ...raw_args]
-    argv = [command, *raw_args]
-    worktree_dir = str(config.get("queue", {}).get("worktree_dir", ".worktrees"))
-    branch = compute_branch_name(command, task_id)
-    worktree = str(Path(worktree_dir) / task_id)
-
-    task = QueueTask(
-        id=task_id,
-        command_argv=argv,
-        after=after,
-        resumable=resumable,
-        added_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        resolved_intent=intent,
-        focus=focus,
-        target=target,
-        branch=branch,
-        worktree=worktree,
-    )
-    try:
-        append_task(project_dir, task)
-    except ValueError as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-    _print_added(task_id, project_dir)
+    for warning in result.warnings:
+        error_console.print(f"[yellow]warning: {rich_escape(warning)}[/yellow]")
+    _print_added(result.task.id, project_dir)
 
 
 # ---------- command group ----------

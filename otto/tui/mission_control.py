@@ -25,9 +25,9 @@ from otto.theme import (
     mission_control_status_style,
     mission_control_status_text,
 )
-from otto.tui.adapters import adapter_for_key
-from otto.tui.mission_control_actions import ActionResult, execute_merge_all
-from otto.tui.mission_control_model import (
+from otto.mission_control.adapters import adapter_for_key
+from otto.mission_control.actions import ActionResult, execute_merge_all
+from otto.mission_control.model import (
     MissionControlFilters,
     MissionControlModel,
     MissionControlState,

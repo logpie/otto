@@ -82,6 +82,21 @@ DIAGNOSIS: Auth remains broken after fix attempt
 
 
 class TestMarkerParsingHardening:
+    def test_story_result_ids_may_contain_spaces(self):
+        from otto.markers import parse_certifier_markers
+
+        parsed = parse_certifier_markers(
+            "STORIES_TESTED: 1\n"
+            "STORIES_PASSED: 1\n"
+            "STORY_RESULT: CLI printed the expected greeting | PASS | "
+            "claim=CLI works | observed_result=stdout matched | summary=CLI passed\n"
+            "VERDICT: PASS\n"
+        )
+
+        assert parsed.verdict_pass is True
+        assert parsed.stories_tested == 1
+        assert [story["story_id"] for story in parsed.stories] == ["CLI printed the expected greeting"]
+
     def test_exact_marker_tokens_only(self):
         from otto.markers import parse_certifier_markers
 

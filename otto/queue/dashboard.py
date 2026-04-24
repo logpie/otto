@@ -17,7 +17,7 @@ from otto.queue.runner import Runner, RunnerConfig
 from otto.queue.schema import QueueTask, load_state
 from otto.theme import error_console
 from otto.tui.mission_control import MissionControlApp
-from otto.tui.mission_control_model import MissionControlFilters
+from otto.mission_control.model import MissionControlFilters
 
 
 def _render_dashboard_closed_notice(running_count: int) -> str | None:
