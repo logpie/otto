@@ -1,4 +1,4 @@
-import {FormEvent, useCallback, useEffect, useMemo, useRef, useState} from "react";
+import {FormEvent, useCallback, useEffect, useRef, useState} from "react";
 import {api, buildQueuePayload, stateQueryParams} from "./api";
 import type {
   ActionResult,
@@ -51,9 +51,11 @@ export function App() {
   const [refreshStatus, setRefreshStatus] = useState("idle");
   const [jobOpen, setJobOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
   const logOffsetRef = useRef(0);
 
   const showToast = useCallback((message: string, severity: ToastState["severity"] = "information") => {
+    if (severity === "error") setLastError(message);
     setToast({message, severity});
     window.setTimeout(() => setToast(null), 3200);
   }, []);
@@ -63,6 +65,7 @@ export function App() {
     try {
       const next = await api<StateResponse>(`/api/state?${stateQueryParams(filters).toString()}`);
       setData(next);
+      setLastError(null);
       setSelectedRunId((current) => {
         const visible = visibleRunIds(next);
         if (current && visible.has(current)) return current;
@@ -197,6 +200,7 @@ export function App() {
 
       <main className="workspace">
         <Toolbar filters={filters} refreshStatus={refreshStatus} onChange={setFilters} onRefresh={() => void refresh()} />
+        <OperationalOverview data={data} lastError={lastError} onDismissError={() => setLastError(null)} />
         <section className="grid">
           <div className="tables">
             <LandingQueue
@@ -311,12 +315,44 @@ function Toolbar({filters, refreshStatus, onChange, onRefresh}: {
           />
           Active
         </label>
+        <button type="button" onClick={() => onChange(defaultFilters)}>Clear filters</button>
       </div>
       <div className="toolbar-actions">
         <span className="muted">{refreshStatus}</span>
         <button type="button" onClick={onRefresh}>Refresh</button>
       </div>
     </header>
+  );
+}
+
+function OperationalOverview({data, lastError, onDismissError}: {data: StateResponse | null; lastError: string | null; onDismissError: () => void}) {
+  const health = workflowHealth(data);
+  return (
+    <section className="overview" aria-label="Mission overview">
+      <div className="overview-strip">
+        <OverviewMetric label="Active" value={String(health.active)} tone={health.active ? "info" : "neutral"} />
+        <OverviewMetric label="Needs attention" value={String(health.needsAttention)} tone={health.needsAttention ? "danger" : "neutral"} />
+        <OverviewMetric label="Ready" value={String(health.ready)} tone={health.ready ? "success" : "neutral"} />
+        <OverviewMetric label="Repository" value={health.repositoryLabel} tone={health.repositoryTone} />
+        <OverviewMetric label="Watcher" value={health.watcherLabel} tone={health.watcherTone} />
+      </div>
+      {lastError && (
+        <div className="status-banner error">
+          <strong>Last error</strong>
+          <span>{lastError}</span>
+          <button type="button" onClick={onDismissError}>Dismiss</button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function OverviewMetric({label, value, tone}: {label: string; value: string; tone: "neutral" | "info" | "success" | "warning" | "danger"}) {
+  return (
+    <div className={`overview-metric tone-${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -541,6 +577,8 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
               <dt>Branch</dt><dd>{detail.branch || "-"}</dd>
               <dt>Worktree</dt><dd>{detail.worktree || detail.cwd || "-"}</dd>
               <dt>Provider</dt><dd>{providerLine(detail)}</dd>
+              <dt>Artifacts</dt><dd>{detail.artifacts.length}</dd>
+              {detail.overlay && <><dt>Overlay</dt><dd>{detail.overlay.reason}</dd></>}
               {detail.summary_lines.map((line, index) => <DetailLine key={`${line}-${index}`} line={line} />)}
             </dl>
           </div>
@@ -615,6 +653,7 @@ function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoad
     return (
       <div className="artifact-pane">
         <button type="button" onClick={onBack}>Back to artifacts</button>
+        <div className="artifact-meta">{artifactContent?.artifact.label || "artifact"} {artifactContent?.truncated ? "(truncated)" : ""}</div>
         <pre>{artifactContent?.content || ""}</pre>
       </div>
     );
@@ -624,7 +663,8 @@ function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoad
     <div className="artifact-pane artifact-list">
       {artifacts.map((artifact) => (
         <button key={artifact.index} type="button" disabled={!artifact.exists} onClick={() => onLoadArtifact(artifact.index)}>
-          {artifact.label} {artifact.exists ? "" : "(missing)"}
+          <strong>{artifact.label}</strong>
+          <span>{artifact.kind} {artifact.exists ? "" : "(missing)"}</span>
         </button>
       ))}
     </div>
@@ -642,10 +682,16 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
   const [effort, setEffort] = useState("");
   const [fast, setFast] = useState(true);
   const [status, setStatus] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (command === "build" && !intent.trim()) {
+      setStatus("Build intent is required.");
+      return;
+    }
     setStatus("queueing");
+    setSubmitting(true);
     try {
       const payload = buildQueuePayload({command, subcommand, intent: intent.trim(), taskId: taskId.trim(), after, provider, model, effort, fast});
       const result = await api<QueueResult>(`/api/queue/${command}`, {method: "POST", body: JSON.stringify(payload)});
@@ -654,6 +700,8 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
       const message = errorMessage(error);
       setStatus(message);
       onError(message);
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -718,7 +766,7 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
         </label>
         <footer>
           <span className="muted">{status}</span>
-          <button className="primary" type="submit">Queue job</button>
+          <button className="primary" type="submit" disabled={submitting}>{submitting ? "Queueing" : "Queue job"}</button>
         </footer>
       </form>
     </div>
@@ -754,6 +802,31 @@ function refreshIntervalMs(data: StateResponse | null): number {
 function activeCount(watcher?: WatcherInfo): number {
   const counts = watcher?.counts || {};
   return Number(counts.running || 0) + Number(counts.starting || 0) + Number(counts.terminating || 0);
+}
+
+function workflowHealth(data: StateResponse | null): {
+  active: number;
+  needsAttention: number;
+  ready: number;
+  repositoryLabel: string;
+  repositoryTone: "neutral" | "warning" | "danger";
+  watcherLabel: string;
+  watcherTone: "neutral" | "success" | "warning";
+} {
+  const active = data?.live.active_count || 0;
+  const failedHistory = (data?.history.items || []).filter((item) => ["failed", "cancelled", "interrupted"].includes(item.status)).length;
+  const staleLive = (data?.live.items || []).filter((item) => item.display_status === "stale").length;
+  const needsAttention = failedHistory + staleLive;
+  const ready = data?.landing.counts.ready || 0;
+  const repositoryLabel = data?.landing.merge_blocked
+    ? "blocked"
+    : data?.project.dirty
+    ? "dirty"
+    : "clean";
+  const repositoryTone = data?.landing.merge_blocked ? "danger" : data?.project.dirty ? "warning" : "neutral";
+  const watcherLabel = data?.watcher.alive ? "running" : "stopped";
+  const watcherTone = data?.watcher.alive ? "success" : ready || active ? "warning" : "neutral";
+  return {active, needsAttention, ready, repositoryLabel, repositoryTone, watcherLabel, watcherTone};
 }
 
 function canMerge(landing?: LandingState): boolean {

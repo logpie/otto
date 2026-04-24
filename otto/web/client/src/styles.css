@@ -142,7 +142,7 @@ button:disabled {
 .workspace {
   min-width: 0;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
 }
 
 .toolbar {
@@ -197,7 +197,73 @@ textarea {
   grid-template-columns: minmax(0, 1fr) 420px;
   gap: 14px;
   min-height: 0;
-  padding: 14px;
+  padding: 0 14px 14px;
+}
+
+.overview {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.overview-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.overview-metric {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.overview-metric span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.overview-metric strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tone-info strong {
+  color: var(--blue);
+}
+
+.tone-success strong {
+  color: var(--green);
+}
+
+.tone-warning strong {
+  color: var(--amber);
+}
+
+.tone-danger strong {
+  color: var(--red);
+}
+
+.status-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.status-banner.error {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #7f1d1d;
 }
 
 .tables {
@@ -470,11 +536,25 @@ tbody tr.selected {
 }
 
 .artifact-list {
-  display: flex;
-  align-content: flex-start;
-  align-items: flex-start;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
+}
+
+.artifact-list button {
+  display: grid;
+  gap: 3px;
+  height: auto;
+  min-height: 48px;
+  justify-items: start;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.artifact-list span,
+.artifact-meta {
+  color: #cbd5e1;
+  font-size: 12px;
 }
 
 .artifact-pane pre {
@@ -566,6 +646,10 @@ tbody tr.selected {
   .grid {
     grid-template-columns: 1fr;
   }
+
+  .overview-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 640px) {
@@ -581,6 +665,11 @@ tbody tr.selected {
   }
 
   .field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-strip,
+  .status-banner {
     grid-template-columns: 1fr;
   }
 }
