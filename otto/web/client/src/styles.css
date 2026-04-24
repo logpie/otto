@@ -415,6 +415,7 @@ tbody tr.selected {
 
 .detail-body dt {
   color: var(--muted);
+  text-transform: capitalize;
 }
 
 .detail-body dd {
@@ -468,8 +469,16 @@ tbody tr.selected {
   background: #111827;
 }
 
-.hidden {
-  display: none !important;
+.artifact-list {
+  display: flex;
+  align-content: flex-start;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.artifact-pane pre {
+  margin: 12px 0 0;
 }
 
 .muted {
@@ -495,32 +504,53 @@ tbody tr.selected {
   transform: translateY(0);
 }
 
-dialog {
-  width: min(520px, calc(100vw - 28px));
+.toast-error {
+  background: #7f1d1d !important;
+}
+
+.toast-warning {
+  background: #713f12 !important;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  background: rgba(17, 24, 39, 0.45);
+  z-index: 20;
+}
+
+.job-dialog {
+  width: min(560px, calc(100vw - 28px));
+  max-height: calc(100vh - 28px);
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+  padding: 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
+  background: var(--surface);
   box-shadow: var(--shadow);
 }
 
-dialog::backdrop {
-  background: rgba(17, 24, 39, 0.45);
-}
-
-dialog form {
-  display: grid;
-  gap: 12px;
-}
-
-dialog header,
-dialog footer {
+.job-dialog header,
+.job-dialog footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 
-dialog h2 {
+.job-dialog h2 {
   font-size: 16px;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
 @media (max-width: 980px) {
@@ -529,37 +559,28 @@ dialog h2 {
   }
 
   .sidebar {
-    display: grid;
-    grid-template-columns: 1fr auto auto;
-    align-items: center;
-  }
-
-  .project-meta {
-    display: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
   }
 
   .grid {
     grid-template-columns: 1fr;
   }
-
-  .detail {
-    min-height: 520px;
-  }
 }
 
-@media (max-width: 620px) {
+@media (max-width: 640px) {
   .toolbar,
-  .filters,
-  .toolbar-actions {
+  .panel-heading {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .search-label input {
+  .search-label input,
+  .filters label {
     width: 100%;
   }
 
-  .sidebar {
+  .field-grid {
     grid-template-columns: 1fr;
   }
 }

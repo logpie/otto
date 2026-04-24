@@ -36,6 +36,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["otto*"]
 
+[tool.setuptools.package-data]
+"otto.web" = ["static/*", "static/assets/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "strict"

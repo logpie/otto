@@ -16,6 +16,7 @@ otto.egg-info/
 .venv/
 .worktrees/
 .claude/worktrees/
+node_modules/
 
 # Scratch
 qkrem*.md
