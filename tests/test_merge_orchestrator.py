@@ -1036,6 +1036,23 @@ def test_merge_repair_does_not_heartbeat_nonterminal_records(tmp_path: Path) -> 
     assert after.timing["heartbeat_at"] == before.timing["heartbeat_at"]
 
 
+def test_merge_repair_does_not_resurrect_missing_nonterminal_records(tmp_path: Path) -> None:
+    state = MergeState(
+        merge_id="merge-clean-but-unfinished",
+        started_at="2026-04-23T12:00:00Z",
+        target="main",
+        target_head_before="abc123",
+        branches_in_order=["feature/a"],
+        outcomes=[orchestrator_module.BranchOutcome(branch="feature/a", status="merged")],
+    )
+    orchestrator_module.write_state(tmp_path, state)
+    live_path = paths.live_run_path(tmp_path, "merge-clean-but-unfinished")
+
+    orchestrator_module._repair_merge_run_records(tmp_path)
+
+    assert not live_path.exists()
+
+
 def test_merge_stops_publisher_when_body_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakePublisher:
         def __init__(self) -> None:
