@@ -18,8 +18,9 @@ New layout (one dir per invocation):
         ├── history.jsonl
         └── certifier-memory.jsonl
 
-Legacy layout (pre-restructure) is still readable. Writers go through this
-module exclusively — no `otto_logs/...` literals elsewhere.
+Legacy layout (pre-restructure) is still readable. Managed runtime path helpers
+live here; new product code should prefer these helpers instead of spelling out
+`otto_logs/...` paths inline.
 
 Project locking uses a kernel `flock` on Unix for correctness. On Windows,
 locking is best-effort; `release()` has an unavoidable TOCTOU. Use flock
@@ -31,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import uuid
 from contextlib import contextmanager
@@ -68,11 +70,17 @@ REQUESTS_FILE_NAME = "requests.jsonl"
 REQUESTS_PROCESSING_FILE_NAME = "requests.jsonl.processing"
 ACKS_FILE_NAME = "acks.jsonl"
 MERGE_DIR_NAME = "merge"
+QUEUE_DIR_NAME = "queue"
+QUEUE_TASK_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:-\d+)?$")
 
 # Legacy (pre-restructure) path constants — reader fallback only.
 LEGACY_CHECKPOINT = "checkpoint.json"
 LEGACY_RUN_HISTORY = "run-history.jsonl"
 LEGACY_CERTIFIER_MEMORY = "certifier-memory.jsonl"
+LEGACY_BUILDS_DIR_NAME = "builds"
+LEGACY_CERTIFIER_DIR_NAME = "certifier"
+LEGACY_ROUNDS_DIR_NAME = "rounds"
+LEGACY_RUNS_DIR_NAME = "runs"
 
 
 def logs_dir(project_dir: Path) -> Path:
@@ -197,6 +205,39 @@ def merge_dir(project_dir: Path) -> Path:
     return logs_dir(project_dir) / MERGE_DIR_NAME
 
 
+def queue_dir(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / QUEUE_DIR_NAME
+
+
+def queue_manifest_path(project_dir: Path, task_id: str) -> Path:
+    if not QUEUE_TASK_ID_RE.fullmatch(str(task_id)):
+        raise ValueError(
+            f"Invalid queue task id {task_id!r}. Expected a lowercase slug "
+            "like 'add-csv-export' or 'add-csv-export-2'."
+        )
+    return queue_dir(project_dir) / task_id / "manifest.json"
+
+
+def legacy_builds_dir(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / LEGACY_BUILDS_DIR_NAME
+
+
+def legacy_certifier_dir(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / LEGACY_CERTIFIER_DIR_NAME
+
+
+def legacy_certifier_latest_pow_html(project_dir: Path) -> Path:
+    return legacy_certifier_dir(project_dir) / "latest" / "proof-of-work.html"
+
+
+def legacy_rounds_dir(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / LEGACY_ROUNDS_DIR_NAME
+
+
+def legacy_runs_dir(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / LEGACY_RUNS_DIR_NAME
+
+
 def merge_commands_dir(project_dir: Path) -> Path:
     return merge_dir(project_dir) / COMMANDS_DIR_NAME
 
@@ -231,6 +272,14 @@ def queue_command_acks_path(project_dir: Path) -> Path:
 
 def legacy_checkpoint(project_dir: Path) -> Path:
     return logs_dir(project_dir) / LEGACY_CHECKPOINT
+
+
+def legacy_certifier_memory_jsonl(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / LEGACY_CERTIFIER_MEMORY
+
+
+def legacy_run_history_jsonl(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / LEGACY_RUN_HISTORY
 
 
 def ensure_session_scaffold(project_dir: Path, session_id: str, phase: str | None = None) -> Path:

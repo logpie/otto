@@ -19,7 +19,6 @@ import os
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 from contextlib import contextmanager

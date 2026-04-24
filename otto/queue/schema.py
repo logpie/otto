@@ -293,49 +293,6 @@ def append_command(project_dir: Path, cmd: dict[str, Any]) -> None:
             fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
 
-def drain_commands(project_dir: Path) -> list[dict[str, Any]]:
-    """Read all commands and atomically truncate the file. **Watcher only.**
-
-    Atomic: rename to .processing → read → unlink. If the watcher crashes
-    between rename and read, the .processing file persists and is picked
-    up on next call.
-    """
-    path = commands_path(project_dir)
-    proc_path = path.with_suffix(".jsonl.processing")
-    lock_target = commands_lock_path(project_dir)
-    with open(lock_target, "w") as lf:
-        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-        try:
-            # Use rename-then-read; if .processing exists from a prior crash, drain it first.
-            if proc_path.exists():
-                if path.exists():
-                    with open(proc_path, "a") as pf:
-                        pf.write(path.read_text())
-                        pf.flush()
-                        os.fsync(pf.fileno())
-                    path.unlink()
-            else:
-                if not path.exists():
-                    return []
-                path.rename(proc_path)
-        finally:
-            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
-    out: list[dict[str, Any]] = []
-    for line in proc_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            cmd = json.loads(line)
-            if isinstance(cmd, dict):
-                out.append(cmd)
-        except json.JSONDecodeError:
-            # Skip malformed lines — log via caller; refuse to crash the watcher
-            continue
-    proc_path.unlink()
-    return out
-
-
 def load_command_ack_ids(project_dir: Path) -> set[str]:
     return {
         str(row.get("command_id") or "")

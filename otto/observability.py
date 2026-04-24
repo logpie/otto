@@ -12,43 +12,9 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 logger = logging.getLogger("otto.observability")
-
-
-def append_text_log(
-    path: Path,
-    lines: str | Iterable[str],
-    *,
-    retries: int = 0,
-    strict: bool = False,
-) -> None:
-    """Append human-readable text to a log file.
-
-    Best-effort: logs and swallows I/O failures so observability writes never
-    break the caller's main path. The log message names the file so a silent
-    write failure is still discoverable in the debug log.
-    """
-    if isinstance(lines, str):
-        text = lines
-    else:
-        text = "\n".join(str(line) for line in lines)
-    attempts = retries + 1
-    last_exc: OSError | None = None
-    for _ in range(attempts):
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "a", encoding="utf-8") as handle:
-                handle.write(text)
-                if not text.endswith("\n"):
-                    handle.write("\n")
-            return
-        except OSError as exc:
-            last_exc = exc
-            logger.warning("append_text_log(%s) failed: %s", path, exc)
-    if strict and last_exc is not None:
-        raise last_exc
 
 
 def write_json_file(path: Path, data: Any, *, strict: bool = False) -> None:

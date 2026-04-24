@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import signal
 import subprocess
@@ -9,7 +8,6 @@ import textwrap
 import time
 from pathlib import Path
 
-from otto import paths
 from otto.queue.schema import QueueTask, append_task
 from otto.mission_control.model import MissionControlModel
 from tests._helpers import init_repo

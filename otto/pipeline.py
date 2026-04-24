@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -439,7 +438,9 @@ def _persist_atomic_cancelled_terminal_state(
         breakdown=breakdown or None,
         runtime_path=runtime_path,
     )
-    if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1":
+    from otto.queue.runtime import is_queue_runner_child
+
+    if is_queue_runner_child():
         return
 
     summary = _read_json_dict(paths.session_summary(project_dir, run_id))
@@ -492,7 +493,9 @@ def _atomic_artifacts(project_dir: Path, run_id: str, *, primary_phase: str) -> 
 
 
 def _atomic_registry_enabled() -> bool:
-    return os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1"
+    from otto.queue.runtime import is_queue_runner_child
+
+    return not is_queue_runner_child()
 
 
 def _atomic_publisher(
@@ -1261,7 +1264,9 @@ async def build_agentic_v3(
             stories_tested=stories_tested,
             last_event="completed" if passed else "failed",
         )
-        if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1":
+        from otto.queue.runtime import is_queue_runner_child
+
+        if not is_queue_runner_child():
             _append_session_history(
                 project_dir,
                 run_id=build_id,
@@ -2183,7 +2188,9 @@ async def run_certify_fix_loop(
             stories_tested=len(journeys),
             last_event="completed" if passed else "failed",
         )
-        if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1":
+        from otto.queue.runtime import is_queue_runner_child
+
+        if not is_queue_runner_child():
             _append_session_history(
                 project_dir,
                 run_id=build_id,
@@ -2254,7 +2261,9 @@ def _commit_artifacts(project_dir: Path) -> None:
     """Commit otto artifacts (intent.md, etc.) so agents see them."""
     git_timeout = 30  # seconds — prevent hang on locked repo
     files_to_stage = ["intent.md", "otto.yaml"]
-    if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1":
+    from otto.queue.runtime import is_queue_runner_child
+
+    if is_queue_runner_child():
         from otto.config import DEFAULT_CONFIG, load_config
 
         queue_cfg = load_config(project_dir / "otto.yaml").get("queue", {})

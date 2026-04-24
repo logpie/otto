@@ -29,9 +29,6 @@ from otto.redaction import redact_text
 
 logger = logging.getLogger("otto.memory")
 MAX_ENTRIES = 5
-# Legacy path still READ as a fallback; new writes go to
-# otto_logs/cross-sessions/certifier-memory.jsonl via paths.py.
-LEGACY_HISTORY_FILE = "otto_logs/certifier-memory.jsonl"
 
 
 def record_run(
@@ -111,7 +108,7 @@ def load_history(project_dir: Path) -> list[dict[str, Any]]:
     """
     candidates: list[Path] = [
         paths.certifier_memory_jsonl(project_dir),
-        project_dir / LEGACY_HISTORY_FILE,
+        paths.legacy_certifier_memory_jsonl(project_dir),
     ]
     for archive in paths.archived_pre_restructure_dirs(project_dir):
         candidates.append(archive / paths.LEGACY_CERTIFIER_MEMORY)

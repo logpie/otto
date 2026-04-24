@@ -380,7 +380,7 @@ After all branches are merged, the certifier runs once against the post-merge tr
 
 **Conflict resolution.** When `git` can't auto-merge, otto first commits all marker-laden merges (preserving each branch's merge history), then runs ONE agent session that resolves every conflict globally with full project context — Bash, project test command, all tools. The agent self-corrects within its session (test-driven retry), then a single orchestrator-level validation enforces no out-of-scope edits, no leftover markers, HEAD unchanged. Bench data: ~2× faster and ~30% cheaper than per-conflict resolution on multi-branch merges.
 
-**Manual fallback.** Use `--fast` to bail on the first conflict without invoking the agent. Then resolve manually with `git merge --continue` and run `otto merge` again for any remaining branches. (`--resume` is on the roadmap but not yet implemented — the flag prints a deferred-message and exits non-zero.)
+**Manual fallback.** Use `--fast` to bail on the first conflict without invoking the agent. Then resolve manually with `git merge --continue` and run `otto merge` again for any remaining branches.
 
 ### `otto history`
 
@@ -644,9 +644,11 @@ intent.md                                   Project root — canonical product
 ```
 
 Each queued task runs in its own worktree with its own `otto_logs/sessions/<id>/`
-directory, so parallel runs never collide. The `manifest.json` written next to
-each session's `summary.json` is what `otto merge` reads to find a task's
-completed work + cert PoW.
+directory, so parallel runs never collide. The queue child writes the canonical
+session manifest in that worktree and mirrors it to the main repo at
+`otto_logs/queue/<task-id>/manifest.json`. `otto merge` reads the queue mirror
+first, then follows `mirror_of` back to the canonical session when it needs the
+task's completed work and cert PoW.
 
 Legacy `otto_logs/runs/`, `otto_logs/builds/`, `otto_logs/certifier/`,
 `otto_logs/run-history.jsonl`, and root `checkpoint.json` remain readable

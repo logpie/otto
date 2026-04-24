@@ -18,6 +18,24 @@ from otto.queue.schema import QueueTask
 INTERRUPTED_STATUS = "interrupted"
 IN_FLIGHT_STATUSES = {"running", "terminating"}
 
+_QUEUE_RUNNER_CHILD = False
+
+
+def set_queue_runner_child(enabled: bool) -> None:
+    """Record that this process was launched as a queue child.
+
+    ``otto.cli.main`` strips ``OTTO_INTERNAL_QUEUE_RUNNER`` before command
+    execution so nested subprocesses do not inherit the venv bypass. Runtime
+    code still needs to know the original launch mode after that strip.
+    """
+    global _QUEUE_RUNNER_CHILD
+    _QUEUE_RUNNER_CHILD = enabled
+
+
+def is_queue_runner_child() -> bool:
+    """Return True when the current Otto process was launched by the queue."""
+    return _QUEUE_RUNNER_CHILD or os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1"
+
 
 def watcher_alive(state: dict, *, max_age_s: float = 10.0) -> bool:
     """Return True iff state.json's watcher heartbeat is fresh and live."""

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import re
 import signal
@@ -1353,7 +1352,6 @@ async def run_agent_query(
     subagent_dispatches = 0
     max_subagent_dispatches = getattr(options, "max_subagent_dispatches", None)
 
-    provider = _provider_name(options)
     query_kwargs: dict[str, Any] = {"prompt": prompt, "options": options}
     if state is not None:
         query_kwargs["state"] = state

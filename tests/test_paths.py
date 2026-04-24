@@ -145,6 +145,18 @@ class TestSessionScaffold:
         assert not (sess / "improve").exists()
 
 
+class TestQueuePaths:
+    def test_queue_manifest_path_uses_queue_namespace(self, project_dir):
+        assert paths.queue_manifest_path(project_dir, "add-csv-export") == (
+            paths.queue_dir(project_dir) / "add-csv-export" / "manifest.json"
+        )
+
+    @pytest.mark.parametrize("bad_value", ["../escape", "foo/bar", "..", "UPPER", "foo..bar"])
+    def test_queue_manifest_path_rejects_invalid_task_ids(self, project_dir, bad_value):
+        with pytest.raises(ValueError, match="Invalid queue task id"):
+            paths.queue_manifest_path(project_dir, bad_value)
+
+
 class TestResolvePointerPausedPointer:
     def test_missing_paused_pointer_does_not_scan_sessions(self, project_dir):
         sid = "2026-04-20-170200-abcdef"

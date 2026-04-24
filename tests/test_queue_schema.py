@@ -18,7 +18,8 @@ from otto.queue.schema import (
     QueueTask,
     append_command,
     append_task,
-    drain_commands,
+    begin_command_drain,
+    finish_command_drain,
     load_queue,
     load_state,
     write_state,
@@ -192,29 +193,32 @@ def test_load_state_rejects_invalid_json(tmp_path: Path):
 def test_append_then_drain_returns_commands_in_order(tmp_path: Path):
     append_command(tmp_path, {"cmd": "cancel", "id": "t1"})
     append_command(tmp_path, {"cmd": "remove", "id": "t2"})
-    drained = drain_commands(tmp_path)
+    drained = begin_command_drain(tmp_path)
     assert drained == [
         {"cmd": "cancel", "id": "t1"},
         {"cmd": "remove", "id": "t2"},
     ]
+    finish_command_drain(tmp_path)
 
 
 def test_drain_clears_file(tmp_path: Path):
     append_command(tmp_path, {"cmd": "cancel", "id": "t1"})
-    drain_commands(tmp_path)
+    begin_command_drain(tmp_path)
+    finish_command_drain(tmp_path)
     # Subsequent drain returns nothing
-    assert drain_commands(tmp_path) == []
+    assert begin_command_drain(tmp_path) == []
 
 
 def test_drain_skips_malformed_lines(tmp_path: Path):
     p = tmp_path / COMMANDS_FILE
     p.write_text("not json\n" + json.dumps({"cmd": "cancel", "id": "t1"}) + "\n" + "{broken\n")
-    drained = drain_commands(tmp_path)
+    drained = begin_command_drain(tmp_path)
     assert drained == [{"cmd": "cancel", "id": "t1"}]
+    finish_command_drain(tmp_path)
 
 
 def test_drain_returns_empty_when_file_missing(tmp_path: Path):
-    assert drain_commands(tmp_path) == []
+    assert begin_command_drain(tmp_path) == []
 
 
 def test_drain_handles_leftover_processing_file(tmp_path: Path):
@@ -223,11 +227,12 @@ def test_drain_handles_leftover_processing_file(tmp_path: Path):
     proc_path.write_text(json.dumps({"cmd": "cancel", "id": "old"}) + "\n")
     # New commands arrive after crash
     append_command(tmp_path, {"cmd": "cancel", "id": "new"})
-    drained = drain_commands(tmp_path)
+    drained = begin_command_drain(tmp_path)
     # Both old and new commands recovered
     ids = [d["id"] for d in drained]
     assert "old" in ids
     assert "new" in ids
+    finish_command_drain(tmp_path)
 
 
 def test_concurrent_appends_to_commands_dont_lose_lines(tmp_path: Path):
@@ -246,6 +251,7 @@ def test_concurrent_appends_to_commands_dont_lose_lines(tmp_path: Path):
         t.join()
 
     assert errors == []
-    drained = drain_commands(tmp_path)
+    drained = begin_command_drain(tmp_path)
     ids = sorted(d["id"] for d in drained)
     assert ids == sorted(f"t-{i}" for i in range(20))
+    finish_command_drain(tmp_path)

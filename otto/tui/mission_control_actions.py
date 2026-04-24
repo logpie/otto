@@ -1,4 +1,4 @@
-"""Compatibility alias for shared Mission Control actions."""
+"""Compatibility wrapper for shared Mission Control actions."""
 
 from __future__ import annotations
 

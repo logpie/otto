@@ -8,7 +8,6 @@ import pytest
 from otto import paths
 from otto.agent import AgentOptions, run_agent_query
 from otto.markers import parse_certifier_markers
-from otto.pipeline import build_agentic_v3
 
 from .conftest import (
     assistant_text,

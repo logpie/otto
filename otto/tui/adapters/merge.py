@@ -1,4 +1,4 @@
-"""Compatibility alias for the shared merge Mission Control adapter."""
+"""Compatibility wrapper for the shared Mission Control merge adapter."""
 
 from __future__ import annotations
 

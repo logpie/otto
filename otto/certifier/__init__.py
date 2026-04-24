@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import subprocess
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,11 +29,18 @@ except ModuleNotFoundError:  # pragma: no cover - Python <3.11 fallback
 
 if TYPE_CHECKING:
     from otto.budget import RunBudget
+    from otto.certifier.report import CertificationReport
 
 logger = logging.getLogger("otto.certifier")
 
 _SCHEMA_VERSION = 1
 _GENERATOR = "otto certifier"
+
+
+def _is_queue_runner_child() -> bool:
+    from otto.queue.runtime import is_queue_runner_child
+
+    return is_queue_runner_child()
 
 _MODE_PROFILES: dict[str, dict[str, Any]] = {
     "fast": {
@@ -172,33 +178,6 @@ def _story_verdict_display(story: dict[str, Any]) -> tuple[str, str, str]:
         "SKIPPED": ("SKIPPED", "–", "skipped"),
         "FLAG_FOR_HUMAN": ("FLAG_FOR_HUMAN", "⚠", "flag"),
     }.get(verdict, (verdict, "?", "unknown"))
-
-
-def _render_pow_markdown(
-    story_results: list[dict[str, Any]],
-    *,
-    outcome: str,
-    duration: float,
-    cost: float,
-    stories_passed: int,
-    stories_tested: int,
-) -> str:
-    """Render the markdown proof-of-work report."""
-    md_lines = [
-        "# Proof-of-Work Certification Report",
-        "",
-        f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"> **Outcome:** {outcome}",
-        f"> **Duration:** {duration:.0f}s",
-        f"> **Cost:** ${cost:.2f}",
-        f"> **Stories:** {stories_passed}/{stories_tested}",
-        "",
-    ]
-    for s in story_results:
-        verdict, icon, _status_class = _story_verdict_display(s)
-        md_lines.append(f"- **{icon} {verdict}** {s['story_id']}: {s.get('summary', '')}")
-    md_lines.append("")
-    return "\n".join(md_lines)
 
 
 def _format_stories_section(
@@ -785,14 +764,6 @@ def _visual_caption(item: dict[str, Any], story: dict[str, Any] | None) -> str:
     if story and story.get("status") in {"fail", "warn"}:
         return "walkthrough"
     return ""
-
-
-def _story_detail_sections(stories: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    ordered = _ordered_stories(stories)
-    return {
-        "failing": [story for story in ordered if story.get("status") == "fail"],
-        "remaining": [story for story in ordered if story.get("status") != "fail"],
-    }
 
 
 def _coverage_render_data(report: dict[str, Any]) -> dict[str, Any]:
@@ -2288,7 +2259,7 @@ async def run_agentic_certifier(
         write_history
         and write_session_summary
         and merge_context is None
-        and os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1"
+        and not _is_queue_runner_child()
     ):
         from otto.pipeline import _current_branch_name, _current_head_sha
         from otto.runs.registry import publisher_for
@@ -2488,7 +2459,7 @@ async def run_agentic_certifier(
         if (
             write_history
             and merge_context is None
-            and os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1"
+            and not _is_queue_runner_child()
         ):
             from otto.pipeline import _append_session_history
 
@@ -2515,60 +2486,3 @@ async def run_agentic_certifier(
     finally:
         if publisher is not None:
             publisher.stop()
-
-
-def _generate_agentic_html_pow(
-    output_dir: Path,
-    story_results: list[dict[str, Any]],
-    outcome: str,
-    duration: float,
-    cost: float,
-    passed: int,
-    total: int,
-    *,
-    diagnosis: str = "",
-    round_history: list[dict[str, Any]] | None = None,
-    evidence_dir: Path | None = None,
-    certifier_cost: float | None = None,
-    coverage_observed: list[str] | None = None,
-    coverage_gaps: list[str] | None = None,
-    coverage_emitted: bool | None = None,
-) -> None:
-    """Compatibility wrapper used by legacy tests."""
-    report = _build_pow_report_data(
-        project_dir=output_dir,
-        report_dir=output_dir,
-        log_dir=output_dir,
-        run_id="ad-hoc-report",
-        session_id="",
-        pipeline_mode="agentic_v3",
-        certifier_mode="standard",
-        outcome=outcome,
-        story_results=story_results,
-        diagnosis=diagnosis,
-        certify_rounds=[
-            {
-                "round": item.get("round", index + 1),
-                "stories": [],
-                "verdict": item.get("verdict") == "passed" if isinstance(item.get("verdict"), str) else item.get("verdict"),
-                "diagnosis": item.get("diagnosis", ""),
-                "tested": item.get("stories_tested", item.get("stories_count", 0)),
-            }
-            for index, item in enumerate(round_history or [])
-        ],
-        duration_s=duration,
-        certifier_cost_usd=float(certifier_cost if certifier_cost is not None else cost),
-        total_cost_usd=float(cost),
-        intent="",
-        options=type("Opts", (), {"provider": "", "model": None, "effort": None})(),
-        evidence_dir=evidence_dir,
-        stories_tested=total,
-        stories_passed=passed,
-        coverage_observed=coverage_observed,
-        coverage_gaps=coverage_gaps,
-        coverage_emitted=coverage_emitted,
-        round_timings=None,
-    )
-    from otto.observability import write_text_atomic
-
-    write_text_atomic(output_dir / "proof-of-work.html", _render_pow_html(report))

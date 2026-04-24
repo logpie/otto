@@ -9,21 +9,15 @@ Usage:
 
 from __future__ import annotations
 
-import os
-import shutil
-import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 from e2e_harness import (
     OTTO_BIN,
-    FAKE_OTTO,
     Repo,
     Result,
     Watcher,
-    fail,
     info,
     make_repo,
     ok,
@@ -78,7 +72,7 @@ def scenario_a2(results: list[Result]) -> None:
         # Enqueue 3 different intents
         ids = []
         for n in ("alpha", "beta", "gamma"):
-            r = repo.otto("queue", "build", f"add feature {n}")
+            repo.otto("queue", "build", f"add feature {n}")
             ids.append(n)
         info(f"enqueued: {ids}")
         # Start watcher with concurrency 3 + sleep so they overlap
@@ -339,23 +333,35 @@ def _make_two_done_branches(repo: Repo, *, sleep: str = "0.2") -> None:
         w.stop()
 
 
+def _task_branch(repo: Repo, task_id: str) -> str:
+    from otto.queue.schema import load_queue
+
+    for task in load_queue(repo.path):
+        if task.id == task_id and task.branch:
+            return task.branch
+    raise AssertionError(f"no branch recorded for queue task {task_id!r}")
+
+
 def scenario_b1_clean_merge(results: list[Result]) -> None:
     """B1: Two clean (different files) branches merged with --no-certify."""
     with scenario("B1: clean merge (no LLM)", results), make_repo("b1-") as repo:
-        # Make each fake-otto write to a different file so no conflict
         repo.otto("queue", "build", "--as", "alpha", "feature alpha")
         repo.otto("queue", "build", "--as", "beta", "feature beta")
-        # Use FAKE_OTTO_TOUCH so each writes a distinct file
-        # Note: env is per-spawn but our harness shares env — workaround: distinct filenames
-        # by intent (fake-otto.sh defaults to fake-otto-output.txt without env vars,
-        # which would collide). Set the env per task by encoding in argv... no easy way.
-        # Trick: use --as as the differentiator via FAKE_OTTO_TOUCH path encoded in env
-        # vars set on the watcher (same for both). Since both write the same file,
-        # there WILL be a conflict on fake-otto-output.txt. So let's pivot: this
-        # scenario actually exercises the conflict path.
-        # Skipping clean-merge for now; B4 will exercise the conflict path with
-        # --fast (no LLM) instead.
-        ok("DEFERRED — see B4 for conflict path; needs per-task FAKE_OTTO_TOUCH support")
+        w = start_watcher(repo, concurrent=2, extra_env={
+            "FAKE_OTTO_TOUCH": "fake-{task_id}.txt",
+            "FAKE_OTTO_TOUCH_TEXT": "clean-{task_id}",
+        })
+        try:
+            wait_for(lambda: task_count_by_status(repo, "done") == 2, timeout=20, label="both done")
+        finally:
+            w.stop()
+        r = repo.otto("merge", "--all", "--no-certify", check=False)
+        out = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode == 0, f"clean merge failed: rc={r.returncode}, out={out!r}"
+        assert "merge complete" in out.lower(), f"missing complete: {out!r}"
+        assert (repo.path / "fake-alpha.txt").read_text().strip() == "clean-alpha"
+        assert (repo.path / "fake-beta.txt").read_text().strip() == "clean-beta"
+        ok("two queue branches merged cleanly")
 
 
 def scenario_b4_fast_bail(results: list[Result]) -> None:
@@ -370,13 +376,8 @@ def scenario_b4_fast_bail(results: list[Result]) -> None:
         # First branch merges clean (nothing to conflict with). Second one conflicts.
         # --fast should report and exit non-zero.
         if r.returncode == 0:
-            # No conflict actually — both branches' intent.md unioned cleanly,
-            # AND only one branch wrote to fake-otto-output.txt at a time. Maybe
-            # because both branches diverged from same parent and added IDENTICAL
-            # initial content? Let's verify by reading the merged file.
             content = (repo.path / "fake-otto-output.txt").read_text() if (repo.path / "fake-otto-output.txt").exists() else "(missing)"
-            ok(f"merged cleanly (unexpected for B4) — content: {content!r}")
-            return
+            raise AssertionError(f"--fast should have bailed on conflict but merged cleanly: {content!r}")
         assert "conflict" in out.lower() or "bail" in out.lower(), \
             f"--fast bail did not mention conflict: {out!r}"
         ok(f"--fast bailed: {out.strip().splitlines()[-1] if out.strip() else '(silent)'}")
@@ -411,13 +412,18 @@ def scenario_b5_real_conflict_fast_bail(results: list[Result]) -> None:
     with scenario("B5: --fast bails on real conflict", results), make_repo("b5-") as repo:
         _make_two_done_branches(repo)
         # Sanity: the two branches' fake-otto-output.txt should differ
-        diff_a = repo.git("show", "build/feat-a-2026-04-20:fake-otto-output.txt", check=False).stdout.strip()
-        diff_b = repo.git("show", "build/feat-b-2026-04-20:fake-otto-output.txt", check=False).stdout.strip()
+        branch_a = _task_branch(repo, "feat-a")
+        branch_b = _task_branch(repo, "feat-b")
+        show_a = repo.git("show", f"{branch_a}:fake-otto-output.txt", check=False)
+        show_b = repo.git("show", f"{branch_b}:fake-otto-output.txt", check=False)
+        assert show_a.returncode == 0, f"missing fake output on {branch_a}: {show_a.stderr!r}"
+        assert show_b.returncode == 0, f"missing fake output on {branch_b}: {show_b.stderr!r}"
+        diff_a = show_a.stdout.strip()
+        diff_b = show_b.stdout.strip()
         info(f"A content: {diff_a!r}")
         info(f"B content: {diff_b!r}")
         if diff_a == diff_b:
-            ok("DEFERRED — fake-otto produced identical content; can't test conflict bail here")
-            return
+            raise AssertionError("fake-otto produced identical content; conflict precondition failed")
         r = repo.otto("merge", "--all", "--fast", "--no-certify", check=False)
         out = (r.stdout or "") + (r.stderr or "")
         # The first branch should merge cleanly; the second should conflict
@@ -459,8 +465,7 @@ def scenario_b10_cleanup_on_success(results: list[Result]) -> None:
         # Confirm worktree exists pre-merge
         wt_pre = repo.git("worktree", "list").stdout
         assert ".worktrees/only" in wt_pre, f"worktree missing pre-merge: {wt_pre}"
-        r = repo.otto("merge", "--all", "--no-certify", "--cleanup-on-success")
-        out = (r.stdout or "") + (r.stderr or "")
+        repo.otto("merge", "--all", "--no-certify", "--cleanup-on-success")
         # Confirm worktree gone, branch still here
         wt_post = repo.git("worktree", "list").stdout
         br_post = repo.git("branch").stdout
@@ -537,30 +542,11 @@ def scenario_b13_explicit_branch_arg(results: list[Result]) -> None:
         finally:
             w.stop()
         # Use the branch name directly (no --all)
-        branches = [
-            line.strip()
-            for line in repo.git("branch", "--format=%(refname:short)").stdout.splitlines()
-        ]
-        branch = next((b for b in branches if b.startswith("build/only-")), None)
-        assert branch, f"missing build/only branch in {branches!r}"
-        r = repo.otto("merge", branch, "--no-certify")
+        r = repo.otto("merge", _task_branch(repo, "only"), "--no-certify")
         out = (r.stdout or "") + (r.stderr or "")
         assert r.returncode == 0, f"explicit-branch merge failed: {out!r}"
         assert "merge complete" in out.lower(), f"missing complete: {out!r}"
         ok("explicit branch arg merged")
-
-
-def scenario_b14_resume_stub(results: list[Result]) -> None:
-    """B14: --resume currently prints 'deferred'; just verify it exits 2 with helpful message."""
-    with scenario("B14: --resume placeholder UX", results), make_repo("b14-") as repo:
-        # No setup needed — we're just testing the CLI message
-        r = repo.otto("merge", "--resume", check=False)
-        out = (r.stdout or "") + (r.stderr or "")
-        assert r.returncode == 2, f"expected --resume to exit 2 (deferred), got rc={r.returncode}: {out!r}"
-        assert "deferred" in out.lower() or "follow-up" in out.lower() or "workaround" in out.lower(), \
-            f"missing actionable hint: {out!r}"
-        ok(f"--resume hints workaround: {out.strip().splitlines()[0] if out.strip() else '(silent)'}")
-
 
 def scenario_b12_post_merge_preview(results: list[Result]) -> None:
     """B12: --post-merge-preview detects file overlap."""
@@ -619,6 +605,7 @@ def scenario_c1_single_real_build(results: list[Result]) -> None:
     """
     with scenario("C1: real single build via queue", results), real_repo("c1-") as repo:
         # Tiny intent that should cost ~$1-2
+        base_sha = repo.git("rev-parse", "HEAD").stdout.strip()
         real_otto_run(repo, "queue", "build", "--", "--fast", "--no-qa",
                       "make calc.py with add(a,b) returning a+b and a unit test")
         info("enqueued; starting watcher")
@@ -639,9 +626,14 @@ def scenario_c1_single_real_build(results: list[Result]) -> None:
         cost = float(ts.get("cost_usd") or 0.0)
         ok(f"real build done: cost=${cost:.2f}, duration={ts.get('duration_s'):.1f}s")
         # Verify a real branch with a real commit
-        log = repo.git("log", "--oneline", "build/" + (ts.get("manifest_path", "")
-              .split("/queue/")[1].split("/")[0] if "/queue/" in (ts.get("manifest_path") or "")
-              else "")).stdout if False else ""  # Skip detailed branch check
+        task_id = next(iter(state["tasks"]))
+        branch = _task_branch(repo, task_id)
+        branch_sha = repo.git("rev-parse", branch).stdout.strip()
+        changed_files = repo.git("diff", "--name-only", f"{base_sha}..{branch}").stdout.splitlines()
+        assert branch_sha != base_sha, f"real build branch {branch!r} did not advance"
+        assert changed_files, f"real build branch {branch!r} has no diff from base {base_sha}"
+        if ts.get("head_sha"):
+            assert ts["head_sha"] == branch_sha
         info(f"manifest at: {ts.get('manifest_path')}")
 
 
@@ -697,7 +689,6 @@ SCENARIOS = {
     "B11": scenario_b11_target_branch,
     "B12": scenario_b12_post_merge_preview,
     "B13": scenario_b13_explicit_branch_arg,
-    "B14": scenario_b14_resume_stub,
     "C1": scenario_c1_single_real_build,
     "C1B": scenario_c1b_merge_after_real_build,
 }

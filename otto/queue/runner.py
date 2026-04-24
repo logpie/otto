@@ -34,6 +34,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +85,10 @@ class RunnerConfig:
     # would otherwise occupy its concurrency slot forever. None disables.
     # Default: 30 minutes — generous for thorough builds, fatal for hangs.
     task_timeout_s: float | None = 1800.0
+    # Grace period after SIGTERM before escalating a terminating child to
+    # SIGKILL. Keeps cancellation graceful without letting ignored SIGTERM
+    # wedge queue concurrency forever.
+    termination_grace_s: float = 10.0
     # Exit the foreground watcher once the queue has no queued or in-flight work.
     exit_when_empty: bool = False
     # When true, capture child stdout/stderr and prefix each emitted line with
@@ -418,7 +423,7 @@ class Runner:
             last_heartbeat = now
 
         if self.shutdown_level == "immediate":
-            self._kill_all_in_flight()
+            self._kill_all_in_flight(force=True)
             return last_heartbeat, None, True
         if self.shutdown_level == "graceful" and not self._has_in_flight():
             return last_heartbeat, None, True
@@ -445,8 +450,10 @@ class Runner:
     def _tick(self) -> None:
         """One main-loop iteration: drain commands, reap children, dispatch new."""
         commands: list[dict[str, Any]] = []
+        command_drain_started = False
         try:
             commands = begin_command_drain(self.project_dir)
+            command_drain_started = queue_schema.commands_processing_path(self.project_dir).exists()
         except (OSError, ValueError) as exc:
             # IO failures or malformed JSONL — log loudly so user sees it.
             # A real bug (e.g. import error) is a different exception type
@@ -499,7 +506,7 @@ class Runner:
                 writer_id=f"queue:{os.getpid()}",
                 state_version=int(state.get("version") or 0),
             )
-        if commands:
+        if command_drain_started:
             finish_command_drain(self.project_dir)
         self._refresh_queue_run_records(tasks, state)
         if self._should_exit_when_empty(tasks, state):
@@ -517,8 +524,10 @@ class Runner:
           fail   → mark failed
         """
         state = load_state(self.project_dir)
+        command_drain_started = False
         try:
             commands = begin_command_drain(self.project_dir)
+            command_drain_started = queue_schema.commands_processing_path(self.project_dir).exists()
         except (OSError, ValueError) as exc:
             logger.error("startup reconcile: failed to drain commands: %s", exc)
             commands = []
@@ -534,6 +543,7 @@ class Runner:
             still_alive = child_is_alive(child)
             if status == "terminating":
                 if still_alive:
+                    self._maybe_escalate_terminating(tid, ts)
                     logger.info(
                         "reconciling: task %s still terminating, preserving terminal_status=%s",
                         tid,
@@ -603,7 +613,7 @@ class Runner:
                 writer_id=f"queue:{os.getpid()}",
                 state_version=int(state.get("version") or 0),
             )
-        if commands:
+        if command_drain_started:
             finish_command_drain(self.project_dir)
         self._refresh_queue_run_records(list(tasks_by_id.values()), state)
 
@@ -697,7 +707,6 @@ class Runner:
         timeout = self.config.task_timeout_s
         if timeout is None:
             return
-        from datetime import datetime, timezone
         now = datetime.now(tz=timezone.utc)
         for tid, ts in in_flight:
             if ts.get("status") != "running":
@@ -747,6 +756,8 @@ class Runner:
                 wpid, wstatus = os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
                 if child_is_alive(child):
+                    if status == "terminating":
+                        self._maybe_escalate_terminating(tid, ts)
                     logger.info(
                         "reap deferred for %s: child still alive but waitpid returned ECHILD",
                         tid,
@@ -761,6 +772,8 @@ class Runner:
                 continue
             if wpid == 0:
                 # Still running
+                if status == "terminating":
+                    self._maybe_escalate_terminating(tid, ts)
                 continue
             exit_code = int(os.waitstatus_to_exitcode(wstatus))
             if status == "terminating":
@@ -1048,7 +1061,7 @@ class Runner:
     def _queue_spec_path(self, task: QueueTask, ts: dict[str, Any]) -> str | None:
         session_run_id = str(ts.get("child_run_id") or ts.get("attempt_run_id") or "").strip()
         if session_run_id:
-            session_spec = paths.session_dir(self._worktree_for(task), session_run_id) / "spec.md"
+            session_spec = paths.spec_dir(self._worktree_for(task), session_run_id) / "spec.md"
             if session_spec.exists():
                 return str(session_spec)
         spec_path = str(task.spec_file_path or "").strip()
@@ -1244,7 +1257,7 @@ class Runner:
         if thread is not None:
             thread.join(timeout=0.5)
 
-    def _kill_all_in_flight(self) -> None:
+    def _kill_all_in_flight(self, *, force: bool = False) -> None:
         state = load_state(self.project_dir)
         tasks_by_id = {
             task.id: task for task in self._load_queue_or_empty(context="shutdown interrupt")
@@ -1268,6 +1281,10 @@ class Runner:
                 final_status=final_status,
                 reason=reason,
             )
+            if force:
+                if kill_child_safely(child, signal.SIGKILL):
+                    ts["sigkill_sent_at"] = now_iso()
+                    logger.warning("immediate shutdown sent SIGKILL to task %s", tid)
         self._write_state_or_raise(state)
 
     def _terminate_spawned_child_after_persist_failure(
@@ -1324,9 +1341,40 @@ class Runner:
     def _mark_terminating(self, ts: dict[str, Any], *, final_status: str, reason: str | None) -> None:
         ts["status"] = "terminating"
         ts["terminal_status"] = final_status
+        ts.setdefault("terminating_since", now_iso())
         ts["finished_at"] = None
         if reason is not None:
             ts["failure_reason"] = reason
+
+    def _terminating_elapsed_s(self, ts: dict[str, Any]) -> float | None:
+        raw = ts.get("terminating_since") or ts.get("started_at")
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            started = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        return (datetime.now(tz=timezone.utc) - started).total_seconds()
+
+    def _maybe_escalate_terminating(self, task_id: str, ts: dict[str, Any]) -> None:
+        if ts.get("status") != "terminating" or ts.get("sigkill_sent_at"):
+            return
+        elapsed = self._terminating_elapsed_s(ts)
+        if elapsed is None:
+            ts.setdefault("terminating_since", now_iso())
+            return
+        if elapsed < max(0.0, self.config.termination_grace_s):
+            return
+        child = ts.get("child") or {}
+        if kill_child_safely(child, signal.SIGKILL):
+            ts["sigkill_sent_at"] = now_iso()
+            logger.warning(
+                "task %s ignored SIGTERM for %.0fs; sent SIGKILL",
+                task_id,
+                elapsed,
+            )
+        elif not child_is_alive(child):
+            self._finish_terminating(ts)
 
     def _finalize_task_from_manifest(
         self,
@@ -1381,6 +1429,8 @@ class Runner:
         ts["status"] = ts.pop("terminal_status", "cancelled")
         ts["finished_at"] = now_iso()
         ts["child"] = None
+        ts.pop("terminating_since", None)
+        ts.pop("sigkill_sent_at", None)
 
     def _finalize_queue_attempt(self, task_id: str, ts: dict[str, Any]) -> None:
         status = str(ts.get("status") or "")
@@ -1450,6 +1500,12 @@ class Runner:
 def runner_config_from_otto_config(config: dict[str, Any]) -> RunnerConfig:
     """Build a RunnerConfig from the parsed otto.yaml dict."""
     q = config.get("queue") or {}
+    raw_concurrent = q.get("concurrent", 3)
+    if not isinstance(raw_concurrent, int) or isinstance(raw_concurrent, bool):
+        raise ValueError("queue.concurrent must be an integer >= 1")
+    concurrent = raw_concurrent
+    if concurrent < 1:
+        raise ValueError("queue.concurrent must be >= 1")
     raw_timeout = q.get("task_timeout_s", 1800.0)
     task_timeout: float | None
     if raw_timeout is None or raw_timeout == 0 or raw_timeout is False:
@@ -1457,7 +1513,7 @@ def runner_config_from_otto_config(config: dict[str, Any]) -> RunnerConfig:
     else:
         task_timeout = float(raw_timeout)
     return RunnerConfig(
-        concurrent=int(q.get("concurrent", 3)),
+        concurrent=concurrent,
         worktree_dir=str(q.get("worktree_dir", ".worktrees")),
         on_watcher_restart=str(q.get("on_watcher_restart", "resume")),
         task_timeout_s=task_timeout,

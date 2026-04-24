@@ -189,10 +189,11 @@ def main():
         sys.exit(1)
     cwd_context = _resolve_git_worktree_context(Path(_cwd)) or {}
     otto_context = _resolve_git_worktree_context(Path(_otto_pkg.__file__).resolve().parent) or {}
+    queue_runner_env = os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER")
     should_block, msg = _check_venv_guard(
         cwd=_cwd,
         otto_src=str(Path(_otto_pkg.__file__).resolve().parent),
-        queue_runner_env=os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER"),
+        queue_runner_env=queue_runner_env,
         cwd_repo_root=cwd_context.get("repo_root"),
         otto_repo_root=otto_context.get("repo_root"),
         cwd_git_dir=cwd_context.get("git_dir"),
@@ -201,6 +202,9 @@ def main():
     if should_block:
         click.echo(msg, err=True)
         sys.exit(1)
+    from otto.queue.runtime import set_queue_runner_child
+
+    set_queue_runner_child(queue_runner_env == "1")
     # Scope the bypass to ONE level — strip from env now so nested subprocesses
     # do not inherit it. Safe to do unconditionally (no-op if not set).
     os.environ.pop("OTTO_INTERNAL_QUEUE_RUNNER", None)
@@ -1171,8 +1175,9 @@ def _build_locked(
                 except OSError as exc:
                     console.print(f"  [yellow]Could not mark prior session abandoned: {exc}[/yellow]")
             # Legacy path (pre-restructure) archive-by-rename.
-            legacy_run_dir = project_dir / "otto_logs" / "runs" / run_id_to_archive
-            legacy_abandoned = project_dir / "otto_logs" / "runs" / f"{run_id_to_archive}.abandoned"
+            legacy_runs_dir = _paths.legacy_runs_dir(project_dir)
+            legacy_run_dir = legacy_runs_dir / run_id_to_archive
+            legacy_abandoned = legacy_runs_dir / f"{run_id_to_archive}.abandoned"
             if legacy_run_dir.exists():
                 try:
                     legacy_run_dir.rename(legacy_abandoned)
@@ -1974,7 +1979,7 @@ def _certify_locked(
         if pow_html.exists():
             console.print(f"  Report: {pow_html}")
     else:
-        legacy_pow = project_dir / "otto_logs" / "certifier" / "latest" / "proof-of-work.html"
+        legacy_pow = _paths.legacy_certifier_latest_pow_html(project_dir)
         if legacy_pow.exists():
             console.print(f"  Report: {legacy_pow}")
 

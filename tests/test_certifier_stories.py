@@ -13,10 +13,10 @@ import pytest
 
 from otto.certifier import (
     _format_stories_section,
-    _generate_agentic_html_pow,
     _render_certifier_prompt,
     _render_pow_markdown,
 )
+from tests._helpers import write_test_pow_report
 
 
 # ---------- _format_stories_section ----------
@@ -256,7 +256,10 @@ def test_explicit_fail_still_counts_as_failure():
         "VERDICT: FAIL\n"
     )
     parsed = parse_certifier_markers(text)
-    has_failures = any(s.get("verdict", "FAIL") == "FAIL" for s in parsed.stories)
+    by_id = {story["story_id"]: story for story in parsed.stories}
+    assert by_id["b"]["verdict"] == "FAIL"
+    assert by_id["b"]["passed"] is False
+    has_failures = any(s["verdict"] == "FAIL" for s in parsed.stories)
     assert has_failures
 
 
@@ -286,7 +289,7 @@ def test_pow_rendering_distinguishes_all_story_verdicts(tmp_path: Path):
     assert "– SKIPPED" in markdown
     assert "⚠ FLAG_FOR_HUMAN" in markdown
 
-    _generate_agentic_html_pow(
+    write_test_pow_report(
         tmp_path,
         story_results,
         "passed",

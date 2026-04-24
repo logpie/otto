@@ -1,3 +1,8 @@
 Seeded auth app for overlapping queue builds that both touch user/session
 behavior. Use this fixture to validate queue execution, semantic merge conflict
 handling, and post-merge verification for related authentication changes.
+Maintain a FastAPI authentication app with login, sessions, and account pages.
+
+Keep existing login behavior working while adding account-management features
+that may touch the user model, auth routes, templates, and session handling.
+Overlapping branches must merge without losing either authentication change.

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from otto.cli import _check_venv_guard, _resolve_git_worktree_context
@@ -114,30 +115,41 @@ def test_env_var_popped_after_main_runs(tmp_path: Path):
     #   1. sets OTTO_INTERNAL_QUEUE_RUNNER=1
     #   2. imports otto.cli, runs main with a no-op subcommand
     #   3. checks os.environ post-main
-    py = str(Path(__file__).resolve().parent.parent / ".venv" / "bin" / "python")
+    repo = init_repo(tmp_path)
     helper_path = tmp_path / "helper.py"
     helper_path.write_text(
         "import os\n"
+        "import subprocess\n"
+        "import sys\n"
         "os.environ['OTTO_INTERNAL_QUEUE_RUNNER'] = '1'\n"
         "import otto.cli\n"
-        "try:\n"
-        "    otto.cli.main(['history'], standalone_mode=False)\n"
-        "except SystemExit:\n"
-        "    pass\n"
-        "except Exception:\n"
-        "    pass\n"
+        "from otto.queue.runtime import is_queue_runner_child\n"
+        "result = otto.cli.main(['history'], standalone_mode=False)\n"
+        "nested = subprocess.run([sys.executable, '-c', \"import os; print('NESTED_HAS_VAR=' + str('OTTO_INTERNAL_QUEUE_RUNNER' in os.environ))\"], capture_output=True, text=True, check=True)\n"
+        "print('MAIN_RESULT=' + str(result))\n"
         "print('HAS_VAR=' + str('OTTO_INTERNAL_QUEUE_RUNNER' in os.environ))\n"
+        "print('QUEUE_CHILD=' + str(is_queue_runner_child()))\n"
+        "print(nested.stdout.strip())\n"
     )
     env = dict(os.environ)
     env["OTTO_INTERNAL_QUEUE_RUNNER"] = "1"
     result = subprocess.run(
-        [py, str(helper_path)],
-        cwd=str(tmp_path),
+        [sys.executable, str(helper_path)],
+        cwd=str(repo),
         env=env,
         capture_output=True,
         text=True,
     )
+    assert result.returncode == 0, result.stderr
     assert "HAS_VAR=False" in result.stdout, (
         f"Env var was not popped after main() ran.\n"
+        f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+    )
+    assert "QUEUE_CHILD=True" in result.stdout, (
+        f"Queue child context was not preserved after env pop.\n"
+        f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+    )
+    assert "NESTED_HAS_VAR=False" in result.stdout, (
+        f"Nested subprocess inherited queue-runner bypass.\n"
         f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
     )

@@ -32,7 +32,11 @@ from otto.queue.runner import (
 )
 from otto.queue.schema import (
     QueueTask,
+    append_command,
+    append_command_ack,
     append_task,
+    commands_path,
+    commands_processing_path,
     load_queue,
     load_state,
     write_state,
@@ -854,6 +858,12 @@ def test_runner_config_from_otto_config():
     assert cfg.on_watcher_restart == "fail"
 
 
+@pytest.mark.parametrize("bad_concurrent", [0, -2, True, "3"])
+def test_runner_config_rejects_bad_concurrency(bad_concurrent: object):
+    with pytest.raises(ValueError, match="queue.concurrent"):
+        runner_config_from_otto_config({"queue": {"concurrent": bad_concurrent}})
+
+
 def test_runner_config_falls_back_to_defaults_with_empty_queue():
     cfg = runner_config_from_otto_config({"queue": {}})
     assert cfg.concurrent == 3
@@ -928,6 +938,34 @@ def test_tick_logs_malformed_queue_yml_and_continues_after_fix(
                 pass
 
 
+def test_tick_finishes_drain_when_commands_are_all_malformed(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    (repo / ".otto-queue-commands.jsonl").write_text("{broken\n")
+
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    runner._tick()
+
+    assert not commands_path(repo).exists()
+    assert not commands_processing_path(repo).exists()
+    runner._tick()
+    assert not commands_processing_path(repo).exists()
+
+
+def test_tick_finishes_drain_when_commands_are_already_acked(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    cmd = {"schema_version": 1, "command_id": "cmd-1", "kind": "cancel", "id": "t1"}
+    append_command(repo, cmd)
+    append_command_ack(repo, cmd, writer_id="queue:test")
+
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    runner._tick()
+
+    assert not commands_path(repo).exists()
+    assert not commands_processing_path(repo).exists()
+    runner._tick()
+    assert not commands_processing_path(repo).exists()
+
+
 def test_run_exits_on_state_persistence_failure_after_spawn(
     tmp_path: Path,
     monkeypatch,
@@ -999,6 +1037,36 @@ def test_reap_children_keeps_running_task_when_echild_child_is_still_alive(
     assert state["tasks"]["t1"]["status"] == "running"
     assert state["tasks"]["t1"]["child"] == {"pid": 12345, "pgid": 12345}
     assert "reap deferred for t1" in caplog.text
+
+
+def test_reap_children_escalates_stale_terminating_child_to_sigkill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo = init_repo(tmp_path)
+    runner = Runner(repo, RunnerConfig(termination_grace_s=0.0), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "terminating",
+        "terminal_status": "cancelled",
+        "terminating_since": "2026-04-19T00:00:00Z",
+        "child": {"pid": 12345, "pgid": 12345},
+    }
+    sent: list[int] = []
+
+    monkeypatch.setattr(os, "waitpid", lambda pid, flags: (0, 0))
+
+    def fake_kill_child_safely(child: dict[str, Any], sig: int = signal.SIGTERM) -> bool:
+        sent.append(sig)
+        return True
+
+    monkeypatch.setattr(runner_module, "kill_child_safely", fake_kill_child_safely)
+
+    runner._reap_children(state)
+
+    assert sent == [signal.SIGKILL]
+    assert state["tasks"]["t1"]["status"] == "terminating"
+    assert state["tasks"]["t1"]["sigkill_sent_at"]
 
 
 def test_tick_logs_same_cycle_only_once(tmp_path: Path, caplog):
@@ -1238,6 +1306,38 @@ def test_immediate_shutdown_preserves_explicit_cancel_terminal_status(tmp_path: 
     assert updated["failure_reason"] == "cancelled by user"
 
 
+def test_immediate_shutdown_force_escalates_to_sigkill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = init_repo(tmp_path)
+    write_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "build1": {
+                    "status": "running",
+                    "started_at": "2026-04-22T01:00:00Z",
+                    "child": {"pid": 999999, "pgid": 999999},
+                },
+            },
+        },
+    )
+    sent: list[int] = []
+
+    def fake_kill_child_safely(child: dict[str, Any], sig: int = signal.SIGTERM) -> bool:
+        sent.append(sig)
+        return True
+
+    monkeypatch.setattr(runner_module, "kill_child_safely", fake_kill_child_safely)
+
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    runner._kill_all_in_flight(force=True)
+
+    updated = load_state(repo)["tasks"]["build1"]
+    assert sent == [signal.SIGTERM, signal.SIGKILL]
+    assert updated["sigkill_sent_at"]
+
+
 def test_spawn_uses_snapshotted_branch_when_intent_matches(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
     task1 = QueueTask(
@@ -1307,6 +1407,38 @@ def test_reconcile_on_startup_tolerates_malformed_queue_yml(tmp_path: Path, capl
 
     assert "failed to load queue.yml during startup reconcile" in caplog.text
     assert load_state(repo)["tasks"]["running1"]["status"] == "failed"
+
+
+def test_reconcile_on_startup_finishes_empty_command_drain(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    cmd = {"schema_version": 1, "command_id": "cmd-1", "kind": "cancel", "id": "t1"}
+    append_command(repo, cmd)
+    append_command_ack(repo, cmd, writer_id="queue:test")
+
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume"), otto_bin="/bin/true")
+    runner._reconcile_on_startup()
+
+    assert not commands_path(repo).exists()
+    assert not commands_processing_path(repo).exists()
+
+
+def test_queue_spec_path_uses_session_spec_dir(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    )
+    worktree = repo / ".worktrees" / "t1"
+    spec_dir = _paths.spec_dir(worktree, "run-123")
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = spec_dir / "spec.md"
+    spec_path.write_text("# spec\n")
+
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+
+    assert runner._queue_spec_path(task, {"attempt_run_id": "run-123"}) == str(spec_path)
 
 
 # ---------- restart reconciliation ----------
@@ -1462,6 +1594,7 @@ def test_reconcile_keeps_terminating_task_when_child_still_alive(tmp_path: Path)
         state["tasks"]["t1"] = {
             "status": "terminating",
             "started_at": "2026-04-19T00:00:00Z",
+            "terminating_since": runner_module.now_iso(),
             "finished_at": None,
             "child": child,
             "terminal_status": "cancelled",
