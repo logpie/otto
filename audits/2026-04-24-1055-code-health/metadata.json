@@ -1,0 +1,10 @@
+{
+  "stamp": "2026-04-24-1055",
+  "target": "otto/agent.py otto/config.py otto/mission_control/service.py tests/test_agent.py tests/test_config.py tests/test_web_mission_control.py",
+  "tests": "tests/test_agent.py::test_codex_query_normalizes_json_events tests/test_config.py::TestDetectDefaultBranch::test_preserves_origin_head_branch_path tests/test_web_mission_control.py::test_web_keeps_failed_queue_tasks_inspectable_for_requeue tests/test_web_mission_control.py::test_web_landing_target_preserves_detected_branch_path",
+  "mode": "fix",
+  "hunters": "local",
+  "rounds_requested": 1,
+  "gate_cmd": "uv run pytest tests/test_agent.py::test_codex_query_normalizes_json_events tests/test_config.py::TestDetectDefaultBranch::test_preserves_origin_head_branch_path tests/test_web_mission_control.py::test_web_keeps_failed_queue_tasks_inspectable_for_requeue tests/test_web_mission_control.py::test_web_landing_target_preserves_detected_branch_path -q",
+  "sweep_cmd": "uv run pytest -q --maxfail=10"
+}

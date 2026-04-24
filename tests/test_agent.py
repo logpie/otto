@@ -8,6 +8,7 @@ from otto.agent import (
     AgentCallError,
     AgentOptions,
     AssistantMessage,
+    CODEX_STDIO_LIMIT_BYTES,
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
@@ -140,6 +141,8 @@ async def test_codex_query_normalizes_json_events(tmp_path, monkeypatch):
     assert "--dangerously-bypass-approvals-and-sandbox" in args
     assert "-C" in args
     assert str(tmp_path) in args
+    assert seen["kwargs"]["limit"] == CODEX_STDIO_LIMIT_BYTES
+    assert CODEX_STDIO_LIMIT_BYTES >= 16 * 1024 * 1024
 
 
 @pytest.mark.asyncio

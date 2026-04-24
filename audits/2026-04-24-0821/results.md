@@ -37,6 +37,14 @@ Branch: `fix/codex-provider-i2p`
    - Root cause: the TS client mapped action key `x` to `cleanup` even when the rendered label was `remove`.
    - Fix: confirmation titles/buttons now use the server-provided action label.
 
+9. Codex provider crashed on large JSONL stdout lines.
+   - Root cause: Codex can emit a single JSONL event containing hundreds of kilobytes of command output, while Otto used asyncio's default subprocess stream limit.
+   - Fix: Codex subprocess creation now uses a 16 MiB stream reader limit and has regression coverage.
+
+10. Web merge target could truncate default branch names containing slashes.
+   - Root cause: `detect_default_branch()` split `refs/remotes/origin/fix/codex-provider-i2p` on `/` and kept only the last segment.
+   - Fix: branch paths under `refs/remotes/origin/` are preserved, and Mission Control uses `load_config()` for the same target detection path as the merge CLI.
+
 ## Browser E2E Coverage
 
 ### Greenfield API
@@ -90,6 +98,7 @@ Browser checks with `agent-browser` on `http://localhost:8777`:
 - Codex provider is usable from Mission Control, but simple certification can be much slower than Claude because the Codex run duplicated certifier/sub-agent activity. That should become a provider efficiency follow-up, not a web blocker.
 - Mission Control still uses polling. It is acceptable for the local MVP, but high-volume task lists may need pagination controls or row virtualization beyond the current history pagination.
 - Remove/requeue actions are launched asynchronously. The row can remain visible until the next refresh after the subprocess completes; the UI now recovers correctly, but a future polish pass could show a per-row pending state.
+- Failed runs that crash before Codex reports token usage can still show `$0.00`; successful Codex runs display token counts, while USD cost remains provider-unreported.
 
 ## Final Verification
 
@@ -97,4 +106,7 @@ Browser checks with `agent-browser` on `http://localhost:8777`:
 - `npm run web:build` passed and produced `otto/web/static/assets/index-DsuiWvCp.js`.
 - `uv run pytest -x -q` passed: `922 passed, 18 deselected in 102.74s`.
 - `uv run pytest -q --maxfail=10` passed: `922 passed, 18 deselected in 103.19s`.
+- Additional Codex stream/branch-target fix verification passed:
+  `uv run pytest -q --maxfail=10` returned
+  `924 passed, 18 deselected in 105.58s`.
 - `git diff --check` passed.

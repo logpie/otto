@@ -434,6 +434,37 @@ class TestDetectDefaultBranch:
 
         assert detect_default_branch(repo) == "main"
 
+    def test_preserves_origin_head_branch_path(self, tmp_path):
+        import subprocess
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (repo / "README.md").write_text("hello\n")
+        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/fix/codex-provider-i2p", sha],
+            cwd=repo,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/fix/codex-provider-i2p",
+            ],
+            cwd=repo,
+            check=True,
+        )
+
+        assert detect_default_branch(repo) == "fix/codex-provider-i2p"
+        assert load_config(repo / "otto.yaml")["default_branch"] == "fix/codex-provider-i2p"
+
 
 class TestCreateConfig:
     def test_creates_config_file(self, tmp_bare_git_repo):

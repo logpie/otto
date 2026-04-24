@@ -972,8 +972,17 @@ def detect_default_branch(project_dir: Path) -> str:
             text=True,
         )
         if result.returncode == 0:
-            # refs/remotes/origin/main → main
-            return result.stdout.strip().split("/")[-1]
+            # refs/remotes/origin/main -> main
+            # refs/remotes/origin/release/2026 -> release/2026
+            remote_head = result.stdout.strip()
+            prefix = "refs/remotes/origin/"
+            if remote_head.startswith(prefix):
+                branch = remote_head[len(prefix):].strip()
+                if branch:
+                    return branch
+            fallback = remote_head.rsplit("/", 1)[-1].strip()
+            if fallback:
+                return fallback
     except FileNotFoundError:
         pass
 

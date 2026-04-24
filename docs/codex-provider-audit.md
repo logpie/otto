@@ -153,6 +153,24 @@ Result:
 This validates Codex through the full Otto build + certification loop, not only
 standalone `certify`.
 
+### Mission Control Complex Repo, Codex Retry, and Merge
+
+Project: `/private/tmp/otto-complex-web-20260424-093052`
+
+- Queued a real Codex task from Mission Control against a fresh Otto repo clone.
+- The first run failed in 11 seconds because Codex emitted a JSONL stdout line
+  larger than asyncio's default subprocess stream limit.
+- Otto now creates the Codex subprocess with a 16 MiB stream reader limit.
+- Requeued the task from the web UI; Codex completed build and certification.
+- Certifier passed 5/5 stories, including web shell load, filtered detail
+  inspectability, and requeue action execution.
+- Mission Control showed usage as `1.3M in / 5.2K out` for the successful retry.
+- Web merge then exposed and fixed a branch-target bug: remote default branch
+  names containing slashes were truncated. `origin/fix/codex-provider-i2p` now
+  resolves to `fix/codex-provider-i2p`.
+- Retried web merge succeeded into `fix/codex-provider-i2p`, and the restarted
+  UI displayed the same target.
+
 ### Patched Codex Token Reporting
 
 Fast standalone Codex certify after the token-reporting patch:
@@ -177,7 +195,8 @@ The PoW JSON includes:
 Latest full test run:
 
 ```text
-uv run pytest
-395 passed in 42.97s
+npm run web:typecheck
+npm run web:build
+uv run pytest -q --maxfail=10
+924 passed, 18 deselected in 105.58s
 ```
-

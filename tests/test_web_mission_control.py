@@ -25,6 +25,16 @@ def _init_repo(repo: Path) -> None:
     subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
 
 
+def _set_origin_head(repo: Path, branch: str) -> None:
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "update-ref", f"refs/remotes/origin/{branch}", sha], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{branch}"],
+        cwd=repo,
+        check=True,
+    )
+
+
 def _write_run(repo: Path, *, run_id: str = "build-web", outside_artifact: str | None = None) -> None:
     primary_log = paths.build_dir(repo, run_id) / "narrative.log"
     primary_log.parent.mkdir(parents=True, exist_ok=True)
@@ -243,8 +253,9 @@ def test_web_keeps_failed_queue_tasks_inspectable_for_requeue(tmp_path: Path) ->
     assert state["live"]["active_count"] == 0
     assert state["landing"]["items"][0]["run_id"] == "failed-task-run"
 
-    detail = client.get("/api/runs/failed-task-run").json()
+    detail = client.get("/api/runs/failed-task-run?type=merge&query=unmatched").json()
     actions = {action["key"]: action for action in detail["legal_actions"]}
+    assert detail["run_id"] == "failed-task-run"
     assert detail["display_status"] == "failed"
     assert actions["R"]["label"] == "requeue"
     assert actions["R"]["enabled"] is True
@@ -319,6 +330,43 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     assert by_id["ready-task"]["stories_passed"] == 2
     assert by_id["merged-task"]["landing_state"] == "merged"
     assert by_id["merged-task"]["merge_id"] == "merge-merged"
+
+
+def test_web_landing_target_preserves_detected_branch_path(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _set_origin_head(repo, "fix/codex-provider-i2p")
+    append_task(
+        repo,
+        QueueTask(
+            id="ready-task",
+            command_argv=["build", "ready task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="ready task",
+            branch="build/ready-task",
+            worktree=".worktrees/ready-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "ready-task": {
+                    "status": "done",
+                    "attempt_run_id": "run-ready",
+                    "stories_passed": 1,
+                    "stories_tested": 1,
+                },
+            },
+        },
+    )
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+
+    assert state["landing"]["target"] == "fix/codex-provider-i2p"
+    assert state["landing"]["counts"]["ready"] == 1
 
 
 def test_web_landing_blocks_merge_when_project_has_tracked_changes(tmp_path: Path) -> None:

@@ -463,7 +463,7 @@ def _action_key(action: str) -> str:
 
 def _merge_target(project_dir: Path) -> str:
     try:
-        cfg = load_config(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
+        cfg = load_config(project_dir / "otto.yaml")
     except Exception:
         cfg = {}
     return str(cfg.get("default_branch") or "main")

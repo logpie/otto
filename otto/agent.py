@@ -16,6 +16,8 @@ from typing import Any, Callable
 from otto.observability import iso_timestamp, write_crash_artifact
 _SDK_IMPORT_ERROR_MESSAGE = ""
 
+CODEX_STDIO_LIMIT_BYTES = 16 * 1024 * 1024
+
 try:
     from claude_agent_sdk import ClaudeAgentOptions as _SDKClaudeAgentOptions
     from claude_agent_sdk import query as _sdk_query
@@ -1040,6 +1042,7 @@ async def _query_codex(
             stderr=asyncio.subprocess.STDOUT,
             cwd=opts.cwd or None,
             env=env,
+            limit=CODEX_STDIO_LIMIT_BYTES,
             start_new_session=True,
         )
     except FileNotFoundError as exc:
