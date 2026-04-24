@@ -63,7 +63,7 @@ Claude smoke:
 
 5. Web merge action used agent merge in Codex projects.
    - Root cause: Mission Control launched `otto merge ...`; Codex-configured projects require Claude for conflict-resolution merge unless `--fast` is used.
-   - Fix: Mission Control merge actions now launch `otto merge --fast ...` and `otto merge --fast --all`.
+   - Fix: Mission Control merge actions now launch `otto merge --fast --no-certify ...` and `otto merge --fast --no-certify --all`.
 
 6. Immediate merge failures could be hidden behind “launched”.
    - Root cause: action process launch only waited briefly before returning success.

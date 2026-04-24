@@ -1,0 +1,12 @@
+{
+  "stamp": "2026-04-24-0222",
+  "target": "otto/web, otto/mission_control, otto/merge, focused Mission Control and merge tests",
+  "tests": "tests/test_web_mission_control.py tests/test_mission_control_actions.py tests/test_merge_orchestrator.py tests/test_mission_control_adapters.py tests/test_mission_control_tui.py",
+  "mode": "fix",
+  "hunters": "local",
+  "rounds_requested": 1,
+  "test_cmd": "uv run pytest -x -q",
+  "gate_cmd": "uv run pytest -x -q",
+  "sweep_cmd": "uv run pytest -q --maxfail=10",
+  "hunter_mode_note": "Local-only audit because runtime policy requires explicit user permission before spawning subagents."
+}
