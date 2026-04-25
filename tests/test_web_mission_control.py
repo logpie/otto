@@ -42,6 +42,14 @@ def _set_origin_head(repo: Path, branch: str) -> None:
     )
 
 
+def _create_branch_file(repo: Path, branch: str, filename: str = "feature.txt", content: str = "ready\n") -> None:
+    subprocess.run(["git", "checkout", "-q", "-b", branch], cwd=repo, check=True)
+    (repo / filename).write_text(content, encoding="utf-8")
+    subprocess.run(["git", "add", filename], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", f"add {filename}"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+
+
 def _write_run(repo: Path, *, run_id: str = "build-web", outside_artifact: str | None = None) -> None:
     primary_log = paths.build_dir(repo, run_id) / "narrative.log"
     primary_log.parent.mkdir(parents=True, exist_ok=True)
@@ -312,6 +320,7 @@ def test_web_keeps_failed_queue_tasks_inspectable_for_requeue(tmp_path: Path) ->
 def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
+    _create_branch_file(repo, "build/ready-task", "ready.txt")
     append_task(
         repo,
         QueueTask(
@@ -392,6 +401,72 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     assert actions["m"]["reason"] == "Already merged into main."
 
 
+def test_web_landed_task_does_not_diff_deleted_source_branch(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    subprocess.run(["git", "checkout", "-q", "-b", "build/merged-task"], cwd=repo, check=True)
+    (repo / "merged.txt").write_text("merged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "merged.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add merged task"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "merge", "--no-ff", "-m", "land merged task", "build/merged-task"], cwd=repo, check=True)
+    merge_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "branch", "-D", "build/merged-task"], cwd=repo, check=True)
+    append_task(
+        repo,
+        QueueTask(
+            id="merged-task",
+            command_argv=["build", "merged task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="merged task",
+            branch="build/merged-task",
+            worktree=".worktrees/merged-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "merged-task": {
+                    "status": "done",
+                    "attempt_run_id": "run-merged",
+                    "stories_passed": 1,
+                    "stories_tested": 1,
+                },
+            },
+        },
+    )
+    write_merge_state(
+        repo,
+        MergeState(
+            merge_id="merge-merged",
+            started_at="2026-04-24T00:00:00Z",
+            finished_at="2026-04-24T00:01:00Z",
+            target="main",
+            status="done",
+            terminal_outcome="success",
+            branches_in_order=["build/merged-task"],
+            outcomes=[BranchOutcome(branch="build/merged-task", status="merged", merge_commit=merge_commit)],
+        ),
+    )
+
+    client = TestClient(create_app(repo))
+    item = client.get("/api/state").json()["landing"]["items"][0]
+    packet = client.get("/api/runs/run-merged").json()["review_packet"]
+    checks = {check["key"]: check for check in packet["checks"]}
+
+    assert item["landing_state"] == "merged"
+    assert item["diff_error"] is None
+    assert item["changed_file_count"] == 0
+    assert packet["readiness"]["state"] == "merged"
+    assert packet["changes"]["diff_error"] is None
+    assert packet["changes"]["diff_command"] is None
+    assert checks["changes"]["status"] == "info"
+    assert checks["changes"]["detail"] == "No unlanded diff remains."
+
+
 def test_web_merge_action_rejects_already_merged_task(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -437,9 +512,52 @@ def test_web_merge_action_rejects_already_merged_task(tmp_path: Path, monkeypatc
     assert calls == []
 
 
+def test_web_merge_action_reports_already_merged_before_dirty_repo(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    record = make_run_record(
+        project_dir=repo,
+        run_id="run-merged",
+        domain="queue",
+        run_type="queue",
+        command="build merged",
+        display_name="merged-task",
+        status="done",
+        cwd=repo,
+        identity={"queue_task_id": "merged-task"},
+        git={"branch": "build/merged-task"},
+        intent={"summary": "merged"},
+        adapter_key="queue.attempt",
+    )
+    write_record(repo, record)
+    write_merge_state(
+        repo,
+        MergeState(
+            merge_id="merge-merged",
+            started_at="2026-04-24T00:00:00Z",
+            finished_at="2026-04-24T00:01:00Z",
+            target="main",
+            status="done",
+            terminal_outcome="success",
+            branches_in_order=["build/merged-task"],
+            outcomes=[BranchOutcome(branch="build/merged-task", status="merged")],
+        ),
+    )
+    monkeypatch.setattr(
+        "otto.mission_control.service._merge_preflight",
+        lambda project_dir: {"merge_blocked": True, "merge_blockers": ["dirty"], "dirty_files": ["README.md"]},
+    )
+
+    response = TestClient(create_app(repo)).post("/api/runs/run-merged/actions/merge", json={})
+
+    assert response.status_code == 409
+    assert response.json()["message"] == "Already merged into main."
+
+
 def test_web_landing_ignores_merge_state_for_different_target(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
+    _create_branch_file(repo, "build/ready-task", "ready.txt")
     append_task(
         repo,
         QueueTask(
@@ -590,7 +708,8 @@ def test_web_landing_and_detail_show_review_packet_changed_files(tmp_path: Path)
     assert packet["certification"]["stories_tested"] == 1
     assert packet["changes"]["files"] == ["feature.txt"]
     assert packet["changes"]["diff_command"] == "git diff main...build/ready-task"
-    assert packet["next_action"]["label"] == "merge selected"
+    assert packet["next_action"]["label"] == "Land selected"
+    assert packet["next_action"]["action_key"] == "m"
 
 
 def test_web_landing_surfaces_diff_errors(tmp_path: Path) -> None:
@@ -619,10 +738,21 @@ def test_web_landing_surfaces_diff_errors(tmp_path: Path) -> None:
     state = client.get("/api/state").json()
     detail = client.get("/api/runs/run-ready").json()
 
+    assert state["landing"]["counts"]["ready"] == 0
+    assert state["landing"]["counts"]["blocked"] == 1
+    assert state["landing"]["items"][0]["landing_state"] == "blocked"
+    assert state["landing"]["items"][0]["label"] == "Review blocked"
     assert "build/missing" in state["landing"]["items"][0]["diff_error"]
     assert "build/missing" in detail["review_packet"]["changes"]["diff_error"]
+    assert detail["review_packet"]["headline"] == "Review blocked before landing"
     assert detail["review_packet"]["readiness"]["state"] == "blocked"
     assert detail["review_packet"]["readiness"]["tone"] == "danger"
+    assert detail["review_packet"]["next_action"] == {
+        "label": "Land blocked",
+        "action_key": None,
+        "enabled": False,
+        "reason": "Resolve review blockers before landing.",
+    }
     checks = {check["key"]: check for check in detail["review_packet"]["checks"]}
     assert checks["changes"]["status"] == "fail"
     assert "build/missing" in checks["landing"]["detail"]
@@ -632,6 +762,7 @@ def test_web_landing_target_preserves_detected_branch_path(tmp_path: Path) -> No
     repo = tmp_path / "repo"
     _init_repo(repo)
     _set_origin_head(repo, "fix/codex-provider-i2p")
+    _create_branch_file(repo, "build/ready-task", "ready.txt")
     append_task(
         repo,
         QueueTask(
@@ -668,6 +799,7 @@ def test_web_landing_target_preserves_detected_branch_path(tmp_path: Path) -> No
 def test_web_landing_blocks_merge_when_project_has_tracked_changes(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
+    _create_branch_file(repo, "build/ready-task", "ready.txt")
     append_task(
         repo,
         QueueTask(
@@ -702,6 +834,60 @@ def test_web_landing_blocks_merge_when_project_has_tracked_changes(tmp_path: Pat
     assert state["landing"]["merge_blocked"] is True
     assert "working tree has unstaged changes" in state["landing"]["merge_blockers"]
     assert state["landing"]["dirty_files"] == ["README.md"]
+
+
+def test_web_review_packet_blocks_landing_when_project_has_tracked_changes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    subprocess.run(["git", "checkout", "-q", "-b", "build/ready-task"], cwd=repo, check=True)
+    (repo / "feature.txt").write_text("ready\n", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add feature"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+    append_task(
+        repo,
+        QueueTask(
+            id="ready-task",
+            command_argv=["build", "ready task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="ready task",
+            branch="build/ready-task",
+            worktree=".worktrees/ready-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "ready-task": {
+                    "status": "done",
+                    "attempt_run_id": "run-ready",
+                    "stories_passed": 1,
+                    "stories_tested": 1,
+                },
+            },
+        },
+    )
+    (repo / "README.md").write_text("# web\n\nlocal runtime state\n", encoding="utf-8")
+
+    detail = TestClient(create_app(repo)).get("/api/runs/run-ready").json()
+    packet = detail["review_packet"]
+    checks = {check["key"]: check for check in packet["checks"]}
+
+    assert packet["headline"] == "Repository cleanup required before landing"
+    assert packet["readiness"]["state"] == "blocked"
+    assert packet["readiness"]["tone"] == "danger"
+    assert packet["next_action"] == {
+        "label": "Land blocked",
+        "action_key": None,
+        "enabled": False,
+        "reason": "Commit, stash, or revert local project changes before landing.",
+    }
+    assert "Repository has local changes: README.md." in packet["readiness"]["blockers"]
+    assert checks["landing"]["status"] == "fail"
+    assert "README.md" in checks["landing"]["detail"]
 
 
 def test_web_merge_all_rejects_dirty_project_before_launch(tmp_path: Path) -> None:
@@ -967,6 +1153,83 @@ def test_web_history_usage_reads_merge_summary_extra_artifact(tmp_path: Path) ->
     assert state["history"]["items"][0]["cost_display"] == "2.0K in / 300 out"
 
 
+def test_web_merge_run_review_packet_is_landing_audit_not_landable(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    record = make_run_record(
+        project_dir=repo,
+        run_id="merge-audit",
+        domain="merge",
+        run_type="merge",
+        command="merge",
+        display_name="merge: 1 branch",
+        status="done",
+        cwd=repo,
+        identity={"merge_id": "merge-audit"},
+        git={"branch": "main", "target_branch": "main"},
+        intent={"summary": "merge 1 branch"},
+        adapter_key="merge.run",
+    )
+    record.terminal_outcome = "success"
+    write_record(repo, record)
+
+    detail = TestClient(create_app(repo)).get("/api/runs/merge-audit").json()
+    packet = detail["review_packet"]
+    checks = {check["key"]: check for check in packet["checks"]}
+
+    assert packet["headline"] == "Landed in main"
+    assert packet["readiness"]["state"] == "merged"
+    assert packet["readiness"]["next_step"] == "Audit the landing record, artifacts, and final logs if needed."
+    assert packet["next_action"] == {
+        "label": "No action",
+        "action_key": None,
+        "enabled": False,
+        "reason": "Landing runs are audit records.",
+    }
+    assert packet["changes"]["file_count"] == 0
+    assert packet["changes"]["diff_command"] is None
+    assert checks["landing"]["detail"] == "No further landing action is needed."
+    assert checks["certification"]["status"] == "info"
+
+
+def test_web_merge_history_review_packet_uses_persisted_target(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    write_merge_state(
+        repo,
+        MergeState(
+            merge_id="merge-release",
+            started_at="2026-04-24T00:00:00Z",
+            finished_at="2026-04-24T00:01:00Z",
+            target="release/1.0",
+            target_head_before="abc123",
+            status="done",
+            terminal_outcome="success",
+            branches_in_order=["build/release-task"],
+            outcomes=[BranchOutcome(branch="build/release-task", status="merged")],
+        ),
+    )
+    append_history_snapshot(
+        repo,
+        build_terminal_snapshot(
+            run_id="merge-release",
+            domain="merge",
+            run_type="merge",
+            command="merge",
+            intent_meta={"summary": "merge release", "intent_path": None, "spec_path": None},
+            status="done",
+            terminal_outcome="success",
+            identity={"merge_id": "merge-release"},
+            artifacts={"session_dir": str(paths.merge_dir(repo) / "merge-release")},
+        ),
+    )
+
+    packet = TestClient(create_app(repo)).get("/api/runs/merge-release?type=merge").json()["review_packet"]
+
+    assert packet["headline"] == "Landed in release/1.0"
+    assert packet["changes"]["target"] == "release/1.0"
+
+
 def test_web_merge_action_uses_fast_merge_and_reports_immediate_failure(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1091,7 +1354,7 @@ def test_web_runtime_surfaces_state_and_command_recovery_issues(tmp_path: Path) 
     _init_repo(repo)
     (repo / ".otto-queue.yml").write_text("schema_version: [\n", encoding="utf-8")
     paths.queue_commands_processing_path(repo).write_text(
-        json.dumps({"command_id": "cmd-1", "run_id": "run-1"}) + "\n",
+        json.dumps({"command_id": "cmd-1", "run_id": "run-1", "kind": "cancel", "args": {"task_id": "task-a"}}) + "\n",
         encoding="utf-8",
     )
 
@@ -1100,6 +1363,8 @@ def test_web_runtime_surfaces_state_and_command_recovery_issues(tmp_path: Path) 
 
     assert state["runtime"]["status"] == "attention"
     assert state["runtime"]["command_backlog"]["processing"] == 1
+    assert state["runtime"]["command_backlog"]["items"][0]["state"] == "processing"
+    assert state["runtime"]["command_backlog"]["items"][0]["task_id"] == "task-a"
     assert "Queue file unreadable" in labels
     assert "Command drain is unfinished" in labels
 

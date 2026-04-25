@@ -104,6 +104,8 @@ def build_terminal_snapshot(
         "finished_at": finished_at,
         "timestamp": _string_or_none(timing.get("timestamp")) or finished_at or utc_now_iso(),
         "branch": _string_or_none(git.get("branch")),
+        "target_branch": _string_or_none(git.get("target_branch")),
+        "head_sha": _string_or_none(git.get("head_sha")),
         "worktree": _string_or_none(git.get("worktree")),
         "resumable": bool(source.get("resumable", False)),
         "session_dir": normalized_artifacts["session_dir"],

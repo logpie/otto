@@ -109,6 +109,8 @@ class HistoryRow:
     merge_id: str | None
     intent: str
     branch: str | None
+    target_branch: str | None
+    head_sha: str | None
     worktree: str | None
     cost_usd: float | None
     duration_s: float | None
@@ -773,6 +775,8 @@ def _normalize_history_row(raw: dict[str, Any]) -> HistoryRow | None:
         merge_id=_string_or_none(raw.get("merge_id")),
         intent=_string_or_none(raw.get("intent")) or "",
         branch=_string_or_none(raw.get("branch")),
+        target_branch=_string_or_none(raw.get("target_branch")),
+        head_sha=_string_or_none(raw.get("head_sha")),
         worktree=_string_or_none(raw.get("worktree")),
         cost_usd=_coerce_float(raw.get("cost_usd")),
         duration_s=_coerce_float(raw.get("duration_s")),
@@ -839,7 +843,7 @@ def _history_row_to_record(project_dir: Path, row: HistoryRow) -> RunRecord:
             "heartbeat_interval_s": HEARTBEAT_INTERVAL_S,
             "heartbeat_seq": 0,
         },
-        git={"branch": row.branch, "worktree": row.worktree, "target_branch": None, "head_sha": None},
+        git={"branch": row.branch, "worktree": row.worktree, "target_branch": row.target_branch, "head_sha": row.head_sha},
         intent={"summary": row.intent, "intent_path": row.intent_path, "spec_path": row.spec_path},
         artifacts={
             "session_dir": row.session_dir,

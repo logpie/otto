@@ -5,6 +5,7 @@ import type {
   ActionState,
   ArtifactContentResponse,
   ArtifactRef,
+  CommandBacklogItem,
   HistoryItem,
   ImproveSubcommand,
   JobCommand,
@@ -47,6 +48,24 @@ interface Filters {
   activeOnly: boolean;
 }
 
+type ViewMode = "tasks" | "diagnostics";
+
+type BoardStage = "attention" | "working" | "ready" | "landed";
+
+interface BoardTask {
+  id: string;
+  runId: string | null;
+  title: string;
+  summary: string;
+  stage: BoardStage;
+  status: string;
+  branch: string | null;
+  changedFileCount: number | null;
+  proof: string;
+  reason: string;
+  source: "landing" | "live" | "history";
+}
+
 const defaultFilters: Filters = {
   type: "all",
   outcome: "all",
@@ -70,6 +89,7 @@ export function App() {
   const [resultBanner, setResultBanner] = useState<ResultBannerState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [confirmPending, setConfirmPending] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("tasks");
   const logOffsetRef = useRef(0);
   const selectedRunIdRef = useRef<string | null>(null);
 
@@ -303,58 +323,80 @@ export function App() {
             <p>Mission Control</p>
           </div>
         </div>
-        <ProjectMeta project={project} watcher={watcher} active={active} />
-        <button className="primary" type="button" onClick={() => setJobOpen(true)}>New job</button>
-        <button type="button" disabled={!canStartWatcher(data)} title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
-        <button type="button" disabled={!canStopWatcher(data)} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
-        <button type="button" disabled={!canMerge(landing)} title={mergeButtonTitle(landing)} onClick={() => void mergeReadyTasks()}>
-          {landing?.counts.ready ? `Land ${landing.counts.ready} ready` : "Land ready"}
-        </button>
+        <ProjectMeta project={project} watcher={watcher} landing={landing} active={active} />
+        <button className="primary" type="button" data-testid="new-job-button" onClick={() => setJobOpen(true)}>New job</button>
+        <button type="button" data-testid="start-watcher-button" disabled={!canStartWatcher(data)} title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
+        <button type="button" data-testid="stop-watcher-button" disabled={!canStopWatcher(data)} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
       </aside>
 
       <main className="workspace">
-        <Toolbar filters={filters} refreshStatus={refreshStatus} onChange={setFilters} onRefresh={() => void refresh()} />
-        <OperationalOverview
-          data={data}
-          lastError={lastError}
-          resultBanner={resultBanner}
-          onDismissError={() => setLastError(null)}
-          onDismissResult={() => setResultBanner(null)}
+        <Toolbar
+          filters={filters}
+          refreshStatus={refreshStatus}
+          viewMode={viewMode}
+          onChange={setFilters}
+          onRefresh={() => void refresh()}
+          onViewChange={setViewMode}
         />
-        <section className="grid">
-          <div className="tables">
-            <LandingQueue
+        {viewMode === "tasks" ? (
+          <section className="mission-layout" aria-label="Mission Control task workflow">
+            <div className="main-stack">
+              <MissionFocus
+                data={data}
+                lastError={lastError}
+                resultBanner={resultBanner}
+                onNewJob={() => setJobOpen(true)}
+                onStartWatcher={() => void runWatcherAction("start")}
+                onLandReady={() => void mergeReadyTasks()}
+                onOpenDiagnostics={() => setViewMode("diagnostics")}
+                onDismissError={() => setLastError(null)}
+                onDismissResult={() => setResultBanner(null)}
+              />
+              <TaskBoard
+                data={data}
+                selectedRunId={selectedRunId}
+                onSelect={selectRun}
+              />
+              <RecentActivity events={data?.events} history={data?.history.items || []} selectedRunId={selectedRunId} onSelect={selectRun} />
+            </div>
+            <RunDetailPanel
+              detail={detail}
               landing={landing}
-              selectedRunId={selectedRunId}
-              onSelect={selectRun}
-              onMergeReady={() => void mergeReadyTasks()}
-              onMergeRun={(runId) => void runActionForRun(runId, "merge", "Land this task into the target branch?")}
+              logText={logText}
+              showingArtifacts={showingArtifacts}
+              selectedArtifactIndex={selectedArtifactIndex}
+              artifactContent={artifactContent}
+              onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
+              onShowLogs={() => {
+                setShowingArtifacts(false);
+                setArtifactContent(null);
+                if (selectedRunId) void loadLogs(selectedRunId, true);
+              }}
+              onShowArtifacts={() => setShowingArtifacts(true)}
+              onLoadArtifact={(index) => void loadArtifact(index)}
+              onBackToArtifacts={() => {
+                setSelectedArtifactIndex(null);
+                setArtifactContent(null);
+              }}
             />
-            <LiveRuns items={data?.live.items || []} selectedRunId={selectedRunId} onSelect={selectRun} />
-            <EventTimeline events={data?.events} />
-            <History items={data?.history.items || []} totalRows={data?.history.total_rows || 0} selectedRunId={selectedRunId} onSelect={selectRun} />
-          </div>
-          <RunDetailPanel
-            detail={detail}
-            landing={landing}
-            logText={logText}
-            showingArtifacts={showingArtifacts}
-            selectedArtifactIndex={selectedArtifactIndex}
-            artifactContent={artifactContent}
-            onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
-            onShowLogs={() => {
-              setShowingArtifacts(false);
-              setArtifactContent(null);
-              if (selectedRunId) void loadLogs(selectedRunId, true);
-            }}
-            onShowArtifacts={() => setShowingArtifacts(true)}
-            onLoadArtifact={(index) => void loadArtifact(index)}
-            onBackToArtifacts={() => {
-              setSelectedArtifactIndex(null);
-              setArtifactContent(null);
-            }}
-          />
-        </section>
+          </section>
+        ) : (
+          <section className="diagnostics-layout" aria-label="Mission Control diagnostics">
+            <OperationalOverview
+              data={data}
+              lastError={lastError}
+              resultBanner={resultBanner}
+              onDismissError={() => setLastError(null)}
+              onDismissResult={() => setResultBanner(null)}
+            />
+            <div className="diagnostics-grid">
+              <DiagnosticsSummary data={data} onSelect={selectRun} />
+              <LiveRuns items={data?.live.items || []} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
+              <EventTimeline events={data?.events} />
+              <History items={data?.history.items || []} totalRows={data?.history.total_rows || 0} selectedRunId={selectedRunId} onSelect={selectRun} />
+            </div>
+          </section>
+        )}
       </main>
 
       {jobOpen && (
@@ -383,7 +425,12 @@ export function App() {
   );
 }
 
-function ProjectMeta({project, watcher, active}: {project: StateResponse["project"] | undefined; watcher: WatcherInfo | undefined; active: number}) {
+function ProjectMeta({project, watcher, landing, active}: {
+  project: StateResponse["project"] | undefined;
+  watcher: WatcherInfo | undefined;
+  landing: LandingState | undefined;
+  active: number;
+}) {
   const counts = watcher?.counts || {};
   const health = watcher?.health;
   return (
@@ -393,8 +440,8 @@ function ProjectMeta({project, watcher, active}: {project: StateResponse["projec
       <MetaItem label="State" value={!project ? "unknown" : project.dirty ? "dirty" : "clean"} />
       <MetaItem label="Watcher" value={watcherSummary(watcher)} />
       <MetaItem label="Heartbeat" value={health?.heartbeat_age_s === null || health?.heartbeat_age_s === undefined ? "-" : `${Math.round(health.heartbeat_age_s)}s ago`} />
-      <MetaItem label="Active" value={String(active)} />
-      <MetaItem label="Queue" value={`queued ${counts.queued || 0} / active ${active} / done ${counts.done || 0}`} />
+      <MetaItem label="In flight" value={String(active)} />
+      <MetaItem label="Tasks" value={`queued ${counts.queued || 0} / needs ${landing?.counts.blocked || 0} / ready ${landing?.counts.ready || 0} / landed ${landing?.counts.merged || 0}`} />
     </dl>
   );
 }
@@ -403,14 +450,36 @@ function MetaItem({label, value}: {label: string; value: string}) {
   return <div><dt>{label}</dt><dd>{value}</dd></div>;
 }
 
-function Toolbar({filters, refreshStatus, onChange, onRefresh}: {
+function Toolbar({filters, refreshStatus, viewMode, onChange, onRefresh, onViewChange}: {
   filters: Filters;
   refreshStatus: string;
+  viewMode: ViewMode;
   onChange: (filters: Filters) => void;
   onRefresh: () => void;
+  onViewChange: (viewMode: ViewMode) => void;
 }) {
   return (
     <header className="toolbar">
+      <div className="view-tabs" aria-label="Mission Control views">
+        <button
+          className={viewMode === "tasks" ? "active" : ""}
+          type="button"
+          aria-pressed={viewMode === "tasks"}
+          data-testid="tasks-tab"
+          onClick={() => onViewChange("tasks")}
+        >
+          Tasks
+        </button>
+        <button
+          className={viewMode === "diagnostics" ? "active" : ""}
+          type="button"
+          aria-pressed={viewMode === "diagnostics"}
+          data-testid="diagnostics-tab"
+          onClick={() => onViewChange("diagnostics")}
+        >
+          Diagnostics
+        </button>
+      </div>
       <div className="filters" aria-label="Run filters">
         <label>Type
           <select value={filters.type} onChange={(event) => onChange({...filters, type: event.target.value as RunTypeFilter})}>
@@ -525,185 +594,255 @@ function RuntimeWarnings({data}: {data: StateResponse}) {
   );
 }
 
-function LandingQueue({landing, selectedRunId, onSelect, onMergeReady, onMergeRun}: {
-  landing: LandingState | undefined;
-  selectedRunId: string | null;
-  onSelect: (runId: string) => void;
-  onMergeReady: () => void;
-  onMergeRun: (runId: string) => void;
-}) {
-  const items = landing?.items || [];
+function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSelect: (runId: string) => void}) {
+  const issues = data?.runtime.issues || [];
+  const landingItems = data?.landing.items || [];
+  const commands = data?.runtime.command_backlog.items || [];
+  const visibleLanding = [
+    ...landingItems.filter((item) => item.landing_state === "ready"),
+    ...landingItems.filter((item) => item.landing_state === "blocked"),
+    ...landingItems.filter((item) => item.landing_state === "merged"),
+  ].slice(0, 8);
   return (
-    <section className="panel landing-panel" aria-labelledby="landingHeading">
+    <section className="panel diagnostics-summary" aria-labelledby="diagnosticsSummaryHeading">
       <div className="panel-heading">
         <div>
-          <h2 id="landingHeading">Review &amp; Land</h2>
-          <p className="panel-subtitle">{landingSummaryText(landing)}</p>
+          <h2 id="diagnosticsSummaryHeading">Diagnostics Summary</h2>
+          <p className="panel-subtitle">Runtime issues and landing state, translated into operator actions.</p>
         </div>
-        <button className="primary" type="button" disabled={!canMerge(landing)} title={mergeButtonTitle(landing)} onClick={onMergeReady}>
-          {landing?.counts.ready ? `Land ${landing.counts.ready} ready` : "Land ready"}
-        </button>
+        <span className="pill">{issues.length + commands.length + visibleLanding.length}</span>
       </div>
-      <LandingWarnings landing={landing} />
-      <LandingPlan landing={landing} onMergeReady={onMergeReady} />
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Review</th>
-              <th>Task</th>
-              <th>Branch</th>
-              <th>Changes</th>
-              <th>Proof</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.length ? items.map((item) => (
-              <LandingRow
-                key={item.task_id}
-                item={item}
-                selected={item.run_id === selectedRunId}
-                mergeBlocked={Boolean(landing?.merge_blocked)}
-                onSelect={onSelect}
-                onMergeRun={onMergeRun}
-              />
-            )) : (
-              <tr><td colSpan={6} className="empty-cell">No queued work yet.</td></tr>
-            )}
-          </tbody>
-        </table>
+      <div className="diagnostics-summary-body">
+        <section aria-label="Command backlog">
+          <h3>Command Backlog</h3>
+          {commands.length ? commands.map((command, index) => (
+            <div className={`diagnostic-card command-${command.state}`} key={`${command.command_id || command.run_id || "command"}-${index}`}>
+              <span>{command.state}</span>
+              <strong>{command.kind || "queued action"}</strong>
+              <p>{command.run_id || command.task_id || command.command_id || "target unknown"}</p>
+              <em>{commandBacklogLine(command)}</em>
+            </div>
+          )) : <div className="diagnostic-empty">No pending commands.</div>}
+        </section>
+        <section aria-label="Runtime issues">
+          <h3>Runtime Issues</h3>
+          {issues.length ? issues.slice(0, 4).map((issue, index) => (
+            <div className={`diagnostic-card severity-${issue.severity}`} key={`${issue.label}-${index}`}>
+              <span>{issue.severity}</span>
+              <strong>{issue.label}</strong>
+              <p>{issue.detail}</p>
+              <em>{issue.next_action}</em>
+            </div>
+          )) : <div className="diagnostic-empty">No runtime issues.</div>}
+        </section>
+        <section aria-label="Landing states" className="wide-diagnostics-section">
+          <h3>Review And Landing</h3>
+          {visibleLanding.length ? visibleLanding.map((item) => (
+            <button
+              className={`diagnostic-card landing-state-${item.landing_state}`}
+              type="button"
+              key={item.task_id}
+              disabled={!item.run_id}
+              onClick={() => item.run_id && onSelect(item.run_id)}
+            >
+              <span>{landingStateText(item)}</span>
+              <strong>{item.task_id}</strong>
+              <p>{item.summary || item.branch || "-"}</p>
+              <em>{diagnosticLandingAction(item)}</em>
+            </button>
+          )) : <div className="diagnostic-empty">No queued work.</div>}
+        </section>
       </div>
     </section>
   );
 }
 
-function LandingPlan({landing, onMergeReady}: {landing: LandingState | undefined; onMergeReady: () => void}) {
-  const items = landing?.items || [];
-  const ready = items.filter((item) => item.landing_state === "ready");
-  const waiting = items.filter(isWaitingLandingItem);
-  const needsAction = items.filter((item) => item.landing_state === "blocked" && !isWaitingLandingItem(item));
-  const merged = items.filter((item) => item.landing_state === "merged");
-  const firstReady = ready.slice(0, 3);
+function MissionFocus({data, lastError, resultBanner, onNewJob, onStartWatcher, onLandReady, onOpenDiagnostics, onDismissError, onDismissResult}: {
+  data: StateResponse | null;
+  lastError: string | null;
+  resultBanner: ResultBannerState | null;
+  onNewJob: () => void;
+  onStartWatcher: () => void;
+  onLandReady: () => void;
+  onOpenDiagnostics: () => void;
+  onDismissError: () => void;
+  onDismissResult: () => void;
+}) {
+  const focus = missionFocus(data);
   return (
-    <div className="landing-plan" aria-label="Landing plan">
-      <div className="plan-summary">
-        <PlanMetric label="Ready to land" value={String(ready.length)} tone={ready.length ? "success" : "neutral"} />
-        <PlanMetric label="Waiting" value={String(waiting.length)} tone={waiting.length ? "info" : "neutral"} />
-        <PlanMetric label="Needs action" value={String(needsAction.length)} tone={needsAction.length ? "warning" : "neutral"} />
-        <PlanMetric label="Already landed" value={String(merged.length)} tone={merged.length ? "info" : "neutral"} />
+    <section className={`mission-focus focus-${focus.tone}`} data-testid="mission-focus" aria-label="Mission focus">
+      <div className="focus-copy">
+        <span>{focus.kicker}</span>
+        <h2>{focus.title}</h2>
+        <p>{focus.body}</p>
       </div>
-      <div className="plan-copy">
-        <strong>{landingPlanHeadline(landing)}</strong>
-        <span>{landingPlanBody(landing, ready, waiting, needsAction)}</span>
+      <div className="focus-actions">
+        {focus.primary === "land" && (
+          <button className="primary" type="button" disabled={!canMerge(data?.landing)} onClick={onLandReady}>Land ready work</button>
+        )}
+        {focus.primary === "start" && (
+          <button className="primary" type="button" disabled={!canStartWatcher(data)} onClick={onStartWatcher}>Start watcher</button>
+        )}
+        {focus.primary === "diagnostics" && (
+          <button className="primary" type="button" onClick={onOpenDiagnostics}>Review cleanup</button>
+        )}
+        {focus.primary === "new" && (
+          <button className="primary" type="button" onClick={onNewJob}>New job</button>
+        )}
+        {focus.primary !== "new" && <button type="button" onClick={onNewJob}>New job</button>}
       </div>
-      {firstReady.length > 0 && (
-        <ul className="plan-ready-list">
-          {firstReady.map((item) => (
-            <li key={item.task_id}>
-              <span>{item.task_id}</span>
-              <strong>{changeLine(item)} / {proofLine(item)}</strong>
-            </li>
-          ))}
-          {ready.length > firstReady.length && <li>+{ready.length - firstReady.length} more ready task{ready.length - firstReady.length === 1 ? "" : "s"}</li>}
-        </ul>
+      <div className="focus-metrics">
+        <FocusMetric label="In flight" value={String(focus.working)} />
+        <FocusMetric label="Needs action" value={String(focus.needsAction)} />
+        <FocusMetric label="Ready" value={String(focus.ready)} />
+      </div>
+      {lastError && (
+        <div className="status-banner error">
+          <strong>Last error</strong>
+          <span>{lastError}</span>
+          <button type="button" onClick={onDismissError}>Dismiss</button>
+        </div>
       )}
-      <button type="button" disabled={!canMerge(landing)} title={mergeButtonTitle(landing)} onClick={onMergeReady}>
-        Review complete: land ready work
-      </button>
-    </div>
+      {resultBanner && (
+        <div className={`status-banner ${resultBanner.severity === "error" ? "error" : "warning"}`}>
+          <strong>{resultBanner.title}</strong>
+          <span>{resultBanner.body}</span>
+          <button type="button" onClick={onDismissResult}>Dismiss</button>
+        </div>
+      )}
+      {data?.runtime.issues.length ? <RuntimeWarnings data={data} /> : null}
+    </section>
   );
 }
 
-function PlanMetric({label, value, tone}: {label: string; value: string; tone: "neutral" | "info" | "success" | "warning"}) {
+function FocusMetric({label, value}: {label: string; value: string}) {
   return (
-    <div className={`plan-metric plan-${tone}`}>
+    <div>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
   );
 }
 
-function LandingWarnings({landing}: {landing: LandingState | undefined}) {
-  const blockers = landing?.merge_blockers || [];
-  const dirtyFiles = landing?.dirty_files || [];
-  const collisions = landing?.collisions || [];
-  if (!blockers.length && !collisions.length) return null;
-  return (
-    <div className="landing-warnings">
-      {blockers.length > 0 && (
-        <div>
-          <strong>Merge blocked by local repository state</strong>
-          <p>{blockers.join("; ")}. Commit, stash, or revert these project changes before merging.</p>
-          {dirtyFiles.length > 0 && (
-            <ul>
-              {dirtyFiles.slice(0, 6).map((path) => <li key={path}>{path}</li>)}
-              {dirtyFiles.length > 6 && <li>+{dirtyFiles.length - 6} more</li>}
-            </ul>
-          )}
-        </div>
-      )}
-      {collisions.length > 0 && (
-        <div>
-          <strong>{collisions.length} overlap{collisions.length === 1 ? "" : "s"} before merging into {landing?.target || "main"}</strong>
-          <ul>
-            {collisions.slice(0, 4).map((collision) => (
-              <li key={`${collision.left}-${collision.right}`}>
-                {collision.left} vs {collision.right}: {collision.files.join(", ")}
-                {collision.file_count > collision.files.length ? ` (+${collision.file_count - collision.files.length} more)` : ""}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function LandingRow({item, selected, mergeBlocked, onSelect, onMergeRun}: {
-  item: LandingItem;
-  selected: boolean;
-  mergeBlocked: boolean;
+function TaskBoard({data, selectedRunId, onSelect}: {
+  data: StateResponse | null;
+  selectedRunId: string | null;
   onSelect: (runId: string) => void;
-  onMergeRun: (runId: string) => void;
 }) {
-  const canMergeRow = item.landing_state === "ready" && Boolean(item.run_id) && !mergeBlocked;
-  const canOpenRow = Boolean(item.run_id);
+  const columns = taskBoardColumns(data);
   return (
-    <tr
-      className={selected ? "selected" : ""}
-      role="button"
-      tabIndex={item.run_id ? 0 : -1}
-      aria-selected={selected}
-      onClick={() => item.run_id && onSelect(item.run_id)}
-      onKeyDown={(event) => item.run_id && selectOnKeyboard(event, () => onSelect(item.run_id as string))}
-    >
-      <td><span className={`landing-chip landing-${item.landing_state || "blocked"}`}>{item.label || item.landing_state}</span></td>
-      <td title={item.summary || ""}>
-        <strong>{item.task_id || "-"}</strong>
-        <span className="landing-subtext">{shortText(item.summary || "", 96)}</span>
-      </td>
-      <td title={item.branch || ""}>{item.branch || "-"}</td>
-      <td title={changeListTitle(item)}>{changeLine(item)}</td>
-      <td title={proofLine(item)}>{proofLine(item)}</td>
-      <td>
-        <button type="button" disabled={!canOpenRow || (item.landing_state === "ready" && !canMergeRow)} title={mergeBlocked ? mergeButtonTitle({merge_blocked: true} as LandingState) : ""} onClick={(event) => {
-          event.stopPropagation();
-          if (!item.run_id) return;
-          if (canMergeRow) {
-            onMergeRun(item.run_id);
-            return;
-          }
-          onSelect(item.run_id);
-        }}>
-          {actionLabelForLanding(item)}
-        </button>
-      </td>
-    </tr>
+    <section className="panel task-board-panel" data-testid="task-board" aria-labelledby="taskBoardHeading">
+      <div className="panel-heading">
+        <div>
+          <h2 id="taskBoardHeading">Task Board</h2>
+          <p className="panel-subtitle">{taskBoardSubtitle(data)}</p>
+        </div>
+      </div>
+      <div className="task-board">
+        {columns.map((column) => (
+          <section className="task-column" key={column.stage} aria-label={column.title}>
+            <header>
+              <span>{column.title}</span>
+              <strong>{column.items.length}</strong>
+            </header>
+            <div className="task-list">
+              {column.items.length ? column.items.map((task) => (
+                <TaskCard
+                  key={`${task.source}-${task.id}`}
+                  task={task}
+                  selected={Boolean(task.runId && task.runId === selectedRunId)}
+                  onSelect={onSelect}
+                />
+              )) : (
+                <div className="task-empty">{column.empty}</div>
+              )}
+            </div>
+          </section>
+        ))}
+      </div>
+    </section>
   );
 }
 
-function LiveRuns({items, selectedRunId, onSelect}: {items: LiveRunItem[]; selectedRunId: string | null; onSelect: (runId: string) => void}) {
+function TaskCard({task, selected, onSelect}: {
+  task: BoardTask;
+  selected: boolean;
+  onSelect: (runId: string) => void;
+}) {
+  const selectTask = () => task.runId && onSelect(task.runId);
+  return (
+    <button
+      className={`task-card-main task-card task-${task.stage} ${selected ? "selected" : ""}`}
+      type="button"
+      disabled={!task.runId}
+      data-testid={testIdForTask(task.id)}
+      aria-pressed={selected}
+      onClick={selectTask}
+    >
+      <span className="task-status">{task.status}</span>
+      <strong title={task.title}>{task.title}</strong>
+      <span title={task.summary}>{shortText(task.summary, 120)}</span>
+      <span className="task-card-meta">
+        <span title={task.branch || ""}>{task.branch || "no branch"}</span>
+        <span>{taskChangeLine(task)}</span>
+        <span>{task.proof}</span>
+      </span>
+      <span className="task-card-reason">{task.reason}</span>
+      <span className="task-card-cta">{task.stage === "ready" ? "Review" : "Details"}</span>
+    </button>
+  );
+}
+
+function RecentActivity({events, history, selectedRunId, onSelect}: {
+  events: StateResponse["events"] | undefined;
+  history: HistoryItem[];
+  selectedRunId: string | null;
+  onSelect: (runId: string) => void;
+}) {
+  const recentEvents = events?.items.slice(0, 4) || [];
+  const recentHistory = history.slice(0, 4);
+  return (
+    <section className="panel activity-panel" aria-labelledby="activityHeading">
+      <div className="panel-heading">
+        <div>
+          <h2 id="activityHeading">Recent Activity</h2>
+          <p className="panel-subtitle">Latest queue, watcher, land, and run outcomes.</p>
+        </div>
+        <span className="pill">{(events?.total_count || 0) + history.length}</span>
+      </div>
+      <div className="activity-list">
+        {recentEvents.map((event) => (
+          <div className={`activity-item event-${event.severity}`} key={event.event_id || `${event.created_at}-${event.message}`}>
+            <span>{event.severity}</span>
+            <strong title={event.message}>{event.message}</strong>
+            <time dateTime={event.created_at}>{formatEventTime(event.created_at)}</time>
+          </div>
+        ))}
+        {recentHistory.map((item) => (
+          <button
+            className={`activity-item history-activity ${item.run_id === selectedRunId ? "selected" : ""}`}
+            type="button"
+            key={item.run_id}
+            onClick={() => onSelect(item.run_id)}
+          >
+            <span>{item.outcome_display || item.status}</span>
+            <strong title={item.summary}>{item.queue_task_id || item.run_id}</strong>
+            <time>{item.duration_display || "-"}</time>
+          </button>
+        ))}
+        {!recentEvents.length && !recentHistory.length && <div className="timeline-empty">No activity yet.</div>}
+      </div>
+    </section>
+  );
+}
+
+function LiveRuns({items, landing, selectedRunId, onSelect}: {
+  items: LiveRunItem[];
+  landing: LandingState | undefined;
+  selectedRunId: string | null;
+  onSelect: (runId: string) => void;
+}) {
+  const landingByTask = new Map((landing?.items || []).map((item) => [item.task_id, item]));
   return (
     <section className="panel" aria-labelledby="liveHeading">
       <div className="panel-heading">
@@ -738,7 +877,7 @@ function LiveRuns({items, selectedRunId, onSelect}: {items: LiveRunItem[]; selec
                 <td title={item.branch_task || ""}>{item.branch_task || "-"}</td>
                 <td>{item.elapsed_display || "-"}</td>
                 <td>{item.cost_display || "-"}</td>
-                <td title={item.last_event || ""}>{item.last_event || "-"}</td>
+                <td title={runEventText(item, landingByTask)}>{runEventText(item, landingByTask)}</td>
               </tr>
             )) : (
               <tr><td colSpan={6} className="empty-cell">No live runs.</td></tr>
@@ -754,7 +893,7 @@ function History({items, totalRows, selectedRunId, onSelect}: {items: HistoryIte
   return (
     <section className="panel" aria-labelledby="historyHeading">
       <div className="panel-heading">
-        <h2 id="historyHeading">History</h2>
+        <h2 id="historyHeading">Run History</h2>
         <span className="pill">{totalRows}</span>
       </div>
       <div className="table-wrap">
@@ -845,7 +984,7 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
     <aside className="detail" aria-labelledby="detailHeading">
       <div className="panel-heading">
         <h2 id="detailHeading">{detail ? "Review Packet" : "Run Detail"}</h2>
-        <span className="pill">{detail?.display_status || "-"}</span>
+        <span className="pill">{detail ? detailStatusLabel(detail) : "-"}</span>
       </div>
       {detail ? (
         <>
@@ -890,7 +1029,10 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
 function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]; onRunAction: (action: string, label?: string) => void}) {
   const action = packet.next_action;
   const blockers = packet.readiness.blockers || [];
-  const evidence = packet.evidence.slice(0, 4);
+  const inProgress = packet.readiness.state === "in_progress";
+  const artifactCount = packet.evidence.length;
+  const evidence = packet.evidence.filter((artifact) => artifact.exists).slice(0, 4);
+  const showActionButton = Boolean(action.action_key);
   return (
     <section className={`review-packet review-${packet.readiness.tone || "info"}`} aria-label="Review packet">
       <div className="review-head">
@@ -899,15 +1041,17 @@ function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]
           <strong>{packet.headline}</strong>
           <span title={packet.summary}>{packet.summary}</span>
         </div>
-        <button
-          className={action.enabled ? "primary" : ""}
-          type="button"
-          disabled={!action.enabled || !action.action_key}
-          title={action.reason || ""}
-          onClick={() => action.action_key && onRunAction(actionName(action.action_key), action.label)}
-        >
-          {reviewActionLabel(action.label)}
-        </button>
+        {showActionButton && (
+          <button
+            className={action.enabled ? "primary" : ""}
+            type="button"
+            disabled={!action.enabled || !action.action_key}
+            title={action.reason || ""}
+            onClick={() => action.action_key && onRunAction(actionName(action.action_key), action.label)}
+          >
+            {reviewActionLabel(action.label)}
+          </button>
+        )}
       </div>
       <div className="review-next-step">
         <strong>Next</strong>
@@ -915,13 +1059,14 @@ function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]
       </div>
       {blockers.length > 0 && (
         <ul className="review-blockers" aria-label="Review blockers">
-          {blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
+          {blockers.map((blocker) => <li key={blocker}>{formatReviewText(blocker)}</li>)}
         </ul>
       )}
-      <div className="review-grid">
+      <div className={`review-grid ${packet.readiness.state === "merged" || inProgress ? "review-grid-wide" : ""}`}>
         <ReviewMetric label="Stories" value={storiesLine(packet)} />
         <ReviewMetric label="Changes" value={packet.changes.file_count ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}` : "-"} />
-        <ReviewMetric label="Evidence" value={`${packet.evidence.filter((item) => item.exists).length}/${packet.evidence.length}`} />
+        <ReviewMetric label="Evidence" value={evidenceLine(packet)} />
+        {(packet.readiness.state === "merged" || inProgress) && <ReviewMetric label="Artifacts" value={artifactCount ? `${artifactCount} file${artifactCount === 1 ? "" : "s"}` : "-"} />}
       </div>
       <div className="review-checklist" aria-label="Readiness checklist">
         {packet.checks.map((check) => (
@@ -929,13 +1074,13 @@ function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]
             <span>{checkStatusLabel(check.status)}</span>
             <div>
               <strong>{check.label}</strong>
-              <p>{check.detail}</p>
+              <p>{formatReviewText(check.detail)}</p>
             </div>
           </div>
         ))}
       </div>
       {packet.failure && <div className="review-note danger">{packet.failure.reason || "failure recorded"}</div>}
-      {packet.changes.diff_error && <div className="review-note danger">{packet.changes.diff_error}</div>}
+      {packet.changes.diff_error && <div className="review-note danger">{formatTechnicalIssue(packet.changes.diff_error)}</div>}
       {packet.changes.files.length > 0 && (
         <ul className="review-files" aria-label="Changed files">
           {packet.changes.files.map((path) => <li key={path}>{path}</li>)}
@@ -949,10 +1094,10 @@ function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]
               {artifact.label}{artifact.exists ? "" : " missing"}
             </span>
           ))}
-          {packet.evidence.length > evidence.length && <span>+{packet.evidence.length - evidence.length} more</span>}
+          {packet.evidence.length > evidence.length && !inProgress && <span>+{packet.evidence.length - evidence.length} more</span>}
         </div>
       )}
-      {packet.changes.diff_command && <code title={packet.changes.diff_command}>{packet.changes.diff_command}</code>}
+      {packet.changes.diff_command && packet.readiness.state === "ready" && <code title={packet.changes.diff_command}>{packet.changes.diff_command}</code>}
     </section>
   );
 }
@@ -962,25 +1107,27 @@ function ReviewMetric({label, value}: {label: string; value: string}) {
 }
 
 function DetailLine({line}: {line: string}) {
-  const split = line.indexOf(":");
-  if (split > 0 && split < 24) {
+  const visibleLine = userVisibleDetailLine(line);
+  if (!visibleLine) return null;
+  const visibleSplit = visibleLine.indexOf(":");
+  if (visibleSplit > 0 && visibleSplit < 24) {
     return (
       <>
-        <dt>{line.slice(0, split)}</dt>
-        <dd>{line.slice(split + 1).trim() || "-"}</dd>
+        <dt>{visibleLine.slice(0, visibleSplit)}</dt>
+        <dd>{visibleLine.slice(visibleSplit + 1).trim() || "-"}</dd>
       </>
     );
   }
   return (
     <>
       <dt>Info</dt>
-      <dd>{line}</dd>
+      <dd>{visibleLine}</dd>
     </>
   );
 }
 
 function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]; mergeBlocked: boolean; onRunAction: (action: string, label?: string) => void}) {
-  const visible = actions.filter((action) => !["o", "e", "M"].includes(action.key));
+  const visible = actions.filter((action) => !["o", "e", "m", "M"].includes(action.key));
   return (
     <div className="action-bar">
       {visible.map((action) => {
@@ -1039,6 +1186,14 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !submitting) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, submitting]);
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (command === "build" && !intent.trim()) {
@@ -1062,9 +1217,9 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="job-dialog" onSubmit={(event) => void submit(event)}>
+      <form className="job-dialog" role="dialog" aria-modal="true" aria-labelledby="jobDialogHeading" onSubmit={(event) => void submit(event)}>
         <header>
-          <h2>New queue job</h2>
+          <h2 id="jobDialogHeading">New queue job</h2>
           <button type="button" aria-label="Close" onClick={onClose}>x</button>
         </header>
         <label>Command
@@ -1135,6 +1290,14 @@ function ConfirmDialog({confirm, pending, onCancel, onConfirm}: {
   onConfirm: () => void;
 }) {
   const confirmClass = confirm.tone === "danger" ? "danger-button" : "primary";
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !pending) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onCancel, pending]);
+
   return (
     <div className="modal-backdrop" role="presentation">
       <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmHeading">
@@ -1152,6 +1315,257 @@ function ConfirmDialog({confirm, pending, onCancel, onConfirm}: {
       </div>
     </div>
   );
+}
+
+function missionFocus(data: StateResponse | null): {
+  kicker: string;
+  title: string;
+  body: string;
+  tone: "neutral" | "info" | "success" | "warning" | "danger";
+  primary: "new" | "start" | "land" | "diagnostics";
+  working: number;
+  needsAction: number;
+  ready: number;
+} {
+  if (!data) {
+    return {
+      kicker: "Loading",
+      title: "Reading project state",
+      body: "Mission Control is loading the queue, runs, and repository status.",
+      tone: "info",
+      primary: "new",
+      working: 0,
+      needsAction: 0,
+      ready: 0,
+    };
+  }
+  const columns = taskBoardColumns(data);
+  const working = columns.find((column) => column.stage === "working")?.items.length || 0;
+  const needsAction = columns.find((column) => column.stage === "attention")?.items.length || 0;
+  const ready = columns.find((column) => column.stage === "ready")?.items.length || 0;
+  const rawReady = data.landing.counts.ready || 0;
+  const queued = data.watcher.counts.queued || 0;
+  const commandBacklog = Number(data.runtime.command_backlog.pending || 0) + Number(data.runtime.command_backlog.processing || 0);
+  const target = data.landing.target || "main";
+  if (commandBacklog && data.watcher.health.state !== "running") {
+    return {
+      kicker: "Commands",
+      title: `${commandBacklog} command${commandBacklog === 1 ? "" : "s"} waiting`,
+      body: "Start the watcher to apply pending operator actions.",
+      tone: "warning",
+      primary: "start",
+      working,
+      needsAction,
+      ready,
+    };
+  }
+  if (data.landing.merge_blocked && rawReady) {
+    const dirty = data.landing.dirty_files.slice(0, 3).join(", ");
+    return {
+      kicker: "Repository",
+      title: "Cleanup required before landing",
+      body: dirty ? `Local changes block landing: ${dirty}.` : "Local repository state blocks landing.",
+      tone: "danger",
+      primary: "diagnostics",
+      working,
+      needsAction,
+      ready,
+    };
+  }
+  if (needsAction) {
+    return {
+      kicker: "Attention",
+      title: `${needsAction} task${needsAction === 1 ? "" : "s"} need action`,
+      body: "Open blocked work to inspect the failure, stale run, missing branch, or recovery action.",
+      tone: "warning",
+      primary: "diagnostics",
+      working,
+      needsAction,
+      ready,
+    };
+  }
+  if (ready) {
+    return {
+      kicker: "Review",
+      title: `${ready} task${ready === 1 ? "" : "s"} ready to land`,
+      body: `Review evidence and changed files, then land ready work into ${target}.`,
+      tone: "success",
+      primary: "land",
+      working,
+      needsAction,
+      ready,
+    };
+  }
+  if (queued && data.watcher.health.state !== "running") {
+    return {
+      kicker: "Queue",
+      title: `${queued} queued task${queued === 1 ? "" : "s"} waiting`,
+      body: "Start the watcher to run queued work.",
+      tone: "info",
+      primary: "start",
+      working,
+      needsAction,
+      ready,
+    };
+  }
+  if (working) {
+    return {
+      kicker: "Working",
+      title: `${working} task${working === 1 ? "" : "s"} in flight`,
+      body: "Runs are active. Review packets will update as tasks finish.",
+      tone: "info",
+      primary: "new",
+      working,
+      needsAction,
+      ready,
+    };
+  }
+  if (data.landing.counts.total || data.history.total_rows) {
+    return {
+      kicker: "Idle",
+      title: "No task needs action",
+      body: "Queue the next product task when the current work is complete.",
+      tone: "neutral",
+      primary: "new",
+      working,
+      needsAction,
+      ready,
+    };
+  }
+  return {
+    kicker: "Start",
+    title: "Queue the first job",
+    body: "Create a build, improve, or certify task for this project.",
+    tone: "neutral",
+    primary: "new",
+    working,
+    needsAction,
+    ready,
+  };
+}
+
+function taskBoardColumns(data: StateResponse | null): Array<{
+  stage: BoardStage;
+  title: string;
+  empty: string;
+  items: BoardTask[];
+}> {
+  const columns: Array<{stage: BoardStage; title: string; empty: string; items: BoardTask[]}> = [
+    {stage: "attention", title: "Needs Action", empty: "No blocked work.", items: []},
+    {stage: "working", title: "Queued / Running", empty: "No queued or running tasks.", items: []},
+    {stage: "ready", title: "Ready To Land", empty: "Nothing ready yet.", items: []},
+    {stage: "landed", title: "Landed", empty: "Nothing landed yet.", items: []},
+  ];
+  if (!data) return columns;
+  const liveByTask = new Map<string, LiveRunItem>();
+  const cardsByKey = new Map<string, BoardTask>();
+  for (const item of data.live.items) {
+    if (item.queue_task_id) liveByTask.set(item.queue_task_id, item);
+  }
+  for (const item of data.landing.items) {
+    const live = liveByTask.get(item.task_id);
+    const runId = item.run_id || live?.run_id || null;
+    const card = boardTaskFromLanding(item, runId, !data.landing.merge_blocked);
+    cardsByKey.set(item.task_id, card);
+  }
+  for (const item of data.live.items) {
+    const key = item.queue_task_id || item.run_id;
+    if (cardsByKey.has(key)) continue;
+    if (!item.queue_task_id && !item.active && !isAttentionStatus(item.display_status)) continue;
+    cardsByKey.set(key, boardTaskFromLive(item));
+  }
+  for (const card of cardsByKey.values()) {
+    const column = columns.find((candidate) => candidate.stage === card.stage);
+    column?.items.push(card);
+  }
+  for (const column of columns) {
+    column.items.sort(compareBoardTasks);
+  }
+  return columns;
+}
+
+function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllowed: boolean): BoardTask {
+  const stage = boardStageForLanding(item, mergeAllowed);
+  return {
+    id: item.task_id,
+    runId,
+    title: item.task_id || item.summary || "queue task",
+    summary: item.summary || item.task_id || "",
+    stage,
+    status: boardStatusLabel(item, mergeAllowed),
+    branch: item.branch,
+    changedFileCount: item.changed_file_count,
+    proof: proofLine(item),
+    reason: boardReasonForLanding(item, mergeAllowed),
+    source: "landing",
+  };
+}
+
+function boardTaskFromLive(item: LiveRunItem): BoardTask {
+  const stage: BoardStage = item.active ? "working" : isAttentionStatus(item.display_status) ? "attention" : "working";
+  return {
+    id: item.queue_task_id || item.run_id,
+    runId: item.run_id,
+    title: item.queue_task_id || item.display_id || item.run_id,
+    summary: item.command || item.last_event || item.run_id,
+    stage,
+    status: item.display_status,
+    branch: item.branch,
+    changedFileCount: null,
+    proof: item.cost_display || "-",
+    reason: item.overlay?.reason || item.last_event || item.elapsed_display || item.display_status,
+    source: "live",
+  };
+}
+
+function boardStageForLanding(item: LandingItem, mergeAllowed: boolean): BoardStage {
+  if (item.landing_state === "merged") return "landed";
+  if (item.landing_state === "ready") return mergeAllowed ? "ready" : "attention";
+  if (isWaitingLandingItem(item)) return "working";
+  return "attention";
+}
+
+function boardStatusLabel(item: LandingItem, mergeAllowed: boolean): string {
+  if (item.landing_state === "ready") return mergeAllowed ? "ready" : "blocked";
+  if (item.landing_state === "merged") return "landed";
+  return item.queue_status || item.landing_state || "blocked";
+}
+
+function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean): string {
+  if (item.landing_state === "ready" && !mergeAllowed) return "Repository cleanup required before landing.";
+  if (item.landing_state === "ready") return `${changeLine(item)} changed; ${proofLine(item)} recorded.`;
+  if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";
+  if (item.queue_status === "queued") return "Waiting for the watcher.";
+  if (["starting", "running", "terminating"].includes(item.queue_status)) return "Task is still in flight.";
+  if (item.diff_error) return formatTechnicalIssue(item.diff_error);
+  if (!item.branch) return "No branch is recorded.";
+  if (["failed", "cancelled", "interrupted", "stale"].includes(item.queue_status)) return "Open the review packet for recovery actions.";
+  return "Not ready to land yet.";
+}
+
+function taskChangeLine(task: BoardTask): string {
+  if (task.changedFileCount === null) return "diff pending";
+  if (task.stage === "landed") return "no unlanded diff";
+  return `${task.changedFileCount} file${task.changedFileCount === 1 ? "" : "s"}`;
+}
+
+function compareBoardTasks(left: BoardTask, right: BoardTask): number {
+  const stageOrder: Record<BoardStage, number> = {attention: 0, ready: 1, working: 2, landed: 3};
+  const byStage = stageOrder[left.stage] - stageOrder[right.stage];
+  if (byStage) return byStage;
+  return left.title.localeCompare(right.title);
+}
+
+function taskBoardSubtitle(data: StateResponse | null): string {
+  if (!data) return "Loading tasks.";
+  const total = taskBoardColumns(data).reduce((sum, column) => sum + column.items.length, 0);
+  if (!total) return "No work queued.";
+  const target = data.landing.target || "main";
+  return `${total} visible task${total === 1 ? "" : "s"} for ${target}.`;
+}
+
+function testIdForTask(taskId: string): string {
+  return `task-card-${taskId.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
 }
 
 function visibleRunIds(data: StateResponse): Set<string> {
@@ -1172,7 +1586,9 @@ function activeCount(watcher?: WatcherInfo): number {
 }
 
 function canStartWatcher(data?: StateResponse | null): boolean {
-  return Boolean(data?.runtime.supervisor.can_start);
+  const queued = Number(data?.watcher.counts.queued || 0);
+  const backlog = Number(data?.runtime.command_backlog.pending || 0) + Number(data?.runtime.command_backlog.processing || 0);
+  return Boolean(data?.runtime.supervisor.can_start && (queued > 0 || backlog > 0));
 }
 
 function canStopWatcher(data?: StateResponse | null): boolean {
@@ -1185,6 +1601,19 @@ function watcherSummary(watcher?: WatcherInfo): string {
   if (health.state === "running") return `running pid ${health.blocking_pid || "-"}`;
   if (health.state === "stale") return `stale pid ${health.blocking_pid || "-"}`;
   return "stopped";
+}
+
+function commandBacklogLine(command: CommandBacklogItem): string {
+  const id = command.command_id || "command id unknown";
+  const target = command.run_id || command.task_id || command.command_id || "target unknown";
+  const age = command.age_s === null || command.age_s === undefined ? "" : ` · ${formatDuration(command.age_s)} old`;
+  return `${id} · ${target}${age}`;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 3600)}h`;
 }
 
 function workflowHealth(data: StateResponse | null): {
@@ -1302,48 +1731,18 @@ function landingBulkConfirmation(landing?: LandingState): string {
   return `Land ${ready.length} ready task${ready.length === 1 ? "" : "s"} into ${target}: ${taskList}${suffix}. This will land ${changed} changed file${changed === 1 ? "" : "s"} across the ready work.`;
 }
 
-function landingSummaryText(landing?: LandingState): string {
-  if (!landing || (!landing.counts.ready && !landing.counts.merged && !landing.counts.blocked)) {
-    return "Finished tasks appear here for review, evidence checks, and landing.";
-  }
-  const waiting = landing.items.filter(isWaitingLandingItem).length;
-  const needsAction = landing.items.filter((item) => item.landing_state === "blocked" && !isWaitingLandingItem(item)).length;
-  const parts: string[] = [];
-  if (landing.counts.ready) parts.push(`${landing.counts.ready} ready to land`);
-  if (landing.counts.merged) parts.push(`${landing.counts.merged} already landed`);
-  if (waiting) parts.push(`${waiting} waiting`);
-  if (needsAction) parts.push(`${needsAction} needs action`);
-  const summary = `${parts.join(" / ")} into ${landing.target}.`;
-  return landing.merge_blocked ? `${summary} Merge blocked by local changes.` : summary;
-}
-
-function landingPlanHeadline(landing?: LandingState): string {
-  if (!landing || !landing.counts.total) return "No work is waiting for review.";
-  if (landing.merge_blocked) return "Repository cleanup is required before landing.";
-  if (landing.counts.ready) return `${landing.counts.ready} task${landing.counts.ready === 1 ? "" : "s"} can land now.`;
-  if (landing.items.some(isWaitingLandingItem)) return "Queued work is waiting for the watcher.";
-  if (landing.counts.blocked) return "Work exists, but nothing is ready to land.";
-  return "All visible work has already landed.";
-}
-
-function landingPlanBody(landing: LandingState | undefined, ready: LandingItem[], waiting: LandingItem[], needsAction: LandingItem[]): string {
-  if (!landing || !landing.counts.total) return "Queue a build, improve, or certify job to start the product loop.";
-  if (landing.merge_blocked) return "Commit, stash, or revert local project changes, then refresh Mission Control.";
-  if (ready.length) {
-    const fileCount = ready.reduce((sum, item) => sum + Number(item.changed_file_count || 0), 0);
-    return `Review the checklist for each task, then land the ready branches into ${landing.target}. ${fileCount} changed file${fileCount === 1 ? "" : "s"} will be considered.`;
-  }
-  if (waiting.length) return "Start the watcher to let queued tasks create branches, write evidence, and become reviewable.";
-  if (needsAction.length) return "Open each blocked task to inspect its failure, stale state, missing branch, or unfinished run.";
-  return "Use history and artifacts to audit what landed, or queue the next product task.";
-}
-
 function isWaitingLandingItem(item: LandingItem): boolean {
   return item.landing_state === "blocked" && ["queued", "starting", "running", "terminating"].includes(item.queue_status);
 }
 
 function providerLine(detail: RunDetail): string {
   return [detail.provider, detail.model, detail.reasoning_effort].filter(Boolean).join(" / ") || "-";
+}
+
+function detailStatusLabel(detail: RunDetail): string {
+  const readiness = detail.review_packet.readiness.state;
+  if (readiness === "blocked" || readiness === "merged") return readiness;
+  return detail.display_status || "-";
 }
 
 function actionName(key: string): string {
@@ -1369,18 +1768,47 @@ function proofLine(item: LandingItem): string {
   return "-";
 }
 
+function evidenceLine(packet: RunDetail["review_packet"]): string {
+  if (packet.readiness.state === "in_progress") return "-";
+  if (isRepositoryBlockedPacket(packet)) return "-";
+  return `${packet.evidence.filter((item) => item.exists).length}/${packet.evidence.length}`;
+}
+
+function isRepositoryBlockedPacket(packet: RunDetail["review_packet"]): boolean {
+  return packet.readiness.blockers.some((blocker) => blocker.startsWith("Repository has local changes"));
+}
+
+function runEventText(item: LiveRunItem, landingByTask: Map<string, LandingItem>): string {
+  const landingItem = item.queue_task_id ? landingByTask.get(item.queue_task_id) : undefined;
+  if (landingItem?.landing_state === "ready") return "Ready for review";
+  if (landingItem?.landing_state === "merged") return "Landed";
+  if (landingItem && isWaitingLandingItem(landingItem)) return landingItem.queue_status === "queued" ? "Queued" : "In progress";
+  if (String(item.last_event || "").toLowerCase() === "legacy queue mode") return "Queue task";
+  return item.last_event || "-";
+}
+
+function landingStateText(item: LandingItem): string {
+  if (item.landing_state === "ready") return "Ready to land";
+  if (item.landing_state === "merged") return "Landed";
+  if (isWaitingLandingItem(item)) return item.queue_status === "queued" ? "Queued" : "In progress";
+  return item.label || "Needs action";
+}
+
+function diagnosticLandingAction(item: LandingItem): string {
+  if (item.landing_state === "ready") return `${changeLine(item)} changed; review evidence before landing.`;
+  if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";
+  if (item.queue_status === "queued") return "Start the watcher to run this task.";
+  if (item.queue_status === "failed") return "Open review packet and requeue or remove.";
+  if (item.queue_status === "stale") return "Open review packet and remove stale work.";
+  if (item.diff_error) return formatTechnicalIssue(item.diff_error);
+  return "Open review packet for next action.";
+}
+
 function changeLine(item: LandingItem): string {
   if (item.diff_error) return "diff error";
   const count = Number(item.changed_file_count || 0);
   if (!count) return "-";
   return `${count} file${count === 1 ? "" : "s"}`;
-}
-
-function changeListTitle(item: LandingItem): string {
-  if (item.diff_error) return item.diff_error;
-  if (!item.changed_files.length) return "";
-  const suffix = item.changed_file_count > item.changed_files.length ? `\n+${item.changed_file_count - item.changed_files.length} more` : "";
-  return `${item.changed_files.join("\n")}${suffix}`;
 }
 
 function timelineSubtitle(events?: StateResponse["events"]): string {
@@ -1404,12 +1832,6 @@ function formatEventTime(value: string): string {
   return date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
 }
 
-function actionLabelForLanding(item: LandingItem): string {
-  if (item.landing_state === "merged") return "Audit";
-  if (item.landing_state === "ready") return "Land";
-  return item.run_id ? "Review" : item.queue_status || "Blocked";
-}
-
 function storiesLine(packet: RunDetail["review_packet"]): string {
   const tested = Number(packet.certification.stories_tested || 0);
   const passed = Number(packet.certification.stories_passed || 0);
@@ -1420,6 +1842,27 @@ function reviewActionLabel(label: string): string {
   const normalized = label.toLowerCase();
   if (normalized === "merge selected") return "Land selected";
   return normalized.includes("merge") ? "Land task" : label;
+}
+
+function formatReviewText(message: string): string {
+  return formatTechnicalIssue(message);
+}
+
+function userVisibleDetailLine(line: string): string | null {
+  const normalized = line.toLowerCase();
+  if (normalized.startsWith("compat:")) return null;
+  return line.replace("legacy queue mode", "queue compatibility mode");
+}
+
+function formatTechnicalIssue(message: string): string {
+  const value = message.trim();
+  if (/unknown revision|ambiguous argument|bad revision|invalid object name/i.test(value)) {
+    return "Changed files could not be inspected because the source branch is missing or not reachable. Refresh after the task creates its branch, or remove and requeue the task.";
+  }
+  if (/working tree has|unstaged changes|uncommitted changes/i.test(value)) {
+    return "Repository has local changes. Commit, stash, or revert them before landing.";
+  }
+  return value;
 }
 
 function checkStatusLabel(status: string): string {

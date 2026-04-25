@@ -76,6 +76,11 @@ def runtime_status(
     pending_commands = int(commands_file.get("line_count") or 0)
     processing_commands = int(processing_file.get("line_count") or 0)
     malformed_commands = int(commands_file.get("malformed_count") or 0) + int(processing_file.get("malformed_count") or 0)
+    generated_at = datetime.now(tz=timezone.utc)
+    command_items = [
+        *_command_backlog_items(commands_processing_path(project_dir), state="processing", now=generated_at),
+        *_command_backlog_items(commands_path(project_dir), state="pending", now=generated_at),
+    ][:8]
 
     if watcher_state == "stale":
         issues.append(
@@ -148,13 +153,14 @@ def runtime_status(
     issues.sort(key=lambda item: severity_rank.get(str(item.get("severity")), 0), reverse=True)
     return {
         "status": "attention" if issues else "healthy",
-        "generated_at": _utc_iso(datetime.now(tz=timezone.utc)),
+        "generated_at": _utc_iso(generated_at),
         "queue_tasks": queue_tasks,
         "state_tasks": state_tasks,
         "command_backlog": {
             "pending": pending_commands,
             "processing": processing_commands,
             "malformed": malformed_commands,
+            "items": command_items,
         },
         "files": {
             "queue": queue_file,
@@ -269,6 +275,46 @@ def _jsonl_file_status(path: Path) -> dict[str, Any]:
         except json.JSONDecodeError:
             out["malformed_count"] += 1
     return out
+
+
+def _command_backlog_items(path: Path, *, state: str, now: datetime) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    items: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        requested_at = _string_or_none(row.get("requested_at") or row.get("created_at") or row.get("queued_at"))
+        parsed_requested_at = _parse_utc(requested_at)
+        args = row.get("args")
+        args = args if isinstance(args, dict) else {}
+        items.append(
+            {
+                "state": state,
+                "command_id": _string_or_none(row.get("command_id")),
+                "kind": _string_or_none(row.get("kind") or row.get("action") or row.get("command")),
+                "run_id": _string_or_none(row.get("run_id")),
+                "task_id": _string_or_none(row.get("task_id") or row.get("queue_task_id") or args.get("task_id") or args.get("id")),
+                "requested_at": requested_at,
+                "age_s": max(0.0, (now - parsed_requested_at).total_seconds()) if parsed_requested_at else None,
+            }
+        )
+    return items
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _pid_alive(pid: int | None) -> bool:

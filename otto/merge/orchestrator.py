@@ -352,6 +352,11 @@ def _append_merge_history(project_dir: Path, state: MergeState) -> None:
                 "finished_at": state.finished_at or _now_iso(),
                 "timestamp": state.finished_at or _now_iso(),
             },
+            git={
+                "branch": state.target,
+                "target_branch": state.target,
+                "head_sha": state.target_head_before,
+            },
             source={"resumable": False},
             identity={"merge_id": state.merge_id},
             artifacts={

@@ -152,11 +152,11 @@ class MissionControlService:
             reason = legal[key].reason or "action disabled"
             raise MissionControlServiceError(reason, status_code=409)
         if key == "m":
-            _ensure_merge_unblocked(self.project_dir)
             merge_info = _detail_merge_info(self.project_dir, detail)
             if merge_info is not None:
                 target = str(merge_info.get("target") or _merge_target(self.project_dir))
                 raise MissionControlServiceError(f"Already merged into {target}.", status_code=409)
+            _ensure_merge_unblocked(self.project_dir)
 
         selected_artifact_path = None
         if key == "e":
@@ -271,18 +271,23 @@ class MissionControlService:
             queue_status = _queue_display_status(raw_state if isinstance(raw_state, dict) else None, state)
             branch = str(task.branch or "").strip()
             merge_info = merged_by_branch.get(branch)
+            diff = (
+                {"files": [], "error": None}
+                if merge_info is not None or queue_status in {"queued", "starting", "running", "terminating"}
+                else _branch_diff(self.project_dir, branch, target)
+            )
             if merge_info is not None:
                 landing_state = "merged"
                 label = "Landed"
                 counts["merged"] += 1
-            elif queue_status == "done" and branch:
+            elif queue_status == "done" and branch and diff["error"] is None:
                 landing_state = "ready"
                 label = "Ready to land"
                 counts["ready"] += 1
                 ready_tasks.append(task)
             else:
                 landing_state = "blocked"
-                label = _blocked_landing_label(queue_status, branch)
+                label = "Review blocked" if queue_status == "done" and diff["error"] else _blocked_landing_label(queue_status, branch)
                 counts["blocked"] += 1
 
             counts["total"] += 1
@@ -303,11 +308,6 @@ class MissionControlService:
                 "stories_passed": _number_from_mapping(raw_state, "stories_passed"),
                 "stories_tested": _number_from_mapping(raw_state, "stories_tested"),
             }
-            diff = (
-                _branch_diff(self.project_dir, branch, target)
-                if queue_status not in {"queued", "starting", "running", "terminating"}
-                else {"files": [], "error": None}
-            )
             item["changed_file_count"] = len(diff["files"])
             item["changed_files"] = diff["files"][:8]
             item["diff_error"] = diff["error"]
@@ -727,19 +727,22 @@ def filters_from_params(
 def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
     record = detail.record
     display_status = "stale" if detail.overlay is not None and detail.overlay.level == "stale" else record.status
-    target = str(record.git.get("target_branch") or _merge_target(project_dir))
+    target = _review_target(project_dir, record)
+    if record.domain == "merge":
+        return _merge_review_packet(project_dir, detail, display_status=display_status, target=target)
     branch = _optional_str(record.git.get("branch"))
     merge_info = _detail_merge_info(project_dir, detail)
     merged = merge_info is not None
     in_progress = display_status in REVIEW_IN_PROGRESS_STATUSES
     diff = (
         {"files": [], "error": None}
-        if in_progress
+        if merged or in_progress
         else _branch_diff(project_dir, branch, target)
     )
     changed_files = diff["files"]
     certification = _certification_summary(record)
     evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
+    merge_preflight = _merge_preflight(project_dir)
     readiness = _review_readiness(
         display_status=display_status,
         merged=merged,
@@ -747,9 +750,27 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
         diff_error=diff["error"],
         target=target,
         overlay=detail.overlay,
+        merge_preflight=merge_preflight,
     )
+    next_action = (
+        {"label": "No action", "action_key": None, "enabled": False, "reason": f"Already merged into {target}."}
+        if merged
+        else _suggested_next_action(display_status, detail.legal_actions, detail.overlay)
+    )
+    if not merged and next_action.get("action_key") == "m" and readiness.get("state") != "ready":
+        reason = (
+            "Commit, stash, or revert local project changes before landing."
+            if display_status == "done" and merge_preflight.get("merge_blocked")
+            else "Resolve review blockers before landing."
+        )
+        next_action = {
+            "label": "Land blocked",
+            "action_key": None,
+            "enabled": False,
+            "reason": reason,
+        }
     return {
-        "headline": f"Already merged into {target}" if merged else _review_headline(record, display_status),
+        "headline": _review_packet_headline(record, display_status, merged=merged, readiness=readiness, target=target),
         "status": "merged" if merged else display_status,
         "summary": _optional_str(record.intent.get("summary")) or record.display_name or record.run_id,
         "readiness": readiness,
@@ -763,11 +784,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
             evidence=evidence,
             readiness=readiness,
         ),
-        "next_action": (
-            {"label": "No action", "action_key": None, "enabled": False, "reason": f"Already merged into {target}."}
-            if merged
-            else _suggested_next_action(display_status, detail.legal_actions, detail.overlay)
-        ),
+        "next_action": next_action,
         "certification": certification,
         "changes": {
             "branch": branch,
@@ -777,12 +794,145 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
             "file_count": len(changed_files),
             "files": changed_files[:12],
             "truncated": len(changed_files) > 12,
-            "diff_command": None if in_progress else f"git diff {target}...{branch}" if branch and branch != target else None,
+            "diff_command": None if merged or in_progress else f"git diff {target}...{branch}" if branch and branch != target else None,
             "diff_error": diff["error"],
         },
         "evidence": evidence,
         "failure": _failure_summary(record, detail.overlay),
     }
+
+
+def _merge_review_packet(project_dir: Path, detail: DetailView, *, display_status: str, target: str) -> dict[str, Any]:
+    record = detail.record
+    merge_id = _optional_str(record.identity.get("merge_id")) or record.run_id
+    certification = _certification_summary(record)
+    evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
+    terminal_success = display_status == "done" or record.terminal_outcome == "success"
+    needs_attention = display_status in {"failed", "cancelled", "interrupted", "stale"}
+    if terminal_success:
+        readiness = {
+            "state": "merged",
+            "label": f"Landed in {target}",
+            "tone": "success",
+            "blockers": [],
+            "next_step": "Audit the landing record, artifacts, and final logs if needed.",
+        }
+        headline = f"Landed in {target}"
+    elif display_status in REVIEW_IN_PROGRESS_STATUSES:
+        readiness = {
+            "state": "in_progress",
+            "label": "Landing in progress",
+            "tone": "info",
+            "blockers": ["Wait for the landing run to finish."],
+            "next_step": "Watch logs or wait for completion.",
+        }
+        headline = "Landing in progress"
+    elif needs_attention:
+        reason = detail.overlay.reason if detail.overlay is not None else f"Landing status is {display_status}."
+        readiness = {
+            "state": "needs_attention",
+            "label": "Landing needs action",
+            "tone": "danger",
+            "blockers": [reason],
+            "next_step": "Inspect merge logs and resolve the landing failure.",
+        }
+        headline = "Landing failed"
+    else:
+        readiness = {
+            "state": "blocked",
+            "label": "Landing audit",
+            "tone": "warning",
+            "blockers": [f"Landing status is {display_status or 'unknown'}."],
+            "next_step": "Inspect merge logs before taking further action.",
+        }
+        headline = "Landing audit"
+    return {
+        "headline": headline,
+        "status": "merged" if terminal_success else display_status,
+        "summary": _optional_str(record.intent.get("summary")) or record.display_name or record.run_id,
+        "readiness": readiness,
+        "checks": _merge_review_checks(
+            display_status=display_status,
+            target=target,
+            certification=certification,
+            evidence=evidence,
+            readiness=readiness,
+        ),
+        "next_action": {"label": "No action", "action_key": None, "enabled": False, "reason": "Landing runs are audit records."},
+        "certification": certification,
+        "changes": {
+            "branch": _optional_str(record.git.get("branch")),
+            "target": target,
+            "merged": terminal_success,
+            "merge_id": merge_id,
+            "file_count": 0,
+            "files": [],
+            "truncated": False,
+            "diff_command": None,
+            "diff_error": None,
+        },
+        "evidence": evidence,
+        "failure": _failure_summary(record, detail.overlay),
+    }
+
+
+def _review_target(project_dir: Path, record: Any) -> str:
+    target = _optional_str(record.git.get("target_branch")) if hasattr(record, "git") else None
+    if target:
+        return target
+    if getattr(record, "domain", None) == "merge":
+        merge_id = _optional_str(record.identity.get("merge_id")) if hasattr(record, "identity") else None
+        merge_id = merge_id or _optional_str(getattr(record, "run_id", None))
+        if merge_id:
+            try:
+                state = load_merge_state(project_dir, merge_id)
+            except Exception:
+                state = None
+            if state is not None:
+                state_target = _optional_str(state.target)
+                if state_target:
+                    return state_target
+    return _merge_target(project_dir)
+
+
+def _merge_review_checks(
+    *,
+    display_status: str,
+    target: str,
+    certification: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    readiness: dict[str, Any],
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    terminal_success = readiness["state"] == "merged"
+    if terminal_success:
+        checks.append(_review_check("run", "Landing run", "pass", f"Landing completed into {target}."))
+    elif display_status in REVIEW_IN_PROGRESS_STATUSES:
+        checks.append(_review_check("run", "Landing run", "pending", "Landing is still in flight."))
+    else:
+        checks.append(_review_check("run", "Landing run", "fail", f"Landing status is {display_status or 'unknown'}."))
+
+    stories_tested = _int_or_none(certification.get("stories_tested"))
+    stories_passed = _int_or_none(certification.get("stories_passed"))
+    if stories_tested and stories_passed is not None and stories_passed >= stories_tested:
+        checks.append(_review_check("certification", "Post-landing certification", "pass", f"{stories_passed}/{stories_tested} stories passed."))
+    elif stories_tested and stories_passed is not None:
+        checks.append(_review_check("certification", "Post-landing certification", "fail", f"{stories_passed}/{stories_tested} stories passed."))
+    else:
+        checks.append(_review_check("certification", "Post-landing certification", "info", "No post-landing story count was recorded."))
+
+    existing_evidence = [item for item in evidence if item.get("exists")]
+    if existing_evidence:
+        checks.append(_review_check("evidence", "Evidence", "pass", f"{len(existing_evidence)} artifact{'' if len(existing_evidence) == 1 else 's'} available."))
+    else:
+        checks.append(_review_check("evidence", "Evidence", "warn", "No readable landing artifacts are attached."))
+
+    if terminal_success:
+        checks.append(_review_check("landing", "Landing state", "pass", "No further landing action is needed."))
+    else:
+        detail = "; ".join(str(item) for item in readiness.get("blockers", []) if item) or "Landing is not complete."
+        checks.append(_review_check("landing", "Landing state", "fail", detail))
+    return checks
 
 
 def _review_readiness(
@@ -793,6 +943,7 @@ def _review_readiness(
     diff_error: str | None,
     target: str,
     overlay: Any,
+    merge_preflight: dict[str, Any],
 ) -> dict[str, Any]:
     blockers: list[str] = []
     if merged:
@@ -827,6 +978,8 @@ def _review_readiness(
             blockers.append("No source branch was recorded for this task.")
         if diff_error:
             blockers.append(f"Changed files could not be inspected: {diff_error}")
+        if merge_preflight.get("merge_blocked"):
+            blockers.append(_merge_preflight_review_blocker(merge_preflight))
         if blockers:
             return {
                 "state": "blocked",
@@ -884,7 +1037,13 @@ def _review_checks(
     elif display_status == "done":
         checks.append(_review_check("run", "Run finished", "pass", "Task completed and is ready for human review."))
     elif display_status in REVIEW_IN_PROGRESS_STATUSES:
-        checks.append(_review_check("run", "Run finished", "pending", "Task is still in flight."))
+        run_label = "Waiting to start" if display_status == "queued" else "Run in progress"
+        run_detail = (
+            "The watcher has not started this queued task yet."
+            if display_status == "queued"
+            else "Task is still in flight."
+        )
+        checks.append(_review_check("run", run_label, "pending", run_detail))
     else:
         checks.append(_review_check("run", "Run finished", "fail", f"Run status is {display_status or 'unknown'}."))
 
@@ -941,6 +1100,24 @@ def _review_check(key: str, label: str, status: str, detail: str) -> dict[str, s
     return {"key": key, "label": label, "status": status, "detail": detail}
 
 
+def _review_packet_headline(
+    record: Any,
+    display_status: str,
+    *,
+    merged: bool,
+    readiness: dict[str, Any],
+    target: str,
+) -> str:
+    if merged:
+        return f"Already merged into {target}"
+    if readiness.get("state") == "blocked" and display_status == "done":
+        blockers = [str(item) for item in readiness.get("blockers", []) if item]
+        if any(item.startswith("Repository has local changes") for item in blockers):
+            return "Repository cleanup required before landing"
+        return "Review blocked before landing"
+    return _review_headline(record, display_status)
+
+
 def _review_headline(record: Any, display_status: str) -> str:
     if display_status == "done":
         return "Ready for review"
@@ -984,7 +1161,7 @@ def _suggested_next_action(
         action = by_key.get(key)
         if action is not None and action.enabled:
             return {
-                "label": action.label,
+                "label": _review_action_label(action.key, action.label),
                 "action_key": action.key,
                 "enabled": True,
                 "reason": action.preview,
@@ -992,13 +1169,17 @@ def _suggested_next_action(
     for action in actions:
         if action.enabled:
             return {
-                "label": action.label,
+                "label": _review_action_label(action.key, action.label),
                 "action_key": action.key,
                 "enabled": True,
                 "reason": action.preview,
             }
     reason = overlay.reason if overlay is not None else "No safe action is currently enabled."
     return {"label": "No action", "action_key": None, "enabled": False, "reason": reason}
+
+
+def _review_action_label(key: str, label: str) -> str:
+    return "Land selected" if key == "m" else label
 
 
 def _apply_landing_context(project_dir: Path, payload: dict[str, Any], detail: DetailView) -> None:
@@ -1186,6 +1367,19 @@ def _ensure_merge_unblocked(project_dir: Path) -> None:
     )
 
 
+def _merge_preflight_review_blocker(preflight: dict[str, Any]) -> str:
+    dirty_files = list(preflight.get("dirty_files", []) or [])
+    if dirty_files:
+        preview = ", ".join(str(path) for path in dirty_files[:3])
+        if len(dirty_files) > 3:
+            preview += f", ... (+{len(dirty_files) - 3} more)"
+        return f"Repository has local changes: {preview}."
+    blockers = [str(item) for item in preflight.get("merge_blockers", []) or [] if item]
+    if blockers:
+        return f"Repository is not ready to land: {'; '.join(blockers)}."
+    return "Repository is not ready to land."
+
+
 def _merged_branch_index(project_dir: Path, target: str) -> dict[str, dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     for state_path in sorted(paths.merge_dir(project_dir).glob("*/state.json")):
@@ -1218,11 +1412,22 @@ def _branch_diff(project_dir: Path, branch: str | None, target: str) -> dict[str
     target = str(target or "").strip()
     if not branch or not target or branch == target:
         return {"files": [], "error": None}
-    result = git_ops.run_git(project_dir, "diff", "--name-only", f"{target}...{branch}")
+    target_ref = _git_diff_ref(project_dir, target)
+    branch_ref = _git_diff_ref(project_dir, branch)
+    result = git_ops.run_git(project_dir, "diff", "--name-only", f"{target_ref}...{branch_ref}")
     if not result.ok:
         detail = (result.stderr or result.stdout or f"git diff exited {result.returncode}").strip()
         return {"files": [], "error": detail}
     return {"files": sorted(line for line in result.stdout.splitlines() if line), "error": None}
+
+
+def _git_diff_ref(project_dir: Path, ref: str) -> str:
+    if git_ops.run_git(project_dir, "rev-parse", "--verify", "--quiet", ref).ok:
+        return ref
+    remote_ref = f"origin/{ref}"
+    if git_ops.run_git(project_dir, "rev-parse", "--verify", "--quiet", remote_ref).ok:
+        return remote_ref
+    return ref
 
 
 def _branch_changed_files(project_dir: Path, branch: str | None, target: str) -> list[str]:

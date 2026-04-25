@@ -58,6 +58,7 @@ export interface RuntimeStatus {
     pending: number;
     processing: number;
     malformed: number;
+    items: CommandBacklogItem[];
   };
   files: {
     queue: RuntimeFileStatus;
@@ -67,6 +68,16 @@ export interface RuntimeStatus {
   };
   supervisor: RuntimeSupervisor;
   issues: RuntimeIssue[];
+}
+
+export interface CommandBacklogItem {
+  state: "pending" | "processing" | string;
+  command_id: string | null;
+  kind: string | null;
+  run_id: string | null;
+  task_id: string | null;
+  requested_at: string | null;
+  age_s: number | null;
 }
 
 export interface RuntimeSupervisor {

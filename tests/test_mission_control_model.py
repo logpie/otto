@@ -517,6 +517,8 @@ def test_history_unknown_outcome_buckets_to_other_and_warns_once(caplog) -> None
         merge_id=None,
         intent="mystery",
         branch=None,
+        target_branch=None,
+        head_sha=None,
         worktree=None,
         cost_usd=None,
         duration_s=None,
