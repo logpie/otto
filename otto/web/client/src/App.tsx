@@ -1469,7 +1469,7 @@ function LogPane({text}: {text: string}) {
         <strong>Run logs</strong>
         <span>{lineCount ? `${lineCount} line${lineCount === 1 ? "" : "s"}` : "waiting for output"}{compact.truncated ? " · showing latest output" : ""}</span>
       </div>
-      <pre className="log-pane" tabIndex={0} aria-label="Run log output" data-testid="run-log-pane">{renderLogText(compact.text)}</pre>
+      <pre className="log-pane log-content" tabIndex={0} aria-label="Run log output" data-testid="run-log-pane">{renderLogText(compact.text)}</pre>
     </div>
   );
 }
@@ -1486,7 +1486,9 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
   const evidence = packet.evidence.filter(isReadableArtifact);
   const stories = packet.certification.stories || [];
   const proofReport = packet.certification.proof_report;
-  const compact = compactLongText(formatArtifactContent(proofContent?.content || ""), 20000);
+  const proofContentIsLog = isLogArtifact(proofContent?.artifact || null);
+  const proofContentText = proofContent?.content || "";
+  const compact = compactLongText(proofContentIsLog ? proofContentText : formatArtifactContent(proofContentText), 20000);
   return (
     <div className="proof-pane" data-testid="proof-pane">
       <section className="proof-summary" aria-labelledby="proofHeading">
@@ -1592,7 +1594,9 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
           </div>
           {proofContent?.truncated || compact.truncated ? <span>truncated</span> : null}
         </div>
-        <pre tabIndex={0} aria-label="Selected evidence content">{compact.text || "Loading evidence content..."}</pre>
+        <pre className={proofContentIsLog ? "log-content" : ""} tabIndex={0} aria-label="Selected evidence content">
+          {compact.text ? (proofContentIsLog ? renderLogText(compact.text) : compact.text) : "Loading evidence content..."}
+        </pre>
       </section>
     </div>
   );
@@ -1786,14 +1790,18 @@ function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoad
   onBack: () => void;
 }) {
   if (selectedArtifactIndex !== null) {
-    const compact = compactLongText(artifactContent?.content || "No content.", 20000);
+    const artifactIsLog = isLogArtifact(artifactContent?.artifact || null);
+    const rawContent = artifactContent?.content || "No content.";
+    const compact = compactLongText(artifactIsLog ? rawContent : formatArtifactContent(rawContent), 20000);
     return (
       <div className="artifact-pane">
         <button type="button" onClick={onBack}>Back to artifacts</button>
         <div className="artifact-meta">
           {artifactContent?.artifact.label || "artifact"} {artifactContent?.truncated || compact.truncated ? "(truncated)" : ""}
         </div>
-        <pre tabIndex={0} aria-label="Artifact content">{compact.text}</pre>
+        <pre className={artifactIsLog ? "log-content" : ""} tabIndex={0} aria-label="Artifact content">
+          {artifactIsLog ? renderLogText(compact.text) : compact.text}
+        </pre>
       </div>
     );
   }
@@ -2583,6 +2591,14 @@ function canShowDiff(detail: RunDetail | null): boolean {
 
 function isReadableArtifact(artifact: ArtifactRef): boolean {
   return artifact.exists && artifact.kind !== "directory";
+}
+
+function isLogArtifact(artifact: ArtifactRef | null): boolean {
+  if (!artifact) return false;
+  const kind = artifact.kind.toLowerCase();
+  const label = artifact.label.toLowerCase();
+  const path = artifact.path.toLowerCase();
+  return kind === "log" || label.includes("log") || path.endsWith(".log");
 }
 
 function artifactKindLabel(artifact: ArtifactRef): string {

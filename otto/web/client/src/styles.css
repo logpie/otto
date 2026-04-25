@@ -1740,6 +1740,8 @@ tbody tr.selected {
   color: #e5e7eb;
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .log-viewer,
@@ -1767,8 +1769,6 @@ tbody tr.selected {
   color: #94a3b8;
 }
 
-.log-pane,
-.diff-pane,
 .artifact-pane {
   min-height: 0;
   margin: 0;
@@ -1784,7 +1784,30 @@ tbody tr.selected {
 
 .log-pane,
 .diff-pane {
+  min-height: 0;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  background: #0b1020;
+  color: #e5e7eb;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.log-pane,
+.diff-pane {
   flex: 1;
+}
+
+.log-content {
+  background: #0b1020;
+  color: #e5e7eb;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .log-line {
@@ -1960,6 +1983,9 @@ tbody tr.selected {
   margin: 12px 0 0;
   max-height: 52vh;
   overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .run-inspector .artifact-pane pre {

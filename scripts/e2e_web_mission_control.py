@@ -671,6 +671,7 @@ def scenario_long_log_layout(ctx: ScenarioContext) -> None:
     browser("find", "role", "button", "click", "--name", "primary log log")
     wait_text("complete lines")
     assert_page_contains("Long log fixture output line")
+    assert_artifact_log_theme()
     browser("find", "role", "button", "click", "--name", "Back to artifacts")
     wait_text("messages")
     browser("find", "testid", "close-inspector-button", "click")
@@ -1448,6 +1449,35 @@ def assert_artifact_list_layout() -> None:
         raise AssertionError(f"artifact cards are stretched instead of compact: {metrics}")
     if metrics["minWidth"] < 150:
         raise AssertionError(f"artifact cards are too narrow to scan: {metrics}")
+
+
+def assert_artifact_log_theme() -> None:
+    raw = browser_eval(
+        """JSON.stringify((() => {
+          const pane = document.querySelector('.artifact-pane pre');
+          const infoLine = pane?.querySelector('.log-line-info');
+          const paneStyle = pane ? getComputedStyle(pane) : null;
+          const lineStyle = infoLine ? getComputedStyle(infoLine) : null;
+          return {
+            exists: Boolean(pane),
+            whiteSpace: paneStyle?.whiteSpace || "",
+            overflowWrap: paneStyle?.overflowWrap || "",
+            background: paneStyle?.backgroundColor || "",
+            infoLine: Boolean(infoLine),
+            infoColor: lineStyle?.color || "",
+            textHead: pane?.textContent?.slice(0, 220) || ""
+          };
+        })())"""
+    )
+    metrics = parse_browser_json(raw)
+    if not metrics["exists"]:
+        raise AssertionError(f"artifact log pane missing: {metrics}")
+    if metrics["whiteSpace"] != "pre-wrap" or metrics["overflowWrap"] not in {"anywhere", "break-word"}:
+        raise AssertionError(f"artifact log pane is not wrapped like logs tab: {metrics}")
+    if not metrics["infoLine"] or metrics["infoColor"] in {"rgb(229, 231, 235)", "rgb(255, 255, 255)", "rgb(0, 0, 0)"}:
+        raise AssertionError(f"artifact log pane lacks semantic log color: {metrics}")
+    if "\n0716 [build]" not in metrics["textHead"] and "\n0772 [build]" not in metrics["textHead"]:
+        raise AssertionError(f"artifact log pane lost line breaks: {metrics}")
 
 
 def assert_inspector_closed() -> None:
