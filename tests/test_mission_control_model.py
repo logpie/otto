@@ -101,6 +101,10 @@ def test_stale_overlay_derivation_uses_grace_window_and_dead_writer(tmp_path: Pa
 
     clock.tick(seconds=3)
     state = model.refresh(state)
+    assert state.live_runs.items[0].overlay is None
+
+    clock.tick(seconds=3)
+    state = model.refresh(state)
     assert state.live_runs.items[0].overlay is not None
     assert state.live_runs.items[0].overlay.label == "LAGGING"
 

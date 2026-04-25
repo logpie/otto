@@ -692,6 +692,7 @@ class MissionControlModel:
 
         heartbeat_interval_s = max(_coerce_float(record.timing.get("heartbeat_interval_s")) or HEARTBEAT_INTERVAL_S, 0.1)
         stale_threshold_s = max(3.0 * heartbeat_interval_s, 15.0)
+        lagging_threshold_s = min(stale_threshold_s, max(2.0 * heartbeat_interval_s, 5.0))
         heartbeat_seq = int(record.timing.get("heartbeat_seq") or 0)
         writer_identity = _writer_identity(record.writer)
         heartbeat_at = _parse_iso(record.timing.get("heartbeat_at"))
@@ -706,7 +707,7 @@ class MissionControlModel:
                 writer_alive = self._process_probe(record.writer)
                 if not writer_alive:
                     return StaleOverlay("stale", "STALE", "heartbeat stalled and writer identity is gone", False)
-                if wall_age_s > heartbeat_interval_s:
+                if wall_age_s > lagging_threshold_s:
                     return StaleOverlay("lagging", "LAGGING", "heartbeat overdue but writer still alive", True)
             return None
 
@@ -715,9 +716,9 @@ class MissionControlModel:
             self._suspend_started_monotonic is not None
             and (monotonic_now - self._suspend_started_monotonic) < stale_threshold_s
         )
-        if grace_active and wall_age_s > heartbeat_interval_s and writer_alive:
+        if grace_active and wall_age_s > lagging_threshold_s and writer_alive:
             return StaleOverlay("lagging", "LAGGING", "reader grace window after suspend/clock jump", writer_alive)
-        if wall_age_s > heartbeat_interval_s and writer_alive:
+        if wall_age_s > lagging_threshold_s and writer_alive:
             return StaleOverlay("lagging", "LAGGING", "heartbeat overdue but writer still alive", True)
         if wall_age_s >= stale_threshold_s and not writer_alive:
             return StaleOverlay("stale", "STALE", "heartbeat stalled and writer identity is gone", False)
