@@ -61,7 +61,7 @@ def main() -> int:
     parser.add_argument("--otto-root", type=Path, default=Path.cwd(), help="Otto source tree to test.")
     parser.add_argument(
         "--scenario",
-        choices=["all", "fresh-queue", "ready-land", "dirty-blocked", "multi-state", "command-backlog"],
+        choices=["all", "project-launcher", "fresh-queue", "ready-land", "dirty-blocked", "multi-state", "command-backlog"],
         default="all",
     )
     parser.add_argument("--artifacts", type=Path, default=None, help="Directory for logs and screenshots.")
@@ -120,12 +120,37 @@ def main() -> int:
 
 def scenarios() -> list[Scenario]:
     return [
+        Scenario("project-launcher", "create a managed project before queueing work", scenario_project_launcher),
         Scenario("fresh-queue", "queue a first build from the web UI before the watcher starts", scenario_fresh_queue),
         Scenario("ready-land", "review and land a clean completed task", scenario_ready_land),
         Scenario("dirty-blocked", "show a clean recovery path when local changes block landing", scenario_dirty_blocked),
         Scenario("multi-state", "audit queued, failed, ready, and landed work in one board", scenario_multi_state),
         Scenario("command-backlog", "recover pending command backlog when the watcher is stopped", scenario_command_backlog),
     ]
+
+
+def scenario_project_launcher(ctx: ScenarioContext) -> None:
+    host = init_repo(ctx.run_root / "host")
+    projects_root = ctx.run_root / "managed-projects"
+    start_server(ctx, host, extra_args=["--project-launcher", "--projects-root", str(projects_root)])
+    open_app(ctx)
+
+    wait_text("Project Launcher")
+    wait_text("Create project")
+    assert_page_contains(str(projects_root))
+    assert_no_passive_refresh_status()
+    browser("find", "label", "Project name", "fill", "Expense Approval Portal")
+    browser("find", "role", "button", "click", "--name", "Create project")
+    wait_text("Task Board")
+    managed = projects_root / "expense-approval-portal"
+    assert (managed / ".git").exists()
+    assert (managed / "otto.yaml").exists()
+    browser("find", "testid", "new-job-button", "click")
+    wait_text("New queue job")
+    assert_page_contains(str(managed))
+    browser("find", "role", "button", "click", "--name", "Close")
+    assert_page_lacks(str(host))
+    screenshot(ctx, "project-launcher.png")
 
 
 def scenario_fresh_queue(ctx: ScenarioContext) -> None:
@@ -146,6 +171,7 @@ def scenario_fresh_queue(ctx: ScenarioContext) -> None:
     wait_text("Task Board")
     wait_text("1 queued task waiting")
     wait_text("Waiting for watcher")
+    assert_no_passive_refresh_status()
     assert_page_lacks("fatal:")
     assert_page_lacks("queue manifest missing")
     assert_page_lacks("worktree missing")
@@ -436,7 +462,7 @@ def merge_queue_state(repo: Path, task_id: str, task_state: dict[str, object]) -
     write_queue_state(repo, state)
 
 
-def start_server(ctx: ScenarioContext, repo: Path) -> None:
+def start_server(ctx: ScenarioContext, repo: Path, extra_args: list[str] | None = None) -> None:
     ctx.repo = repo
     log_path = ctx.artifacts_dir / "server.log"
     log = log_path.open("w", encoding="utf-8")
@@ -444,7 +470,7 @@ def start_server(ctx: ScenarioContext, repo: Path) -> None:
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONPATH"] = str(ctx.otto_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     ctx.server = subprocess.Popen(
-        [sys.executable, "-m", "otto.cli", "web", "--port", str(ctx.port), "--no-open"],
+        [sys.executable, "-m", "otto.cli", "web", "--port", str(ctx.port), "--no-open", *(extra_args or [])],
         cwd=repo,
         stdout=log,
         stderr=subprocess.STDOUT,
@@ -495,7 +521,7 @@ def wait_for_server(ctx: ScenarioContext, timeout_s: float = 20) -> None:
         if ctx.server is not None and ctx.server.poll() is not None:
             raise RuntimeError(f"web server exited early with {ctx.server.returncode}")
         try:
-            with urllib.request.urlopen(ctx.url + "api/state", timeout=0.5) as response:
+            with urllib.request.urlopen(ctx.url + "api/projects", timeout=0.5) as response:
                 if response.status == 200:
                     return
         except (OSError, urllib.error.URLError) as exc:
@@ -644,6 +670,14 @@ def assert_page_contains(text: str) -> None:
     snapshot = browser("snapshot", timeout_s=10).stdout
     if text not in snapshot:
         raise AssertionError(f"expected page text {text!r}\n{snapshot}")
+
+
+def assert_no_passive_refresh_status() -> None:
+    time.sleep(2)
+    snapshot = browser("snapshot", timeout_s=10).stdout
+    forbidden = [text for text in ("idle", "refreshing") if text in snapshot]
+    if forbidden:
+        raise AssertionError(f"unexpected passive refresh status {forbidden}\n{snapshot}")
 
 
 def assert_modal_focus() -> None:

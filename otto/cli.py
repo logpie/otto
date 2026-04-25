@@ -229,9 +229,25 @@ def dashboard(dashboard_mouse: bool) -> None:
               help="Open the browser after the server starts.")
 @click.option("--allow-remote", is_flag=True,
               help="Allow binding to a non-localhost address.")
-def web_command(host: str, port: int, open_browser: bool, allow_remote: bool) -> None:
+@click.option("--project-launcher", is_flag=True,
+              help="Start at the managed project launcher instead of selecting the current directory.")
+@click.option("--projects-root", default="~/otto-projects", show_default=True,
+              type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+              help="Managed projects root used by the launcher.")
+@click.option("--cwd-project", is_flag=True,
+              help="Use the current directory as the active project even for remote binds.")
+def web_command(
+    host: str,
+    port: int,
+    open_browser: bool,
+    allow_remote: bool,
+    project_launcher: bool,
+    projects_root: Path,
+    cwd_project: bool,
+) -> None:
     """Open local web Mission Control for this project."""
-    if host not in {"127.0.0.1", "localhost", "::1"} and not allow_remote:
+    remote_bind = host not in {"127.0.0.1", "localhost", "::1"}
+    if remote_bind and not allow_remote:
         error_console.print(
             "[error]Refusing to bind web Mission Control outside localhost without --allow-remote.[/error]"
         )
@@ -245,7 +261,13 @@ def web_command(host: str, port: int, open_browser: bool, allow_remote: bool) ->
     from otto.web.app import create_app
 
     project_dir = Path.cwd()
-    app = create_app(project_dir)
+    launcher_mode = project_launcher or (remote_bind and not cwd_project)
+    if remote_bind and launcher_mode:
+        console.print(
+            "  Remote web access starts in the managed project launcher. "
+            "Use --cwd-project only when you intentionally want this directory as the active project."
+        )
+    app = create_app(project_dir, project_launcher=launcher_mode, projects_root=projects_root)
     url_host = "localhost" if host in {"127.0.0.1", "::1"} else host
     url = f"http://{url_host}:{port}/"
     console.print(f"  Web Mission Control: [info]{rich_escape(url)}[/info]")

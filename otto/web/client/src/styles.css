@@ -171,6 +171,147 @@ textarea:focus-visible,
   grid-template-rows: auto 1fr;
 }
 
+.launcher-shell {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+.launcher-workspace {
+  display: block;
+  padding: 18px;
+}
+
+.project-launcher {
+  display: grid;
+  gap: 14px;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.launcher-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.launcher-head > div:first-child > span {
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.launcher-head h2,
+.launcher-head p,
+.launcher-panel h3,
+.launcher-panel p {
+  margin: 0;
+}
+
+.launcher-head h2 {
+  font-size: 22px;
+}
+
+.launcher-head p,
+.launcher-panel p,
+.launcher-status,
+.launcher-empty {
+  color: var(--muted);
+}
+
+.launcher-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.launcher-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(260px, 0.8fr);
+  gap: 14px;
+}
+
+.launcher-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.launcher-form {
+  align-content: start;
+}
+
+.launcher-status {
+  min-height: 20px;
+  margin: 0;
+}
+
+.managed-root code,
+.project-row code {
+  display: block;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.project-list {
+  display: grid;
+  gap: 8px;
+}
+
+.project-row {
+  height: auto;
+  min-height: 68px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  text-align: left;
+}
+
+.project-row > span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.project-row-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: end;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-row-meta span {
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #f8fafc;
+}
+
+.launcher-empty {
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -1484,9 +1625,31 @@ tbody tr.selected {
     grid-template-columns: 1fr;
   }
 
+  .launcher-shell {
+    grid-template-columns: 1fr;
+  }
+
   .sidebar {
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  .launcher-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .launcher-head,
+  .project-row {
+    grid-template-columns: 1fr;
+  }
+
+  .launcher-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .project-row-meta {
+    justify-content: start;
   }
 
   .mission-focus {

@@ -13,8 +13,11 @@ import type {
   LandingState,
   LiveRunItem,
   LogsResponse,
+  ManagedProjectInfo,
   MissionEvent,
   OutcomeFilter,
+  ProjectMutationResponse,
+  ProjectsResponse,
   QueueResult,
   RunDetail,
   RunTypeFilter,
@@ -76,6 +79,7 @@ const defaultFilters: Filters = {
 export function App() {
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [data, setData] = useState<StateResponse | null>(null);
+  const [projectsState, setProjectsState] = useState<ProjectsResponse | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [logText, setLogText] = useState("");
@@ -157,9 +161,26 @@ export function App() {
     }
   }, [filters, loadLogs]);
 
-  const refresh = useCallback(async () => {
-    setRefreshStatus("refreshing");
+  const loadProjects = useCallback(async () => {
+    const next = await api<ProjectsResponse>("/api/projects");
+    setProjectsState(next);
+    return next;
+  }, []);
+
+  const refresh = useCallback(async (showStatus = false) => {
+    if (showStatus) setRefreshStatus("refreshing");
     try {
+      const projectStatus = await loadProjects();
+      if (projectStatus.launcher_enabled && !projectStatus.current) {
+        setData(null);
+        setSelectedRunId(null);
+        setDetail(null);
+        setLogText("");
+        setArtifactContent(null);
+        setLastError(null);
+        setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
+        return;
+      }
       const next = await api<StateResponse>(`/api/state?${stateQueryParams(filters).toString()}`);
       setData(next);
       setLastError(null);
@@ -173,16 +194,16 @@ export function App() {
         if (current && visible.has(current)) return current;
         return next.live.items[0]?.run_id || next.landing.items.find((item) => item.run_id)?.run_id || next.history.items[0]?.run_id || null;
       });
-      setRefreshStatus("idle");
+      setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
     } catch (error) {
       setRefreshStatus("error");
       showToast(errorMessage(error), "error");
     }
-  }, [filters, refreshDetail, selectedRunId, showToast]);
+  }, [filters, loadProjects, refreshDetail, selectedRunId, showToast]);
 
   useEffect(() => {
-    void refresh();
-    const interval = window.setInterval(() => void refresh(), refreshIntervalMs(data));
+    void refresh(false);
+    const interval = window.setInterval(() => void refresh(false), refreshIntervalMs(data));
     return () => window.clearInterval(interval);
   }, [refresh, data?.live.refresh_interval_s]);
 
@@ -234,7 +255,7 @@ export function App() {
             body: JSON.stringify({}),
           });
           handleActionResult(result, `${action} requested`, showToast, setResultBanner);
-          if (result.refresh !== false) await refresh();
+          if (result.refresh !== false) await refresh(true);
         } catch (error) {
           showToast(errorMessage(error), "error");
         }
@@ -261,7 +282,7 @@ export function App() {
         try {
           const result = await api<ActionResult>("/api/actions/merge-all", {method: "POST", body: "{}"});
           handleActionResult(result, "merge all requested", showToast, setResultBanner);
-          if (result.refresh !== false) await refresh();
+          if (result.refresh !== false) await refresh(true);
         } catch (error) {
           showToast(errorMessage(error), "error");
         }
@@ -277,7 +298,7 @@ export function App() {
           body: action === "start" ? JSON.stringify({concurrent: 2}) : "{}",
         });
         showToast(result.message || `watcher ${action} requested`);
-        await refresh();
+        await refresh(true);
       } catch (error) {
         showToast(errorMessage(error), "error");
       }
@@ -315,6 +336,63 @@ export function App() {
   const watcherHint = watcherControlHint(data);
   const modalOpen = jobOpen || Boolean(confirm);
 
+  const createManagedProject = useCallback(async (name: string) => {
+    const result = await api<ProjectMutationResponse>("/api/projects/create", {
+      method: "POST",
+      body: JSON.stringify({name}),
+    });
+    setProjectsState((current) => ({
+      launcher_enabled: current?.launcher_enabled ?? true,
+      projects_root: current?.projects_root || "",
+      current: result.project || null,
+      projects: result.projects,
+    }));
+    showToast(`Created ${result.project?.name || "project"}`);
+    await refresh(true);
+  }, [refresh, showToast]);
+
+  const selectManagedProject = useCallback(async (path: string) => {
+    const result = await api<ProjectMutationResponse>("/api/projects/select", {
+      method: "POST",
+      body: JSON.stringify({path}),
+    });
+    setProjectsState((current) => ({
+      launcher_enabled: current?.launcher_enabled ?? true,
+      projects_root: current?.projects_root || "",
+      current: result.project || null,
+      projects: result.projects,
+    }));
+    showToast(`Opened ${result.project?.name || "project"}`);
+    await refresh(true);
+  }, [refresh, showToast]);
+
+  if (projectsState?.launcher_enabled && !data) {
+    return (
+      <div className="app-shell launcher-shell">
+        <aside className="sidebar">
+          <div className="brand">
+            <div className="brand-mark">O</div>
+            <div>
+              <h1>Otto</h1>
+              <p>Project Launcher</p>
+            </div>
+          </div>
+          <p className="sidebar-hint">Choose a managed project before queueing work.</p>
+        </aside>
+        <main className="workspace launcher-workspace">
+          <ProjectLauncher
+            projectsState={projectsState}
+            refreshStatus={refreshStatus}
+            onCreate={createManagedProject}
+            onSelect={selectManagedProject}
+            onRefresh={() => void refresh(true)}
+          />
+        </main>
+        {toast && <div id="toast" className={`visible toast-${toast.severity}`} role="status" aria-live="polite">{toast.message}</div>}
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-hidden={modalOpen ? true : undefined}>
@@ -338,7 +416,7 @@ export function App() {
           refreshStatus={refreshStatus}
           viewMode={viewMode}
           onChange={setFilters}
-          onRefresh={() => void refresh()}
+          onRefresh={() => void refresh(true)}
           onViewChange={setViewMode}
         />
         {viewMode === "tasks" ? (
@@ -476,6 +554,122 @@ function MetaItem({label, value}: {label: string; value: string}) {
   return <div><dt>{label}</dt><dd>{value}</dd></div>;
 }
 
+function ProjectLauncher({projectsState, refreshStatus, onCreate, onSelect, onRefresh}: {
+  projectsState: ProjectsResponse;
+  refreshStatus: string;
+  onCreate: (name: string) => Promise<void>;
+  onSelect: (path: string) => Promise<void>;
+  onRefresh: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [status, setStatus] = useState("");
+  const [pending, setPending] = useState(false);
+  const projects = projectsState.projects || [];
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setStatus("Project name is required.");
+      return;
+    }
+    setPending(true);
+    setStatus("Creating project");
+    try {
+      await onCreate(trimmed);
+      setName("");
+      setStatus("");
+    } catch (error) {
+      setStatus(errorMessage(error));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function openProject(project: ManagedProjectInfo) {
+    if (!project.path || pending) return;
+    setPending(true);
+    setStatus(`Opening ${project.name}`);
+    try {
+      await onSelect(project.path);
+      setStatus("");
+    } catch (error) {
+      setStatus(errorMessage(error));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <section className="project-launcher" aria-labelledby="projectLauncherHeading">
+      <div className="launcher-head">
+        <div>
+          <span>Managed workspace</span>
+          <h2 id="projectLauncherHeading">Project Launcher</h2>
+          <p>Create or open a managed git project before queueing work.</p>
+        </div>
+        <div className="launcher-actions">
+          {refreshLabel(refreshStatus) && <span className="muted">{refreshLabel(refreshStatus)}</span>}
+          <button type="button" onClick={onRefresh}>Refresh</button>
+        </div>
+      </div>
+
+      <div className="launcher-grid">
+        <form className="launcher-panel launcher-form" onSubmit={(event) => void submit(event)}>
+          <div>
+            <h3>Create project</h3>
+            <p>Otto will create a normal folder and initialize a git repo in the managed projects root.</p>
+          </div>
+          <label>Project name
+            <input
+              value={name}
+              autoFocus
+              type="text"
+              placeholder="Expense approval portal"
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+          <button className="primary" type="submit" disabled={pending}>{pending ? "Working" : "Create project"}</button>
+          <p className="launcher-status" aria-live="polite">{status}</p>
+        </form>
+
+        <div className="launcher-panel managed-root">
+          <h3>Managed root</h3>
+          <code title={projectsState.projects_root}>{projectsState.projects_root}</code>
+          <p>Managed projects isolate Otto work from the repo that launched the web server. They are not a filesystem security sandbox.</p>
+        </div>
+      </div>
+
+      <div className="launcher-panel project-list-panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Open project</h3>
+            <p className="panel-subtitle">Existing managed git repos under the projects root.</p>
+          </div>
+          <span className="pill">{projects.length}</span>
+        </div>
+        <div className="project-list">
+          {projects.length ? projects.map((project) => (
+            <button className="project-row" type="button" key={project.path} disabled={pending} onClick={() => void openProject(project)}>
+              <span>
+                <strong>{project.name}</strong>
+                <code title={project.path}>{project.path}</code>
+              </span>
+              <span className="project-row-meta">
+                <span>{project.branch || "-"}</span>
+                <span>{project.dirty ? "dirty" : "clean"}</span>
+                <span>{project.head_sha ? project.head_sha.slice(0, 7) : "-"}</span>
+              </span>
+            </button>
+          )) : (
+            <div className="launcher-empty">No managed projects yet.</div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function Toolbar({filters, refreshStatus, viewMode, onChange, onRefresh, onViewChange}: {
   filters: Filters;
   refreshStatus: string;
@@ -547,7 +741,7 @@ function Toolbar({filters, refreshStatus, viewMode, onChange, onRefresh, onViewC
         <button type="button" onClick={() => onChange(defaultFilters)}>Clear filters</button>
       </div>
       <div className="toolbar-actions">
-        <span className="muted">{refreshStatus}</span>
+        {refreshLabel(refreshStatus) && <span className="muted">{refreshLabel(refreshStatus)}</span>}
         <button type="button" onClick={onRefresh}>Refresh</button>
       </div>
     </header>
@@ -2079,6 +2273,12 @@ function compactLongText(value: string, maxLength: number): {text: string; trunc
 
 function capitalize(value: string): string {
   return value ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : value;
+}
+
+function refreshLabel(status: string): string {
+  if (status === "refreshing") return "refreshing";
+  if (status === "error") return "refresh failed";
+  return "";
 }
 
 function errorMessage(error: unknown): string {

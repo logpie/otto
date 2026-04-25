@@ -11,6 +11,24 @@ export interface ProjectInfo {
   head_sha: string | null;
 }
 
+export interface ManagedProjectInfo extends ProjectInfo {
+  managed?: boolean;
+}
+
+export interface ProjectsResponse {
+  launcher_enabled: boolean;
+  projects_root: string;
+  current: ProjectInfo | null;
+  projects: ManagedProjectInfo[];
+}
+
+export interface ProjectMutationResponse {
+  ok: boolean;
+  project?: ProjectInfo;
+  current?: ProjectInfo | null;
+  projects: ManagedProjectInfo[];
+}
+
 export interface WatcherInfo {
   alive: boolean;
   watcher: {pid?: number | null} | null;
