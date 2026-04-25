@@ -81,5 +81,5 @@ markers = [
 # `tests/browser/conftest.py`) resolve cleanly. pytest already discovers these
 # at runtime via the package `__init__.py` files.
 [tool.pyright]
-include = ["otto", "tests"]
-extraPaths = ["."]
+include = ["otto", "tests", "scripts"]
+extraPaths = [".", "scripts"]
