@@ -57,7 +57,8 @@ class ArtifactRef:
     @classmethod
     def from_path(cls, label: str, path: str, *, kind: str = "file") -> "ArtifactRef":
         candidate = Path(path)
-        return cls(label=label, path=path, kind=kind, exists=candidate.exists())
+        resolved_kind = "directory" if kind == "file" and candidate.is_dir() else kind
+        return cls(label=label, path=path, kind=resolved_kind, exists=candidate.exists())
 
 
 @dataclass(slots=True)

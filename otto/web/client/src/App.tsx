@@ -1,4 +1,5 @@
 import {FormEvent, useCallback, useEffect, useRef, useState} from "react";
+import type {ReactNode} from "react";
 import {ApiError, api, buildQueuePayload, stateQueryParams} from "./api";
 import type {
   ActionResult,
@@ -6,6 +7,7 @@ import type {
   ArtifactContentResponse,
   ArtifactRef,
   CommandBacklogItem,
+  DiffResponse,
   HistoryItem,
   ImproveSubcommand,
   JobCommand,
@@ -54,7 +56,7 @@ interface Filters {
 type ViewMode = "tasks" | "diagnostics";
 
 type BoardStage = "attention" | "working" | "ready" | "landed";
-type InspectorMode = "proof" | "logs" | "artifacts";
+type InspectorMode = "proof" | "logs" | "artifacts" | "diff";
 
 interface BoardTask {
   id: string;
@@ -90,6 +92,7 @@ export function App() {
   const [artifactContent, setArtifactContent] = useState<ArtifactContentResponse | null>(null);
   const [proofArtifactIndex, setProofArtifactIndex] = useState<number | null>(null);
   const [proofContent, setProofContent] = useState<ArtifactContentResponse | null>(null);
+  const [diffContent, setDiffContent] = useState<DiffResponse | null>(null);
   const [refreshStatus, setRefreshStatus] = useState("idle");
   const [jobOpen, setJobOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -127,6 +130,7 @@ export function App() {
       setLogText("");
       setArtifactContent(null);
       setProofContent(null);
+      setDiffContent(null);
       setProofArtifactIndex(null);
       setSelectedArtifactIndex(null);
       setInspectorMode("proof");
@@ -188,6 +192,7 @@ export function App() {
         setLogText("");
         setArtifactContent(null);
         setProofContent(null);
+        setDiffContent(null);
         setProofArtifactIndex(null);
         setInspectorOpen(false);
         setLastError(null);
@@ -226,6 +231,7 @@ export function App() {
       setLogText("");
       setArtifactContent(null);
       setProofContent(null);
+      setDiffContent(null);
       setProofArtifactIndex(null);
       setInspectorOpen(false);
       return;
@@ -236,6 +242,7 @@ export function App() {
     setLogText("");
     setArtifactContent(null);
     setProofContent(null);
+    setDiffContent(null);
     setProofArtifactIndex(null);
     setSelectedArtifactIndex(null);
     refreshDetail(selectedRunId).catch((error) => {
@@ -245,6 +252,7 @@ export function App() {
         setLogText("");
         setArtifactContent(null);
         setProofContent(null);
+        setDiffContent(null);
         setProofArtifactIndex(null);
         setInspectorOpen(false);
         return;
@@ -370,6 +378,20 @@ export function App() {
     }
   }, [showToast]);
 
+  const loadDiff = useCallback(async () => {
+    const runId = selectedRunIdRef.current;
+    if (!runId) return;
+    setDiffContent(null);
+    try {
+      const content = await api<DiffResponse>(`/api/runs/${encodeURIComponent(runId)}/diff`);
+      if (selectedRunIdRef.current !== runId) return;
+      setDiffContent(content);
+    } catch (error) {
+      if (detailWasRemoved(error) || selectedRunIdRef.current !== runId) return;
+      showToast(errorMessage(error), "error");
+    }
+  }, [showToast]);
+
   const showLogs = useCallback(() => {
     setInspectorOpen(true);
     setInspectorMode("logs");
@@ -384,6 +406,13 @@ export function App() {
     setSelectedArtifactIndex(null);
     setArtifactContent(null);
   }, []);
+
+  const showDiff = useCallback(() => {
+    setInspectorOpen(true);
+    setInspectorMode("diff");
+    setArtifactContent(null);
+    void loadDiff();
+  }, [loadDiff]);
 
   const showProof = useCallback(() => {
     setInspectorOpen(true);
@@ -435,6 +464,32 @@ export function App() {
     await refresh(true);
   }, [refresh, showToast]);
 
+  const switchProject = useCallback(async () => {
+    const result = await api<ProjectMutationResponse>("/api/projects/clear", {
+      method: "POST",
+      body: "{}",
+    });
+    setProjectsState((current) => ({
+      launcher_enabled: current?.launcher_enabled ?? true,
+      projects_root: current?.projects_root || "",
+      current: result.current || null,
+      projects: result.projects,
+    }));
+    setData(null);
+    setSelectedRunId(null);
+    setDetail(null);
+    setLogText("");
+    setArtifactContent(null);
+    setProofContent(null);
+    setDiffContent(null);
+    setProofArtifactIndex(null);
+    setSelectedArtifactIndex(null);
+    setInspectorOpen(false);
+    setJobOpen(false);
+    setViewMode("tasks");
+    showToast("Choose a project");
+  }, [showToast]);
+
   if (projectsState?.launcher_enabled && !data) {
     return (
       <div className="app-shell launcher-shell">
@@ -473,6 +528,9 @@ export function App() {
           </div>
         </div>
         <ProjectMeta project={project} watcher={watcher} landing={landing} active={active} />
+        {projectsState?.launcher_enabled && (
+          <button type="button" data-testid="switch-project-button" onClick={() => void switchProject()}>Switch project</button>
+        )}
         <button className="primary" type="button" data-testid="new-job-button" onClick={openJobDialog}>New job</button>
         <button type="button" data-testid="start-watcher-button" disabled={!canStartWatcher(data)} aria-describedby="watcher-action-hint" title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
         <button type="button" data-testid="stop-watcher-button" disabled={!canStopWatcher(data)} aria-describedby="watcher-action-hint" title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
@@ -516,6 +574,7 @@ export function App() {
               onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
               onShowProof={showProof}
               onShowLogs={showLogs}
+              onShowDiff={showDiff}
               onShowArtifacts={showArtifacts}
               onLoadArtifact={(index) => void loadArtifact(index)}
             />
@@ -528,8 +587,10 @@ export function App() {
                 artifactContent={artifactContent}
                 proofArtifactIndex={proofArtifactIndex}
                 proofContent={proofContent}
+                diffContent={diffContent}
                 onShowLogs={showLogs}
                 onShowProof={showProof}
+                onShowDiff={showDiff}
                 onShowArtifacts={showArtifacts}
                 onLoadProofArtifact={(index) => void loadProofArtifact(index)}
                 onLoadArtifact={(index) => void loadArtifact(index)}
@@ -563,6 +624,7 @@ export function App() {
                 onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
                 onShowProof={showProof}
                 onShowLogs={showLogs}
+                onShowDiff={showDiff}
                 onShowArtifacts={showArtifacts}
                 onLoadArtifact={(index) => void loadArtifact(index)}
               />
@@ -575,8 +637,10 @@ export function App() {
                   artifactContent={artifactContent}
                   proofArtifactIndex={proofArtifactIndex}
                   proofContent={proofContent}
+                  diffContent={diffContent}
                   onShowLogs={showLogs}
                   onShowProof={showProof}
+                  onShowDiff={showDiff}
                   onShowArtifacts={showArtifacts}
                   onLoadProofArtifact={(index) => void loadProofArtifact(index)}
                   onLoadArtifact={(index) => void loadArtifact(index)}
@@ -1284,12 +1348,13 @@ function EventTimeline({events}: {events: StateResponse["events"] | undefined}) 
   );
 }
 
-function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, onShowArtifacts, onLoadArtifact}: {
+function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact}: {
   detail: RunDetail | null;
   landing: LandingState | undefined;
   onRunAction: (action: string, label?: string) => void;
   onShowProof: () => void;
   onShowLogs: () => void;
+  onShowDiff: () => void;
   onShowArtifacts: () => void;
   onLoadArtifact: (index: number) => void;
 }) {
@@ -1320,6 +1385,7 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
           </div>
           <div className="detail-inspector-actions" aria-label="Evidence shortcuts">
             <button className="primary" type="button" data-testid="open-proof-button" onClick={onShowProof}>Open proof</button>
+            <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} onClick={onShowDiff}>Diff</button>
             <button type="button" data-testid="open-logs-button" onClick={onShowLogs}>Logs</button>
             <button type="button" data-testid="open-artifacts-button" onClick={onShowArtifacts}>Artifacts</button>
           </div>
@@ -1331,7 +1397,7 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
   );
 }
 
-function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, onShowProof, onShowLogs, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onBackToArtifacts, onClose}: {
+function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, diffContent, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onBackToArtifacts, onClose}: {
   detail: RunDetail;
   mode: InspectorMode;
   logText: string;
@@ -1339,8 +1405,10 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
   artifactContent: ArtifactContentResponse | null;
   proofArtifactIndex: number | null;
   proofContent: ArtifactContentResponse | null;
+  diffContent: DiffResponse | null;
   onShowProof: () => void;
   onShowLogs: () => void;
+  onShowDiff: () => void;
   onShowArtifacts: () => void;
   onLoadProofArtifact: (index: number) => void;
   onLoadArtifact: (index: number) => void;
@@ -1365,6 +1433,7 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
         </div>
         <div className="detail-tabs" role="tablist" aria-label="Evidence view">
           <button className={`tab ${mode === "proof" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "proof"} onClick={onShowProof}>Proof</button>
+          <button className={`tab ${mode === "diff" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "diff"} disabled={!canShowDiff(detail)} onClick={onShowDiff}>Diff</button>
           <button className={`tab ${mode === "logs" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "logs"} onClick={onShowLogs}>Logs</button>
           <button className={`tab ${mode === "artifacts" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "artifacts"} onClick={onShowArtifacts}>Artifacts</button>
         </div>
@@ -1372,7 +1441,9 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
       </div>
       <div className="run-inspector-body">
         {mode === "proof" ? (
-          <ProofPane detail={detail} proofArtifactIndex={proofArtifactIndex} proofContent={proofContent} onLoadProofArtifact={onLoadProofArtifact} />
+          <ProofPane detail={detail} proofArtifactIndex={proofArtifactIndex} proofContent={proofContent} onShowDiff={onShowDiff} onLoadProofArtifact={onLoadProofArtifact} />
+        ) : mode === "diff" ? (
+          <DiffPane diff={diffContent} />
         ) : mode === "logs" ? (
           <LogPane text={logText} />
         ) : (
@@ -1398,20 +1469,21 @@ function LogPane({text}: {text: string}) {
         <strong>Run logs</strong>
         <span>{lineCount ? `${lineCount} line${lineCount === 1 ? "" : "s"}` : "waiting for output"}{compact.truncated ? " · showing latest output" : ""}</span>
       </div>
-      <pre className="log-pane" tabIndex={0} aria-label="Run log output" data-testid="run-log-pane">{compact.text}</pre>
+      <pre className="log-pane" tabIndex={0} aria-label="Run log output" data-testid="run-log-pane">{renderAnsiText(compact.text)}</pre>
     </div>
   );
 }
 
-function ProofPane({detail, proofArtifactIndex, proofContent, onLoadProofArtifact}: {
+function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoadProofArtifact}: {
   detail: RunDetail;
   proofArtifactIndex: number | null;
   proofContent: ArtifactContentResponse | null;
+  onShowDiff: () => void;
   onLoadProofArtifact: (index: number) => void;
 }) {
   const packet = detail.review_packet;
   const changedFiles = packet.changes.files.slice(0, 10);
-  const evidence = packet.evidence.filter((artifact) => artifact.exists);
+  const evidence = packet.evidence.filter(isReadableArtifact);
   const compact = compactLongText(formatArtifactContent(proofContent?.content || ""), 20000);
   return (
     <div className="proof-pane" data-testid="proof-pane">
@@ -1456,6 +1528,19 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onLoadProofArtifac
           <p>No changed files reported yet.</p>
         )}
       </section>
+      <section className="proof-section" aria-labelledby="proofDiffHeading">
+        <h3 id="proofDiffHeading">Code diff</h3>
+        {packet.changes.diff_error ? (
+          <p>{formatTechnicalIssue(packet.changes.diff_error)}</p>
+        ) : canShowDiff(detail) ? (
+          <>
+            <p>{packet.changes.diff_command || `Review ${packet.changes.file_count} changed file${packet.changes.file_count === 1 ? "" : "s"}.`}</p>
+            <button type="button" data-testid="proof-open-diff-button" onClick={onShowDiff}>Open code diff</button>
+          </>
+        ) : (
+          <p>No code diff is available for this run yet.</p>
+        )}
+      </section>
       <section className="proof-section" aria-labelledby="proofArtifactsHeading">
         <h3 id="proofArtifactsHeading">Evidence artifacts</h3>
         {evidence.length ? (
@@ -1485,6 +1570,28 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onLoadProofArtifac
   );
 }
 
+function DiffPane({diff}: {diff: DiffResponse | null}) {
+  if (!diff) {
+    return <div className="diff-viewer"><div className="diff-toolbar"><strong>Code diff</strong><span>loading</span></div><pre className="diff-pane">Loading diff...</pre></div>;
+  }
+  return (
+    <div className="diff-viewer" data-testid="diff-pane">
+      <div className="diff-toolbar">
+        <strong>Code diff</strong>
+        <span>{diff.branch || "-"} → {diff.target}{diff.truncated ? " · truncated" : ""}</span>
+      </div>
+      {diff.error ? <div className="diff-error">{formatTechnicalIssue(diff.error)}</div> : null}
+      {diff.files.length ? (
+        <ul className="diff-files" aria-label="Changed files in diff">
+          {diff.files.slice(0, 24).map((path) => <li key={path}>{path}</li>)}
+          {diff.files.length > 24 && <li>+{diff.files.length - 24} more</li>}
+        </ul>
+      ) : null}
+      <pre className="diff-pane" tabIndex={0} aria-label="Code diff output">{diff.text ? renderDiffText(diff.text) : "No diff content."}</pre>
+    </div>
+  );
+}
+
 function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
   packet: RunDetail["review_packet"];
   onRunAction: (action: string, label?: string) => void;
@@ -1495,7 +1602,7 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
   const blockers = packet.readiness.blockers || [];
   const inProgress = packet.readiness.state === "in_progress";
   const artifactCount = packet.evidence.length;
-  const evidence = packet.evidence.filter((artifact) => artifact.exists).slice(0, 4);
+  const evidence = packet.evidence.filter(isReadableArtifact).slice(0, 4);
   const showActionButton = Boolean(action.action_key);
   return (
     <section className={`review-packet review-${packet.readiness.tone || "info"}`} aria-label="Review packet">
@@ -1561,7 +1668,7 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
       {evidence.length > 0 && (
         <div className="review-evidence" aria-label="Evidence artifacts">
           {evidence.map((artifact) => (
-            <button className={artifact.exists ? "" : "missing"} key={`${artifact.index}-${artifact.path}`} type="button" onClick={() => onLoadArtifact(artifact.index)}>
+            <button className={isReadableArtifact(artifact) ? "" : "missing"} key={`${artifact.index}-${artifact.path}`} type="button" disabled={!isReadableArtifact(artifact)} onClick={() => onLoadArtifact(artifact.index)}>
               {artifact.label}{artifact.exists ? "" : " missing"}
             </button>
           ))}
@@ -1644,9 +1751,9 @@ function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoad
   return (
     <div className="artifact-pane artifact-list">
       {artifacts.map((artifact) => (
-        <button key={artifact.index} type="button" disabled={!artifact.exists} onClick={() => onLoadArtifact(artifact.index)}>
+        <button key={artifact.index} type="button" disabled={!isReadableArtifact(artifact)} onClick={() => onLoadArtifact(artifact.index)}>
           <strong>{artifact.label}</strong>
-          <span>{artifact.kind} {artifact.exists ? "" : "(missing)"}</span>
+          <span>{artifactKindLabel(artifact)}</span>
         </button>
       ))}
     </div>
@@ -2400,14 +2507,14 @@ function proofLine(item: LandingItem): string {
 function evidenceLine(packet: RunDetail["review_packet"]): string {
   if (packet.readiness.state === "in_progress") return "-";
   if (isRepositoryBlockedPacket(packet)) return "-";
-  const existing = packet.evidence.filter((item) => item.exists).length;
+  const existing = packet.evidence.filter(isReadableArtifact).length;
   if (!packet.evidence.length) return "-";
   if (!existing) return "not attached";
   return `${existing}/${packet.evidence.length}`;
 }
 
 function preferredProofArtifact(artifacts: ArtifactRef[]): ArtifactRef | null {
-  const existing = artifacts.filter((artifact) => artifact.exists);
+  const existing = artifacts.filter(isReadableArtifact);
   if (!existing.length) return null;
   const preferredLabels = ["summary", "queue manifest", "manifest", "intent", "primary log"];
   for (const label of preferredLabels) {
@@ -2415,6 +2522,23 @@ function preferredProofArtifact(artifacts: ArtifactRef[]): ArtifactRef | null {
     if (match) return match;
   }
   return existing[0] || null;
+}
+
+function canShowDiff(detail: RunDetail | null): boolean {
+  if (!detail) return false;
+  const packet = detail.review_packet;
+  if (!packet.changes.branch || packet.changes.diff_error) return false;
+  return packet.readiness.state !== "in_progress";
+}
+
+function isReadableArtifact(artifact: ArtifactRef): boolean {
+  return artifact.exists && artifact.kind !== "directory";
+}
+
+function artifactKindLabel(artifact: ArtifactRef): string {
+  if (!artifact.exists) return `${artifact.kind} (missing)`;
+  if (artifact.kind === "directory") return "directory - use Diff for code review";
+  return artifact.kind;
 }
 
 function formatArtifactContent(content: string): string {
@@ -2427,6 +2551,84 @@ function formatArtifactContent(content: string): string {
     return content;
   }
 }
+
+function renderDiffText(text: string) {
+  return text.split(/(\n)/).map((part, index) => {
+    if (part === "\n") return part;
+    const className = diffLineClass(part);
+    return <span className={className} key={`${index}-${part.slice(0, 12)}`}>{part}</span>;
+  });
+}
+
+function diffLineClass(line: string): string {
+  if (line.startsWith("@@")) return "diff-hunk";
+  if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ")) return "diff-meta";
+  if (line.startsWith("+")) return "diff-add";
+  if (line.startsWith("-")) return "diff-del";
+  return "diff-context";
+}
+
+function renderAnsiText(text: string) {
+  const segments: ReactNode[] = [];
+  const pattern = /\x1b\[([0-9;]*)m/g;
+  let lastIndex = 0;
+  let style: {fg: string; bold: boolean} = {fg: "", bold: false};
+  let key = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > lastIndex) {
+      appendAnsiSegment(segments, text.slice(lastIndex, match.index), style, key++);
+    }
+    style = applyAnsiCodes(style, match[1] || "0");
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    appendAnsiSegment(segments, text.slice(lastIndex), style, key++);
+  }
+  return segments.length ? segments : text;
+}
+
+function appendAnsiSegment(segments: ReactNode[], text: string, style: {fg: string; bold: boolean}, key: number) {
+  if (!text) return;
+  const className = [style.fg ? `ansi-${style.fg}` : "", style.bold ? "ansi-bold" : ""].filter(Boolean).join(" ");
+  if (!className) {
+    segments.push(text);
+    return;
+  }
+  segments.push(<span className={className} key={`ansi-${key}`}>{text}</span>);
+}
+
+function applyAnsiCodes(current: {fg: string; bold: boolean}, rawCodes: string): {fg: string; bold: boolean} {
+  const codes = rawCodes.split(";").filter(Boolean).map((code) => Number(code));
+  if (!codes.length) return {fg: "", bold: false};
+  let next = {...current};
+  for (const code of codes) {
+    if (code === 0) next = {fg: "", bold: false};
+    else if (code === 1) next.bold = true;
+    else if (code === 22) next.bold = false;
+    else if (code === 39) next.fg = "";
+    else if (ANSI_COLOR_CLASS[code]) next.fg = ANSI_COLOR_CLASS[code];
+  }
+  return next;
+}
+
+const ANSI_COLOR_CLASS: Record<number, string> = {
+  30: "black",
+  31: "red",
+  32: "green",
+  33: "yellow",
+  34: "blue",
+  35: "magenta",
+  36: "cyan",
+  37: "white",
+  90: "gray",
+  91: "red",
+  92: "green",
+  93: "yellow",
+  94: "blue",
+  95: "magenta",
+  96: "cyan",
+  97: "white",
+};
 
 function isRepositoryBlockedPacket(packet: RunDetail["review_packet"]): boolean {
   return packet.readiness.blockers.some((blocker) => blocker.startsWith("Repository has local changes"));

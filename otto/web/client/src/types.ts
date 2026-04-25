@@ -362,6 +362,18 @@ export interface ArtifactContentResponse {
   truncated: boolean;
 }
 
+export interface DiffResponse {
+  run_id: string;
+  branch: string | null;
+  target: string;
+  command: string | null;
+  files: string[];
+  file_count: number;
+  text: string;
+  error: string | null;
+  truncated: boolean;
+}
+
 export interface ActionResult {
   ok: boolean;
   message: string | null;

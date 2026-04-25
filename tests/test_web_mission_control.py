@@ -148,6 +148,26 @@ def test_web_project_launcher_creates_managed_git_project(tmp_path: Path) -> Non
     assert payload["projects"][0]["path"] == str(project_path.resolve())
 
 
+def test_web_project_launcher_can_clear_selected_project(tmp_path: Path) -> None:
+    host = tmp_path / "host"
+    projects_root = tmp_path / "managed"
+    _init_repo(host)
+
+    client = TestClient(create_app(host, project_launcher=True, projects_root=projects_root))
+    created = client.post("/api/projects/create", json={"name": "Expense Approval Portal"}).json()
+    assert created["project"]["name"] == "expense-approval-portal"
+
+    cleared = client.post("/api/projects/clear", json={})
+
+    assert cleared.status_code == 200
+    payload = cleared.json()
+    assert payload["current"] is None
+    assert payload["projects"][0]["name"] == "expense-approval-portal"
+    state = client.get("/api/state")
+    assert state.status_code == 409
+    assert "No project selected" in state.json()["message"]
+
+
 def test_web_project_launcher_rejects_selection_outside_managed_root(tmp_path: Path) -> None:
     host = tmp_path / "host"
     outside = tmp_path / "outside"
@@ -782,6 +802,13 @@ def test_web_landing_and_detail_show_review_packet_changed_files(tmp_path: Path)
     assert packet["changes"]["diff_command"] == "git diff main...build/ready-task"
     assert packet["next_action"]["label"] == "Land selected"
     assert packet["next_action"]["action_key"] == "m"
+
+    diff = client.get("/api/runs/run-ready/diff").json()
+    assert diff["command"] == "git diff main...build/ready-task"
+    assert diff["files"] == ["feature.txt"]
+    assert diff["file_count"] == 1
+    assert diff["error"] is None
+    assert "+ready" in diff["text"]
 
 
 def test_web_landing_surfaces_diff_errors(tmp_path: Path) -> None:

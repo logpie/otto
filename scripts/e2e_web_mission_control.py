@@ -84,6 +84,7 @@ COVERAGE_MODEL: dict[str, list[dict[str, str]]] = {
         {"id": "run.land.bulk.cancel", "scenario": "control-tour", "intent": "cancel bulk land confirmation"},
         {"id": "run.land.bulk.confirm", "scenario": "bulk-land", "intent": "land all ready tasks"},
         {"id": "run.cleanup.cancel", "scenario": "control-tour", "intent": "open and cancel advanced cleanup"},
+        {"id": "inspector.diff", "scenario": "ready-land", "intent": "open changed-file code diff before landing"},
         {"id": "inspector.proof", "scenario": "long-log-layout", "intent": "open proof content"},
         {"id": "inspector.logs", "scenario": "long-log-layout", "intent": "open bounded logs"},
         {"id": "inspector.artifact.drilldown", "scenario": "long-log-layout", "intent": "open artifact content and return"},
@@ -260,6 +261,13 @@ def scenario_project_launcher(ctx: ScenarioContext) -> None:
     assert_page_contains(str(managed))
     browser("find", "role", "button", "click", "--name", "Close")
     assert_page_lacks(str(host))
+    browser("find", "testid", "switch-project-button", "click")
+    wait_text("Project Launcher")
+    wait_text("Open project")
+    wait_text("expense-approval-portal")
+    browser("find", "role", "button", "click", "--name", "expense-approval-portal")
+    wait_text("Task Board")
+    assert_page_contains("expense-approval-portal")
     screenshot(ctx, "project-launcher.png")
 
 
@@ -298,6 +306,12 @@ def scenario_ready_land(ctx: ScenarioContext) -> None:
     browser("find", "testid", "task-card-saved-views", "click")
     wait_text("Ready for review")
     wait_text("Safe to land into main.")
+    browser("find", "testid", "open-diff-button", "click")
+    wait_text("Code diff")
+    wait_text("saved_views.txt")
+    wait_text("+saved-views")
+    browser("find", "testid", "close-inspector-button", "click")
+    assert_inspector_closed()
     browser("find", "testid", "review-next-action-button", "click")
     browser("find", "role", "button", "click", "--name", "Land task")
     wait_text("merge saved-views")
@@ -1254,6 +1268,8 @@ def assert_long_log_layout() -> None:
             inspectorExists: Boolean(inspector),
             detailExists: Boolean(detail),
             detailHasLog: Boolean(detailLog),
+            logWhiteSpace: log ? getComputedStyle(log).whiteSpace : "",
+            logOverflowWrap: log ? getComputedStyle(log).overflowWrap : "",
             inspectorWidth: inspectorBox ? Math.round(inspectorBox.width) : 0,
             inspectorHeight: inspectorBox ? Math.round(inspectorBox.height) : 0,
             inspectorTop: inspectorBox ? Math.round(inspectorBox.top) : 0,
@@ -1276,6 +1292,8 @@ def assert_long_log_layout() -> None:
         raise AssertionError(f"missing inspector/detail: {metrics}")
     if metrics["detailHasLog"]:
         raise AssertionError(f"log pane is still cramped inside the detail panel: {metrics}")
+    if metrics["logWhiteSpace"] != "pre-wrap" or metrics["logOverflowWrap"] not in {"anywhere", "break-word"}:
+        raise AssertionError(f"logs should wrap by default: {metrics}")
     if metrics["viewportWidth"] > 1180 and metrics["inspectorWidth"] < metrics["viewportWidth"] * 0.78:
         raise AssertionError(f"inspector should have a wide review workspace: {metrics}")
     if metrics["viewportWidth"] <= 980 and metrics["inspectorWidth"] < metrics["viewportWidth"] - 40:

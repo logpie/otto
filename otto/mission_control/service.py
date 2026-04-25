@@ -134,6 +134,41 @@ class MissionControlService:
             "truncated": read.next_offset < (path.stat().st_size if path.exists() else read.next_offset),
         }
 
+    def diff(
+        self,
+        run_id: str,
+        *,
+        filters: MissionControlFilters | None = None,
+        limit_chars: int = 240_000,
+    ) -> dict[str, Any]:
+        detail = self._detail_view(run_id, filters)
+        target = _review_target(self.project_dir, detail.record)
+        branch = _optional_str(detail.record.git.get("branch"))
+        diff = _branch_diff(self.project_dir, branch, target)
+        text = ""
+        truncated = False
+        command = f"git diff {target}...{branch}" if branch and branch != target else None
+        if branch and target and branch != target and diff["error"] is None:
+            text_result = _branch_diff_text(self.project_dir, branch, target)
+            if text_result["error"] is not None:
+                diff = {**diff, "error": text_result["error"]}
+            else:
+                text = str(text_result["text"])
+                if len(text) > limit_chars:
+                    text = text[:limit_chars]
+                    truncated = True
+        return {
+            "run_id": detail.run_id,
+            "branch": branch,
+            "target": target,
+            "command": command,
+            "files": diff["files"],
+            "file_count": len(diff["files"]),
+            "text": text,
+            "error": diff["error"],
+            "truncated": truncated,
+        }
+
     def execute(
         self,
         run_id: str,
@@ -1429,6 +1464,20 @@ def _branch_diff(project_dir: Path, branch: str | None, target: str) -> dict[str
         detail = (result.stderr or result.stdout or f"git diff exited {result.returncode}").strip()
         return {"files": [], "error": detail}
     return {"files": sorted(line for line in result.stdout.splitlines() if line), "error": None}
+
+
+def _branch_diff_text(project_dir: Path, branch: str | None, target: str) -> dict[str, Any]:
+    branch = str(branch or "").strip()
+    target = str(target or "").strip()
+    if not branch or not target or branch == target:
+        return {"text": "", "error": None}
+    target_ref = _git_diff_ref(project_dir, target)
+    branch_ref = _git_diff_ref(project_dir, branch)
+    result = git_ops.run_git(project_dir, "diff", "--no-ext-diff", "--no-color", f"{target_ref}...{branch_ref}")
+    if not result.ok:
+        detail = (result.stderr or result.stdout or f"git diff exited {result.returncode}").strip()
+        return {"text": "", "error": detail}
+    return {"text": result.stdout, "error": None}
 
 
 def _git_diff_ref(project_dir: Path, ref: str) -> str:

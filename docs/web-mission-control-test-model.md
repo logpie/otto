@@ -20,6 +20,7 @@ Mission Control E2E coverage is now model-driven instead of a loose smoke suite.
 ## Covered Actions
 
 - Create a managed project from the launcher.
+- Return from Mission Control to the project launcher and reopen a managed project.
 - Submit build jobs.
 - Submit improve jobs with advanced options.
 - Submit certify jobs with advanced options.
@@ -31,6 +32,7 @@ Mission Control E2E coverage is now model-driven instead of a loose smoke suite.
 - Confirm bulk landing.
 - Open and cancel advanced cleanup.
 - Open proof, logs, and artifact drill-downs.
+- Open code diff before landing a ready task.
 - Open diagnostics.
 - Search and clear task filters.
 - Run responsive viewport checks.
@@ -75,3 +77,10 @@ The harness removes old numbered scenario folders before each run. On failure it
 ## Bug Found In This Round
 
 Submitting an `improve` job from the web UI with an unknown `After` dependency produced an internal server error. The service now converts queue validation `ValueError`s into user-facing HTTP 400 responses, and the regression test verifies the queue remains unchanged.
+
+Additional UI gaps covered after real use:
+
+- Mission Control now has a `Switch project` control when launched with the managed project launcher.
+- The evidence inspector has a `Diff` path for changed files, so users do not have to click a worktree directory to understand code changes.
+- Directory artifacts are labeled as directories and are not treated as readable evidence files.
+- Logs wrap by default and render ANSI color sequences instead of showing raw escape codes.

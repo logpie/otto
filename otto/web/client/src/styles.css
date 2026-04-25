@@ -1513,6 +1513,7 @@ tbody tr.selected {
 }
 
 .run-inspector .log-viewer,
+.run-inspector .diff-viewer,
 .run-inspector .artifact-pane {
   min-height: 0;
 }
@@ -1658,14 +1659,16 @@ tbody tr.selected {
   white-space: pre-wrap;
 }
 
-.log-viewer {
+.log-viewer,
+.diff-viewer {
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   background: #0b1020;
 }
 
-.log-toolbar {
+.log-toolbar,
+.diff-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1676,12 +1679,15 @@ tbody tr.selected {
   font-size: 12px;
 }
 
-.log-toolbar span {
+.log-toolbar span,
+.diff-toolbar span {
   color: #94a3b8;
 }
 
 .log-pane,
+.diff-pane,
 .artifact-pane {
+  min-height: 0;
   margin: 0;
   padding: 12px;
   overflow: auto;
@@ -1689,6 +1695,81 @@ tbody tr.selected {
   color: #e5e7eb;
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.log-pane,
+.diff-pane {
+  flex: 1;
+}
+
+.diff-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 12px;
+  list-style: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  color: #cbd5e1;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.diff-files li {
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.14);
+  overflow-wrap: anywhere;
+}
+
+.diff-error {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  color: #fecaca;
+  background: rgba(185, 28, 28, 0.18);
+}
+
+.diff-add,
+.ansi-green {
+  color: #86efac;
+}
+
+.diff-del,
+.ansi-red {
+  color: #fca5a5;
+}
+
+.diff-hunk,
+.ansi-cyan {
+  color: #67e8f9;
+}
+
+.diff-meta,
+.ansi-blue {
+  color: #93c5fd;
+}
+
+.ansi-yellow {
+  color: #fde68a;
+}
+
+.ansi-magenta {
+  color: #f0abfc;
+}
+
+.ansi-gray,
+.ansi-black {
+  color: #94a3b8;
+}
+
+.ansi-white {
+  color: #f8fafc;
+}
+
+.ansi-bold {
+  font-weight: 700;
 }
 
 .artifact-pane {

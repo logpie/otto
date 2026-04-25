@@ -148,6 +148,10 @@ def create_app(
     def run_artifact_content(run_id: str, artifact_index: int) -> dict[str, Any]:
         return _service().artifact_content(run_id, artifact_index)
 
+    @app.get("/api/runs/{run_id}/diff")
+    def run_diff(run_id: str) -> dict[str, Any]:
+        return _service().diff(run_id)
+
     @app.post("/api/runs/{run_id}/actions/{action}")
     def run_action(run_id: str, action: str, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
         return _service().execute(
