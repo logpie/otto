@@ -40,6 +40,7 @@ from typing import Any
 
 from otto.manifest import queue_index_path_for
 from otto import paths
+from otto.queue.artifacts import preserve_queue_session_artifacts
 from otto.queue.runtime import (
     IN_FLIGHT_STATUSES,
     INTERRUPTED_STATUS,
@@ -688,6 +689,41 @@ class Runner:
             ts["child"] = None
             ts["failure_reason"] = None
             ts["resumed_from_checkpoint"] = True
+        elif kind == "cleanup":
+            if status not in {"done", "failed", "cancelled", "removed", INTERRUPTED_STATUS}:
+                logger.warning("cleanup ignored for %s in status=%s", tid, status)
+                return
+            task = next((task for task in self._load_queue_or_empty(context="cleanup command") if task.id == tid), None)
+            if task is not None and task.worktree:
+                wt_path = self.project_dir / task.worktree
+                if wt_path.exists():
+                    try:
+                        preserve_queue_session_artifacts(
+                            self.project_dir,
+                            task_id=tid,
+                            worktree_path=wt_path,
+                            strict=False,
+                        )
+                    except Exception as exc:
+                        logger.warning("cleanup: could not preserve artifacts for %s: %s", tid, exc)
+                        return
+                    result = subprocess.run(
+                        ["git", "worktree", "remove", str(wt_path)],
+                        cwd=self.project_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if result.returncode != 0:
+                        detail = (result.stderr or result.stdout or "").strip()
+                        logger.warning("cleanup: could not remove worktree for %s: %s", tid, detail)
+                        return
+            if self._remove_task_definition(tid) is None:
+                return
+            ts["status"] = "removed"
+            ts["finished_at"] = ts.get("finished_at") or now_iso()
+            ts["child"] = None
+            ts["failure_reason"] = ts.get("failure_reason") or "cleaned up"
+            logger.info("cleanup: removed terminal task %s from queue", tid)
         else:
             logger.warning("unknown command kind: %r", kind)
 

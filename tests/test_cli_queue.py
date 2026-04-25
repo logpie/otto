@@ -19,6 +19,7 @@ from otto.queue.schema import (
     QueueTask,
     append_task,
     load_queue,
+    load_state,
     write_state,
 )
 from otto.runs.history import append_history_snapshot, read_history_rows
@@ -430,6 +431,62 @@ def test_queue_rm_refuses_finished_task_without_watcher(tmp_path: Path):
     assert [task.id for task in load_queue(repo)] == ["csv"]
 
 
+def test_queue_cleanup_without_watcher_prunes_terminal_task(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(
+        repo,
+        QueueTask(
+            id="failed-task",
+            command_argv=["build", "failed"],
+            added_at="2026-04-25T00:00:00Z",
+            branch="build/failed-task",
+            worktree=".worktrees/failed-task",
+        ),
+    )
+    _write_watcher_state(repo, watcher=None, tasks={"failed-task": {"status": "failed"}})
+
+    code, out, _ = _run(["queue", "cleanup", "failed-task"], cwd=repo)
+
+    assert code == 0, out
+    assert "removed terminal task" in out
+    assert [task.id for task in load_queue(repo)] == []
+    assert "failed-task" not in load_state(repo)["tasks"]
+
+
+def test_queue_cleanup_with_watcher_queues_cleanup_command(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+    append_task(
+        repo,
+        QueueTask(
+            id="failed-task",
+            command_argv=["build", "failed"],
+            added_at="2026-04-25T00:00:00Z",
+            branch="build/failed-task",
+            worktree=".worktrees/failed-task",
+        ),
+    )
+    now = _fresh_iso_now()
+    _write_watcher_state(
+        repo,
+        watcher={
+            "pid": os.getpid(),
+            "pgid": os.getpid(),
+            "started_at": now,
+            "heartbeat": now,
+        },
+        tasks={"failed-task": {"status": "failed"}},
+    )
+    monkeypatch.setattr(cli_queue_module.os, "kill", lambda pid, sig: None)
+
+    code, out, _ = _run(["queue", "cleanup", "failed-task"], cwd=repo)
+
+    assert code == 0, out
+    assert "Cleanup queued; watcher will remove 1 terminal task from the board." in out
+    assert [task.id for task in load_queue(repo)] == ["failed-task"]
+    cmds = [json.loads(line) for line in (repo / COMMANDS_FILE).read_text().splitlines() if line.strip()]
+    assert cmds == [{"ts": cmds[0]["ts"], "cmd": "cleanup", "id": "failed-task"}]
+
+
 def test_queue_cleanup_preserves_session_artifacts_and_repairs_history(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path
     task_id = "csv"
@@ -493,6 +550,7 @@ def test_queue_cleanup_preserves_session_artifacts_and_repairs_history(tmp_path:
             worktree=".worktrees/csv",
         ),
     )
+    _write_watcher_state(repo, watcher=None, tasks={task_id: {"status": "done"}})
     append_history_snapshot(
         repo,
         {

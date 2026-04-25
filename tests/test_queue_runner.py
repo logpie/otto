@@ -1244,6 +1244,27 @@ def test_remove_done_task_is_noop_with_cleanup_warning(tmp_path: Path, caplog):
     assert "use cleanup" in caplog.text
 
 
+def test_cleanup_command_prunes_terminal_task_from_queue(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="failed1",
+        command_argv=["build", "failed1"],
+        branch="build/failed1",
+        worktree=".worktrees/failed1",
+    ))
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["failed1"] = {
+        "status": "failed",
+        "finished_at": "2026-04-20T00:00:00Z",
+    }
+
+    runner._apply_command({"cmd": "cleanup", "id": "failed1"}, state)
+
+    assert state["tasks"]["failed1"]["status"] == "removed"
+    assert [task.id for task in load_queue(repo)] == []
+
+
 def test_immediate_shutdown_marks_running_task_interrupted(tmp_path: Path):
     repo = init_repo(tmp_path)
     append_task(repo, QueueTask(

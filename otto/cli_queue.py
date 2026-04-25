@@ -848,7 +848,7 @@ def register_queue_commands(main: click.Group) -> None:
             otto queue cleanup --all        # also failed/cancelled/removed
             otto queue cleanup t1 t2        # specific tasks
         """
-        from otto.queue.schema import load_queue, load_state
+        from otto.queue.schema import append_command, load_queue, load_state, remove_task, write_state
         project_dir = _project_dir()
         try:
             tasks = load_queue(project_dir)
@@ -880,39 +880,71 @@ def register_queue_commands(main: click.Group) -> None:
             console.print("  No worktrees to clean up.")
             return
 
+        terminal_statuses = {"done", "failed", "cancelled", "removed", INTERRUPTED_STATUS}
+        non_terminal = [
+            t.id
+            for t in targets
+            if task_display_status(state.get("tasks", {}).get(t.id, {"status": "queued"})) not in terminal_statuses
+        ]
+        if non_terminal:
+            error_console.print(
+                "[error]cleanup only applies to terminal tasks; still active: "
+                f"{rich_escape(', '.join(non_terminal))}[/error]"
+            )
+            sys.exit(2)
+
+        if _watcher_is_alive(project_dir):
+            for t in targets:
+                append_command(project_dir, {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "cmd": "cleanup",
+                    "id": t.id,
+                })
+            console.print(
+                "  Cleanup queued; watcher will remove "
+                f"{len(targets)} terminal task{'s' if len(targets) != 1 else ''} from the board."
+            )
+            return
+
         cleaned = 0
         skipped = 0
         for t in targets:
-            if not t.worktree:
-                continue
-            wt_path = project_dir / t.worktree
-            if not wt_path.exists():
-                continue
-            try:
-                preserve_queue_session_artifacts(
-                    project_dir,
-                    task_id=t.id,
-                    worktree_path=wt_path,
-                    strict=False,
-                )
-            except Exception as exc:
-                console.print(
-                    f"  [yellow]✗[/yellow] could not preserve queue artifacts for {t.worktree}: "
-                    f"{rich_escape(str(exc))}"
-                )
-                skipped += 1
-                continue
-            r = _git_worktree_remove(project_dir, wt_path, force=force)
-            if r.returncode == 0:
-                console.print(f"  [success]✓[/success] removed [info]{t.worktree}[/info] (task: {t.id})")
-                cleaned += 1
-            else:
-                console.print(f"  [yellow]✗[/yellow] could not remove {t.worktree}: "
-                              f"{rich_escape(r.stderr.strip())}")
-                skipped += 1
+            removed_worktree = False
+            if t.worktree:
+                wt_path = project_dir / t.worktree
+                if wt_path.exists():
+                    try:
+                        preserve_queue_session_artifacts(
+                            project_dir,
+                            task_id=t.id,
+                            worktree_path=wt_path,
+                            strict=False,
+                        )
+                    except Exception as exc:
+                        console.print(
+                            f"  [yellow]✗[/yellow] could not preserve queue artifacts for {t.worktree}: "
+                            f"{rich_escape(str(exc))}"
+                        )
+                        skipped += 1
+                        continue
+                    r = _git_worktree_remove(project_dir, wt_path, force=force)
+                    if r.returncode == 0:
+                        console.print(f"  [success]✓[/success] removed [info]{t.worktree}[/info] (task: {t.id})")
+                        removed_worktree = True
+                    else:
+                        console.print(f"  [yellow]✗[/yellow] could not remove {t.worktree}: "
+                                      f"{rich_escape(r.stderr.strip())}")
+                        skipped += 1
+                        continue
+            remove_task(project_dir, t.id)
+            state.get("tasks", {}).pop(t.id, None)
+            cleaned += 1
+            if not removed_worktree:
+                console.print(f"  [success]✓[/success] removed terminal task [info]{t.id}[/info] from queue.")
+        write_state(project_dir, state)
         console.print(
             f"\n  Done. Cleaned {cleaned}, skipped {skipped}. "
-            f"Manifests preserved at otto_logs/queue/<task-id>/."
+            f"Manifests preserved at otto_logs/queue/<task-id>/; history preserved."
         )
 
     # ---- run (the watcher) ----
