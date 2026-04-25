@@ -71,6 +71,7 @@ def main() -> int:
             "multi-state",
             "command-backlog",
             "long-log-layout",
+            "control-tour",
         ],
         default="all",
     )
@@ -137,6 +138,7 @@ def scenarios() -> list[Scenario]:
         Scenario("multi-state", "audit queued, failed, ready, and landed work in one board", scenario_multi_state),
         Scenario("command-backlog", "recover pending command backlog when the watcher is stopped", scenario_command_backlog),
         Scenario("long-log-layout", "keep large logs in a bounded full-width inspector", scenario_long_log_layout),
+        Scenario("control-tour", "click through the main controls, dialogs, inspectors, and tabs", scenario_control_tour),
     ]
 
 
@@ -199,7 +201,7 @@ def scenario_ready_land(ctx: ScenarioContext) -> None:
     browser("find", "testid", "task-card-saved-views", "click")
     wait_text("Ready for review")
     wait_text("Safe to land into main.")
-    browser("find", "role", "button", "click", "--name", "Land selected")
+    browser("find", "testid", "review-next-action-button", "click")
     browser("find", "role", "button", "click", "--name", "Land task")
     wait_text("merge saved-views")
     wait_for_api_state(ctx, lambda state: state["landing"]["counts"]["merged"] >= 1, "task landed", timeout_s=20)
@@ -333,17 +335,123 @@ def scenario_command_backlog(ctx: ScenarioContext) -> None:
     screenshot(ctx, "command-backlog.png")
 
 
+def scenario_control_tour(ctx: ScenarioContext) -> None:
+    repo = init_repo(ctx.run_root / "control-tour")
+    seed_ready_task(repo, task_id="ready-dashboard", filename="ready_dashboard.txt")
+    start_server(ctx, repo)
+    open_app(ctx)
+
+    wait_text("1 task ready to land")
+    browser("find", "role", "button", "click", "--name", "Refresh")
+    assert_no_horizontal_overflow()
+
+    browser("find", "label", "Search", "fill", "ready-dashboard")
+    wait_text("ready-dashboard")
+    assert_task_card_count(1)
+    browser("find", "label", "Search", "fill", "no-such-task")
+    assert_task_card_count(0)
+    browser("find", "role", "button", "click", "--name", "Clear filters")
+    wait_text("ready-dashboard")
+
+    browser("select", "[data-testid='filter-type-select']", "build")
+    browser("select", "[data-testid='filter-outcome-select']", "success")
+    browser("find", "role", "button", "click", "--name", "Clear filters")
+    browser("find", "label", "Active", "click")
+    browser("find", "role", "button", "click", "--name", "Clear filters")
+
+    browser("find", "testid", "new-job-button", "click")
+    wait_text("New queue job")
+    assert_modal_focus()
+    assert_submit_disabled("Queue job")
+    browser("select", "[data-testid='job-command-select']", "improve")
+    wait_text("Improve mode")
+    browser("select", "[data-testid='job-improve-mode-select']", "feature")
+    browser("find", "label", "Intent / focus", "fill", "Add saved dashboard views with named filters.")
+    browser("find", "label", "Task id", "fill", "saved-dashboard-views")
+    browser("find", "label", "After", "fill", "ready-dashboard")
+    browser("select", "[data-testid='job-provider-select']", "codex")
+    browser("select", "[data-testid='job-effort-select']", "high")
+    browser("find", "label", "Model", "fill", "gpt-5.4")
+    browser("find", "label", "Fast mode", "click")
+    browser("find", "testid", "target-project-confirm", "click")
+    assert_submit_enabled("Queue job")
+    browser("find", "role", "button", "click", "--name", "Close")
+    assert_page_lacks("New queue job")
+
+    browser("find", "role", "button", "click", "--name", "Land all ready")
+    wait_text("Land ready tasks")
+    assert_modal_focus()
+    browser("find", "role", "button", "click", "--name", "Cancel")
+    assert_no_dialog()
+
+    browser("find", "testid", "task-card-ready-dashboard", "click")
+    wait_text("Ready for review")
+    browser("find", "testid", "open-proof-button", "click")
+    wait_text("Proof of work")
+    assert_no_horizontal_overflow()
+    if ctx.viewport_width > 980:
+        browser("find", "testid", "new-job-button", "click")
+        wait_text("New queue job")
+        assert_modal_focus()
+        browser("find", "role", "button", "click", "--name", "Close")
+        assert_inspector_closed()
+        browser("find", "testid", "open-proof-button", "click")
+        wait_text("Proof of work")
+    browser("find", "role", "tab", "click", "--name", "Artifacts")
+    wait_text("Artifacts")
+    browser("find", "role", "tab", "click", "--name", "Logs")
+    wait_text("Run logs")
+    browser("find", "role", "tab", "click", "--name", "Proof")
+    wait_text("Certification checks")
+    browser("find", "testid", "close-inspector-button", "click")
+    assert_inspector_closed()
+
+    browser("find", "testid", "review-next-action-button", "click")
+    wait_text("Land task")
+    assert_modal_focus()
+    browser("find", "role", "button", "click", "--name", "Cancel")
+    assert_no_dialog()
+
+    browser("find", "text", "Advanced run actions", "click")
+    wait_text("Clean run record")
+    browser("find", "role", "button", "click", "--name", "Clean run record")
+    wait_text("Clean run record")
+    assert_modal_focus()
+    browser("find", "role", "button", "click", "--name", "Cancel")
+    assert_no_dialog()
+
+    browser("find", "testid", "diagnostics-tab", "click")
+    wait_text("Diagnostics Summary")
+    wait_text("Live Runs")
+    browser("find", "testid", "tasks-tab", "click")
+    wait_text("Task Board")
+    assert_no_horizontal_overflow()
+    screenshot(ctx, "control-tour.png")
+
+
 def scenario_long_log_layout(ctx: ScenarioContext) -> None:
     repo = init_repo(ctx.run_root / "long-log")
     seed_long_log_run(repo)
     start_server(ctx, repo)
     open_app(ctx)
 
-    wait_text("Long log fixture")
+    wait_text("run-long-log")
     assert_inspector_closed()
     browser("find", "testid", "open-proof-button", "click")
     wait_text("Proof of work")
     assert_page_contains("Evidence artifacts")
+    assert_page_contains("Evidence content")
+    assert_page_contains("stories_tested")
+    browser("find", "testid", "close-inspector-button", "click")
+    assert_inspector_closed()
+    browser("find", "testid", "review-more-artifacts-button", "click")
+    wait_text("messages")
+    assert_artifact_list_layout()
+    browser("find", "role", "button", "click", "--name", "primary log log")
+    wait_text("complete lines")
+    assert_page_contains("Long log fixture output line")
+    browser("find", "role", "button", "click", "--name", "Back to artifacts")
+    wait_text("messages")
     browser("find", "testid", "close-inspector-button", "click")
     assert_inspector_closed()
     browser("find", "testid", "open-logs-button", "click")
@@ -479,6 +587,13 @@ def seed_landed_task(repo: Path, *, task_id: str, filename: str) -> None:
 
 def seed_long_log_run(repo: Path) -> None:
     run_id = "run-long-log"
+    branch = "build/long-log-fixture"
+    git(repo, "checkout", "-q", "-b", branch)
+    (repo / "long_log_fixture.txt").write_text("long log fixture\n", encoding="utf-8")
+    git(repo, "add", "long_log_fixture.txt")
+    git(repo, "commit", "-q", "-m", "add long log fixture")
+    git(repo, "checkout", "-q", "main")
+    session_dir = paths.session_dir(repo, run_id)
     log_path = paths.build_dir(repo, run_id) / "narrative.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -486,6 +601,29 @@ def seed_long_log_run(repo: Path) -> None:
         for index in range(900)
     ]
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    messages_path = log_path.with_name("messages.jsonl")
+    messages_path.write_text(json.dumps({"event": "long-log", "run_id": run_id}) + "\n", encoding="utf-8")
+    manifest_path = session_dir / "manifest.json"
+    summary_path = session_dir / "summary.json"
+    checkpoint_path = session_dir / "checkpoint.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps({"run_id": run_id, "command": "build", "fixture": "long-log"}, indent=2), encoding="utf-8")
+    summary_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "status": "done",
+                "intent": "Exercise Mission Control with a large streaming log.",
+                "stories_tested": 3,
+                "stories_passed": 3,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    checkpoint_path.write_text(json.dumps({"resumable": True, "last_step": "streaming"}, indent=2), encoding="utf-8")
+    intent_path = session_dir / "intent.txt"
+    intent_path.write_text("Exercise Mission Control with a large streaming log.\n", encoding="utf-8")
     record = make_run_record(
         project_dir=repo,
         run_id=run_id,
@@ -493,11 +631,16 @@ def seed_long_log_run(repo: Path) -> None:
         run_type="build",
         command="build long-log-fixture",
         display_name="Long log fixture",
-        status="running",
+        status="done",
         cwd=repo,
-        git={"branch": "build/long-log-fixture"},
-        intent={"summary": "Exercise Mission Control with a large streaming log."},
-        artifacts={"primary_log_path": str(log_path)},
+        git={"branch": branch},
+        intent={"summary": "Exercise Mission Control with a large streaming log.", "intent_path": str(intent_path)},
+        artifacts={
+            "manifest_path": str(manifest_path),
+            "summary_path": str(summary_path),
+            "checkpoint_path": str(checkpoint_path),
+            "primary_log_path": str(log_path),
+        },
         adapter_key="atomic.build",
         last_event="streaming long log fixture output",
     )
@@ -741,6 +884,58 @@ def assert_no_passive_refresh_status() -> None:
         raise AssertionError(f"unexpected passive refresh status {forbidden}\n{snapshot}")
 
 
+def assert_no_horizontal_overflow() -> None:
+    raw = browser_eval(
+        """JSON.stringify({
+          viewportWidth: window.innerWidth,
+          scrollWidth: document.documentElement.scrollWidth,
+          bodyScrollWidth: document.body?.scrollWidth || 0
+        })"""
+    )
+    metrics = json.loads(raw)
+    if isinstance(metrics, str):
+        metrics = json.loads(metrics)
+    max_scroll = max(int(metrics["scrollWidth"]), int(metrics["bodyScrollWidth"]))
+    if max_scroll > int(metrics["viewportWidth"]) + 1:
+        raise AssertionError(f"page has horizontal overflow: {metrics}")
+
+
+def assert_task_card_count(expected: int) -> None:
+    raw = browser_eval(
+        """JSON.stringify({
+          count: document.querySelectorAll('.task-card-main').length,
+          titles: [...document.querySelectorAll('.task-card-main .task-title')].map((item) => item.textContent || '')
+        })"""
+    )
+    metrics = json.loads(raw)
+    if isinstance(metrics, str):
+        metrics = json.loads(metrics)
+    if int(metrics["count"]) != expected:
+        raise AssertionError(f"expected {expected} task card(s): {metrics}")
+
+
+def assert_submit_disabled(label: str) -> None:
+    result = browser_eval(
+        f"""(() => {{
+          const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === {json.dumps(label)});
+          return button instanceof HTMLButtonElement && button.disabled;
+        }})()"""
+    )
+    if not result.endswith("true"):
+        raise AssertionError(f"expected {label!r} submit button to be disabled: {result}")
+
+
+def assert_submit_enabled(label: str) -> None:
+    result = browser_eval(
+        f"""(() => {{
+          const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === {json.dumps(label)});
+          return button instanceof HTMLButtonElement && !button.disabled;
+        }})()"""
+    )
+    if not result.endswith("true"):
+        raise AssertionError(f"expected {label!r} submit button to be enabled: {result}")
+
+
 def assert_modal_focus() -> None:
     result = browser_eval(
         """(() => {
@@ -753,6 +948,12 @@ def assert_modal_focus() -> None:
     )
     if not result.endswith("true"):
         raise AssertionError(f"modal focus/background isolation failed: {result}")
+
+
+def assert_no_dialog() -> None:
+    result = browser_eval("""(() => !document.querySelector('[role="dialog"][aria-modal="true"]'))()""")
+    if not result.endswith("true"):
+        raise AssertionError(f"expected modal dialog to be closed: {result}")
 
 
 def assert_long_log_layout() -> None:
@@ -778,6 +979,7 @@ def assert_long_log_layout() -> None:
             viewportWidth: window.innerWidth,
             viewportHeight: window.innerHeight,
             bodyScrollWidth: document.documentElement.scrollWidth,
+            visibleLogHead: log?.textContent?.slice(0, 180) || "",
             visibleLogTail: log?.textContent?.slice(-120) || ""
           };
         })())"""
@@ -789,17 +991,21 @@ def assert_long_log_layout() -> None:
         raise AssertionError(f"missing inspector/detail: {metrics}")
     if metrics["detailHasLog"]:
         raise AssertionError(f"log pane is still cramped inside the detail panel: {metrics}")
-    if metrics["viewportWidth"] > 1180 and metrics["inspectorWidth"] <= metrics["detailWidth"]:
-        raise AssertionError(f"inspector should be wider than the detail panel: {metrics}")
-    if metrics["viewportWidth"] <= 1180 and metrics["inspectorWidth"] < metrics["viewportWidth"] - 40:
+    if metrics["viewportWidth"] > 1180 and metrics["inspectorWidth"] < metrics["viewportWidth"] * 0.78:
+        raise AssertionError(f"inspector should have a wide review workspace: {metrics}")
+    if metrics["viewportWidth"] <= 980 and metrics["inspectorWidth"] < metrics["viewportWidth"] - 40:
         raise AssertionError(f"inspector should use the mobile width: {metrics}")
-    if metrics["inspectorHeight"] < 280 or metrics["inspectorHeight"] > 540:
-        raise AssertionError(f"inspector height should be bounded: {metrics}")
+    if 980 < metrics["viewportWidth"] <= 1180 and metrics["inspectorWidth"] < metrics["viewportWidth"] * 0.68:
+        raise AssertionError(f"inspector should use most of the sidebar desktop workspace: {metrics}")
+    min_height = 620 if metrics["viewportHeight"] >= 760 else max(360, int(metrics["viewportHeight"] * 0.72))
+    if metrics["inspectorHeight"] < min_height:
+        raise AssertionError(f"inspector should have enough workspace height to scan evidence: {metrics}")
     if metrics["viewportWidth"] > 980 and metrics["inspectorBottom"] > metrics["viewportHeight"] + 1:
         raise AssertionError(f"inspector should be visible in the desktop viewport: {metrics}")
-    if metrics["viewportWidth"] > 980 and metrics["inspectorTop"] >= metrics["viewportHeight"] * 0.72:
+    if metrics["viewportWidth"] > 980 and metrics["inspectorTop"] > 140:
         raise AssertionError(f"inspector starts too low to scan: {metrics}")
-    if metrics["logClientHeight"] < 180:
+    min_log_height = 420 if metrics["viewportHeight"] >= 760 else 220
+    if metrics["logClientHeight"] < min_log_height:
         raise AssertionError(f"log viewport is too short to scan: {metrics}")
     if metrics["logScrollHeight"] <= metrics["logClientHeight"]:
         raise AssertionError(f"long logs should scroll inside the inspector: {metrics}")
@@ -807,6 +1013,35 @@ def assert_long_log_layout() -> None:
         raise AssertionError(f"page has horizontal overflow: {metrics}")
     if "0899" not in metrics["visibleLogTail"]:
         raise AssertionError(f"log tail did not load latest output: {metrics}")
+    first_visible_line = str(metrics["visibleLogHead"]).split("\n\n", 1)[-1].splitlines()[0]
+    if not first_visible_line.startswith("0771 [build]"):
+        raise AssertionError(f"log truncation starts mid-line: {metrics}")
+
+
+def assert_artifact_list_layout() -> None:
+    raw = browser_eval(
+        """JSON.stringify((() => {
+          const cards = [...document.querySelectorAll('.artifact-list button')].map((button) => {
+            const box = button.getBoundingClientRect();
+            return {width: Math.round(box.width), height: Math.round(box.height), text: button.textContent || ""};
+          });
+          return {
+            count: cards.length,
+            maxHeight: Math.max(0, ...cards.map((card) => card.height)),
+            minWidth: Math.min(...cards.map((card) => card.width)),
+            hasOverflowArtifact: cards.some((card) => card.text.includes("messages") || card.text.includes("primary log"))
+          };
+        })())"""
+    )
+    metrics = json.loads(raw)
+    if isinstance(metrics, str):
+        metrics = json.loads(metrics)
+    if metrics["count"] < 6 or not metrics["hasOverflowArtifact"]:
+        raise AssertionError(f"artifact cards missing expected items: {metrics}")
+    if metrics["maxHeight"] > 120:
+        raise AssertionError(f"artifact cards are stretched instead of compact: {metrics}")
+    if metrics["minWidth"] < 150:
+        raise AssertionError(f"artifact cards are too narrow to scan: {metrics}")
 
 
 def assert_inspector_closed() -> None:

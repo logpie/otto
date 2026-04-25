@@ -88,6 +88,8 @@ export function App() {
   const [inspectorMode, setInspectorMode] = useState<InspectorMode>("proof");
   const [selectedArtifactIndex, setSelectedArtifactIndex] = useState<number | null>(null);
   const [artifactContent, setArtifactContent] = useState<ArtifactContentResponse | null>(null);
+  const [proofArtifactIndex, setProofArtifactIndex] = useState<number | null>(null);
+  const [proofContent, setProofContent] = useState<ArtifactContentResponse | null>(null);
   const [refreshStatus, setRefreshStatus] = useState("idle");
   const [jobOpen, setJobOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -113,12 +115,19 @@ export function App() {
     setConfirm(next);
   }, []);
 
+  const openJobDialog = useCallback(() => {
+    setInspectorOpen(false);
+    setJobOpen(true);
+  }, []);
+
   const selectRun = useCallback((runId: string) => {
     setInspectorOpen(false);
     if (runId !== selectedRunIdRef.current) {
       setDetail(null);
       setLogText("");
       setArtifactContent(null);
+      setProofContent(null);
+      setProofArtifactIndex(null);
       setSelectedArtifactIndex(null);
       setInspectorMode("proof");
     }
@@ -178,6 +187,8 @@ export function App() {
         setDetail(null);
         setLogText("");
         setArtifactContent(null);
+        setProofContent(null);
+        setProofArtifactIndex(null);
         setInspectorOpen(false);
         setLastError(null);
         setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
@@ -214,6 +225,8 @@ export function App() {
       setDetail(null);
       setLogText("");
       setArtifactContent(null);
+      setProofContent(null);
+      setProofArtifactIndex(null);
       setInspectorOpen(false);
       return;
     }
@@ -222,6 +235,8 @@ export function App() {
     logOffsetRef.current = 0;
     setLogText("");
     setArtifactContent(null);
+    setProofContent(null);
+    setProofArtifactIndex(null);
     setSelectedArtifactIndex(null);
     refreshDetail(selectedRunId).catch((error) => {
       if (detailWasRemoved(error)) {
@@ -229,6 +244,8 @@ export function App() {
         setDetail(null);
         setLogText("");
         setArtifactContent(null);
+        setProofContent(null);
+        setProofArtifactIndex(null);
         setInspectorOpen(false);
         return;
       }
@@ -322,18 +339,36 @@ export function App() {
   }, [refresh, requestConfirm, showToast]);
 
   const loadArtifact = useCallback(async (index: number) => {
-    if (!selectedRunId) return;
+    const runId = selectedRunIdRef.current;
+    if (!runId) return;
     setSelectedArtifactIndex(index);
     setInspectorMode("artifacts");
     setInspectorOpen(true);
     setArtifactContent(null);
     try {
-      const content = await api<ArtifactContentResponse>(`/api/runs/${encodeURIComponent(selectedRunId)}/artifacts/${index}/content`);
+      const content = await api<ArtifactContentResponse>(`/api/runs/${encodeURIComponent(runId)}/artifacts/${index}/content`);
+      if (selectedRunIdRef.current !== runId) return;
       setArtifactContent(content);
     } catch (error) {
+      if (detailWasRemoved(error) || selectedRunIdRef.current !== runId) return;
       showToast(errorMessage(error), "error");
     }
-  }, [selectedRunId, showToast]);
+  }, [showToast]);
+
+  const loadProofArtifact = useCallback(async (index: number) => {
+    const runId = selectedRunIdRef.current;
+    if (!runId) return;
+    setProofArtifactIndex(index);
+    setProofContent(null);
+    try {
+      const content = await api<ArtifactContentResponse>(`/api/runs/${encodeURIComponent(runId)}/artifacts/${index}/content`);
+      if (selectedRunIdRef.current !== runId) return;
+      setProofContent(content);
+    } catch (error) {
+      if (detailWasRemoved(error) || selectedRunIdRef.current !== runId) return;
+      showToast(errorMessage(error), "error");
+    }
+  }, [showToast]);
 
   const showLogs = useCallback(() => {
     setInspectorOpen(true);
@@ -346,12 +381,22 @@ export function App() {
   const showArtifacts = useCallback(() => {
     setInspectorOpen(true);
     setInspectorMode("artifacts");
+    setSelectedArtifactIndex(null);
+    setArtifactContent(null);
   }, []);
 
   const showProof = useCallback(() => {
     setInspectorOpen(true);
     setInspectorMode("proof");
   }, []);
+
+  useEffect(() => {
+    if (!detail || !inspectorOpen || inspectorMode !== "proof") return;
+    const artifact = preferredProofArtifact(detail.artifacts);
+    if (!artifact) return;
+    if (proofArtifactIndex === artifact.index && proofContent) return;
+    void loadProofArtifact(artifact.index);
+  }, [detail, inspectorMode, inspectorOpen, loadProofArtifact, proofArtifactIndex, proofContent]);
 
   const project = data?.project;
   const watcher = data?.watcher;
@@ -428,7 +473,7 @@ export function App() {
           </div>
         </div>
         <ProjectMeta project={project} watcher={watcher} landing={landing} active={active} />
-        <button className="primary" type="button" data-testid="new-job-button" onClick={() => setJobOpen(true)}>New job</button>
+        <button className="primary" type="button" data-testid="new-job-button" onClick={openJobDialog}>New job</button>
         <button type="button" data-testid="start-watcher-button" disabled={!canStartWatcher(data)} aria-describedby="watcher-action-hint" title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
         <button type="button" data-testid="stop-watcher-button" disabled={!canStopWatcher(data)} aria-describedby="watcher-action-hint" title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
         <p id="watcher-action-hint" className="sidebar-hint">{watcherHint}</p>
@@ -450,7 +495,7 @@ export function App() {
                 data={data}
                 lastError={lastError}
                 resultBanner={resultBanner}
-                onNewJob={() => setJobOpen(true)}
+                onNewJob={openJobDialog}
                 onStartWatcher={() => void runWatcherAction("start")}
                 onLandReady={() => void mergeReadyTasks()}
                 onOpenDiagnostics={() => setViewMode("diagnostics")}
@@ -459,6 +504,7 @@ export function App() {
               />
               <TaskBoard
                 data={data}
+                filters={filters}
                 selectedRunId={selectedRunId}
                 onSelect={selectRun}
               />
@@ -471,6 +517,7 @@ export function App() {
               onShowProof={showProof}
               onShowLogs={showLogs}
               onShowArtifacts={showArtifacts}
+              onLoadArtifact={(index) => void loadArtifact(index)}
             />
             {inspectorOpen && detail && (
               <RunInspector
@@ -479,9 +526,12 @@ export function App() {
                 logText={logText}
                 selectedArtifactIndex={selectedArtifactIndex}
                 artifactContent={artifactContent}
+                proofArtifactIndex={proofArtifactIndex}
+                proofContent={proofContent}
                 onShowLogs={showLogs}
                 onShowProof={showProof}
                 onShowArtifacts={showArtifacts}
+                onLoadProofArtifact={(index) => void loadProofArtifact(index)}
                 onLoadArtifact={(index) => void loadArtifact(index)}
                 onBackToArtifacts={() => {
                   setSelectedArtifactIndex(null);
@@ -514,6 +564,7 @@ export function App() {
                 onShowProof={showProof}
                 onShowLogs={showLogs}
                 onShowArtifacts={showArtifacts}
+                onLoadArtifact={(index) => void loadArtifact(index)}
               />
               {inspectorOpen && detail && (
                 <RunInspector
@@ -522,9 +573,12 @@ export function App() {
                   logText={logText}
                   selectedArtifactIndex={selectedArtifactIndex}
                   artifactContent={artifactContent}
+                  proofArtifactIndex={proofArtifactIndex}
+                  proofContent={proofContent}
                   onShowLogs={showLogs}
                   onShowProof={showProof}
                   onShowArtifacts={showArtifacts}
+                  onLoadProofArtifact={(index) => void loadProofArtifact(index)}
                   onLoadArtifact={(index) => void loadArtifact(index)}
                   onBackToArtifacts={() => {
                     setSelectedArtifactIndex(null);
@@ -738,7 +792,7 @@ function Toolbar({filters, refreshStatus, viewMode, onChange, onRefresh, onViewC
       </div>
       <div className="filters" aria-label="Run filters">
         <label>Type
-          <select value={filters.type} onChange={(event) => onChange({...filters, type: event.target.value as RunTypeFilter})}>
+          <select data-testid="filter-type-select" value={filters.type} onChange={(event) => onChange({...filters, type: event.target.value as RunTypeFilter})}>
             <option value="all">All</option>
             <option value="build">Build</option>
             <option value="improve">Improve</option>
@@ -748,7 +802,7 @@ function Toolbar({filters, refreshStatus, viewMode, onChange, onRefresh, onViewC
           </select>
         </label>
         <label>Outcome
-          <select value={filters.outcome} onChange={(event) => onChange({...filters, outcome: event.target.value as OutcomeFilter})}>
+          <select data-testid="filter-outcome-select" value={filters.outcome} onChange={(event) => onChange({...filters, outcome: event.target.value as OutcomeFilter})}>
             <option value="all">All</option>
             <option value="success">Success</option>
             <option value="failed">Failed</option>
@@ -981,18 +1035,19 @@ function FocusMetric({label, value}: {label: string; value: string}) {
   );
 }
 
-function TaskBoard({data, selectedRunId, onSelect}: {
+function TaskBoard({data, filters, selectedRunId, onSelect}: {
   data: StateResponse | null;
+  filters: Filters;
   selectedRunId: string | null;
   onSelect: (runId: string) => void;
 }) {
-  const columns = taskBoardColumns(data);
+  const columns = taskBoardColumns(data, filters);
   return (
     <section className="panel task-board-panel" data-testid="task-board" aria-labelledby="taskBoardHeading">
       <div className="panel-heading">
         <div>
           <h2 id="taskBoardHeading">Task Board</h2>
-          <p className="panel-subtitle">{taskBoardSubtitle(data)}</p>
+          <p className="panel-subtitle">{taskBoardSubtitle(data, filters)}</p>
         </div>
       </div>
       <div className="task-board">
@@ -1229,13 +1284,14 @@ function EventTimeline({events}: {events: StateResponse["events"] | undefined}) 
   );
 }
 
-function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, onShowArtifacts}: {
+function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, onShowArtifacts, onLoadArtifact}: {
   detail: RunDetail | null;
   landing: LandingState | undefined;
   onRunAction: (action: string, label?: string) => void;
   onShowProof: () => void;
   onShowLogs: () => void;
   onShowArtifacts: () => void;
+  onLoadArtifact: (index: number) => void;
 }) {
   return (
     <aside className="detail" aria-labelledby="detailHeading" data-testid="run-detail-panel">
@@ -1246,7 +1302,7 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
       {detail ? (
         <>
           <div className="detail-scroll">
-            <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} />
+            <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} onLoadArtifact={onLoadArtifact} onShowArtifacts={onShowArtifacts} />
             <div className="detail-body">
               <h3>{detail.title || detail.run_id}</h3>
               <dl>
@@ -1275,21 +1331,33 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
   );
 }
 
-function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactContent, onShowProof, onShowLogs, onShowArtifacts, onLoadArtifact, onBackToArtifacts, onClose}: {
+function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, onShowProof, onShowLogs, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onBackToArtifacts, onClose}: {
   detail: RunDetail;
   mode: InspectorMode;
   logText: string;
   selectedArtifactIndex: number | null;
   artifactContent: ArtifactContentResponse | null;
+  proofArtifactIndex: number | null;
+  proofContent: ArtifactContentResponse | null;
   onShowProof: () => void;
   onShowLogs: () => void;
   onShowArtifacts: () => void;
+  onLoadProofArtifact: (index: number) => void;
   onLoadArtifact: (index: number) => void;
   onBackToArtifacts: () => void;
   onClose: () => void;
 }) {
+  const inspectorRef = useDialogFocus<HTMLElement>(onClose, false);
   return (
-    <section className="run-inspector" aria-labelledby="runInspectorHeading" data-testid="run-inspector">
+    <section
+      ref={inspectorRef}
+      className="run-inspector"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="runInspectorHeading"
+      data-testid="run-inspector"
+      tabIndex={-1}
+    >
       <div className="run-inspector-heading">
         <div>
           <h2 id="runInspectorHeading">{detail.title || detail.run_id}</h2>
@@ -1304,7 +1372,7 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
       </div>
       <div className="run-inspector-body">
         {mode === "proof" ? (
-          <ProofPane detail={detail} onLoadArtifact={onLoadArtifact} />
+          <ProofPane detail={detail} proofArtifactIndex={proofArtifactIndex} proofContent={proofContent} onLoadProofArtifact={onLoadProofArtifact} />
         ) : mode === "logs" ? (
           <LogPane text={logText} />
         ) : (
@@ -1335,10 +1403,16 @@ function LogPane({text}: {text: string}) {
   );
 }
 
-function ProofPane({detail, onLoadArtifact}: {detail: RunDetail; onLoadArtifact: (index: number) => void}) {
+function ProofPane({detail, proofArtifactIndex, proofContent, onLoadProofArtifact}: {
+  detail: RunDetail;
+  proofArtifactIndex: number | null;
+  proofContent: ArtifactContentResponse | null;
+  onLoadProofArtifact: (index: number) => void;
+}) {
   const packet = detail.review_packet;
   const changedFiles = packet.changes.files.slice(0, 10);
   const evidence = packet.evidence.filter((artifact) => artifact.exists);
+  const compact = compactLongText(formatArtifactContent(proofContent?.content || ""), 20000);
   return (
     <div className="proof-pane" data-testid="proof-pane">
       <section className="proof-summary" aria-labelledby="proofHeading">
@@ -1387,7 +1461,7 @@ function ProofPane({detail, onLoadArtifact}: {detail: RunDetail; onLoadArtifact:
         {evidence.length ? (
           <div className="proof-artifacts">
             {evidence.map((artifact) => (
-              <button key={artifact.index} type="button" onClick={() => onLoadArtifact(artifact.index)}>
+              <button className={proofArtifactIndex === artifact.index ? "selected" : ""} key={artifact.index} type="button" onClick={() => onLoadProofArtifact(artifact.index)}>
                 <strong>{artifact.label}</strong>
                 <span>{artifact.kind}</span>
               </button>
@@ -1397,11 +1471,26 @@ function ProofPane({detail, onLoadArtifact}: {detail: RunDetail; onLoadArtifact:
           <p>No readable evidence artifacts are attached.</p>
         )}
       </section>
+      <section className="proof-section proof-content" aria-labelledby="proofContentHeading">
+        <div className="proof-content-heading">
+          <div>
+            <h3 id="proofContentHeading">Evidence content</h3>
+            <p>{proofContent?.artifact.label || "Loading selected evidence artifact"}</p>
+          </div>
+          {proofContent?.truncated || compact.truncated ? <span>truncated</span> : null}
+        </div>
+        <pre tabIndex={0} aria-label="Selected evidence content">{compact.text || "Loading evidence content..."}</pre>
+      </section>
     </div>
   );
 }
 
-function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]; onRunAction: (action: string, label?: string) => void}) {
+function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
+  packet: RunDetail["review_packet"];
+  onRunAction: (action: string, label?: string) => void;
+  onLoadArtifact: (index: number) => void;
+  onShowArtifacts: () => void;
+}) {
   const action = packet.next_action;
   const blockers = packet.readiness.blockers || [];
   const inProgress = packet.readiness.state === "in_progress";
@@ -1420,6 +1509,7 @@ function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]
           <button
             className={action.enabled ? "primary" : ""}
             type="button"
+            data-testid="review-next-action-button"
             disabled={!action.enabled || !action.action_key}
             title={action.reason || ""}
             onClick={() => action.action_key && onRunAction(actionName(action.action_key), action.label)}
@@ -1471,11 +1561,13 @@ function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]
       {evidence.length > 0 && (
         <div className="review-evidence" aria-label="Evidence artifacts">
           {evidence.map((artifact) => (
-            <span className={artifact.exists ? "" : "missing"} key={`${artifact.index}-${artifact.path}`}>
+            <button className={artifact.exists ? "" : "missing"} key={`${artifact.index}-${artifact.path}`} type="button" onClick={() => onLoadArtifact(artifact.index)}>
               {artifact.label}{artifact.exists ? "" : " missing"}
-            </span>
+            </button>
           ))}
-          {packet.evidence.length > evidence.length && !inProgress && <span>+{packet.evidence.length - evidence.length} more</span>}
+          {packet.evidence.length > evidence.length && !inProgress && (
+            <button type="button" data-testid="review-more-artifacts-button" onClick={onShowArtifacts}>+{packet.evidence.length - evidence.length} more</button>
+          )}
         </div>
       )}
       {packet.changes.diff_command && packet.readiness.state === "ready" && <code title={packet.changes.diff_command}>{packet.changes.diff_command}</code>}
@@ -1627,7 +1719,7 @@ function JobDialog({project, onClose, onQueued, onError}: {
           <button type="button" onClick={onClose}>Close</button>
         </header>
         <label>Command
-          <select value={command} onChange={(event) => setCommand(event.target.value as JobCommand)}>
+          <select data-testid="job-command-select" value={command} onChange={(event) => setCommand(event.target.value as JobCommand)}>
             <option value="build">Build</option>
             <option value="improve">Improve</option>
             <option value="certify">Certify</option>
@@ -1653,7 +1745,7 @@ function JobDialog({project, onClose, onQueued, onError}: {
         </div>
         {command === "improve" && (
           <label>Improve mode
-            <select value={subcommand} onChange={(event) => setSubcommand(event.target.value as ImproveSubcommand)}>
+            <select data-testid="job-improve-mode-select" value={subcommand} onChange={(event) => setSubcommand(event.target.value as ImproveSubcommand)}>
               <option value="bugs">Bugs</option>
               <option value="feature">Feature</option>
               <option value="target">Target</option>
@@ -1673,14 +1765,14 @@ function JobDialog({project, onClose, onQueued, onError}: {
         </div>
         <div className="field-grid">
           <label>Provider
-            <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+            <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
               <option value="">Inherit</option>
               <option value="codex">Codex</option>
               <option value="claude">Claude</option>
             </select>
           </label>
           <label>Reasoning effort
-            <select value={effort} onChange={(event) => setEffort(event.target.value)}>
+            <select data-testid="job-effort-select" value={effort} onChange={(event) => setEffort(event.target.value)}>
               <option value="">Inherit</option>
               <option value="low">Low</option>
               <option value="medium">Medium</option>
@@ -1868,7 +1960,7 @@ function missionFocus(data: StateResponse | null): {
   };
 }
 
-function taskBoardColumns(data: StateResponse | null): Array<{
+function taskBoardColumns(data: StateResponse | null, filters: Filters = defaultFilters): Array<{
   stage: BoardStage;
   title: string;
   empty: string;
@@ -1899,6 +1991,7 @@ function taskBoardColumns(data: StateResponse | null): Array<{
     cardsByKey.set(key, boardTaskFromLive(item));
   }
   for (const card of cardsByKey.values()) {
+    if (!boardTaskMatchesFilters(card, filters)) continue;
     const column = columns.find((candidate) => candidate.stage === card.stage);
     column?.items.push(card);
   }
@@ -1906,6 +1999,30 @@ function taskBoardColumns(data: StateResponse | null): Array<{
     column.items.sort(compareBoardTasks);
   }
   return columns;
+}
+
+function boardTaskMatchesFilters(task: BoardTask, filters: Filters): boolean {
+  const query = filters.query.trim().toLowerCase();
+  if (query) {
+    const haystack = [task.id, task.title, task.summary, task.status, task.branch || "", task.reason, task.proof]
+      .join(" ")
+      .toLowerCase();
+    if (!haystack.includes(query)) return false;
+  }
+  if (filters.activeOnly && task.stage !== "working") return false;
+  if (filters.outcome !== "all" && !boardTaskMatchesOutcome(task, filters.outcome)) return false;
+  return true;
+}
+
+function boardTaskMatchesOutcome(task: BoardTask, outcome: OutcomeFilter): boolean {
+  const status = task.status.toLowerCase();
+  if (outcome === "success") return ["ready", "landed", "done", "success"].some((value) => status.includes(value));
+  if (outcome === "failed") return status.includes("failed") || task.stage === "attention";
+  if (outcome === "interrupted") return status.includes("interrupted") || status.includes("stale");
+  if (outcome === "cancelled") return status.includes("cancelled");
+  if (outcome === "removed") return status.includes("removed");
+  if (outcome === "other") return !["ready", "landed", "done", "success", "failed", "interrupted", "stale", "cancelled", "removed"].some((value) => status.includes(value));
+  return true;
 }
 
 function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllowed: boolean): BoardTask {
@@ -1982,9 +2099,9 @@ function compareBoardTasks(left: BoardTask, right: BoardTask): number {
   return left.title.localeCompare(right.title);
 }
 
-function taskBoardSubtitle(data: StateResponse | null): string {
+function taskBoardSubtitle(data: StateResponse | null, filters: Filters = defaultFilters): string {
   if (!data) return "Loading tasks.";
-  const total = taskBoardColumns(data).reduce((sum, column) => sum + column.items.length, 0);
+  const total = taskBoardColumns(data, filters).reduce((sum, column) => sum + column.items.length, 0);
   if (!total) return "No work queued.";
   const target = data.landing.target || "main";
   return `${total} visible task${total === 1 ? "" : "s"} for ${target}.`;
@@ -2289,6 +2406,28 @@ function evidenceLine(packet: RunDetail["review_packet"]): string {
   return `${existing}/${packet.evidence.length}`;
 }
 
+function preferredProofArtifact(artifacts: ArtifactRef[]): ArtifactRef | null {
+  const existing = artifacts.filter((artifact) => artifact.exists);
+  if (!existing.length) return null;
+  const preferredLabels = ["summary", "queue manifest", "manifest", "intent", "primary log"];
+  for (const label of preferredLabels) {
+    const match = existing.find((artifact) => artifact.label.toLowerCase() === label);
+    if (match) return match;
+  }
+  return existing[0] || null;
+}
+
+function formatArtifactContent(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) return "";
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return content;
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return content;
+  }
+}
+
 function isRepositoryBlockedPacket(packet: RunDetail["review_packet"]): boolean {
   return packet.readiness.blockers.some((blocker) => blocker.startsWith("Repository has local changes"));
 }
@@ -2400,8 +2539,12 @@ function shortText(value: string, maxLength: number): string {
 
 function compactLongText(value: string, maxLength: number): {text: string; truncated: boolean} {
   if (value.length <= maxLength) return {text: value, truncated: false};
+  const tail = value.slice(-maxLength);
+  const firstLineBreak = tail.indexOf("\n");
+  const lineAlignedTail = firstLineBreak >= 0 ? tail.slice(firstLineBreak + 1) : tail;
+  const visibleLines = lineAlignedTail ? lineAlignedTail.split(/\n/).filter((line) => line.length > 0).length : 0;
   return {
-    text: `[showing latest ${maxLength.toLocaleString()} characters]\n\n${value.slice(-maxLength)}`,
+    text: `[showing latest ${visibleLines.toLocaleString()} complete lines]\n\n${lineAlignedTail}`,
     truncated: true,
   };
 }

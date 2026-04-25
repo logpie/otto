@@ -114,3 +114,53 @@ Agent-browser checks:
 - Existing historical rows created before the parser fix can still show the old false failure; new runs parse correctly.
 - Merge duration currently shows `-` in some history rows because merge history does not always persist `duration_s` in the normalized field.
 - The web portal still uses simple polling. It is usable now, but high-volume task lists may need pagination or virtualized rows later.
+
+## Follow-up UI Audit
+
+After user screenshot review, a second UI/E2E pass focused on proof review, artifact navigation, and cramped layouts.
+
+Additional bugs fixed:
+
+1. Proof view only showed counters and checks, not the actual proof content.
+   - Fix: the Proof inspector now opens the preferred evidence artifact, highlights the selected artifact, and renders readable content in a large evidence pane.
+
+2. Artifacts view stretched cards into tall blank columns.
+   - Fix: artifact cards now use compact grid rows and stay scan-friendly.
+
+3. Review-packet evidence chips and `+N more` were not reliable artifact entry points.
+   - Fix: evidence chips are buttons, `+N more` opens the artifact list, and E2E now clicks through to artifact content and back.
+
+4. Logs and proof were cramped into the right rail.
+   - Fix: the inspector is now a focused fixed workspace. On MBA-width desktop, the task board gets the full lane and the review packet moves below the board instead of narrowing the workflow columns.
+
+5. Modals could render behind the inspector.
+   - Fix: job/confirm modals render above the inspector, and opening a job from desktop while the inspector is open closes the inspector first.
+
+6. Inspector behaved like a modal but had weak keyboard/accessibility behavior.
+   - Fix: the inspector now has dialog semantics, focus management, Tab containment, and Escape close.
+
+7. Long logs started with a partial truncated line.
+   - Fix: long text compaction now cuts on a line boundary and labels the visible output as complete lines.
+
+8. Task-board search did not prove non-matching tasks disappeared.
+   - Fix: task-board cards now apply client-side query/outcome/active filtering, and E2E asserts a no-match search hides task cards.
+
+Additional verification:
+
+```text
+npm run web:typecheck
+npm run web:build
+uv run pytest tests/test_web_mission_control.py tests/test_mission_control_model.py tests/test_mission_control_polish.py -q
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario all --artifacts /tmp/otto-web-e2e-mission-control-all --viewport 1440x900
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario control-tour --artifacts /tmp/otto-web-e2e-control-tour-mobile --viewport 390x844
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario long-log-layout --artifacts /tmp/otto-web-e2e-long-log-layout-mobile --viewport 390x844
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario control-tour --artifacts /tmp/otto-web-e2e-control-tour-1024 --viewport 1024x768
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario long-log-layout --artifacts /tmp/otto-web-e2e-long-log-layout-1024 --viewport 1024x768
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario control-tour --artifacts /tmp/otto-web-e2e-control-tour-ipad --viewport 768x1024
+```
+
+Remaining lower-priority gaps:
+
+- New job advanced options are clicked and validated, but not submitted for every command variant.
+- Watcher stop confirmation is still not covered through the visible button in the E2E harness.
+- Bulk landing is opened and cancelled in the control tour, while selected landing is fully exercised.
