@@ -581,19 +581,21 @@ function LandingQueue({landing, selectedRunId, onSelect, onMergeReady, onMergeRu
 function LandingPlan({landing, onMergeReady}: {landing: LandingState | undefined; onMergeReady: () => void}) {
   const items = landing?.items || [];
   const ready = items.filter((item) => item.landing_state === "ready");
-  const needsAction = items.filter((item) => item.landing_state === "blocked");
+  const waiting = items.filter(isWaitingLandingItem);
+  const needsAction = items.filter((item) => item.landing_state === "blocked" && !isWaitingLandingItem(item));
   const merged = items.filter((item) => item.landing_state === "merged");
   const firstReady = ready.slice(0, 3);
   return (
     <div className="landing-plan" aria-label="Landing plan">
       <div className="plan-summary">
         <PlanMetric label="Ready to land" value={String(ready.length)} tone={ready.length ? "success" : "neutral"} />
+        <PlanMetric label="Waiting" value={String(waiting.length)} tone={waiting.length ? "info" : "neutral"} />
         <PlanMetric label="Needs action" value={String(needsAction.length)} tone={needsAction.length ? "warning" : "neutral"} />
         <PlanMetric label="Already landed" value={String(merged.length)} tone={merged.length ? "info" : "neutral"} />
       </div>
       <div className="plan-copy">
         <strong>{landingPlanHeadline(landing)}</strong>
-        <span>{landingPlanBody(landing, ready, needsAction)}</span>
+        <span>{landingPlanBody(landing, ready, waiting, needsAction)}</span>
       </div>
       {firstReady.length > 0 && (
         <ul className="plan-ready-list">
@@ -1304,10 +1306,13 @@ function landingSummaryText(landing?: LandingState): string {
   if (!landing || (!landing.counts.ready && !landing.counts.merged && !landing.counts.blocked)) {
     return "Finished tasks appear here for review, evidence checks, and landing.";
   }
+  const waiting = landing.items.filter(isWaitingLandingItem).length;
+  const needsAction = landing.items.filter((item) => item.landing_state === "blocked" && !isWaitingLandingItem(item)).length;
   const parts: string[] = [];
   if (landing.counts.ready) parts.push(`${landing.counts.ready} ready to land`);
   if (landing.counts.merged) parts.push(`${landing.counts.merged} already landed`);
-  if (landing.counts.blocked) parts.push(`${landing.counts.blocked} not ready`);
+  if (waiting) parts.push(`${waiting} waiting`);
+  if (needsAction) parts.push(`${needsAction} needs action`);
   const summary = `${parts.join(" / ")} into ${landing.target}.`;
   return landing.merge_blocked ? `${summary} Merge blocked by local changes.` : summary;
 }
@@ -1316,19 +1321,25 @@ function landingPlanHeadline(landing?: LandingState): string {
   if (!landing || !landing.counts.total) return "No work is waiting for review.";
   if (landing.merge_blocked) return "Repository cleanup is required before landing.";
   if (landing.counts.ready) return `${landing.counts.ready} task${landing.counts.ready === 1 ? "" : "s"} can land now.`;
+  if (landing.items.some(isWaitingLandingItem)) return "Queued work is waiting for the watcher.";
   if (landing.counts.blocked) return "Work exists, but nothing is ready to land.";
   return "All visible work has already landed.";
 }
 
-function landingPlanBody(landing: LandingState | undefined, ready: LandingItem[], needsAction: LandingItem[]): string {
+function landingPlanBody(landing: LandingState | undefined, ready: LandingItem[], waiting: LandingItem[], needsAction: LandingItem[]): string {
   if (!landing || !landing.counts.total) return "Queue a build, improve, or certify job to start the product loop.";
   if (landing.merge_blocked) return "Commit, stash, or revert local project changes, then refresh Mission Control.";
   if (ready.length) {
     const fileCount = ready.reduce((sum, item) => sum + Number(item.changed_file_count || 0), 0);
     return `Review the checklist for each task, then land the ready branches into ${landing.target}. ${fileCount} changed file${fileCount === 1 ? "" : "s"} will be considered.`;
   }
+  if (waiting.length) return "Start the watcher to let queued tasks create branches, write evidence, and become reviewable.";
   if (needsAction.length) return "Open each blocked task to inspect its failure, stale state, missing branch, or unfinished run.";
   return "Use history and artifacts to audit what landed, or queue the next product task.";
+}
+
+function isWaitingLandingItem(item: LandingItem): boolean {
+  return item.landing_state === "blocked" && ["queued", "starting", "running", "terminating"].includes(item.queue_status);
 }
 
 function providerLine(detail: RunDetail): string {

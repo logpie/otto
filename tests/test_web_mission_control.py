@@ -795,6 +795,44 @@ def test_web_landing_does_not_show_diff_errors_for_queued_future_branches(tmp_pa
     assert item["changed_file_count"] == 0
 
 
+def test_web_review_packet_does_not_diff_queued_future_branch(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="queued-task",
+            command_argv=["build", "queued task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="queued task",
+            branch="build/queued-task",
+            worktree=".worktrees/queued-task",
+        ),
+    )
+    write_queue_state(repo, {"schema_version": 1, "watcher": None, "tasks": {}})
+
+    client = TestClient(create_app(repo))
+    state = client.get("/api/state").json()
+    run_id = state["live"]["items"][0]["run_id"]
+    detail = client.get(f"/api/runs/{run_id}").json()
+    packet = detail["review_packet"]
+    checks = {check["key"]: check for check in packet["checks"]}
+
+    assert detail["display_status"] == "queued"
+    assert packet["headline"] == "Waiting for watcher"
+    assert packet["readiness"]["label"] == "Queued"
+    assert packet["readiness"]["next_step"] == "Start the watcher when you want this queued task to run."
+    assert packet["next_action"]["label"] == "Start watcher"
+    assert packet["next_action"]["enabled"] is False
+    assert packet["changes"]["diff_error"] is None
+    assert packet["changes"]["diff_command"] is None
+    assert packet["changes"]["file_count"] == 0
+    assert packet["changes"]["files"] == []
+    assert checks["changes"]["status"] == "pending"
+    assert checks["certification"]["status"] == "pending"
+    assert checks["evidence"]["status"] == "pending"
+
+
 def test_web_records_queue_events_and_exposes_operator_timeline(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)

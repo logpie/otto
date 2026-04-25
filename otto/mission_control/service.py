@@ -46,6 +46,7 @@ from otto.queue.runner import child_is_alive
 from otto.queue.schema import load_queue, load_state as load_queue_state
 
 LOGGER = logging.getLogger(__name__)
+REVIEW_IN_PROGRESS_STATUSES = {"queued", "starting", "running", "terminating"}
 
 
 class MissionControlServiceError(ValueError):
@@ -730,7 +731,12 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
     branch = _optional_str(record.git.get("branch"))
     merge_info = _detail_merge_info(project_dir, detail)
     merged = merge_info is not None
-    diff = _branch_diff(project_dir, branch, target)
+    in_progress = display_status in REVIEW_IN_PROGRESS_STATUSES
+    diff = (
+        {"files": [], "error": None}
+        if in_progress
+        else _branch_diff(project_dir, branch, target)
+    )
     changed_files = diff["files"]
     certification = _certification_summary(record)
     evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
@@ -771,7 +777,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
             "file_count": len(changed_files),
             "files": changed_files[:12],
             "truncated": len(changed_files) > 12,
-            "diff_command": f"git diff {target}...{branch}" if branch and branch != target else None,
+            "diff_command": None if in_progress else f"git diff {target}...{branch}" if branch and branch != target else None,
             "diff_error": diff["error"],
         },
         "evidence": evidence,
@@ -797,13 +803,24 @@ def _review_readiness(
             "blockers": blockers,
             "next_step": "No merge action is needed.",
         }
-    if display_status in {"running", "starting", "queued", "terminating"}:
+    if display_status in REVIEW_IN_PROGRESS_STATUSES:
+        label = {
+            "queued": "Queued",
+            "starting": "Starting",
+            "running": "Running",
+            "terminating": "Stopping",
+        }.get(display_status, "In progress")
+        next_step = (
+            "Start the watcher when you want this queued task to run."
+            if display_status == "queued"
+            else "Watch logs or wait for completion."
+        )
         return {
             "state": "in_progress",
-            "label": "Still running",
+            "label": label,
             "tone": "info",
             "blockers": ["Wait for the task to finish before review."],
-            "next_step": "Watch logs or wait for completion.",
+            "next_step": next_step,
         }
     if display_status == "done":
         if not branch:
@@ -866,19 +883,23 @@ def _review_checks(
         checks.append(_review_check("run", "Run finished", "pass", f"Already landed in {target}."))
     elif display_status == "done":
         checks.append(_review_check("run", "Run finished", "pass", "Task completed and is ready for human review."))
-    elif display_status in {"running", "starting", "queued", "terminating"}:
+    elif display_status in REVIEW_IN_PROGRESS_STATUSES:
         checks.append(_review_check("run", "Run finished", "pending", "Task is still in flight."))
     else:
         checks.append(_review_check("run", "Run finished", "fail", f"Run status is {display_status or 'unknown'}."))
 
-    if stories_tested and stories_passed is not None and stories_passed >= stories_tested:
+    if display_status in REVIEW_IN_PROGRESS_STATUSES:
+        checks.append(_review_check("certification", "Certification", "pending", "Certification is pending until the task finishes."))
+    elif stories_tested and stories_passed is not None and stories_passed >= stories_tested:
         checks.append(_review_check("certification", "Certification", "pass", f"{stories_passed}/{stories_tested} stories passed."))
     elif stories_tested and stories_passed is not None:
         checks.append(_review_check("certification", "Certification", "fail", f"{stories_passed}/{stories_tested} stories passed."))
     else:
         checks.append(_review_check("certification", "Certification", "warn", "No story pass count was recorded. Inspect artifacts before landing."))
 
-    if diff_error:
+    if display_status in REVIEW_IN_PROGRESS_STATUSES:
+        checks.append(_review_check("changes", "Changed files", "pending", "Changed files are available after the task creates its branch."))
+    elif diff_error:
         checks.append(_review_check("changes", "Changed files", "fail", diff_error))
     elif changed_files:
         checks.append(_review_check("changes", "Changed files", "pass", f"{len(changed_files)} file{'' if len(changed_files) == 1 else 's'} changed on {branch}."))
@@ -887,7 +908,9 @@ def _review_checks(
     else:
         checks.append(_review_check("changes", "Changed files", "warn", "No changed files were detected. Confirm the task produced the expected artifact."))
 
-    if existing_evidence and not missing_evidence:
+    if display_status in REVIEW_IN_PROGRESS_STATUSES and not existing_evidence:
+        checks.append(_review_check("evidence", "Evidence", "pending", "Evidence is available after the task writes artifacts."))
+    elif existing_evidence and not missing_evidence:
         checks.append(_review_check("evidence", "Evidence", "pass", f"{len(existing_evidence)} artifact{'' if len(existing_evidence) == 1 else 's'} available."))
     elif existing_evidence:
         checks.append(
@@ -925,7 +948,9 @@ def _review_headline(record: Any, display_status: str) -> str:
         return "Failed; review evidence and requeue or remove"
     if display_status == "stale":
         return "Stale; stop or remove the orphaned work"
-    if display_status in {"running", "starting", "queued"}:
+    if display_status == "queued":
+        return "Waiting for watcher"
+    if display_status in REVIEW_IN_PROGRESS_STATUSES:
         return "In progress"
     if display_status == "interrupted":
         return "Interrupted; resume or requeue"
@@ -938,6 +963,13 @@ def _suggested_next_action(
     actions: list[Any],
     overlay: Any,
 ) -> dict[str, Any]:
+    if display_status == "queued":
+        return {
+            "label": "Start watcher",
+            "action_key": None,
+            "enabled": False,
+            "reason": "Use Start watcher in the sidebar to run queued work.",
+        }
     by_key = {action.key: action for action in actions}
     preferred = {
         "failed": ["R", "x"],
