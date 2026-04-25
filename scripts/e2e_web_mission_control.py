@@ -340,11 +340,20 @@ def scenario_long_log_layout(ctx: ScenarioContext) -> None:
     open_app(ctx)
 
     wait_text("Long log fixture")
+    assert_inspector_closed()
+    browser("find", "testid", "open-proof-button", "click")
+    wait_text("Proof of work")
+    assert_page_contains("Evidence artifacts")
+    browser("find", "testid", "close-inspector-button", "click")
+    assert_inspector_closed()
+    browser("find", "testid", "open-logs-button", "click")
     wait_text("Run logs")
     assert_long_log_layout()
     screenshot(ctx, "long-log-layout.png")
     scroll_to_run_inspector()
     screenshot(ctx, "long-log-inspector.png")
+    browser("find", "testid", "close-inspector-button", "click")
+    assert_inspector_closed()
 
 
 def init_repo(repo: Path) -> Path:
@@ -798,6 +807,12 @@ def assert_long_log_layout() -> None:
         raise AssertionError(f"page has horizontal overflow: {metrics}")
     if "0899" not in metrics["visibleLogTail"]:
         raise AssertionError(f"log tail did not load latest output: {metrics}")
+
+
+def assert_inspector_closed() -> None:
+    result = browser_eval("""(() => !document.querySelector('[data-testid="run-inspector"]'))()""")
+    if not result.endswith("true"):
+        raise AssertionError(f"run inspector should be closed: {result}")
 
 
 def scroll_to_run_inspector() -> None:

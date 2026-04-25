@@ -54,7 +54,7 @@ interface Filters {
 type ViewMode = "tasks" | "diagnostics";
 
 type BoardStage = "attention" | "working" | "ready" | "landed";
-type InspectorMode = "logs" | "artifacts";
+type InspectorMode = "proof" | "logs" | "artifacts";
 
 interface BoardTask {
   id: string;
@@ -84,8 +84,8 @@ export function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [logText, setLogText] = useState("");
-  const [showingArtifacts, setShowingArtifacts] = useState(false);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorMode, setInspectorMode] = useState<InspectorMode>("proof");
   const [selectedArtifactIndex, setSelectedArtifactIndex] = useState<number | null>(null);
   const [artifactContent, setArtifactContent] = useState<ArtifactContentResponse | null>(null);
   const [refreshStatus, setRefreshStatus] = useState("idle");
@@ -114,13 +114,13 @@ export function App() {
   }, []);
 
   const selectRun = useCallback((runId: string) => {
-    setInspectorOpen(true);
+    setInspectorOpen(false);
     if (runId !== selectedRunIdRef.current) {
       setDetail(null);
       setLogText("");
       setArtifactContent(null);
       setSelectedArtifactIndex(null);
-      setShowingArtifacts(false);
+      setInspectorMode("proof");
     }
     setSelectedRunId(runId);
   }, []);
@@ -139,7 +139,7 @@ export function App() {
   }, [confirm, confirmPending, showToast]);
 
   const loadLogs = useCallback(async (runId: string, reset = false) => {
-    if ((showingArtifacts || !inspectorOpen) && !reset) return;
+    if ((inspectorMode !== "logs" || !inspectorOpen) && !reset) return;
     const offset = reset ? 0 : logOffsetRef.current;
     try {
       const logs = await api<LogsResponse>(`/api/runs/${encodeURIComponent(runId)}/logs?offset=${offset}`);
@@ -153,17 +153,14 @@ export function App() {
       if (detailWasRemoved(error)) return;
       showToast(errorMessage(error), "error");
     }
-  }, [inspectorOpen, showingArtifacts, showToast]);
+  }, [inspectorMode, inspectorOpen, showToast]);
 
-  const refreshDetail = useCallback(async (runId: string, resetLogs = false) => {
+  const refreshDetail = useCallback(async (runId: string) => {
     const params = stateQueryParams(filters).toString();
     const nextDetail = await api<RunDetail>(`/api/runs/${encodeURIComponent(runId)}?${params}`);
     if (selectedRunIdRef.current !== runId) return;
     setDetail(nextDetail);
-    if (resetLogs) {
-      await loadLogs(runId, true);
-    }
-  }, [filters, loadLogs]);
+  }, [filters]);
 
   const loadProjects = useCallback(async () => {
     const next = await api<ProjectsResponse>("/api/projects");
@@ -220,14 +217,13 @@ export function App() {
       setInspectorOpen(false);
       return;
     }
-    setInspectorOpen(true);
-    setShowingArtifacts(false);
+    setInspectorMode("proof");
     setDetail(null);
     logOffsetRef.current = 0;
     setLogText("");
     setArtifactContent(null);
     setSelectedArtifactIndex(null);
-    refreshDetail(selectedRunId, true).catch((error) => {
+    refreshDetail(selectedRunId).catch((error) => {
       if (detailWasRemoved(error)) {
         setSelectedRunId(null);
         setDetail(null);
@@ -241,10 +237,10 @@ export function App() {
   }, [refreshDetail, selectedRunId, showToast]);
 
   useEffect(() => {
-    if (!selectedRunId || showingArtifacts || !inspectorOpen) return;
+    if (!selectedRunId || inspectorMode !== "logs" || !inspectorOpen) return;
     const interval = window.setInterval(() => void loadLogs(selectedRunId), 1200);
     return () => window.clearInterval(interval);
-  }, [inspectorOpen, loadLogs, selectedRunId, showingArtifacts]);
+  }, [inspectorMode, inspectorOpen, loadLogs, selectedRunId]);
 
   const runActionForRun = useCallback(async (runId: string, action: string, message: string, label?: string) => {
     if (action === "merge" && data?.landing.merge_blocked) {
@@ -328,7 +324,7 @@ export function App() {
   const loadArtifact = useCallback(async (index: number) => {
     if (!selectedRunId) return;
     setSelectedArtifactIndex(index);
-    setShowingArtifacts(true);
+    setInspectorMode("artifacts");
     setInspectorOpen(true);
     setArtifactContent(null);
     try {
@@ -341,7 +337,7 @@ export function App() {
 
   const showLogs = useCallback(() => {
     setInspectorOpen(true);
-    setShowingArtifacts(false);
+    setInspectorMode("logs");
     setArtifactContent(null);
     const runId = selectedRunIdRef.current;
     if (runId) void loadLogs(runId, true);
@@ -349,7 +345,12 @@ export function App() {
 
   const showArtifacts = useCallback(() => {
     setInspectorOpen(true);
-    setShowingArtifacts(true);
+    setInspectorMode("artifacts");
+  }, []);
+
+  const showProof = useCallback(() => {
+    setInspectorOpen(true);
+    setInspectorMode("proof");
   }, []);
 
   const project = data?.project;
@@ -467,17 +468,19 @@ export function App() {
               detail={detail}
               landing={landing}
               onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
+              onShowProof={showProof}
               onShowLogs={showLogs}
               onShowArtifacts={showArtifacts}
             />
             {inspectorOpen && detail && (
               <RunInspector
                 detail={detail}
-                mode={showingArtifacts ? "artifacts" : "logs"}
+                mode={inspectorMode}
                 logText={logText}
                 selectedArtifactIndex={selectedArtifactIndex}
                 artifactContent={artifactContent}
                 onShowLogs={showLogs}
+                onShowProof={showProof}
                 onShowArtifacts={showArtifacts}
                 onLoadArtifact={(index) => void loadArtifact(index)}
                 onBackToArtifacts={() => {
@@ -508,17 +511,19 @@ export function App() {
                 detail={detail}
                 landing={landing}
                 onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
+                onShowProof={showProof}
                 onShowLogs={showLogs}
                 onShowArtifacts={showArtifacts}
               />
               {inspectorOpen && detail && (
                 <RunInspector
                   detail={detail}
-                  mode={showingArtifacts ? "artifacts" : "logs"}
+                  mode={inspectorMode}
                   logText={logText}
                   selectedArtifactIndex={selectedArtifactIndex}
                   artifactContent={artifactContent}
                   onShowLogs={showLogs}
+                  onShowProof={showProof}
                   onShowArtifacts={showArtifacts}
                   onLoadArtifact={(index) => void loadArtifact(index)}
                   onBackToArtifacts={() => {
@@ -1224,10 +1229,11 @@ function EventTimeline({events}: {events: StateResponse["events"] | undefined}) 
   );
 }
 
-function RunDetailPanel({detail, landing, onRunAction, onShowLogs, onShowArtifacts}: {
+function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, onShowArtifacts}: {
   detail: RunDetail | null;
   landing: LandingState | undefined;
   onRunAction: (action: string, label?: string) => void;
+  onShowProof: () => void;
   onShowLogs: () => void;
   onShowArtifacts: () => void;
 }) {
@@ -1257,8 +1263,9 @@ function RunDetailPanel({detail, landing, onRunAction, onShowLogs, onShowArtifac
             <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
           </div>
           <div className="detail-inspector-actions" aria-label="Evidence shortcuts">
-            <button type="button" onClick={onShowLogs}>Open logs</button>
-            <button type="button" onClick={onShowArtifacts}>Open artifacts</button>
+            <button className="primary" type="button" data-testid="open-proof-button" onClick={onShowProof}>Open proof</button>
+            <button type="button" data-testid="open-logs-button" onClick={onShowLogs}>Logs</button>
+            <button type="button" data-testid="open-artifacts-button" onClick={onShowArtifacts}>Artifacts</button>
           </div>
         </>
       ) : (
@@ -1268,12 +1275,13 @@ function RunDetailPanel({detail, landing, onRunAction, onShowLogs, onShowArtifac
   );
 }
 
-function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactContent, onShowLogs, onShowArtifacts, onLoadArtifact, onBackToArtifacts, onClose}: {
+function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactContent, onShowProof, onShowLogs, onShowArtifacts, onLoadArtifact, onBackToArtifacts, onClose}: {
   detail: RunDetail;
   mode: InspectorMode;
   logText: string;
   selectedArtifactIndex: number | null;
   artifactContent: ArtifactContentResponse | null;
+  onShowProof: () => void;
   onShowLogs: () => void;
   onShowArtifacts: () => void;
   onLoadArtifact: (index: number) => void;
@@ -1285,16 +1293,19 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
       <div className="run-inspector-heading">
         <div>
           <h2 id="runInspectorHeading">{detail.title || detail.run_id}</h2>
-          <p>{detailStatusLabel(detail)} evidence</p>
+          <p>{detailStatusLabel(detail)} evidence packet</p>
         </div>
         <div className="detail-tabs" role="tablist" aria-label="Evidence view">
+          <button className={`tab ${mode === "proof" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "proof"} onClick={onShowProof}>Proof</button>
           <button className={`tab ${mode === "logs" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "logs"} onClick={onShowLogs}>Logs</button>
           <button className={`tab ${mode === "artifacts" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "artifacts"} onClick={onShowArtifacts}>Artifacts</button>
         </div>
-        <button type="button" onClick={onClose}>Close</button>
+        <button type="button" data-testid="close-inspector-button" onClick={onClose}>Close inspector</button>
       </div>
       <div className="run-inspector-body">
-        {mode === "logs" ? (
+        {mode === "proof" ? (
+          <ProofPane detail={detail} onLoadArtifact={onLoadArtifact} />
+        ) : mode === "logs" ? (
           <LogPane text={logText} />
         ) : (
           <ArtifactPane
@@ -1320,6 +1331,72 @@ function LogPane({text}: {text: string}) {
         <span>{lineCount ? `${lineCount} line${lineCount === 1 ? "" : "s"}` : "waiting for output"}{compact.truncated ? " · showing latest output" : ""}</span>
       </div>
       <pre className="log-pane" tabIndex={0} aria-label="Run log output" data-testid="run-log-pane">{compact.text}</pre>
+    </div>
+  );
+}
+
+function ProofPane({detail, onLoadArtifact}: {detail: RunDetail; onLoadArtifact: (index: number) => void}) {
+  const packet = detail.review_packet;
+  const changedFiles = packet.changes.files.slice(0, 10);
+  const evidence = packet.evidence.filter((artifact) => artifact.exists);
+  return (
+    <div className="proof-pane" data-testid="proof-pane">
+      <section className="proof-summary" aria-labelledby="proofHeading">
+        <div>
+          <span>{packet.readiness.label}</span>
+          <h3 id="proofHeading">Proof of work</h3>
+          <p>{packet.headline}</p>
+        </div>
+        <div className="proof-metrics">
+          <ReviewMetric label="Stories" value={storiesLine(packet)} />
+          <ReviewMetric label="Changes" value={packet.changes.file_count ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}` : "-"} />
+          <ReviewMetric label="Evidence" value={evidenceLine(packet)} />
+        </div>
+      </section>
+      <section className="proof-section" aria-labelledby="proofNextHeading">
+        <h3 id="proofNextHeading">Next action</h3>
+        <p>{packet.readiness.next_step}</p>
+      </section>
+      <section className="proof-section" aria-labelledby="proofChecksHeading">
+        <h3 id="proofChecksHeading">Certification checks</h3>
+        <div className="proof-checks">
+          {packet.checks.map((check) => (
+            <div className={`review-check check-${check.status}`} key={check.key}>
+              <span>{checkStatusLabel(check.status)}</span>
+              <div>
+                <strong>{check.label}</strong>
+                <p>{formatReviewText(check.detail)}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="proof-section" aria-labelledby="proofFilesHeading">
+        <h3 id="proofFilesHeading">Changed files</h3>
+        {changedFiles.length ? (
+          <ul className="proof-files">
+            {changedFiles.map((path) => <li key={path}>{path}</li>)}
+            {packet.changes.truncated && <li>more files not shown</li>}
+          </ul>
+        ) : (
+          <p>No changed files reported yet.</p>
+        )}
+      </section>
+      <section className="proof-section" aria-labelledby="proofArtifactsHeading">
+        <h3 id="proofArtifactsHeading">Evidence artifacts</h3>
+        {evidence.length ? (
+          <div className="proof-artifacts">
+            {evidence.map((artifact) => (
+              <button key={artifact.index} type="button" onClick={() => onLoadArtifact(artifact.index)}>
+                <strong>{artifact.label}</strong>
+                <span>{artifact.kind}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p>No readable evidence artifacts are attached.</p>
+        )}
+      </section>
     </div>
   );
 }

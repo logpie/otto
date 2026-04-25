@@ -2,8 +2,8 @@
   color-scheme: light;
   --bg: #f7f8fa;
   --surface: #ffffff;
-  --surface-alt: #f0f3f6;
-  --line: #d8dde4;
+  --surface-alt: #f4f7fb;
+  --line: #d5dce6;
   --text: #18202a;
   --muted: #647180;
   --accent: #0f766e;
@@ -13,7 +13,7 @@
   --amber: #a16207;
   --red: #b91c1c;
   --magenta: #a21caf;
-  --shadow: 0 8px 24px rgba(24, 32, 42, 0.08);
+  --shadow: 0 10px 30px rgba(24, 32, 42, 0.09);
 }
 
 * {
@@ -38,7 +38,7 @@ body,
 
 body {
   margin: 0;
-  background: var(--bg);
+  background: linear-gradient(180deg, #fbfcfd 0, var(--bg) 180px);
   color: var(--text);
   font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
@@ -403,8 +403,7 @@ textarea {
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 480px);
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 440px);
   gap: 14px;
   padding: 14px;
   overflow: hidden;
@@ -732,8 +731,7 @@ textarea {
 .diagnostics-workspace {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 480px);
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 440px);
   gap: 14px;
   overflow: hidden;
 }
@@ -1210,7 +1208,7 @@ tbody tr.selected {
 
 .detail-inspector-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1.1fr repeat(2, minmax(0, 0.85fr));
   gap: 8px;
   padding: 10px 12px;
   border-top: 1px solid var(--line);
@@ -1462,16 +1460,20 @@ tbody tr.selected {
 }
 
 .run-inspector {
-  grid-column: 1 / -1;
+  position: fixed;
+  left: 254px;
+  right: 14px;
+  bottom: 14px;
+  z-index: 30;
   min-height: 280px;
-  height: clamp(280px, 34vh, 440px);
+  height: clamp(300px, 46vh, 560px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--surface);
-  box-shadow: var(--shadow);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
 }
 
 .run-inspector-heading {
@@ -1479,7 +1481,7 @@ tbody tr.selected {
   grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: center;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--line);
   background: #fbfcfd;
 }
@@ -1509,6 +1511,104 @@ tbody tr.selected {
 .run-inspector .log-viewer,
 .run-inspector .artifact-pane {
   min-height: 0;
+}
+
+.proof-pane {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, 0.75fr) minmax(0, 1fr);
+  gap: 12px;
+  overflow: auto;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.proof-summary,
+.proof-section {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.proof-summary {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.proof-summary span {
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.proof-summary h3,
+.proof-summary p,
+.proof-section h3,
+.proof-section p {
+  margin: 0;
+}
+
+.proof-summary p,
+.proof-section p {
+  color: var(--muted);
+}
+
+.proof-metrics,
+.proof-checks,
+.proof-artifacts {
+  display: grid;
+  gap: 8px;
+}
+
+.proof-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.proof-metrics div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-alt);
+}
+
+.proof-metrics span {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: none;
+}
+
+.proof-files {
+  max-height: 160px;
+  margin: 0;
+  padding-left: 18px;
+  overflow: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.proof-artifacts {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.proof-artifacts button {
+  display: grid;
+  justify-items: start;
+  height: auto;
+  min-height: 50px;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.proof-artifacts span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .log-viewer {
@@ -1735,6 +1835,11 @@ tbody tr.selected {
     overflow: visible;
   }
 
+  .run-inspector {
+    left: 14px;
+    right: 14px;
+  }
+
   .launcher-shell {
     grid-template-columns: 1fr;
   }
@@ -1870,7 +1975,7 @@ tbody tr.selected {
   }
 
   .run-inspector {
-    height: min(52vh, 440px);
+    height: min(64vh, 560px);
     min-height: 260px;
   }
 
@@ -1894,6 +1999,11 @@ tbody tr.selected {
   }
 
   .detail-inspector-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .proof-pane,
+  .proof-metrics {
     grid-template-columns: 1fr;
   }
 }
