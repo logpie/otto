@@ -75,6 +75,10 @@ interface BoardTask {
   changedFileCount: number | null;
   proof: string;
   reason: string;
+  active: boolean;
+  elapsedDisplay: string | null;
+  lastEvent: string | null;
+  progress: string | null;
   source: "landing" | "live" | "history";
 }
 
@@ -571,7 +575,7 @@ export function App() {
     showToast("Choose a project");
   }, [showToast]);
 
-  if (projectsState?.launcher_enabled && !data) {
+  if (projectsState?.launcher_enabled && !projectsState.current && !data) {
     return (
       <div className="app-shell launcher-shell">
         <aside className="sidebar">
@@ -1131,6 +1135,7 @@ function MissionFocus({data, lastError, resultBanner, onNewJob, onStartWatcher, 
   onDismissResult: () => void;
 }) {
   const focus = missionFocus(data);
+  const progressItems = activeProgressItems(data);
   return (
     <section className={`mission-focus focus-${focus.tone}`} data-testid="mission-focus" aria-label="Mission focus">
       <div className="focus-copy">
@@ -1158,6 +1163,17 @@ function MissionFocus({data, lastError, resultBanner, onNewJob, onStartWatcher, 
         <FocusMetric label="Needs action" value={String(focus.needsAction)} />
         <FocusMetric label="Ready" value={String(focus.ready)} />
       </div>
+      {progressItems.length ? (
+        <div className="focus-progress" aria-label="Live worker progress">
+          {progressItems.map((item) => (
+            <div key={item.run_id}>
+              <span>{item.queue_task_id || item.display_id}</span>
+              <strong>{item.elapsed_display}</strong>
+              <p>{item.progress}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {lastError && (
         <div className="status-banner error">
           <strong>Last error</strong>
@@ -1234,7 +1250,9 @@ function TaskCard({task, selected, onSelect}: {
 }) {
   const [expanded, setExpanded] = useState(false);
   const selectTask = () => task.runId && onSelect(task.runId);
-  const meta = [taskChangeLine(task), task.proof].filter(Boolean);
+  const meta = [taskChangeLine(task), taskProofMeta(task)].filter(Boolean);
+  const liveEvent = liveEventLabel(task);
+  const progress = progressLabel(task);
   return (
     <article className={`task-card task-${task.stage} ${selected ? "selected" : ""}`}>
       <button
@@ -1251,9 +1269,18 @@ function TaskCard({task, selected, onSelect}: {
           <span className="task-card-cta">{task.stage === "ready" ? "Review" : "Details"}</span>
         </span>
         <strong className="task-title" title={task.title}>{task.title}</strong>
+        {(task.active || task.elapsedDisplay) ? (
+          <span className={`task-card-live ${task.active ? "is-active" : ""}`}>
+            {task.active ? <span className="task-live-dot" aria-hidden="true" /> : null}
+            <span>{task.active ? "Running" : "Elapsed"}</span>
+            {task.elapsedDisplay ? <strong>{task.elapsedDisplay}</strong> : null}
+            {liveEvent ? <em title={task.lastEvent || ""}>{liveEvent}</em> : null}
+          </span>
+        ) : null}
         <span className="task-card-meta">
           {meta.map((item) => <span key={item}>{item}</span>)}
         </span>
+        {progress ? <span className="task-card-progress" title={task.progress || ""}>{progress}</span> : null}
       </button>
       <button
         className="task-card-toggle"
@@ -2442,7 +2469,7 @@ function taskBoardColumns(data: StateResponse | null, filters: Filters = default
   for (const item of data.landing.items) {
     const live = liveByTask.get(item.task_id);
     const runId = item.run_id || live?.run_id || null;
-    const card = boardTaskFromLanding(item, runId, !data.landing.merge_blocked);
+    const card = boardTaskFromLanding(item, runId, !data.landing.merge_blocked, live);
     cardsByKey.set(item.task_id, card);
   }
   for (const item of data.live.items) {
@@ -2486,8 +2513,9 @@ function boardTaskMatchesOutcome(task: BoardTask, outcome: OutcomeFilter): boole
   return true;
 }
 
-function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllowed: boolean): BoardTask {
+function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllowed: boolean, live?: LiveRunItem): BoardTask {
   const stage = boardStageForLanding(item, mergeAllowed);
+  const active = Boolean(live?.active) || isActiveQueueStatus(item.queue_status);
   return {
     id: item.task_id,
     runId,
@@ -2498,7 +2526,11 @@ function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllo
     branch: item.branch,
     changedFileCount: item.changed_file_count,
     proof: proofLine(item),
-    reason: boardReasonForLanding(item, mergeAllowed),
+    reason: boardReasonForLanding(item, mergeAllowed, live),
+    active,
+    elapsedDisplay: live?.elapsed_display || null,
+    lastEvent: live?.last_event || null,
+    progress: live?.progress || null,
     source: "landing",
   };
 }
@@ -2516,6 +2548,10 @@ function boardTaskFromLive(item: LiveRunItem): BoardTask {
     changedFileCount: null,
     proof: item.cost_display || "-",
     reason: item.overlay?.reason || item.last_event || item.elapsed_display || item.display_status,
+    active: item.active,
+    elapsedDisplay: item.elapsed_display || null,
+    lastEvent: item.last_event || null,
+    progress: item.progress || null,
     source: "live",
   };
 }
@@ -2533,13 +2569,16 @@ function boardStatusLabel(item: LandingItem, mergeAllowed: boolean): string {
   return item.queue_status || item.landing_state || "blocked";
 }
 
-function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean): string {
+function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean, live?: LiveRunItem): string {
   if (item.landing_state === "ready" && !mergeAllowed) return "Repository cleanup required before landing.";
   if (item.landing_state === "ready") return `${changeLine(item)} changed; ${proofLine(item)} recorded.`;
   if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";
   if (item.queue_status === "queued") return "Waiting for the watcher.";
   if (item.queue_status === "initializing") return "Child process started; waiting for Otto session readiness.";
-  if (["starting", "running", "terminating"].includes(item.queue_status)) return "Task is still in flight.";
+  if (["starting", "running", "terminating"].includes(item.queue_status)) {
+    if (live?.elapsed_display) return `Running for ${live.elapsed_display}.`;
+    return "Task is still in flight.";
+  }
   if (item.diff_error) return formatTechnicalIssue(item.diff_error);
   if (!item.branch) return "No branch is recorded.";
   if (["failed", "cancelled", "interrupted", "stale"].includes(item.queue_status)) return "Open the review packet for recovery actions.";
@@ -2552,6 +2591,38 @@ function taskChangeLine(task: BoardTask): string {
   if (task.stage === "working") return "diff pending";
   if (task.stage === "landed") return "no unlanded diff";
   return `${task.changedFileCount} file${task.changedFileCount === 1 ? "" : "s"}`;
+}
+
+function taskProofMeta(task: BoardTask): string {
+  const proof = task.proof.trim();
+  if (task.active && ["running", "starting", "initializing"].includes(proof.toLowerCase())) return "";
+  return proof;
+}
+
+function isActiveQueueStatus(status: string): boolean {
+  return ["initializing", "starting", "running", "terminating"].includes(status);
+}
+
+function liveEventLabel(task: BoardTask): string | null {
+  const event = String(task.lastEvent || "").trim();
+  if (!event || event === "-") return null;
+  const normalized = event.toLowerCase();
+  const status = task.status.toLowerCase();
+  if (normalized === status || ["running", "queued", "starting", "initializing"].includes(normalized)) return null;
+  return shortText(event, 56);
+}
+
+function progressLabel(task: BoardTask): string | null {
+  const progress = String(task.progress || "").trim();
+  if (!task.active || !progress) return null;
+  return shortText(progress, 110);
+}
+
+function activeProgressItems(data: StateResponse | null): LiveRunItem[] {
+  if (!data) return [];
+  return data.live.items
+    .filter((item) => item.active && item.progress)
+    .slice(0, 3);
 }
 
 function compareBoardTasks(left: BoardTask, right: BoardTask): number {

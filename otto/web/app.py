@@ -8,7 +8,7 @@ import subprocess
 from typing import Any
 
 from fastapi import Body, FastAPI, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from otto.mission_control.serializers import serialize_project
@@ -149,8 +149,20 @@ def create_app(
         return _service().artifact_content(run_id, artifact_index)
 
     @app.get("/api/runs/{run_id}/proof-report")
-    def run_proof_report(run_id: str) -> FileResponse:
-        return FileResponse(_service().proof_report_path(run_id), media_type="text/html")
+    def run_proof_report(run_id: str) -> HTMLResponse:
+        return HTMLResponse(_service().proof_report_html(run_id))
+
+    @app.get("/api/runs/{run_id}/proof-assets/{asset_path:path}")
+    def run_proof_asset(run_id: str, asset_path: str) -> FileResponse:
+        return FileResponse(_service().proof_report_asset_path(run_id, asset_path))
+
+    @app.get("/api/runs/{run_id}/evidence/{asset_path:path}")
+    def run_legacy_proof_evidence_asset(run_id: str, asset_path: str) -> FileResponse:
+        return FileResponse(_service().proof_report_asset_path(run_id, f"evidence/{asset_path}"))
+
+    @app.get("/api/runs/{run_id}/proof-of-work.{extension}")
+    def run_legacy_proof_file(run_id: str, extension: str) -> FileResponse:
+        return FileResponse(_service().proof_report_asset_path(run_id, f"proof-of-work.{extension}"))
 
     @app.get("/api/runs/{run_id}/diff")
     def run_diff(run_id: str) -> dict[str, Any]:

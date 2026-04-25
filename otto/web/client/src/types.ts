@@ -231,6 +231,7 @@ export interface LiveRunItem extends RunSummary {
   cost_usd: number | null;
   cost_display: string;
   last_event: string;
+  progress: string;
   row_label: string;
   overlay: Overlay | null;
 }

@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import click
 
@@ -50,6 +51,7 @@ from otto.queue.schema import load_queue, load_state as load_queue_state
 
 LOGGER = logging.getLogger(__name__)
 REVIEW_IN_PROGRESS_STATUSES = {"queued", "starting", "initializing", "running", "terminating"}
+PROOF_LINK_ATTR_RE = re.compile(r"(?P<prefix>\b(?:src|href)=)(?P<quote>[\"'])(?P<url>.*?)(?P=quote)", re.IGNORECASE)
 
 
 class MissionControlServiceError(ValueError):
@@ -155,6 +157,42 @@ class MissionControlService:
         if not path.exists() or path.is_dir():
             raise MissionControlServiceError("proof-of-work HTML report not found", status_code=404)
         return path
+
+    def proof_report_html(
+        self,
+        run_id: str,
+        *,
+        filters: MissionControlFilters | None = None,
+    ) -> str:
+        path = self.proof_report_path(run_id, filters=filters)
+        html = path.read_text(encoding="utf-8", errors="replace")
+        return _rewrite_proof_report_links(html, run_id)
+
+    def proof_report_asset_path(
+        self,
+        run_id: str,
+        asset_path: str,
+        *,
+        filters: MissionControlFilters | None = None,
+    ) -> Path:
+        detail = self._detail_view(run_id, filters)
+        report = _proof_report_info(self.project_dir, detail.record)
+        html_path_text = _optional_str(report.get("html_path"))
+        if not html_path_text:
+            raise MissionControlServiceError("proof-of-work HTML report not found", status_code=404)
+        html_path = self._validated_artifact_path(html_path_text)
+        decoded = unquote(str(asset_path or "")).strip()
+        if not decoded or Path(decoded).is_absolute():
+            raise MissionControlServiceError("proof-report asset path is invalid", status_code=400)
+        candidate = (html_path.parent / decoded).resolve(strict=False)
+        root = _proof_report_asset_root(detail.record, html_path)
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise MissionControlServiceError("proof-report asset path is outside the session", status_code=403) from exc
+        if not candidate.exists() or not candidate.is_file():
+            raise MissionControlServiceError("proof-report asset not found", status_code=404)
+        return candidate
 
     def diff(
         self,
@@ -676,7 +714,8 @@ class MissionControlService:
         return detail
 
     def _validated_artifact_path(self, path: str) -> Path:
-        candidate = Path(path).expanduser().resolve(strict=False)
+        raw_candidate = Path(path).expanduser()
+        candidate = (raw_candidate if raw_candidate.is_absolute() else self.project_dir / raw_candidate).resolve(strict=False)
         root = self.project_dir.resolve(strict=False)
         try:
             candidate.relative_to(root)
@@ -1455,6 +1494,44 @@ def _proof_report_info(project_dir: Path, record: Any) -> dict[str, Any]:
         "html_url": f"/api/runs/{quote(run_id, safe='')}/proof-report" if html_path is not None else None,
         "available": html_path is not None,
     }
+
+
+def _rewrite_proof_report_links(html: str, run_id: str) -> str:
+    run_token = quote(run_id, safe="")
+
+    def replace(match: re.Match[str]) -> str:
+        url = match.group("url")
+        rewritten = _proof_asset_url(run_token, url)
+        if rewritten == url:
+            return match.group(0)
+        return f"{match.group('prefix')}{match.group('quote')}{rewritten}{match.group('quote')}"
+
+    return PROOF_LINK_ATTR_RE.sub(replace, html)
+
+
+def _proof_asset_url(run_token: str, url: str) -> str:
+    if not url or url.startswith("#"):
+        return url
+    parts = urlsplit(url)
+    if parts.scheme or parts.netloc or parts.path.startswith("/"):
+        return url
+    if not parts.path:
+        return url
+    rewritten = f"/api/runs/{run_token}/proof-assets/{quote(parts.path, safe='')}"
+    if parts.query:
+        rewritten = f"{rewritten}?{parts.query}"
+    if parts.fragment:
+        rewritten = f"{rewritten}#{parts.fragment}"
+    return rewritten
+
+
+def _proof_report_asset_root(record: Any, html_path: Path) -> Path:
+    artifacts = getattr(record, "artifacts", {}) if isinstance(getattr(record, "artifacts", {}), dict) else {}
+    session_dir = _optional_str(artifacts.get("session_dir"))
+    if session_dir:
+        candidate = Path(session_dir).expanduser()
+        return candidate.resolve(strict=False)
+    return html_path.parent.parent.resolve(strict=False)
 
 
 def _proof_report_paths(project_dir: Path, record: Any) -> tuple[Path | None, Path | None]:

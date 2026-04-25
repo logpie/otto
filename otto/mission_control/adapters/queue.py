@@ -264,7 +264,10 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
 def _queue_worktree(record) -> str | None:
     worktree = str(record.git.get("worktree") or "").strip()
     if worktree:
-        return worktree
+        candidate = Path(worktree).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(record.project_dir) / candidate
+        return str(candidate.resolve(strict=False))
     try:
         for task in load_queue(Path(record.project_dir)):
             task_id = str(record.identity.get("queue_task_id") or "")

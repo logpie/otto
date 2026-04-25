@@ -142,6 +142,7 @@ class LiveRunItem:
     cost_usd: float | None
     cost_display: str
     event: str
+    progress: str
     row_label: str
 
 
@@ -586,6 +587,7 @@ class MissionControlModel:
                     cost_usd=cost_usd,
                     cost_display=_format_usage(cost_usd, token_usage, pending=effectively_active),
                     event=_live_event(record, overlay),
+                    progress=_live_progress(record) if effectively_active else "",
                     row_label=row_label,
                 )
             )
@@ -1008,6 +1010,23 @@ def _live_event(record: RunRecord, overlay: StaleOverlay | None) -> str:
     if overlay is not None and overlay.level == "stale":
         return _truncate(overlay.reason, 96)
     return _truncate(_strip_terminal_escapes(record.last_event or "-"), 96)
+
+
+def _live_progress(record: RunRecord) -> str:
+    path_text = _string_or_none(record.artifacts.get("primary_log_path"))
+    if not path_text:
+        return ""
+    path = Path(path_text).expanduser()
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    text = data[-8192:].decode("utf-8", errors="replace")
+    for raw_line in reversed(text.splitlines()):
+        line = _truncate(_strip_terminal_escapes(raw_line), 140)
+        if line:
+            return line
+    return ""
 
 
 def _adapter_key_for_record(record: RunRecord) -> str:

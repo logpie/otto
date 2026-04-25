@@ -195,6 +195,7 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     assert row["model"] == "gpt-5.4"
     assert row["reasoning_effort"] == "medium"
     assert row["cost_display"] == "1.2K in / 56 out"
+    assert row["progress"] == "STORY_RESULT: web PASS"
 
     detail = client.get("/api/runs/build-web").json()
     assert detail["title"].startswith("build:")
@@ -216,7 +217,13 @@ def test_web_review_packet_includes_story_details_and_html_report(tmp_path: Path
     _write_run(repo)
     certify_dir = paths.certify_dir(repo, "build-web")
     certify_dir.mkdir(parents=True, exist_ok=True)
-    (certify_dir / "proof-of-work.html").write_text("<html><body>Proof report</body></html>", encoding="utf-8")
+    evidence_dir = certify_dir / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "homepage.png").write_bytes(b"fake-png")
+    (certify_dir / "proof-of-work.html").write_text(
+        '<html><body>Proof report <img src="evidence/homepage.png"><a href="../build/narrative.log">log</a></body></html>',
+        encoding="utf-8",
+    )
     (certify_dir / "proof-of-work.json").write_text(
         json.dumps(
             {
@@ -254,6 +261,11 @@ def test_web_review_packet_includes_story_details_and_html_report(tmp_path: Path
     report = client.get("/api/runs/build-web/proof-report")
     assert report.status_code == 200
     assert "Proof report" in report.text
+    assert "/api/runs/build-web/proof-assets/evidence%2Fhomepage.png" in report.text
+    assert "/api/runs/build-web/proof-assets/..%2Fbuild%2Fnarrative.log" in report.text
+    assert client.get("/api/runs/build-web/proof-assets/evidence%2Fhomepage.png").content == b"fake-png"
+    assert "STORY_RESULT: web PASS" in client.get("/api/runs/build-web/proof-assets/..%2Fbuild%2Fnarrative.log").text
+    assert client.get("/api/runs/build-web/evidence/homepage.png").content == b"fake-png"
 
 
 def test_web_run_detail_is_not_hidden_by_list_filters(tmp_path: Path) -> None:

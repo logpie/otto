@@ -90,6 +90,7 @@ def serialize_live_item(item: LiveRunItem) -> dict[str, Any]:
         "cost_usd": item.cost_usd,
         "cost_display": item.cost_display,
         "last_event": item.event,
+        "progress": item.progress,
         "row_label": item.row_label,
         "overlay": serialize_overlay(item.overlay),
     }

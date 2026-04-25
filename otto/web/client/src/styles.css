@@ -434,6 +434,49 @@ textarea {
   grid-column: 1 / -1;
 }
 
+.focus-progress {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.focus-progress div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(120px, 0.36fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.focus-progress span,
+.focus-progress strong {
+  color: #1e3a8a;
+  font-size: 12px;
+}
+
+.focus-progress span,
+.focus-progress p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.focus-progress strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.focus-progress p {
+  margin: 0;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
 .focus-copy {
   min-width: 0;
   display: grid;
@@ -635,6 +678,70 @@ textarea {
   -webkit-box-orient: vertical;
 }
 
+.task-card-live {
+  max-width: 100%;
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.task-card-live strong {
+  color: #172554;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-card-live em {
+  min-width: 0;
+  overflow: hidden;
+  color: #475569;
+  font-style: normal;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-card-live.is-active {
+  border-color: #93c5fd;
+  background: #dbeafe;
+}
+
+.task-live-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--blue);
+  box-shadow: 0 0 0 0 rgba(29, 78, 216, 0.38);
+  animation: task-live-pulse 1.4s ease-out infinite;
+}
+
+@keyframes task-live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(29, 78, 216, 0.38);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(29, 78, 216, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(29, 78, 216, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-live-dot {
+    animation: none;
+  }
+}
+
 .task-card-cta,
 .task-summary,
 .task-card-reason {
@@ -674,6 +781,21 @@ textarea {
   padding: 2px 6px;
   border-radius: 999px;
   background: var(--surface-alt);
+}
+
+.task-card-progress {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 6px;
+  border-left: 3px solid #93c5fd;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .task-card-toggle {
