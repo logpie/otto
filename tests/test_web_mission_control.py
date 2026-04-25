@@ -374,15 +374,19 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     assert state["landing"]["counts"] == {"ready": 1, "merged": 1, "blocked": 0, "total": 2}
     by_id = {item["task_id"]: item for item in state["landing"]["items"]}
     assert by_id["ready-task"]["landing_state"] == "ready"
+    assert by_id["ready-task"]["label"] == "Ready to land"
     assert by_id["ready-task"]["run_id"] == "run-ready"
     assert by_id["ready-task"]["stories_passed"] == 2
     assert by_id["merged-task"]["landing_state"] == "merged"
+    assert by_id["merged-task"]["label"] == "Landed"
     assert by_id["merged-task"]["merge_id"] == "merge-merged"
 
     detail = TestClient(create_app(repo)).get("/api/runs/run-merged").json()
     actions = {action["key"]: action for action in detail["legal_actions"]}
     assert detail["landing_state"] == "merged"
     assert detail["review_packet"]["headline"] == "Already merged into main"
+    assert detail["review_packet"]["readiness"]["state"] == "merged"
+    assert detail["review_packet"]["checks"][-1]["detail"] == "Task is already landed."
     assert detail["review_packet"]["next_action"]["enabled"] is False
     assert actions["m"]["enabled"] is False
     assert actions["m"]["reason"] == "Already merged into main."
@@ -570,6 +574,18 @@ def test_web_landing_and_detail_show_review_packet_changed_files(tmp_path: Path)
     detail = client.get("/api/runs/run-ready").json()
     packet = detail["review_packet"]
     assert packet["headline"] == "Ready for review"
+    assert packet["readiness"] == {
+        "state": "ready",
+        "label": "Ready to land in main",
+        "tone": "success",
+        "blockers": [],
+        "next_step": "Review evidence and land the task.",
+    }
+    checks = {check["key"]: check for check in packet["checks"]}
+    assert checks["run"]["status"] == "pass"
+    assert checks["certification"]["detail"] == "1/1 stories passed."
+    assert checks["changes"]["status"] == "pass"
+    assert checks["landing"]["detail"] == "Safe to land into main."
     assert packet["certification"]["stories_passed"] == 1
     assert packet["certification"]["stories_tested"] == 1
     assert packet["changes"]["files"] == ["feature.txt"]
@@ -605,6 +621,11 @@ def test_web_landing_surfaces_diff_errors(tmp_path: Path) -> None:
 
     assert "build/missing" in state["landing"]["items"][0]["diff_error"]
     assert "build/missing" in detail["review_packet"]["changes"]["diff_error"]
+    assert detail["review_packet"]["readiness"]["state"] == "blocked"
+    assert detail["review_packet"]["readiness"]["tone"] == "danger"
+    checks = {check["key"]: check for check in detail["review_packet"]["checks"]}
+    assert checks["changes"]["status"] == "fail"
+    assert "build/missing" in checks["landing"]["detail"]
 
 
 def test_web_landing_target_preserves_detected_branch_path(tmp_path: Path) -> None:

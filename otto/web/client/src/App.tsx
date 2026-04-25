@@ -203,9 +203,9 @@ export function App() {
     }
     const actionLabel = capitalize(label || action);
     requestConfirm({
-      title: action === "merge" ? "Merge task" : `${actionLabel} run`,
+      title: action === "merge" ? "Land task" : `${actionLabel} run`,
       body: message,
-      confirmLabel: action === "merge" ? "Merge task" : actionLabel,
+      confirmLabel: action === "merge" ? "Land task" : actionLabel,
       tone: ["cancel", "cleanup"].includes(action) ? "danger" : "primary",
       onConfirm: async () => {
         try {
@@ -230,13 +230,13 @@ export function App() {
       return;
     }
     if (!ready) {
-      showToast("No merge-ready tasks", "warning");
+      showToast("No land-ready tasks", "warning");
       return;
     }
     requestConfirm({
-      title: "Merge ready tasks",
-      body: `Merge ${ready} ready task${ready === 1 ? "" : "s"} into ${landing?.target || "main"}?`,
-      confirmLabel: ready === 1 ? "Merge 1 task" : `Merge ${ready} tasks`,
+      title: "Land ready tasks",
+      body: landingBulkConfirmation(landing),
+      confirmLabel: ready === 1 ? "Land 1 task" : `Land ${ready} tasks`,
       onConfirm: async () => {
         try {
           const result = await api<ActionResult>("/api/actions/merge-all", {method: "POST", body: "{}"});
@@ -308,7 +308,7 @@ export function App() {
         <button type="button" disabled={!canStartWatcher(data)} title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
         <button type="button" disabled={!canStopWatcher(data)} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
         <button type="button" disabled={!canMerge(landing)} title={mergeButtonTitle(landing)} onClick={() => void mergeReadyTasks()}>
-          {landing?.counts.ready ? `Merge ${landing.counts.ready} ready` : "Merge ready"}
+          {landing?.counts.ready ? `Land ${landing.counts.ready} ready` : "Land ready"}
         </button>
       </aside>
 
@@ -328,7 +328,7 @@ export function App() {
               selectedRunId={selectedRunId}
               onSelect={selectRun}
               onMergeReady={() => void mergeReadyTasks()}
-              onMergeRun={(runId) => void runActionForRun(runId, "merge", "Merge this task?")}
+              onMergeRun={(runId) => void runActionForRun(runId, "merge", "Land this task into the target branch?")}
             />
             <LiveRuns items={data?.live.items || []} selectedRunId={selectedRunId} onSelect={selectRun} />
             <EventTimeline events={data?.events} />
@@ -537,19 +537,20 @@ function LandingQueue({landing, selectedRunId, onSelect, onMergeReady, onMergeRu
     <section className="panel landing-panel" aria-labelledby="landingHeading">
       <div className="panel-heading">
         <div>
-          <h2 id="landingHeading">Landing Queue</h2>
+          <h2 id="landingHeading">Review &amp; Land</h2>
           <p className="panel-subtitle">{landingSummaryText(landing)}</p>
         </div>
         <button className="primary" type="button" disabled={!canMerge(landing)} title={mergeButtonTitle(landing)} onClick={onMergeReady}>
-          {landing?.counts.ready ? `Merge ${landing.counts.ready} ready` : "Merge ready"}
+          {landing?.counts.ready ? `Land ${landing.counts.ready} ready` : "Land ready"}
         </button>
       </div>
       <LandingWarnings landing={landing} />
+      <LandingPlan landing={landing} onMergeReady={onMergeReady} />
       <div className="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Landing</th>
+              <th>Review</th>
               <th>Task</th>
               <th>Branch</th>
               <th>Changes</th>
@@ -574,6 +575,50 @@ function LandingQueue({landing, selectedRunId, onSelect, onMergeReady, onMergeRu
         </table>
       </div>
     </section>
+  );
+}
+
+function LandingPlan({landing, onMergeReady}: {landing: LandingState | undefined; onMergeReady: () => void}) {
+  const items = landing?.items || [];
+  const ready = items.filter((item) => item.landing_state === "ready");
+  const needsAction = items.filter((item) => item.landing_state === "blocked");
+  const merged = items.filter((item) => item.landing_state === "merged");
+  const firstReady = ready.slice(0, 3);
+  return (
+    <div className="landing-plan" aria-label="Landing plan">
+      <div className="plan-summary">
+        <PlanMetric label="Ready to land" value={String(ready.length)} tone={ready.length ? "success" : "neutral"} />
+        <PlanMetric label="Needs action" value={String(needsAction.length)} tone={needsAction.length ? "warning" : "neutral"} />
+        <PlanMetric label="Already landed" value={String(merged.length)} tone={merged.length ? "info" : "neutral"} />
+      </div>
+      <div className="plan-copy">
+        <strong>{landingPlanHeadline(landing)}</strong>
+        <span>{landingPlanBody(landing, ready, needsAction)}</span>
+      </div>
+      {firstReady.length > 0 && (
+        <ul className="plan-ready-list">
+          {firstReady.map((item) => (
+            <li key={item.task_id}>
+              <span>{item.task_id}</span>
+              <strong>{changeLine(item)} / {proofLine(item)}</strong>
+            </li>
+          ))}
+          {ready.length > firstReady.length && <li>+{ready.length - firstReady.length} more ready task{ready.length - firstReady.length === 1 ? "" : "s"}</li>}
+        </ul>
+      )}
+      <button type="button" disabled={!canMerge(landing)} title={mergeButtonTitle(landing)} onClick={onMergeReady}>
+        Review complete: land ready work
+      </button>
+    </div>
+  );
+}
+
+function PlanMetric({label, value, tone}: {label: string; value: string; tone: "neutral" | "info" | "success" | "warning"}) {
+  return (
+    <div className={`plan-metric plan-${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -621,6 +666,7 @@ function LandingRow({item, selected, mergeBlocked, onSelect, onMergeRun}: {
   onMergeRun: (runId: string) => void;
 }) {
   const canMergeRow = item.landing_state === "ready" && Boolean(item.run_id) && !mergeBlocked;
+  const canOpenRow = Boolean(item.run_id);
   return (
     <tr
       className={selected ? "selected" : ""}
@@ -639,9 +685,14 @@ function LandingRow({item, selected, mergeBlocked, onSelect, onMergeRun}: {
       <td title={changeListTitle(item)}>{changeLine(item)}</td>
       <td title={proofLine(item)}>{proofLine(item)}</td>
       <td>
-        <button type="button" disabled={!canMergeRow} title={mergeBlocked ? mergeButtonTitle({merge_blocked: true} as LandingState) : ""} onClick={(event) => {
+        <button type="button" disabled={!canOpenRow || (item.landing_state === "ready" && !canMergeRow)} title={mergeBlocked ? mergeButtonTitle({merge_blocked: true} as LandingState) : ""} onClick={(event) => {
           event.stopPropagation();
-          if (item.run_id) onMergeRun(item.run_id);
+          if (!item.run_id) return;
+          if (canMergeRow) {
+            onMergeRun(item.run_id);
+            return;
+          }
+          onSelect(item.run_id);
         }}>
           {actionLabelForLanding(item)}
         </button>
@@ -791,11 +842,12 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
   return (
     <aside className="detail" aria-labelledby="detailHeading">
       <div className="panel-heading">
-        <h2 id="detailHeading">Run Detail</h2>
+        <h2 id="detailHeading">{detail ? "Review Packet" : "Run Detail"}</h2>
         <span className="pill">{detail?.display_status || "-"}</span>
       </div>
       {detail ? (
         <>
+          <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} />
           <div className="detail-body">
             <h3>{detail.title || detail.run_id}</h3>
             <dl>
@@ -809,7 +861,6 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
               {detail.summary_lines.map((line, index) => <DetailLine key={`${line}-${index}`} line={line} />)}
             </dl>
           </div>
-          <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} />
           <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
           <div className="detail-tabs">
             <button className={`tab ${!showingArtifacts ? "active" : ""}`} type="button" onClick={onShowLogs}>Logs</button>
@@ -836,36 +887,70 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
 
 function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]; onRunAction: (action: string, label?: string) => void}) {
   const action = packet.next_action;
+  const blockers = packet.readiness.blockers || [];
+  const evidence = packet.evidence.slice(0, 4);
   return (
-    <section className="review-packet" aria-label="Review packet">
+    <section className={`review-packet review-${packet.readiness.tone || "info"}`} aria-label="Review packet">
       <div className="review-head">
         <div>
+          <span className="review-kicker">{packet.readiness.label}</span>
           <strong>{packet.headline}</strong>
-          <span>{packet.summary}</span>
+          <span title={packet.summary}>{packet.summary}</span>
         </div>
         <button
+          className={action.enabled ? "primary" : ""}
           type="button"
           disabled={!action.enabled || !action.action_key}
           title={action.reason || ""}
           onClick={() => action.action_key && onRunAction(actionName(action.action_key), action.label)}
         >
-          {action.label}
+          {reviewActionLabel(action.label)}
         </button>
       </div>
+      <div className="review-next-step">
+        <strong>Next</strong>
+        <span>{packet.readiness.next_step}</span>
+      </div>
+      {blockers.length > 0 && (
+        <ul className="review-blockers" aria-label="Review blockers">
+          {blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
+        </ul>
+      )}
       <div className="review-grid">
         <ReviewMetric label="Stories" value={storiesLine(packet)} />
         <ReviewMetric label="Changes" value={packet.changes.file_count ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}` : "-"} />
         <ReviewMetric label="Evidence" value={`${packet.evidence.filter((item) => item.exists).length}/${packet.evidence.length}`} />
       </div>
+      <div className="review-checklist" aria-label="Readiness checklist">
+        {packet.checks.map((check) => (
+          <div className={`review-check check-${check.status}`} key={check.key}>
+            <span>{checkStatusLabel(check.status)}</span>
+            <div>
+              <strong>{check.label}</strong>
+              <p>{check.detail}</p>
+            </div>
+          </div>
+        ))}
+      </div>
       {packet.failure && <div className="review-note danger">{packet.failure.reason || "failure recorded"}</div>}
       {packet.changes.diff_error && <div className="review-note danger">{packet.changes.diff_error}</div>}
       {packet.changes.files.length > 0 && (
-        <ul className="review-files">
+        <ul className="review-files" aria-label="Changed files">
           {packet.changes.files.map((path) => <li key={path}>{path}</li>)}
           {packet.changes.truncated && <li>more files not shown</li>}
         </ul>
       )}
-      {packet.changes.diff_command && <code>{packet.changes.diff_command}</code>}
+      {evidence.length > 0 && (
+        <div className="review-evidence" aria-label="Evidence artifacts">
+          {evidence.map((artifact) => (
+            <span className={artifact.exists ? "" : "missing"} key={`${artifact.index}-${artifact.path}`}>
+              {artifact.label}{artifact.exists ? "" : " missing"}
+            </span>
+          ))}
+          {packet.evidence.length > evidence.length && <span>+{packet.evidence.length - evidence.length} more</span>}
+        </div>
+      )}
+      {packet.changes.diff_command && <code title={packet.changes.diff_command}>{packet.changes.diff_command}</code>}
     </section>
   );
 }
@@ -902,7 +987,7 @@ function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]
         const title = action.key === "m" && mergeBlocked ? "Commit, stash, or revert local project changes before merging." : action.reason || action.preview || "";
         return (
           <button key={action.key} type="button" disabled={disabled} title={title} onClick={() => onRunAction(name, action.label)}>
-            {action.label}
+            {reviewActionLabel(action.label)}
           </button>
         );
       })}
@@ -1206,16 +1291,44 @@ function mergeBlockedText(landing: LandingState): string {
   return `Merge blocked by local changes${suffix}`;
 }
 
+function landingBulkConfirmation(landing?: LandingState): string {
+  const ready = (landing?.items || []).filter((item) => item.landing_state === "ready");
+  const target = landing?.target || "main";
+  const taskList = ready.slice(0, 5).map((item) => item.task_id).join(", ");
+  const suffix = ready.length > 5 ? `, +${ready.length - 5} more` : "";
+  const changed = ready.reduce((sum, item) => sum + Number(item.changed_file_count || 0), 0);
+  return `Land ${ready.length} ready task${ready.length === 1 ? "" : "s"} into ${target}: ${taskList}${suffix}. This will land ${changed} changed file${changed === 1 ? "" : "s"} across the ready work.`;
+}
+
 function landingSummaryText(landing?: LandingState): string {
   if (!landing || (!landing.counts.ready && !landing.counts.merged && !landing.counts.blocked)) {
-    return "Queue work appears here when tasks start or finish.";
+    return "Finished tasks appear here for review, evidence checks, and landing.";
   }
   const parts: string[] = [];
-  if (landing.counts.ready) parts.push(`${landing.counts.ready} ready to merge`);
-  if (landing.counts.merged) parts.push(`${landing.counts.merged} already merged`);
+  if (landing.counts.ready) parts.push(`${landing.counts.ready} ready to land`);
+  if (landing.counts.merged) parts.push(`${landing.counts.merged} already landed`);
   if (landing.counts.blocked) parts.push(`${landing.counts.blocked} not ready`);
   const summary = `${parts.join(" / ")} into ${landing.target}.`;
   return landing.merge_blocked ? `${summary} Merge blocked by local changes.` : summary;
+}
+
+function landingPlanHeadline(landing?: LandingState): string {
+  if (!landing || !landing.counts.total) return "No work is waiting for review.";
+  if (landing.merge_blocked) return "Repository cleanup is required before landing.";
+  if (landing.counts.ready) return `${landing.counts.ready} task${landing.counts.ready === 1 ? "" : "s"} can land now.`;
+  if (landing.counts.blocked) return "Work exists, but nothing is ready to land.";
+  return "All visible work has already landed.";
+}
+
+function landingPlanBody(landing: LandingState | undefined, ready: LandingItem[], needsAction: LandingItem[]): string {
+  if (!landing || !landing.counts.total) return "Queue a build, improve, or certify job to start the product loop.";
+  if (landing.merge_blocked) return "Commit, stash, or revert local project changes, then refresh Mission Control.";
+  if (ready.length) {
+    const fileCount = ready.reduce((sum, item) => sum + Number(item.changed_file_count || 0), 0);
+    return `Review the checklist for each task, then land the ready branches into ${landing.target}. ${fileCount} changed file${fileCount === 1 ? "" : "s"} will be considered.`;
+  }
+  if (needsAction.length) return "Open each blocked task to inspect its failure, stale state, missing branch, or unfinished run.";
+  return "Use history and artifacts to audit what landed, or queue the next product task.";
 }
 
 function providerLine(detail: RunDetail): string {
@@ -1229,7 +1342,7 @@ function actionName(key: string): string {
 function actionConfirmationBody(action: string, label?: string): string {
   const normalized = (label || action).toLowerCase();
   if (action === "cancel") return "Cancel this run?";
-  if (action === "merge") return "Merge this task?";
+  if (action === "merge") return "Land this task into the target branch?";
   if (normalized === "remove") return "Remove this queue task?";
   if (normalized === "cleanup") return "Clean up this run?";
   if (normalized === "requeue") return "Requeue this task?";
@@ -1281,15 +1394,31 @@ function formatEventTime(value: string): string {
 }
 
 function actionLabelForLanding(item: LandingItem): string {
-  if (item.landing_state === "merged") return "Merged";
-  if (item.landing_state === "ready") return "Merge";
-  return item.queue_status || "Blocked";
+  if (item.landing_state === "merged") return "Audit";
+  if (item.landing_state === "ready") return "Land";
+  return item.run_id ? "Review" : item.queue_status || "Blocked";
 }
 
 function storiesLine(packet: RunDetail["review_packet"]): string {
   const tested = Number(packet.certification.stories_tested || 0);
   const passed = Number(packet.certification.stories_passed || 0);
   return tested ? `${passed}/${tested}` : "-";
+}
+
+function reviewActionLabel(label: string): string {
+  const normalized = label.toLowerCase();
+  if (normalized === "merge selected") return "Land selected";
+  return normalized.includes("merge") ? "Land task" : label;
+}
+
+function checkStatusLabel(status: string): string {
+  return {
+    pass: "Pass",
+    warn: "Warn",
+    fail: "Fail",
+    pending: "Wait",
+    info: "Info",
+  }[status] || capitalize(status || "info");
 }
 
 function shortText(value: string, maxLength: number): string {

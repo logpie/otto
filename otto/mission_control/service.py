@@ -272,11 +272,11 @@ class MissionControlService:
             merge_info = merged_by_branch.get(branch)
             if merge_info is not None:
                 landing_state = "merged"
-                label = "Merged"
+                label = "Landed"
                 counts["merged"] += 1
             elif queue_status == "done" and branch:
                 landing_state = "ready"
-                label = "Ready to merge"
+                label = "Ready to land"
                 counts["ready"] += 1
                 ready_tasks.append(task)
             else:
@@ -732,16 +732,37 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
     merged = merge_info is not None
     diff = _branch_diff(project_dir, branch, target)
     changed_files = diff["files"]
+    certification = _certification_summary(record)
+    evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
+    readiness = _review_readiness(
+        display_status=display_status,
+        merged=merged,
+        branch=branch,
+        diff_error=diff["error"],
+        target=target,
+        overlay=detail.overlay,
+    )
     return {
         "headline": f"Already merged into {target}" if merged else _review_headline(record, display_status),
         "status": "merged" if merged else display_status,
         "summary": _optional_str(record.intent.get("summary")) or record.display_name or record.run_id,
+        "readiness": readiness,
+        "checks": _review_checks(
+            display_status=display_status,
+            merged=merged,
+            branch=branch,
+            target=target,
+            diff=diff,
+            certification=certification,
+            evidence=evidence,
+            readiness=readiness,
+        ),
         "next_action": (
             {"label": "No action", "action_key": None, "enabled": False, "reason": f"Already merged into {target}."}
             if merged
             else _suggested_next_action(display_status, detail.legal_actions, detail.overlay)
         ),
-        "certification": _certification_summary(record),
+        "certification": certification,
         "changes": {
             "branch": branch,
             "target": target,
@@ -753,9 +774,148 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
             "diff_command": f"git diff {target}...{branch}" if branch and branch != target else None,
             "diff_error": diff["error"],
         },
-        "evidence": [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)],
+        "evidence": evidence,
         "failure": _failure_summary(record, detail.overlay),
     }
+
+
+def _review_readiness(
+    *,
+    display_status: str,
+    merged: bool,
+    branch: str | None,
+    diff_error: str | None,
+    target: str,
+    overlay: Any,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    if merged:
+        return {
+            "state": "merged",
+            "label": f"Landed in {target}",
+            "tone": "success",
+            "blockers": blockers,
+            "next_step": "No merge action is needed.",
+        }
+    if display_status in {"running", "starting", "queued", "terminating"}:
+        return {
+            "state": "in_progress",
+            "label": "Still running",
+            "tone": "info",
+            "blockers": ["Wait for the task to finish before review."],
+            "next_step": "Watch logs or wait for completion.",
+        }
+    if display_status == "done":
+        if not branch:
+            blockers.append("No source branch was recorded for this task.")
+        if diff_error:
+            blockers.append(f"Changed files could not be inspected: {diff_error}")
+        if blockers:
+            return {
+                "state": "blocked",
+                "label": "Review blocked",
+                "tone": "danger",
+                "blockers": blockers,
+                "next_step": "Fix the branch or repository state, then refresh.",
+            }
+        return {
+            "state": "ready",
+            "label": f"Ready to land in {target}",
+            "tone": "success",
+            "blockers": blockers,
+            "next_step": "Review evidence and land the task.",
+        }
+    if display_status in {"failed", "cancelled", "interrupted", "stale"}:
+        reason = overlay.reason if overlay is not None else f"Run status is {display_status}."
+        return {
+            "state": "needs_attention",
+            "label": "Needs action",
+            "tone": "warning" if display_status in {"interrupted", "stale"} else "danger",
+            "blockers": [reason],
+            "next_step": "Inspect failure evidence and retry, resume, requeue, or remove.",
+        }
+    return {
+        "state": "blocked",
+        "label": "Not ready",
+        "tone": "warning",
+        "blockers": [f"Run status is {display_status or 'unknown'}."],
+        "next_step": "Inspect the run before taking action.",
+    }
+
+
+def _review_checks(
+    *,
+    display_status: str,
+    merged: bool,
+    branch: str | None,
+    target: str,
+    diff: dict[str, Any],
+    certification: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    readiness: dict[str, Any],
+) -> list[dict[str, Any]]:
+    changed_files = list(diff.get("files") or [])
+    diff_error = _optional_str(diff.get("error"))
+    existing_evidence = [item for item in evidence if item.get("exists")]
+    missing_evidence = [item for item in evidence if not item.get("exists")]
+    stories_tested = _int_or_none(certification.get("stories_tested"))
+    stories_passed = _int_or_none(certification.get("stories_passed"))
+
+    checks: list[dict[str, Any]] = []
+    if merged:
+        checks.append(_review_check("run", "Run finished", "pass", f"Already landed in {target}."))
+    elif display_status == "done":
+        checks.append(_review_check("run", "Run finished", "pass", "Task completed and is ready for human review."))
+    elif display_status in {"running", "starting", "queued", "terminating"}:
+        checks.append(_review_check("run", "Run finished", "pending", "Task is still in flight."))
+    else:
+        checks.append(_review_check("run", "Run finished", "fail", f"Run status is {display_status or 'unknown'}."))
+
+    if stories_tested and stories_passed is not None and stories_passed >= stories_tested:
+        checks.append(_review_check("certification", "Certification", "pass", f"{stories_passed}/{stories_tested} stories passed."))
+    elif stories_tested and stories_passed is not None:
+        checks.append(_review_check("certification", "Certification", "fail", f"{stories_passed}/{stories_tested} stories passed."))
+    else:
+        checks.append(_review_check("certification", "Certification", "warn", "No story pass count was recorded. Inspect artifacts before landing."))
+
+    if diff_error:
+        checks.append(_review_check("changes", "Changed files", "fail", diff_error))
+    elif changed_files:
+        checks.append(_review_check("changes", "Changed files", "pass", f"{len(changed_files)} file{'' if len(changed_files) == 1 else 's'} changed on {branch}."))
+    elif merged:
+        checks.append(_review_check("changes", "Changed files", "info", "No unlanded diff remains."))
+    else:
+        checks.append(_review_check("changes", "Changed files", "warn", "No changed files were detected. Confirm the task produced the expected artifact."))
+
+    if existing_evidence and not missing_evidence:
+        checks.append(_review_check("evidence", "Evidence", "pass", f"{len(existing_evidence)} artifact{'' if len(existing_evidence) == 1 else 's'} available."))
+    elif existing_evidence:
+        checks.append(
+            _review_check(
+                "evidence",
+                "Evidence",
+                "warn",
+                f"{len(existing_evidence)} available, {len(missing_evidence)} missing.",
+            )
+        )
+    else:
+        checks.append(_review_check("evidence", "Evidence", "warn", "No readable artifacts are attached."))
+
+    if readiness["state"] == "ready":
+        checks.append(_review_check("landing", "Landing action", "pass", f"Safe to land into {target}."))
+    elif readiness["state"] == "merged":
+        checks.append(_review_check("landing", "Landing action", "pass", "Task is already landed."))
+    elif readiness["state"] == "in_progress":
+        checks.append(_review_check("landing", "Landing action", "pending", "Landing is disabled until the task completes."))
+    else:
+        detail = "; ".join(str(item) for item in readiness.get("blockers", []) if item) or "Landing is disabled."
+        checks.append(_review_check("landing", "Landing action", "fail", detail))
+
+    return checks
+
+
+def _review_check(key: str, label: str, status: str, detail: str) -> dict[str, str]:
+    return {"key": key, "label": label, "status": status, "detail": detail}
 
 
 def _review_headline(record: Any, display_status: str) -> str:

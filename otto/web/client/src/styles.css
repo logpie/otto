@@ -383,6 +383,100 @@ h2 {
   border-top: 1px solid #f4d58d;
 }
 
+.landing-plan {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.9fr) minmax(260px, 1.2fr) minmax(180px, 0.9fr) auto;
+  gap: 10px;
+  align-items: stretch;
+  margin: 10px 12px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.plan-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.plan-metric {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.plan-metric span,
+.plan-copy span,
+.plan-ready-list,
+.review-next-step span,
+.review-blockers,
+.review-check p,
+.review-evidence {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.plan-metric strong {
+  font-size: 16px;
+}
+
+.plan-success strong {
+  color: var(--green);
+}
+
+.plan-warning strong {
+  color: var(--amber);
+}
+
+.plan-info strong {
+  color: var(--blue);
+}
+
+.plan-copy {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+}
+
+.plan-copy strong,
+.plan-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plan-ready-list {
+  min-width: 0;
+  margin: 0;
+  padding-left: 18px;
+  overflow: hidden;
+}
+
+.plan-ready-list li {
+  min-width: 0;
+}
+
+.plan-ready-list span,
+.plan-ready-list strong {
+  display: inline-block;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+.landing-plan > button {
+  align-self: center;
+  min-width: 160px;
+}
+
 .landing-chip {
   display: inline-flex;
   align-items: center;
@@ -614,6 +708,22 @@ tbody tr.selected {
   background: #f8fafc;
 }
 
+.review-success {
+  box-shadow: inset 4px 0 0 var(--green);
+}
+
+.review-info {
+  box-shadow: inset 4px 0 0 var(--blue);
+}
+
+.review-warning {
+  box-shadow: inset 4px 0 0 var(--amber);
+}
+
+.review-danger {
+  box-shadow: inset 4px 0 0 var(--red);
+}
+
 .review-head {
   display: flex;
   align-items: start;
@@ -625,6 +735,13 @@ tbody tr.selected {
   min-width: 0;
   display: grid;
   gap: 2px;
+}
+
+.review-kicker {
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .review-head strong,
@@ -639,6 +756,34 @@ tbody tr.selected {
 .review-files {
   color: var(--muted);
   font-size: 12px;
+}
+
+.review-head button {
+  flex: 0 0 auto;
+}
+
+.review-next-step {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.review-next-step span {
+  min-width: 0;
+}
+
+.review-blockers {
+  margin: 0;
+  padding: 7px 8px 7px 26px;
+  border: 1px solid #f4d58d;
+  border-radius: 6px;
+  background: #fff8e1;
+  color: #713f12;
 }
 
 .review-grid {
@@ -663,6 +808,61 @@ tbody tr.selected {
   white-space: nowrap;
 }
 
+.review-checklist {
+  display: grid;
+  gap: 6px;
+}
+
+.review-check {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.review-check > span {
+  display: inline-grid;
+  place-items: center;
+  min-height: 22px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.review-check div {
+  min-width: 0;
+}
+
+.review-check p {
+  margin: 2px 0 0;
+}
+
+.check-pass > span {
+  background: #dcfce7;
+  color: var(--green);
+}
+
+.check-warn > span,
+.check-pending > span {
+  background: #fff8e1;
+  color: var(--amber);
+}
+
+.check-fail > span {
+  background: #fef2f2;
+  color: var(--red);
+}
+
+.check-info > span {
+  background: #dbeafe;
+  color: var(--blue);
+}
+
 .review-note {
   padding: 7px 8px;
   border-radius: 6px;
@@ -675,6 +875,29 @@ tbody tr.selected {
   padding-left: 18px;
   max-height: 84px;
   overflow: auto;
+}
+
+.review-evidence {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.review-evidence span {
+  max-width: 180px;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-evidence .missing {
+  border-color: #f4d58d;
+  color: #713f12;
+  background: #fff8e1;
 }
 
 .review-packet code {
@@ -843,6 +1066,10 @@ tbody tr.selected {
     grid-template-columns: 1fr;
   }
 
+  .landing-plan {
+    grid-template-columns: 1fr;
+  }
+
   .overview-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -866,6 +1093,11 @@ tbody tr.selected {
 
   .overview-strip,
   .status-banner {
+    grid-template-columns: 1fr;
+  }
+
+  .plan-summary,
+  .review-grid {
     grid-template-columns: 1fr;
   }
 }

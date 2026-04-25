@@ -255,6 +255,19 @@ export interface ReviewPacket {
   headline: string;
   status: string;
   summary: string;
+  readiness: {
+    state: "ready" | "merged" | "blocked" | "in_progress" | "needs_attention" | string;
+    label: string;
+    tone: "success" | "info" | "warning" | "danger" | string;
+    blockers: string[];
+    next_step: string;
+  };
+  checks: Array<{
+    key: string;
+    label: string;
+    status: "pass" | "warn" | "fail" | "pending" | "info" | string;
+    detail: string;
+  }>;
   next_action: {
     label: string;
     action_key: string | null;
