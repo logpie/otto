@@ -100,6 +100,9 @@ class MissionControlService:
         filters: MissionControlFilters | None = None,
     ) -> dict[str, Any]:
         detail = self._detail_view(run_id, filters)
+        fallback = _queue_failure_log_fallback(self.project_dir, detail.record, offset=offset, limit_bytes=limit_bytes)
+        if fallback is not None:
+            return asdict(fallback)
         if not detail.log_paths:
             return asdict(LogReadResult(None, offset, offset, "", False))
         index = min(max(log_index, 0), len(detail.log_paths) - 1)
@@ -798,6 +801,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
     certification = _certification_summary(project_dir, record)
     evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
     merge_preflight = _merge_preflight(project_dir)
+    failure = _failure_summary(project_dir, record, detail.overlay)
     readiness = _review_readiness(
         display_status=display_status,
         merged=merged,
@@ -806,6 +810,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
         target=target,
         overlay=detail.overlay,
         merge_preflight=merge_preflight,
+        failure=failure,
     )
     next_action = (
         {"label": "No action", "action_key": None, "enabled": False, "reason": f"Already merged into {target}."}
@@ -838,6 +843,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
             certification=certification,
             evidence=evidence,
             readiness=readiness,
+            failure=failure,
         ),
         "next_action": next_action,
         "certification": certification,
@@ -853,7 +859,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
             "diff_error": diff["error"],
         },
         "evidence": evidence,
-        "failure": _failure_summary(record, detail.overlay),
+        "failure": failure,
     }
 
 
@@ -862,6 +868,7 @@ def _merge_review_packet(project_dir: Path, detail: DetailView, *, display_statu
     merge_id = _optional_str(record.identity.get("merge_id")) or record.run_id
     certification = _certification_summary(project_dir, record)
     evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
+    failure = _failure_summary(project_dir, record, detail.overlay)
     terminal_success = display_status == "done" or record.terminal_outcome == "success"
     needs_attention = display_status in {"failed", "cancelled", "interrupted", "stale"}
     if terminal_success:
@@ -927,7 +934,7 @@ def _merge_review_packet(project_dir: Path, detail: DetailView, *, display_statu
             "diff_error": None,
         },
         "evidence": evidence,
-        "failure": _failure_summary(record, detail.overlay),
+        "failure": failure,
     }
 
 
@@ -999,6 +1006,7 @@ def _review_readiness(
     target: str,
     overlay: Any,
     merge_preflight: dict[str, Any],
+    failure: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     if merged:
@@ -1051,7 +1059,9 @@ def _review_readiness(
             "next_step": "Review evidence and land the task.",
         }
     if display_status in {"failed", "cancelled", "interrupted", "stale"}:
-        reason = overlay.reason if overlay is not None else f"Run status is {display_status}."
+        reason = (
+            _optional_str(failure.get("reason")) if failure is not None else None
+        ) or (overlay.reason if overlay is not None else f"Run status is {display_status}.")
         return {
             "state": "needs_attention",
             "label": "Needs action",
@@ -1078,6 +1088,7 @@ def _review_checks(
     certification: dict[str, Any],
     evidence: list[dict[str, Any]],
     readiness: dict[str, Any],
+    failure: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     changed_files = list(diff.get("files") or [])
     diff_error = _optional_str(diff.get("error"))
@@ -1100,7 +1111,8 @@ def _review_checks(
         )
         checks.append(_review_check("run", run_label, "pending", run_detail))
     else:
-        checks.append(_review_check("run", "Run finished", "fail", f"Run status is {display_status or 'unknown'}."))
+        reason = (_optional_str(failure.get("reason")) if failure is not None else None) or f"Run status is {display_status or 'unknown'}."
+        checks.append(_review_check("run", "Run finished", "fail", reason))
 
     if display_status in REVIEW_IN_PROGRESS_STATUSES:
         checks.append(_review_check("certification", "Certification", "pending", "Certification is pending until the task finishes."))
@@ -1152,7 +1164,7 @@ def _review_checks(
     elif readiness["state"] == "in_progress":
         checks.append(_review_check("landing", "Landing action", "pending", "Landing is disabled until the task completes."))
     else:
-        detail = "; ".join(str(item) for item in readiness.get("blockers", []) if item) or "Landing is disabled."
+        detail = (_optional_str(failure.get("reason")) if failure is not None else None) or "; ".join(str(item) for item in readiness.get("blockers", []) if item) or "Landing is disabled."
         checks.append(_review_check("landing", "Landing action", "fail", detail))
 
     return checks
@@ -1482,16 +1494,139 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _failure_summary(record: Any, overlay: Any) -> dict[str, Any] | None:
+def _queue_failure_log_fallback(
+    project_dir: Path,
+    record: Any,
+    *,
+    offset: int,
+    limit_bytes: int,
+) -> LogReadResult | None:
+    if getattr(record, "domain", None) != "queue":
+        return None
+    status = str(getattr(record, "status", "") or "")
+    if status not in {"failed", "cancelled", "interrupted", "stale"}:
+        return None
+    artifacts = getattr(record, "artifacts", {}) if isinstance(getattr(record, "artifacts", {}), dict) else {}
+    primary_log = _optional_str(artifacts.get("primary_log_path"))
+    if primary_log and Path(primary_log).expanduser().exists():
+        return None
+    fallback = _queue_missing_primary_log_excerpt(project_dir, record)
+    if fallback is None:
+        return None
+    path, text = fallback
+    raw = text.encode("utf-8", errors="replace")
+    start = max(0, min(offset, len(raw)))
+    chunk = raw[start : start + max(1, limit_bytes)]
+    return LogReadResult(
+        path=str(path),
+        offset=start,
+        next_offset=start + len(chunk),
+        text=chunk.decode("utf-8", errors="replace"),
+        exists=True,
+    )
+
+
+def _failure_summary(project_dir: Path, record: Any, overlay: Any) -> dict[str, Any] | None:
     status = str(getattr(record, "status", "") or "")
     overlay_reason = overlay.reason if overlay is not None else None
     last_event = _optional_str(getattr(record, "last_event", None))
     if status not in {"failed", "cancelled", "interrupted"} and not overlay_reason:
         return None
+    fallback = _queue_missing_primary_log_excerpt(project_dir, record)
+    excerpt = fallback[1] if fallback is not None else None
+    reason = overlay_reason or _specific_failure_reason(excerpt) or _friendly_exit_reason(last_event) or last_event or status
     return {
-        "reason": overlay_reason or last_event or status,
+        "reason": reason,
         "last_event": last_event,
+        "excerpt": excerpt,
+        "source": str(fallback[0]) if fallback is not None else None,
     }
+
+
+def _friendly_exit_reason(last_event: str | None) -> str | None:
+    if last_event and last_event.startswith("exit_code="):
+        return f"Process exited with {last_event}; no session artifacts were created. Open logs for the watcher excerpt."
+    return None
+
+
+def _specific_failure_reason(excerpt: str | None) -> str | None:
+    if not excerpt:
+        return None
+    for line in excerpt.splitlines():
+        stripped = _strip_queue_log_prefix(line.strip())
+        if not stripped or stripped.startswith("Primary session log"):
+            continue
+        if "Fatal Python error" in stripped:
+            return stripped
+        if "OSError:" in stripped:
+            return stripped
+    for line in reversed(excerpt.splitlines()):
+        stripped = _strip_queue_log_prefix(line.strip())
+        if "exit_code=" in stripped or "failed" in stripped.lower():
+            return stripped
+    return None
+
+
+def _queue_missing_primary_log_excerpt(project_dir: Path, record: Any) -> tuple[Path, str] | None:
+    if getattr(record, "domain", None) != "queue":
+        return None
+    artifacts = getattr(record, "artifacts", {}) if isinstance(getattr(record, "artifacts", {}), dict) else {}
+    primary_log = _optional_str(artifacts.get("primary_log_path"))
+    if primary_log and Path(primary_log).expanduser().is_file():
+        return None
+    return _queue_failure_excerpt(project_dir, record)
+
+
+def _strip_queue_log_prefix(line: str) -> str:
+    if line.startswith("[") and "] " in line:
+        return line.split("] ", 1)[1].strip()
+    return line
+
+
+def _queue_failure_excerpt(project_dir: Path, record: Any, *, max_lines: int = 80) -> tuple[Path, str] | None:
+    task_id = _optional_str(getattr(record, "identity", {}).get("queue_task_id")) if isinstance(getattr(record, "identity", {}), dict) else None
+    run_id = _optional_str(getattr(record, "run_id", None))
+    if not task_id and not run_id:
+        return None
+    primary_needle = f"[{run_id}]" if run_id else None
+    secondary_needle = f"[{task_id}]" if task_id else None
+    for path in (
+        paths.logs_dir(project_dir) / "web" / "watcher.log",
+        paths.queue_dir(project_dir) / "watcher.log",
+    ):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        matched = _watcher_excerpt_lines(lines, primary_needle=primary_needle, secondary_needle=secondary_needle, max_lines=max_lines)
+        if not matched:
+            continue
+        excerpt = "\n".join(matched[-max_lines:])
+        return (
+            path,
+            "Primary session log was not created. Showing watcher output for this task.\n\n"
+            f"{excerpt}\n",
+        )
+    return None
+
+
+def _watcher_excerpt_lines(
+    lines: list[str],
+    *,
+    primary_needle: str | None,
+    secondary_needle: str | None,
+    max_lines: int,
+) -> list[str]:
+    for needle in (primary_needle, secondary_needle):
+        if not needle:
+            continue
+        indexes = [index for index, line in enumerate(lines) if needle in line]
+        if indexes:
+            first_index = last_index = indexes[-1]
+            while first_index > 0 and needle in lines[first_index - 1]:
+                first_index -= 1
+            return lines[first_index : last_index + 1][-max_lines:]
+    return []
 
 
 def _action_key(action: str) -> str:

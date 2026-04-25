@@ -938,6 +938,10 @@ class Runner:
             "cwd": str(wt_path),
             "env": env,
             "preexec_fn": os.setsid,
+            # A watcher can outlive the web/terminal process that launched it.
+            # Do not let spawned Python children inherit a closed fd 0; Python
+            # can fail during interpreter startup before Otto writes artifacts.
+            "stdin": subprocess.DEVNULL,
         }
         if self._prefix_child_output:
             popen_kwargs.update(
@@ -1043,14 +1047,27 @@ class Runner:
         wt_path = self._worktree_for(task)
         session_dir = paths.session_dir(wt_path, session_run_id) if session_run_id else paths.sessions_root(wt_path)
         manifest_path = ts.get("manifest_path") or (session_dir / "manifest.json")
+        primary_log = paths.build_dir(wt_path, session_run_id) / "narrative.log" if session_run_id else None
         return {
             "session_dir": str(session_dir),
             "manifest_path": str(manifest_path) if manifest_path else None,
             "checkpoint_path": str(paths.session_checkpoint(wt_path, session_run_id)) if session_run_id else None,
             "summary_path": str(paths.session_summary(wt_path, session_run_id)) if session_run_id else None,
-            "primary_log_path": str(paths.build_dir(wt_path, session_run_id) / "narrative.log") if session_run_id else None,
-            "extra_log_paths": [],
+            "primary_log_path": str(primary_log) if primary_log is not None else None,
+            "extra_log_paths": self._queue_extra_log_paths(ts, primary_log),
         }
+
+    def _queue_extra_log_paths(self, ts: dict[str, Any], primary_log: Path | None) -> list[str]:
+        status = str(ts.get("status") or "")
+        if status not in {"failed", "cancelled", INTERRUPTED_STATUS}:
+            return []
+        if primary_log is not None and primary_log.exists():
+            return []
+        candidates = [
+            paths.logs_dir(self.project_dir) / "web" / "watcher.log",
+            paths.queue_dir(self.project_dir) / "watcher.log",
+        ]
+        return [str(path.resolve(strict=False)) for path in candidates if path.exists()]
 
     def _queue_intent_path(self, task: QueueTask, ts: dict[str, Any]) -> str | None:
         session_run_id = str(ts.get("child_run_id") or ts.get("attempt_run_id") or "").strip()

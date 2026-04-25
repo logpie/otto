@@ -802,9 +802,12 @@ def test_runner_sets_queue_project_dir_env_on_spawn(tmp_path: Path, monkeypatch:
     repo = init_repo(tmp_path)
 
     captured_env: dict[str, str] = {}
+    captured_stdin: Any = None
 
-    def fake_popen(argv: list[str], *, cwd: str, env: dict[str, str], preexec_fn: Any):  # type: ignore[no-untyped-def]
+    def fake_popen(argv: list[str], *, cwd: str, env: dict[str, str], preexec_fn: Any, stdin: Any):  # type: ignore[no-untyped-def]
+        nonlocal captured_stdin
         captured_env.update(env)
+        captured_stdin = stdin
 
         class _StubProc:
             def __init__(self) -> None:
@@ -838,6 +841,7 @@ def test_runner_sets_queue_project_dir_env_on_spawn(tmp_path: Path, monkeypatch:
         assert captured_env.get("OTTO_QUEUE_PROJECT_DIR") == str(repo), \
             f"runner must set OTTO_QUEUE_PROJECT_DIR; got: {captured_env.get('OTTO_QUEUE_PROJECT_DIR')!r}"
         assert captured_env.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1"
+        assert captured_stdin is runner_module.subprocess.DEVNULL
     finally:
         runner._lock_fh.close()
 

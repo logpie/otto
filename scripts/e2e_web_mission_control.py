@@ -406,6 +406,11 @@ def scenario_multi_state(ctx: ScenarioContext) -> None:
     wait_text("Failed; review evidence and requeue or remove")
     failed_packet = api_json(ctx, "api/runs/run-failed-report")["review_packet"]
     assert failed_packet["readiness"]["state"] == "needs_attention"
+    assert "Fatal Python error" in failed_packet["failure"]["reason"]
+    browser("find", "testid", "open-logs-button", "click")
+    wait_text("Primary session log was not created")
+    wait_text("Bad file descriptor")
+    browser("find", "testid", "close-inspector-button", "click")
     browser("find", "testid", "diagnostics-tab", "click")
     wait_text("Diagnostics Summary")
     wait_text("Review Packet")
@@ -753,6 +758,19 @@ def seed_failed_task(repo: Path, task_id: str) -> None:
             "finished_at": iso_now(),
             "failure_reason": "visible test failed",
         },
+    )
+    watcher_log = repo / "otto_logs" / "web" / "watcher.log"
+    watcher_log.parent.mkdir(parents=True, exist_ok=True)
+    watcher_log.write_text(
+        "\n".join(
+            [
+                f"[{task_id}] Fatal Python error: init_sys_streams: can't initialize sys standard streams",
+                f"[{task_id}] OSError: [Errno 9] Bad file descriptor",
+                f"[02:00:22] reaped {task_id}: failed (exit_code=1)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 

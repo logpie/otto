@@ -1489,6 +1489,7 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
   const proofContentIsLog = isLogArtifact(proofContent?.artifact || null);
   const proofContentText = proofContent?.content || "";
   const compact = compactLongText(proofContentIsLog ? proofContentText : formatArtifactContent(proofContentText), 20000);
+  const proofChecks = packet.failure ? packet.checks.filter((check) => check.key !== "run" && check.key !== "landing") : packet.checks;
   return (
     <div className="proof-pane" data-testid="proof-pane">
       <section className="proof-summary" aria-labelledby="proofHeading">
@@ -1514,19 +1515,29 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
           )}
         </div>
       </section>
+      {packet.failure && (
+        <section className="proof-section proof-failure" aria-labelledby="proofFailureHeading">
+          <h3 id="proofFailureHeading">What failed</h3>
+          <FailureSummary failure={packet.failure} showExcerpt />
+        </section>
+      )}
       <section className="proof-section" aria-labelledby="proofChecksHeading">
         <h3 id="proofChecksHeading">Certification checks</h3>
-        <div className="proof-checks">
-          {packet.checks.map((check) => (
-            <div className={`review-check check-${check.status}`} key={check.key}>
-              <span>{checkStatusLabel(check.status)}</span>
-              <div>
-                <strong>{check.label}</strong>
-                <p>{formatReviewText(check.detail)}</p>
+        {proofChecks.length ? (
+          <div className="proof-checks">
+            {proofChecks.map((check) => (
+              <div className={`review-check check-${check.status}`} key={check.key}>
+                <span>{checkStatusLabel(check.status)}</span>
+                <div>
+                  <strong>{check.label}</strong>
+                  <p>{formatReviewText(check.detail)}</p>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        ) : (
+          <p>No additional checks were recorded before the task failed.</p>
+        )}
       </section>
       <section className="proof-section" aria-labelledby="proofStoriesHeading">
         <h3 id="proofStoriesHeading">Stories tested</h3>
@@ -1658,6 +1669,8 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
   const artifactCount = packet.evidence.length;
   const evidence = packet.evidence.filter(isReadableArtifact).slice(0, 4);
   const showActionButton = Boolean(action.action_key);
+  const hasFailure = Boolean(packet.failure);
+  const visibleChecks = hasFailure ? packet.checks.filter((check) => check.status === "pass") : packet.checks;
   return (
     <section className={`review-packet review-${packet.readiness.tone || "info"}`} aria-label="Review packet">
       <div className="review-head">
@@ -1679,11 +1692,12 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
           </button>
         )}
       </div>
+      {packet.failure && <FailureSummary failure={packet.failure} />}
       <div className="review-next-step">
         <strong>Next</strong>
         <span>{packet.readiness.next_step}</span>
       </div>
-      {blockers.length > 0 && (
+      {!hasFailure && blockers.length > 0 && (
         <ul className="review-blockers" aria-label="Review blockers">
           {blockers.map((blocker) => <li key={blocker}>{formatReviewText(blocker)}</li>)}
         </ul>
@@ -1694,18 +1708,19 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
         <ReviewMetric label="Evidence" value={evidenceLine(packet)} />
         {(packet.readiness.state === "merged" || inProgress) && <ReviewMetric label="Artifacts" value={artifactCount ? `${artifactCount} file${artifactCount === 1 ? "" : "s"}` : "-"} />}
       </div>
-      <div className="review-checklist" aria-label="Readiness checklist">
-        {packet.checks.map((check) => (
-          <div className={`review-check check-${check.status}`} key={check.key}>
-            <span>{checkStatusLabel(check.status)}</span>
-            <div>
-              <strong>{check.label}</strong>
-              <p>{formatReviewText(check.detail)}</p>
+      {visibleChecks.length > 0 && (
+        <div className="review-checklist" aria-label="Readiness checklist">
+          {visibleChecks.map((check) => (
+            <div className={`review-check check-${check.status}`} key={check.key}>
+              <span>{checkStatusLabel(check.status)}</span>
+              <div>
+                <strong>{check.label}</strong>
+                <p>{formatReviewText(check.detail)}</p>
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
-      {packet.failure && <div className="review-note danger">{packet.failure.reason || "failure recorded"}</div>}
+          ))}
+        </div>
+      )}
       {packet.changes.diff_error && <div className="review-note danger">{formatTechnicalIssue(packet.changes.diff_error)}</div>}
       {isRepositoryBlockedPacket(packet) && (
         <div className="review-note recovery-note">
@@ -1738,6 +1753,21 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
 
 function ReviewMetric({label, value}: {label: string; value: string}) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function FailureSummary({failure, showExcerpt = false}: {
+  failure: NonNullable<RunDetail["review_packet"]["failure"]>;
+  showExcerpt?: boolean;
+}) {
+  return (
+    <div className="review-note danger failure-summary">
+      <strong>Failure</strong>
+      <span>{failure.reason || "Failure recorded."}</span>
+      {showExcerpt && failure.excerpt ? (
+        <pre className="log-content" tabIndex={0} aria-label="Failure log excerpt">{renderLogText(failure.excerpt)}</pre>
+      ) : null}
+    </div>
+  );
 }
 
 function DetailLine({line}: {line: string}) {

@@ -1389,6 +1389,35 @@ tbody tr.selected {
   color: #7f1d1d;
 }
 
+.failure-summary {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #fecaca;
+}
+
+.failure-summary strong {
+  color: #991b1b;
+}
+
+.failure-summary pre {
+  max-height: 180px;
+  margin: 2px 0 0;
+  padding: 9px 10px;
+  overflow: auto;
+  border-radius: 6px;
+}
+
+.proof-failure .failure-summary {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.proof-failure .failure-summary pre {
+  max-height: 320px;
+}
+
 .recovery-note {
   display: grid;
   gap: 3px;

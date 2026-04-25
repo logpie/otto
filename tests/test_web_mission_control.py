@@ -347,7 +347,6 @@ def test_web_state_marks_abandoned_legacy_queue_runs_stale(tmp_path: Path) -> No
             },
         },
     )
-
     client = TestClient(create_app(repo))
     state = client.get("/api/state").json()
 
@@ -437,6 +436,14 @@ def test_web_keeps_failed_queue_tasks_inspectable_for_requeue(tmp_path: Path) ->
             },
         },
     )
+    watcher_log = repo / "otto_logs" / "web" / "watcher.log"
+    watcher_log.parent.mkdir(parents=True, exist_ok=True)
+    watcher_log.write_text(
+        "[failed-task] Fatal Python error: init_sys_streams: can't initialize sys standard streams\n"
+        "[failed-task] OSError: [Errno 9] Bad file descriptor\n"
+        "[01:00:01] reaped failed-task: failed (exit_code=1)\n",
+        encoding="utf-8",
+    )
 
     client = TestClient(create_app(repo))
     state = client.get("/api/state").json()
@@ -452,7 +459,103 @@ def test_web_keeps_failed_queue_tasks_inspectable_for_requeue(tmp_path: Path) ->
     assert actions["R"]["label"] == "requeue"
     assert actions["R"]["enabled"] is True
     assert detail["review_packet"]["next_action"]["label"] == "requeue"
-    assert detail["review_packet"]["failure"]["reason"] == "old failure"
+    assert detail["review_packet"]["failure"]["reason"] == "Fatal Python error: init_sys_streams: can't initialize sys standard streams"
+    assert "Bad file descriptor" in detail["review_packet"]["failure"]["excerpt"]
+    assert any(artifact["label"] == "watcher log" for artifact in detail["artifacts"])
+
+    logs = client.get("/api/runs/failed-task-run/logs?offset=0").json()
+    assert logs["exists"] is True
+    assert logs["path"] == str(watcher_log)
+    assert "Primary session log was not created" in logs["text"]
+    assert "Bad file descriptor" in logs["text"]
+
+
+def test_web_failed_queue_run_prefers_existing_primary_log(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_id = "failed-task-run"
+    primary_log = paths.build_dir(repo, run_id) / "narrative.log"
+    primary_log.parent.mkdir(parents=True, exist_ok=True)
+    primary_log.write_text("Current task failed because tests failed.\n", encoding="utf-8")
+    watcher_log = repo / "otto_logs" / "web" / "watcher.log"
+    watcher_log.parent.mkdir(parents=True, exist_ok=True)
+    watcher_log.write_text(
+        "[failed-task] Fatal Python error: stale old attempt\n"
+        "[failed-task] OSError: [Errno 9] stale descriptor\n",
+        encoding="utf-8",
+    )
+    record = make_run_record(
+        project_dir=repo,
+        run_id=run_id,
+        domain="queue",
+        run_type="queue",
+        command="build failed task",
+        display_name="failed-task",
+        status="failed",
+        cwd=repo,
+        identity={"queue_task_id": "failed-task"},
+        git={"branch": "build/failed-task"},
+        intent={"summary": "failed task"},
+        artifacts={"primary_log_path": str(primary_log)},
+        adapter_key="queue.attempt",
+        last_event="pytest failed",
+    )
+    write_record(repo, record)
+
+    client = TestClient(create_app(repo))
+    detail = client.get(f"/api/runs/{run_id}").json()
+    logs = client.get(f"/api/runs/{run_id}/logs?offset=0").json()
+
+    assert detail["review_packet"]["failure"]["reason"] == "pytest failed"
+    assert detail["review_packet"]["failure"]["excerpt"] is None
+    assert logs["path"] == str(primary_log)
+    assert "Current task failed because tests failed" in logs["text"]
+
+
+def test_web_failed_queue_fallback_uses_latest_exact_task_block(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="failed-task",
+            command_argv=["build", "failed task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="failed task",
+            branch="build/failed-task",
+            worktree=".worktrees/failed-task",
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "failed-task": {
+                    "status": "failed",
+                    "attempt_run_id": "failed-task-run",
+                    "started_at": "2026-04-24T00:00:00Z",
+                    "finished_at": "2026-04-24T00:01:00Z",
+                    "failure_reason": "exit_code=1",
+                }
+            },
+        },
+    )
+    watcher_log = repo / "otto_logs" / "web" / "watcher.log"
+    watcher_log.parent.mkdir(parents=True, exist_ok=True)
+    watcher_log.write_text(
+        "[failed-task] Fatal Python error: stale old attempt\n"
+        "[failed-task-extra] Fatal Python error: prefix collision\n"
+        "[failed-task] OSError: [Errno 9] current descriptor\n"
+        "[01:00:01] reaped failed-task: failed (exit_code=1)\n",
+        encoding="utf-8",
+    )
+
+    detail = TestClient(create_app(repo)).get("/api/runs/failed-task-run").json()
+
+    assert detail["review_packet"]["failure"]["reason"] == "OSError: [Errno 9] current descriptor"
+    assert "prefix collision" not in detail["review_packet"]["failure"]["excerpt"]
 
 
 def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:

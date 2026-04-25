@@ -63,6 +63,7 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
         checkpoint_path = str(record.artifacts.get("checkpoint_path") or "").strip()
         summary_path = str(record.artifacts.get("summary_path") or "").strip()
         primary_log = str(record.artifacts.get("primary_log_path") or "").strip()
+        extra_log_paths = [str(path).strip() for path in record.artifacts.get("extra_log_paths") or [] if str(path).strip()]
 
         if intent_path:
             items.append(ArtifactRef.from_path("intent", intent_path))
@@ -84,6 +85,9 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
             messages_path = Path(primary_log).with_name("messages.jsonl")
             if messages_path.exists():
                 items.append(ArtifactRef.from_path("messages", str(messages_path), kind="log"))
+        for index, path in enumerate(extra_log_paths, start=1):
+            label = "watcher log" if path.endswith("watcher.log") else f"extra {index}"
+            items.append(ArtifactRef.from_path(label, path, kind="log"))
         if worktree:
             items.append(ArtifactRef.from_path("worktree", worktree))
         return items
@@ -276,6 +280,11 @@ def _legacy_queue_record(project_dir, task, task_state, now):
     queue_manifest = queue_index_path_for(project_dir, task.id)
     child_manifest = session_dir / "manifest.json" if session_run_id else None
     primary_log_path = paths.build_dir(worktree_path, session_run_id) / "narrative.log" if session_run_id else None
+    extra_log_paths: list[str] = []
+    if status in {"failed", "cancelled", INTERRUPTED_STATUS} and not (primary_log_path and primary_log_path.exists()):
+        for candidate in (paths.logs_dir(project_dir) / "web" / "watcher.log", paths.queue_dir(project_dir) / "watcher.log"):
+            if candidate.exists():
+                extra_log_paths.append(str(candidate.resolve(strict=False)))
     started_at = str(state.get("started_at") or task.added_at or now.strftime("%Y-%m-%dT%H:%M:%SZ")).strip()
     finished_at = str(state.get("finished_at") or "").strip() or None
     if not is_terminal_status(status):
@@ -311,7 +320,7 @@ def _legacy_queue_record(project_dir, task, task_state, now):
             "checkpoint_path": str(checkpoint_path.resolve(strict=False)) if checkpoint_path is not None else None,
             "summary_path": str(paths.session_summary(worktree_path, session_run_id).resolve(strict=False)) if session_run_id else None,
             "primary_log_path": str(primary_log_path.resolve(strict=False)) if primary_log_path and primary_log_path.exists() else None,
-            "extra_log_paths": [],
+            "extra_log_paths": extra_log_paths,
             "queue_manifest_path": str(queue_manifest.resolve(strict=False)) if queue_manifest is not None else None,
         },
         metrics={

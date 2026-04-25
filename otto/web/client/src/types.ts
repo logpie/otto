@@ -338,6 +338,8 @@ export interface ReviewPacket {
   failure: {
     reason: string | null;
     last_event: string | null;
+    excerpt?: string | null;
+    source?: string | null;
   } | null;
 }
 
