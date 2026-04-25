@@ -2106,6 +2106,29 @@ tbody tr.selected {
   gap: 10px;
 }
 
+.job-advanced {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.job-advanced[open] {
+  display: grid;
+}
+
+.job-advanced summary {
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.job-advanced > * + * {
+  margin-top: 10px;
+}
+
 .target-guard {
   display: grid;
   gap: 8px;

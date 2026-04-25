@@ -279,11 +279,10 @@ def scenario_fresh_queue(ctx: ScenarioContext) -> None:
     browser("find", "testid", "new-job-button", "click")
     wait_text("New queue job")
     assert_page_contains(str(repo))
-    wait_text("I understand this job will run in this project")
     assert_modal_focus()
     browser("find", "label", "Intent / focus", "fill", "Build an expense approval portal for a small company.")
+    browser("find", "text", "Advanced options", "click")
     browser("find", "label", "Task id", "fill", "expense-portal")
-    browser("find", "testid", "target-project-confirm", "click")
     browser("find", "role", "button", "click", "--name", "Queue job")
     wait_text("queued expense-portal")
     wait_text("Task Board")
@@ -593,13 +592,13 @@ def scenario_control_tour(ctx: ScenarioContext) -> None:
     wait_text("Improve mode")
     browser("select", "[data-testid='job-improve-mode-select']", "feature")
     browser("find", "label", "Intent / focus", "fill", "Add saved dashboard views with named filters.")
+    browser("find", "text", "Advanced options", "click")
     browser("find", "label", "Task id", "fill", "saved-dashboard-views")
     browser("find", "label", "After", "fill", "ready-dashboard")
     browser("select", "[data-testid='job-provider-select']", "codex")
     browser("select", "[data-testid='job-effort-select']", "high")
     browser("find", "label", "Model", "fill", "gpt-5.4")
     browser("find", "label", "Fast mode", "click")
-    browser("find", "testid", "target-project-confirm", "click")
     assert_submit_enabled("Queue job")
     browser("find", "role", "button", "click", "--name", "Close")
     assert_page_lacks("New queue job")
@@ -1118,18 +1117,20 @@ def queue_job_from_dialog(
         wait_text("Improve mode")
         browser("select", "[data-testid='job-improve-mode-select']", subcommand)
     browser("find", "label", "Intent / focus", "fill", intent)
-    browser("find", "label", "Task id", "fill", task_id)
-    if after:
-        browser("find", "label", "After", "fill", after)
-    if provider:
-        browser("select", "[data-testid='job-provider-select']", provider)
-    if effort:
-        browser("select", "[data-testid='job-effort-select']", effort)
-    if model:
-        browser("find", "label", "Model", "fill", model)
-    if not fast:
-        browser("find", "label", "Fast mode", "click")
-    browser("find", "testid", "target-project-confirm", "click")
+    if task_id or after or provider or effort or model or not fast:
+        browser("find", "text", "Advanced options", "click")
+        if task_id:
+            browser("find", "label", "Task id", "fill", task_id)
+        if after:
+            browser("find", "label", "After", "fill", after)
+        if provider:
+            browser("select", "[data-testid='job-provider-select']", provider)
+        if effort:
+            browser("select", "[data-testid='job-effort-select']", effort)
+        if model:
+            browser("find", "label", "Model", "fill", model)
+        if not fast:
+            browser("find", "label", "Fast mode", "click")
     assert_submit_enabled("Queue job")
     browser("find", "role", "button", "click", "--name", "Queue job")
 

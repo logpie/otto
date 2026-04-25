@@ -1867,6 +1867,8 @@ function JobDialog({project, onClose, onQueued, onError}: {
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const dialogRef = useDialogFocus<HTMLFormElement>(onClose, submitting);
+  const targetNeedsConfirmation = Boolean(project?.dirty);
+  const submitDisabled = submitting || (command === "build" && !intent.trim()) || (targetNeedsConfirmation && !targetConfirmed);
 
   useEffect(() => {
     setTargetConfirmed(false);
@@ -1878,8 +1880,8 @@ function JobDialog({project, onClose, onQueued, onError}: {
       setStatus("Build intent is required.");
       return;
     }
-    if (!targetConfirmed) {
-      setStatus("Confirm the target project before queueing.");
+    if (targetNeedsConfirmation && !targetConfirmed) {
+      setStatus("Confirm the dirty target project before queueing.");
       return;
     }
     setStatus("queueing");
@@ -1928,15 +1930,17 @@ function JobDialog({project, onClose, onQueued, onError}: {
             <dt>State</dt><dd>{project ? project.dirty ? "dirty" : "clean" : "unknown"}</dd>
           </dl>
           <p>This job can create branches/worktrees and modify files under this folder.</p>
-          <label className="check-label target-confirm">
-            <input
-              checked={targetConfirmed}
-              data-testid="target-project-confirm"
-              type="checkbox"
-              onChange={(event) => setTargetConfirmed(event.target.checked)}
-            />
-            I understand this job will run in this project
-          </label>
+          {targetNeedsConfirmation && (
+            <label className="check-label target-confirm">
+              <input
+                checked={targetConfirmed}
+                data-testid="target-project-confirm"
+                type="checkbox"
+                onChange={(event) => setTargetConfirmed(event.target.checked)}
+              />
+              I understand this dirty project may affect the queued work
+            </label>
+          )}
         </div>
         {command === "improve" && (
           <label>Improve mode
@@ -1950,42 +1954,45 @@ function JobDialog({project, onClose, onQueued, onError}: {
         <label>Intent / focus
           <textarea value={intent} rows={5} placeholder="Describe the requested outcome" onChange={(event) => setIntent(event.target.value)} />
         </label>
-        <div className="field-grid">
-          <label>Task id
-            <input value={taskId} type="text" placeholder="optional" onChange={(event) => setTaskId(event.target.value)} />
+        <details className="job-advanced">
+          <summary>Advanced options</summary>
+          <div className="field-grid">
+            <label>Task id
+              <input value={taskId} type="text" placeholder="auto-generated" onChange={(event) => setTaskId(event.target.value)} />
+            </label>
+            <label>After
+              <input value={after} type="text" placeholder="optional dependencies" onChange={(event) => setAfter(event.target.value)} />
+            </label>
+          </div>
+          <div className="field-grid">
+            <label>Provider
+              <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
+                <option value="">Project default</option>
+                <option value="codex">Codex</option>
+                <option value="claude">Claude</option>
+              </select>
+            </label>
+            <label>Reasoning effort
+              <select data-testid="job-effort-select" value={effort} onChange={(event) => setEffort(event.target.value)}>
+                <option value="">Project default</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="max">Max</option>
+              </select>
+            </label>
+          </div>
+          <label>Model
+            <input value={model} type="text" placeholder="provider default" onChange={(event) => setModel(event.target.value)} />
           </label>
-          <label>After
-            <input value={after} type="text" placeholder="task-a, task-b" onChange={(event) => setAfter(event.target.value)} />
+          <label className="check-label">
+            <input checked={fast} type="checkbox" onChange={(event) => setFast(event.target.checked)} />
+            Fast mode
           </label>
-        </div>
-        <div className="field-grid">
-          <label>Provider
-            <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
-              <option value="">Inherit</option>
-              <option value="codex">Codex</option>
-              <option value="claude">Claude</option>
-            </select>
-          </label>
-          <label>Reasoning effort
-            <select data-testid="job-effort-select" value={effort} onChange={(event) => setEffort(event.target.value)}>
-              <option value="">Inherit</option>
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-              <option value="max">Max</option>
-            </select>
-          </label>
-        </div>
-        <label>Model
-          <input value={model} type="text" placeholder="provider default" onChange={(event) => setModel(event.target.value)} />
-        </label>
-        <label className="check-label">
-          <input checked={fast} type="checkbox" onChange={(event) => setFast(event.target.checked)} />
-          Fast mode
-        </label>
+        </details>
         <footer>
           <span id="jobDialogStatus" className="muted" aria-live="polite">{status}</span>
-          <button className="primary" type="submit" disabled={submitting || !targetConfirmed}>{submitting ? "Queueing" : "Queue job"}</button>
+          <button className="primary" type="submit" disabled={submitDisabled}>{submitting ? "Queueing" : "Queue job"}</button>
         </footer>
       </form>
     </div>
