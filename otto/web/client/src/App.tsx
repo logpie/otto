@@ -59,6 +59,11 @@ type ViewMode = "tasks" | "diagnostics";
 type BoardStage = "attention" | "working" | "ready" | "landed";
 type InspectorMode = "proof" | "logs" | "artifacts" | "diff";
 
+interface RouteState {
+  viewMode: ViewMode;
+  selectedRunId: string | null;
+}
+
 interface BoardTask {
   id: string;
   runId: string | null;
@@ -80,11 +85,37 @@ const defaultFilters: Filters = {
   activeOnly: false,
 };
 
+function readRouteState(): RouteState {
+  if (typeof window === "undefined") return {viewMode: "tasks", selectedRunId: null};
+  const params = new URLSearchParams(window.location.search);
+  return {
+    viewMode: params.get("view") === "diagnostics" ? "diagnostics" : "tasks",
+    selectedRunId: params.get("run") || null,
+  };
+}
+
+function writeRouteState(route: RouteState, mode: "push" | "replace"): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", route.viewMode);
+  if (route.selectedRunId) {
+    url.searchParams.set("run", route.selectedRunId);
+  } else {
+    url.searchParams.delete("run");
+  }
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next === current) return;
+  const method = mode === "replace" ? "replaceState" : "pushState";
+  window.history[method]({otto: true}, "", next);
+}
+
 export function App() {
+  const initialRoute = useMemo(() => readRouteState(), []);
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [data, setData] = useState<StateResponse | null>(null);
   const [projectsState, setProjectsState] = useState<ProjectsResponse | null>(null);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRoute.selectedRunId);
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [logText, setLogText] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -101,13 +132,42 @@ export function App() {
   const [resultBanner, setResultBanner] = useState<ResultBannerState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [confirmPending, setConfirmPending] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("tasks");
+  const [viewMode, setViewMode] = useState<ViewMode>(initialRoute.viewMode);
   const logOffsetRef = useRef(0);
-  const selectedRunIdRef = useRef<string | null>(null);
+  const selectedRunIdRef = useRef<string | null>(initialRoute.selectedRunId);
+  const viewModeRef = useRef<ViewMode>(initialRoute.viewMode);
 
   useEffect(() => {
     selectedRunIdRef.current = selectedRunId;
   }, [selectedRunId]);
+
+  useEffect(() => {
+    viewModeRef.current = viewMode;
+  }, [viewMode]);
+
+  useEffect(() => {
+    writeRouteState({viewMode: viewModeRef.current, selectedRunId: selectedRunIdRef.current}, "replace");
+    const onPopState = () => {
+      const next = readRouteState();
+      viewModeRef.current = next.viewMode;
+      selectedRunIdRef.current = next.selectedRunId;
+      setViewMode(next.viewMode);
+      setSelectedRunId(next.selectedRunId);
+      setInspectorOpen(false);
+      setJobOpen(false);
+      setConfirm(null);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  const navigateView = useCallback((nextView: ViewMode) => {
+    if (nextView === viewModeRef.current) return;
+    viewModeRef.current = nextView;
+    setViewMode(nextView);
+    setInspectorOpen(false);
+    writeRouteState({viewMode: nextView, selectedRunId: selectedRunIdRef.current}, "push");
+  }, []);
 
   const showToast = useCallback((message: string, severity: ToastState["severity"] = "information") => {
     if (severity === "error") setLastError(message);
@@ -136,7 +196,9 @@ export function App() {
       setSelectedArtifactIndex(null);
       setInspectorMode("proof");
     }
+    selectedRunIdRef.current = runId;
     setSelectedRunId(runId);
+    writeRouteState({viewMode: viewModeRef.current, selectedRunId: runId}, "push");
   }, []);
 
   const executeConfirmedAction = useCallback(async () => {
@@ -211,7 +273,10 @@ export function App() {
       }
       setSelectedRunId((current) => {
         if (current && visible.has(current)) return current;
-        return next.live.items[0]?.run_id || next.landing.items.find((item) => item.run_id)?.run_id || next.history.items[0]?.run_id || null;
+        const nextRunId = next.live.items[0]?.run_id || next.landing.items.find((item) => item.run_id)?.run_id || next.history.items[0]?.run_id || null;
+        selectedRunIdRef.current = nextRunId;
+        writeRouteState({viewMode: viewModeRef.current, selectedRunId: nextRunId}, "replace");
+        return nextRunId;
       });
       setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
     } catch (error) {
@@ -248,6 +313,7 @@ export function App() {
     setSelectedArtifactIndex(null);
     refreshDetail(selectedRunId).catch((error) => {
       if (detailWasRemoved(error)) {
+        selectedRunIdRef.current = null;
         setSelectedRunId(null);
         setDetail(null);
         setLogText("");
@@ -256,6 +322,7 @@ export function App() {
         setDiffContent(null);
         setProofArtifactIndex(null);
         setInspectorOpen(false);
+        writeRouteState({viewMode: viewModeRef.current, selectedRunId: null}, "replace");
         return;
       }
       showToast(errorMessage(error), "error");
@@ -446,6 +513,11 @@ export function App() {
       current: result.project || null,
       projects: result.projects,
     }));
+    viewModeRef.current = "tasks";
+    selectedRunIdRef.current = null;
+    setViewMode("tasks");
+    setSelectedRunId(null);
+    writeRouteState({viewMode: "tasks", selectedRunId: null}, "replace");
     showToast(`Created ${result.project?.name || "project"}`);
     await refresh(true);
   }, [refresh, showToast]);
@@ -461,6 +533,11 @@ export function App() {
       current: result.project || null,
       projects: result.projects,
     }));
+    viewModeRef.current = "tasks";
+    selectedRunIdRef.current = null;
+    setViewMode("tasks");
+    setSelectedRunId(null);
+    writeRouteState({viewMode: "tasks", selectedRunId: null}, "replace");
     showToast(`Opened ${result.project?.name || "project"}`);
     await refresh(true);
   }, [refresh, showToast]);
@@ -487,7 +564,10 @@ export function App() {
     setSelectedArtifactIndex(null);
     setInspectorOpen(false);
     setJobOpen(false);
+    viewModeRef.current = "tasks";
+    selectedRunIdRef.current = null;
     setViewMode("tasks");
+    writeRouteState({viewMode: "tasks", selectedRunId: null}, "replace");
     showToast("Choose a project");
   }, [showToast]);
 
@@ -545,7 +625,7 @@ export function App() {
           viewMode={viewMode}
           onChange={setFilters}
           onRefresh={() => void refresh(true)}
-          onViewChange={setViewMode}
+          onViewChange={navigateView}
         />
         {viewMode === "tasks" ? (
           <section className="mission-layout" aria-label="Mission Control task workflow">
@@ -557,7 +637,7 @@ export function App() {
                 onNewJob={openJobDialog}
                 onStartWatcher={() => void runWatcherAction("start")}
                 onLandReady={() => void mergeReadyTasks()}
-                onOpenDiagnostics={() => setViewMode("diagnostics")}
+                onOpenDiagnostics={() => navigateView("diagnostics")}
                 onDismissError={() => setLastError(null)}
                 onDismissResult={() => setResultBanner(null)}
               />

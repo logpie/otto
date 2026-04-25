@@ -96,3 +96,52 @@ Landed queue tasks used source-branch diff logic even after merge. Once a branch
 - Merge state indexing stores `target_head_before`, `merge_commit`, and a first-parent `diff_base`.
 - Cleaned failed queue history no longer advertises cleanup as an enabled next action when the queue item has already been removed.
 - Regression tests cover landed diff after source branch deletion and cleaned failed queue history.
+
+# Mission Control Navigation Debug
+
+Date: 2026-04-25
+
+## Observations
+
+- User reports that clicking `Tasks` from Diagnostics can behave like a no-op.
+- Browser reproduction could switch Diagnostics -> Tasks through the semantic locator, so the click handler itself is not completely dead.
+- The URL stays `http://127.0.0.1:9000/` after switching to Diagnostics.
+- Browser Back after opening Diagnostics navigates to `about:blank`, leaving the app instead of returning to Tasks.
+- Reloading while Diagnostics is visible rehydrates the app on Tasks, so the current view is not refresh-safe.
+
+## Hypotheses
+
+### H1: Mission Control view state is local React state only (root)
+
+- Supports: URL does not change when switching views; reload resets to default `tasks`; Back exits the app because no in-app history entry exists.
+- Conflicts: none found.
+- Test: add URL-backed view state, then verify Diagnostics refresh persists and Back returns to Tasks.
+
+### H2: The Tasks tab is covered by an overlay or layout layer
+
+- Supports: user sees a click no-op; layout has dense diagnostics and inspector panels.
+- Conflicts: agent-browser can click the tab and switch views in the live layout.
+- Test: inspect hit targets and add E2E click coverage for Diagnostics -> Tasks.
+
+### H3: A stale static bundle is served in the browser
+
+- Supports: user may have had an older bundle loaded after server rebuilds.
+- Conflicts: Back/reload behavior is also incorrect in the current bundle.
+- Test: verify route behavior after rebuilding and restarting the live server.
+
+## Experiments
+
+- Reproduced Diagnostics -> Back on the live server: after opening Diagnostics, the URL stayed `/`; browser Back left the app and navigated to `about:blank`.
+- Reproduced Diagnostics -> Reload on the live server: reload returned to the default Tasks view instead of preserving Diagnostics.
+- After URL-backed routing, `control-tour` E2E verifies Diagnostics reload stays on Diagnostics and browser Back returns to Tasks.
+
+## Root Cause
+
+Mission Control treated the active view and selected run as private React state, so the browser had no in-app history entry and no URL state to restore after reload.
+
+## Fix
+
+- View and selected run are now stored in query parameters (`view` and `run`).
+- App startup reads the URL, replaces missing route state with `view=tasks`, and listens for `popstate`.
+- View changes and run selections push in-app history entries; automatic refresh selection uses replace.
+- E2E coverage now exercises Diagnostics refresh, Tasks tab switching, and browser Back returning to Tasks.

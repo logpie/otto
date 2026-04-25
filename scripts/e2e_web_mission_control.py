@@ -663,8 +663,18 @@ def scenario_control_tour(ctx: ScenarioContext) -> None:
     browser("find", "testid", "diagnostics-tab", "click")
     wait_text("Diagnostics Summary")
     wait_text("Live Runs")
+    assert_url_contains("view=diagnostics")
+    browser("reload")
+    wait_text("Diagnostics Summary")
+    assert_url_contains("view=diagnostics")
     browser("find", "testid", "tasks-tab", "click")
     wait_text("Task Board")
+    assert_url_contains("view=tasks")
+    browser("find", "testid", "diagnostics-tab", "click")
+    wait_text("Diagnostics Summary")
+    browser("back")
+    wait_text("Task Board")
+    assert_url_contains("view=tasks")
     assert_no_horizontal_overflow()
     screenshot(ctx, "control-tour.png")
 
@@ -1265,6 +1275,12 @@ def assert_page_contains(text: str) -> None:
     snapshot = browser("snapshot", timeout_s=10).stdout
     if text not in snapshot:
         raise AssertionError(f"expected page text {text!r}\n{snapshot}")
+
+
+def assert_url_contains(text: str) -> None:
+    url = browser("get", "url", timeout_s=10).stdout.strip()
+    if text not in url:
+        raise AssertionError(f"expected URL to contain {text!r}, got {url!r}")
 
 
 def wait_snapshot_contains(text: str, timeout_s: float = 20) -> None:
