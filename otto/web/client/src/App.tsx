@@ -1,4 +1,4 @@
-import {FormEvent, useCallback, useEffect, useRef, useState} from "react";
+import {FormEvent, useCallback, useEffect, useMemo, useRef, useState} from "react";
 import type {ReactNode} from "react";
 import {ApiError, api, buildQueuePayload, stateQueryParams} from "./api";
 import type {
@@ -1469,7 +1469,7 @@ function LogPane({text}: {text: string}) {
         <strong>Run logs</strong>
         <span>{lineCount ? `${lineCount} line${lineCount === 1 ? "" : "s"}` : "waiting for output"}{compact.truncated ? " · showing latest output" : ""}</span>
       </div>
-      <pre className="log-pane" tabIndex={0} aria-label="Run log output" data-testid="run-log-pane">{renderAnsiText(compact.text)}</pre>
+      <pre className="log-pane" tabIndex={0} aria-label="Run log output" data-testid="run-log-pane">{renderLogText(compact.text)}</pre>
     </div>
   );
 }
@@ -1484,6 +1484,8 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
   const packet = detail.review_packet;
   const changedFiles = packet.changes.files.slice(0, 10);
   const evidence = packet.evidence.filter(isReadableArtifact);
+  const stories = packet.certification.stories || [];
+  const proofReport = packet.certification.proof_report;
   const compact = compactLongText(formatArtifactContent(proofContent?.content || ""), 20000);
   return (
     <div className="proof-pane" data-testid="proof-pane">
@@ -1502,6 +1504,13 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
       <section className="proof-section" aria-labelledby="proofNextHeading">
         <h3 id="proofNextHeading">Next action</h3>
         <p>{packet.readiness.next_step}</p>
+        <div className="proof-report-actions">
+          {proofReport?.html_url ? (
+            <a href={proofReport.html_url} target="_blank" rel="noreferrer" data-testid="proof-report-link">Open HTML proof report</a>
+          ) : (
+            <span>No HTML proof report is linked for this run.</span>
+          )}
+        </div>
       </section>
       <section className="proof-section" aria-labelledby="proofChecksHeading">
         <h3 id="proofChecksHeading">Certification checks</h3>
@@ -1516,6 +1525,25 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
             </div>
           ))}
         </div>
+      </section>
+      <section className="proof-section" aria-labelledby="proofStoriesHeading">
+        <h3 id="proofStoriesHeading">Stories tested</h3>
+        {stories.length ? (
+          <div className="proof-stories" data-testid="proof-story-list">
+            {stories.map((story) => (
+              <article className={`proof-story story-${storyStatusClass(story.status)}`} key={story.id || story.title}>
+                <span>{storyStatusLabel(story.status)}</span>
+                <div>
+                  <strong>{story.title || story.id}</strong>
+                  {story.detail ? <p>{formatReviewText(story.detail)}</p> : null}
+                  <small>{[story.id, story.methodology, story.surface].filter(Boolean).join(" · ")}</small>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p>No per-story certification details were recorded. Open the HTML report or summary artifact if available.</p>
+        )}
       </section>
       <section className="proof-section" aria-labelledby="proofFilesHeading">
         <h3 id="proofFilesHeading">Changed files</h3>
@@ -1571,6 +1599,12 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
 }
 
 function DiffPane({diff}: {diff: DiffResponse | null}) {
+  const sections = useMemo(() => splitDiffIntoFiles(diff?.text || "", diff?.files || []), [diff?.text, diff?.files]);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  useEffect(() => {
+    setSelectedPath(sections[0]?.path || null);
+  }, [diff?.run_id, diff?.text, sections]);
+  const selected = sections.find((section) => section.path === selectedPath) || sections[0] || null;
   if (!diff) {
     return <div className="diff-viewer"><div className="diff-toolbar"><strong>Code diff</strong><span>loading</span></div><pre className="diff-pane">Loading diff...</pre></div>;
   }
@@ -1581,13 +1615,29 @@ function DiffPane({diff}: {diff: DiffResponse | null}) {
         <span>{diff.branch || "-"} → {diff.target}{diff.truncated ? " · truncated" : ""}</span>
       </div>
       {diff.error ? <div className="diff-error">{formatTechnicalIssue(diff.error)}</div> : null}
-      {diff.files.length ? (
-        <ul className="diff-files" aria-label="Changed files in diff">
-          {diff.files.slice(0, 24).map((path) => <li key={path}>{path}</li>)}
-          {diff.files.length > 24 && <li>+{diff.files.length - 24} more</li>}
-        </ul>
-      ) : null}
-      <pre className="diff-pane" tabIndex={0} aria-label="Code diff output">{diff.text ? renderDiffText(diff.text) : "No diff content."}</pre>
+      <div className="diff-layout">
+        {sections.length ? (
+          <nav className="diff-file-list" aria-label="Changed files in diff" data-testid="diff-file-list">
+            {sections.map((section) => (
+              <button
+                className={section.path === selected?.path ? "selected" : ""}
+                type="button"
+                key={section.path}
+                onClick={() => setSelectedPath(section.path)}
+              >
+                {section.path}
+              </button>
+            ))}
+          </nav>
+        ) : null}
+        <div className="diff-file-view">
+          <div className="diff-file-heading" data-testid="diff-selected-file">
+            <strong>{selected?.path || "No changed file selected"}</strong>
+            <span>{sections.length ? `${sections.length} file${sections.length === 1 ? "" : "s"}` : "empty diff"}</span>
+          </div>
+          <pre className="diff-pane" tabIndex={0} aria-label="Code diff output">{selected?.text ? renderDiffText(selected.text) : "No diff content."}</pre>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2560,12 +2610,60 @@ function renderDiffText(text: string) {
   });
 }
 
+interface DiffFileSection {
+  path: string;
+  text: string;
+}
+
+function splitDiffIntoFiles(text: string, files: string[]): DiffFileSection[] {
+  const sections: DiffFileSection[] = [];
+  let current: DiffFileSection | null = null;
+  const lines = text ? text.split("\n") : [];
+  for (const line of lines) {
+    const match = line.match(/^diff --git a\/(.*) b\/(.*)$/);
+    if (match) {
+      current = {path: match[2] || match[1] || `file-${sections.length + 1}`, text: line};
+      sections.push(current);
+      continue;
+    }
+    if (current) {
+      current.text += `\n${line}`;
+    }
+  }
+  if (sections.length) return sections;
+  if (text.trim()) return [{path: files[0] || "diff", text}];
+  return files.map((path) => ({path, text: ""}));
+}
+
 function diffLineClass(line: string): string {
   if (line.startsWith("@@")) return "diff-hunk";
   if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ")) return "diff-meta";
   if (line.startsWith("+")) return "diff-add";
   if (line.startsWith("-")) return "diff-del";
   return "diff-context";
+}
+
+function renderLogText(text: string) {
+  const lines = text.split("\n");
+  return lines.map((line, index) => (
+    <span className={`log-line ${logLineClass(line)}`} key={`log-${index}`}>
+      {line ? renderAnsiText(line) : ""}
+      {index < lines.length - 1 ? "\n" : ""}
+    </span>
+  ));
+}
+
+function logLineClass(line: string): string {
+  const clean = stripAnsi(line).toLowerCase();
+  if (/(\bfatal\b|\berror\b|traceback|exception|\bfailed\b|\bfail\b|exit code [1-9])/.test(clean)) return "log-line-error";
+  if (/(\bwarn\b|warning|blocked|stale|retry|skipped|caution)/.test(clean)) return "log-line-warn";
+  if (/(\bpass\b|passed|success|completed|ready|done)/.test(clean)) return "log-line-success";
+  if (/(story_result|story result|pytest|npm|uv run|\btest\b|collecting|running|\[build\]|\[certify\]|\[merge\]|\[queue\]|\binfo\b)/.test(clean)) return "log-line-info";
+  return "log-line-muted";
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 function renderAnsiText(text: string) {
@@ -2731,6 +2829,22 @@ function checkStatusLabel(status: string): string {
     pending: "Wait",
     info: "Info",
   }[status] || capitalize(status || "info");
+}
+
+function storyStatusLabel(status: string): string {
+  return {
+    pass: "Pass",
+    warn: "Warn",
+    fail: "Fail",
+    skipped: "Skip",
+    unknown: "Info",
+  }[status] || capitalize(status || "info");
+}
+
+function storyStatusClass(status: string): string {
+  const normalized = String(status || "unknown").toLowerCase();
+  if (["pass", "warn", "fail", "skipped"].includes(normalized)) return normalized;
+  return "unknown";
 }
 
 function shortText(value: string, maxLength: number): string {

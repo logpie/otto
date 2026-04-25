@@ -306,10 +306,16 @@ def scenario_ready_land(ctx: ScenarioContext) -> None:
     browser("find", "testid", "task-card-saved-views", "click")
     wait_text("Ready for review")
     wait_text("Safe to land into main.")
-    browser("find", "testid", "open-diff-button", "click")
+    browser("find", "testid", "open-proof-button", "click")
+    wait_text("Stories tested")
+    wait_text("saved-views-create")
+    wait_text("Open HTML proof report")
+    assert_proof_report_link()
+    browser("find", "testid", "proof-open-diff-button", "click")
     wait_text("Code diff")
     wait_text("saved_views.txt")
     wait_text("+saved-views")
+    assert_diff_file_browser()
     browser("find", "testid", "close-inspector-button", "click")
     assert_inspector_closed()
     browser("find", "testid", "review-next-action-button", "click")
@@ -778,6 +784,57 @@ def seed_ready_task(repo: Path, *, task_id: str, filename: str) -> None:
             "stories_passed": 2,
             "stories_tested": 2,
         },
+    )
+    seed_proof_report(repo, task_id=task_id, run_id=f"run-{task_id}")
+
+
+def seed_proof_report(repo: Path, *, task_id: str, run_id: str) -> None:
+    worktree = repo / ".worktrees" / task_id
+    certify_dir = paths.certify_dir(worktree, run_id)
+    certify_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = paths.session_summary(worktree, run_id)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "status": "done",
+                "stories_tested": 2,
+                "stories_passed": 2,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (certify_dir / "proof-of-work.html").write_text(
+        f"<html><body><h1>Proof of work</h1><p>{task_id} report</p></body></html>",
+        encoding="utf-8",
+    )
+    (certify_dir / "proof-of-work.json").write_text(
+        json.dumps(
+            {
+                "stories_tested": 2,
+                "stories_passed": 2,
+                "stories": [
+                    {
+                        "story_id": f"{task_id}-create",
+                        "status": "pass",
+                        "claim": f"{task_id} can be created by the user.",
+                        "observed_result": "The primary workflow completed with live UI events.",
+                        "methodology": "live-ui-events",
+                    },
+                    {
+                        "story_id": f"{task_id}-restore",
+                        "status": "pass",
+                        "claim": f"{task_id} can be reopened and verified.",
+                        "observed_result": "The saved state remained visible after reload.",
+                        "methodology": "live-ui-events",
+                    },
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
     )
 
 
@@ -1253,6 +1310,52 @@ def assert_no_dialog() -> None:
     result = browser_eval("""(() => !document.querySelector('[role="dialog"][aria-modal="true"]'))()""")
     if not result.endswith("true"):
         raise AssertionError(f"expected modal dialog to be closed: {result}")
+
+
+def assert_proof_report_link() -> None:
+    raw = browser_eval(
+        """JSON.stringify((() => {
+          const link = document.querySelector('[data-testid="proof-report-link"]');
+          return {
+            exists: Boolean(link),
+            href: link?.getAttribute('href') || '',
+            label: link?.textContent || ''
+          };
+        })())"""
+    )
+    data = parse_browser_json(raw)
+    if not data["exists"] or not data["href"].endswith("/proof-report"):
+        raise AssertionError(f"proof report link missing or wrong: {data}")
+
+
+def assert_diff_file_browser() -> None:
+    raw = browser_eval(
+        """JSON.stringify((() => {
+          const fileList = document.querySelector('[data-testid="diff-file-list"]');
+          const selected = document.querySelector('[data-testid="diff-selected-file"]');
+          const diffPane = document.querySelector('.diff-pane');
+          return {
+            fileList: Boolean(fileList),
+            selected: selected?.textContent || '',
+            selectedButtons: fileList ? fileList.querySelectorAll('button.selected').length : 0,
+            paneText: diffPane?.textContent?.slice(0, 500) || ''
+          };
+        })())"""
+    )
+    data = parse_browser_json(raw)
+    if not data["fileList"] or data["selectedButtons"] != 1:
+        raise AssertionError(f"diff file browser missing selected file: {data}")
+    if "saved_views.txt" not in data["selected"] or "+saved-views" not in data["paneText"]:
+        raise AssertionError(f"diff file browser did not show selected file patch: {data}")
+
+
+def parse_browser_json(raw: str) -> dict[str, object]:
+    data = json.loads(raw)
+    if isinstance(data, str):
+        data = json.loads(data)
+    if not isinstance(data, dict):
+        raise AssertionError(f"expected browser JSON object, got: {raw}")
+    return data
 
 
 def assert_long_log_layout() -> None:

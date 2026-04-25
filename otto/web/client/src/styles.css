@@ -1565,7 +1565,8 @@ tbody tr.selected {
 
 .proof-metrics,
 .proof-checks,
-.proof-artifacts {
+.proof-artifacts,
+.proof-stories {
   display: grid;
   gap: 8px;
 }
@@ -1599,6 +1600,88 @@ tbody tr.selected {
   font-size: 12px;
 }
 
+.proof-report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.proof-report-actions a,
+.proof-report-actions span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--surface-alt);
+  color: var(--text);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.proof-report-actions span {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.proof-story {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-alt);
+}
+
+.proof-story > span {
+  align-self: start;
+  min-width: 42px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.proof-story.story-pass > span {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.proof-story.story-warn > span,
+.proof-story.story-skipped > span {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.proof-story.story-fail > span {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.proof-story strong,
+.proof-story p,
+.proof-story small {
+  display: block;
+  min-width: 0;
+}
+
+.proof-story strong {
+  color: var(--text);
+}
+
+.proof-story small {
+  margin-top: 4px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .proof-artifacts {
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
@@ -1624,7 +1707,7 @@ tbody tr.selected {
 
 .proof-content {
   grid-column: 2;
-  grid-row: 1 / span 5;
+  grid-row: 1 / span 7;
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -1704,24 +1787,93 @@ tbody tr.selected {
   flex: 1;
 }
 
-.diff-files {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0;
-  padding: 8px 12px;
-  list-style: none;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+.log-line {
+  display: inline;
+}
+
+.log-line-muted {
   color: #cbd5e1;
+}
+
+.log-line-info {
+  color: #93c5fd;
+}
+
+.log-line-success {
+  color: #86efac;
+}
+
+.log-line-warn {
+  color: #fde68a;
+}
+
+.log-line-error {
+  color: #fca5a5;
+  font-weight: 700;
+}
+
+.diff-layout {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
+}
+
+.diff-file-list {
+  min-height: 0;
+  padding: 10px;
+  overflow: auto;
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(15, 23, 42, 0.88);
+}
+
+.diff-file-list button {
+  justify-content: start;
+  width: 100%;
+  height: auto;
+  min-height: 34px;
+  margin-bottom: 6px;
+  padding: 7px 9px;
+  border-color: rgba(148, 163, 184, 0.28);
+  background: rgba(148, 163, 184, 0.08);
+  color: #cbd5e1;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.diff-file-list button.selected {
+  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.16);
+  color: #e0f2fe;
+}
+
+.diff-file-view {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.diff-file-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e5e7eb;
   font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
-.diff-files li {
-  max-width: 100%;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: rgba(148, 163, 184, 0.14);
+.diff-file-heading strong,
+.diff-file-heading span {
+  min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.diff-file-heading span {
+  color: #94a3b8;
 }
 
 .diff-error {
@@ -2167,5 +2319,15 @@ tbody tr.selected {
     grid-column: auto;
     grid-row: auto;
     min-height: 260px;
+  }
+
+  .diff-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .diff-file-list {
+    max-height: 180px;
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   }
 }

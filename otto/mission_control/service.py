@@ -11,6 +11,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from otto.config import load_config
 from otto.config import repo_preflight_issues
@@ -133,6 +134,22 @@ class MissionControlService:
             "content": read.text,
             "truncated": read.next_offset < (path.stat().st_size if path.exists() else read.next_offset),
         }
+
+    def proof_report_path(
+        self,
+        run_id: str,
+        *,
+        filters: MissionControlFilters | None = None,
+    ) -> Path:
+        detail = self._detail_view(run_id, filters)
+        report = _proof_report_info(self.project_dir, detail.record)
+        html_path = _optional_str(report.get("html_path"))
+        if not html_path:
+            raise MissionControlServiceError("proof-of-work HTML report not found", status_code=404)
+        path = self._validated_artifact_path(html_path)
+        if not path.exists() or path.is_dir():
+            raise MissionControlServiceError("proof-of-work HTML report not found", status_code=404)
+        return path
 
     def diff(
         self,
@@ -778,7 +795,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
         else _branch_diff(project_dir, branch, target)
     )
     changed_files = diff["files"]
-    certification = _certification_summary(record)
+    certification = _certification_summary(project_dir, record)
     evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
     merge_preflight = _merge_preflight(project_dir)
     readiness = _review_readiness(
@@ -843,7 +860,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
 def _merge_review_packet(project_dir: Path, detail: DetailView, *, display_status: str, target: str) -> dict[str, Any]:
     record = detail.record
     merge_id = _optional_str(record.identity.get("merge_id")) or record.run_id
-    certification = _certification_summary(record)
+    certification = _certification_summary(project_dir, record)
     evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
     terminal_success = display_status == "done" or record.terminal_outcome == "success"
     needs_attention = display_status in {"failed", "cancelled", "interrupted", "stale"}
@@ -1253,16 +1270,25 @@ def _detail_merge_info(project_dir: Path, detail: DetailView) -> dict[str, Any] 
     return {**info, "target": target}
 
 
-def _certification_summary(record: Any) -> dict[str, Any]:
+def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
     summary = _summary_for_record(record)
+    proof_report = _proof_report_info(project_dir, record)
+    proof_json = _read_json_object(Path(str(proof_report["json_path"]))) if proof_report.get("json_path") else None
     metrics = getattr(record, "metrics", {}) if isinstance(getattr(record, "metrics", {}), dict) else {}
     stories_tested = _int_or_none(metrics.get("stories_tested"))
     stories_passed = _int_or_none(metrics.get("stories_passed"))
-    if isinstance(summary, dict):
-        stories_tested = stories_tested if stories_tested is not None else _int_or_none(summary.get("stories_tested"))
-        stories_passed = stories_passed if stories_passed is not None else _int_or_none(summary.get("stories_passed"))
+    for source in (summary, proof_json):
+        if not isinstance(source, dict):
+            continue
+        stories_tested = stories_tested if stories_tested is not None else _int_or_none(source.get("stories_tested"))
+        stories_passed = stories_passed if stories_passed is not None else _int_or_none(source.get("stories_passed"))
         if stories_tested is None:
-            stories_tested = _int_or_none(summary.get("stories_total_count"))
+            stories_tested = _int_or_none(source.get("stories_total_count"))
+    stories = _certification_stories(proof_json) or _certification_stories(summary)
+    if stories and stories_tested is None:
+        stories_tested = len(stories)
+    if stories and stories_passed is None:
+        stories_passed = sum(1 for story in stories if story.get("status") in {"pass", "warn"})
     return {
         "stories_passed": stories_passed,
         "stories_tested": stories_tested,
@@ -1273,7 +1299,67 @@ def _certification_summary(record: Any) -> dict[str, Any]:
             and stories_passed >= stories_tested
         ),
         "summary_path": _optional_str(getattr(record, "artifacts", {}).get("summary_path")),
+        "stories": stories,
+        "proof_report": proof_report,
     }
+
+
+def _certification_stories(source: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(source, dict):
+        return []
+    raw_stories = source.get("stories") or source.get("stories_ordered") or source.get("story_results")
+    if not isinstance(raw_stories, list):
+        return []
+    stories: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_stories, start=1):
+        if not isinstance(raw, dict):
+            continue
+        story_id = _first_nonempty(raw.get("story_id"), raw.get("id"), raw.get("name"), f"story-{index}")
+        title = _first_nonempty(raw.get("claim"), raw.get("title"), raw.get("summary"), raw.get("name"), story_id)
+        detail = _first_nonempty(
+            raw.get("observed_result"),
+            raw.get("key_finding"),
+            raw.get("evidence"),
+            raw.get("failure_evidence"),
+            raw.get("summary"),
+        )
+        stories.append(
+            {
+                "id": story_id,
+                "title": title,
+                "status": _story_status(raw),
+                "methodology": _first_nonempty(raw.get("methodology"), raw.get("interaction_method")),
+                "surface": _first_nonempty(raw.get("surface"), raw.get("surface_display")),
+                "detail": detail,
+            }
+        )
+    return stories[:100]
+
+
+def _story_status(story: dict[str, Any]) -> str:
+    raw = str(story.get("status") or story.get("verdict") or story.get("outcome") or "").strip().lower()
+    if raw in {"pass", "passed", "success", "ok"}:
+        return "pass"
+    if raw in {"warn", "warning", "flag", "flag_for_human", "flag-for-human"}:
+        return "warn"
+    if raw in {"skip", "skipped"}:
+        return "skipped"
+    if raw in {"fail", "failed", "failure", "error"}:
+        return "fail"
+    passed = story.get("passed")
+    if passed is True:
+        return "pass"
+    if passed is False:
+        return "fail"
+    return raw or "unknown"
+
+
+def _first_nonempty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _summary_for_record(record: Any) -> dict[str, Any] | None:
@@ -1290,6 +1376,102 @@ def _summary_for_record(record: Any) -> dict[str, Any] | None:
         if value is not None:
             return value
     return None
+
+
+def _proof_report_info(project_dir: Path, record: Any) -> dict[str, Any]:
+    json_path, html_path = _proof_report_paths(project_dir, record)
+    run_id = str(getattr(record, "run_id", "") or "")
+    return {
+        "json_path": str(json_path) if json_path is not None else None,
+        "html_path": str(html_path) if html_path is not None else None,
+        "html_url": f"/api/runs/{quote(run_id, safe='')}/proof-report" if html_path is not None else None,
+        "available": html_path is not None,
+    }
+
+
+def _proof_report_paths(project_dir: Path, record: Any) -> tuple[Path | None, Path | None]:
+    root = project_dir.resolve(strict=False)
+    artifacts = getattr(record, "artifacts", {}) if isinstance(getattr(record, "artifacts", {}), dict) else {}
+    record_project = Path(str(getattr(record, "project_dir", "") or project_dir)).expanduser()
+    run_id = str(getattr(record, "run_id", "") or "").strip()
+    json_candidates: list[Path] = []
+    html_candidates: list[Path] = []
+
+    _append_path_candidate(json_candidates, artifacts.get("proof_of_work_path"))
+    for manifest_path in _manifest_path_candidates(project_dir, record, artifacts):
+        manifest = _read_json_object(manifest_path)
+        if manifest is not None:
+            _append_path_candidate(json_candidates, manifest.get("proof_of_work_path"))
+
+    summary_path = _optional_str(artifacts.get("summary_path"))
+    if summary_path:
+        summary_parent = Path(summary_path).expanduser().parent
+        _append_path_candidate(json_candidates, summary_parent / "certify" / "proof-of-work.json")
+    session_dir = _optional_str(artifacts.get("session_dir"))
+    if session_dir:
+        _append_path_candidate(json_candidates, Path(session_dir).expanduser() / "certify" / "proof-of-work.json")
+    if run_id:
+        _append_path_candidate(json_candidates, paths.certify_dir(record_project, run_id) / "proof-of-work.json")
+        _append_path_candidate(json_candidates, paths.certify_dir(project_dir, run_id) / "proof-of-work.json")
+
+    extra_paths = artifacts.get("extra_log_paths") if isinstance(artifacts.get("extra_log_paths"), list) else []
+    for value in extra_paths:
+        path = Path(str(value)).expanduser()
+        if path.name == "proof-of-work.html":
+            _append_path_candidate(html_candidates, path)
+        elif path.name == "proof-of-work.json":
+            _append_path_candidate(json_candidates, path)
+
+    for candidate in list(json_candidates):
+        _append_path_candidate(html_candidates, candidate.with_name("proof-of-work.html"))
+
+    json_path = _first_existing_project_path(root, json_candidates)
+    html_path = _first_existing_project_path(root, html_candidates)
+    return json_path, html_path
+
+
+def _manifest_path_candidates(project_dir: Path, record: Any, artifacts: dict[str, Any]) -> list[Path]:
+    candidates: list[Path] = []
+    _append_path_candidate(candidates, artifacts.get("manifest_path"))
+    _append_path_candidate(candidates, artifacts.get("queue_manifest_path"))
+    queue_task_id = _optional_str(getattr(record, "identity", {}).get("queue_task_id")) if isinstance(getattr(record, "identity", {}), dict) else None
+    if queue_task_id:
+        try:
+            manifest = paths.queue_manifest_path(project_dir, queue_task_id)
+        except ValueError:
+            manifest = None
+        _append_path_candidate(candidates, manifest)
+    return candidates
+
+
+def _append_path_candidate(candidates: list[Path], value: Any) -> None:
+    if value is None:
+        return
+    path = value if isinstance(value, Path) else Path(str(value))
+    text = str(path).strip()
+    if not text:
+        return
+    candidate = Path(text).expanduser()
+    if candidate not in candidates:
+        candidates.append(candidate)
+
+
+def _first_existing_project_path(root: Path, candidates: list[Path]) -> Path | None:
+    for candidate in candidates:
+        path = candidate.resolve(strict=False)
+        if not _is_relative_to_path(path, root):
+            continue
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
+def _is_relative_to_path(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _read_json_object(path: Path) -> dict[str, Any] | None:

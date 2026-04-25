@@ -148,6 +148,10 @@ def create_app(
     def run_artifact_content(run_id: str, artifact_index: int) -> dict[str, Any]:
         return _service().artifact_content(run_id, artifact_index)
 
+    @app.get("/api/runs/{run_id}/proof-report")
+    def run_proof_report(run_id: str) -> FileResponse:
+        return FileResponse(_service().proof_report_path(run_id), media_type="text/html")
+
     @app.get("/api/runs/{run_id}/diff")
     def run_diff(run_id: str) -> dict[str, Any]:
         return _service().diff(run_id)

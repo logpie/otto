@@ -211,6 +211,52 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     assert '"passed"' in content["content"]
 
 
+def test_web_review_packet_includes_story_details_and_html_report(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write_run(repo)
+    certify_dir = paths.certify_dir(repo, "build-web")
+    certify_dir.mkdir(parents=True, exist_ok=True)
+    (certify_dir / "proof-of-work.html").write_text("<html><body>Proof report</body></html>", encoding="utf-8")
+    (certify_dir / "proof-of-work.json").write_text(
+        json.dumps(
+            {
+                "stories_tested": 2,
+                "stories_passed": 1,
+                "stories": [
+                    {
+                        "story_id": "save-filter",
+                        "status": "pass",
+                        "claim": "Users can save a filtered dashboard view.",
+                        "observed_result": "Saved view appeared in the view switcher.",
+                        "methodology": "live-ui-events",
+                    },
+                    {
+                        "story_id": "restore-filter",
+                        "status": "fail",
+                        "claim": "Users can restore a saved dashboard view.",
+                        "failure_evidence": "Restore did not apply the owner filter.",
+                        "methodology": "live-ui-events",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client = TestClient(create_app(repo))
+    packet = client.get("/api/runs/build-web").json()["review_packet"]
+
+    assert packet["certification"]["stories_tested"] == 2
+    assert packet["certification"]["stories_passed"] == 1
+    assert packet["certification"]["stories"][0]["id"] == "save-filter"
+    assert packet["certification"]["stories"][1]["status"] == "fail"
+    assert packet["certification"]["proof_report"]["html_url"] == "/api/runs/build-web/proof-report"
+    report = client.get("/api/runs/build-web/proof-report")
+    assert report.status_code == 200
+    assert "Proof report" in report.text
+
+
 def test_web_run_detail_is_not_hidden_by_list_filters(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)

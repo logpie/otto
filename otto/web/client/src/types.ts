@@ -308,6 +308,20 @@ export interface ReviewPacket {
     stories_tested: number | null;
     passed: boolean;
     summary_path: string | null;
+    stories: Array<{
+      id: string;
+      title: string;
+      status: "pass" | "warn" | "fail" | "skipped" | "unknown" | string;
+      methodology: string;
+      surface: string;
+      detail: string;
+    }>;
+    proof_report: {
+      json_path: string | null;
+      html_path: string | null;
+      html_url: string | null;
+      available: boolean;
+    };
   };
   changes: {
     branch: string | null;
