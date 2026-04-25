@@ -1029,6 +1029,25 @@ def test_web_queue_build_enqueues_without_click_context(tmp_path: Path) -> None:
     assert matching["live"]["items"][0]["queue_task_id"] == "saved-searches"
 
 
+def test_web_queue_rejects_unknown_after_dependency(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    response = TestClient(create_app(repo)).post(
+        "/api/queue/improve",
+        json={
+            "subcommand": "feature",
+            "focus": "add saved views",
+            "as": "saved-views",
+            "after": ["missing-task"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "after references unknown task(s): ['missing-task']" in response.json()["message"]
+    assert load_queue(repo) == []
+
+
 def test_web_landing_does_not_show_diff_errors_for_queued_future_branches(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)

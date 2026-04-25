@@ -27,7 +27,7 @@ from typing import Callable
 
 from otto import paths
 from otto.merge.state import BranchOutcome, MergeState, write_state as write_merge_state
-from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
+from otto.queue.schema import QueueTask, append_task, load_queue, write_state as write_queue_state
 from otto.runs.registry import make_run_record, write_record
 
 
@@ -57,6 +57,43 @@ class Scenario:
     run: Callable[[ScenarioContext], None]
 
 
+COVERAGE_MODEL: dict[str, list[dict[str, str]]] = {
+    "states": [
+        {"id": "project.launcher", "scenario": "project-launcher", "intent": "managed project creation and target selection"},
+        {"id": "project.clean.empty", "scenario": "fresh-queue", "intent": "clean project with no work"},
+        {"id": "queue.queued", "scenario": "fresh-queue", "intent": "queued task waiting for watcher"},
+        {"id": "queue.command_backlog", "scenario": "command-backlog", "intent": "pending command backlog"},
+        {"id": "watcher.running", "scenario": "watcher-stop-ui", "intent": "running watcher with visible stop affordance"},
+        {"id": "task.ready", "scenario": "ready-land", "intent": "single task ready to land"},
+        {"id": "task.bulk_ready", "scenario": "bulk-land", "intent": "multiple ready tasks"},
+        {"id": "task.failed", "scenario": "multi-state", "intent": "failed task needs recovery"},
+        {"id": "task.landed", "scenario": "multi-state", "intent": "landed task review packet"},
+        {"id": "repo.dirty_blocked", "scenario": "dirty-blocked", "intent": "dirty working tree blocks landing"},
+        {"id": "evidence.large_log", "scenario": "long-log-layout", "intent": "large log and artifact review"},
+        {"id": "filters.no_match", "scenario": "control-tour", "intent": "filtered board can hide all task cards"},
+    ],
+    "actions": [
+        {"id": "project.create", "scenario": "project-launcher", "intent": "create managed project"},
+        {"id": "queue.build.submit", "scenario": "fresh-queue", "intent": "submit build job"},
+        {"id": "queue.improve.submit", "scenario": "job-submit-matrix", "intent": "submit improve job with advanced options"},
+        {"id": "queue.certify.submit", "scenario": "job-submit-matrix", "intent": "submit certify job with advanced options"},
+        {"id": "watcher.start", "scenario": "command-backlog", "intent": "start watcher from UI"},
+        {"id": "watcher.stop.cancel", "scenario": "watcher-stop-ui", "intent": "cancel stop confirmation"},
+        {"id": "watcher.stop.confirm", "scenario": "watcher-stop-ui", "intent": "confirm stop watcher"},
+        {"id": "run.land.selected", "scenario": "ready-land", "intent": "land one selected task"},
+        {"id": "run.land.bulk.cancel", "scenario": "control-tour", "intent": "cancel bulk land confirmation"},
+        {"id": "run.land.bulk.confirm", "scenario": "bulk-land", "intent": "land all ready tasks"},
+        {"id": "run.cleanup.cancel", "scenario": "control-tour", "intent": "open and cancel advanced cleanup"},
+        {"id": "inspector.proof", "scenario": "long-log-layout", "intent": "open proof content"},
+        {"id": "inspector.logs", "scenario": "long-log-layout", "intent": "open bounded logs"},
+        {"id": "inspector.artifact.drilldown", "scenario": "long-log-layout", "intent": "open artifact content and return"},
+        {"id": "diagnostics.open", "scenario": "multi-state", "intent": "open diagnostics view"},
+        {"id": "filters.search", "scenario": "control-tour", "intent": "search and clear task filters"},
+        {"id": "responsive.mobile", "scenario": "control-tour", "intent": "scenario is viewport-safe for mobile/tablet runs"},
+    ],
+}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--otto-root", type=Path, default=Path.cwd(), help="Otto source tree to test.")
@@ -70,6 +107,9 @@ def main() -> int:
             "dirty-blocked",
             "multi-state",
             "command-backlog",
+            "watcher-stop-ui",
+            "job-submit-matrix",
+            "bulk-land",
             "long-log-layout",
             "control-tour",
         ],
@@ -90,6 +130,7 @@ def main() -> int:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     viewport_width, viewport_height = parse_viewport(args.viewport)
     print(f"[web-e2e] artifacts: {artifacts_dir}")
+    prepare_artifacts_dir(artifacts_dir)
     selected = [scenario for scenario in scenarios() if args.scenario == "all" or scenario.name == args.scenario]
     results: list[dict[str, str]] = []
     try:
@@ -103,12 +144,18 @@ def main() -> int:
                 viewport_width=viewport_width,
                 viewport_height=viewport_height,
             )
+            if ctx.artifacts_dir.exists():
+                shutil.rmtree(ctx.artifacts_dir)
             ctx.artifacts_dir.mkdir(parents=True, exist_ok=True)
             print(f"[web-e2e] {scenario.name}: {scenario.description}")
             try:
                 with browser_session_lock(scenario.name):
                     try:
-                        scenario.run(ctx)
+                        try:
+                            scenario.run(ctx)
+                        except Exception:
+                            capture_failure_evidence(ctx, scenario.name)
+                            raise
                     finally:
                         browser("close", check=False)
             except Exception as exc:
@@ -121,6 +168,7 @@ def main() -> int:
             finally:
                 stop_server(ctx)
         (artifacts_dir / "summary.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+        write_coverage_report(artifacts_dir, [item["scenario"] for item in results])
     finally:
         if args.keep:
             print(f"[web-e2e] kept projects under {run_root}")
@@ -137,9 +185,58 @@ def scenarios() -> list[Scenario]:
         Scenario("dirty-blocked", "show a clean recovery path when local changes block landing", scenario_dirty_blocked),
         Scenario("multi-state", "audit queued, failed, ready, and landed work in one board", scenario_multi_state),
         Scenario("command-backlog", "recover pending command backlog when the watcher is stopped", scenario_command_backlog),
+        Scenario("watcher-stop-ui", "cancel and confirm watcher stop from the visible UI", scenario_watcher_stop_ui),
+        Scenario("job-submit-matrix", "submit improve and certify jobs with advanced queue options", scenario_job_submit_matrix),
+        Scenario("bulk-land", "land multiple ready tasks through the bulk action", scenario_bulk_land),
         Scenario("long-log-layout", "keep large logs in a bounded full-width inspector", scenario_long_log_layout),
         Scenario("control-tour", "click through the main controls, dialogs, inspectors, and tabs", scenario_control_tour),
     ]
+
+
+def prepare_artifacts_dir(artifacts_dir: Path) -> None:
+    for child in artifacts_dir.iterdir():
+        if child.is_dir() and len(child.name) > 3 and child.name[:2].isdigit() and child.name[2] == "-":
+            shutil.rmtree(child)
+    for filename in ("summary.json", "coverage-model.json"):
+        with contextlib.suppress(FileNotFoundError):
+            (artifacts_dir / filename).unlink()
+
+
+def write_coverage_report(artifacts_dir: Path, selected_scenarios: list[str]) -> None:
+    scenario_names = {scenario.name for scenario in scenarios()}
+    selected = set(selected_scenarios)
+    model_errors: list[str] = []
+    covered: dict[str, list[dict[str, str]]] = {}
+    missing: dict[str, list[dict[str, str]]] = {}
+    for group, entries in COVERAGE_MODEL.items():
+        seen_ids: set[str] = set()
+        covered[group] = []
+        missing[group] = []
+        for entry in entries:
+            entry_id = entry["id"]
+            owner = entry["scenario"]
+            if entry_id in seen_ids:
+                model_errors.append(f"duplicate {group} coverage id {entry_id}")
+            seen_ids.add(entry_id)
+            if owner not in scenario_names:
+                model_errors.append(f"{group} coverage id {entry_id} references unknown scenario {owner}")
+            if owner in selected:
+                covered[group].append(entry)
+            else:
+                missing[group].append(entry)
+    report = {
+        "schema_version": 1,
+        "selected_scenarios": selected_scenarios,
+        "model": COVERAGE_MODEL,
+        "covered": covered,
+        "missing": missing,
+        "model_errors": model_errors,
+    }
+    (artifacts_dir / "coverage-model.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if set(selected_scenarios) == scenario_names:
+        missing_items = [entry for entries in missing.values() for entry in entries]
+        if model_errors or missing_items:
+            raise AssertionError(f"coverage model incomplete: errors={model_errors}, missing={missing_items}")
 
 
 def scenario_project_launcher(ctx: ScenarioContext) -> None:
@@ -333,6 +430,110 @@ def scenario_command_backlog(ctx: ScenarioContext) -> None:
     browser("find", "testid", "diagnostics-tab", "click")
     wait_text("No pending commands")
     screenshot(ctx, "command-backlog.png")
+
+
+def scenario_watcher_stop_ui(ctx: ScenarioContext) -> None:
+    repo = init_repo(ctx.run_root / "watcher-stop-ui")
+    paths.queue_commands_path(repo).write_text(
+        json.dumps({"command_id": "cmd-stop-ui", "run_id": "run-missing", "action": "retry"}) + "\n",
+        encoding="utf-8",
+    )
+    start_server(ctx, repo)
+    open_app(ctx)
+
+    wait_text("Commands are waiting")
+    browser("find", "testid", "start-watcher-button", "click")
+    wait_for_api_state(
+        ctx,
+        lambda state: bool(state["runtime"]["supervisor"]["can_stop"]) or state["watcher"]["health"]["state"] == "running",
+        "watcher can stop",
+        timeout_s=20,
+    )
+    browser("find", "testid", "stop-watcher-button", "click")
+    wait_text("Stop watcher")
+    assert_modal_focus()
+    browser("find", "role", "button", "click", "--name", "Cancel")
+    assert_no_dialog()
+    wait_for_api_state(ctx, lambda state: state["watcher"]["health"]["state"] == "running", "watcher remains running after cancel", timeout_s=10)
+
+    browser("find", "testid", "stop-watcher-button", "click")
+    wait_text("Stop watcher")
+    browser("find", "role", "button", "click", "--name", "Stop watcher")
+    wait_for_api_state(ctx, lambda state: state["watcher"]["health"]["state"] != "running", "watcher stopped from UI", timeout_s=20)
+    browser("reload")
+    wait_text("watcher stop requested")
+    screenshot(ctx, "watcher-stop-ui.png")
+
+
+def scenario_job_submit_matrix(ctx: ScenarioContext) -> None:
+    repo = init_repo(ctx.run_root / "job-submit-matrix")
+    seed_queued_task(repo, "base-task")
+    start_server(ctx, repo)
+    open_app(ctx)
+
+    queue_job_from_dialog(
+        command="improve",
+        task_id="improve-saved-views",
+        intent="Add saved dashboard views with named filters.",
+        after="base-task",
+        subcommand="feature",
+        provider="codex",
+        model="gpt-5.4",
+        effort="high",
+        fast=True,
+    )
+    wait_text("queued improve-saved-views")
+
+    queue_job_from_dialog(
+        command="certify",
+        task_id="certify-checkout",
+        intent="Certify the checkout workflow against the product spec.",
+        provider="claude",
+        effort="medium",
+        fast=True,
+    )
+    wait_text("queued certify-checkout")
+
+    tasks = {task.id: task for task in load_queue(repo)}
+    improve = tasks["improve-saved-views"]
+    certify = tasks["certify-checkout"]
+    assert improve.command_argv[:3] == ["improve", "feature", "Add saved dashboard views with named filters."], improve
+    assert improve.after == ["base-task"], improve
+    assert improve.focus == "Add saved dashboard views with named filters.", improve
+    assert improve.resumable is True
+    assert_cli_args(improve.command_argv, {"--provider": "codex", "--model": "gpt-5.4", "--effort": "high"}, flags=["--fast"])
+    assert certify.command_argv[:2] == ["certify", "Certify the checkout workflow against the product spec."], certify
+    assert certify.resumable is False
+    assert_cli_args(certify.command_argv, {"--provider": "claude", "--effort": "medium"}, flags=["--fast"])
+    state = api_json(ctx, "api/state")
+    assert state["watcher"]["counts"]["queued"] == 3
+    screenshot(ctx, "job-submit-matrix.png")
+
+
+def scenario_bulk_land(ctx: ScenarioContext) -> None:
+    repo = init_repo(ctx.run_root / "bulk-land")
+    seed_ready_task(repo, task_id="saved-views", filename="saved_views.txt")
+    seed_ready_task(repo, task_id="audit-log", filename="audit_log.txt")
+    start_server(ctx, repo)
+    open_app(ctx)
+
+    wait_text("2 tasks ready to land")
+    browser("find", "role", "button", "click", "--name", "Land all ready")
+    wait_text("Land ready tasks")
+    wait_text("saved-views")
+    wait_text("audit-log")
+    assert_modal_focus()
+    browser("find", "role", "button", "click", "--name", "Land 2 tasks")
+    wait_for_api_state(ctx, lambda state: state["landing"]["counts"]["merged"] >= 2, "bulk tasks landed", timeout_s=30)
+    assert_git_file(repo, "main", "saved_views.txt", "saved-views")
+    assert_git_file(repo, "main", "audit_log.txt", "audit-log")
+    state = api_json(ctx, "api/state")
+    by_task = {item["task_id"]: item for item in state["landing"]["items"]}
+    assert by_task["saved-views"]["landing_state"] == "merged"
+    assert by_task["audit-log"]["landing_state"] == "merged"
+    browser("reload")
+    wait_text("Landed")
+    screenshot(ctx, "bulk-land.png")
 
 
 def scenario_control_tour(ctx: ScenarioContext) -> None:
@@ -736,12 +937,47 @@ def wait_for_server(ctx: ScenarioContext, timeout_s: float = 20) -> None:
 
 def wait_for_api_state(ctx: ScenarioContext, predicate: Callable[[dict[str, object]], bool], label: str, timeout_s: float = 15) -> None:
     deadline = time.monotonic() + timeout_s
+    last_state: dict[str, object] | None = None
     while time.monotonic() < deadline:
         state = api_json(ctx, "api/state")
+        last_state = state
         if predicate(state):
             return
         time.sleep(0.5)
-    raise AssertionError(f"timed out waiting for {label}")
+    raise AssertionError(f"timed out waiting for {label}: {state_debug_summary(last_state)}")
+
+
+def capture_failure_evidence(ctx: ScenarioContext, scenario_name: str) -> None:
+    with contextlib.suppress(Exception):
+        state = api_json(ctx, "api/state")
+        (ctx.artifacts_dir / "failure-state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+    with contextlib.suppress(Exception):
+        screenshot(ctx, f"{scenario_name}-failure.png")
+
+
+def state_debug_summary(state: dict[str, object] | None) -> str:
+    if not state:
+        return "no state captured"
+    landing = state.get("landing")
+    live = state.get("live")
+    runtime = state.get("runtime")
+    summary = {
+        "landing": landing.get("counts") if isinstance(landing, dict) else None,
+        "live": live.get("counts") if isinstance(live, dict) else None,
+        "runtime": runtime.get("summary") if isinstance(runtime, dict) else None,
+    }
+    if isinstance(landing, dict):
+        summary["landing_items"] = [
+            {
+                "task_id": item.get("task_id"),
+                "state": item.get("landing_state"),
+                "blocked": item.get("landing_blocked"),
+                "reason": item.get("landing_blocked_reason"),
+            }
+            for item in landing.get("items", [])
+            if isinstance(item, dict)
+        ]
+    return json.dumps(summary, sort_keys=True)
 
 
 def api_json(ctx: ScenarioContext, path: str) -> dict[str, object]:
@@ -770,6 +1006,55 @@ def landing_item(state: dict[str, object], task_id: str) -> dict[str, object]:
         if isinstance(item, dict) and item.get("task_id") == task_id:
             return item
     raise AssertionError(f"landing item {task_id!r} not found")
+
+
+def queue_job_from_dialog(
+    *,
+    command: str,
+    task_id: str,
+    intent: str,
+    after: str = "",
+    subcommand: str = "bugs",
+    provider: str = "",
+    model: str = "",
+    effort: str = "",
+    fast: bool = True,
+) -> None:
+    browser("find", "testid", "new-job-button", "click")
+    wait_text("New queue job")
+    assert_modal_focus()
+    browser("select", "[data-testid='job-command-select']", command)
+    if command == "improve":
+        wait_text("Improve mode")
+        browser("select", "[data-testid='job-improve-mode-select']", subcommand)
+    browser("find", "label", "Intent / focus", "fill", intent)
+    browser("find", "label", "Task id", "fill", task_id)
+    if after:
+        browser("find", "label", "After", "fill", after)
+    if provider:
+        browser("select", "[data-testid='job-provider-select']", provider)
+    if effort:
+        browser("select", "[data-testid='job-effort-select']", effort)
+    if model:
+        browser("find", "label", "Model", "fill", model)
+    if not fast:
+        browser("find", "label", "Fast mode", "click")
+    browser("find", "testid", "target-project-confirm", "click")
+    assert_submit_enabled("Queue job")
+    browser("find", "role", "button", "click", "--name", "Queue job")
+
+
+def assert_cli_args(argv: list[str], values: dict[str, str], *, flags: list[str] | None = None) -> None:
+    for flag, expected in values.items():
+        if flag not in argv:
+            raise AssertionError(f"missing {flag!r} in {argv!r}")
+        index = argv.index(flag)
+        actual = argv[index + 1] if index + 1 < len(argv) else None
+        if actual != expected:
+            raise AssertionError(f"expected {flag} {expected!r}, got {actual!r} in {argv!r}")
+    for flag in flags or []:
+        if flag not in argv:
+            raise AssertionError(f"missing flag {flag!r} in {argv!r}")
 
 
 def browser(*args: str, check: bool = True, timeout_s: float = 30) -> subprocess.CompletedProcess[str]:

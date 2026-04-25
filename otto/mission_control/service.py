@@ -510,57 +510,60 @@ class MissionControlService:
         after = _string_list(payload.get("after"))
         extra_args = _string_list(payload.get("extra_args"))
 
-        if command == "build":
-            intent = _required_str(payload.get("intent"), "intent")
-            result = enqueue_task(
-                self.project_dir,
-                command="build",
-                raw_args=[intent, *extra_args],
-                intent=intent,
-                explicit_intent=intent,
-                after=after,
-                explicit_as=explicit_as,
-                resumable=True,
-            )
-        elif command == "improve":
-            subcommand = _required_str(payload.get("subcommand"), "subcommand")
-            if subcommand not in {"bugs", "feature", "target"}:
-                raise MissionControlServiceError("unsupported improve subcommand", status_code=400)
-            focus_or_goal = _optional_str(payload.get("focus") or payload.get("goal"))
-            raw_args = [subcommand]
-            if focus_or_goal:
-                raw_args.append(focus_or_goal)
-            raw_args.extend(extra_args)
-            snapshot_intent = resolve_intent_for_enqueue(self.project_dir)
-            result = enqueue_task(
-                self.project_dir,
-                command="improve",
-                raw_args=raw_args,
-                intent=snapshot_intent,
-                explicit_intent=focus_or_goal,
-                after=after,
-                explicit_as=explicit_as,
-                resumable=True,
-                focus=focus_or_goal if subcommand in {"bugs", "feature"} else None,
-                target=focus_or_goal if subcommand == "target" else None,
-            )
-        elif command == "certify":
-            intent = _optional_str(payload.get("intent"))
-            resolved = resolve_intent_for_enqueue(self.project_dir, explicit=intent)
-            raw_args = [intent] if intent else []
-            raw_args.extend(extra_args)
-            result = enqueue_task(
-                self.project_dir,
-                command="certify",
-                raw_args=raw_args,
-                intent=resolved,
-                explicit_intent=intent,
-                after=after,
-                explicit_as=explicit_as,
-                resumable=False,
-            )
-        else:
-            raise MissionControlServiceError("unsupported queue command", status_code=404)
+        try:
+            if command == "build":
+                intent = _required_str(payload.get("intent"), "intent")
+                result = enqueue_task(
+                    self.project_dir,
+                    command="build",
+                    raw_args=[intent, *extra_args],
+                    intent=intent,
+                    explicit_intent=intent,
+                    after=after,
+                    explicit_as=explicit_as,
+                    resumable=True,
+                )
+            elif command == "improve":
+                subcommand = _required_str(payload.get("subcommand"), "subcommand")
+                if subcommand not in {"bugs", "feature", "target"}:
+                    raise MissionControlServiceError("unsupported improve subcommand", status_code=400)
+                focus_or_goal = _optional_str(payload.get("focus") or payload.get("goal"))
+                raw_args = [subcommand]
+                if focus_or_goal:
+                    raw_args.append(focus_or_goal)
+                raw_args.extend(extra_args)
+                snapshot_intent = resolve_intent_for_enqueue(self.project_dir)
+                result = enqueue_task(
+                    self.project_dir,
+                    command="improve",
+                    raw_args=raw_args,
+                    intent=snapshot_intent,
+                    explicit_intent=focus_or_goal,
+                    after=after,
+                    explicit_as=explicit_as,
+                    resumable=True,
+                    focus=focus_or_goal if subcommand in {"bugs", "feature"} else None,
+                    target=focus_or_goal if subcommand == "target" else None,
+                )
+            elif command == "certify":
+                intent = _optional_str(payload.get("intent"))
+                resolved = resolve_intent_for_enqueue(self.project_dir, explicit=intent)
+                raw_args = [intent] if intent else []
+                raw_args.extend(extra_args)
+                result = enqueue_task(
+                    self.project_dir,
+                    command="certify",
+                    raw_args=raw_args,
+                    intent=resolved,
+                    explicit_intent=intent,
+                    after=after,
+                    explicit_as=explicit_as,
+                    resumable=False,
+                )
+            else:
+                raise MissionControlServiceError("unsupported queue command", status_code=404)
+        except ValueError as exc:
+            raise MissionControlServiceError(str(exc), status_code=400) from exc
 
         response = {
             "ok": True,
