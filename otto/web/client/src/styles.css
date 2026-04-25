@@ -61,6 +61,15 @@ button:disabled {
   background: #eef1f5;
 }
 
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid #2563eb;
+  outline-offset: 2px;
+}
+
 .primary {
   border-color: var(--accent);
   background: var(--accent);
@@ -149,6 +158,13 @@ button:disabled {
   word-break: break-word;
 }
 
+.sidebar-hint {
+  margin: -4px 0 0;
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .workspace {
   min-width: 0;
   display: grid;
@@ -226,7 +242,7 @@ textarea {
 .mission-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 420px;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 480px);
   gap: 14px;
   padding: 14px;
 }
@@ -333,7 +349,7 @@ textarea {
 .task-board {
   min-height: 0;
   display: grid;
-  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: 10px;
   padding: 12px;
   overflow: auto;
@@ -419,30 +435,47 @@ textarea {
   text-align: left;
 }
 
+.task-card-top {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .task-card-main:disabled {
   color: var(--text);
   cursor: default;
 }
 
-.task-card-main strong,
-.task-card-main span,
-.task-card p,
+.task-title,
+.task-summary,
+.task-card-reason,
 .task-card-meta span {
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
-.task-card-main strong {
+.task-title {
   max-width: 100%;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .task-card-cta,
-.task-card p {
+.task-summary,
+.task-card-reason {
   color: var(--muted);
   font-size: 12px;
+}
+
+.task-summary,
+.task-card-reason {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .task-status {
@@ -457,15 +490,19 @@ textarea {
 }
 
 .task-card-meta {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   color: var(--muted);
   font-size: 12px;
 }
 
-.task-card p {
-  margin: 0;
+.task-card-meta span {
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-alt);
 }
 
 .task-empty {
@@ -527,10 +564,17 @@ textarea {
   padding: 14px;
 }
 
+.diagnostics-workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 480px);
+  gap: 14px;
+}
+
 .diagnostics-grid {
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(180px, 0.7fr) minmax(190px, 0.8fr) minmax(170px, 0.7fr) minmax(220px, 1fr);
+  grid-template-rows: auto minmax(190px, 0.8fr) minmax(170px, 0.7fr) minmax(220px, 1fr);
   gap: 14px;
 }
 
@@ -592,8 +636,7 @@ button.diagnostic-card {
   min-width: 0;
   max-width: 100%;
   margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
 .diagnostic-card p,
@@ -717,9 +760,7 @@ button.diagnostic-card {
 
 .runtime-banner span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .runtime-backlog {
@@ -750,7 +791,7 @@ button.diagnostic-card {
 
 .detail {
   display: grid;
-  grid-template-rows: auto auto auto auto minmax(180px, 1fr);
+  grid-template-rows: auto auto minmax(0, auto) auto auto minmax(180px, 1fr);
   overflow: hidden;
 }
 
@@ -942,6 +983,7 @@ tbody tr.selected {
 .detail-body {
   padding: 12px;
   border-bottom: 1px solid var(--line);
+  overflow: auto;
 }
 
 .detail-body h3 {
@@ -971,12 +1013,27 @@ tbody tr.selected {
   color: var(--muted);
 }
 
+.advanced-actions {
+  border-bottom: 1px solid var(--line);
+}
+
+.advanced-actions.empty {
+  min-height: 0;
+  border-bottom: 0;
+}
+
+.advanced-actions summary {
+  padding: 9px 12px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
 .action-bar {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
+  padding: 0 12px 10px;
 }
 
 .review-packet {
@@ -1153,6 +1210,14 @@ tbody tr.selected {
   color: #7f1d1d;
 }
 
+.recovery-note {
+  display: grid;
+  gap: 3px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1e3a8a;
+}
+
 .review-files {
   margin: 0;
   padding-left: 18px;
@@ -1209,6 +1274,28 @@ tbody tr.selected {
   font-weight: 600;
 }
 
+.log-viewer {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: #0b1020;
+}
+
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.log-toolbar span {
+  color: #94a3b8;
+}
+
 .log-pane,
 .artifact-pane {
   margin: 0;
@@ -1248,6 +1335,8 @@ tbody tr.selected {
 
 .artifact-pane pre {
   margin: 12px 0 0;
+  max-height: 52vh;
+  overflow: auto;
 }
 
 .muted {
@@ -1335,6 +1424,17 @@ tbody tr.selected {
   gap: 10px;
 }
 
+@media (max-width: 1180px) {
+  .mission-layout,
+  .diagnostics-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .diagnostics-workspace > .detail {
+    order: -1;
+  }
+}
+
 @media (max-width: 980px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -1343,10 +1443,6 @@ tbody tr.selected {
   .sidebar {
     border-right: 0;
     border-bottom: 1px solid var(--line);
-  }
-
-  .mission-layout {
-    grid-template-columns: 1fr;
   }
 
   .mission-focus {
@@ -1371,6 +1467,24 @@ tbody tr.selected {
 }
 
 @media (max-width: 640px) {
+  .sidebar {
+    gap: 10px;
+    padding: 14px 18px;
+  }
+
+  .project-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 12px;
+  }
+
+  .project-meta div {
+    padding-top: 7px;
+  }
+
+  .project-meta dt {
+    font-size: 10px;
+  }
+
   .toolbar,
   .panel-heading {
     align-items: stretch;
@@ -1411,6 +1525,7 @@ tbody tr.selected {
   }
 
   .task-card-meta {
+    display: grid;
     grid-template-columns: 1fr;
   }
 }

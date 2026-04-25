@@ -39,6 +39,8 @@ class ScenarioContext:
     run_root: Path
     artifacts_dir: Path
     port: int
+    viewport_width: int
+    viewport_height: int
     server: subprocess.Popen[str] | None = None
     repo: Path | None = None
 
@@ -63,6 +65,7 @@ def main() -> int:
         default="all",
     )
     parser.add_argument("--artifacts", type=Path, default=None, help="Directory for logs and screenshots.")
+    parser.add_argument("--viewport", default="1440x1000", help="Browser viewport as WIDTHxHEIGHT.")
     parser.add_argument("--keep", action="store_true", help="Keep temporary projects after the run.")
     args = parser.parse_args()
 
@@ -74,6 +77,7 @@ def main() -> int:
     default_artifacts = Path(tempfile.gettempdir()) / datetime.now().strftime("otto-web-e2e-%Y-%m-%d-%H%M%S")
     artifacts_dir = (args.artifacts or default_artifacts).resolve(strict=False)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
+    viewport_width, viewport_height = parse_viewport(args.viewport)
     print(f"[web-e2e] artifacts: {artifacts_dir}")
     selected = [scenario for scenario in scenarios() if args.scenario == "all" or scenario.name == args.scenario]
     results: list[dict[str, str]] = []
@@ -85,6 +89,8 @@ def main() -> int:
                 run_root=run_root / scenario.name,
                 artifacts_dir=artifacts_dir / f"{index:02d}-{scenario.name}",
                 port=port,
+                viewport_width=viewport_width,
+                viewport_height=viewport_height,
             )
             ctx.artifacts_dir.mkdir(parents=True, exist_ok=True)
             print(f"[web-e2e] {scenario.name}: {scenario.description}")
@@ -128,6 +134,8 @@ def scenario_fresh_queue(ctx: ScenarioContext) -> None:
     open_app(ctx)
 
     browser("find", "testid", "new-job-button", "click")
+    wait_text("New queue job")
+    assert_modal_focus()
     browser("find", "label", "Intent / focus", "fill", "Build an expense approval portal for a small company.")
     browser("find", "label", "Task id", "fill", "expense-portal")
     browser("find", "role", "button", "click", "--name", "Queue job")
@@ -241,6 +249,8 @@ def scenario_multi_state(ctx: ScenarioContext) -> None:
     assert failed_packet["readiness"]["state"] == "needs_attention"
     browser("find", "testid", "diagnostics-tab", "click")
     wait_text("Diagnostics Summary")
+    wait_text("Review Packet")
+    wait_text("Failed; review evidence and requeue or remove")
     wait_text("Ready to land")
     wait_text("Landed")
     wait_text("Live Runs")
@@ -457,8 +467,22 @@ def stop_server(ctx: ScenarioContext) -> None:
 
 def open_app(ctx: ScenarioContext) -> None:
     browser("open", ctx.url)
-    browser("set", "viewport", "1440", "1000")
+    browser("set", "viewport", str(ctx.viewport_width), str(ctx.viewport_height))
     wait_text("Otto")
+
+
+def parse_viewport(value: str) -> tuple[int, int]:
+    parts = value.lower().split("x", 1)
+    if len(parts) != 2:
+        raise SystemExit("--viewport must use WIDTHxHEIGHT, for example 1440x1000")
+    try:
+        width = int(parts[0])
+        height = int(parts[1])
+    except ValueError as exc:
+        raise SystemExit("--viewport must use integer WIDTHxHEIGHT") from exc
+    if width < 320 or height < 480:
+        raise SystemExit("--viewport is too small for Mission Control E2E")
+    return width, height
 
 
 def wait_for_server(ctx: ScenarioContext, timeout_s: float = 20) -> None:
@@ -613,8 +637,25 @@ def assert_page_lacks(text: str) -> None:
         raise AssertionError(f"unexpected page text {text!r}\n{snapshot}")
 
 
+def assert_modal_focus() -> None:
+    result = browser_eval(
+        """(() => {
+          const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
+          const active = document.activeElement;
+          const mainHidden = document.querySelector('main')?.getAttribute('aria-hidden') === 'true';
+          const sideHidden = document.querySelector('aside.sidebar')?.getAttribute('aria-hidden') === 'true';
+          return Boolean(dialog && active && dialog.contains(active) && mainHidden && sideHidden);
+        })()"""
+    )
+    if not result.endswith("true"):
+        raise AssertionError(f"modal focus/background isolation failed: {result}")
+
+
 def screenshot(ctx: ScenarioContext, name: str) -> None:
-    browser("screenshot", str(ctx.artifacts_dir / name), timeout_s=20)
+    path = ctx.artifacts_dir / name
+    browser("screenshot", str(path), timeout_s=20)
+    snapshot = browser("snapshot", timeout_s=20).stdout
+    path.with_suffix(f"{path.suffix}.snapshot.txt").write_text(snapshot, encoding="utf-8")
 
 
 def git(repo: Path, *args: str) -> str:

@@ -312,10 +312,12 @@ export function App() {
   const watcher = data?.watcher;
   const landing = data?.landing;
   const active = activeCount(watcher);
+  const watcherHint = watcherControlHint(data);
+  const modalOpen = jobOpen || Boolean(confirm);
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      <aside className="sidebar" aria-hidden={modalOpen ? true : undefined}>
         <div className="brand">
           <div className="brand-mark">O</div>
           <div>
@@ -325,11 +327,12 @@ export function App() {
         </div>
         <ProjectMeta project={project} watcher={watcher} landing={landing} active={active} />
         <button className="primary" type="button" data-testid="new-job-button" onClick={() => setJobOpen(true)}>New job</button>
-        <button type="button" data-testid="start-watcher-button" disabled={!canStartWatcher(data)} title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
-        <button type="button" data-testid="stop-watcher-button" disabled={!canStopWatcher(data)} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
+        <button type="button" data-testid="start-watcher-button" disabled={!canStartWatcher(data)} aria-describedby="watcher-action-hint" title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
+        <button type="button" data-testid="stop-watcher-button" disabled={!canStopWatcher(data)} aria-describedby="watcher-action-hint" title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
+        <p id="watcher-action-hint" className="sidebar-hint">{watcherHint}</p>
       </aside>
 
-      <main className="workspace">
+      <main className="workspace" aria-hidden={modalOpen ? true : undefined}>
         <Toolbar
           filters={filters}
           refreshStatus={refreshStatus}
@@ -389,11 +392,33 @@ export function App() {
               onDismissError={() => setLastError(null)}
               onDismissResult={() => setResultBanner(null)}
             />
-            <div className="diagnostics-grid">
-              <DiagnosticsSummary data={data} onSelect={selectRun} />
-              <LiveRuns items={data?.live.items || []} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
-              <EventTimeline events={data?.events} />
-              <History items={data?.history.items || []} totalRows={data?.history.total_rows || 0} selectedRunId={selectedRunId} onSelect={selectRun} />
+            <div className="diagnostics-workspace">
+              <div className="diagnostics-grid">
+                <DiagnosticsSummary data={data} onSelect={selectRun} />
+                <LiveRuns items={data?.live.items || []} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
+                <EventTimeline events={data?.events} />
+                <History items={data?.history.items || []} totalRows={data?.history.total_rows || 0} selectedRunId={selectedRunId} onSelect={selectRun} />
+              </div>
+              <RunDetailPanel
+                detail={detail}
+                landing={landing}
+                logText={logText}
+                showingArtifacts={showingArtifacts}
+                selectedArtifactIndex={selectedArtifactIndex}
+                artifactContent={artifactContent}
+                onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
+                onShowLogs={() => {
+                  setShowingArtifacts(false);
+                  setArtifactContent(null);
+                  if (selectedRunId) void loadLogs(selectedRunId, true);
+                }}
+                onShowArtifacts={() => setShowingArtifacts(true)}
+                onLoadArtifact={(index) => void loadArtifact(index)}
+                onBackToArtifacts={() => {
+                  setSelectedArtifactIndex(null);
+                  setArtifactContent(null);
+                }}
+              />
             </div>
           </section>
         )}
@@ -441,7 +466,7 @@ function ProjectMeta({project, watcher, landing, active}: {
       <MetaItem label="Watcher" value={watcherSummary(watcher)} />
       <MetaItem label="Heartbeat" value={health?.heartbeat_age_s === null || health?.heartbeat_age_s === undefined ? "-" : `${Math.round(health.heartbeat_age_s)}s ago`} />
       <MetaItem label="In flight" value={String(active)} />
-      <MetaItem label="Tasks" value={`queued ${counts.queued || 0} / needs ${landing?.counts.blocked || 0} / ready ${landing?.counts.ready || 0} / landed ${landing?.counts.merged || 0}`} />
+      <MetaItem label="Tasks" value={`queued ${counts.queued || 0} / ready ${landing?.counts.ready || 0} / landed ${landing?.counts.merged || 0}`} />
     </dl>
   );
 }
@@ -603,6 +628,7 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
     ...landingItems.filter((item) => item.landing_state === "blocked"),
     ...landingItems.filter((item) => item.landing_state === "merged"),
   ].slice(0, 8);
+  const diagnosticCount = issues.length + commands.length + visibleLanding.length;
   return (
     <section className="panel diagnostics-summary" aria-labelledby="diagnosticsSummaryHeading">
       <div className="panel-heading">
@@ -610,7 +636,7 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
           <h2 id="diagnosticsSummaryHeading">Diagnostics Summary</h2>
           <p className="panel-subtitle">Runtime issues and landing state, translated into operator actions.</p>
         </div>
-        <span className="pill">{issues.length + commands.length + visibleLanding.length}</span>
+        <span className="pill" title="Runtime issues, command backlog items, and review items." aria-label={`${diagnosticCount} diagnostic items`}>{diagnosticCount}</span>
       </div>
       <div className="diagnostics-summary-body">
         <section aria-label="Command backlog">
@@ -678,7 +704,7 @@ function MissionFocus({data, lastError, resultBanner, onNewJob, onStartWatcher, 
       </div>
       <div className="focus-actions">
         {focus.primary === "land" && (
-          <button className="primary" type="button" disabled={!canMerge(data?.landing)} onClick={onLandReady}>Land ready work</button>
+          <button className="primary" type="button" disabled={!canMerge(data?.landing)} onClick={onLandReady}>Land all ready</button>
         )}
         {focus.primary === "start" && (
           <button className="primary" type="button" disabled={!canStartWatcher(data)} onClick={onStartWatcher}>Start watcher</button>
@@ -692,7 +718,7 @@ function MissionFocus({data, lastError, resultBanner, onNewJob, onStartWatcher, 
         {focus.primary !== "new" && <button type="button" onClick={onNewJob}>New job</button>}
       </div>
       <div className="focus-metrics">
-        <FocusMetric label="In flight" value={String(focus.working)} />
+        <FocusMetric label="Queued/running" value={String(focus.working)} />
         <FocusMetric label="Needs action" value={String(focus.needsAction)} />
         <FocusMetric label="Ready" value={String(focus.ready)} />
       </div>
@@ -777,18 +803,21 @@ function TaskCard({task, selected, onSelect}: {
       disabled={!task.runId}
       data-testid={testIdForTask(task.id)}
       aria-pressed={selected}
+      aria-label={`${task.title}: ${task.status}`}
       onClick={selectTask}
     >
-      <span className="task-status">{task.status}</span>
-      <strong title={task.title}>{task.title}</strong>
-      <span title={task.summary}>{shortText(task.summary, 120)}</span>
+      <span className="task-card-top">
+        <span className="task-status">{task.status}</span>
+        <span className="task-card-cta">{task.stage === "ready" ? "Review" : "Details"}</span>
+      </span>
+      <strong className="task-title" title={task.title}>{task.title}</strong>
+      <span className="task-summary" title={task.summary}>{shortText(task.summary, 180)}</span>
       <span className="task-card-meta">
         <span title={task.branch || ""}>{task.branch || "no branch"}</span>
         <span>{taskChangeLine(task)}</span>
         <span>{task.proof}</span>
       </span>
       <span className="task-card-reason">{task.reason}</span>
-      <span className="task-card-cta">{task.stage === "ready" ? "Review" : "Details"}</span>
     </button>
   );
 }
@@ -869,6 +898,7 @@ function LiveRuns({items, landing, selectedRunId, onSelect}: {
                 role="button"
                 tabIndex={0}
                 aria-selected={item.run_id === selectedRunId}
+                aria-label={`Open live run ${item.display_id || item.run_id}`}
                 onClick={() => onSelect(item.run_id)}
                 onKeyDown={(event) => selectOnKeyboard(event, () => onSelect(item.run_id))}
               >
@@ -915,6 +945,7 @@ function History({items, totalRows, selectedRunId, onSelect}: {items: HistoryIte
                 role="button"
                 tabIndex={0}
                 aria-selected={item.run_id === selectedRunId}
+                aria-label={`Open history run ${item.queue_task_id || item.run_id}`}
                 onClick={() => onSelect(item.run_id)}
                 onKeyDown={(event) => selectOnKeyboard(event, () => onSelect(item.run_id))}
               >
@@ -1004,11 +1035,11 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
           </div>
           <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
           <div className="detail-tabs">
-            <button className={`tab ${!showingArtifacts ? "active" : ""}`} type="button" onClick={onShowLogs}>Logs</button>
-            <button className={`tab ${showingArtifacts ? "active" : ""}`} type="button" onClick={onShowArtifacts}>Artifacts</button>
+            <button className={`tab ${!showingArtifacts ? "active" : ""}`} type="button" aria-pressed={!showingArtifacts} onClick={onShowLogs}>Logs</button>
+            <button className={`tab ${showingArtifacts ? "active" : ""}`} type="button" aria-pressed={showingArtifacts} onClick={onShowArtifacts}>Artifacts</button>
           </div>
           {!showingArtifacts ? (
-            <pre className="log-pane">{logText}</pre>
+            <LogPane text={logText} />
           ) : (
             <ArtifactPane
               artifacts={detail.artifacts || []}
@@ -1023,6 +1054,20 @@ function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArt
         <div className="detail-body empty">Select a run.</div>
       )}
     </aside>
+  );
+}
+
+function LogPane({text}: {text: string}) {
+  const compact = compactLongText(text || "No logs yet.", 14000);
+  const lineCount = text ? text.split(/\n/).length : 0;
+  return (
+    <div className="log-viewer">
+      <div className="log-toolbar">
+        <strong>Run logs</strong>
+        <span>{lineCount ? `${lineCount} line${lineCount === 1 ? "" : "s"}` : "waiting for output"}{compact.truncated ? " · showing latest output" : ""}</span>
+      </div>
+      <pre className="log-pane" tabIndex={0} aria-label="Run log output">{compact.text}</pre>
+    </div>
   );
 }
 
@@ -1081,6 +1126,12 @@ function ReviewPacket({packet, onRunAction}: {packet: RunDetail["review_packet"]
       </div>
       {packet.failure && <div className="review-note danger">{packet.failure.reason || "failure recorded"}</div>}
       {packet.changes.diff_error && <div className="review-note danger">{formatTechnicalIssue(packet.changes.diff_error)}</div>}
+      {isRepositoryBlockedPacket(packet) && (
+        <div className="review-note recovery-note">
+          <strong>Recovery</strong>
+          <span>Run git status --short, then commit, stash, or revert local project changes before landing.</span>
+        </div>
+      )}
       {packet.changes.files.length > 0 && (
         <ul className="review-files" aria-label="Changed files">
           {packet.changes.files.map((path) => <li key={path}>{path}</li>)}
@@ -1128,19 +1179,23 @@ function DetailLine({line}: {line: string}) {
 
 function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]; mergeBlocked: boolean; onRunAction: (action: string, label?: string) => void}) {
   const visible = actions.filter((action) => !["o", "e", "m", "M"].includes(action.key));
+  if (!visible.length) return <div className="advanced-actions empty" aria-hidden="true" />;
   return (
-    <div className="action-bar">
-      {visible.map((action) => {
-        const name = actionName(action.key);
-        const disabled = !action.enabled || (action.key === "m" && mergeBlocked);
-        const title = action.key === "m" && mergeBlocked ? "Commit, stash, or revert local project changes before merging." : action.reason || action.preview || "";
-        return (
-          <button key={action.key} type="button" disabled={disabled} title={title} onClick={() => onRunAction(name, action.label)}>
-            {reviewActionLabel(action.label)}
-          </button>
-        );
-      })}
-    </div>
+    <details className="advanced-actions">
+      <summary>Advanced run actions</summary>
+      <div className="action-bar" aria-label="Advanced run actions">
+        {visible.map((action) => {
+          const name = actionName(action.key);
+          const disabled = !action.enabled || (action.key === "m" && mergeBlocked);
+          const title = action.key === "m" && mergeBlocked ? "Commit, stash, or revert local project changes before merging." : action.reason || action.preview || "";
+          return (
+            <button key={action.key} type="button" disabled={disabled} title={title} onClick={() => onRunAction(name, action.label)}>
+              {reviewActionLabel(action.label)}
+            </button>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 
@@ -1152,11 +1207,14 @@ function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoad
   onBack: () => void;
 }) {
   if (selectedArtifactIndex !== null) {
+    const compact = compactLongText(artifactContent?.content || "No content.", 20000);
     return (
       <div className="artifact-pane">
         <button type="button" onClick={onBack}>Back to artifacts</button>
-        <div className="artifact-meta">{artifactContent?.artifact.label || "artifact"} {artifactContent?.truncated ? "(truncated)" : ""}</div>
-        <pre>{artifactContent?.content || ""}</pre>
+        <div className="artifact-meta">
+          {artifactContent?.artifact.label || "artifact"} {artifactContent?.truncated || compact.truncated ? "(truncated)" : ""}
+        </div>
+        <pre tabIndex={0} aria-label="Artifact content">{compact.text}</pre>
       </div>
     );
   }
@@ -1185,14 +1243,7 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
   const [fast, setFast] = useState(true);
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !submitting) onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, submitting]);
+  const dialogRef = useDialogFocus<HTMLFormElement>(onClose, submitting);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1217,10 +1268,19 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="job-dialog" role="dialog" aria-modal="true" aria-labelledby="jobDialogHeading" onSubmit={(event) => void submit(event)}>
+      <form
+        ref={dialogRef}
+        className="job-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="jobDialogHeading"
+        aria-describedby={status ? "jobDialogStatus" : undefined}
+        tabIndex={-1}
+        onSubmit={(event) => void submit(event)}
+      >
         <header>
           <h2 id="jobDialogHeading">New queue job</h2>
-          <button type="button" aria-label="Close" onClick={onClose}>x</button>
+          <button type="button" onClick={onClose}>Close</button>
         </header>
         <label>Command
           <select value={command} onChange={(event) => setCommand(event.target.value as JobCommand)}>
@@ -1275,7 +1335,7 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
           Fast mode
         </label>
         <footer>
-          <span className="muted">{status}</span>
+          <span id="jobDialogStatus" className="muted" aria-live="polite">{status}</span>
           <button className="primary" type="submit" disabled={submitting}>{submitting ? "Queueing" : "Queue job"}</button>
         </footer>
       </form>
@@ -1290,22 +1350,24 @@ function ConfirmDialog({confirm, pending, onCancel, onConfirm}: {
   onConfirm: () => void;
 }) {
   const confirmClass = confirm.tone === "danger" ? "danger-button" : "primary";
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !pending) onCancel();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onCancel, pending]);
+  const dialogRef = useDialogFocus<HTMLDivElement>(onCancel, pending);
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmHeading">
+      <div
+        ref={dialogRef}
+        className="confirm-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirmHeading"
+        aria-describedby="confirmBody"
+        tabIndex={-1}
+      >
         <header>
           <h2 id="confirmHeading">{confirm.title}</h2>
-          <button type="button" aria-label="Close" disabled={pending} onClick={onCancel}>x</button>
+          <button type="button" disabled={pending} onClick={onCancel}>Close</button>
         </header>
-        <p>{confirm.body}</p>
+        <p id="confirmBody">{confirm.body}</p>
         <footer>
           <button type="button" disabled={pending} onClick={onCancel}>Cancel</button>
           <button className={confirmClass} type="button" disabled={pending} onClick={onConfirm}>
@@ -1545,6 +1607,8 @@ function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean): string
 
 function taskChangeLine(task: BoardTask): string {
   if (task.changedFileCount === null) return "diff pending";
+  if (task.stage === "working" && task.status.toLowerCase() === "queued") return "not built yet";
+  if (task.stage === "working") return "diff pending";
   if (task.stage === "landed") return "no unlanded diff";
   return `${task.changedFileCount} file${task.changedFileCount === 1 ? "" : "s"}`;
 }
@@ -1593,6 +1657,20 @@ function canStartWatcher(data?: StateResponse | null): boolean {
 
 function canStopWatcher(data?: StateResponse | null): boolean {
   return Boolean(data?.runtime.supervisor.can_stop);
+}
+
+function watcherControlHint(data?: StateResponse | null): string {
+  if (!data) return "Loading watcher controls.";
+  const queued = Number(data.watcher.counts.queued || 0);
+  const backlog = Number(data.runtime.command_backlog.pending || 0) + Number(data.runtime.command_backlog.processing || 0);
+  if (canStartWatcher(data)) {
+    const work = [queued ? `${queued} queued` : "", backlog ? `${backlog} command${backlog === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ");
+    return `Start watcher to process ${work}.`;
+  }
+  if (canStopWatcher(data)) return "Watcher is running; stop it only when you need to pause queue processing.";
+  if (data.runtime.supervisor.start_blocked_reason) return `Start unavailable: ${data.runtime.supervisor.start_blocked_reason}`;
+  if (!queued && !backlog) return "Queue a job before starting the watcher.";
+  return data.watcher.health.next_action || "Watcher controls are unavailable.";
 }
 
 function watcherSummary(watcher?: WatcherInfo): string {
@@ -1672,6 +1750,78 @@ function selectOnKeyboard(event: {key: string; preventDefault: () => void}, onSe
   if (event.key !== "Enter" && event.key !== " ") return;
   event.preventDefault();
   onSelect();
+}
+
+function useDialogFocus<T extends HTMLElement>(onCancel: () => void, disabled: boolean) {
+  const dialogRef = useRef<T | null>(null);
+  const onCancelRef = useRef(onCancel);
+  const disabledRef = useRef(disabled);
+
+  useEffect(() => {
+    onCancelRef.current = onCancel;
+  }, [onCancel]);
+
+  useEffect(() => {
+    disabledRef.current = disabled;
+  }, [disabled]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    window.setTimeout(() => {
+      const first = focusableDialogElements(dialog)[0] || dialog;
+      first.focus();
+    }, 0);
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !disabledRef.current) {
+        event.preventDefault();
+        onCancelRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = focusableDialogElements(dialog);
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    dialog.addEventListener("keydown", onKeyDown);
+    return () => {
+      dialog.removeEventListener("keydown", onKeyDown);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, []);
+
+  return dialogRef;
+}
+
+function focusableDialogElements(root: HTMLElement): HTMLElement[] {
+  const selector = [
+    "button:not([disabled])",
+    "input:not([disabled])",
+    "select:not([disabled])",
+    "textarea:not([disabled])",
+    "a[href]",
+    "[tabindex]:not([tabindex='-1'])",
+  ].join(",");
+  return Array.from(root.querySelectorAll<HTMLElement>(selector)).filter((element) => {
+    const style = window.getComputedStyle(element);
+    return style.visibility !== "hidden" && style.display !== "none";
+  });
 }
 
 function handleActionResult(
@@ -1771,7 +1921,10 @@ function proofLine(item: LandingItem): string {
 function evidenceLine(packet: RunDetail["review_packet"]): string {
   if (packet.readiness.state === "in_progress") return "-";
   if (isRepositoryBlockedPacket(packet)) return "-";
-  return `${packet.evidence.filter((item) => item.exists).length}/${packet.evidence.length}`;
+  const existing = packet.evidence.filter((item) => item.exists).length;
+  if (!packet.evidence.length) return "-";
+  if (!existing) return "not attached";
+  return `${existing}/${packet.evidence.length}`;
 }
 
 function isRepositoryBlockedPacket(packet: RunDetail["review_packet"]): boolean {
@@ -1841,7 +1994,9 @@ function storiesLine(packet: RunDetail["review_packet"]): string {
 function reviewActionLabel(label: string): string {
   const normalized = label.toLowerCase();
   if (normalized === "merge selected") return "Land selected";
-  return normalized.includes("merge") ? "Land task" : label;
+  if (normalized === "cleanup") return "Clean run record";
+  if (normalized === "remove") return "Remove task";
+  return normalized.includes("merge") ? "Land task" : capitalize(label);
 }
 
 function formatReviewText(message: string): string {
@@ -1879,6 +2034,14 @@ function shortText(value: string, maxLength: number): string {
   const text = value.replace(/\s+/g, " ").trim();
   if (text.length <= maxLength) return text;
   return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function compactLongText(value: string, maxLength: number): {text: string; truncated: boolean} {
+  if (value.length <= maxLength) return {text: value, truncated: false};
+  return {
+    text: `[showing latest ${maxLength.toLocaleString()} characters]\n\n${value.slice(-maxLength)}`,
+    truncated: true,
+  };
 }
 
 function capitalize(value: string): string {

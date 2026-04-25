@@ -1081,7 +1081,14 @@ def _review_checks(
             )
         )
     else:
-        checks.append(_review_check("evidence", "Evidence", "warn", "No readable artifacts are attached."))
+        checks.append(
+            _review_check(
+                "evidence",
+                "Evidence",
+                "warn",
+                "No readable artifacts are attached; use stories and changed files as proof before landing.",
+            )
+        )
 
     if readiness["state"] == "ready":
         checks.append(_review_check("landing", "Landing action", "pass", f"Safe to land into {target}."))

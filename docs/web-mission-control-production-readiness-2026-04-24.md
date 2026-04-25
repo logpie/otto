@@ -21,6 +21,10 @@ Make the web Mission Control portal usable as the default local single-user task
   - release manager reviewing/landing/blocked states
   - support/operator debugging multi-state and command backlog states
 - Ran multi-round code-health audits and fixed important findings before final verification.
+- Added a follow-up usability/accessibility pass after the initial commit:
+  - three additional read-only user-simulation agents
+  - three final browser E2E rounds at desktop, laptop, and mobile widths
+  - modal focus/background isolation checks in the E2E harness
 
 ## Critical Fixes
 
@@ -38,9 +42,17 @@ Make the web Mission Control portal usable as the default local single-user task
 - Review Packet wording for queued work now says `Waiting to start` instead of `Run finished`.
 - Landed cards say `no unlanded diff`, not `no diff yet`.
 - Raw git errors are translated in primary UI copy.
-- Modal dialogs now have dialog roles, labels, and Escape handling.
+- Modal dialogs now have dialog roles, labels, Escape handling, focus trapping/restoration, and background content hidden from the accessibility tree while open.
+- Diagnostics now shows the selected Review Packet/detail rail, so operator recovery does not require switching views.
+- At laptop widths, Diagnostics prioritizes the selected Review Packet before dense runtime tables.
+- Task cards wrap important titles/reasons, reduce low-value truncation, and use clearer queued/running wording.
+- Long logs and artifact content are compacted with a scannable header instead of filling the whole detail rail.
+- Watcher controls now include visible help text instead of relying only on disabled-button titles.
+- Ready-work CTAs distinguish `Land all ready` from `Land selected`.
+- Evidence wording no longer shows a confusing `0/N` metric for missing optional artifacts.
 - E2E artifacts default to `/tmp`, and the browser lock records owner/PID and cleans stale locks.
 - E2E runs force `PYTHONPATH` to this worktree to avoid false passes against installed Otto code.
+- E2E screenshots now include accessibility snapshots beside PNGs.
 
 ## E2E Matrix
 
@@ -65,6 +77,31 @@ PASS multi-state
 PASS command-backlog
 ```
 
+Follow-up browser rounds after usability/accessibility fixes:
+
+```text
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario all --artifacts /tmp/otto-web-e2e-final-a11y-assert-desktop --viewport 1440x1000
+PASS fresh-queue
+PASS ready-land
+PASS dirty-blocked
+PASS multi-state
+PASS command-backlog
+
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario all --artifacts /tmp/otto-web-e2e-final-a11y-assert-laptop --viewport 1024x768
+PASS fresh-queue
+PASS ready-land
+PASS dirty-blocked
+PASS multi-state
+PASS command-backlog
+
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario all --artifacts /tmp/otto-web-e2e-final-a11y-assert-mobile --viewport 390x844
+PASS fresh-queue
+PASS ready-land
+PASS dirty-blocked
+PASS multi-state
+PASS command-backlog
+```
+
 ## Verification
 
 ```text
@@ -75,21 +112,20 @@ npm run web:build
 PASS
 
 uv run pytest tests/test_web_mission_control.py tests/test_mission_control_model.py -q
-55 passed in 11.67s
+55 passed in 11.43s
 
 uv run pytest -q --maxfail=10
-951 passed, 18 deselected in 112.23s
+951 passed, 18 deselected in 112.61s
 ```
 
 Static bundle check before commit:
 
-- `otto/web/static/index.html` references `index-CWbcW1V1.js` and `index-BhnA45UB.css`.
+- `otto/web/static/index.html` references the current built JS/CSS assets.
 - These assets must be staged with the static HTML and old hashed assets removed.
 
 ## Remaining Limits
 
 - This is production-ready for local single-user use, not hosted multi-user deployment.
 - Command backlog is inspectable and recoverable, but there is not yet a UI action to discard a pending command.
-- Diagnostics is clearer than the MVP, but still dense for very large projects; future work should add expandable sections and better audit packet summaries.
-- Modal focus trapping/restoration is still partial; roles, labels, and Escape handling are present.
+- Diagnostics is clearer than the MVP, but very large projects may still need expandable sections and better audit packet summaries.
 - No 24x7 soak/chaos run was completed in this pass.
