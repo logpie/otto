@@ -28,6 +28,7 @@ from typing import Callable
 from otto import paths
 from otto.merge.state import BranchOutcome, MergeState, write_state as write_merge_state
 from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
+from otto.runs.registry import make_run_record, write_record
 
 
 BROWSER_LOCK_DIR = Path(tempfile.gettempdir()) / "otto-agent-browser.lock"
@@ -61,7 +62,16 @@ def main() -> int:
     parser.add_argument("--otto-root", type=Path, default=Path.cwd(), help="Otto source tree to test.")
     parser.add_argument(
         "--scenario",
-        choices=["all", "project-launcher", "fresh-queue", "ready-land", "dirty-blocked", "multi-state", "command-backlog"],
+        choices=[
+            "all",
+            "project-launcher",
+            "fresh-queue",
+            "ready-land",
+            "dirty-blocked",
+            "multi-state",
+            "command-backlog",
+            "long-log-layout",
+        ],
         default="all",
     )
     parser.add_argument("--artifacts", type=Path, default=None, help="Directory for logs and screenshots.")
@@ -126,6 +136,7 @@ def scenarios() -> list[Scenario]:
         Scenario("dirty-blocked", "show a clean recovery path when local changes block landing", scenario_dirty_blocked),
         Scenario("multi-state", "audit queued, failed, ready, and landed work in one board", scenario_multi_state),
         Scenario("command-backlog", "recover pending command backlog when the watcher is stopped", scenario_command_backlog),
+        Scenario("long-log-layout", "keep large logs in a bounded full-width inspector", scenario_long_log_layout),
     ]
 
 
@@ -322,6 +333,20 @@ def scenario_command_backlog(ctx: ScenarioContext) -> None:
     screenshot(ctx, "command-backlog.png")
 
 
+def scenario_long_log_layout(ctx: ScenarioContext) -> None:
+    repo = init_repo(ctx.run_root / "long-log")
+    seed_long_log_run(repo)
+    start_server(ctx, repo)
+    open_app(ctx)
+
+    wait_text("Long log fixture")
+    wait_text("Run logs")
+    assert_long_log_layout()
+    screenshot(ctx, "long-log-layout.png")
+    scroll_to_run_inspector()
+    screenshot(ctx, "long-log-inspector.png")
+
+
 def init_repo(repo: Path) -> Path:
     repo.mkdir(parents=True, exist_ok=True)
     git(repo, "init", "-q", "-b", "main")
@@ -441,6 +466,33 @@ def seed_landed_task(repo: Path, *, task_id: str, filename: str) -> None:
             outcomes=[BranchOutcome(branch=f"build/{task_id}", status="merged", merge_commit=merge_commit)],
         ),
     )
+
+
+def seed_long_log_run(repo: Path) -> None:
+    run_id = "run-long-log"
+    log_path = paths.build_dir(repo, run_id) / "narrative.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"{index:04d} [build] Long log fixture output line with enough content to exercise horizontal and vertical scanning."
+        for index in range(900)
+    ]
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    record = make_run_record(
+        project_dir=repo,
+        run_id=run_id,
+        domain="atomic",
+        run_type="build",
+        command="build long-log-fixture",
+        display_name="Long log fixture",
+        status="running",
+        cwd=repo,
+        git={"branch": "build/long-log-fixture"},
+        intent={"summary": "Exercise Mission Control with a large streaming log."},
+        artifacts={"primary_log_path": str(log_path)},
+        adapter_key="atomic.build",
+        last_event="streaming long log fixture output",
+    )
+    write_record(repo, record)
 
 
 def merge_queue_state(repo: Path, task_id: str, task_state: dict[str, object]) -> None:
@@ -692,6 +744,69 @@ def assert_modal_focus() -> None:
     )
     if not result.endswith("true"):
         raise AssertionError(f"modal focus/background isolation failed: {result}")
+
+
+def assert_long_log_layout() -> None:
+    raw = browser_eval(
+        """JSON.stringify((() => {
+          const inspector = document.querySelector('[data-testid="run-inspector"]');
+          const detail = document.querySelector('[data-testid="run-detail-panel"]');
+          const log = document.querySelector('[data-testid="run-log-pane"]');
+          const detailLog = detail?.querySelector('[data-testid="run-log-pane"]');
+          const inspectorBox = inspector?.getBoundingClientRect();
+          const detailBox = detail?.getBoundingClientRect();
+          return {
+            inspectorExists: Boolean(inspector),
+            detailExists: Boolean(detail),
+            detailHasLog: Boolean(detailLog),
+            inspectorWidth: inspectorBox ? Math.round(inspectorBox.width) : 0,
+            inspectorHeight: inspectorBox ? Math.round(inspectorBox.height) : 0,
+            inspectorTop: inspectorBox ? Math.round(inspectorBox.top) : 0,
+            inspectorBottom: inspectorBox ? Math.round(inspectorBox.bottom) : 0,
+            detailWidth: detailBox ? Math.round(detailBox.width) : 0,
+            logClientHeight: log ? Math.round(log.clientHeight) : 0,
+            logScrollHeight: log ? Math.round(log.scrollHeight) : 0,
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+            bodyScrollWidth: document.documentElement.scrollWidth,
+            visibleLogTail: log?.textContent?.slice(-120) || ""
+          };
+        })())"""
+    )
+    metrics = json.loads(raw)
+    if isinstance(metrics, str):
+        metrics = json.loads(metrics)
+    if not metrics["inspectorExists"] or not metrics["detailExists"]:
+        raise AssertionError(f"missing inspector/detail: {metrics}")
+    if metrics["detailHasLog"]:
+        raise AssertionError(f"log pane is still cramped inside the detail panel: {metrics}")
+    if metrics["viewportWidth"] > 1180 and metrics["inspectorWidth"] <= metrics["detailWidth"]:
+        raise AssertionError(f"inspector should be wider than the detail panel: {metrics}")
+    if metrics["viewportWidth"] <= 1180 and metrics["inspectorWidth"] < metrics["viewportWidth"] - 40:
+        raise AssertionError(f"inspector should use the mobile width: {metrics}")
+    if metrics["inspectorHeight"] < 280 or metrics["inspectorHeight"] > 540:
+        raise AssertionError(f"inspector height should be bounded: {metrics}")
+    if metrics["viewportWidth"] > 980 and metrics["inspectorBottom"] > metrics["viewportHeight"] + 1:
+        raise AssertionError(f"inspector should be visible in the desktop viewport: {metrics}")
+    if metrics["viewportWidth"] > 980 and metrics["inspectorTop"] >= metrics["viewportHeight"] * 0.72:
+        raise AssertionError(f"inspector starts too low to scan: {metrics}")
+    if metrics["logClientHeight"] < 180:
+        raise AssertionError(f"log viewport is too short to scan: {metrics}")
+    if metrics["logScrollHeight"] <= metrics["logClientHeight"]:
+        raise AssertionError(f"long logs should scroll inside the inspector: {metrics}")
+    if metrics["bodyScrollWidth"] > metrics["viewportWidth"] + 1:
+        raise AssertionError(f"page has horizontal overflow: {metrics}")
+    if "0899" not in metrics["visibleLogTail"]:
+        raise AssertionError(f"log tail did not load latest output: {metrics}")
+
+
+def scroll_to_run_inspector() -> None:
+    browser_eval(
+        """(() => {
+          document.querySelector('[data-testid="run-inspector"]')?.scrollIntoView({block: "nearest"});
+          return true;
+        })()"""
+    )
 
 
 def screenshot(ctx: ScenarioContext, name: str) -> None:

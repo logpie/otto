@@ -54,6 +54,7 @@ interface Filters {
 type ViewMode = "tasks" | "diagnostics";
 
 type BoardStage = "attention" | "working" | "ready" | "landed";
+type InspectorMode = "logs" | "artifacts";
 
 interface BoardTask {
   id: string;
@@ -84,6 +85,7 @@ export function App() {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [logText, setLogText] = useState("");
   const [showingArtifacts, setShowingArtifacts] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
   const [selectedArtifactIndex, setSelectedArtifactIndex] = useState<number | null>(null);
   const [artifactContent, setArtifactContent] = useState<ArtifactContentResponse | null>(null);
   const [refreshStatus, setRefreshStatus] = useState("idle");
@@ -112,11 +114,13 @@ export function App() {
   }, []);
 
   const selectRun = useCallback((runId: string) => {
+    setInspectorOpen(true);
     if (runId !== selectedRunIdRef.current) {
       setDetail(null);
       setLogText("");
       setArtifactContent(null);
       setSelectedArtifactIndex(null);
+      setShowingArtifacts(false);
     }
     setSelectedRunId(runId);
   }, []);
@@ -135,7 +139,7 @@ export function App() {
   }, [confirm, confirmPending, showToast]);
 
   const loadLogs = useCallback(async (runId: string, reset = false) => {
-    if (showingArtifacts && !reset) return;
+    if ((showingArtifacts || !inspectorOpen) && !reset) return;
     const offset = reset ? 0 : logOffsetRef.current;
     try {
       const logs = await api<LogsResponse>(`/api/runs/${encodeURIComponent(runId)}/logs?offset=${offset}`);
@@ -149,7 +153,7 @@ export function App() {
       if (detailWasRemoved(error)) return;
       showToast(errorMessage(error), "error");
     }
-  }, [showingArtifacts, showToast]);
+  }, [inspectorOpen, showingArtifacts, showToast]);
 
   const refreshDetail = useCallback(async (runId: string, resetLogs = false) => {
     const params = stateQueryParams(filters).toString();
@@ -177,6 +181,7 @@ export function App() {
         setDetail(null);
         setLogText("");
         setArtifactContent(null);
+        setInspectorOpen(false);
         setLastError(null);
         setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
         return;
@@ -212,8 +217,11 @@ export function App() {
       setDetail(null);
       setLogText("");
       setArtifactContent(null);
+      setInspectorOpen(false);
       return;
     }
+    setInspectorOpen(true);
+    setShowingArtifacts(false);
     setDetail(null);
     logOffsetRef.current = 0;
     setLogText("");
@@ -225,6 +233,7 @@ export function App() {
         setDetail(null);
         setLogText("");
         setArtifactContent(null);
+        setInspectorOpen(false);
         return;
       }
       showToast(errorMessage(error), "error");
@@ -232,10 +241,10 @@ export function App() {
   }, [refreshDetail, selectedRunId, showToast]);
 
   useEffect(() => {
-    if (!selectedRunId || showingArtifacts) return;
+    if (!selectedRunId || showingArtifacts || !inspectorOpen) return;
     const interval = window.setInterval(() => void loadLogs(selectedRunId), 1200);
     return () => window.clearInterval(interval);
-  }, [loadLogs, selectedRunId, showingArtifacts]);
+  }, [inspectorOpen, loadLogs, selectedRunId, showingArtifacts]);
 
   const runActionForRun = useCallback(async (runId: string, action: string, message: string, label?: string) => {
     if (action === "merge" && data?.landing.merge_blocked) {
@@ -320,6 +329,7 @@ export function App() {
     if (!selectedRunId) return;
     setSelectedArtifactIndex(index);
     setShowingArtifacts(true);
+    setInspectorOpen(true);
     setArtifactContent(null);
     try {
       const content = await api<ArtifactContentResponse>(`/api/runs/${encodeURIComponent(selectedRunId)}/artifacts/${index}/content`);
@@ -328,6 +338,19 @@ export function App() {
       showToast(errorMessage(error), "error");
     }
   }, [selectedRunId, showToast]);
+
+  const showLogs = useCallback(() => {
+    setInspectorOpen(true);
+    setShowingArtifacts(false);
+    setArtifactContent(null);
+    const runId = selectedRunIdRef.current;
+    if (runId) void loadLogs(runId, true);
+  }, [loadLogs]);
+
+  const showArtifacts = useCallback(() => {
+    setInspectorOpen(true);
+    setShowingArtifacts(true);
+  }, []);
 
   const project = data?.project;
   const watcher = data?.watcher;
@@ -443,23 +466,27 @@ export function App() {
             <RunDetailPanel
               detail={detail}
               landing={landing}
-              logText={logText}
-              showingArtifacts={showingArtifacts}
-              selectedArtifactIndex={selectedArtifactIndex}
-              artifactContent={artifactContent}
               onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
-              onShowLogs={() => {
-                setShowingArtifacts(false);
-                setArtifactContent(null);
-                if (selectedRunId) void loadLogs(selectedRunId, true);
-              }}
-              onShowArtifacts={() => setShowingArtifacts(true)}
-              onLoadArtifact={(index) => void loadArtifact(index)}
-              onBackToArtifacts={() => {
-                setSelectedArtifactIndex(null);
-                setArtifactContent(null);
-              }}
+              onShowLogs={showLogs}
+              onShowArtifacts={showArtifacts}
             />
+            {inspectorOpen && detail && (
+              <RunInspector
+                detail={detail}
+                mode={showingArtifacts ? "artifacts" : "logs"}
+                logText={logText}
+                selectedArtifactIndex={selectedArtifactIndex}
+                artifactContent={artifactContent}
+                onShowLogs={showLogs}
+                onShowArtifacts={showArtifacts}
+                onLoadArtifact={(index) => void loadArtifact(index)}
+                onBackToArtifacts={() => {
+                  setSelectedArtifactIndex(null);
+                  setArtifactContent(null);
+                }}
+                onClose={() => setInspectorOpen(false)}
+              />
+            )}
           </section>
         ) : (
           <section className="diagnostics-layout" aria-label="Mission Control diagnostics">
@@ -480,23 +507,27 @@ export function App() {
               <RunDetailPanel
                 detail={detail}
                 landing={landing}
-                logText={logText}
-                showingArtifacts={showingArtifacts}
-                selectedArtifactIndex={selectedArtifactIndex}
-                artifactContent={artifactContent}
                 onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
-                onShowLogs={() => {
-                  setShowingArtifacts(false);
-                  setArtifactContent(null);
-                  if (selectedRunId) void loadLogs(selectedRunId, true);
-                }}
-                onShowArtifacts={() => setShowingArtifacts(true)}
-                onLoadArtifact={(index) => void loadArtifact(index)}
-                onBackToArtifacts={() => {
-                  setSelectedArtifactIndex(null);
-                  setArtifactContent(null);
-                }}
+                onShowLogs={showLogs}
+                onShowArtifacts={showArtifacts}
               />
+              {inspectorOpen && detail && (
+                <RunInspector
+                  detail={detail}
+                  mode={showingArtifacts ? "artifacts" : "logs"}
+                  logText={logText}
+                  selectedArtifactIndex={selectedArtifactIndex}
+                  artifactContent={artifactContent}
+                  onShowLogs={showLogs}
+                  onShowArtifacts={showArtifacts}
+                  onLoadArtifact={(index) => void loadArtifact(index)}
+                  onBackToArtifacts={() => {
+                    setSelectedArtifactIndex(null);
+                    setArtifactContent(null);
+                  }}
+                  onClose={() => setInspectorOpen(false)}
+                />
+              )}
             </div>
           </section>
         )}
@@ -1193,62 +1224,89 @@ function EventTimeline({events}: {events: StateResponse["events"] | undefined}) 
   );
 }
 
-function RunDetailPanel({detail, landing, logText, showingArtifacts, selectedArtifactIndex, artifactContent, onRunAction, onShowLogs, onShowArtifacts, onLoadArtifact, onBackToArtifacts}: {
+function RunDetailPanel({detail, landing, onRunAction, onShowLogs, onShowArtifacts}: {
   detail: RunDetail | null;
   landing: LandingState | undefined;
-  logText: string;
-  showingArtifacts: boolean;
-  selectedArtifactIndex: number | null;
-  artifactContent: ArtifactContentResponse | null;
   onRunAction: (action: string, label?: string) => void;
   onShowLogs: () => void;
   onShowArtifacts: () => void;
-  onLoadArtifact: (index: number) => void;
-  onBackToArtifacts: () => void;
 }) {
   return (
-    <aside className="detail" aria-labelledby="detailHeading">
+    <aside className="detail" aria-labelledby="detailHeading" data-testid="run-detail-panel">
       <div className="panel-heading">
         <h2 id="detailHeading">{detail ? "Review Packet" : "Run Detail"}</h2>
         <span className="pill">{detail ? detailStatusLabel(detail) : "-"}</span>
       </div>
       {detail ? (
         <>
-          <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} />
-          <div className="detail-body">
-            <h3>{detail.title || detail.run_id}</h3>
-            <dl>
-              <dt>Run</dt><dd>{detail.run_id}</dd>
-              <dt>Type</dt><dd>{detail.domain} / {detail.run_type}</dd>
-              <dt>Branch</dt><dd>{detail.branch || "-"}</dd>
-              <dt>Worktree</dt><dd>{detail.worktree || detail.cwd || "-"}</dd>
-              <dt>Provider</dt><dd>{providerLine(detail)}</dd>
-              <dt>Artifacts</dt><dd>{detail.artifacts.length}</dd>
-              {detail.overlay && <><dt>Overlay</dt><dd>{detail.overlay.reason}</dd></>}
-              {detail.summary_lines.map((line, index) => <DetailLine key={`${line}-${index}`} line={line} />)}
-            </dl>
+          <div className="detail-scroll">
+            <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} />
+            <div className="detail-body">
+              <h3>{detail.title || detail.run_id}</h3>
+              <dl>
+                <dt>Run</dt><dd>{detail.run_id}</dd>
+                <dt>Type</dt><dd>{detail.domain} / {detail.run_type}</dd>
+                <dt>Branch</dt><dd>{detail.branch || "-"}</dd>
+                <dt>Worktree</dt><dd>{detail.worktree || detail.cwd || "-"}</dd>
+                <dt>Provider</dt><dd>{providerLine(detail)}</dd>
+                <dt>Artifacts</dt><dd>{detail.artifacts.length}</dd>
+                {detail.overlay && <><dt>Overlay</dt><dd>{detail.overlay.reason}</dd></>}
+                {detail.summary_lines.map((line, index) => <DetailLine key={`${line}-${index}`} line={line} />)}
+              </dl>
+            </div>
+            <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
           </div>
-          <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
-          <div className="detail-tabs">
-            <button className={`tab ${!showingArtifacts ? "active" : ""}`} type="button" aria-pressed={!showingArtifacts} onClick={onShowLogs}>Logs</button>
-            <button className={`tab ${showingArtifacts ? "active" : ""}`} type="button" aria-pressed={showingArtifacts} onClick={onShowArtifacts}>Artifacts</button>
+          <div className="detail-inspector-actions" aria-label="Evidence shortcuts">
+            <button type="button" onClick={onShowLogs}>Open logs</button>
+            <button type="button" onClick={onShowArtifacts}>Open artifacts</button>
           </div>
-          {!showingArtifacts ? (
-            <LogPane text={logText} />
-          ) : (
-            <ArtifactPane
-              artifacts={detail.artifacts || []}
-              selectedArtifactIndex={selectedArtifactIndex}
-              artifactContent={artifactContent}
-              onLoadArtifact={onLoadArtifact}
-              onBack={onBackToArtifacts}
-            />
-          )}
         </>
       ) : (
         <div className="detail-body empty">Select a run.</div>
       )}
     </aside>
+  );
+}
+
+function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactContent, onShowLogs, onShowArtifacts, onLoadArtifact, onBackToArtifacts, onClose}: {
+  detail: RunDetail;
+  mode: InspectorMode;
+  logText: string;
+  selectedArtifactIndex: number | null;
+  artifactContent: ArtifactContentResponse | null;
+  onShowLogs: () => void;
+  onShowArtifacts: () => void;
+  onLoadArtifact: (index: number) => void;
+  onBackToArtifacts: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <section className="run-inspector" aria-labelledby="runInspectorHeading" data-testid="run-inspector">
+      <div className="run-inspector-heading">
+        <div>
+          <h2 id="runInspectorHeading">{detail.title || detail.run_id}</h2>
+          <p>{detailStatusLabel(detail)} evidence</p>
+        </div>
+        <div className="detail-tabs" role="tablist" aria-label="Evidence view">
+          <button className={`tab ${mode === "logs" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "logs"} onClick={onShowLogs}>Logs</button>
+          <button className={`tab ${mode === "artifacts" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "artifacts"} onClick={onShowArtifacts}>Artifacts</button>
+        </div>
+        <button type="button" onClick={onClose}>Close</button>
+      </div>
+      <div className="run-inspector-body">
+        {mode === "logs" ? (
+          <LogPane text={logText} />
+        ) : (
+          <ArtifactPane
+            artifacts={detail.artifacts || []}
+            selectedArtifactIndex={selectedArtifactIndex}
+            artifactContent={artifactContent}
+            onLoadArtifact={onLoadArtifact}
+            onBack={onBackToArtifacts}
+          />
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -1261,7 +1319,7 @@ function LogPane({text}: {text: string}) {
         <strong>Run logs</strong>
         <span>{lineCount ? `${lineCount} line${lineCount === 1 ? "" : "s"}` : "waiting for output"}{compact.truncated ? " · showing latest output" : ""}</span>
       </div>
-      <pre className="log-pane" tabIndex={0} aria-label="Run log output">{compact.text}</pre>
+      <pre className="log-pane" tabIndex={0} aria-label="Run log output" data-testid="run-log-pane">{compact.text}</pre>
     </div>
   );
 }

@@ -20,6 +20,22 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+#root {
+  height: 100vh;
+}
+
+@supports (height: 100dvh) {
+  #root {
+    height: 100dvh;
+  }
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -93,7 +109,8 @@ textarea:focus-visible,
 .app-shell {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
-  min-height: 100vh;
+  min-height: 0;
+  height: 100%;
 }
 
 .sidebar {
@@ -167,8 +184,10 @@ textarea:focus-visible,
 
 .workspace {
   min-width: 0;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto 1fr;
+  overflow: hidden;
 }
 
 .launcher-shell {
@@ -381,11 +400,14 @@ textarea {
 }
 
 .mission-layout {
+  height: 100%;
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(360px, 480px);
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 14px;
   padding: 14px;
+  overflow: hidden;
 }
 
 .main-stack {
@@ -698,18 +720,22 @@ textarea {
 }
 
 .diagnostics-layout {
+  height: 100%;
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 14px;
   padding: 14px;
+  overflow: hidden;
 }
 
 .diagnostics-workspace {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(360px, 480px);
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 14px;
+  overflow: hidden;
 }
 
 .diagnostics-grid {
@@ -932,8 +958,13 @@ button.diagnostic-card {
 
 .detail {
   display: grid;
-  grid-template-rows: auto auto minmax(0, auto) auto auto minmax(180px, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
+}
+
+.detail-scroll {
+  min-height: 0;
+  overflow: auto;
 }
 
 .panel-heading {
@@ -1177,6 +1208,15 @@ tbody tr.selected {
   padding: 0 12px 10px;
 }
 
+.detail-inspector-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-alt);
+}
+
 .review-packet {
   display: grid;
   gap: 8px;
@@ -1399,7 +1439,9 @@ tbody tr.selected {
 
 .detail-tabs {
   display: flex;
-  border-bottom: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
 }
 
 .tab {
@@ -1409,10 +1451,64 @@ tbody tr.selected {
   background: var(--surface-alt);
 }
 
+.tab:last-child {
+  border-right: 0;
+}
+
 .tab.active {
   background: var(--surface);
   color: var(--accent-strong);
   font-weight: 600;
+}
+
+.run-inspector {
+  grid-column: 1 / -1;
+  min-height: 280px;
+  height: clamp(280px, 34vh, 440px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.run-inspector-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfd;
+}
+
+.run-inspector-heading h2,
+.run-inspector-heading p {
+  margin: 0;
+}
+
+.run-inspector-heading h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-inspector-heading p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.run-inspector-body {
+  min-height: 0;
+  display: grid;
+  overflow: hidden;
+}
+
+.run-inspector .log-viewer,
+.run-inspector .artifact-pane {
+  min-height: 0;
 }
 
 .log-viewer {
@@ -1478,6 +1574,10 @@ tbody tr.selected {
   margin: 12px 0 0;
   max-height: 52vh;
   overflow: auto;
+}
+
+.run-inspector .artifact-pane pre {
+  max-height: none;
 }
 
 .muted {
@@ -1621,8 +1721,18 @@ tbody tr.selected {
 }
 
 @media (max-width: 980px) {
+  #root {
+    height: auto;
+  }
+
   .app-shell {
     grid-template-columns: 1fr;
+    min-height: 100vh;
+    height: auto;
+  }
+
+  .workspace {
+    overflow: visible;
   }
 
   .launcher-shell {
@@ -1700,6 +1810,10 @@ tbody tr.selected {
 
   .toolbar {
     align-items: stretch;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 10px 18px;
   }
 
   .view-tabs {
@@ -1713,6 +1827,25 @@ tbody tr.selected {
   .search-label input,
   .filters label {
     width: 100%;
+  }
+
+  .filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: end;
+    gap: 8px;
+  }
+
+  .search-label {
+    grid-column: 1 / -1;
+  }
+
+  .check-label {
+    min-height: 34px;
+  }
+
+  .toolbar-actions {
+    justify-content: space-between;
   }
 
   .field-grid {
@@ -1733,6 +1866,34 @@ tbody tr.selected {
 
   .task-card-meta {
     display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .run-inspector {
+    height: min(52vh, 440px);
+    min-height: 260px;
+  }
+
+  .run-inspector-heading {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .run-inspector-heading h2 {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .run-inspector-heading .detail-tabs {
+    width: 100%;
+  }
+
+  .log-toolbar {
+    display: grid;
+    align-items: start;
+  }
+
+  .detail-inspector-actions {
     grid-template-columns: 1fr;
   }
 }
