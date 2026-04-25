@@ -135,9 +135,12 @@ def scenario_fresh_queue(ctx: ScenarioContext) -> None:
 
     browser("find", "testid", "new-job-button", "click")
     wait_text("New queue job")
+    assert_page_contains(str(repo))
+    wait_text("I understand this job will run in this project")
     assert_modal_focus()
     browser("find", "label", "Intent / focus", "fill", "Build an expense approval portal for a small company.")
     browser("find", "label", "Task id", "fill", "expense-portal")
+    browser("find", "testid", "target-project-confirm", "click")
     browser("find", "role", "button", "click", "--name", "Queue job")
     wait_text("queued expense-portal")
     wait_text("Task Board")
@@ -635,6 +638,12 @@ def assert_page_lacks(text: str) -> None:
     snapshot = browser("snapshot", timeout_s=10).stdout
     if text in snapshot:
         raise AssertionError(f"unexpected page text {text!r}\n{snapshot}")
+
+
+def assert_page_contains(text: str) -> None:
+    snapshot = browser("snapshot", timeout_s=10).stdout
+    if text not in snapshot:
+        raise AssertionError(f"expected page text {text!r}\n{snapshot}")
 
 
 def assert_modal_focus() -> None:

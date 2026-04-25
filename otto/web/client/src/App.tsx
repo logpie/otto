@@ -426,6 +426,7 @@ export function App() {
 
       {jobOpen && (
         <JobDialog
+          project={project}
           onClose={() => setJobOpen(false)}
           onQueued={async (message) => {
             setJobOpen(false);
@@ -1231,7 +1232,12 @@ function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoad
   );
 }
 
-function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued: (message?: string) => Promise<void>; onError: (message: string) => void}) {
+function JobDialog({project, onClose, onQueued, onError}: {
+  project: StateResponse["project"] | undefined;
+  onClose: () => void;
+  onQueued: (message?: string) => Promise<void>;
+  onError: (message: string) => void;
+}) {
   const [command, setCommand] = useState<JobCommand>("build");
   const [subcommand, setSubcommand] = useState<"bugs" | "feature" | "target">("bugs");
   const [intent, setIntent] = useState("");
@@ -1241,14 +1247,23 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [fast, setFast] = useState(true);
+  const [targetConfirmed, setTargetConfirmed] = useState(false);
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const dialogRef = useDialogFocus<HTMLFormElement>(onClose, submitting);
+
+  useEffect(() => {
+    setTargetConfirmed(false);
+  }, [project?.path]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (command === "build" && !intent.trim()) {
       setStatus("Build intent is required.");
+      return;
+    }
+    if (!targetConfirmed) {
+      setStatus("Confirm the target project before queueing.");
       return;
     }
     setStatus("queueing");
@@ -1289,6 +1304,24 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
             <option value="certify">Certify</option>
           </select>
         </label>
+        <div className={`target-guard ${project?.dirty ? "target-dirty" : ""}`} aria-label="Target project">
+          <strong>Target project</strong>
+          <dl>
+            <dt>Path</dt><dd title={project?.path || ""}>{project?.path || "loading"}</dd>
+            <dt>Branch</dt><dd>{project?.branch || "-"}</dd>
+            <dt>State</dt><dd>{project ? project.dirty ? "dirty" : "clean" : "unknown"}</dd>
+          </dl>
+          <p>This job can create branches/worktrees and modify files under this folder.</p>
+          <label className="check-label target-confirm">
+            <input
+              checked={targetConfirmed}
+              data-testid="target-project-confirm"
+              type="checkbox"
+              onChange={(event) => setTargetConfirmed(event.target.checked)}
+            />
+            I understand this job will run in this project
+          </label>
+        </div>
         {command === "improve" && (
           <label>Improve mode
             <select value={subcommand} onChange={(event) => setSubcommand(event.target.value as ImproveSubcommand)}>
@@ -1336,7 +1369,7 @@ function JobDialog({onClose, onQueued, onError}: {onClose: () => void; onQueued:
         </label>
         <footer>
           <span id="jobDialogStatus" className="muted" aria-live="polite">{status}</span>
-          <button className="primary" type="submit" disabled={submitting}>{submitting ? "Queueing" : "Queue job"}</button>
+          <button className="primary" type="submit" disabled={submitting || !targetConfirmed}>{submitting ? "Queueing" : "Queue job"}</button>
         </footer>
       </form>
     </div>

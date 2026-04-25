@@ -1424,6 +1424,50 @@ tbody tr.selected {
   gap: 10px;
 }
 
+.target-guard {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1e3a8a;
+}
+
+.target-dirty {
+  border-color: #f4d58d;
+  background: #fff8e1;
+  color: #713f12;
+}
+
+.target-guard strong,
+.target-guard p {
+  margin: 0;
+}
+
+.target-guard dl {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 3px 10px;
+  margin: 0;
+}
+
+.target-guard dt {
+  color: inherit;
+  opacity: 0.74;
+}
+
+.target-guard dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.target-confirm {
+  color: inherit;
+  font-size: 13px;
+}
+
 @media (max-width: 1180px) {
   .mission-layout,
   .diagnostics-workspace {
