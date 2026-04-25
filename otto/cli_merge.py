@@ -7,6 +7,7 @@ Single command with mode flags:
     otto merge --no-certify           # skip post-merge verification
     otto merge --full-verify          # test every merged story
     otto merge --fast                 # pure git, NO LLM, bail on first conflict
+    otto merge --fast --transactional # stage clean merges before touching target
     otto merge --cleanup-on-success   # remove worktrees after merge
 """
 
@@ -75,6 +76,8 @@ def register_merge_command(main: click.Group) -> None:
                   help="Verify the full merged story union; don't allow per-story skips")
     @click.option("--fast", is_flag=True,
                   help="Pure git merge; bail on first conflict (no LLM)")
+    @click.option("--transactional", is_flag=True,
+                  help="With --fast, stage all merges first and only fast-forward target after success")
     @click.option("--cleanup-on-success", is_flag=True,
                   help="Remove worktrees of merged tasks on successful merge")
     @click.option("--allow-any-branch", is_flag=True,
@@ -86,6 +89,7 @@ def register_merge_command(main: click.Group) -> None:
         no_certify: bool,
         full_verify: bool,
         fast: bool,
+        transactional: bool,
         cleanup_on_success: bool,
         allow_any_branch: bool,
     ) -> None:
@@ -138,6 +142,7 @@ def register_merge_command(main: click.Group) -> None:
             no_certify=no_certify,
             full_verify=full_verify,
             fast=fast,
+            transactional=transactional,
             cleanup_on_success=cleanup_on_success,
             allow_any_branch=allow_any_branch,
         )
@@ -154,6 +159,8 @@ def register_merge_command(main: click.Group) -> None:
         console.print(f"  [bold]Merging[/bold] into [info]{target_branch}[/info]")
         if fast:
             console.print("  [dim]Mode:[/dim] [yellow]--fast[/yellow] (pure git, no LLM)")
+        if transactional:
+            console.print("  [dim]Mode:[/dim] [yellow]--transactional[/yellow] (stage before target update)")
         if no_certify:
             console.print("  [dim]Mode:[/dim] [yellow]--no-certify[/yellow]")
         if full_verify:

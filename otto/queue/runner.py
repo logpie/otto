@@ -43,7 +43,9 @@ from otto import paths
 from otto.queue.artifacts import preserve_queue_session_artifacts
 from otto.queue.runtime import (
     IN_FLIGHT_STATUSES,
+    INITIALIZING_STATUS,
     INTERRUPTED_STATUS,
+    RUNNING_STATUS,
     checkpoint_path_for_task,
 )
 from otto.queue import schema as queue_schema
@@ -508,6 +510,7 @@ class Runner:
         # Reap before command application so a cancel/remove arriving just
         # after child exit cannot overwrite an already-successful manifest.
         self._reap_children(state)
+        self._promote_ready_children(tasks, state)
 
         # Apply commands
         cycle_ids = {tid for cycle in cycles for tid in cycle}
@@ -576,6 +579,9 @@ class Runner:
                 ts["failure_reason"] = None
                 logger.info("reconciling: task %s was starting with no child; re-queued", tid)
                 continue
+            task = tasks_by_id.get(tid)
+            if status == INITIALIZING_STATUS and task is not None and self._promote_ready_task(task, ts):
+                status = ts.get("status")
             if status not in IN_FLIGHT_STATUSES:
                 continue
             child = ts.get("child") or {}
@@ -596,11 +602,10 @@ class Runner:
                     ts.get("status"),
                 )
                 continue
-            task = tasks_by_id.get(tid)
             if still_alive:
                 if policy == "resume":
                     logger.info("reconciling: task %s child still alive, re-attaching", tid)
-                    # Leave status=running; main loop will reap on exit
+                    # Leave status unchanged; main loop will promote/reap later.
                     continue
                 if policy == "fail":
                     logger.info("reconciling: policy=fail, killing %s", tid)
@@ -694,11 +699,11 @@ class Runner:
         ts = state["tasks"].setdefault(tid, {"status": "queued"})
         status = ts.get("status", "queued")
         if kind == "cancel":
-            if status not in ("queued", "running", "terminating"):
+            if status not in ("queued", INITIALIZING_STATUS, RUNNING_STATUS, "terminating"):
                 logger.warning("cancel ignored for %s in status=%s", tid, status)
                 return
-            if status == "running":
-                if self._finalize_running_child_if_finished(tid, ts):
+            if status in {INITIALIZING_STATUS, RUNNING_STATUS}:
+                if self._finalize_child_if_finished(tid, ts):
                     logger.info("cancel ignored for %s after child finalized as %s", tid, ts.get("status"))
                     return
                 child = ts.get("child") or {}
@@ -724,8 +729,8 @@ class Runner:
             if status in TERMINAL_STATUSES:
                 logger.warning("remove ignored for %s in terminal status=%s; use cleanup", tid, status)
                 return
-            if status == "running":
-                if self._finalize_running_child_if_finished(tid, ts):
+            if status in {INITIALIZING_STATUS, RUNNING_STATUS}:
+                if self._finalize_child_if_finished(tid, ts):
                     logger.info("remove ignored for %s after child finalized as %s", tid, ts.get("status"))
                     return
                 self._snapshot_task_definition(tid, ts)
@@ -813,7 +818,7 @@ class Runner:
             return
         now = datetime.now(tz=timezone.utc)
         for tid, ts in in_flight:
-            if ts.get("status") != "running":
+            if ts.get("status") not in {INITIALIZING_STATUS, RUNNING_STATUS}:
                 continue
             started = ts.get("started_at")
             if not isinstance(started, str):
@@ -825,7 +830,7 @@ class Runner:
             elapsed = (now - t0).total_seconds()
             if elapsed < timeout:
                 continue
-            if self._finalize_running_child_if_finished(tid, ts):
+            if self._finalize_child_if_finished(tid, ts):
                 continue
             child = ts.get("child") or {}
             logger.warning(
@@ -839,14 +844,14 @@ class Runner:
                 reason=f"timed out after {elapsed:.0f}s (limit {timeout:.0f}s)",
             )
 
-    def _finalize_running_child_if_finished(self, task_id: str, ts: dict[str, Any]) -> bool:
-        """Finalize a just-exited running child before cancel/remove/timeout wins.
+    def _finalize_child_if_finished(self, task_id: str, ts: dict[str, Any]) -> bool:
+        """Finalize a just-exited child before cancel/remove/timeout wins.
 
         `_reap_children` already runs before commands and timeouts. This second
         non-blocking check closes the small race where the child exits after the
         first reap pass returned 0 but before a destructive transition is applied.
         """
-        if ts.get("status") != "running":
+        if ts.get("status") not in {INITIALIZING_STATUS, RUNNING_STATUS}:
             return False
         child = ts.get("child") or {}
         pid = child.get("pid")
@@ -1043,6 +1048,11 @@ class Runner:
         if ts_existing.get("resumed_from_checkpoint"):
             argv.append("--resume")
             ts_existing.pop("resumed_from_checkpoint", None)
+        ready_path = paths.queue_ready_path(self.project_dir, task.id)
+        try:
+            ready_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeError(f"could not clear stale readiness marker for {task.id}: {exc}") from exc
 
         state["tasks"][task.id] = {
             **ts_existing,
@@ -1094,7 +1104,7 @@ class Runner:
             start_time_ns = int(time.time() * 1_000_000_000)
 
         state["tasks"][task.id] = {
-            "status": "running",
+            "status": INITIALIZING_STATUS,
             "started_at": now_iso(),
             "finished_at": None,
             "attempt_run_id": attempt_run_id,
@@ -1107,6 +1117,8 @@ class Runner:
                 "cwd": str(wt_path),
             },
             "manifest_path": None,
+            "ready_path": str(ready_path),
+            "ready_at": None,
             "cost_usd": None,
             "duration_s": None,
             "failure_reason": None,
@@ -1117,12 +1129,79 @@ class Runner:
             self._terminate_spawned_child_after_persist_failure(task.id, state)
             raise
         try:
-            self._write_queue_run_record(task, state["tasks"][task.id], status="running")
+            self._write_queue_run_record(task, state["tasks"][task.id], status=INITIALIZING_STATUS)
         except Exception:
             logger.exception("failed to update queue run record after spawn; continuing")
         logger.info("spawned %s: pid=%d, branch=%s", task.id, proc.pid, branch)
 
+    def _read_queue_ready(self, task_id: str, ts: dict[str, Any]) -> dict[str, Any] | None:
+        ready_path = paths.queue_ready_path(self.project_dir, task_id)
+        if not ready_path.exists():
+            return None
+        try:
+            payload = json.loads(ready_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            logger.warning("ignoring unreadable queue readiness marker for %s: %s", task_id, exc)
+            return None
+        if not isinstance(payload, dict):
+            logger.warning("ignoring invalid queue readiness marker for %s", task_id)
+            return None
+        expected_run_id = str(ts.get("attempt_run_id") or "").strip()
+        ready_run_id = str(payload.get("run_id") or "").strip()
+        if expected_run_id and ready_run_id != expected_run_id:
+            logger.warning(
+                "ignoring stale queue readiness marker for %s: expected run_id=%s got %s",
+                task_id,
+                expected_run_id,
+                ready_run_id or "<missing>",
+            )
+            return None
+        payload["_ready_path"] = str(ready_path)
+        return payload
+
+    def _promote_ready_task(self, task: QueueTask, ts: dict[str, Any]) -> bool:
+        if ts.get("status") != INITIALIZING_STATUS:
+            return False
+        payload = self._read_queue_ready(task.id, ts)
+        if payload is None:
+            return False
+        run_id = str(payload.get("run_id") or "").strip()
+        if run_id:
+            ts["child_run_id"] = run_id
+        ts["status"] = RUNNING_STATUS
+        ts["ready_at"] = payload.get("ready_at") or now_iso()
+        ts["ready_path"] = payload.get("_ready_path")
+        for src_key, dst_key in (
+            ("session_dir", "session_dir"),
+            ("checkpoint_path", "checkpoint_path"),
+            ("phase", "ready_phase"),
+        ):
+            value = payload.get(src_key)
+            if value:
+                ts[dst_key] = value
+        ts["failure_reason"] = None
+        return True
+
+    def _promote_ready_children(self, tasks: list[QueueTask], state: dict[str, Any]) -> bool:
+        changed = False
+        tasks_by_id = {task.id: task for task in tasks}
+        for task_id, ts in state.get("tasks", {}).items():
+            task = tasks_by_id.get(task_id)
+            if task is None:
+                continue
+            before = _json_fingerprint(ts)
+            self._promote_ready_task(task, ts)
+            changed = changed or _json_fingerprint(ts) != before
+        return changed
+
     def _recover_child_run_id(self, task: QueueTask, ts: dict[str, Any]) -> str | None:
+        ready = self._read_queue_ready(task.id, ts)
+        if ready is not None:
+            run_id = str(ready.get("run_id") or "").strip()
+            if run_id:
+                ts["ready_path"] = ready.get("_ready_path")
+                ts["ready_at"] = ready.get("ready_at") or ts.get("ready_at")
+                return run_id
         manifest_path = queue_index_path_for(self.project_dir, task.id)
         if manifest_path is not None and manifest_path.exists():
             try:
@@ -1439,7 +1518,7 @@ class Runner:
             kill_child_safely(child, signal.SIGTERM)
             final_status = ts.get("terminal_status", "cancelled")
             reason = ts.get("failure_reason")
-            if ts.get("status") == "running":
+            if ts.get("status") in {INITIALIZING_STATUS, RUNNING_STATUS}:
                 task = tasks_by_id.get(tid)
                 final_status = INTERRUPTED_STATUS
                 if task is not None and checkpoint_path_for_task(self.project_dir, task) is not None:

@@ -2254,6 +2254,15 @@ async def run_agentic_certifier(
     report_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = report_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    from otto.queue.runtime import mark_queue_child_ready
+
+    mark_queue_child_ready(
+        project_dir,
+        run_id=session_id,
+        session_dir=paths.session_dir(project_dir, session_id),
+        phase="certify",
+        checkpoint_path=None,
+    )
     publisher = None
     if (
         write_history

@@ -1192,6 +1192,7 @@ tbody tr.selected {
 }
 
 .status-running,
+.status-initializing,
 .status-starting {
   color: var(--blue);
 }

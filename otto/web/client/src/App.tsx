@@ -2538,6 +2538,7 @@ function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean): string
   if (item.landing_state === "ready") return `${changeLine(item)} changed; ${proofLine(item)} recorded.`;
   if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";
   if (item.queue_status === "queued") return "Waiting for the watcher.";
+  if (item.queue_status === "initializing") return "Child process started; waiting for Otto session readiness.";
   if (["starting", "running", "terminating"].includes(item.queue_status)) return "Task is still in flight.";
   if (item.diff_error) return formatTechnicalIssue(item.diff_error);
   if (!item.branch) return "No branch is recorded.";
@@ -2586,7 +2587,10 @@ function refreshIntervalMs(data: StateResponse | null): number {
 
 function activeCount(watcher?: WatcherInfo): number {
   const counts = watcher?.counts || {};
-  return Number(counts.running || 0) + Number(counts.starting || 0) + Number(counts.terminating || 0);
+  return Number(counts.running || 0)
+    + Number(counts.initializing || 0)
+    + Number(counts.starting || 0)
+    + Number(counts.terminating || 0);
 }
 
 function canStartWatcher(data?: StateResponse | null): boolean {
@@ -2819,7 +2823,7 @@ function landingBulkConfirmation(landing?: LandingState): string {
 }
 
 function isWaitingLandingItem(item: LandingItem): boolean {
-  return item.landing_state === "blocked" && ["queued", "starting", "running", "terminating"].includes(item.queue_status);
+  return item.landing_state === "blocked" && ["queued", "starting", "initializing", "running", "terminating"].includes(item.queue_status);
 }
 
 function providerLine(detail: RunDetail): string {

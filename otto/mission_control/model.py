@@ -36,6 +36,7 @@ _WARNED_UNKNOWN_HISTORY_OUTCOMES: set[str] = set()
 _STATUS_PRIORITY = {
     "running": 0,
     "starting": 0,
+    "initializing": 0,
     "terminating": 0,
     "queued": 1,
     "paused": 2,

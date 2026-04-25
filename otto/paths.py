@@ -218,6 +218,15 @@ def queue_manifest_path(project_dir: Path, task_id: str) -> Path:
     return queue_dir(project_dir) / task_id / "manifest.json"
 
 
+def queue_ready_path(project_dir: Path, task_id: str) -> Path:
+    if not QUEUE_TASK_ID_RE.fullmatch(str(task_id)):
+        raise ValueError(
+            f"Invalid queue task id {task_id!r}. Expected a lowercase slug "
+            "like 'add-csv-export' or 'add-csv-export-2'."
+        )
+    return queue_dir(project_dir) / task_id / "ready.json"
+
+
 def legacy_builds_dir(project_dir: Path) -> Path:
     return logs_dir(project_dir) / LEGACY_BUILDS_DIR_NAME
 

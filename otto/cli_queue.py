@@ -285,7 +285,10 @@ def _print_added(task_id: str, project_dir: Path) -> None:
     except Exception:
         state = {}
     if watcher_alive(state):
-        running = sum(1 for ts in state.get("tasks", {}).values() if ts.get("status") == "running")
+        running = sum(
+            1 for ts in state.get("tasks", {}).values()
+            if ts.get("status") in {"initializing", "running"}
+        )
         queued_before = sum(
             1 for tid, ts in state.get("tasks", {}).items()
             if ts.get("status") == "queued" and tid != task_id

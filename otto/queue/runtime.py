@@ -8,17 +8,23 @@ watcher, CLI, and read-only dashboard agree on what "active" and
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 from otto import paths
+from otto.observability import write_json_atomic
 from otto.queue.schema import QueueTask
 
 INTERRUPTED_STATUS = "interrupted"
-IN_FLIGHT_STATUSES = {"starting", "running", "terminating"}
+INITIALIZING_STATUS = "initializing"
+RUNNING_STATUS = "running"
+QUEUE_READY_SCHEMA_VERSION = 1
+IN_FLIGHT_STATUSES = {"starting", INITIALIZING_STATUS, RUNNING_STATUS, "terminating"}
 
 _QUEUE_RUNNER_CHILD = False
+logger = logging.getLogger("otto.queue.runtime")
 
 
 def set_queue_runner_child(enabled: bool) -> None:
@@ -35,6 +41,62 @@ def set_queue_runner_child(enabled: bool) -> None:
 def is_queue_runner_child() -> bool:
     """Return True when the current Otto process was launched by the queue."""
     return _QUEUE_RUNNER_CHILD or os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1"
+
+
+def _queue_anchor_dir(project_dir: Path) -> Path:
+    raw = str(os.environ.get("OTTO_QUEUE_PROJECT_DIR") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path(project_dir)
+
+
+def mark_queue_child_ready(
+    project_dir: Path,
+    *,
+    run_id: str,
+    session_dir: Path,
+    phase: str,
+    checkpoint_path: Path | None = None,
+) -> Path | None:
+    """Publish that a queue child has initialized its Otto session.
+
+    Queue children run inside per-task worktrees, while the watcher owns queue
+    state in the main project. ``OTTO_QUEUE_PROJECT_DIR`` anchors the marker so
+    the two processes agree on the same file.
+    """
+    if not is_queue_runner_child():
+        return None
+    task_id = str(os.environ.get("OTTO_QUEUE_TASK_ID") or "").strip()
+    if not task_id:
+        return None
+    run_id = str(run_id or os.environ.get("OTTO_RUN_ID") or "").strip()
+    if not run_id:
+        return None
+    anchor = _queue_anchor_dir(project_dir)
+    try:
+        ready_path = paths.queue_ready_path(anchor, task_id)
+    except ValueError as exc:
+        logger.warning("could not publish queue child readiness: %s", exc)
+        return None
+    payload = {
+        "schema_version": QUEUE_READY_SCHEMA_VERSION,
+        "task_id": task_id,
+        "run_id": run_id,
+        "phase": str(phase or ""),
+        "ready_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "pid": os.getpid(),
+        "cwd": str(Path(project_dir).resolve(strict=False)),
+        "session_dir": str(Path(session_dir).resolve(strict=False)),
+        "checkpoint_path": (
+            str(Path(checkpoint_path).resolve(strict=False)) if checkpoint_path is not None else None
+        ),
+    }
+    try:
+        write_json_atomic(ready_path, payload, sort_keys=False, trailing_newline=True)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("could not publish queue child readiness to %s: %s", ready_path, exc)
+        return None
+    return ready_path
 
 
 def watcher_alive(state: dict, *, max_age_s: float = 10.0) -> bool:

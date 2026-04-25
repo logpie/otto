@@ -49,7 +49,7 @@ from otto.queue.runner import child_is_alive
 from otto.queue.schema import load_queue, load_state as load_queue_state
 
 LOGGER = logging.getLogger(__name__)
-REVIEW_IN_PROGRESS_STATUSES = {"queued", "starting", "running", "terminating"}
+REVIEW_IN_PROGRESS_STATUSES = {"queued", "starting", "initializing", "running", "terminating"}
 
 
 class MissionControlServiceError(ValueError):
@@ -297,6 +297,7 @@ class MissionControlService:
         counts = {
             "queued": 0,
             "starting": 0,
+            "initializing": 0,
             "running": 0,
             "terminating": 0,
             "interrupted": 0,
@@ -344,7 +345,7 @@ class MissionControlService:
                 _merged_task_diff(self.project_dir, merge_info)
                 if merge_info is not None
                 else {"files": [], "error": None}
-                if queue_status in {"queued", "starting", "running", "terminating"}
+                if queue_status in {"queued", "starting", "initializing", "running", "terminating"}
                 else _branch_diff(self.project_dir, branch, target)
             )
             if merge_info is not None:
@@ -1045,6 +1046,7 @@ def _review_readiness(
         label = {
             "queued": "Queued",
             "starting": "Starting",
+            "initializing": "Initializing",
             "running": "Running",
             "terminating": "Stopping",
         }.get(display_status, "In progress")
@@ -1257,6 +1259,7 @@ def _suggested_next_action(
         "stale": ["x", "c"],
         "done": ["m", "x"],
         "running": ["c"],
+        "initializing": ["c"],
         "starting": ["c"],
         "queued": ["x"],
     }.get(display_status, [])
@@ -1960,7 +1963,7 @@ def _blocked_landing_label(queue_status: str, branch: str) -> str:
         return "No branch"
     if queue_status == "queued":
         return "Queued"
-    if queue_status in {"starting", "running", "terminating"}:
+    if queue_status in {"starting", "initializing", "running", "terminating"}:
         return "In progress"
     if queue_status in {"failed", "cancelled", "interrupted", "stale"}:
         return "Needs attention"

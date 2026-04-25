@@ -281,6 +281,7 @@ def test_fast_mode_bails_on_conflict(tmp_path: Path):
     ))
     assert result.success is False
     assert "--fast" in result.note or "fast" in result.note
+    assert "Partial merge: target advanced" in result.note
     # First branch merged cleanly; second hit conflict
     statuses = [o.status for o in result.state.outcomes]
     assert "merged" in statuses
@@ -291,6 +292,80 @@ def test_fast_mode_bails_on_conflict(tmp_path: Path):
     # Working tree should be left dirty for manual resolution.
     assert git_ops.merge_in_progress(repo)
     git_ops.merge_abort(repo)  # cleanup
+
+
+def test_transactional_fast_conflict_leaves_target_unchanged(tmp_path: Path):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    _make_branch(repo, "feat-a", "f.txt", "A's content\n")
+    _make_branch(repo, "feat-b", "f.txt", "B's content\n")
+    target_head_before = git_ops.head_sha(repo)
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(
+            target="main",
+            no_certify=True,
+            fast=True,
+            transactional=True,
+            allow_any_branch=True,
+        ),
+        explicit_ids_or_branches=["feat-a", "feat-b"],
+    ))
+
+    assert result.success is False
+    assert "transactional --fast stopped on conflict" in result.note
+    assert git_ops.head_sha(repo) == target_head_before
+    assert not git_ops.merge_in_progress(repo)
+    assert not git_ops.branch_exists(repo, f"otto/merge-staging/{result.merge_id}")
+
+
+def test_transactional_fast_clean_merge_updates_target_after_all_branches(tmp_path: Path):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    _make_branch(repo, "feat-a", "a.txt", "A\n")
+    _make_branch(repo, "feat-b", "b.txt", "B\n")
+    target_head_before = git_ops.head_sha(repo)
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(
+            target="main",
+            no_certify=True,
+            fast=True,
+            transactional=True,
+            allow_any_branch=True,
+        ),
+        explicit_ids_or_branches=["feat-a", "feat-b"],
+    ))
+
+    assert result.success is True
+    assert "transactional --fast merged 2 branch(es)" in result.note
+    assert git_ops.head_sha(repo) != target_head_before
+    assert (repo / "a.txt").read_text() == "A\n"
+    assert (repo / "b.txt").read_text() == "B\n"
+    assert not git_ops.branch_exists(repo, f"otto/merge-staging/{result.merge_id}")
+    assert not (paths.merge_dir(repo) / result.merge_id / "staging-worktree").exists()
+
+
+def test_transactional_requires_fast_mode(tmp_path: Path):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    _make_branch(repo, "feat-a", "a.txt", "A\n")
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(
+            target="main",
+            no_certify=True,
+            transactional=True,
+            allow_any_branch=True,
+        ),
+        explicit_ids_or_branches=["feat-a"],
+    ))
+
+    assert result.success is False
+    assert "--transactional currently supports only --fast" in result.note
 
 
 # ---------- provider=codex rejects conflict agent ----------
@@ -619,7 +694,8 @@ def test_merge_honors_cancel_after_conflict_agent_returns_before_commit(
 
     assert result.success is False
     assert result.state.status == "cancelled"
-    assert result.note == "merge cancelled after conflict resolution"
+    assert result.note.startswith("merge cancelled after conflict resolution")
+    assert "Partial merge: target advanced" in result.note
     assert add_calls == [["shared.txt"]]
     assert len(head_during_cancel) == 1
     assert subprocess.run(

@@ -11,6 +11,7 @@ RUN_RECORD_SCHEMA_VERSION = 1
 STATUS_VALUES = {
     "queued",
     "starting",
+    "initializing",
     "running",
     "terminating",
     "paused",

@@ -50,6 +50,7 @@ def mission_control_status_style(status: str, *, overlay: str | None = None) -> 
     return {
         "running": MISSION_CONTROL_THEME.running,
         "starting": MISSION_CONTROL_THEME.starting,
+        "initializing": MISSION_CONTROL_THEME.starting,
         "terminating": MISSION_CONTROL_THEME.lagging,
         "queued": MISSION_CONTROL_THEME.queued,
         "paused": MISSION_CONTROL_THEME.paused,

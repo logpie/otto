@@ -90,6 +90,53 @@ class MergeOptions:
     fast: bool = False                  # pure git, bail on first conflict
     cleanup_on_success: bool = False    # remove worktrees after merge
     allow_any_branch: bool = False
+    transactional: bool = False         # experimental: stage pure-git fast merges before target update
+
+
+def _short_sha(value: str | None) -> str:
+    return str(value or "")[:12]
+
+
+def _partial_merge_note(project_dir: Path, state: MergeState, target_head_before: str) -> str:
+    landed = [
+        outcome.branch
+        for outcome in state.outcomes
+        if outcome.status in {"merged", "merged_with_markers", "conflict_resolved"}
+    ]
+    if not landed:
+        return ""
+    try:
+        current_head = git_ops.head_sha(project_dir)
+    except Exception:
+        current_head = ""
+    if current_head and target_head_before and current_head == target_head_before:
+        return ""
+    failed = [
+        outcome.branch
+        for outcome in state.outcomes
+        if outcome.status == "agent_giveup"
+    ]
+    parts = [
+        "Partial merge: target advanced"
+        f" {_short_sha(target_head_before)} -> {_short_sha(current_head)};",
+        f"landed {len(landed)} branch(es): {', '.join(landed)}.",
+    ]
+    if failed:
+        parts.append(f"Needs action on: {', '.join(failed)}.")
+    return " ".join(parts)
+
+
+def _with_partial_merge_note(
+    note: str,
+    *,
+    project_dir: Path,
+    state: MergeState,
+    target_head_before: str,
+) -> str:
+    partial = _partial_merge_note(project_dir, state, target_head_before)
+    if not partial:
+        return note
+    return f"{note}\n\n{partial}" if note else partial
 
 
 _ATOMIC_BRANCH_RE = re.compile(
@@ -559,6 +606,189 @@ def _cancelled_merge_result(
     )
 
 
+def _remove_transactional_staging(project_dir: Path, staging_path: Path, staging_branch: str) -> None:
+    if staging_path.exists():
+        result = git_ops.run_git(project_dir, "worktree", "remove", "--force", str(staging_path))
+        if not result.ok:
+            logger.warning("failed to remove transactional staging worktree %s: %s", staging_path, result.stderr.strip())
+    if git_ops.branch_exists(project_dir, staging_branch):
+        result = git_ops.run_git(project_dir, "branch", "-D", staging_branch)
+        if not result.ok:
+            logger.warning("failed to remove transactional staging branch %s: %s", staging_branch, result.stderr.strip())
+
+
+def _mark_transactional_staging_rolled_back(state: MergeState, reason: str) -> None:
+    for outcome in state.outcomes:
+        if outcome.status != "merged":
+            continue
+        if not str(outcome.note or "").startswith("staged on "):
+            continue
+        outcome.status = "skipped"
+        outcome.merge_commit = None
+        outcome.note = reason
+
+
+def _run_transactional_fast_merge(
+    *,
+    project_dir: Path,
+    options: MergeOptions,
+    state: MergeState,
+    merge_id: str,
+    branches: list[str],
+    queue_lookup: dict[str, str],
+    target_head_before: str,
+) -> MergeRunResult:
+    """Stage pure-git fast merges outside the target, then fast-forward target.
+
+    This intentionally supports only ``--fast``. Agent conflict resolution and
+    post-merge certification need a broader refactor to separate "repository
+    under test" from "project directory where Otto writes state".
+    """
+    if _drain_merge_cancel_commands(project_dir, merge_id, state):
+        return _cancelled_merge_result(
+            project_dir,
+            state=state,
+            merge_id=merge_id,
+            note="merge cancelled before transactional staging",
+        )
+    staging_branch = f"otto/merge-staging/{merge_id}"
+    staging_path = paths.merge_dir(project_dir) / merge_id / "staging-worktree"
+    if staging_path.exists():
+        return MergeRunResult(
+            success=False,
+            merge_id=merge_id,
+            state=state,
+            note=f"transactional staging path already exists: {staging_path}",
+        )
+
+    add_result = git_ops.run_git(
+        project_dir,
+        "worktree",
+        "add",
+        "-b",
+        staging_branch,
+        str(staging_path),
+        target_head_before,
+    )
+    if not add_result.ok:
+        return MergeRunResult(
+            success=False,
+            merge_id=merge_id,
+            state=state,
+            note=f"transactional staging setup failed: {(add_result.stderr or add_result.stdout).strip()}",
+        )
+
+    try:
+        for branch in branches:
+            if _drain_merge_cancel_commands(project_dir, merge_id, state):
+                _mark_transactional_staging_rolled_back(
+                    state,
+                    "transactional staging discarded because merge was cancelled",
+                )
+                write_state(project_dir, state)
+                return _cancelled_merge_result(
+                    project_dir,
+                    state=state,
+                    merge_id=merge_id,
+                    note=f"merge cancelled while staging {branch}",
+                )
+            result = git_ops.merge_no_ff(staging_path, branch)
+            if result.ok:
+                state.outcomes.append(BranchOutcome(
+                    branch=branch,
+                    status="merged",
+                    merge_commit=git_ops.head_sha(staging_path),
+                    note=f"staged on {staging_branch}",
+                ))
+                write_state(project_dir, state)
+                continue
+
+            conflicts = git_ops.conflicted_files(staging_path)
+            if conflicts:
+                git_ops.merge_abort(staging_path)
+                _mark_transactional_staging_rolled_back(
+                    state,
+                    "transactional staging discarded because a later branch conflicted",
+                )
+                state.outcomes.append(BranchOutcome(
+                    branch=branch,
+                    status="agent_giveup",
+                    note="conflict in transactional --fast staging; target unchanged",
+                ))
+                write_state(project_dir, state)
+                return MergeRunResult(
+                    success=False,
+                    merge_id=merge_id,
+                    state=state,
+                    note=(
+                        f"transactional --fast stopped on conflict in {branch!r}; "
+                        f"target {options.target!r} remains at {_short_sha(target_head_before)}. "
+                        "Retry without --transactional to resolve manually or with agent mode."
+                    ),
+                )
+
+            _mark_transactional_staging_rolled_back(
+                state,
+                "transactional staging discarded because a later branch failed",
+            )
+            state.outcomes.append(BranchOutcome(
+                branch=branch,
+                status="agent_giveup",
+                note=f"git merge failed in transactional staging: {result.stderr.strip()[:200]}",
+            ))
+            write_state(project_dir, state)
+            return MergeRunResult(
+                success=False,
+                merge_id=merge_id,
+                state=state,
+                note=f"transactional staging merge of {branch!r} failed: {result.stderr.strip()[:200]}",
+            )
+
+        current_head = git_ops.head_sha(project_dir)
+        if current_head != target_head_before:
+            _mark_transactional_staging_rolled_back(
+                state,
+                "transactional staging discarded because target moved",
+            )
+            write_state(project_dir, state)
+            return MergeRunResult(
+                success=False,
+                merge_id=merge_id,
+                state=state,
+                note=(
+                    f"transactional merge aborted: target moved from "
+                    f"{_short_sha(target_head_before)} to {_short_sha(current_head)} "
+                    "before staged changes could land."
+                ),
+            )
+        ff_result = git_ops.run_git(project_dir, "merge", "--ff-only", staging_branch)
+        if not ff_result.ok:
+            _mark_transactional_staging_rolled_back(
+                state,
+                "transactional staging discarded because target fast-forward failed",
+            )
+            write_state(project_dir, state)
+            return MergeRunResult(
+                success=False,
+                merge_id=merge_id,
+                state=state,
+                note=f"transactional fast-forward failed: {(ff_result.stderr or ff_result.stdout).strip()}",
+            )
+        if options.cleanup_on_success:
+            _graduate_merged_task_sessions(project_dir, queue_lookup)
+        return MergeRunResult(
+            success=True,
+            merge_id=merge_id,
+            state=state,
+            note=(
+                f"transactional --fast merged {len(branches)} branch(es) in staging, "
+                f"then fast-forwarded {options.target}"
+            ),
+        )
+    finally:
+        _remove_transactional_staging(project_dir, staging_path, staging_branch)
+
+
 async def run_merge(
     *,
     project_dir: Path,
@@ -622,6 +852,13 @@ async def run_merge(
         all_done_queue_tasks=all_done_queue_tasks,
         allow_any_branch=options.allow_any_branch,
     )
+    if options.transactional and not options.fast:
+        return MergeRunResult(
+            success=False,
+            merge_id="",
+            state=MergeState(),
+            note="--transactional currently supports only --fast pure-git merges.",
+        )
     provider = agent_provider(config)
     if provider != "claude" and not options.fast:
         return MergeRunResult(
@@ -673,6 +910,16 @@ async def run_merge(
                 state=state,
                 note="merge cancelled before start",
             )
+        elif options.transactional:
+            result = _run_transactional_fast_merge(
+                project_dir=project_dir,
+                options=options,
+                state=state,
+                merge_id=merge_id,
+                branches=branches,
+                queue_lookup=queue_lookup,
+                target_head_before=target_head_before,
+            )
         else:
             result = await _run_consolidated_agentic_merge(
                 project_dir=project_dir,
@@ -686,6 +933,18 @@ async def run_merge(
                 budget=budget,
             )
 
+        if not result.success:
+            updated_note = _with_partial_merge_note(
+                result.note,
+                project_dir=project_dir,
+                state=result.state,
+                target_head_before=target_head_before,
+            )
+            if updated_note != result.note:
+                result.note = updated_note
+                if is_terminal_status(str(result.state.status or "")):
+                    result.state.note = updated_note
+                    write_state(project_dir, result.state)
         final_status = result.state.status
         if not is_terminal_status(final_status):
             final_status = "done" if result.success else "failed"

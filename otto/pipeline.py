@@ -925,6 +925,16 @@ async def build_agentic_v3(
         # returns leaves a resumable marker. On resumed runs, preserve the prior
         # session_id so a second crash is still resumable.
         _cp("in_progress", session_id=checkpoint_session_id)
+        if manage_checkpoint:
+            from otto.queue.runtime import mark_queue_child_ready
+
+            mark_queue_child_ready(
+                project_dir,
+                run_id=checkpoint_run_id,
+                session_dir=paths.session_dir(project_dir, checkpoint_run_id),
+                phase="build",
+                checkpoint_path=paths.session_checkpoint(project_dir, checkpoint_run_id),
+            )
         if _ack_atomic_cancel_commands(project_dir, build_id):
             raise KeyboardInterrupt("cancelled by command")
 
@@ -1727,6 +1737,17 @@ async def run_certify_fix_loop(
                 rounds=use_rounds,
                 journeys=_stories_to_journeys(last_stories) if last_stories else [],
             )
+
+        _save_cp(phase=checkpoint_phase)
+        from otto.queue.runtime import mark_queue_child_ready
+
+        mark_queue_child_ready(
+            project_dir,
+            run_id=build_id,
+            session_dir=_paths.session_dir(project_dir, build_id),
+            phase=checkpoint_phase,
+            checkpoint_path=_paths.session_checkpoint(project_dir, build_id),
+        )
 
         round_id = init_round(project_dir,
                               f"build: {intent[:60]}" if not skip_initial_build

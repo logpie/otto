@@ -235,14 +235,45 @@ def test_kill_child_safely_refuses_dead_child(tmp_path: Path):
 # ---------- end-to-end runner: dispatch + reap ----------
 
 
-def _make_fake_otto(tmp_path: Path, *, exit_code: int = 0, sleep: float = 0.1, write_manifest: bool = True) -> Path:
+def _make_fake_otto(
+    tmp_path: Path,
+    *,
+    exit_code: int = 0,
+    sleep: float = 0.1,
+    write_manifest: bool = True,
+    write_ready: bool = True,
+) -> Path:
     """Write a tiny shell script that mimics otto: sleeps, optionally writes
     a manifest at the queue path, and exits with `exit_code`."""
     fake = tmp_path / "fake_otto.sh"
+    ready_block = ""
+    if write_ready:
+        ready_block = '''
+TASK_ID="${OTTO_QUEUE_TASK_ID:-}"
+RUN_ID="${OTTO_RUN_ID:-fake-run}"
+if [ -n "$TASK_ID" ]; then
+  READY_DIR="${OTTO_QUEUE_PROJECT_DIR}/otto_logs/queue/${TASK_ID}"
+  mkdir -p "$READY_DIR"
+  cat > "$READY_DIR/ready.json" <<EOF
+{
+  "schema_version": 1,
+  "task_id": "$TASK_ID",
+  "run_id": "$RUN_ID",
+  "phase": "build",
+  "ready_at": "2026-04-19T00:00:00Z",
+  "pid": $$,
+  "cwd": "$(pwd)",
+  "session_dir": "$(pwd)/otto_logs/sessions/${RUN_ID}",
+  "checkpoint_path": "$(pwd)/otto_logs/sessions/${RUN_ID}/checkpoint.json"
+}
+EOF
+fi
+'''
     manifest_block = ""
     if write_manifest:
         manifest_block = '''
 TASK_ID="${OTTO_QUEUE_TASK_ID:-}"
+RUN_ID="${OTTO_RUN_ID:-fake-run}"
 if [ -n "$TASK_ID" ]; then
   MANIFEST_DIR="${OTTO_QUEUE_PROJECT_DIR}/otto_logs/queue/${TASK_ID}"
   mkdir -p "$MANIFEST_DIR"
@@ -251,7 +282,7 @@ if [ -n "$TASK_ID" ]; then
   "command": "build",
   "argv": ["build", "test"],
   "queue_task_id": "$TASK_ID",
-  "run_id": "fake-run",
+  "run_id": "$RUN_ID",
   "branch": null,
   "checkpoint_path": null,
   "proof_of_work_path": null,
@@ -271,6 +302,7 @@ EOF
 fi
 '''
     fake.write_text(f"""#!/bin/sh
+{ready_block}
 sleep {sleep}
 {manifest_block}
 exit {exit_code}
@@ -405,9 +437,10 @@ def test_runner_dispatches_and_reaps_a_simple_task(tmp_path: Path):
     runner._lock_fh = acquire_lock(repo)
     try:
         runner._tick()
-        # Task should be running now
+        # The child process is spawned immediately; a later tick promotes it
+        # from initializing to running after the child publishes readiness.
         state = load_state(repo)
-        assert state["tasks"]["t1"]["status"] == "running"
+        assert state["tasks"]["t1"]["status"] in {"initializing", "running"}
         state = _tick_until_task_status(runner, repo, "t1", {"done"})
         assert state["tasks"]["t1"]["status"] == "done", \
             f"expected done, got {state['tasks']['t1']!r}"
@@ -699,8 +732,8 @@ def test_runner_respects_concurrent_cap(tmp_path: Path):
     try:
         runner._tick()
         state = load_state(repo)
-        running = sum(1 for ts in state["tasks"].values() if ts.get("status") == "running")
-        assert running == 2, f"expected 2 running, got {running}: {state['tasks']!r}"
+        in_flight = sum(1 for ts in state["tasks"].values() if ts.get("status") in {"initializing", "running"})
+        assert in_flight == 2, f"expected 2 in flight, got {in_flight}: {state['tasks']!r}"
         # Untouched tasks aren't in state.json yet — they're "queued" by absence.
         assert len(state["tasks"]) == 2, \
             f"expected only 2 tasks in state (dispatched), got {len(state['tasks'])}"
@@ -773,7 +806,7 @@ def test_runner_cascades_failure_through_after_chain(tmp_path: Path):
         # Tick 1: dispatch a (only ready task; b/c blocked on deps)
         runner._tick()
         state = load_state(repo)
-        assert state["tasks"]["a"]["status"] == "running"
+        assert state["tasks"]["a"]["status"] in {"initializing", "running"}
         # Tick until a is reaped; b cascades failed once a fails.
         state = _tick_until_task_status(runner, repo, "a", {"failed"})
         assert state["tasks"]["a"]["status"] == "failed"
@@ -806,7 +839,7 @@ def test_runner_blocks_task_with_unsatisfied_after(tmp_path: Path):
     try:
         runner._tick()
         state = load_state(repo)
-        assert state["tasks"]["a"]["status"] == "running"
+        assert state["tasks"]["a"]["status"] in {"initializing", "running"}
         # b not yet dispatched → not in state.json yet
         assert "b" not in state["tasks"]
         state = _tick_until_task_status(runner, repo, "a", {"done"})
@@ -814,7 +847,7 @@ def test_runner_blocks_task_with_unsatisfied_after(tmp_path: Path):
         # Now b should dispatch
         runner._tick()
         state = load_state(repo)
-        assert state["tasks"]["b"]["status"] == "running"
+        assert state["tasks"]["b"]["status"] in {"initializing", "running"}
     finally:
         runner._lock_fh.close()
 
@@ -851,8 +884,7 @@ exit 0
     runner._lock_fh = acquire_lock(repo)
     try:
         runner._tick()
-        # Task should be running
-        assert load_state(repo)["tasks"]["hang"]["status"] == "running"
+        assert load_state(repo)["tasks"]["hang"]["status"] in {"initializing", "running"}
         state = load_state(repo)
         state["tasks"]["hang"]["started_at"] = "2000-01-01T00:00:00Z"
         write_state(repo, state)
@@ -993,7 +1025,7 @@ def test_runner_sets_queue_project_dir_env_on_spawn(tmp_path: Path, monkeypatch:
         runner._lock_fh.close()
 
 
-def test_spawn_persists_running_state_before_return(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_spawn_persists_initializing_state_before_return(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     repo = init_repo(tmp_path)
     task = QueueTask(
         id="t1",
@@ -1024,10 +1056,42 @@ def test_spawn_persists_running_state_before_return(tmp_path: Path, monkeypatch:
 
     runner._spawn(task, state)
 
-    assert [item["tasks"]["t1"]["status"] for item in writes] == ["starting", "running"]
+    assert [item["tasks"]["t1"]["status"] for item in writes] == ["starting", "initializing"]
     persisted = load_state(repo)["tasks"]["t1"]
-    assert persisted["status"] == "running"
+    assert persisted["status"] == "initializing"
     assert persisted["child"]["pid"] == 12345
+
+
+def test_ready_marker_promotes_initializing_task_to_running(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=1.0, write_manifest=False)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    ))
+    runner = Runner(repo, RunnerConfig(concurrent=1, poll_interval_s=0.01), otto_bin=str(fake_otto))
+    runner._lock_fh = acquire_lock(repo)
+    child: dict[str, Any] | None = None
+    try:
+        runner._tick()
+        state = load_state(repo)
+        assert state["tasks"]["t1"]["status"] == "initializing"
+        state = _tick_until_task_status(runner, repo, "t1", {"running"}, timeout_s=1.0)
+        ts = state["tasks"]["t1"]
+        child = ts["child"]
+        assert ts["child_run_id"] == ts["attempt_run_id"]
+        assert ts["ready_path"].endswith("otto_logs/queue/t1/ready.json")
+        assert ts["ready_at"] == "2026-04-19T00:00:00Z"
+    finally:
+        if child and child_is_alive(child):
+            kill_child_safely(child, signal.SIGTERM)
+            try:
+                os.waitpid(int(child["pid"]), 0)
+            except (ChildProcessError, ProcessLookupError):
+                pass
+        runner._lock_fh.close()
 
 
 def test_starting_queue_record_is_not_fallback_killable(tmp_path: Path) -> None:
@@ -1175,7 +1239,7 @@ def test_tick_logs_malformed_queue_yml_and_continues_after_fix(
         runner._tick()
 
         state = load_state(repo)
-        assert state["tasks"]["t1"]["status"] == "running"
+        assert state["tasks"]["t1"]["status"] in {"initializing", "running"}
     finally:
         child = load_state(repo)["tasks"].get("t1", {}).get("child") or {}
         pid = child.get("pid")
@@ -1268,7 +1332,7 @@ def test_run_exits_on_state_persistence_failure_after_spawn(
             os.kill(proc.pid, 0)
 
 
-def test_spawn_keeps_child_tracked_when_running_record_update_fails(
+def test_spawn_keeps_child_tracked_when_initializing_record_update_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1289,23 +1353,23 @@ def test_spawn_keeps_child_tracked_when_running_record_update_fails(
     child: dict[str, Any] | None = None
 
     try:
-        def fail_running_record(
+        def fail_initializing_record(
             task_arg: QueueTask,
             state_arg: dict[str, Any],
             *,
             status: str,
         ) -> None:
             del task_arg, state_arg
-            if status == "running":
+            if status == "initializing":
                 raise OSError("index unavailable")
 
-        monkeypatch.setattr(runner, "_write_queue_run_record", fail_running_record)
+        monkeypatch.setattr(runner, "_write_queue_run_record", fail_initializing_record)
 
         with caplog.at_level("ERROR", logger="otto.queue.runner"):
             runner._spawn(task, state)
 
         child = state["tasks"]["t1"]["child"]
-        assert state["tasks"]["t1"]["status"] == "running"
+        assert state["tasks"]["t1"]["status"] == "initializing"
         assert child_is_alive(child)
         assert "failed to update queue run record after spawn; continuing" in caplog.text
     finally:
