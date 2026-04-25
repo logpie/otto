@@ -1,6 +1,9 @@
 import {FormEvent, useCallback, useEffect, useMemo, useRef, useState} from "react";
 import type {ReactNode} from "react";
 import {ApiError, api, buildQueuePayload, stateQueryParams} from "./api";
+import {Spinner} from "./components/Spinner";
+import {useInFlight} from "./hooks/useInFlight";
+import {useDebouncedValue} from "./hooks/useDebouncedValue";
 import type {
   ActionResult,
   ActionState,
@@ -132,7 +135,16 @@ export function App() {
   const [resultBanner, setResultBanner] = useState<ResultBannerState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [confirmPending, setConfirmPending] = useState(false);
+  // Synchronous lock for the confirm dialog. `confirmPending` is React state
+  // and updates asynchronously; a fast double-click on the modal Confirm
+  // button can read `pending=false` for both clicks. The ref is checked and
+  // set in the same microtask, eliminating the duplicate POST race that
+  // mc-audit codex-state-management #10 documented.
+  const confirmLockRef = useRef(false);
   const [viewMode, setViewMode] = useState<ViewMode>(initialRoute.viewMode);
+  const watcherInFlight = useInFlight();
+  const refreshInFlight = useInFlight();
+  const mergeAllInFlight = useInFlight();
   const logOffsetRef = useRef(0);
   const selectedRunIdRef = useRef<string | null>(initialRoute.selectedRunId);
   const viewModeRef = useRef<ViewMode>(initialRoute.viewMode);
@@ -202,7 +214,11 @@ export function App() {
   }, []);
 
   const executeConfirmedAction = useCallback(async () => {
-    if (!confirm || confirmPending) return;
+    // `confirmLockRef` is the synchronous half of the dedup. `confirmPending`
+    // drives the visual disabled state but cannot block a click that arrived
+    // in the same React batch as the previous one.
+    if (!confirm || confirmLockRef.current) return;
+    confirmLockRef.current = true;
     setConfirmPending(true);
     try {
       await confirm.onConfirm();
@@ -210,9 +226,10 @@ export function App() {
     } catch (error) {
       showToast(errorMessage(error), "error");
     } finally {
+      confirmLockRef.current = false;
       setConfirmPending(false);
     }
-  }, [confirm, confirmPending, showToast]);
+  }, [confirm, showToast]);
 
   const loadLogs = useCallback(async (runId: string, reset = false) => {
     if ((inspectorMode !== "logs" || !inspectorOpen) && !reset) return;
@@ -290,6 +307,14 @@ export function App() {
     const interval = window.setInterval(() => void refresh(false), refreshIntervalMs(data));
     return () => window.clearInterval(interval);
   }, [refresh, data?.live.refresh_interval_s]);
+
+  // Manual-refresh handler: wraps `refresh(true)` in a synchronous in-flight
+  // latch so the toolbar/launcher Refresh buttons disable while a fetch is in
+  // flight. The polling interval above continues uninhibited — only the
+  // user-initiated path is gated. mc-audit microinteractions I2.
+  const onManualRefresh = useCallback(() => {
+    void refreshInFlight.run(() => refresh(true));
+  }, [refresh, refreshInFlight]);
 
   useEffect(() => {
     if (!selectedRunId) {
@@ -376,7 +401,7 @@ export function App() {
       title: "Land ready tasks",
       body: landingBulkConfirmation(landing),
       confirmLabel: ready === 1 ? "Land 1 task" : `Land ${ready} tasks`,
-      onConfirm: async () => {
+      onConfirm: () => mergeAllInFlight.run(async () => {
         try {
           const result = await api<ActionResult>("/api/actions/merge-all", {method: "POST", body: "{}"});
           handleActionResult(result, "merge all requested", showToast, setResultBanner);
@@ -384,12 +409,16 @@ export function App() {
         } catch (error) {
           showToast(errorMessage(error), "error");
         }
-      },
+      }),
     });
-  }, [data?.landing, refresh, requestConfirm, showToast]);
+  }, [data?.landing, mergeAllInFlight, refresh, requestConfirm, showToast]);
 
   const runWatcherAction = useCallback(async (action: "start" | "stop") => {
-    const execute = async () => {
+    // Both paths share `watcherInFlight` — start fires directly (no confirm
+    // gate per existing UX), stop goes through the confirm modal but the
+    // trigger button must also disable for the duration of the POST, not just
+    // the modal pause. mc-audit microinteractions C2 / first-time-user #14.
+    const execute = () => watcherInFlight.run(async () => {
       try {
         const result = await api<ActionResult | {message?: string}>(`/api/watcher/${action}`, {
           method: "POST",
@@ -400,7 +429,7 @@ export function App() {
       } catch (error) {
         showToast(errorMessage(error), "error");
       }
-    };
+    });
     if (action === "stop") {
       requestConfirm({
         title: "Stop watcher",
@@ -412,7 +441,7 @@ export function App() {
       return;
     }
     await execute();
-  }, [refresh, requestConfirm, showToast]);
+  }, [refresh, requestConfirm, showToast, watcherInFlight]);
 
   const loadArtifact = useCallback(async (index: number) => {
     const runId = selectedRunIdRef.current;
@@ -588,9 +617,10 @@ export function App() {
           <ProjectLauncher
             projectsState={projectsState}
             refreshStatus={refreshStatus}
+            refreshPending={refreshInFlight.pending}
             onCreate={createManagedProject}
             onSelect={selectManagedProject}
-            onRefresh={() => void refresh(true)}
+            onRefresh={onManualRefresh}
           />
         </main>
         {toast && <div id="toast" className={`visible toast-${toast.severity}`} role="status" aria-live="polite">{toast.message}</div>}
@@ -613,8 +643,8 @@ export function App() {
           <button type="button" data-testid="switch-project-button" onClick={() => void switchProject()}>Switch project</button>
         )}
         <button className="primary" type="button" data-testid="new-job-button" onClick={openJobDialog}>New job</button>
-        <button type="button" data-testid="start-watcher-button" disabled={!canStartWatcher(data)} aria-describedby="watcher-action-hint" title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>Start watcher</button>
-        <button type="button" data-testid="stop-watcher-button" disabled={!canStopWatcher(data)} aria-describedby="watcher-action-hint" title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>Stop watcher</button>
+        <button type="button" data-testid="start-watcher-button" disabled={!canStartWatcher(data) || watcherInFlight.pending} aria-describedby="watcher-action-hint" aria-busy={watcherInFlight.pending} title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>{watcherInFlight.pending ? <><Spinner /> Starting…</> : "Start watcher"}</button>
+        <button type="button" data-testid="stop-watcher-button" disabled={!canStopWatcher(data) || watcherInFlight.pending} aria-describedby="watcher-action-hint" aria-busy={watcherInFlight.pending} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>{watcherInFlight.pending ? <><Spinner /> Stopping…</> : "Stop watcher"}</button>
         <p id="watcher-action-hint" className="sidebar-hint">{watcherHint}</p>
       </aside>
 
@@ -622,9 +652,10 @@ export function App() {
         <Toolbar
           filters={filters}
           refreshStatus={refreshStatus}
+          refreshPending={refreshInFlight.pending}
           viewMode={viewMode}
           onChange={setFilters}
-          onRefresh={() => void refresh(true)}
+          onRefresh={onManualRefresh}
           onViewChange={navigateView}
         />
         {viewMode === "tasks" ? (
@@ -634,6 +665,8 @@ export function App() {
                 data={data}
                 lastError={lastError}
                 resultBanner={resultBanner}
+                watcherPending={watcherInFlight.pending}
+                landPending={mergeAllInFlight.pending}
                 onNewJob={openJobDialog}
                 onStartWatcher={() => void runWatcherAction("start")}
                 onLandReady={() => void mergeReadyTasks()}
@@ -789,9 +822,10 @@ function MetaItem({label, value}: {label: string; value: string}) {
   return <div><dt>{label}</dt><dd>{value}</dd></div>;
 }
 
-function ProjectLauncher({projectsState, refreshStatus, onCreate, onSelect, onRefresh}: {
+function ProjectLauncher({projectsState, refreshStatus, refreshPending, onCreate, onSelect, onRefresh}: {
   projectsState: ProjectsResponse;
   refreshStatus: string;
+  refreshPending: boolean;
   onCreate: (name: string) => Promise<void>;
   onSelect: (path: string) => Promise<void>;
   onRefresh: () => void;
@@ -845,7 +879,7 @@ function ProjectLauncher({projectsState, refreshStatus, onCreate, onSelect, onRe
         </div>
         <div className="launcher-actions">
           {refreshLabel(refreshStatus) && <span className="muted">{refreshLabel(refreshStatus)}</span>}
-          <button type="button" onClick={onRefresh}>Refresh</button>
+          <button type="button" data-testid="launcher-refresh-button" disabled={refreshPending} aria-busy={refreshPending} onClick={onRefresh}>{refreshPending ? <><Spinner /> Refreshing…</> : "Refresh"}</button>
         </div>
       </div>
 
@@ -905,14 +939,36 @@ function ProjectLauncher({projectsState, refreshStatus, onCreate, onSelect, onRe
   );
 }
 
-function Toolbar({filters, refreshStatus, viewMode, onChange, onRefresh, onViewChange}: {
+function Toolbar({filters, refreshStatus, refreshPending, viewMode, onChange, onRefresh, onViewChange}: {
   filters: Filters;
   refreshStatus: string;
+  refreshPending: boolean;
   viewMode: ViewMode;
   onChange: (filters: Filters) => void;
   onRefresh: () => void;
   onViewChange: (viewMode: ViewMode) => void;
 }) {
+  // Local mirror of the search query so we can debounce its commit to the
+  // shared filters state without rate-limiting the visible textbox itself.
+  // mc-audit microinteractions I3.
+  const [localQuery, setLocalQuery] = useState(filters.query);
+  const debouncedQuery = useDebouncedValue(localQuery, 200);
+  const lastCommittedRef = useRef(filters.query);
+  // Push the debounced value upward when it changes; do not loop back when
+  // the parent prop changes externally (e.g. clear-filters resets us).
+  useEffect(() => {
+    if (debouncedQuery === lastCommittedRef.current) return;
+    if (debouncedQuery === filters.query) return;
+    lastCommittedRef.current = debouncedQuery;
+    onChange({...filters, query: debouncedQuery});
+  }, [debouncedQuery]);
+  // Keep local in sync if the parent resets filters (e.g. Clear filters).
+  useEffect(() => {
+    if (filters.query !== lastCommittedRef.current) {
+      lastCommittedRef.current = filters.query;
+      setLocalQuery(filters.query);
+    }
+  }, [filters.query]);
   return (
     <header className="toolbar">
       <div className="view-tabs" aria-label="Mission Control views">
@@ -959,10 +1015,11 @@ function Toolbar({filters, refreshStatus, viewMode, onChange, onRefresh, onViewC
         </label>
         <label className="search-label">Search
           <input
-            value={filters.query}
+            value={localQuery}
             type="search"
             placeholder="run, task, branch"
-            onChange={(event) => onChange({...filters, query: event.target.value})}
+            data-testid="filter-search-input"
+            onChange={(event) => setLocalQuery(event.target.value)}
           />
         </label>
         <label className="check-label">
@@ -977,7 +1034,7 @@ function Toolbar({filters, refreshStatus, viewMode, onChange, onRefresh, onViewC
       </div>
       <div className="toolbar-actions">
         {refreshLabel(refreshStatus) && <span className="muted">{refreshLabel(refreshStatus)}</span>}
-        <button type="button" onClick={onRefresh}>Refresh</button>
+        <button type="button" data-testid="toolbar-refresh-button" disabled={refreshPending} aria-busy={refreshPending} onClick={onRefresh}>{refreshPending ? <><Spinner /> Refreshing…</> : "Refresh"}</button>
       </div>
     </header>
   );
@@ -1119,10 +1176,12 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
   );
 }
 
-function MissionFocus({data, lastError, resultBanner, onNewJob, onStartWatcher, onLandReady, onOpenDiagnostics, onDismissError, onDismissResult}: {
+function MissionFocus({data, lastError, resultBanner, watcherPending, landPending, onNewJob, onStartWatcher, onLandReady, onOpenDiagnostics, onDismissError, onDismissResult}: {
   data: StateResponse | null;
   lastError: string | null;
   resultBanner: ResultBannerState | null;
+  watcherPending: boolean;
+  landPending: boolean;
   onNewJob: () => void;
   onStartWatcher: () => void;
   onLandReady: () => void;
@@ -1140,10 +1199,10 @@ function MissionFocus({data, lastError, resultBanner, onNewJob, onStartWatcher, 
       </div>
       <div className="focus-actions">
         {focus.primary === "land" && (
-          <button className="primary" type="button" disabled={!canMerge(data?.landing)} onClick={onLandReady}>Land all ready</button>
+          <button className="primary" type="button" data-testid="mission-land-ready-button" disabled={!canMerge(data?.landing) || landPending} aria-busy={landPending} onClick={onLandReady}>{landPending ? <><Spinner /> Landing…</> : "Land all ready"}</button>
         )}
         {focus.primary === "start" && (
-          <button className="primary" type="button" disabled={!canStartWatcher(data)} onClick={onStartWatcher}>Start watcher</button>
+          <button className="primary" type="button" data-testid="mission-start-watcher-button" disabled={!canStartWatcher(data) || watcherPending} aria-busy={watcherPending} onClick={onStartWatcher}>{watcherPending ? <><Spinner /> Starting…</> : "Start watcher"}</button>
         )}
         {focus.primary === "diagnostics" && (
           <button className="primary" type="button" onClick={onOpenDiagnostics}>Review cleanup</button>
@@ -1496,7 +1555,7 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
           </div>
           <div className="detail-inspector-actions" aria-label="Evidence shortcuts">
             <button className="primary" type="button" data-testid="open-proof-button" onClick={onShowProof}>Open proof</button>
-            <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} onClick={onShowDiff}>Diff</button>
+            <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Diff</button>
             <button type="button" data-testid="open-logs-button" onClick={onShowLogs}>Logs</button>
             <button type="button" data-testid="open-artifacts-button" onClick={onShowArtifacts}>Artifacts</button>
           </div>
@@ -1544,7 +1603,7 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
         </div>
         <div className="detail-tabs" role="tablist" aria-label="Evidence view">
           <button className={`tab ${mode === "proof" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "proof"} onClick={onShowProof}>Proof</button>
-          <button className={`tab ${mode === "diff" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "diff"} disabled={!canShowDiff(detail)} onClick={onShowDiff}>Diff</button>
+          <button className={`tab ${mode === "diff" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "diff"} disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Diff</button>
           <button className={`tab ${mode === "logs" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "logs"} onClick={onShowLogs}>Logs</button>
           <button className={`tab ${mode === "artifacts" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "artifacts"} onClick={onShowArtifacts}>Artifacts</button>
         </div>
@@ -2116,8 +2175,24 @@ function JobDialog({project, onClose, onQueued, onError}: {
           </label>
         )}
         <label>Intent / focus
-          <textarea value={intent} rows={5} placeholder="Describe the requested outcome" onChange={(event) => setIntent(event.target.value)} />
+          <textarea
+            value={intent}
+            rows={5}
+            placeholder="Describe the requested outcome"
+            aria-describedby={submitDisabled ? "jobDialogValidationHint" : undefined}
+            aria-invalid={command === "build" && !intent.trim() ? true : undefined}
+            onChange={(event) => setIntent(event.target.value)}
+          />
         </label>
+        {submitDisabled && !submitting && (
+          <p id="jobDialogValidationHint" className="job-dialog-validation" data-testid="job-dialog-validation-hint" aria-live="polite">
+            {command === "build" && !intent.trim()
+              ? "Describe the requested outcome to enable queueing."
+              : targetNeedsConfirmation && !targetConfirmed
+              ? "Confirm the dirty target project above to enable queueing."
+              : "Submit is disabled."}
+          </p>
+        )}
         <details className="job-advanced">
           <summary>Advanced options</summary>
           <div className="field-grid">
@@ -2171,7 +2246,20 @@ function JobDialog({project, onClose, onQueued, onError}: {
         </details>
         <footer>
           <span id="jobDialogStatus" className="muted" aria-live="polite">{status}</span>
-          <button className="primary" type="submit" disabled={submitDisabled}>{submitting ? "Queueing" : "Queue job"}</button>
+          <button
+            className="primary"
+            type="submit"
+            data-testid="job-dialog-submit-button"
+            disabled={submitDisabled}
+            aria-busy={submitting}
+            title={!submitting && submitDisabled ? (
+              command === "build" && !intent.trim()
+                ? "Describe the requested outcome to enable queueing."
+                : "Confirm the dirty target project above."
+            ) : undefined}
+          >
+            {submitting ? <><Spinner /> Queueing…</> : "Queue job"}
+          </button>
         </footer>
       </form>
     </div>
@@ -2285,8 +2373,8 @@ function ConfirmDialog({confirm, pending, onCancel, onConfirm}: {
         <p id="confirmBody">{confirm.body}</p>
         <footer>
           <button type="button" disabled={pending} onClick={onCancel}>Cancel</button>
-          <button className={confirmClass} type="button" disabled={pending} onClick={onConfirm}>
-            {pending ? "Working" : confirm.confirmLabel}
+          <button className={confirmClass} type="button" data-testid="confirm-dialog-confirm-button" disabled={pending} aria-busy={pending} onClick={onConfirm}>
+            {pending ? <><Spinner /> Working…</> : confirm.confirmLabel}
           </button>
         </footer>
       </div>
@@ -2884,6 +2972,20 @@ function canShowDiff(detail: RunDetail | null): boolean {
   const packet = detail.review_packet;
   if (!packet.changes.branch || packet.changes.diff_error) return false;
   return packet.readiness.state !== "in_progress";
+}
+
+/**
+ * Human-readable reason that the Diff control is disabled. Used for `title=`
+ * on every Diff button so operators are not left guessing why the control is
+ * grey (mc-audit microinteractions C4).
+ */
+function diffDisabledReason(detail: RunDetail | null): string {
+  if (!detail) return "Select a run to view its diff.";
+  const packet = detail.review_packet;
+  if (packet.changes.diff_error) return `Diff failed: ${packet.changes.diff_error}`;
+  if (!packet.changes.branch) return "Diff is unavailable until the task creates a branch.";
+  if (packet.readiness.state === "in_progress") return "Diff is unavailable while the run is still in progress.";
+  return "Diff is not available for this run.";
 }
 
 function isReadableArtifact(artifact: ArtifactRef): boolean {

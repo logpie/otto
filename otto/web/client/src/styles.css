@@ -77,6 +77,30 @@ button:disabled {
   background: #eef1f5;
 }
 
+/*
+ * Pressed-state feedback. mc-audit microinteractions C1 / visual-coherence
+ * flagged that no `:active` rule exists anywhere — meaning a click on a slow
+ * network looks identical to a click that was lost. The translateY+filter
+ * combo gives ~16ms tactile feedback before the network response arrives.
+ *
+ * `prefers-reduced-motion` users keep the brightness change but skip the
+ * geometric shift, since translation can trigger vestibular discomfort.
+ */
+button:active:not(:disabled),
+[role="button"]:active:not(:disabled),
+a:active {
+  transform: translateY(1px);
+  filter: brightness(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button:active:not(:disabled),
+  [role="button"]:active:not(:disabled),
+  a:active {
+    transform: none;
+  }
+}
+
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
@@ -2578,4 +2602,50 @@ tbody tr.selected {
     border-right: 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   }
+}
+
+/*
+ * mc-spinner — pure CSS rotating ring used by <Spinner /> in
+ * components/Spinner.tsx. The animation lives in CSS rather than SVG so
+ * `currentColor` carries the parent text colour (works on light buttons,
+ * primary CTAs, danger CTAs, dark sidebar buttons) without reskinning per
+ * site. mc-audit microinteractions C3.
+ */
+@keyframes mc-spin {
+  to { transform: rotate(360deg); }
+}
+
+.mc-spinner {
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 6px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  animation: mc-spin 0.8s linear infinite;
+}
+
+.mc-spinner-sm { width: 12px; height: 12px; border-width: 2px; }
+.mc-spinner-md { width: 16px; height: 16px; border-width: 2px; }
+.mc-spinner-lg { width: 22px; height: 22px; border-width: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-spinner {
+    animation-duration: 1.6s;
+  }
+}
+
+/*
+ * JobDialog inline validation hint — surfaces the *reason* the submit button
+ * is disabled (mc-audit microinteractions I1). Sits between the textarea and
+ * the dialog footer so keyboard users encounter it in tab order before the
+ * disabled submit.
+ */
+.job-dialog-validation {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #fef3c7;
+  color: #78350f;
+  font-size: 12px;
 }
