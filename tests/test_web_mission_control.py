@@ -558,6 +558,40 @@ def test_web_failed_queue_fallback_uses_latest_exact_task_block(tmp_path: Path) 
     assert "prefix collision" not in detail["review_packet"]["failure"]["excerpt"]
 
 
+def test_web_cleaned_failed_queue_history_is_audit_only(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_history_snapshot(
+        repo,
+        build_terminal_snapshot(
+            run_id="run-cleaned-failed",
+            domain="queue",
+            run_type="queue",
+            command="build failed task",
+            intent_meta={"summary": "failed task"},
+            status="failed",
+            terminal_outcome="failure",
+            timing={"finished_at": "2026-04-24T00:00:00Z"},
+            source={"resumable": True},
+            identity={"queue_task_id": "cleaned-task"},
+            extra_fields={"last_event": "failure"},
+        ),
+    )
+
+    client = TestClient(create_app(repo))
+    state = client.get("/api/state").json()
+    detail = client.get("/api/runs/run-cleaned-failed").json()
+    actions = {action["key"]: action for action in detail["legal_actions"]}
+
+    assert state["live"]["items"] == []
+    assert state["landing"]["items"] == []
+    assert state["runtime"]["status"] == "healthy"
+    assert actions["x"]["enabled"] is False
+    assert actions["x"]["reason"] == "queue task already cleaned up"
+    assert detail["review_packet"]["next_action"]["label"] == "No action"
+    assert detail["review_packet"]["next_action"]["enabled"] is False
+
+
 def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -642,7 +676,7 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     assert actions["m"]["reason"] == "Already merged into main."
 
 
-def test_web_landed_task_does_not_diff_deleted_source_branch(tmp_path: Path) -> None:
+def test_web_landed_task_uses_merge_state_diff_after_source_branch_deleted(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
     subprocess.run(["git", "checkout", "-q", "-b", "build/merged-task"], cwd=repo, check=True)
@@ -700,12 +734,19 @@ def test_web_landed_task_does_not_diff_deleted_source_branch(tmp_path: Path) -> 
 
     assert item["landing_state"] == "merged"
     assert item["diff_error"] is None
-    assert item["changed_file_count"] == 0
+    assert item["changed_file_count"] == 1
+    assert item["changed_files"] == ["merged.txt"]
     assert packet["readiness"]["state"] == "merged"
     assert packet["changes"]["diff_error"] is None
-    assert packet["changes"]["diff_command"] is None
-    assert checks["changes"]["status"] == "info"
-    assert checks["changes"]["detail"] == "No unlanded diff remains."
+    assert packet["changes"]["diff_command"].startswith("git diff ")
+    assert packet["changes"]["files"] == ["merged.txt"]
+    assert checks["changes"]["status"] == "pass"
+    assert checks["changes"]["detail"] == "1 file landed into main."
+
+    diff = client.get("/api/runs/run-merged/diff").json()
+    assert diff["file_count"] == 1
+    assert diff["files"] == ["merged.txt"]
+    assert "+merged" in diff["text"]
 
 
 def test_web_merge_action_rejects_already_merged_task(tmp_path: Path, monkeypatch) -> None:

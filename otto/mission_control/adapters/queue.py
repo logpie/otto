@@ -104,14 +104,20 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
         legacy_logs_reason = "legacy queue mode has no registry-backed log view"
         legacy_artifacts_reason = "legacy queue mode has no registry-backed artifacts"
         stale_overlay = overlay is not None and overlay.level == "stale"
+        task_present = _queue_task_present(Path(record.project_dir), queue_task_id)
         cleanup_enabled = (
-            record.status == "queued"
-            or stale_overlay
-            or (is_terminal_status(record.status) and writer_identity_gone_or_stale(record.writer))
+            task_present
+            and (
+                record.status == "queued"
+                or stale_overlay
+                or (is_terminal_status(record.status) and writer_identity_gone_or_stale(record.writer))
+            )
         )
         cleanup_reason = (
             None
             if cleanup_enabled
+            else "queue task already cleaned up"
+            if queue_task_id and not task_present
             else "run is still active"
             if not is_terminal_status(record.status)
             else "writer still alive — wait for finalization"
@@ -267,6 +273,15 @@ def _queue_worktree(record) -> str | None:
     except Exception:
         return None
     return None
+
+
+def _queue_task_present(project_dir: Path, task_id: str) -> bool:
+    if not task_id:
+        return False
+    try:
+        return any(task.id == task_id for task in load_queue(project_dir))
+    except Exception:
+        return False
 
 
 def _legacy_queue_record(project_dir, task, task_state, now):

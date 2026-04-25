@@ -992,23 +992,29 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
         <section aria-label="Command backlog">
           <h3>Command Backlog</h3>
           {commands.length ? commands.map((command, index) => (
-            <div className={`diagnostic-card command-${command.state}`} key={`${command.command_id || command.run_id || "command"}-${index}`}>
-              <span>{command.state}</span>
-              <strong>{command.kind || "queued action"}</strong>
+            <details className={`diagnostic-card command-${command.state}`} key={`${command.command_id || command.run_id || "command"}-${index}`}>
+              <summary>
+                <span>{command.state}</span>
+                <strong>{command.kind || "queued action"}</strong>
+                <small>{commandBacklogLine(command)}</small>
+              </summary>
               <p>{command.run_id || command.task_id || command.command_id || "target unknown"}</p>
               <em>{commandBacklogLine(command)}</em>
-            </div>
+            </details>
           )) : <div className="diagnostic-empty">No pending commands.</div>}
         </section>
         <section aria-label="Runtime issues">
           <h3>Runtime Issues</h3>
           {issues.length ? issues.slice(0, 4).map((issue, index) => (
-            <div className={`diagnostic-card severity-${issue.severity}`} key={`${issue.label}-${index}`}>
-              <span>{issue.severity}</span>
-              <strong>{issue.label}</strong>
+            <details className={`diagnostic-card severity-${issue.severity}`} key={`${issue.label}-${index}`} open={issue.severity === "error"}>
+              <summary>
+                <span>{issue.severity}</span>
+                <strong>{issue.label}</strong>
+                <small>{issue.next_action}</small>
+              </summary>
               <p>{issue.detail}</p>
               <em>{issue.next_action}</em>
-            </div>
+            </details>
           )) : <div className="diagnostic-empty">No runtime issues.</div>}
         </section>
         <section aria-label="Landing states" className="wide-diagnostics-section">
@@ -1146,30 +1152,48 @@ function TaskCard({task, selected, onSelect}: {
   selected: boolean;
   onSelect: (runId: string) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const selectTask = () => task.runId && onSelect(task.runId);
+  const meta = [taskChangeLine(task), task.proof].filter(Boolean);
   return (
-    <button
-      className={`task-card-main task-card task-${task.stage} ${selected ? "selected" : ""}`}
-      type="button"
-      disabled={!task.runId}
-      data-testid={testIdForTask(task.id)}
-      aria-pressed={selected}
-      aria-label={`${task.title}: ${task.status}`}
-      onClick={selectTask}
-    >
-      <span className="task-card-top">
-        <span className="task-status">{task.status}</span>
-        <span className="task-card-cta">{task.stage === "ready" ? "Review" : "Details"}</span>
-      </span>
-      <strong className="task-title" title={task.title}>{task.title}</strong>
-      <span className="task-summary" title={task.summary}>{shortText(task.summary, 180)}</span>
-      <span className="task-card-meta">
-        <span title={task.branch || ""}>{task.branch || "no branch"}</span>
-        <span>{taskChangeLine(task)}</span>
-        <span>{task.proof}</span>
-      </span>
-      <span className="task-card-reason">{task.reason}</span>
-    </button>
+    <article className={`task-card task-${task.stage} ${selected ? "selected" : ""}`}>
+      <button
+        className="task-card-main"
+        type="button"
+        disabled={!task.runId}
+        data-testid={testIdForTask(task.id)}
+        aria-pressed={selected}
+        aria-label={`${task.title}: ${task.status}`}
+        onClick={selectTask}
+      >
+        <span className="task-card-top">
+          <span className="task-status">{task.status}</span>
+          <span className="task-card-cta">{task.stage === "ready" ? "Review" : "Details"}</span>
+        </span>
+        <strong className="task-title" title={task.title}>{task.title}</strong>
+        <span className="task-card-meta">
+          {meta.map((item) => <span key={item}>{item}</span>)}
+        </span>
+      </button>
+      <button
+        className="task-card-toggle"
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={`${testIdForTask(task.id)}-drawer`}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        {expanded ? "Less" : "More"}
+      </button>
+      {expanded ? (
+        <div className="task-card-drawer" id={`${testIdForTask(task.id)}-drawer`}>
+          <p title={task.summary}>{shortText(task.summary, 220)}</p>
+          <dl>
+            <dt>Branch</dt><dd title={task.branch || ""}>{task.branch || "no branch"}</dd>
+            <dt>Reason</dt><dd>{task.reason}</dd>
+          </dl>
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -1369,19 +1393,25 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
         <>
           <div className="detail-scroll">
             <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} onLoadArtifact={onLoadArtifact} onShowArtifacts={onShowArtifacts} />
-            <div className="detail-body">
-              <h3>{detail.title || detail.run_id}</h3>
-              <dl>
-                <dt>Run</dt><dd>{detail.run_id}</dd>
-                <dt>Type</dt><dd>{detail.domain} / {detail.run_type}</dd>
-                <dt>Branch</dt><dd>{detail.branch || "-"}</dd>
-                <dt>Worktree</dt><dd>{detail.worktree || detail.cwd || "-"}</dd>
-                <dt>Provider</dt><dd>{providerLine(detail)}</dd>
-                <dt>Artifacts</dt><dd>{detail.artifacts.length}</dd>
-                {detail.overlay && <><dt>Overlay</dt><dd>{detail.overlay.reason}</dd></>}
-                {detail.summary_lines.map((line, index) => <DetailLine key={`${line}-${index}`} line={line} />)}
-              </dl>
-            </div>
+            <details className="detail-body detail-metadata">
+              <summary>
+                <span>Run metadata</span>
+                <strong title={detail.run_id}>{detail.run_id}</strong>
+              </summary>
+              <div className="detail-metadata-content">
+                <h3>{detail.title || detail.run_id}</h3>
+                <dl>
+                  <dt>Run</dt><dd>{detail.run_id}</dd>
+                  <dt>Type</dt><dd>{detail.domain} / {detail.run_type}</dd>
+                  <dt>Branch</dt><dd>{detail.branch || "-"}</dd>
+                  <dt>Worktree</dt><dd>{detail.worktree || detail.cwd || "-"}</dd>
+                  <dt>Provider</dt><dd>{providerLine(detail)}</dd>
+                  <dt>Artifacts</dt><dd>{detail.artifacts.length}</dd>
+                  {detail.overlay && <><dt>Overlay</dt><dd>{detail.overlay.reason}</dd></>}
+                  {detail.summary_lines.map((line, index) => <DetailLine key={`${line}-${index}`} line={line} />)}
+                </dl>
+              </div>
+            </details>
             <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
           </div>
           <div className="detail-inspector-actions" aria-label="Evidence shortcuts">
@@ -1668,10 +1698,22 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
   const blockers = packet.readiness.blockers || [];
   const inProgress = packet.readiness.state === "in_progress";
   const artifactCount = packet.evidence.length;
-  const evidence = packet.evidence.filter(isReadableArtifact).slice(0, 4);
+  const readableEvidence = packet.evidence.filter(isReadableArtifact);
+  const evidence = readableEvidence.slice(0, 4);
   const showActionButton = Boolean(action.action_key);
   const hasFailure = Boolean(packet.failure);
-  const visibleChecks = hasFailure ? packet.checks.filter((check) => check.status === "pass") : packet.checks;
+  const attentionChecks = packet.checks.filter((check) => !["pass", "info"].includes(check.status));
+  const drawerChecks = attentionChecks.length ? attentionChecks : packet.checks;
+  const checksDefaultOpen = hasFailure || attentionChecks.length > 0;
+  const checkSummary = attentionChecks.length
+    ? `${attentionChecks.length} need review`
+    : `${packet.checks.length} recorded`;
+  const filesSummary = packet.changes.file_count
+    ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}`
+    : `${packet.changes.files.length} file${packet.changes.files.length === 1 ? "" : "s"}`;
+  const evidenceSummary = readableEvidence.length
+    ? `${readableEvidence.length}/${packet.evidence.length}`
+    : `${packet.evidence.length}`;
   return (
     <section className={`review-packet review-${packet.readiness.tone || "info"}`} aria-label="Review packet">
       <div className="review-head">
@@ -1709,18 +1751,20 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
         <ReviewMetric label="Evidence" value={evidenceLine(packet)} />
         {(packet.readiness.state === "merged" || inProgress) && <ReviewMetric label="Artifacts" value={artifactCount ? `${artifactCount} file${artifactCount === 1 ? "" : "s"}` : "-"} />}
       </div>
-      {visibleChecks.length > 0 && (
-        <div className="review-checklist" aria-label="Readiness checklist">
-          {visibleChecks.map((check) => (
-            <div className={`review-check check-${check.status}`} key={check.key}>
-              <span>{checkStatusLabel(check.status)}</span>
-              <div>
-                <strong>{check.label}</strong>
-                <p>{formatReviewText(check.detail)}</p>
+      {drawerChecks.length > 0 && (
+        <ReviewDrawer title="Checks" meta={checkSummary} defaultOpen={checksDefaultOpen}>
+          <div className="review-checklist" aria-label="Readiness checklist">
+            {drawerChecks.map((check) => (
+              <div className={`review-check check-${check.status}`} key={check.key}>
+                <span>{checkStatusLabel(check.status)}</span>
+                <div>
+                  <strong>{check.label}</strong>
+                  <p>{formatReviewText(check.detail)}</p>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </ReviewDrawer>
       )}
       {packet.changes.diff_error && <div className="review-note danger">{formatTechnicalIssue(packet.changes.diff_error)}</div>}
       {isRepositoryBlockedPacket(packet) && (
@@ -1730,30 +1774,53 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
         </div>
       )}
       {packet.changes.files.length > 0 && (
-        <ul className="review-files" aria-label="Changed files">
-          {packet.changes.files.map((path) => <li key={path}>{path}</li>)}
-          {packet.changes.truncated && <li>more files not shown</li>}
-        </ul>
+        <ReviewDrawer title="Changed files" meta={filesSummary}>
+          <ul className="review-files" aria-label="Changed files">
+            {packet.changes.files.map((path) => <li key={path}>{path}</li>)}
+            {packet.changes.truncated && <li>more files not shown</li>}
+          </ul>
+          {packet.changes.diff_command && packet.readiness.state === "ready" && <code title={packet.changes.diff_command}>{packet.changes.diff_command}</code>}
+        </ReviewDrawer>
       )}
       {evidence.length > 0 && (
-        <div className="review-evidence" aria-label="Evidence artifacts">
-          {evidence.map((artifact) => (
-            <button className={isReadableArtifact(artifact) ? "" : "missing"} key={`${artifact.index}-${artifact.path}`} type="button" disabled={!isReadableArtifact(artifact)} onClick={() => onLoadArtifact(artifact.index)}>
-              {artifact.label}{artifact.exists ? "" : " missing"}
-            </button>
-          ))}
-          {packet.evidence.length > evidence.length && !inProgress && (
-            <button type="button" data-testid="review-more-artifacts-button" onClick={onShowArtifacts}>+{packet.evidence.length - evidence.length} more</button>
-          )}
-        </div>
+        <ReviewDrawer title="Evidence" meta={evidenceSummary}>
+          <div className="review-evidence" aria-label="Evidence artifacts">
+            {evidence.map((artifact) => (
+              <button className={isReadableArtifact(artifact) ? "" : "missing"} key={`${artifact.index}-${artifact.path}`} type="button" disabled={!isReadableArtifact(artifact)} onClick={() => onLoadArtifact(artifact.index)}>
+                {artifact.label}{artifact.exists ? "" : " missing"}
+              </button>
+            ))}
+          </div>
+        </ReviewDrawer>
       )}
-      {packet.changes.diff_command && packet.readiness.state === "ready" && <code title={packet.changes.diff_command}>{packet.changes.diff_command}</code>}
+      {packet.evidence.length > evidence.length && !inProgress && (
+        <button className="review-inline-action" type="button" data-testid="review-more-artifacts-button" onClick={onShowArtifacts}>
+          View all evidence
+        </button>
+      )}
     </section>
   );
 }
 
 function ReviewMetric({label, value}: {label: string; value: string}) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function ReviewDrawer({title, meta, defaultOpen = false, children}: {
+  title: string;
+  meta: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <details className="review-drawer" open={defaultOpen}>
+      <summary>
+        <span>{title}</span>
+        <strong>{meta}</strong>
+      </summary>
+      <div className="review-drawer-body">{children}</div>
+    </details>
+  );
 }
 
 function FailureSummary({failure, showExcerpt = false}: {
@@ -2513,9 +2580,6 @@ function workflowHealth(data: StateResponse | null): {
   }
   const active = activeCount(data?.watcher);
   const attentionKeys = new Set<string>();
-  for (const item of data?.history.items || []) {
-    if (isAttentionStatus(item.status)) attentionKeys.add(item.queue_task_id || item.run_id);
-  }
   for (const item of data?.live.items || []) {
     if (isAttentionStatus(item.display_status)) attentionKeys.add(item.queue_task_id || item.run_id);
   }

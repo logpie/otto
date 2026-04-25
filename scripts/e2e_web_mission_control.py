@@ -304,7 +304,7 @@ def scenario_ready_land(ctx: ScenarioContext) -> None:
     wait_text("Ready To Land")
     browser("find", "testid", "task-card-saved-views", "click")
     wait_text("Ready for review")
-    wait_text("Safe to land into main.")
+    wait_text("Review evidence and land the task.")
     browser("find", "testid", "open-proof-button", "click")
     wait_text("Stories tested")
     wait_text("saved-views-create")
@@ -312,8 +312,8 @@ def scenario_ready_land(ctx: ScenarioContext) -> None:
     assert_proof_report_link()
     browser("find", "testid", "proof-open-diff-button", "click")
     wait_text("Code diff")
-    wait_text("saved_views.txt")
-    wait_text("+saved-views")
+    wait_snapshot_contains("saved_views.txt")
+    wait_snapshot_contains("+saved-views")
     assert_diff_file_browser()
     browser("find", "testid", "close-inspector-button", "click")
     assert_inspector_closed()
@@ -333,7 +333,13 @@ def scenario_ready_land(ctx: ScenarioContext) -> None:
     assert packet["readiness"]["state"] == "merged"
     assert packet["next_action"]["enabled"] is False
     assert packet["changes"]["diff_error"] is None
-    assert packet["changes"]["diff_command"] is None
+    assert packet["changes"]["diff_command"]
+    assert packet["changes"]["files"] == ["saved_views.txt"]
+    browser("find", "testid", "open-diff-button", "click")
+    wait_text("Code diff")
+    wait_snapshot_contains("saved_views.txt")
+    wait_snapshot_contains("+saved-views")
+    browser("find", "testid", "close-inspector-button", "click")
     assert_page_lacks("Ready for review")
     assert_page_lacks("No changed files were detected")
     screenshot(ctx, "ready-land.png")
@@ -632,11 +638,11 @@ def scenario_control_tour(ctx: ScenarioContext) -> None:
         browser("find", "testid", "open-proof-button", "click")
         wait_text("Proof of work")
     browser("find", "role", "tab", "click", "--name", "Artifacts")
-    wait_text("Artifacts")
+    wait_snapshot_contains("summary file")
     browser("find", "role", "tab", "click", "--name", "Logs")
-    wait_text("Run logs")
+    wait_snapshot_contains("Run logs")
     browser("find", "role", "tab", "click", "--name", "Proof")
-    wait_text("Certification checks")
+    wait_snapshot_contains("Certification checks")
     browser("find", "testid", "close-inspector-button", "click")
     assert_inspector_closed()
 
@@ -1259,6 +1265,17 @@ def assert_page_contains(text: str) -> None:
     snapshot = browser("snapshot", timeout_s=10).stdout
     if text not in snapshot:
         raise AssertionError(f"expected page text {text!r}\n{snapshot}")
+
+
+def wait_snapshot_contains(text: str, timeout_s: float = 20) -> None:
+    deadline = time.monotonic() + timeout_s
+    last_snapshot = ""
+    while time.monotonic() < deadline:
+        last_snapshot = browser("snapshot", timeout_s=10).stdout
+        if text in last_snapshot:
+            return
+        time.sleep(0.4)
+    raise AssertionError(f"expected page text {text!r}\n{last_snapshot}")
 
 
 def assert_no_passive_refresh_status() -> None:

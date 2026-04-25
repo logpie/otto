@@ -53,3 +53,46 @@ Comparable build/task UIs put the actionable failure first, then let users drill
 - Buildkite uses annotations for concise job-scoped summaries alongside logs and artifacts.
 
 For Otto, this means the Proof packet should lead with: root cause, next action, evidence links, then logs/artifacts as drill-downs. It should not duplicate generic "failed" text in several panels.
+
+# Mission Control Landed Diff Debug
+
+Date: 2026-04-25
+
+## Observations
+
+- Live landed queue run `2026-04-25-051721-18f4a2` returned an empty diff from `/api/runs/2026-04-25-051721-18f4a2/diff`.
+- Its review packet reported `file_count: 0`, `files: []`, and `diff_command: null`.
+- The merge state for `merge-1777107550-44374-37be72a2` contained `target_head_before=e3f2600...` and branch outcome `merge_commit=8e2656d...`.
+- `git diff --name-only e3f2600... 8e2656d...` in the project returned 10 changed files.
+- The previous backend intentionally suppressed branch diff lookup for merged queue tasks to avoid errors after the source branch is deleted.
+
+## Hypotheses
+
+### H1: Landed queue tasks suppress all diff data after merge (root)
+
+- Supports: `_review_packet` and `landing_status` replaced diff data with empty files when merge info existed.
+- Conflicts: none found.
+- Test: compute diff from merge state's `target_head_before` or merge commit first parent to `merge_commit`.
+
+### H2: UI hides valid diff data for landed tasks
+
+- Supports: user saw an empty diff panel.
+- Conflicts: API itself returned empty `text` and `files`, so the UI was rendering backend truth.
+- Test: inspect `/api/runs/<run>/diff` response.
+
+### H3: Source branch was deleted or unreachable
+
+- Supports: prior tests intentionally avoid diffing deleted merged branches.
+- Conflicts: live branch still existed, but `main...branch` was empty after merge because the merge base was the branch tip.
+- Test: compute merge-state diff independent of source branch reachability.
+
+## Root Cause
+
+Landed queue tasks used source-branch diff logic even after merge. Once a branch is merged, `main...branch` can be empty, and if the source branch is deleted it may be unreachable. The persisted merge state already has the durable commit range needed for historical review.
+
+## Fix
+
+- Landed queue review packets and `/diff` now compute changed files from persisted merge state.
+- Merge state indexing stores `target_head_before`, `merge_commit`, and a first-parent `diff_base`.
+- Cleaned failed queue history no longer advertises cleanup as an enabled next action when the queue item has already been removed.
+- Regression tests cover landed diff after source branch deletion and cleaned failed queue history.

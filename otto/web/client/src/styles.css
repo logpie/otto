@@ -558,8 +558,8 @@ textarea {
 
 .task-card {
   display: grid;
-  gap: 8px;
-  padding: 10px;
+  gap: 6px;
+  padding: 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -593,8 +593,16 @@ textarea {
   min-height: 0;
   display: grid;
   justify-items: start;
-  gap: 6px;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   text-align: left;
+}
+
+.task-card-main:hover:not(:disabled) {
+  border-color: transparent;
 }
 
 .task-card-top {
@@ -608,6 +616,7 @@ textarea {
 .task-card-main:disabled {
   color: var(--text);
   cursor: default;
+  background: transparent;
 }
 
 .task-title,
@@ -622,7 +631,7 @@ textarea {
 .task-title {
   max-width: 100%;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
 }
 
@@ -665,6 +674,46 @@ textarea {
   padding: 2px 6px;
   border-radius: 999px;
   background: var(--surface-alt);
+}
+
+.task-card-toggle {
+  min-height: 26px;
+  justify-self: start;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-card-drawer {
+  display: grid;
+  gap: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+
+.task-card-drawer p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-card-drawer dl {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 4px 8px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.task-card-drawer dt {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.task-card-drawer dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .task-empty {
@@ -788,6 +837,23 @@ button.diagnostic-card {
   text-align: left;
 }
 
+.diagnostic-card summary {
+  width: 100%;
+  display: grid;
+  gap: 3px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.diagnostic-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.diagnostic-card:not([open]) p,
+.diagnostic-card:not([open]) em {
+  display: none;
+}
+
 .diagnostic-card span {
   color: var(--muted);
   font-size: 11px;
@@ -797,7 +863,8 @@ button.diagnostic-card {
 
 .diagnostic-card strong,
 .diagnostic-card p,
-.diagnostic-card em {
+.diagnostic-card em,
+.diagnostic-card small {
   min-width: 0;
   max-width: 100%;
   margin: 0;
@@ -805,7 +872,8 @@ button.diagnostic-card {
 }
 
 .diagnostic-card p,
-.diagnostic-card em {
+.diagnostic-card em,
+.diagnostic-card small {
   color: var(--muted);
   font-size: 12px;
   font-style: normal;
@@ -1156,6 +1224,38 @@ tbody tr.selected {
   overflow: auto;
 }
 
+.detail-metadata {
+  padding: 0;
+}
+
+.detail-metadata summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+}
+
+.detail-metadata summary::-webkit-details-marker {
+  display: none;
+}
+
+.detail-metadata summary strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-metadata-content {
+  padding: 0 12px 12px;
+}
+
 .detail-body h3 {
   margin: 0 0 8px;
   font-size: 15px;
@@ -1332,6 +1432,39 @@ tbody tr.selected {
   gap: 6px;
 }
 
+.review-drawer {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.review-drawer summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 8px;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+}
+
+.review-drawer summary::-webkit-details-marker {
+  display: none;
+}
+
+.review-drawer summary strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.review-drawer-body {
+  display: grid;
+  gap: 7px;
+  padding: 0 8px 8px;
+}
+
 .review-check {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr);
@@ -1457,6 +1590,14 @@ tbody tr.selected {
   border-color: #f4d58d;
   color: #713f12;
   background: #fff8e1;
+}
+
+.review-inline-action {
+  justify-self: start;
+  min-height: 0;
+  padding: 4px 8px;
+  color: var(--accent-strong);
+  font-size: 12px;
 }
 
 .review-packet code {

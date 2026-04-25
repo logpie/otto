@@ -166,12 +166,24 @@ class MissionControlService:
         detail = self._detail_view(run_id, filters)
         target = _review_target(self.project_dir, detail.record)
         branch = _optional_str(detail.record.git.get("branch"))
-        diff = _branch_diff(self.project_dir, branch, target)
+        merge_info = _detail_merge_info(self.project_dir, detail)
+        diff = (
+            _merged_task_diff(self.project_dir, merge_info)
+            if merge_info is not None
+            else _branch_diff(self.project_dir, branch, target)
+        )
         text = ""
         truncated = False
-        command = f"git diff {target}...{branch}" if branch and branch != target else None
-        if branch and target and branch != target and diff["error"] is None:
-            text_result = _branch_diff_text(self.project_dir, branch, target)
+        command = (
+            _optional_str(diff.get("command"))
+            or (f"git diff {target}...{branch}" if branch and branch != target else None)
+        )
+        if diff["error"] is None and command:
+            text_result = (
+                _merged_task_diff_text(self.project_dir, merge_info)
+                if merge_info is not None
+                else _branch_diff_text(self.project_dir, branch, target)
+            )
             if text_result["error"] is not None:
                 diff = {**diff, "error": text_result["error"]}
             else:
@@ -329,8 +341,10 @@ class MissionControlService:
             branch = str(task.branch or "").strip()
             merge_info = merged_by_branch.get(branch)
             diff = (
-                {"files": [], "error": None}
-                if merge_info is not None or queue_status in {"queued", "starting", "running", "terminating"}
+                _merged_task_diff(self.project_dir, merge_info)
+                if merge_info is not None
+                else {"files": [], "error": None}
+                if queue_status in {"queued", "starting", "running", "terminating"}
                 else _branch_diff(self.project_dir, branch, target)
             )
             if merge_info is not None:
@@ -798,9 +812,9 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
     merge_info = _detail_merge_info(project_dir, detail)
     merged = merge_info is not None
     in_progress = display_status in REVIEW_IN_PROGRESS_STATUSES
-    diff = (
+    diff = _merged_task_diff(project_dir, merge_info) if merged else (
         {"files": [], "error": None}
-        if merged or in_progress
+        if in_progress
         else _branch_diff(project_dir, branch, target)
     )
     changed_files = diff["files"]
@@ -861,7 +875,11 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
             "file_count": len(changed_files),
             "files": changed_files[:12],
             "truncated": len(changed_files) > 12,
-            "diff_command": None if merged or in_progress else f"git diff {target}...{branch}" if branch and branch != target else None,
+            "diff_command": (
+                _optional_str(diff.get("command"))
+                if merged
+                else None if in_progress else f"git diff {target}...{branch}" if branch and branch != target else None
+            ),
             "diff_error": diff["error"],
         },
         "evidence": evidence,
@@ -1134,7 +1152,12 @@ def _review_checks(
     elif diff_error:
         checks.append(_review_check("changes", "Changed files", "fail", diff_error))
     elif changed_files:
-        checks.append(_review_check("changes", "Changed files", "pass", f"{len(changed_files)} file{'' if len(changed_files) == 1 else 's'} changed on {branch}."))
+        detail = (
+            f"{len(changed_files)} file{'' if len(changed_files) == 1 else 's'} landed into {target}."
+            if merged
+            else f"{len(changed_files)} file{'' if len(changed_files) == 1 else 's'} changed on {branch}."
+        )
+        checks.append(_review_check("changes", "Changed files", "pass", detail))
     elif merged:
         checks.append(_review_check("changes", "Changed files", "info", "No unlanded diff remains."))
     else:
@@ -1247,6 +1270,8 @@ def _suggested_next_action(
                 "reason": action.preview,
             }
     for action in actions:
+        if action.key in {"M", "o", "e"}:
+            continue
         if action.enabled:
             return {
                 "label": _review_action_label(action.key, action.label),
@@ -1286,6 +1311,28 @@ def _detail_merge_info(project_dir: Path, detail: DetailView) -> dict[str, Any] 
     if info is None:
         return None
     return {**info, "target": target}
+
+
+def _merged_task_diff(project_dir: Path, merge_info: dict[str, Any] | None) -> dict[str, Any]:
+    base, head = _merged_task_diff_range(merge_info)
+    if not base or not head:
+        return {"files": [], "error": None, "command": None}
+    return _commit_range_diff(project_dir, base, head)
+
+
+def _merged_task_diff_text(project_dir: Path, merge_info: dict[str, Any] | None) -> dict[str, Any]:
+    base, head = _merged_task_diff_range(merge_info)
+    if not base or not head:
+        return {"text": "", "error": None}
+    return _commit_range_diff_text(project_dir, base, head)
+
+
+def _merged_task_diff_range(merge_info: dict[str, Any] | None) -> tuple[str | None, str | None]:
+    if not merge_info:
+        return None, None
+    base = _optional_str(merge_info.get("diff_base")) or _optional_str(merge_info.get("target_head_before"))
+    head = _optional_str(merge_info.get("merge_commit"))
+    return base, head
 
 
 def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
@@ -1762,17 +1809,56 @@ def _merged_branch_index(project_dir: Path, target: str) -> dict[str, dict[str, 
                 continue
             if outcome.merge_commit and not _merge_commit_reachable(project_dir, outcome.merge_commit, target):
                 continue
+            diff_base = (
+                _merge_commit_first_parent(project_dir, outcome.merge_commit)
+                if outcome.merge_commit
+                else _optional_str(state.target_head_before)
+            )
             merged[outcome.branch] = {
                 "merge_id": state.merge_id,
                 "status": outcome.status,
                 "merge_run_status": state.status,
+                "target_head_before": state.target_head_before,
+                "merge_commit": outcome.merge_commit,
+                "diff_base": diff_base,
             }
     return merged
+
+
+def _merge_commit_first_parent(project_dir: Path, merge_commit: str | None) -> str | None:
+    commit = _optional_str(merge_commit)
+    if not commit:
+        return None
+    result = git_ops.run_git(project_dir, "rev-parse", "--verify", f"{commit}^1")
+    if not result.ok:
+        return None
+    return result.stdout.strip() or None
 
 
 def _merge_commit_reachable(project_dir: Path, merge_commit: str, target: str) -> bool:
     result = git_ops.run_git(project_dir, "merge-base", "--is-ancestor", merge_commit, target)
     return result.returncode == 0
+
+
+def _commit_range_diff(project_dir: Path, base: str, head: str) -> dict[str, Any]:
+    result = git_ops.run_git(project_dir, "diff", "--name-only", base, head)
+    command = f"git diff {base} {head}"
+    if not result.ok:
+        detail = (result.stderr or result.stdout or f"git diff exited {result.returncode}").strip()
+        return {"files": [], "error": detail, "command": command}
+    return {
+        "files": sorted(line for line in result.stdout.splitlines() if line),
+        "error": None,
+        "command": command,
+    }
+
+
+def _commit_range_diff_text(project_dir: Path, base: str, head: str) -> dict[str, Any]:
+    result = git_ops.run_git(project_dir, "diff", "--no-ext-diff", "--no-color", base, head)
+    if not result.ok:
+        detail = (result.stderr or result.stdout or f"git diff exited {result.returncode}").strip()
+        return {"text": "", "error": detail}
+    return {"text": result.stdout, "error": None}
 
 
 def _branch_diff(project_dir: Path, branch: str | None, target: str) -> dict[str, Any]:
