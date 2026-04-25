@@ -1,6 +1,6 @@
 # Conflict-Agent Edit Scope Policy
 
-Status: proposed
+Status: implemented
 
 Owner: merge/orchestrator path
 
@@ -11,13 +11,13 @@ Primary files:
 
 ## Summary
 
-The consolidated conflict-resolution agent currently runs with full file-editing tools, but the
-post-agent validator only permits edits to the exact set of files that had merge markers. In code,
-that policy is:
+The consolidated conflict-resolution agent runs with full file-editing tools, so the orchestrator
+now computes a deterministic edit scope before the call and validates against it afterward. The
+older marker-only policy that motivated this design was:
 
-- `expected_uu_files = set(accumulated_conflict_files)` in
+- `legacy_marker_scope = set(accumulated_conflict_files)` in
   `otto/merge/orchestrator.py:770-795`
-- `out_of_scope = (post_diff_files - pre_diff_files) - expected_uu_files` in
+- `out_of_scope = (post_diff_files - pre_diff_files) - legacy_marker_scope` in
   `otto/merge/conflict_agent.py:148-152`
 
 That rule is too strict for realistic semantic merges. In nightly scenario N8 on 2026-04-22, the
@@ -66,18 +66,18 @@ Today the consolidated path is intentionally narrow and fail-closed:
 The relevant code is explicit:
 
 - `otto/merge/conflict_agent.py:10-15` documents the guarantee as
-  `post_diff − pre_diff ⊆ expected_uu_files`
+  `post_diff - pre_diff <= legacy_marker_scope`
 - `otto/merge/conflict_agent.py:148-152` implements it with:
 
 ```python
 post_diff_files = set(git_ops.changed_files(project_dir))
 delta = post_diff_files - pre_diff_files
-out_of_scope = delta - expected_uu_files
+out_of_scope = delta - legacy_marker_scope
 if out_of_scope:
     return (False, f"agent edited files outside conflict set: {sorted(out_of_scope)!r}")
 ```
 
-- `otto/merge/orchestrator.py:770-775` defines `expected_uu_files` as:
+- `otto/merge/orchestrator.py:770-775` defined that legacy marker scope as:
 
 ```python
 pre_head = git_ops.head_sha(project_dir)
@@ -420,7 +420,7 @@ Recommendation:
 Recommend a deterministic hybrid:
 
 1. Keep the hard validator.
-2. Replace `expected_uu_files` with a richer `allowed_edit_scope`.
+2. Replace the marker-only allowlist with a richer `allowed_edit_scope`.
 3. Compute `allowed_edit_scope` before the agent runs, entirely on the orchestrator side.
 4. Split scope into `primary_files` and `secondary_files`.
 5. `primary_files` are the exact files with markers.
@@ -495,7 +495,7 @@ the final code.
 
 ### 1. Introduce an explicit edit-scope object
 
-Today the code passes `expected_uu_files: set[str]`.
+The legacy code passed a marker-only file set.
 
 Proposed replacement:
 
@@ -522,7 +522,7 @@ class PostAgentValidationResult:
     edited_secondary_files: set[str]
 ```
 
-This avoids overloading a single `expected_uu_files` parameter with multiple meanings.
+This avoids overloading a single marker-only parameter with multiple meanings.
 
 ### 2. Compute scope in the orchestrator before agent invocation
 
@@ -537,7 +537,7 @@ expected_uu = set(accumulated_conflict_files)
 ctx = ConsolidatedConflictContext(...)
 attempt = await resolve_all_conflicts(
     ...,
-    expected_uu_files=expected_uu,
+    edit_scope=scope,
     ...
 )
 ```
@@ -582,7 +582,7 @@ Current validator core in `otto/merge/conflict_agent.py:148-152`:
 ```python
 post_diff_files = set(git_ops.changed_files(project_dir))
 delta = post_diff_files - pre_diff_files
-out_of_scope = delta - expected_uu_files
+out_of_scope = delta - edit_scope.allowed_files
 ```
 
 Proposed validator core:

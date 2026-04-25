@@ -3,10 +3,13 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+
+import pytest
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "otto_as_user_nightly.py"
@@ -77,6 +80,130 @@ def test_main_dry_run_supports_each_core_scenario(capsys) -> None:
         out = capsys.readouterr().out
         assert f"{scenario_id}:" in out
         assert "provider: claude" in out
+
+
+def test_main_real_run_requires_cost_opt_in(monkeypatch) -> None:
+    monkeypatch.delenv("OTTO_ALLOW_REAL_COST", raising=False)
+    monkeypatch.setattr(
+        OTTO_AS_USER_NIGHTLY,
+        "record_one_scenario",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("scenario executed")),
+    )
+
+    assert OTTO_AS_USER_NIGHTLY.main(["--scenario", "N1"]) == 2
+
+
+def test_main_real_run_checks_for_shadowed_otto_cli(monkeypatch) -> None:
+    calls: list[str] = []
+    scenario = OTTO_AS_USER_NIGHTLY.SCENARIOS["N1"]
+
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY, "require_real_cost_opt_in", lambda _activity: calls.append("cost"))
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY.base, "ensure_real_otto_cli", lambda: calls.append("cli"))
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY.base, "utc_run_id", lambda: "run-id")
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY, "print_summary", lambda *_args, **_kwargs: None)
+
+    def fake_record_one_scenario(_scenario, _run_id, _provider):
+        return OTTO_AS_USER_NIGHTLY.NightlyOutcome(
+            scenario=scenario,
+            outcome="PASS",
+            run_result=OTTO_AS_USER_NIGHTLY.base.RunResult(
+                scenario_id="N1",
+                returncode=0,
+                started_at="2026-04-25T00:00:00Z",
+                finished_at="2026-04-25T00:00:01Z",
+                duration_s=1.0,
+                recording_path="recording.cast",
+                repo_path="repo",
+                debug_log="debug.log",
+            ),
+            verify_result=OTTO_AS_USER_NIGHTLY.VerifyResult(True, "ok"),
+            artifact_dir=Path("/tmp/artifacts"),
+        )
+
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY, "record_one_scenario", fake_record_one_scenario)
+
+    assert OTTO_AS_USER_NIGHTLY.main(["--scenario", "N1"]) == 0
+    assert calls == ["cost", "cli"]
+
+
+def test_run_one_attempt_prepares_scenario_isolation_before_setup(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    artifact_dir = tmp_path / "artifacts"
+    scenario_venv = artifact_dir / ".scenario-venv"
+    seen: dict[str, object] = {}
+
+    def fake_mkdtemp(*, prefix: str, dir: str) -> str:
+        assert prefix.startswith("otto-nightly-")
+        assert dir == "/tmp"
+        repo.mkdir()
+        return str(repo)
+
+    def fake_prepare(ctx):
+        scenario_venv.joinpath("bin").mkdir(parents=True)
+        ctx.isolated_venv = scenario_venv
+        ctx.prepended_path_entries = [scenario_venv / "bin"]
+        seen["prepared"] = True
+
+    def setup(repo_arg: Path, provider: str) -> None:
+        if "error" in seen:
+            raise AssertionError(str(seen["error"]))
+        ctx = OTTO_AS_USER_NIGHTLY.base.current_ctx()
+        seen["setup_repo"] = repo_arg
+        seen["provider"] = provider
+        seen["isolated_venv"] = ctx.isolated_venv
+        seen["path_head"] = ctx.env["PATH"].split(os.pathsep)[0]
+
+    def run(repo_arg: Path, _provider: str):
+        return OTTO_AS_USER_NIGHTLY.base.RunResult(
+            scenario_id="ZZ",
+            returncode=0,
+            started_at="2026-04-25T00:00:00Z",
+            finished_at="2026-04-25T00:00:01Z",
+            duration_s=1.0,
+            recording_path=str(artifact_dir / "recording.cast"),
+            repo_path=str(repo_arg),
+            debug_log=str(artifact_dir / "debug.log"),
+        )
+
+    def verify(_repo_arg: Path, _run_result):
+        return OTTO_AS_USER_NIGHTLY.VerifyResult(True, "ok")
+
+    scenario = OTTO_AS_USER_NIGHTLY.base.Scenario(
+        "ZZ",
+        "N",
+        "isolation test",
+        False,
+        0.0,
+        1,
+        False,
+        setup,
+        run,
+        verify,
+    )
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY.base, "prepare_scenario_isolation", fake_prepare)
+    monkeypatch.setattr(
+        OTTO_AS_USER_NIGHTLY,
+        "_fixture_spec",
+        lambda _scenario_id: type("Spec", (), {"fixture_dir": tmp_path / "fixture"})(),
+    )
+
+    _repo, run_result, verify_result = OTTO_AS_USER_NIGHTLY.run_one_attempt(
+        scenario,
+        "claude",
+        artifact_dir,
+        attempt_index=1,
+    )
+
+    assert run_result.returncode == 0
+    assert verify_result.ok is True
+    assert seen == {
+        "prepared": True,
+        "setup_repo": repo,
+        "provider": "claude",
+        "isolated_venv": scenario_venv,
+        "path_head": str(scenario_venv / "bin"),
+    }
 
 
 def test_debug_fast_args_respects_env(monkeypatch) -> None:
@@ -399,13 +526,39 @@ def test_verify_n9_checks_realistic_session_and_uses_visible_hidden(
     assert calls == ["tests/visible", "tests/hidden"]
 
 
-def test_verify_n9_rejects_merge_all(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    artifact_dir = tmp_path / "artifacts"
-    artifact_dir.mkdir()
+def _seed_n9_merge_state(repo: Path) -> None:
+    merge_state = repo / "otto_logs" / "merge" / "merge-1" / "state.json"
+    merge_state.parent.mkdir(parents=True)
+    merge_state.write_text("{}", encoding="utf-8")
 
-    run_result = OTTO_AS_USER_NIGHTLY.base.RunResult(
+
+def _n9_success_details(**overrides: object) -> dict[str, object]:
+    details: dict[str, object] = {
+        "build-live-row-latency-ms": 500,
+        "build-finished-naturally": True,
+        "standalone-heartbeat-advanced": True,
+        "standalone-log-cycled": True,
+        "queue-cancel-history-latency-ms": 300,
+        "queue-cancelled-latency-ms": 400,
+        "editor-spawn-attempted": True,
+        "merge-spawn-argv": ["otto", "merge", "add-post"],
+        "history-terminal-snapshot-count": 4,
+        "history-terminal-outcomes": {
+            "build-run": "success",
+            "queue-success": "success",
+            "queue-cancelled": "cancelled",
+            "merge-run": "success",
+        },
+        "cancelled-queue-run-id": "queue-cancelled",
+        "history-artifacts-resolve": True,
+        "live-records-terminal-after-gc": True,
+    }
+    details.update(overrides)
+    return details
+
+
+def _n9_run_result(repo: Path, artifact_dir: Path, details: dict[str, object]) -> object:
+    return OTTO_AS_USER_NIGHTLY.base.RunResult(
         scenario_id="N9",
         returncode=0,
         started_at="2026-04-23T00:00:00Z",
@@ -415,31 +568,79 @@ def test_verify_n9_rejects_merge_all(tmp_path: Path) -> None:
         repo_path=str(repo),
         debug_log=str(artifact_dir / "debug.log"),
         output="",
-        details={
-            "build-live-row-latency-ms": 500,
-            "build-finished-naturally": True,
-            "standalone-heartbeat-advanced": True,
-            "standalone-log-cycled": True,
-            "queue-cancel-history-latency-ms": 300,
-            "queue-cancelled-latency-ms": 400,
-            "editor-spawn-attempted": True,
-            "merge-spawn-argv": ["otto", "merge", "--all"],
-            "history-terminal-snapshot-count": 3,
-            "history-terminal-outcomes": {
-                "queue-cancelled": "cancelled",
-                "queue-success": "success",
-                "merge-run": "success",
-            },
-            "cancelled-queue-run-id": "queue-cancelled",
-            "history-artifacts-resolve": True,
-            "live-records-terminal-after-gc": True,
-        },
+        details=details,
     )
 
-    result = OTTO_AS_USER_NIGHTLY.verify_n9(repo, run_result)
+
+def test_verify_n9_fails_when_visible_or_hidden_pytest_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_n9_merge_state(repo)
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+
+    def fake_run_pytest(repo_arg: Path, target: str, artifact_dir_arg: Path, attempt_index: int):
+        del repo_arg, artifact_dir_arg, attempt_index
+        return subprocess.CompletedProcess(
+            args=["pytest", target],
+            returncode=1 if target == failing_target else 0,
+            stdout="failed",
+            stderr="",
+        )
+
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY, "_run_pytest", fake_run_pytest)
+
+    for failing_target, expected_note in [
+        ("tests/visible", "N9 visible tests failed after the realistic operator session"),
+        ("tests/hidden", "N9 hidden realistic-session checks failed after merge"),
+    ]:
+        result = OTTO_AS_USER_NIGHTLY.verify_n9(
+            repo,
+            _n9_run_result(repo, artifact_dir, _n9_success_details()),
+        )
+
+        assert result.passed is False
+        assert result.note == expected_note
+
+
+def test_verify_n9_rejects_merge_all(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_n9_merge_state(repo)
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+
+    def fake_run_pytest(repo_arg: Path, target: str, artifact_dir_arg: Path, attempt_index: int):
+        del repo_arg, artifact_dir_arg, attempt_index
+        return subprocess.CompletedProcess(args=["pytest", target], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY, "_run_pytest", fake_run_pytest)
+
+    result = OTTO_AS_USER_NIGHTLY.verify_n9(
+        repo,
+        _n9_run_result(
+            repo,
+            artifact_dir,
+            _n9_success_details(
+                **{
+                    "merge-spawn-argv": ["otto", "merge", "--all"],
+                    "history-terminal-snapshot-count": 3,
+                    "history-terminal-outcomes": {
+                        "queue-cancelled": "cancelled",
+                        "queue-success": "success",
+                        "merge-run": "success",
+                    },
+                },
+            ),
+        ),
+    )
 
     assert result.passed is False
     assert result.note == "N9 merge was not launched from selected queue rows"
+    assert result.details == ["N9 merge was not launched from selected queue rows"]
 
 
 def test_verify_n9_accepts_legacy_queue_cancel_ack_field(monkeypatch, tmp_path: Path) -> None:

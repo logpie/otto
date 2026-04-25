@@ -22,9 +22,20 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
 RESULTS_DIR = REPO_ROOT / "bench-results"
 FIXTURES_DIR = REPO_ROOT / "bench-fixtures"
+
+from real_cost_guard import require_real_cost_opt_in  # noqa: E402
+from bench_costs import merge_cost_from_state_dir  # noqa: E402
+
+
+def _real_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.pop("OTTO_BIN", None)
+    return env
 
 
 def log(msg: str) -> None:
@@ -47,7 +58,7 @@ def otto_run(repo: Path, *args: str, timeout: float = 1800) -> tuple[int, str]:
     r = subprocess.run(
         [str(OTTO_BIN), *args],
         cwd=repo, capture_output=True, text=True, timeout=timeout,
-        env={**os.environ},
+        env=_real_env(),
     )
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
@@ -71,15 +82,25 @@ def wait_for_queue_terminal(repo: Path, timeout: float = 1800) -> dict[str, str]
         time.sleep(20)
 
 
+def queue_branches(repo: Path) -> dict[str, str]:
+    from otto.queue.schema import load_queue
+
+    return {
+        task.id: task.branch
+        for task in load_queue(repo)
+        if task.branch
+    }
+
+
 def main() -> int:
+    require_real_cost_opt_in("Flask benchmark fixture generation")
     log("=== Building Flask API fixture ===")
     repo = setup_repo()
     log(f"repo: {repo}")
 
     # Phase 1: build base via queue
     log("Phase 1: queue base build")
-    rc, out = otto_run(repo, "queue", "build", "--as", "base", "--",
-                       "--fast", "--no-qa",
+    rc, out = otto_run(repo, "queue", "build",
                        "Build a Flask REST API in app.py for a tiny todo list. "
                        "Endpoints: POST /todos {text} creates a todo (returns id). "
                        "GET /todos lists all (id, text, done, created_at). "
@@ -87,7 +108,8 @@ def main() -> int:
                        "DELETE /todos/<id> deletes. "
                        "Persist as todos.json. Use stdlib only (no SQLAlchemy). "
                        "Include test_app.py with at least 4 tests covering "
-                       "create + list + done + delete flow.")
+                       "create + list + done + delete flow.",
+                       "--as", "base", "--", "--fast", "--no-qa")
     if rc != 0:
         log(f"FAILED to enqueue base: {out[:500]}")
         return 1
@@ -96,6 +118,7 @@ def main() -> int:
     watcher = subprocess.Popen(
         [str(OTTO_BIN), "queue", "run", "--concurrent", "1"],
         cwd=repo,
+        env=_real_env(),
         stdout=open(repo / ".watcher.log", "wb"),
         stderr=subprocess.STDOUT,
     )
@@ -112,7 +135,7 @@ def main() -> int:
             watcher.wait()
 
     if statuses.get("base") != "done":
-        log(f"FAILED: base did not reach done")
+        log("FAILED: base did not reach done")
         return 1
 
     # Merge base into main
@@ -135,7 +158,7 @@ def main() -> int:
                           "Add at least 2 tests for priority ordering."),
     ]
     for tid, intent in improves:
-        rc, out = otto_run(repo, "queue", "improve", "feature", "--as", tid, "--", "-n", "1", intent)
+        rc, out = otto_run(repo, "queue", "improve", "feature", intent, "--as", tid, "--", "-n", "1")
         if rc != 0:
             log(f"FAILED to enqueue {tid}: {out[:300]}")
             return 1
@@ -144,6 +167,7 @@ def main() -> int:
     watcher = subprocess.Popen(
         [str(OTTO_BIN), "queue", "run", "--concurrent", "2"],
         cwd=repo,
+        env=_real_env(),
         stdout=open(repo / ".watcher.log", "wb"),
         stderr=subprocess.STDOUT,
     )
@@ -168,42 +192,44 @@ def main() -> int:
         ["git", "update-ref", "refs/fixtures/main", pre_merge_head],
         cwd=repo, check=True,
     )
+    branches_by_task = queue_branches(repo)
     bundle_args = ["git", "bundle", "create", str(FIXTURES_DIR / "flask-api-branches.bundle"),
                    "refs/fixtures/main"]
-    for tid, _ in improves:
-        bundle_args.append(f"improve/{tid}-2026-04-20")
-    bundle_args.append("build/base-2026-04-20")
+    required_task_ids = ["base", *(tid for tid, _ in improves)]
+    missing_branches = [tid for tid in required_task_ids if tid not in branches_by_task]
+    if missing_branches:
+        log(f"FAILED to resolve queue branches for bundle: {missing_branches}; {branches_by_task}")
+        return 1
+    for tid in required_task_ids:
+        bundle_args.append(branches_by_task[tid])
     subprocess.run(bundle_args, cwd=repo, check=True)
-    log(f"Fixture saved")
+    log("Fixture saved")
 
-    # Phase 3: test F13 with consolidated mode
-    log("Phase 3: enable merge_mode=consolidated and run F13 salvage")
+    # Phase 3: test F13 with the default consolidated merge path.
+    log("Phase 3: run F13 salvage")
     yaml_path = repo / "otto.yaml"
     yaml_text = yaml_path.read_text() if yaml_path.exists() else "default_branch: main\n"
-    if "merge_mode" not in yaml_text:
-        yaml_path.write_text(yaml_text.rstrip() + "\n\nqueue:\n  merge_mode: consolidated\n")
-    subprocess.run(["git", "add", "otto.yaml"], cwd=repo, capture_output=True)
-    subprocess.run(["git", "commit", "-q", "-m", "enable consolidated merge"],
-                   cwd=repo, capture_output=True)
+    if "default_branch" not in yaml_text:
+        yaml_path.write_text(yaml_text.rstrip() + "\ndefault_branch: main\n")
+        subprocess.run(["git", "add", "otto.yaml"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "configure otto"],
+                       cwd=repo, capture_output=True)
 
-    branches_to_merge = [f"improve/{tid}-2026-04-20" for tid, _ in improves]
+    branches_to_merge = [
+        branches_by_task[tid]
+        for tid, _ in improves
+        if tid in branches_by_task
+    ]
+    if len(branches_to_merge) != len(improves):
+        log(f"FAILED to resolve improve branches from queue: {branches_by_task}")
+        return 1
     log(f"Running consolidated salvage of {branches_to_merge}")
     t0 = time.time()
     rc, out = otto_run(repo, "merge", *branches_to_merge, "--no-certify", timeout=3600)
     wall = time.time() - t0
     log(f"Salvage done in {wall:.0f}s, rc={rc}")
 
-    cost = 0.0
-    for sf in (repo / "otto_logs" / "merge").glob("merge-*/state.json"):
-        try:
-            d = json.loads(sf.read_text())
-            for o in d.get("outcomes", []):
-                note = o.get("note") or ""
-                if "cost $" in note:
-                    bit = note.split("cost $")[1].split(",")[0].split(")")[0]
-                    cost += float(bit)
-        except Exception:
-            pass
+    cost = merge_cost_from_state_dir(repo / "otto_logs" / "merge")
 
     log_path = repo / "otto_logs" / "merge" / "conflict-agent-agentic.log"
     tool_counts: dict[str, int] = {}

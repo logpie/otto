@@ -17,6 +17,33 @@ except ImportError:  # pragma: no cover - Windows best effort
     fcntl = None
 
 
+def history_run_id(entry: dict[str, Any]) -> str:
+    """Return the canonical run identifier for a history entry."""
+    return str(
+        entry.get("run_id")
+        or entry.get("session_id")
+        or entry.get("build_id")
+        or ""
+    ).strip()
+
+
+def normalize_command_label(command: str | None) -> str:
+    """Normalize dotted command ids to a stable human-readable label."""
+    raw = str(command or "").strip()
+    if not raw:
+        return "build"
+    if raw.startswith("improve."):
+        return f"improve {raw.split('.', 1)[1]}".strip()
+    return raw.replace(".", " ")
+
+
+def command_family(command: str | None) -> str:
+    """Collapse concrete commands into build/certify/improve families."""
+    label = normalize_command_label(command)
+    head = label.split(" ", 1)[0].strip().lower()
+    return head or "build"
+
+
 def append_history_snapshot(
     project_dir: Path,
     row: dict[str, Any],
@@ -76,8 +103,6 @@ def build_terminal_snapshot(
     identity: dict[str, Any] | None = None,
     extra_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from otto.history import normalize_command_label
-
     resolved_run_id = str(run_id).strip()
     if not resolved_run_id:
         raise ValueError("terminal snapshot requires run_id")
@@ -356,19 +381,19 @@ def _source_rows_might_suppress(
     rows: list[dict[str, Any]],
     candidate: dict[str, Any],
 ) -> bool:
-    candidate_run_id = _history_run_id(candidate)
+    candidate_run_id = history_run_id(candidate)
     candidate_command = str(candidate.get("command") or "").strip()
-    candidate_normalized_command = _normalize_command_label(candidate_command) if candidate_command else ""
+    candidate_normalized_command = normalize_command_label(candidate_command) if candidate_command else ""
     candidate_dedupe_key = str(candidate.get("dedupe_key") or "").strip()
     for row in rows:
         dedupe_key = str(row.get("dedupe_key") or "").strip()
         if candidate_dedupe_key and dedupe_key == candidate_dedupe_key:
             return True
-        run_id = _history_run_id(row)
+        run_id = history_run_id(row)
         if not candidate_run_id or run_id != candidate_run_id:
             continue
         command = str(row.get("command") or "").strip()
-        normalized_command = _normalize_command_label(command) if command else ""
+        normalized_command = normalize_command_label(command) if command else ""
         if candidate_normalized_command == normalized_command:
             return True
         if candidate_normalized_command and not normalized_command:
@@ -405,9 +430,9 @@ def _dedupe_history_entries(
 
     for item in sorted(entries, key=preference, reverse=True):
         _, _, _, entry = item
-        run_id = _history_run_id(entry)
+        run_id = history_run_id(entry)
         raw_command = str(entry.get("command") or "").strip()
-        command = _normalize_command_label(raw_command) if raw_command else ""
+        command = normalize_command_label(raw_command) if raw_command else ""
         dedupe_key = str(entry.get("dedupe_key") or "").strip()
         key = ("dedupe", dedupe_key) if dedupe_key else ("run-command", f"{run_id}:{command}")
         if key in selected_keys:
@@ -443,21 +468,3 @@ def _history_sort_key(
         except ValueError:
             pass
     return (fallback_ts, source_index, line_index)
-
-
-def _history_run_id(entry: dict[str, Any]) -> str:
-    return str(
-        entry.get("run_id")
-        or entry.get("session_id")
-        or entry.get("build_id")
-        or ""
-    ).strip()
-
-
-def _normalize_command_label(command: str | None) -> str:
-    raw = str(command or "").strip()
-    if not raw:
-        return "build"
-    if raw.startswith("improve."):
-        return f"improve {raw.split('.', 1)[1]}".strip()
-    return raw.replace(".", " ")

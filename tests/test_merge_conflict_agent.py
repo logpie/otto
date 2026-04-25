@@ -96,8 +96,7 @@ def test_files_with_markers_flags_large_files_via_streaming_scan(tmp_path: Path)
 
 
 def test_validate_post_agent_catches_committed_markers(tmp_path: Path):
-    """`validate_post_agent` catches markers that live in committed files
-    (where `git diff --check` is blind) by content-scanning expected_uu_files."""
+    """`validate_post_agent` catches markers in committed primary-scope files."""
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
@@ -204,7 +203,7 @@ def test_validate_post_agent_fails_when_untracked_cleanup_fails(tmp_path: Path, 
 
 
 def test_validate_post_agent_passes_clean_tree(tmp_path: Path):
-    """Clean tree, expected_uu_files empty, HEAD unchanged → passes."""
+    """Clean tree, empty edit scope, HEAD unchanged -> passes."""
     head = _init_repo(tmp_path)
 
     result = validate_post_agent(

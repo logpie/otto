@@ -8,34 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from otto.redaction import redact_text
-from otto.runs.history import append_history_snapshot
-
-
-def history_run_id(entry: dict[str, Any]) -> str:
-    """Return the canonical run identifier for a history entry."""
-    return str(
-        entry.get("run_id")
-        or entry.get("session_id")
-        or entry.get("build_id")
-        or ""
-    ).strip()
-
-
-def normalize_command_label(command: str | None) -> str:
-    """Normalize dotted command ids to a stable human-readable label."""
-    raw = str(command or "").strip()
-    if not raw:
-        return "build"
-    if raw.startswith("improve."):
-        return f"improve {raw.split('.', 1)[1]}".strip()
-    return raw.replace(".", " ")
-
-
-def command_family(command: str | None) -> str:
-    """Collapse concrete commands into build/certify/improve families."""
-    label = normalize_command_label(command)
-    head = label.split(" ", 1)[0].strip().lower()
-    return head or "build"
+from otto.runs.history import (
+    append_history_snapshot,
+    command_family,
+    history_run_id,
+    normalize_command_label,
+)
 
 
 def append_history_entry(project_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:

@@ -126,7 +126,6 @@ async def _run_dashboard_async(app: MissionControlApp, runner: Runner, *, quiet:
                 console.print("  [yellow]Dashboard crashed; continuing with prefixed stdout.[/yellow]")
                 return await runner_task
             if not runner_task.done():
-                runner.shutdown_level = runner.shutdown_level or "graceful"
                 _print_dashboard_closed_notice(app.state.live_runs.active_count)
                 return await runner_task
             return runner_task.result()

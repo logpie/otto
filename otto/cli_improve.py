@@ -65,20 +65,6 @@ def _exit_for_lock_busy(exc) -> None:
     sys.exit(1)
 
 
-def _resolve_intent(project_dir: Path) -> str | None:
-    """Resolve product description from intent.md or README.md."""
-    from otto.config import _normalize_intent, resolve_intent_provenance
-    try:
-        intent = _normalize_intent(resolve_intent_provenance(project_dir).get("resolved_text", "") or "")
-    except Exception as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-    if intent:
-        console.print("  [dim]Intent from project files[/dim]")
-    return intent
-
-
-
 def _create_improve_branch(project_dir: Path) -> str:
     """Create an improvement branch and switch to it. Returns branch name."""
     branch = f"improve/{time.strftime('%Y-%m-%d')}-{secrets.token_hex(3)}"
@@ -134,7 +120,11 @@ def _resolve_improve_certifier_mode(
         )
         sys.exit(2)
     cli_mode = "fast" if fast else ("standard" if standard else ("thorough" if thorough else None))
-    return resolve_certifier_mode({"certifier_mode": default_mode}, cli_mode=cli_mode)
+    return resolve_certifier_mode(
+        {"certifier_mode": default_mode},
+        cli_mode=cli_mode,
+        allow_internal=True,
+    )
 
 
 def _run_improve(
@@ -172,7 +162,11 @@ def _run_improve(
     from otto.config import load_config
 
     command_id = f"improve.{subcommand}"
-    config = load_config(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
+    try:
+        config = load_config(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
+    except (ConfigError, ValueError) as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
     if resume_state is None:
         resume_state = resolve_resume(
             project_dir,
@@ -312,6 +306,14 @@ def _run_improve_locked(
     ):
         certifier_mode = resume_state.certifier_mode
 
+    pre_branch_allow_dirty = bool(allow_dirty or config.get("allow_dirty_repo"))
+    if not resume_state.resumed:
+        try:
+            ensure_safe_repo_state(project_dir, allow_dirty=pre_branch_allow_dirty)
+        except ConfigError as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
+
     if in_worktree:
         from otto.branching import current_branch as _cb
 
@@ -391,7 +393,10 @@ def _run_improve_locked(
     if overrides.get("debug_unredacted"):
         console.print("  [bold red]UNREDACTED LOGS — do not share[/bold red]")
     try:
-        ensure_safe_repo_state(project_dir, allow_dirty=allow_dirty)
+        ensure_safe_repo_state(
+            project_dir,
+            allow_dirty=bool(resume_state.resumed or allow_dirty or config.get("allow_dirty_repo")),
+        )
     except ConfigError as exc:
         if resume_state.run_id:
             try:

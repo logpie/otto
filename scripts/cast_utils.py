@@ -34,11 +34,6 @@ def mouse_disable_codes(text: str) -> list[str]:
     return MOUSE_DISABLE_RE.findall(text)
 
 
-def render_final_frame(path: Path) -> str:
-    frame = _scan_frames(path, lambda _frame: True, last=True)
-    return frame.screen_text if frame is not None else ""
-
-
 def find_first_frame(path: Path, predicate: Callable[[str], bool]) -> CastFrame | None:
     return _scan_frames(path, predicate, last=False)
 

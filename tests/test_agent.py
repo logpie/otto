@@ -2,6 +2,8 @@
 
 import asyncio
 
+import os
+
 import pytest
 
 from otto.agent import (
@@ -125,12 +127,15 @@ async def test_codex_query_normalizes_json_events(tmp_path, monkeypatch):
     assert [type(m) for m in messages] == [AssistantMessage, AssistantMessage, AssistantMessage, ResultMessage]
     assert isinstance(messages[0].content[0], TextBlock)
     assert messages[0].content[0].text == "Planning..."
+    assert messages[0].session_id == "thread-123"
     assert isinstance(messages[1].content[0], ToolUseBlock)
     assert "ls -1" in messages[1].content[0].input["command"]
     assert messages[1].content[0].id == "item_1"
+    assert messages[1].session_id == "thread-123"
     assert isinstance(messages[2].content[0], ToolResultBlock)
     assert messages[2].content[0].content == "README.md\n"
     assert messages[2].content[0].tool_use_id == "item_1"
+    assert messages[2].session_id == "thread-123"
     assert messages[3].session_id == "thread-123"
     assert messages[3].usage == {"input_tokens": 10, "output_tokens": 3}
     assert process.stdin.buffer.decode("utf-8") == "List files"
@@ -513,6 +518,56 @@ async def test_run_agent_with_timeout_raises_on_error_result(tmp_path, monkeypat
             timeout=30,
             project_dir=tmp_path,
         )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_with_timeout_cleans_up_on_cancelled_error(tmp_path, monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent_query(*args, **kwargs):
+        del args
+        state = kwargs["state"]
+        state["process_group_id"] = 424242
+        state["process_start_time_ns"] = 123456789
+        raise asyncio.CancelledError()
+
+    def fake_cleanup(project_dir, *, process_group_id=None, process_start_time_ns=None):
+        captured["project_dir"] = project_dir
+        captured["process_group_id"] = process_group_id
+        captured["process_start_time_ns"] = process_start_time_ns
+
+    monkeypatch.setattr("otto.agent.run_agent_query", fake_run_agent_query)
+    monkeypatch.setattr("otto.pipeline._cleanup_orphan_processes", fake_cleanup)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_agent_with_timeout(
+            "test",
+            AgentOptions(),
+            log_dir=tmp_path,
+            timeout=30,
+            project_dir=tmp_path,
+        )
+
+    assert captured == {
+        "project_dir": tmp_path,
+        "process_group_id": 424242,
+        "process_start_time_ns": 123456789,
+    }
+
+
+def test_cleanup_orphan_processes_skips_reused_process_group(tmp_path, monkeypatch):
+    from otto.pipeline import _cleanup_orphan_processes
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("stale process identity must not be signaled")
+
+    monkeypatch.setattr("otto.pipeline.os.killpg", fail_if_called)
+
+    _cleanup_orphan_processes(
+        tmp_path,
+        process_group_id=os.getpid(),
+        process_start_time_ns=1,
+    )
 
 
 @pytest.mark.asyncio

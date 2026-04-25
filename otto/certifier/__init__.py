@@ -2046,7 +2046,7 @@ def _render_pow_html(report: dict[str, Any]) -> str:
         )
     if run_context["duration_human"]:
         html_lines.append(f"<div><span class='meta-label'>Duration</span><div>{esc(run_context['duration_human'])}</div></div>")
-    html_lines.append(f"<div><span class='meta-label'>Cost</span>" + "".join(f"<div>{esc(line)}</div>" for line in report["cost_summary"]["lines"]) + "</div>")
+    html_lines.append("<div><span class='meta-label'>Cost</span>" + "".join(f"<div>{esc(line)}</div>" for line in report["cost_summary"]["lines"]) + "</div>")
     html_lines.extend(["</div>"])
     if report["show_round_timeline"]:
         open_attr = " open"

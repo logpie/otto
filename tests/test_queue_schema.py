@@ -17,6 +17,7 @@ from otto.queue.schema import (
     STATE_SCHEMA_VERSION,
     QueueTask,
     append_command,
+    append_command_ack,
     append_task,
     begin_command_drain,
     finish_command_drain,
@@ -191,13 +192,20 @@ def test_load_state_rejects_invalid_json(tmp_path: Path):
 
 
 def test_append_then_drain_returns_commands_in_order(tmp_path: Path):
-    append_command(tmp_path, {"cmd": "cancel", "id": "t1"})
-    append_command(tmp_path, {"cmd": "remove", "id": "t2"})
+    first = append_command(tmp_path, {"cmd": "cancel", "id": "t1"})
+    second = append_command(tmp_path, {"cmd": "remove", "id": "t2"})
     drained = begin_command_drain(tmp_path)
-    assert drained == [
-        {"cmd": "cancel", "id": "t1"},
-        {"cmd": "remove", "id": "t2"},
-    ]
+    assert drained == [first, second]
+    assert drained[0]["schema_version"] == 1
+    assert drained[0]["command_id"].startswith("queue-cmd-")
+    finish_command_drain(tmp_path)
+
+
+def test_append_command_preserves_existing_command_id_and_drain_skips_acked(tmp_path: Path):
+    row = append_command(tmp_path, {"cmd": "cancel", "id": "t1", "command_id": "cmd-known"})
+    append_command_ack(tmp_path, row, writer_id="watcher", outcome="applied")
+
+    assert begin_command_drain(tmp_path) == []
     finish_command_drain(tmp_path)
 
 
@@ -213,7 +221,9 @@ def test_drain_skips_malformed_lines(tmp_path: Path):
     p = tmp_path / COMMANDS_FILE
     p.write_text("not json\n" + json.dumps({"cmd": "cancel", "id": "t1"}) + "\n" + "{broken\n")
     drained = begin_command_drain(tmp_path)
-    assert drained == [{"cmd": "cancel", "id": "t1"}]
+    assert len(drained) == 1
+    assert drained[0]["cmd"] == "cancel"
+    assert drained[0]["id"] == "t1"
     finish_command_drain(tmp_path)
 
 

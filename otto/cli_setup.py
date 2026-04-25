@@ -113,7 +113,8 @@ def register_setup_command(main: click.Group) -> None:
     """Register the setup command on the main CLI group."""
 
     @main.command(context_settings=CONTEXT_SETTINGS)
-    def setup():
+    @click.option("-y", "--yes", is_flag=True, help="Proceed without confirmation prompts and write CLAUDE.md.")
+    def setup(yes: bool):
         """Generate CLAUDE.md with project conventions for the coding agent."""
         from otto.config import require_git
 
@@ -129,31 +130,22 @@ def register_setup_command(main: click.Group) -> None:
 
         claude_md = _paths.project_claude_md(project_dir)
         existing_content = None
-        mode = "generate"
+        original_content = _safe_read(claude_md, 10000) if claude_md.exists() else None
 
         if claude_md.exists():
             existing_content = _safe_read(claude_md, 5000)
-            console.print(f"[dim]CLAUDE.md already exists ({claude_md.stat().st_size} bytes)[/dim]")
-            console.print("  [bold]1[/bold] Merge (keep your rules, add new conventions)")
-            console.print("  [bold]2[/bold] Regenerate (replace entirely)")
-            console.print("  [bold]3[/bold] Keep existing")
-            choice = click.prompt("Choice", type=click.IntRange(1, 3), default=1)
-            if choice == 3:
-                return
-            elif choice == 2:
-                existing_content = None
-                mode = "generate"
+            if yes:
+                console.print("[dim]CLAUDE.md already exists; --yes will merge fresh conventions into it[/dim]")
             else:
-                mode = "merge"
-
-        # Back up existing CLAUDE.md
-        _backup_path = None
-        if mode == "generate" and claude_md.exists():
-            import tempfile as _tf
-            fd, _backup_path = _tf.mkstemp(suffix=".md", prefix="claude_md_backup_")
-            os.close(fd)
-            Path(_backup_path).write_text(claude_md.read_text())
-            claude_md.unlink()
+                console.print(f"[dim]CLAUDE.md already exists ({claude_md.stat().st_size} bytes)[/dim]")
+                console.print("  [bold]1[/bold] Merge (keep your rules, add new conventions)")
+                console.print("  [bold]2[/bold] Regenerate (replace entirely)")
+                console.print("  [bold]3[/bold] Keep existing")
+                choice = click.prompt("Choice", type=click.IntRange(1, 3), default=1)
+                if choice == 3:
+                    return
+                elif choice == 2:
+                    existing_content = None
 
         context_parts = _gather_project_context(project_dir)
         console.print("[dim]Scanning project...[/dim]")
@@ -199,10 +191,30 @@ contradict what the codebase actually does. Deduplicate."""
         except ValueError as exc:
             error_console.print(f"[error]{exc}[/error]")
             raise SystemExit(2) from exc
+        provider = agent_provider(config)
+        model = str(config.get("model") or "").strip() or "provider default"
+        console.print(
+            "[yellow]otto setup will make one provider-backed agent call "
+            f"(provider={provider}, model={model}) to draft CLAUDE.md.[/yellow]"
+        )
+        if not yes and not click.confirm("Continue with CLAUDE.md generation?", default=True):
+            console.print("[dim]Cancelled — CLAUDE.md unchanged[/dim]")
+            return
         result_text = asyncio.run(_run_setup_query(prompt, project_dir, config))
 
-        if not result_text.strip() and claude_md.exists():
-            result_text = _safe_read(claude_md, 10000) or ""
+        generated_file_content = None
+        current_content = _safe_read(claude_md, 10000) if claude_md.exists() else None
+        if current_content is not None and current_content != original_content:
+            generated_file_content = current_content
+            if original_content is None:
+                try:
+                    claude_md.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                claude_md.write_text(original_content, encoding="utf-8")
+        if not result_text.strip() and generated_file_content:
+            result_text = generated_file_content
         if not result_text.strip():
             error_console.print("[red]Failed to generate CLAUDE.md content[/red]")
             return
@@ -220,13 +232,9 @@ contradict what the codebase actually does. Deduplicate."""
         console.print("─" * 60)
         console.print()
 
-        if click.confirm("Write to CLAUDE.md?", default=True):
+        if yes or click.confirm("Write to CLAUDE.md?", default=True):
             claude_md.write_text(content.strip() + "\n")
             console.print(f"[success]Wrote CLAUDE.md ({len(content)} chars)[/success]")
             console.print("[dim]  Commit it so the coding agent can read it.[/dim]")
-            if _backup_path and Path(_backup_path).exists():
-                Path(_backup_path).unlink()
         else:
-            if _backup_path and Path(_backup_path).exists():
-                Path(_backup_path).rename(claude_md)
-            console.print("[dim]Cancelled — original CLAUDE.md restored[/dim]")
+            console.print("[dim]Cancelled — CLAUDE.md unchanged[/dim]")

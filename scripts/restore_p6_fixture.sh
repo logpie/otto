@@ -3,18 +3,19 @@
 #
 # Saves you from re-running phase 1+2 ($11+ and 16min). The bundle contains:
 # - main branch (with base + alerts merged)
-# - improve/imp-categories-2026-04-20 (failed cert, has commits)
-# - improve/imp-suppliers-2026-04-20 (failed cert, has commits)
-# - improve/imp-alerts-2026-04-20 (passed cert, already merged into main)
+# - improve/imp-categories-* (failed cert, has commits)
+# - improve/imp-suppliers-* (failed cert, has commits)
+# - improve/imp-alerts-* (passed cert, already merged into main)
 #
 # Usage:
 #   ./scripts/restore_p6_fixture.sh /tmp/my-merge-test
 #   cd /tmp/my-merge-test
-#   # Set merge_mode in otto.yaml if testing F13:
-#   echo -e "default_branch: main\n\nqueue:\n  merge_mode: consolidated" > otto.yaml
+#   # Set the target branch if testing F13:
+#   printf "default_branch: main\n" > otto.yaml
 #   git add otto.yaml && git commit -q -m "test config"
 #   # Run the merge under test:
-#   otto merge improve/imp-categories-2026-04-20 improve/imp-suppliers-2026-04-20 --no-certify
+#   git branch
+#   otto merge <restored-categories-branch> <restored-suppliers-branch> --no-certify
 #   # Compare cost/wall/result between test variants on the same starting state.
 
 set -euo pipefail
@@ -46,12 +47,23 @@ git config user.name "Fixture"
 git fetch -q "$BUNDLE" '*:refs/fixture-tmp/*'
 # Note: bundle refs land under refs/fixture-tmp/refs/<original>/...
 git update-ref refs/heads/main refs/fixture-tmp/refs/fixtures/main
-for b in alerts categories suppliers; do
-  git update-ref "refs/heads/improve/imp-$b-2026-04-20" \
-    "refs/fixture-tmp/refs/heads/improve/imp-$b-2026-04-20"
-done
-git update-ref refs/heads/build/base-2026-04-20 \
-  refs/fixture-tmp/refs/heads/build/base-2026-04-20
+
+restore_branch() {
+  local pattern="$1"
+  mapfile -t refs < <(git for-each-ref --format='%(refname)' "refs/fixture-tmp/refs/heads/$pattern")
+  if [ "${#refs[@]}" -ne 1 ]; then
+    echo "Expected exactly one bundle ref for $pattern, found ${#refs[@]}" >&2
+    printf '  %s\n' "${refs[@]}" >&2
+    exit 1
+  fi
+  local branch="${refs[0]#refs/fixture-tmp/refs/heads/}"
+  git update-ref "refs/heads/$branch" "${refs[0]}"
+}
+
+restore_branch 'improve/imp-alerts-*'
+restore_branch 'improve/imp-categories-*'
+restore_branch 'improve/imp-suppliers-*'
+restore_branch 'build/base-*'
 git for-each-ref refs/fixture-tmp/ --format='%(refname)' | xargs -n1 -I{} git update-ref -d {} 2>/dev/null || true
 git checkout -q main
 git reset -q --hard main

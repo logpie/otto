@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from otto import paths
 from otto.cli import _new_run_id
 from otto.queue.schema import append_command, append_command_ack, begin_command_drain, finish_command_drain
+import otto.runs.registry as registry_module
 from otto.runs.registry import (
+    append_command_request,
     allocate_run_id,
     garbage_collect_live_records,
     make_run_record,
@@ -93,6 +98,39 @@ def test_gc_skips_terminal_record_while_writer_alive(tmp_path: Path, monkeypatch
     assert paths.live_run_path(tmp_path, run_id).exists()
 
 
+def test_gc_terminalizes_and_removes_stale_nonterminal_record(tmp_path: Path, monkeypatch) -> None:
+    run_id = allocate_run_id(tmp_path)
+    record = make_run_record(
+        project_dir=tmp_path,
+        run_id=run_id,
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="build: stale",
+        status="running",
+        cwd=tmp_path,
+    )
+    record.timing["heartbeat_at"] = "2026-04-20T00:00:00Z"
+    write_record(tmp_path, record)
+    stored = paths.live_run_path(tmp_path, run_id)
+    data = json.loads(stored.read_text(encoding="utf-8"))
+    data["timing"]["heartbeat_at"] = "2026-04-20T00:00:00Z"
+    stored.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr("otto.runs.registry.writer_identity_gone_or_stale", lambda writer: True)
+
+    removed = garbage_collect_live_records(
+        tmp_path,
+        stale_nonterminal_retention_s=1.0,
+        now=datetime(2026, 4, 23, tzinfo=timezone.utc),
+    )
+
+    assert removed == [run_id]
+    row = json.loads(paths.run_gc_tombstones_jsonl(tmp_path).read_text(encoding="utf-8"))
+    assert row["run_id"] == run_id
+    assert row["status"] == "interrupted"
+    assert row["terminal_outcome"] == "interrupted"
+
+
 def test_read_live_records_skips_malformed_rows(tmp_path: Path) -> None:
     good_id = allocate_run_id(tmp_path)
     write_record(
@@ -132,6 +170,45 @@ def test_queue_unacked_command_replays_until_acked(tmp_path: Path) -> None:
     third = begin_command_drain(tmp_path)
     assert third == []
     finish_command_drain(tmp_path)
+
+
+def test_append_command_request_uses_drain_sidecar_lock(tmp_path: Path) -> None:
+    if registry_module.fcntl is None:
+        pytest.skip("fcntl unavailable")
+    request_path = paths.session_command_requests(tmp_path, "run-1")
+    lock_path = request_path.with_suffix(request_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    done: list[bool] = []
+    cmd = {
+        "schema_version": 1,
+        "command_id": "cmd-1",
+        "run_id": "run-1",
+        "kind": "cancel",
+        "requested_at": "2026-04-23T00:00:00Z",
+    }
+
+    attempted = threading.Event()
+
+    def _append() -> None:
+        attempted.set()
+        append_command_request(request_path, cmd)
+        done.append(True)
+
+    with lock_path.open("a", encoding="utf-8") as handle:
+        registry_module.fcntl.flock(handle.fileno(), registry_module.fcntl.LOCK_EX)
+        thread = threading.Thread(target=_append)
+        thread.start()
+        assert attempted.wait(timeout=1.0)
+        thread.join(timeout=0.1)
+        assert done == []
+        assert thread.is_alive()
+        assert not request_path.exists()
+        registry_module.fcntl.flock(handle.fileno(), registry_module.fcntl.LOCK_UN)
+
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert done == [True]
+    assert json.loads(request_path.read_text(encoding="utf-8"))["command_id"] == "cmd-1"
 
 
 def test_new_run_id_prefers_otto_run_id_env(tmp_path: Path, monkeypatch) -> None:

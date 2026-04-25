@@ -8,7 +8,7 @@ Scenarios:
   S4 — Add/add conflict (both branches added the same new file): tests another git edge
   S5 — Large single file (3000+ lines): tests if F13 handles big-file conflicts
 
-Usage: .venv/bin/python scripts/bench_f13_diverse.py [S1|S2|S3|S4|S5|all]
+Usage: OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/bench_f13_diverse.py [S1|S2|S3|S4|S5|all]
 """
 
 from __future__ import annotations
@@ -20,12 +20,18 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
 RESULTS_DIR = REPO_ROOT / "bench-results"
+
+from real_cost_guard import require_real_cost_opt_in  # noqa: E402
+from bench_costs import merge_cost_from_state_dir  # noqa: E402
 
 
 @dataclass
@@ -68,8 +74,8 @@ def setup_repo(prefix: str, files: dict[str, str]) -> Path:
         "__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\n"
         "node_modules/\n*.log\ndist/\nbuild/\n.cache/\n"
     )
-    # Otto config: consolidated mode
-    (base / "otto.yaml").write_text("default_branch: main\n\nqueue:\n  merge_mode: consolidated\n")
+    # Otto config; consolidated merge is the default merge path.
+    (base / "otto.yaml").write_text("default_branch: main\n")
     subprocess.run(["git", "add", "."], cwd=base, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=base, check=True)
     return base
@@ -128,17 +134,7 @@ def run_consolidated(repo: Path, branches: list[str], name: str) -> ScenarioResu
     out = (result.stdout or "") + (result.stderr or "")
     log(f"merge done in {wall:.0f}s, rc={result.returncode}")
 
-    cost = 0.0
-    for sf in (repo / "otto_logs" / "merge").glob("merge-*/state.json"):
-        try:
-            d = json.loads(sf.read_text())
-            for o in d.get("outcomes", []):
-                note = o.get("note") or ""
-                if "cost $" in note:
-                    bit = note.split("cost $")[1].split(",")[0].split(")")[0]
-                    cost += float(bit)
-        except Exception:
-            pass
+    cost = merge_cost_from_state_dir(repo / "otto_logs" / "merge")
 
     log_path = repo / "otto_logs" / "merge" / "conflict-agent-agentic.log"
     tool_counts: dict[str, int] = {}
@@ -471,6 +467,10 @@ SCENARIOS = {
 
 
 def main() -> int:
+    try:
+        require_real_cost_opt_in("F13 diverse benchmark")
+    except SystemExit as exc:
+        return int(exc.code or 2)
     args = sys.argv[1:] or ["all"]
     selected = []
     for arg in args:
@@ -478,14 +478,19 @@ def main() -> int:
             selected = sorted(SCENARIOS.keys())
         elif arg.upper() in SCENARIOS:
             selected.append(arg.upper())
+        else:
+            print(f"unknown scenario: {arg!r}", file=sys.stderr)
+            return 2
     results = []
+    had_exception = False
     for name in selected:
         try:
             res = SCENARIOS[name]()
             results.append(res)
         except Exception as exc:
+            had_exception = True
             log(f"  {name} FAILED with exception: {exc}")
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
 
     # Summary
     hr("SUMMARY")
@@ -497,7 +502,9 @@ def main() -> int:
     out_path = RESULTS_DIR / f"F13-diverse-{int(time.time())}.json"
     out_path.write_text(json.dumps([asdict(r) for r in results], indent=2))
     print(f"\nSaved to {out_path}")
-    return 0
+    if had_exception or not results:
+        return 1
+    return 1 if any(r.rc != 0 or r.markers_remain for r in results) else 0
 
 
 if __name__ == "__main__":

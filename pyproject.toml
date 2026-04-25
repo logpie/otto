@@ -1,14 +1,19 @@
 [project]
 name = "otto"
 version = "0.1.0"
+description = "A reliability harness for autonomous product-building agents."
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Otto maintainers" },
+]
 dependencies = [
     "click>=8.0",
     "pyte>=0.8.2",
     "pyyaml>=6.0",
     "rich>=13.0",
     "psutil>=5.9",
-    "pyte>=0.8.2",
     "fastapi>=0.100",
     "uvicorn>=0.23",
     # SearchableLog overrides private Log internals; stay on the known-working 8.x line.
@@ -29,8 +34,13 @@ dev = [
 [project.scripts]
 otto = "otto.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/logpie/otto"
+Repository = "https://github.com/logpie/otto"
+Issues = "https://github.com/logpie/otto/issues"
+
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -38,10 +48,12 @@ include = ["otto*"]
 
 [tool.setuptools.package-data]
 "otto.web" = ["static/*", "static/assets/*"]
+"otto.prompts" = ["*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 addopts = ["-m", "not tui"]
 markers = [
     "tui: legacy Textual TUI tests; excluded from the default suite because Mission Control is moving to web",

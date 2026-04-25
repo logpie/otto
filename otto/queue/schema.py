@@ -18,7 +18,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import tempfile
+import secrets
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,7 @@ from typing import Any
 import yaml
 
 from otto import paths as otto_paths
+from otto.observability import write_text_atomic
 from otto.runs.registry import append_jsonl_row, read_jsonl_rows, utc_now_iso
 
 QUEUE_FILE = ".otto-queue.yml"
@@ -273,7 +274,7 @@ def _empty_state() -> dict[str, Any]:
 
 # ---------- commands.jsonl (CLI → watcher message log) ----------
 
-def append_command(project_dir: Path, cmd: dict[str, Any]) -> None:
+def append_command(project_dir: Path, cmd: dict[str, Any]) -> dict[str, Any]:
     """Append one command line to commands.jsonl. CLI calls this; watcher consumes.
 
     Atomic via flock — multiple concurrent CLI calls don't interleave.
@@ -281,7 +282,10 @@ def append_command(project_dir: Path, cmd: dict[str, Any]) -> None:
     path = commands_path(project_dir)
     lock_target = commands_lock_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(cmd, sort_keys=False) + "\n"
+    row = dict(cmd)
+    row.setdefault("schema_version", 1)
+    row.setdefault("command_id", f"queue-cmd-{secrets.token_hex(8)}")
+    line = json.dumps(row, sort_keys=False) + "\n"
     with open(lock_target, "w") as lf:
         fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
         try:
@@ -291,6 +295,7 @@ def append_command(project_dir: Path, cmd: dict[str, Any]) -> None:
                 os.fsync(f.fileno())
         finally:
             fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+    return row
 
 
 def load_command_ack_ids(project_dir: Path) -> set[str]:
@@ -374,22 +379,5 @@ def finish_command_drain(project_dir: Path) -> None:
 # ---------- atomic write helper ----------
 
 def _atomic_write_text(path: Path, content: str) -> None:
-    """Write content atomically via tempfile + rename in the same dir.
-
-    Ensures that readers either see the old contents or the new ones,
-    never a partial write.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+    """Write content atomically so readers never see partial state."""
+    write_text_atomic(path, content)

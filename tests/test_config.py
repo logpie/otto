@@ -19,6 +19,7 @@ from otto.config import (
     get_max_turns_per_call,
     get_spec_timeout,
     git_meta_dir,
+    first_touch_bookkeeping,
     load_config,
     resolve_intent_for_enqueue,
     resolve_project_dir,
@@ -98,6 +99,8 @@ class TestLoadConfig:
         assert q["concurrent"] == 3
         assert q["worktree_dir"] == ".worktrees"
         assert q["on_watcher_restart"] == "resume"
+        assert q["task_timeout_s"] == 1800.0
+        assert q["merge_certifier_mode"] == "standard"
         assert "intent.md" in q["bookkeeping_files"]
         assert "otto.yaml" in q["bookkeeping_files"]
 
@@ -112,13 +115,17 @@ class TestLoadConfig:
         assert cfg["queue"]["on_watcher_restart"] == "resume" # preserved
         assert "intent.md" in cfg["queue"]["bookkeeping_files"]
 
-    def test_queue_section_user_extra_keys_preserved(self, tmp_bare_git_repo):
-        """Forward-compat: unknown queue keys round-trip cleanly."""
+    def test_queue_section_unknown_keys_are_rejected(self, tmp_bare_git_repo):
         config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({"queue": {"future_key": "x"}}))
+        with pytest.raises(ConfigError, match="Unknown queue config key: queue.future_key"):
+            load_config(config_path)
+
+    def test_queue_merge_certifier_mode_is_validated_and_normalized(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"queue": {"merge_certifier_mode": "THOROUGH"}}))
         cfg = load_config(config_path)
-        assert cfg["queue"]["future_key"] == "x"
-        assert cfg["queue"]["concurrent"] == 3  # default still present
+        assert cfg["queue"]["merge_certifier_mode"] == "thorough"
 
     def test_warns_when_queue_section_is_not_a_dict(self, tmp_bare_git_repo, caplog):
         config_path = tmp_bare_git_repo / "otto.yaml"
@@ -138,6 +145,7 @@ class TestLoadConfig:
             "queue": {
                 "concurrent": "many",
                 "bookkeeping_files": "intent.md",
+                "merge_certifier_mode": "target",
             }
         }))
 
@@ -146,8 +154,10 @@ class TestLoadConfig:
 
         assert cfg["queue"]["concurrent"] == DEFAULT_CONFIG["queue"]["concurrent"]
         assert cfg["queue"]["bookkeeping_files"] == DEFAULT_CONFIG["queue"]["bookkeeping_files"]
+        assert cfg["queue"]["merge_certifier_mode"] == DEFAULT_CONFIG["queue"]["merge_certifier_mode"]
         assert "Invalid queue.concurrent" in caplog.text
         assert "Invalid queue.bookkeeping_files" in caplog.text
+        assert "Invalid queue.merge_certifier_mode" in caplog.text
 
     @pytest.mark.parametrize("bad_concurrent", [0, -1])
     def test_warns_and_falls_back_for_non_positive_queue_concurrency(
@@ -209,9 +219,6 @@ class TestProviderHelpers:
         (tmp_bare_git_repo / "intent.md").write_text("from project")
         assert resolve_intent_for_enqueue(tmp_bare_git_repo, explicit="from cli") == "from cli"
 
-    def test_default_config_exposes_max_turns(self):
-        assert DEFAULT_CONFIG["max_turns_per_call"] == 200
-
     def test_normalize_intent_collapses_multiline_whitespace(self):
         assert _normalize_intent("a kanban board:\n  localStorage") == "a kanban board: localStorage"
 
@@ -227,6 +234,19 @@ class TestProviderHelpers:
     def test_resolve_certifier_mode_rejects_unknown_value(self):
         with pytest.raises(ValueError, match="Expected one of"):
             validate_certifier_mode("turbo")
+
+    def test_load_config_rejects_internal_certifier_modes(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"certifier_mode": "target"}))
+
+        with pytest.raises(ConfigError, match="Expected one of: fast, standard, thorough"):
+            load_config(config_path)
+
+    def test_internal_certifier_modes_remain_available_to_callers(self):
+        assert resolve_certifier_mode(
+            {"certifier_mode": "target"},
+            allow_internal=True,
+        ) == "target"
 
     def test_get_spec_timeout_uses_default(self):
         assert get_spec_timeout({}) == 600
@@ -299,9 +319,10 @@ class TestProviderHelpers:
         config_path.write_text(match.group(1))
         cfg = load_config(config_path)
 
-        assert cfg["agents"]["build"]["model"] == "opus"
-        assert cfg["agents"]["certifier"]["model"] == "sonnet"
-        assert cfg["agents"]["spec"]["model"] == "sonnet"
+        assert cfg["agents"]["build"]["model"] is None
+        assert cfg["agents"]["certifier"]["model"] is None
+        assert cfg["agents"]["spec"]["model"] is None
+        assert "#   build:" in match.group(1)
 
 
 class TestDetectTestCommand:
@@ -515,6 +536,32 @@ class TestCreateConfig:
             create_config(tmp_bare_git_repo)
 
 
+class TestFirstTouchBookkeeping:
+    def test_does_not_commit_preexisting_dirty_gitignore(self, tmp_bare_git_repo, caplog):
+        import subprocess
+
+        gitignore = tmp_bare_git_repo / ".gitignore"
+        gitignore.write_text("user-cache/\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore"], cwd=tmp_bare_git_repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "add gitignore"], cwd=tmp_bare_git_repo, check=True)
+        gitignore.write_text("user-cache/\nlocal-edit/\n", encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="otto.config"):
+            first_touch_bookkeeping(tmp_bare_git_repo, DEFAULT_CONFIG)
+
+        assert "skipped first-touch .gitignore setup" in caplog.text
+        assert "local-edit/" in gitignore.read_text(encoding="utf-8")
+        assert ".otto-queue.yml" not in gitignore.read_text(encoding="utf-8")
+        status = subprocess.run(
+            ["git", "status", "--short", "--", ".gitignore"],
+            cwd=tmp_bare_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert status.startswith(" M .gitignore")
+
+
 class TestSetupCommandExistingConfig:
     def test_setup_installs_gitattributes_for_existing_config(
         self, tmp_bare_git_repo, monkeypatch
@@ -534,7 +581,7 @@ class TestSetupCommandExistingConfig:
         monkeypatch.chdir(tmp_bare_git_repo)
         monkeypatch.setattr(cli_setup, "_run_setup_query", fake_run_setup_query)
 
-        result = CliRunner().invoke(main, ["setup"], input="\n", catch_exceptions=False)
+        result = CliRunner().invoke(main, ["setup", "--yes"], catch_exceptions=False)
 
         assert result.exit_code == 0
         assert "intent.md merge=union" in gitattributes_path.read_text()
@@ -578,7 +625,65 @@ class TestSetupCommandExistingConfig:
         monkeypatch.chdir(tmp_bare_git_repo)
         monkeypatch.setattr(cli_setup, "_run_setup_query", fake_run_setup_query)
 
-        result = CliRunner().invoke(main, ["setup"], input="\n", catch_exceptions=False)
+        result = CliRunner().invoke(main, ["setup", "--yes"], catch_exceptions=False)
 
         assert result.exit_code == 0
         assert not gitattributes_path.exists()
+
+    def test_setup_regenerate_failure_preserves_existing_claude_md(
+        self, tmp_bare_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+
+        import otto.cli_setup as cli_setup
+        from otto.cli import main
+
+        async def fake_run_setup_query(prompt, project_dir, config=None):
+            return ""
+
+        create_config(tmp_bare_git_repo)
+        claude_md = tmp_bare_git_repo / "CLAUDE.md"
+        claude_md.write_text("# Existing\n", encoding="utf-8")
+
+        monkeypatch.chdir(tmp_bare_git_repo)
+        monkeypatch.setattr(cli_setup, "_run_setup_query", fake_run_setup_query)
+
+        result = CliRunner().invoke(
+            main,
+            ["setup", "--yes"],
+            input="2\n",
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "Choice" not in result.output
+        assert claude_md.read_text(encoding="utf-8") == "# Existing\n"
+
+    def test_setup_restores_direct_agent_write_until_user_confirms(
+        self, tmp_bare_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+
+        import otto.cli_setup as cli_setup
+        from otto.cli import main
+
+        async def fake_run_setup_query(prompt, project_dir, config=None):
+            (project_dir / "CLAUDE.md").write_text("# Draft from agent\n", encoding="utf-8")
+            return ""
+
+        create_config(tmp_bare_git_repo)
+        claude_md = tmp_bare_git_repo / "CLAUDE.md"
+        claude_md.write_text("# Existing\n", encoding="utf-8")
+
+        monkeypatch.chdir(tmp_bare_git_repo)
+        monkeypatch.setattr(cli_setup, "_run_setup_query", fake_run_setup_query)
+
+        result = CliRunner().invoke(
+            main,
+            ["setup"],
+            input="2\n\nn\n",
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert claude_md.read_text(encoding="utf-8") == "# Existing\n"

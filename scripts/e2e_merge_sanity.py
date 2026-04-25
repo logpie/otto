@@ -13,7 +13,7 @@ Two phases:
    manifests are readable, and the merge orchestrator finds them via the
    new sessions/*/manifest.json scan path.
 
-Usage: .venv/bin/python scripts/e2e_merge_sanity.py
+Usage: OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/e2e_merge_sanity.py
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from bench_runner import (
+from bench_runner import (  # noqa: E402
     OTTO_BIN,
     log,
     make_repo,
@@ -38,6 +38,7 @@ from bench_runner import (
     stop_watcher,
     wait_for_all_done,
 )
+from real_cost_guard import require_real_cost_opt_in  # noqa: E402
 
 
 INTENT_SINGLE = (
@@ -199,8 +200,8 @@ def phase2_parallel_merge() -> float:
 
     t0 = time.time()
     log("enqueue 2 non-conflicting builds")
-    otto_run(repo, "queue", "build", "--as", "add", "--", "--fast", INTENT_A)
-    otto_run(repo, "queue", "build", "--as", "mul", "--", "--fast", INTENT_B)
+    otto_run(repo, "queue", "build", INTENT_A, "--as", "add", "--", "--fast")
+    otto_run(repo, "queue", "build", INTENT_B, "--as", "mul", "--", "--fast")
 
     log("start watcher (concurrent=2)")
     w = start_watcher(repo, concurrent=2)
@@ -213,7 +214,7 @@ def phase2_parallel_merge() -> float:
     # === Check: each queued task has its own session dir in its worktree ===
     # Each task runs in .worktrees/<task-slug>/, with its own otto_logs/.
     worktrees_dir = repo / ".worktrees"
-    _check(worktrees_dir.exists(), f".worktrees/ exists")
+    _check(worktrees_dir.exists(), ".worktrees/ exists")
     wts = [p for p in worktrees_dir.iterdir() if p.is_dir()]
     _check(len(wts) >= 2, f"at least 2 worktrees (got {len(wts)})")
 
@@ -245,7 +246,7 @@ def phase2_parallel_merge() -> float:
     # === Check queue task manifests are discoverable at the deterministic path ===
     queue_manifests_dir = repo / "otto_logs" / "queue"
     _check(queue_manifests_dir.exists(),
-           f"otto_logs/queue/ exists on main repo (queue manifest anchor)")
+           "otto_logs/queue/ exists on main repo (queue manifest anchor)")
     queue_manifests = list(queue_manifests_dir.glob("*/manifest.json"))
     _check(len(queue_manifests) >= 2,
            f"at least 2 queue manifests at otto_logs/queue/<task-id>/manifest.json "
@@ -331,9 +332,9 @@ def phase2_parallel_merge() -> float:
 
     # Verify graduated session retains build/narrative.log + certify/proof-of-work.json
     _check((sample / "build" / "narrative.log").exists(),
-           f"graduated build/narrative.log preserved")
+           "graduated build/narrative.log preserved")
     _check((sample / "certify" / "proof-of-work.json").exists(),
-           f"graduated certify/proof-of-work.json preserved")
+           "graduated certify/proof-of-work.json preserved")
 
     # Verify queue manifest now points at graduated paths (not deleted worktree)
     queue_manifest = json.loads(
@@ -354,6 +355,10 @@ def phase2_parallel_merge() -> float:
 
 def main() -> int:
     log(f"E2E merge sanity starting — using {OTTO_BIN}")
+    try:
+        require_real_cost_opt_in("E2E merge sanity")
+    except SystemExit as exc:
+        return int(exc.code or 2)
     t0 = time.time()
     try:
         p1_cost, p1_elapsed = phase1_single_task()

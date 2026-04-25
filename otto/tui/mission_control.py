@@ -1111,7 +1111,7 @@ def _help_text() -> str:
             "Filters And Selection",
             "a toggles active-only live rows.",
             "t cycles the run type filter: all, build, improve, certify, merge, queue.",
-            "f cycles the history outcome filter: all, success, failed, interrupted, cancelled.",
+            "f cycles the history outcome filter: all, success, failed, interrupted, cancelled, removed, other.",
             "/ opens the history substring filter from Live or History. Matches run id, task id, branch, and intent.",
             "Space toggles multi-select on the current live row. Multi-select is used for queue merge-on-done flows.",
             "[ and ] move history pages when History has focus.",

@@ -405,10 +405,10 @@ class TestNarrativeFormatter:
         ]))
         f.close()
 
-        lines = [_strip_ts(l) for l in path.read_text().splitlines()]
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
         # Each thinking paragraph rendered with the ⋯ glyph.
-        assert any(l.startswith("\u22ef first line") for l in lines)
-        assert any(l.startswith("\u22ef second line") for l in lines)
+        assert any(line.startswith("\u22ef first line") for line in lines)
+        assert any(line.startswith("\u22ef second line") for line in lines)
 
     def test_never_truncates_mid_word(self, tmp_path):
         """Long text must break at word boundaries, not in the middle."""

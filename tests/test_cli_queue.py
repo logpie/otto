@@ -57,6 +57,14 @@ def _write_watcher_state(
     )
 
 
+def _read_queue_commands(repo: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (repo / COMMANDS_FILE).read_text().splitlines()
+        if line.strip()
+    ]
+
+
 # ---------- enqueue commands ----------
 
 
@@ -75,6 +83,69 @@ def test_queue_build_appends_to_queue_yml(tmp_path: Path):
     assert tasks[0].id == "add-csv-export"
     assert tasks[0].branch == f"build/add-csv-export-{expected_date}"
     assert tasks[0].worktree == ".worktrees/add-csv-export"
+
+
+def test_queue_build_from_subdirectory_uses_repo_root(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    nested = repo / "src" / "pkg"
+    nested.mkdir(parents=True)
+
+    code, out, _ = _run(["queue", "build", "add csv export"], cwd=nested)
+
+    assert code == 0, out
+    assert (repo / QUEUE_FILE).exists()
+    assert not (nested / QUEUE_FILE).exists()
+    assert load_queue(repo)[0].resolved_intent == "add csv export"
+
+
+def test_queue_build_reports_malformed_otto_yaml_cleanly(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "otto.yaml").write_text("default_branch: [\n")
+
+    code, out, _ = _run(["queue", "build", "add csv export"], cwd=repo)
+
+    assert code == 2
+    assert "otto.yaml" in out
+    assert "Traceback" not in out
+
+
+def test_queue_build_reports_malformed_queue_yml_cleanly(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / QUEUE_FILE).write_text(
+        "schema_version: 1\n"
+        "tasks:\n"
+        "  - id: broken\n"
+        "    added_at: 2026-04-21T00:00:00Z\n"
+    )
+
+    code, out, _ = _run(["queue", "build", "add csv export"], cwd=repo)
+
+    assert code == 2
+    assert "queue.yml is malformed" in out
+    assert "command_argv" in out
+    assert "Traceback" not in out
+
+
+def test_queue_improve_reports_intent_resolution_error_cleanly(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "README.md").write_text("x" * 9000, encoding="utf-8")
+
+    code, out, _ = _run(["queue", "improve", "bugs"], cwd=repo)
+
+    assert code == 2
+    assert "intent exceeds" in out
+    assert "Traceback" not in out
+
+
+def test_queue_certify_reports_intent_resolution_error_cleanly(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "README.md").write_text("x" * 9000, encoding="utf-8")
+
+    code, out, _ = _run(["queue", "certify"], cwd=repo)
+
+    assert code == 2
+    assert "intent exceeds" in out
+    assert "Traceback" not in out
 
 
 def test_queue_certify_marked_not_resumable(tmp_path: Path):
@@ -116,6 +187,28 @@ def test_queue_improve_target_focus_not_set(tmp_path: Path):
     tasks = load_queue(repo)
     assert tasks[0].target == "latency < 100ms"
     assert tasks[0].focus is None
+
+
+def test_queue_improve_target_requires_goal(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "intent.md").write_text("a product")
+
+    code, out, _ = _run(["queue", "improve", "target"], cwd=repo)
+
+    assert code == 2
+    assert "Missing argument 'GOAL'" in out
+    assert load_queue(repo) == []
+
+
+def test_queue_improve_target_requires_goal_before_passthrough(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "intent.md").write_text("a product")
+
+    code, out, _ = _run(["queue", "improve", "target", "--rounds", "4"], cwd=repo)
+
+    assert code == 2
+    assert "Intent looks like a CLI flag" in out
+    assert load_queue(repo) == []
 
 
 def test_queue_build_rejects_resume_in_args(tmp_path: Path):
@@ -390,12 +483,12 @@ def test_queue_rm_with_watcher_running_appends_command(tmp_path: Path, monkeypat
     assert code == 0
     assert "Remove queued; watcher will apply within ~1s." in out
     assert [task.id for task in load_queue(repo)] == ["csv"]
-    cmds_path = repo / COMMANDS_FILE
-    assert cmds_path.exists()
-    cmds = [json.loads(line) for line in cmds_path.read_text().splitlines() if line.strip()]
+    cmds = _read_queue_commands(repo)
     assert len(cmds) == 1
     assert cmds[0]["cmd"] == "remove"
     assert cmds[0]["id"] == "csv"
+    assert cmds[0]["schema_version"] == 1
+    assert cmds[0]["command_id"].startswith("queue-cmd-")
 
 
 def test_queue_rm_reports_malformed_queue_yml_cleanly(tmp_path: Path):
@@ -484,11 +577,53 @@ def test_queue_cleanup_with_watcher_queues_cleanup_command(tmp_path: Path, monke
     assert "Cleanup queued; watcher will remove 1 terminal task from the board." in out
     assert [task.id for task in load_queue(repo)] == ["failed-task"]
     cmds = [json.loads(line) for line in (repo / COMMANDS_FILE).read_text().splitlines() if line.strip()]
-    assert cmds == [{"ts": cmds[0]["ts"], "cmd": "cleanup", "id": "failed-task"}]
+    assert cmds == [
+        {
+            "ts": cmds[0]["ts"],
+            "cmd": "cleanup",
+            "id": "failed-task",
+            "schema_version": 1,
+            "command_id": cmds[0]["command_id"],
+        }
+    ]
+    assert cmds[0]["command_id"].startswith("queue-cmd-")
+
+
+def test_queue_rm_without_watcher_refuses_non_queued_task(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv"], cwd=repo)
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={"csv": {"status": "running"}},
+    )
+
+    code, out, _ = _run(["queue", "rm", "csv"], cwd=repo)
+
+    assert code == 0
+    assert "marked running, but the worker is not running" in out
+    assert [task.id for task in load_queue(repo)] == ["csv"]
+
+
+def test_queue_rm_refuses_interrupted_task_with_resume_or_cleanup_hint(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv"], cwd=repo)
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={"csv": {"status": "interrupted"}},
+    )
+
+    code, out, _ = _run(["queue", "rm", "csv"], cwd=repo)
+
+    assert code == 2
+    assert "otto queue resume csv" in out
+    assert "queue cleanup csv" in out
+    assert [task.id for task in load_queue(repo)] == ["csv"]
 
 
 def test_queue_cleanup_preserves_session_artifacts_and_repairs_history(tmp_path: Path, monkeypatch) -> None:
-    repo = tmp_path
+    repo = init_repo(tmp_path, subdir=None)
     task_id = "csv"
     run_id = "2026-04-23-170653-229eda"
     worktree = repo / ".worktrees" / task_id
@@ -574,6 +709,11 @@ def test_queue_cleanup_preserves_session_artifacts_and_repairs_history(tmp_path:
         },
         strict=True,
     )
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={task_id: {"status": "done"}},
+    )
 
     def _fake_git_worktree_remove(project_dir: Path, wt_path: Path, *, force: bool):
         del project_dir, force
@@ -625,6 +765,56 @@ def test_queue_cleanup_preserves_session_artifacts_and_repairs_history(tmp_path:
         assert Path(artifact_path).exists(), artifact_path
 
 
+def test_queue_cleanup_rejects_running_explicit_task(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    append_task(
+        repo,
+        QueueTask(
+            id="csv",
+            command_argv=["build", "csv"],
+            added_at="2026-04-23T17:06:00Z",
+            branch="build/csv",
+            worktree=".worktrees/csv",
+        ),
+    )
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={"csv": {"status": "running"}},
+    )
+
+    code, out, _ = _run(["queue", "cleanup", "csv", "--force"], cwd=repo)
+
+    assert code == 2
+    assert "Only terminal tasks can be cleaned up" in out
+    assert "csv is running" in out
+
+
+def test_queue_cleanup_accepts_interrupted_explicit_task(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    append_task(
+        repo,
+        QueueTask(
+            id="csv",
+            command_argv=["build", "csv"],
+            added_at="2026-04-23T17:06:00Z",
+            branch="build/csv",
+            worktree=".worktrees/csv",
+        ),
+    )
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={"csv": {"status": "interrupted"}},
+    )
+
+    code, out, _ = _run(["queue", "cleanup", "csv", "--force"], cwd=repo)
+
+    assert code == 0
+    assert "removed terminal task csv from queue" in out
+    assert "Done. Cleaned 1, skipped 0." in out
+
+
 def test_queue_cancel_without_watcher_removes_queued_task(tmp_path: Path):
     repo = init_repo(tmp_path)
     _run(["queue", "build", "csv"], cwd=repo)
@@ -651,7 +841,7 @@ def test_queue_cancel_without_watcher_warns_for_running_task(tmp_path: Path):
     code, out, _ = _run(["queue", "cancel", "csv"], cwd=repo)
     assert code == 0
     assert "is marked running, but the worker is not running." in out
-    assert "--break-lock --concurrent N" in out
+    assert "otto queue run --concurrent N" in out
     assert [task.id for task in load_queue(repo)] == ["csv"]
     assert not (repo / COMMANDS_FILE).exists()
 
@@ -676,6 +866,13 @@ def test_queue_cancel_with_watcher_describes_queued_task(tmp_path: Path, monkeyp
 
     assert code == 0
     assert "Cancel queued; watcher will remove from queue." in out
+    assert [task.id for task in load_queue(repo)] == ["csv"]
+    cmds = _read_queue_commands(repo)
+    assert len(cmds) == 1
+    assert cmds[0]["cmd"] == "cancel"
+    assert cmds[0]["id"] == "csv"
+    assert cmds[0]["schema_version"] == 1
+    assert cmds[0]["command_id"].startswith("queue-cmd-")
 
 
 def test_queue_cancel_with_watcher_describes_running_task(tmp_path: Path, monkeypatch):
@@ -698,6 +895,13 @@ def test_queue_cancel_with_watcher_describes_running_task(tmp_path: Path, monkey
 
     assert code == 0
     assert "Cancel queued; watcher will signal the task." in out
+    assert [task.id for task in load_queue(repo)] == ["csv"]
+    cmds = _read_queue_commands(repo)
+    assert len(cmds) == 1
+    assert cmds[0]["cmd"] == "cancel"
+    assert cmds[0]["id"] == "csv"
+    assert cmds[0]["schema_version"] == 1
+    assert cmds[0]["command_id"].startswith("queue-cmd-")
 
 
 def test_queue_cancel_with_watcher_reports_terminating_task(tmp_path: Path, monkeypatch):
@@ -763,7 +967,43 @@ def test_queue_dashboard_help_shows_examples(tmp_path: Path):
 
     assert code == 0
     assert "otto queue dashboard" in out
-    assert "read-only queue dashboard" in out
+    assert "live queue dashboard" in out
+
+
+def test_queue_run_rejects_zero_concurrency(tmp_path: Path):
+    repo = init_repo(tmp_path)
+
+    code, out, _ = _run(["queue", "run", "--concurrent", "0"], cwd=repo)
+
+    assert code == 2
+    assert "Invalid value for '--concurrent'" in out
+
+
+def test_queue_ls_outside_git_repo_shows_clean_error(tmp_path: Path):
+    code, out, _ = _run(["queue", "ls"], cwd=tmp_path)
+
+    assert code == 2
+    assert "Not a git repository" in out
+    assert "Traceback" not in out
+
+
+def test_queue_run_outside_git_repo_shows_clean_error(tmp_path: Path):
+    code, out, _ = _run(["queue", "run", "--no-dashboard", "--exit-when-empty"], cwd=tmp_path)
+
+    assert code == 2
+    assert "Not a git repository" in out
+    assert "Traceback" not in out
+
+
+def test_queue_run_reports_malformed_otto_yaml_cleanly(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "otto.yaml").write_text("default_branch: [\n")
+
+    code, out, _ = _run(["queue", "run", "--no-dashboard", "--exit-when-empty"], cwd=repo)
+
+    assert code == 2
+    assert "otto.yaml" in out
+    assert "Traceback" not in out
 
 
 def test_queue_resume_help_shows_examples(tmp_path: Path):
@@ -805,8 +1045,12 @@ def test_queue_resume_defaults_to_resumable_interrupted_tasks(tmp_path: Path):
     assert "Marked labels to resume" in out
     tasks = load_queue(repo)
     assert [task.id for task in tasks] == ["labels", "release"]
-    cmds = [json.loads(line) for line in (repo / COMMANDS_FILE).read_text().splitlines() if line.strip()]
-    assert cmds == [{"ts": cmds[0]["ts"], "cmd": "resume", "id": "labels"}]
+    cmds = _read_queue_commands(repo)
+    assert len(cmds) == 1
+    assert cmds[0]["cmd"] == "resume"
+    assert cmds[0]["id"] == "labels"
+    assert cmds[0]["schema_version"] == 1
+    assert cmds[0]["command_id"].startswith("queue-cmd-")
 
 
 def test_queue_resume_explicit_task_errors_without_checkpoint(tmp_path: Path):
@@ -852,8 +1096,12 @@ def test_queue_resume_select_uses_picker(monkeypatch, tmp_path: Path):
     assert "Marked due to resume" in out
     tasks = load_queue(repo)
     assert [task.id for task in tasks] == ["due", "labels"]
-    cmds = [json.loads(line) for line in (repo / COMMANDS_FILE).read_text().splitlines() if line.strip()]
-    assert cmds == [{"ts": cmds[0]["ts"], "cmd": "resume", "id": "due"}]
+    cmds = _read_queue_commands(repo)
+    assert len(cmds) == 1
+    assert cmds[0]["cmd"] == "resume"
+    assert cmds[0]["id"] == "due"
+    assert cmds[0]["schema_version"] == 1
+    assert cmds[0]["command_id"].startswith("queue-cmd-")
 
 
 def test_queue_rm_rejects_unknown_task(tmp_path: Path):

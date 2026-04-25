@@ -9,7 +9,8 @@ Each scenario:
 Run individual scenarios:
     .venv/bin/python scripts/e2e_runner.py A1
     .venv/bin/python scripts/e2e_runner.py A   # all of set A
-    .venv/bin/python scripts/e2e_runner.py all
+    .venv/bin/python scripts/e2e_runner.py all # fake/local scenarios only
+    OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/e2e_runner.py real
 """
 
 from __future__ import annotations
@@ -71,10 +72,24 @@ class Repo:
         if self.cleanup and self.path.exists():
             shutil.rmtree(self.path, ignore_errors=True)
 
-    def run(self, *argv: str, env: dict[str, str] | None = None, check: bool = True, capture: bool = True, timeout: float | None = 60) -> subprocess.CompletedProcess[str]:
-        full_env = {**os.environ, "OTTO_BIN": str(FAKE_OTTO)}
+    def run(
+        self,
+        *argv: str,
+        env: dict[str, str] | None = None,
+        check: bool = True,
+        capture: bool = True,
+        timeout: float | None = 60,
+        fake_otto: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        full_env = dict(os.environ)
+        if fake_otto:
+            full_env["OTTO_BIN"] = str(FAKE_OTTO)
+        else:
+            full_env.pop("OTTO_BIN", None)
         if env:
             full_env.update(env)
+            if not fake_otto:
+                full_env.pop("OTTO_BIN", None)
         result = subprocess.run(
             list(argv),
             cwd=self.path,

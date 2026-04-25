@@ -4,6 +4,7 @@ import json
 import hashlib
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,8 @@ DEFAULTS: dict[str, Any] = {
         "concurrent":           3,             # default --concurrent for `otto queue run`
         "worktree_dir":         ".worktrees",  # where per-task worktrees live (relative to project)
         "on_watcher_restart":   "resume",      # resume | fail
+        "task_timeout_s":        1800.0,        # per-task timeout; 0/null disables
+        "merge_certifier_mode":  "standard",    # fast | standard | thorough
         "bookkeeping_files": [                 # files queue tasks should NOT commit to their branches
             "intent.md",
             "otto.yaml",
@@ -80,7 +83,9 @@ DEFAULTS: dict[str, Any] = {
 DEFAULT_CONFIG: dict[str, Any] = DEFAULTS
 
 SUPPORTED_PROVIDERS = {"claude", "codex"}
-SUPPORTED_CERTIFIER_MODES = ("fast", "standard", "thorough", "hillclimb", "target")
+PUBLIC_CERTIFIER_MODES = ("fast", "standard", "thorough")
+INTERNAL_CERTIFIER_MODES = ("hillclimb", "target")
+SUPPORTED_CERTIFIER_MODES = PUBLIC_CERTIFIER_MODES + INTERNAL_CERTIFIER_MODES
 _REPO_STATE_MARKERS: tuple[tuple[str, str], ...] = (
     ("MERGE_HEAD", "merge in progress"),
     ("rebase-merge", "rebase in progress"),
@@ -153,23 +158,35 @@ def resolve_project_dir(start_dir: Path | None = None) -> Path:
 def resolve_certifier_mode(
     config: dict[str, Any] | None,
     cli_mode: str | None = None,
+    *,
+    allow_internal: bool = False,
 ) -> str:
     """Resolve certifier mode with CLI > config > DEFAULTS precedence."""
     if cli_mode:
-        return validate_certifier_mode(cli_mode, key="CLI certifier mode")
+        return validate_certifier_mode(
+            cli_mode,
+            key="CLI certifier mode",
+            allow_internal=True,
+        )
     resolved = (config or {}).get("certifier_mode")
     if resolved:
-        return validate_certifier_mode(resolved)
+        return validate_certifier_mode(resolved, allow_internal=allow_internal)
     return str(DEFAULTS["certifier_mode"])
 
 
-def validate_certifier_mode(value: str | None, *, key: str = "certifier_mode") -> str:
+def validate_certifier_mode(
+    value: str | None,
+    *,
+    key: str = "certifier_mode",
+    allow_internal: bool = True,
+) -> str:
     """Normalize certifier mode strings and reject unsupported values."""
     mode = str(value or "").strip().lower()
     if not mode:
         return str(DEFAULTS["certifier_mode"])
-    if mode not in SUPPORTED_CERTIFIER_MODES:
-        choices = ", ".join(SUPPORTED_CERTIFIER_MODES)
+    choices_tuple = SUPPORTED_CERTIFIER_MODES if allow_internal else PUBLIC_CERTIFIER_MODES
+    if mode not in choices_tuple:
+        choices = ", ".join(choices_tuple)
         raise ValueError(f"Invalid {key}: {value!r}. Expected one of: {choices}")
     return mode
 
@@ -667,7 +684,10 @@ def load_config(config_path: Path) -> dict[str, Any]:
 
     # Normalize + validate the global provider string.
     config["provider"] = agent_provider(config)
-    config["certifier_mode"] = resolve_certifier_mode(config)
+    try:
+        config["certifier_mode"] = resolve_certifier_mode(config)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
     # Auto-detect project-specific values when yaml didn't set them.
     if not config.get("test_command"):
@@ -688,10 +708,19 @@ def _normalize_queue_overrides(
     queue = dict(base)
     for key, value in raw_queue.items():
         if key not in base:
-            queue[key] = value
-            continue
+            choices = ", ".join(sorted(base))
+            raise ConfigError(f"Unknown queue config key: queue.{key}. Expected one of: {choices}")
         if _queue_value_is_valid(key, value):
-            queue[key] = list(value) if key == "bookkeeping_files" else value
+            if key == "bookkeeping_files":
+                queue[key] = list(value)
+            elif key == "merge_certifier_mode":
+                queue[key] = validate_certifier_mode(
+                    str(value),
+                    key="queue.merge_certifier_mode",
+                    allow_internal=False,
+                )
+            else:
+                queue[key] = value
             continue
         logger.warning(
             "Invalid queue.%s (%r), using default %r",
@@ -710,6 +739,21 @@ def _queue_value_is_valid(key: str, value: Any) -> bool:
         return isinstance(value, str)
     if key == "on_watcher_restart":
         return isinstance(value, str) and value in {"resume", "fail"}
+    if key == "merge_certifier_mode":
+        try:
+            validate_certifier_mode(str(value), key="queue.merge_certifier_mode", allow_internal=False)
+        except ValueError:
+            return False
+        return True
+    if key == "task_timeout_s":
+        return (
+            value is None
+            or (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and float(value) >= 0.0
+            )
+        )
     if key == "bookkeeping_files":
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
     return True
@@ -752,8 +796,8 @@ def first_touch_bookkeeping(project_dir: Path, config: dict[str, Any]) -> None:
     2. Installs the ``.gitattributes`` bookkeeping merge drivers (intent.md
        merge=union, otto.yaml merge=ours). Without this, ``otto merge``
        hard-fails its precondition.
-    3. Auto-commits any new/changed bookkeeping files in a single
-       ``chore(otto): …`` commit so the working tree stays clean.
+    3. Announces and auto-commits any new/changed bookkeeping files in a
+       single ``chore(otto): …`` commit so the working tree stays clean.
 
     Skips silently in non-git directories or if no changes are needed.
     Failures are logged but never raised — better to let the user hit the
@@ -776,28 +820,52 @@ def first_touch_bookkeeping(project_dir: Path, config: dict[str, Any]) -> None:
         return
 
     changed_paths: list[str] = []
+    protected_paths = {".gitignore", ".gitattributes"}
+    preexisting_dirty_paths: set[str] = set()
+
+    try:
+        status = _sp.run(
+            ["git", "status", "--porcelain", "--", *sorted(protected_paths)],
+            cwd=project_dir, capture_output=True, text=True, check=False,
+        )
+        for raw in (status.stdout or "").splitlines():
+            if not raw:
+                continue
+            path_text = raw[3:] if len(raw) > 3 else raw
+            for managed_path in protected_paths:
+                if path_text == managed_path or path_text.endswith(f" {managed_path}"):
+                    preexisting_dirty_paths.add(managed_path)
+    except OSError as exc:
+        log.warning("first-touch bookkeeping dirty check failed: %s", exc)
+        return
 
     # 1. .gitignore
-    try:
-        from otto.setup_gitignore import ensure_gitignore
-        if ensure_gitignore(project_dir, auto_commit=False):
-            changed_paths.append(".gitignore")
-    except Exception as exc:
-        log.warning("first-touch .gitignore setup failed: %s", exc)
+    if ".gitignore" in preexisting_dirty_paths:
+        log.warning("skipped first-touch .gitignore setup: file already has user changes")
+    else:
+        try:
+            from otto.setup_gitignore import ensure_gitignore
+            if ensure_gitignore(project_dir, auto_commit=False):
+                changed_paths.append(".gitignore")
+        except Exception as exc:
+            log.warning("first-touch .gitignore setup failed: %s", exc)
 
     # 2. .gitattributes (only if bookkeeping enabled)
     bookkeeping_files = (config.get("queue") or {}).get("bookkeeping_files") or []
     if bookkeeping_files:
-        try:
-            from otto.setup_gitattributes import GitAttributesConflict, install as install_gitattributes
-            if install_gitattributes(project_dir):
-                changed_paths.append(".gitattributes")
-        except GitAttributesConflict as exc:
-            # Don't crash — let the downstream precondition check surface
-            # the real, actionable error.
-            log.warning("first-touch .gitattributes setup hit conflict: %s", exc)
-        except (FileNotFoundError, PermissionError) as exc:
-            log.warning("first-touch .gitattributes setup failed: %s", exc)
+        if ".gitattributes" in preexisting_dirty_paths:
+            log.warning("skipped first-touch .gitattributes setup: file already has user changes")
+        else:
+            try:
+                from otto.setup_gitattributes import GitAttributesConflict, install as install_gitattributes
+                if install_gitattributes(project_dir):
+                    changed_paths.append(".gitattributes")
+            except GitAttributesConflict as exc:
+                # Don't crash — let the downstream precondition check surface
+                # the real, actionable error.
+                log.warning("first-touch .gitattributes setup hit conflict: %s", exc)
+            except (FileNotFoundError, PermissionError) as exc:
+                log.warning("first-touch .gitattributes setup failed: %s", exc)
 
     if not changed_paths:
         return
@@ -824,6 +892,12 @@ def first_touch_bookkeeping(project_dir: Path, config: dict[str, Any]) -> None:
             cwd=project_dir, capture_output=True, check=True,
         )
         msg = "chore(otto): set up runtime bookkeeping (" + ", ".join(changed_paths) + ")"
+        notice = (
+            "Otto is committing runtime bookkeeping files so queue/merge can run "
+            f"with a clean tree: {', '.join(changed_paths)}"
+        )
+        log.warning(notice)
+        print(notice, file=sys.stderr)
         _sp.run(
             ["git", "commit", "-q", "-m", msg, "--", *changed_paths],
             cwd=project_dir, capture_output=True, check=True,
@@ -1045,6 +1119,8 @@ run_budget_seconds: {run_budget_seconds}      # total wall-clock (primary knob)
 #   concurrent: 3                     # default --concurrent for `otto queue run`
 #   worktree_dir: .worktrees          # where per-task worktrees live
 #   on_watcher_restart: resume        # resume | fail
+#   task_timeout_s: 1800.0            # per-task timeout; 0/null disables
+#   merge_certifier_mode: standard    # fast | standard | thorough
 #   bookkeeping_files:                # NOT committed to task branches
 #     - intent.md
 #     - otto.yaml

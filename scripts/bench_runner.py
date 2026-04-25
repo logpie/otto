@@ -7,8 +7,8 @@ Each benchmark:
 4. Writes a structured `bench-result.json` per benchmark to bench-results/
 
 Usage:
-    .venv/bin/python scripts/bench_runner.py P1
-    .venv/bin/python scripts/bench_runner.py all
+    OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/bench_runner.py P1
+    OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/bench_runner.py all
 """
 
 from __future__ import annotations
@@ -25,8 +25,13 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
 RESULTS_DIR = REPO_ROOT / "bench-results"
+
+from otto.runs.schema import TERMINAL_STATUSES  # noqa: E402
+from real_cost_guard import require_real_cost_opt_in  # noqa: E402
 
 
 # ------------------- helpers -------------------
@@ -104,8 +109,26 @@ def all_tasks_terminal(repo: Path) -> tuple[bool, dict[str, str]]:
     """Return (all_done, {task_id: status})."""
     state = queue_state(repo)
     statuses = {tid: ts.get("status") for tid, ts in state.get("tasks", {}).items()}
-    terminal = {"done", "failed", "cancelled", "removed"}
-    return (all(s in terminal for s in statuses.values()) and bool(statuses), statuses)
+    return (all(s in TERMINAL_STATUSES for s in statuses.values()) and bool(statuses), statuses)
+
+
+def queue_branch_map(repo: Path) -> dict[str, str]:
+    from otto.queue.schema import load_queue
+
+    return {
+        task.id: task.branch
+        for task in load_queue(repo)
+        if task.branch
+    }
+
+
+def proof_of_work_path(repo: Path, run_id: str) -> Path:
+    from otto import paths
+
+    current = paths.certify_dir(repo, run_id) / "proof-of-work.json"
+    if current.exists():
+        return current
+    return repo / "otto_logs" / "certifier" / run_id / "proof-of-work.json"
 
 
 def wait_for_all_done(repo: Path, *, timeout: float = 1800, interval: float = 30) -> dict[str, str]:
@@ -184,7 +207,7 @@ def collect_metrics(repo: Path, name: str, t_start: float, concurrency: int) -> 
     return BenchResult(
         name=name,
         started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t_start)),
-        finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         wall_seconds=time.time() - t_start,
         total_cost_usd=total_cost,
         queue_concurrency=concurrency,
@@ -211,10 +234,18 @@ def bench_p1_todo_parallel_improves(name: str = "P1-todo-parallel-improves") -> 
     try:
         # Phase 1: build the base
         log("phase 1: build base TODO CLI")
-        otto_run(repo, "queue", "build", "--as", "base", "--",
-                 "--fast", "--no-qa",
-                 "Build a Python CLI 'todo.py' with commands: add <task>, list, done <id>, delete <id>. "
-                 "Store tasks in tasks.json with id, text, done fields. Use argparse.")
+        otto_run(
+            repo,
+            "queue",
+            "build",
+            "Build a Python CLI 'todo.py' with commands: add <task>, list, done <id>, delete <id>. "
+            "Store tasks in tasks.json with id, text, done fields. Use argparse.",
+            "--as",
+            "base",
+            "--",
+            "--fast",
+            "--no-qa",
+        )
         w = start_watcher(repo, concurrent=1)
         try:
             wait_for_all_done(repo, timeout=900, interval=20)
@@ -240,7 +271,7 @@ def bench_p1_todo_parallel_improves(name: str = "P1-todo-parallel-improves") -> 
             ("imp-tags", "Add tags field (list of strings) to each task. New command 'tag <id> <tag>'. New command 'filter --tag <name>' that lists tasks with that tag."),
         ]
         for tid, intent in improves:
-            otto_run(repo, "queue", "improve", "feature", "--as", tid, "--", "-n", "1", intent)
+            otto_run(repo, "queue", "improve", "feature", intent, "--as", tid, "--", "-n", "1")
         w = start_watcher(repo, concurrent=3)
         try:
             wait_for_all_done(repo, timeout=1800, interval=30)
@@ -256,11 +287,11 @@ def bench_p1_todo_parallel_improves(name: str = "P1-todo-parallel-improves") -> 
         # branches haven't passed cert individually.
         log("phase 3: merge")
         merge_t0 = time.time()
-        all_branches = [
-            t.get("branch") for t in queue_state(repo)["tasks"].values()
-            if t.get("branch")
+        improve_branches = [
+            branch
+            for task_id, branch in queue_branch_map(repo).items()
+            if task_id != "base" and branch.startswith("improve/")
         ]
-        improve_branches = [b for b in all_branches if b and b.startswith("improve/")]
         statuses = {tid: ts.get("status") for tid, ts in queue_state(repo)["tasks"].items()}
         any_done_improve = any(
             statuses.get(tid) == "done" for tid in statuses if tid != "base"
@@ -268,7 +299,7 @@ def bench_p1_todo_parallel_improves(name: str = "P1-todo-parallel-improves") -> 
         if any_done_improve:
             merge_args = ["merge", "--all"]
         else:
-            log(f"  improves did not pass cert; merging by branch name (best-effort)")
+            log("  improves did not pass cert; merging by branch name (best-effort)")
             merge_args = ["merge", *improve_branches, "--no-certify"]
         merge_r = otto_run(repo, *merge_args, check=False, timeout=600)
         merge_seconds = time.time() - merge_t0
@@ -286,7 +317,7 @@ def bench_p1_todo_parallel_improves(name: str = "P1-todo-parallel-improves") -> 
         res.merge_cost_usd = merge_cost
         res.merge_seconds = merge_seconds
         # Cert outcome from state.json
-        merge_state_files = list((repo / "otto_logs" / "merge").glob("merge-*/state.json"))
+        merge_state_files = sorted((repo / "otto_logs" / "merge").glob("merge-*/state.json"))
         if merge_state_files:
             ms = json.loads(merge_state_files[-1].read_text())
             res.cert_passed = ms.get("cert_passed")
@@ -314,10 +345,18 @@ def bench_p2_sequential_baseline(name: str = "P2-todo-sequential-baseline") -> B
     try:
         # Phase 1: same base build
         log("phase 1: build base TODO CLI")
-        otto_run(repo, "queue", "build", "--as", "base", "--",
-                 "--fast", "--no-qa",
-                 "Build a Python CLI 'todo.py' with commands: add <task>, list, done <id>, delete <id>. "
-                 "Store tasks in tasks.json with id, text, done fields. Use argparse.")
+        otto_run(
+            repo,
+            "queue",
+            "build",
+            "Build a Python CLI 'todo.py' with commands: add <task>, list, done <id>, delete <id>. "
+            "Store tasks in tasks.json with id, text, done fields. Use argparse.",
+            "--as",
+            "base",
+            "--",
+            "--fast",
+            "--no-qa",
+        )
         w = start_watcher(repo, concurrent=1)
         try:
             wait_for_all_done(repo, timeout=900, interval=20)
@@ -338,13 +377,13 @@ def bench_p2_sequential_baseline(name: str = "P2-todo-sequential-baseline") -> B
             ("imp-tags", "Add tags field (list of strings) to each task. New command 'tag <id> <tag>'. New command 'filter --tag <name>' that lists tasks with that tag."),
         ]
         for tid, intent in improves:
-            otto_run(repo, "queue", "improve", "feature", "--as", tid, "--", "-n", "1", intent)
+            otto_run(repo, "queue", "improve", "feature", intent, "--as", tid, "--", "-n", "1")
         w = start_watcher(repo, concurrent=1)  # SEQUENTIAL
         try:
             wait_for_all_done(repo, timeout=2400, interval=30)
         finally:
             stop_watcher(w)
-        log(f"phase 2 done")
+        log("phase 2 done")
 
         # Phase 3: same merge
         merge_t0 = time.time()
@@ -418,12 +457,20 @@ def bench_p3_bookmark_parallel_features(name: str = "P3-bookmark-parallel-featur
     try:
         # Phase 1: build base bookmark API
         log("phase 1: build Flask bookmark API")
-        otto_run(repo, "queue", "build", "--as", "base", "--",
-                 "--fast", "--no-qa",
-                 "Build a Flask app 'app.py' for bookmarks. POST /bookmarks (json: url, title, "
-                 "description) creates a bookmark. GET /bookmarks lists all. GET /bookmarks/<id> "
-                 "fetches one. DELETE /bookmarks/<id> deletes. Persist in bookmarks.json. "
-                 "Show example curl commands in README.md.")
+        otto_run(
+            repo,
+            "queue",
+            "build",
+            "Build a Flask app 'app.py' for bookmarks. POST /bookmarks (json: url, title, "
+            "description) creates a bookmark. GET /bookmarks lists all. GET /bookmarks/<id> "
+            "fetches one. DELETE /bookmarks/<id> deletes. Persist in bookmarks.json. "
+            "Show example curl commands in README.md.",
+            "--as",
+            "base",
+            "--",
+            "--fast",
+            "--no-qa",
+        )
         w = start_watcher(repo, concurrent=1)
         try:
             wait_for_all_done(repo, timeout=900, interval=20)
@@ -443,7 +490,7 @@ def bench_p3_bookmark_parallel_features(name: str = "P3-bookmark-parallel-featur
             ("imp-search", "Add full-text search. New endpoint GET /search?q=<query> returns bookmarks where the query appears in title or description (case-insensitive substring match)."),
         ]
         for tid, intent in improves:
-            otto_run(repo, "queue", "improve", "feature", "--as", tid, "--", "-n", "1", intent)
+            otto_run(repo, "queue", "improve", "feature", intent, "--as", tid, "--", "-n", "1")
         w = start_watcher(repo, concurrent=2)
         try:
             wait_for_all_done(repo, timeout=1800, interval=30)
@@ -468,7 +515,7 @@ def bench_p3_bookmark_parallel_features(name: str = "P3-bookmark-parallel-featur
         res.merge_cost_usd = merge_cost
         res.merge_seconds = merge_seconds
         res.total_cost_usd += merge_cost
-        merge_state_files = list((repo / "otto_logs" / "merge").glob("merge-*/state.json"))
+        merge_state_files = sorted((repo / "otto_logs" / "merge").glob("merge-*/state.json"))
         if merge_state_files:
             ms = json.loads(merge_state_files[-1].read_text())
             res.cert_passed = ms.get("cert_passed")
@@ -507,8 +554,7 @@ def _run_complex_bench(
     t0 = time.time()
     try:
         log("phase 1: build base")
-        otto_run(repo, "queue", "build", "--as", "base", "--",
-                 "--fast", "--no-qa", base_intent)
+        otto_run(repo, "queue", "build", base_intent, "--as", "base", "--", "--fast", "--no-qa")
         w = start_watcher(repo, concurrent=1)
         try:
             wait_for_all_done(repo, timeout=1800, interval=20)
@@ -523,8 +569,8 @@ def _run_complex_bench(
         log(f"base merged. queueing {len(improves)} parallel improves (concurrent={concurrent}, -n {rounds}).")
 
         for tid, intent in improves:
-            otto_run(repo, "queue", "improve", "feature", "--as", tid, "--",
-                     "-n", str(rounds), intent)
+            otto_run(repo, "queue", "improve", "feature", intent, "--as", tid, "--",
+                     "-n", str(rounds))
         w = start_watcher(repo, concurrent=concurrent)
         try:
             wait_for_all_done(repo, timeout=3600, interval=30)
@@ -536,8 +582,11 @@ def _run_complex_bench(
         # Phase 3: merge — try --all first, fall back to explicit branches
         log("phase 3: merge")
         merge_t0 = time.time()
-        all_branches = [t.get("branch") for t in queue_state(repo)["tasks"].values() if t.get("branch")]
-        improve_branches = [b for b in all_branches if b and b.startswith("improve/")]
+        improve_branches = [
+            branch
+            for task_id, branch in queue_branch_map(repo).items()
+            if task_id != "base" and branch.startswith("improve/")
+        ]
         any_done_improve = any(
             ts.get("status") == "done" for tid, ts in queue_state(repo)["tasks"].items()
             if tid != "base"
@@ -561,9 +610,9 @@ def _run_complex_bench(
         res.merge_cost_usd = merge_cost
         res.merge_seconds = merge_seconds
         res.total_cost_usd += merge_cost
-        merge_state_files = list((repo / "otto_logs" / "merge").glob("merge-*/state.json"))
+        merge_state_files = sorted((repo / "otto_logs" / "merge").glob("merge-*/state.json"))
         if merge_state_files:
-            ms = json.loads(sorted(merge_state_files)[-1].read_text())
+            ms = json.loads(merge_state_files[-1].read_text())
             res.cert_passed = ms.get("cert_passed")
         res.notes.append(f"rounds_per_improve: {rounds}")
         res.notes.append(f"merge_log_tail: {merge_out.strip()[-300:]}")
@@ -712,7 +761,19 @@ BENCHES = {
 }
 
 
+def bench_result_failed(result: BenchResult) -> bool:
+    if result.merge_outcome == "failed":
+        return True
+    if any(note == "base build failed" or note.startswith("exception:") for note in result.notes):
+        return True
+    return any(task.status != "done" for task in result.tasks)
+
+
 def main() -> int:
+    try:
+        require_real_cost_opt_in("real benchmark run(s)")
+    except SystemExit as exc:
+        return int(exc.code or 2)
     args = sys.argv[1:] or ["all"]
     selected: list[str] = []
     for arg in args:
@@ -734,7 +795,7 @@ def main() -> int:
     for r in results:
         print(r.short_summary())
     print(f"\n  Results written to {RESULTS_DIR}")
-    return 0
+    return 1 if not results or any(bench_result_failed(r) for r in results) else 0
 
 
 if __name__ == "__main__":

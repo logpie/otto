@@ -640,12 +640,7 @@ async def run_agent_with_timeout(
         )
         return text, cost, session_id, breakdown_data
     except AgentCallError as err:
-        from otto.pipeline import _cleanup_orphan_processes
-
-        _cleanup_orphan_processes(
-            project_dir,
-            process_group_id=agent_state.get("process_group_id"),
-        )
+        _cleanup_agent_processes(project_dir, agent_state)
         err.session_id = err.session_id or agent_state.get("session_id", "")
         if err.total_cost_usd is None and agent_state.get("total_cost_usd") is not None:
             err.total_cost_usd = float(agent_state.get("total_cost_usd"))
@@ -662,11 +657,7 @@ async def run_agent_with_timeout(
     except asyncio.TimeoutError:
         log.error("Agent timed out after %ds", timeout)
         _append_narrative(f"\u2501\u2501\u2501 Timed out after {timeout}s")
-        from otto.pipeline import _cleanup_orphan_processes
-        _cleanup_orphan_processes(
-            project_dir,
-            process_group_id=agent_state.get("process_group_id"),
-        )
+        _cleanup_agent_processes(project_dir, agent_state)
         err = AgentCallError(
             f"Timed out after {timeout}s",
             session_id=agent_state.get("session_id", ""),
@@ -681,22 +672,18 @@ async def run_agent_with_timeout(
         err.last_story_id = narrative.current_story_id()
         err.last_operation_started_at = narrative.last_operation_started_at()
         raise err
+    except asyncio.CancelledError:
+        _append_narrative("\u2501\u2501\u2501 Agent run cancelled")
+        _cleanup_agent_processes(project_dir, agent_state)
+        raise
     except KeyboardInterrupt:
         _append_narrative("\u2501\u2501\u2501 KeyboardInterrupt")
-        from otto.pipeline import _cleanup_orphan_processes
-        _cleanup_orphan_processes(
-            project_dir,
-            process_group_id=agent_state.get("process_group_id"),
-        )
+        _cleanup_agent_processes(project_dir, agent_state)
         raise
     except Exception as exc:
         log.exception("Agent crashed")
         _append_narrative(f"\u2501\u2501\u2501 Agent crashed: {exc}")
-        from otto.pipeline import _cleanup_orphan_processes
-        _cleanup_orphan_processes(
-            project_dir,
-            process_group_id=agent_state.get("process_group_id"),
-        )
+        _cleanup_agent_processes(project_dir, agent_state)
         tb = traceback.format_exc()
         err = AgentCallError(
             f"Agent crashed: {exc}",
@@ -957,7 +944,7 @@ async def _query_claude(
         if state is not None:
             pid = getattr(process, "pid", None)
             if isinstance(pid, int):
-                state["process_group_id"] = pid
+                _remember_agent_process(state, pid)
         return process
 
     os.environ.clear()
@@ -1007,6 +994,26 @@ def _codex_reasoning_effort(effort: str | None) -> str:
     return value
 
 
+def _remember_agent_process(state: dict[str, Any], pid: int) -> None:
+    state["process_group_id"] = pid
+    try:
+        import psutil
+
+        state["process_start_time_ns"] = int(psutil.Process(pid).create_time() * 1_000_000_000)
+    except Exception:
+        state.pop("process_start_time_ns", None)
+
+
+def _cleanup_agent_processes(project_dir: Path, agent_state: dict[str, Any]) -> None:
+    from otto.pipeline import _cleanup_orphan_processes
+
+    _cleanup_orphan_processes(
+        project_dir,
+        process_group_id=agent_state.get("process_group_id"),
+        process_start_time_ns=agent_state.get("process_start_time_ns"),
+    )
+
+
 def _codex_collab_result_text(item: dict[str, Any], child_id: str | None = None) -> str:
     states = item.get("agents_states")
     if not isinstance(states, dict):
@@ -1052,7 +1059,7 @@ async def _query_codex(
     if state is not None:
         pid = getattr(process, "pid", None)
         if isinstance(pid, int):
-            state["process_group_id"] = pid
+            _remember_agent_process(state, pid)
 
     final_prompt = _codex_prompt(prompt, opts)
     stdout = process.stdout
@@ -1090,6 +1097,8 @@ async def _query_codex(
             event_type = event.get("type")
             if event_type == "thread.started":
                 session_id = str(event.get("thread_id", "") or "")
+                if state is not None and session_id:
+                    state["session_id"] = session_id
                 continue
 
             item = event.get("item") or {}
@@ -1098,18 +1107,24 @@ async def _query_codex(
                 text = str(item.get("text", "") or "")
                 if text:
                     last_text = text
-                    yield AssistantMessage(content=[TextBlock(text=text)])
+                    yield AssistantMessage(content=[TextBlock(text=text)], session_id=session_id)
                 continue
 
             if item_type == "command_execution":
                 item_id = str(item.get("id", "") or "") or None
                 command = str(item.get("command", "") or "")
                 if event_type == "item.started":
-                    yield AssistantMessage(content=[ToolUseBlock(name="Bash", input={"command": command}, id=item_id)])
+                    yield AssistantMessage(
+                        content=[ToolUseBlock(name="Bash", input={"command": command}, id=item_id)],
+                        session_id=session_id,
+                    )
                     continue
                 if event_type == "item.completed":
                     output = str(item.get("aggregated_output", "") or "")
-                    yield AssistantMessage(content=[ToolResultBlock(content=output, tool_use_id=item_id)])
+                    yield AssistantMessage(
+                        content=[ToolResultBlock(content=output, tool_use_id=item_id)],
+                        session_id=session_id,
+                    )
                     continue
 
             if item_type == "collab_tool_call":

@@ -10,14 +10,13 @@ Then `otto merge --all` (with cert) exercises:
 This is the post-deletion cert path that P6 doesn't exercise (improves
 don't register stories, so P6 hits the no-stories early-exit instead).
 
-Usage: .venv/bin/python scripts/bench_build_merge_with_cert.py
+Usage: OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/bench_build_merge_with_cert.py
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -26,7 +25,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from bench_runner import (
+from bench_runner import (  # noqa: E402
     BenchResult,
     OTTO_BIN,
     RESULTS_DIR,
@@ -34,10 +33,13 @@ from bench_runner import (
     make_repo,
     otto_run,
     queue_state,
+    proof_of_work_path,
     start_watcher,
     stop_watcher,
     wait_for_all_done,
 )
+from bench_costs import merge_cost_from_state_dir  # noqa: E402
+from real_cost_guard import require_real_cost_opt_in  # noqa: E402
 
 
 # Two conflicting build intents — both write `tools.py` with a CLI.
@@ -54,27 +56,6 @@ INTENT_SUB = (
 )
 
 
-def _sum_cost_from_state(repo: Path) -> float:
-    """Sum agent cost across merge state.json files, dedupe by note string."""
-    cost_re = re.compile(r"cost \$(\d+(?:\.\d+)?)")
-    total = 0.0
-    for state_file in (repo / "otto_logs" / "merge").glob("merge-*/state.json"):
-        try:
-            d = json.loads(state_file.read_text())
-        except Exception:
-            continue
-        seen: set[str] = set()
-        for o in d.get("outcomes", []):
-            note = o.get("note") or ""
-            if not note or note in seen:
-                continue
-            m = cost_re.search(note)
-            if m:
-                total += float(m.group(1))
-                seen.add(note)
-    return total
-
-
 def _read_merge_state(repo: Path) -> dict | None:
     """Return the latest merge state.json (most recent merge dir)."""
     merges = sorted((repo / "otto_logs" / "merge").glob("merge-*/state.json"))
@@ -87,6 +68,7 @@ def _read_merge_state(repo: Path) -> dict | None:
 
 
 def main() -> int:
+    require_real_cost_opt_in("build/merge benchmark")
     name = "build-merge-with-cert"
     log(f"Running {name}: 2 conflicting builds → merge with cert")
     repo = make_repo("bench-build-merge-cert-")
@@ -96,8 +78,8 @@ def main() -> int:
     try:
         # Phase 1: enqueue 2 fast builds that conflict on tools.py
         log("phase 1: enqueue 2 conflicting builds")
-        otto_run(repo, "queue", "build", "--as", "add", "--", "--fast", INTENT_ADD)
-        otto_run(repo, "queue", "build", "--as", "sub", "--", "--fast", INTENT_SUB)
+        otto_run(repo, "queue", "build", INTENT_ADD, "--as", "add", "--", "--fast")
+        otto_run(repo, "queue", "build", INTENT_SUB, "--as", "sub", "--", "--fast")
 
         log("phase 2: start watcher (concurrent=2)")
         w = start_watcher(repo, concurrent=2)
@@ -135,7 +117,7 @@ def main() -> int:
         out = (r.stdout or "") + (r.stderr or "")
         log(f"merge done in {merge_seconds:.0f}s, rc={r.returncode}")
 
-        merge_cost = _sum_cost_from_state(repo)
+        merge_cost = merge_cost_from_state_dir(repo / "otto_logs" / "merge")
         merge_state = _read_merge_state(repo) or {}
         cert_passed = merge_state.get("cert_passed")
         cert_run_id = merge_state.get("cert_run_id")
@@ -145,7 +127,7 @@ def main() -> int:
         # validating: cert ran, saw stories, emitted per-story verdicts).
         verdict_counts: dict[str, int] = {}
         if cert_run_id:
-            pow_file = repo / "otto_logs" / "certifier" / cert_run_id / "proof-of-work.json"
+            pow_file = proof_of_work_path(repo, cert_run_id)
             if pow_file.exists():
                 try:
                     pow_data = json.loads(pow_file.read_text())

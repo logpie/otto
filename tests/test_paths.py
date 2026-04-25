@@ -213,21 +213,25 @@ class TestProjectLock:
             first.release()
 
     def test_stale_lock_auto_released(self, project_dir):
-        """A leftover lock file without a live flock holder is replaced."""
+        """A leftover lock file without a live flock holder is reused in place."""
         paths.logs_dir(project_dir).mkdir(parents=True, exist_ok=True)
-        (paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME).write_text(json.dumps({
+        lock_path = paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME
+        lock_path.write_text(json.dumps({
             "pid": 999999,  # unlikely to be alive
             "started_at": "2026-01-01T00:00:00",
             "command": "build",
             "nonce": "stale-nonce",
             "session_id": None,
         }))
+        before = lock_path.stat()
         handle = paths.acquire_project_lock(project_dir, "build")
         try:
-            record = json.loads((paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME).read_text())
+            after = lock_path.stat()
+            record = json.loads(lock_path.read_text())
             assert record["command"] == "build"
             assert record["nonce"] == handle._nonce
             assert record["nonce"] != "stale-nonce"
+            assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
         finally:
             handle.release()
 
@@ -253,7 +257,7 @@ class TestProjectLock:
             first.release()
 
     def test_break_lock_clears_stale_holder(self, project_dir):
-        """Manual break-lock may clear a stale lock after confirming pid is dead."""
+        """Manual break-lock may clear a stale lock record after confirming pid is dead."""
         lock_path = paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         stale = {
@@ -267,7 +271,8 @@ class TestProjectLock:
 
         prior = paths.break_project_lock(project_dir)
         assert prior == stale
-        assert not lock_path.exists()
+        assert lock_path.exists()
+        assert json.loads(lock_path.read_text() or "{}") == {}
 
     def test_release_does_not_unlink_replaced_lock(self, project_dir, caplog):
         """Old holders must not remove a lock record recreated on a new inode."""
@@ -322,7 +327,7 @@ class TestProjectLock:
             first.release()
 
     @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
-    def test_flock_survives_process_exit_and_stale_file_is_replaced(self, project_dir):
+    def test_flock_survives_process_exit_and_stale_file_is_reused(self, project_dir):
         """Kernel flock blocks concurrent holders and is released when the holder dies."""
         ctx = multiprocessing.get_context("fork")
         parent_ready, child_ready = ctx.Pipe(duplex=False)
@@ -343,12 +348,15 @@ class TestProjectLock:
 
         lock_path = paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME
         assert lock_path.exists(), "crashed holder should leave behind a stale lock file"
+        before = lock_path.stat()
 
         replacement = paths.acquire_project_lock(project_dir, "parent")
         try:
+            after = lock_path.stat()
             record = json.loads(lock_path.read_text())
             assert record["command"] == "parent"
             assert record["nonce"] == replacement._nonce
             assert record["nonce"] != child_nonce
+            assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
         finally:
             replacement.release()

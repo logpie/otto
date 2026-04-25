@@ -45,6 +45,11 @@ from otto.queue.runtime import (
     task_display_status,
     watcher_alive,
 )
+from otto.runs.schema import TERMINAL_STATUSES
+
+
+QUEUE_CLEANUP_STATUSES = set(TERMINAL_STATUSES)
+QUEUE_ACTIVE_STATUSES = {"starting", "running", "terminating"}
 
 
 def _git_worktree_remove(project_dir: Path, wt_path: Path, *, force: bool) -> subprocess.CompletedProcess:
@@ -64,8 +69,12 @@ def _print_post_merge_preview(project_dir: Path, tasks, state) -> None:
     risk at merge time.
     """
     from otto.merge import git_ops
-    from otto.config import load_config
-    cfg = load_config(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
+    from otto.config import ConfigError, load_config
+    try:
+        cfg = load_config(project_dir / "otto.yaml")
+    except (ConfigError, ValueError) as exc:
+        error_console.print(f"[error]Failed to load config for post-merge preview: {rich_escape(str(exc))}[/error]")
+        return
     target = str(cfg.get("default_branch", "main"))
 
     done_tasks = [
@@ -105,7 +114,13 @@ def _print_post_merge_preview(project_dir: Path, tasks, state) -> None:
 # ---------- helpers ----------
 
 def _project_dir() -> Path:
-    return Path.cwd()
+    from otto.config import ConfigError, resolve_project_dir
+
+    try:
+        return resolve_project_dir(Path.cwd())
+    except ConfigError as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
 
 
 def _queue_manifest_pow_html(project_dir: Path, task_id: str, *, status: str) -> str:
@@ -246,20 +261,6 @@ def _resume_status(project_dir: Path, task) -> tuple[str, str | None]:
     return "ready", str(checkpoint_path)
 
 
-def _resume_selection_candidates(project_dir: Path) -> list[Any]:
-    tasks = _load_queue_or_exit(project_dir)
-    from otto.queue.schema import load_state
-
-    state = load_state(project_dir)
-    candidates: list[Any] = []
-    for task in tasks:
-        task_state = state.get("tasks", {}).get(task.id, {"status": "queued"})
-        if task_display_status(task_state) != INTERRUPTED_STATUS:
-            continue
-        candidates.append(task)
-    return candidates
-
-
 def _parse_resume_task_args(values: tuple[str, ...]) -> list[str]:
     task_ids: list[str] = []
     for value in values:
@@ -315,6 +316,7 @@ def _enqueue(
     explicit_intent: str | None = None,
 ) -> None:
     """The shared path for `otto queue build|improve|certify`."""
+    from otto.config import ConfigError
     from otto.queue.enqueue import enqueue_task
 
     project_dir = _project_dir()
@@ -331,7 +333,7 @@ def _enqueue(
             target=target,
             explicit_intent=explicit_intent,
         )
-    except ValueError as exc:
+    except (ConfigError, ValueError) as exc:
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(2)
     for warning in result.warnings:
@@ -368,13 +370,14 @@ def register_queue_commands(main: click.Group) -> None:
     @click.option("--dashboard-mouse", is_flag=True,
                   help="Enable mouse capture (loses terminal copy in most terminals)")
     def dashboard(dashboard_mouse: bool) -> None:
-        """Open a read-only queue dashboard in Mission Control filtered to queue runs.
+        """Open the live queue dashboard in Mission Control filtered to queue runs.
 
         \b
             otto queue dashboard                  # re-open the live queue UI
             otto queue dashboard --dashboard-mouse
 
-        This viewer never mutates queue state or sends signals. Quit with `q`.
+        This viewer can cancel or resume queue runs when the watcher is active.
+        Quit with `q`.
         """
         from otto.queue.dashboard import run_dashboard_viewer
 
@@ -443,9 +446,16 @@ def register_queue_commands(main: click.Group) -> None:
         For subcommands with an explicit focus/goal, it must come before `--`.
         Anything after `--` is passed through to the inner `otto improve`.
         """
-        from otto.config import resolve_intent_for_enqueue
+        from otto.config import ConfigError, resolve_intent_for_enqueue
 
-        snapshot_intent = resolve_intent_for_enqueue(_project_dir())
+        if subcommand == "target" and not str(focus_or_goal or "").strip():
+            error_console.print("[error]Missing argument 'GOAL' for `otto queue improve target`.[/error]")
+            sys.exit(2)
+        try:
+            snapshot_intent = resolve_intent_for_enqueue(_project_dir())
+        except (ConfigError, ValueError) as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
         # Build raw_args: [subcommand, focus_or_goal?, ...extra]
         raw = [subcommand]
         if focus_or_goal is not None:
@@ -492,9 +502,13 @@ def register_queue_commands(main: click.Group) -> None:
         If you pass an explicit intent, it must come before `--`. Anything
         after `--` is passed through to the inner `otto certify`.
         """
-        from otto.config import resolve_intent_for_enqueue
+        from otto.config import ConfigError, resolve_intent_for_enqueue
 
-        resolved = resolve_intent_for_enqueue(_project_dir(), explicit=intent)
+        try:
+            resolved = resolve_intent_for_enqueue(_project_dir(), explicit=intent)
+        except (ConfigError, ValueError) as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
         raw = [intent] if intent else []
         raw.extend(extra_args)
         _validate_target_args(main.commands["certify"], raw)
@@ -517,8 +531,8 @@ def register_queue_commands(main: click.Group) -> None:
     def ls(show_all: bool, post_merge_preview: bool) -> None:
         """List tasks in the queue with their current state."""
         from otto.queue.schema import load_queue, load_state
-        project_dir = _project_dir()
         try:
+            project_dir = _project_dir()
             tasks = load_queue(project_dir)
             state = load_state(project_dir)
         except Exception as exc:
@@ -640,14 +654,33 @@ def register_queue_commands(main: click.Group) -> None:
             error_console.print(f"[error]No such task: {task_id!r}[/error]")
             sys.exit(2)
         status = _task_status(project_dir, task_id)
-        if status in {"done", "failed", "cancelled"}:
+        if status in QUEUE_CLEANUP_STATUSES:
+            action = (
+                f"use `otto queue resume {task_id}` to continue it, or "
+                f"`otto queue cleanup {task_id}` to discard its worktree"
+                if status == INTERRUPTED_STATUS
+                else f"use `otto queue cleanup {task_id}` to clear finished tasks"
+            )
             error_console.print(
                 "[error]task "
-                f"{task_id} is {status}; use `otto queue cleanup {task_id}` to clear finished tasks."
+                f"{task_id} is {status}; {action}."
                 "[/error]"
             )
             sys.exit(2)
         if not _watcher_is_alive(project_dir):
+            if status != "queued":
+                if status in QUEUE_ACTIVE_STATUSES:
+                    console.print(
+                        f"  [yellow]Task [info]{task_id}[/info] is marked {status}, but the worker is "
+                        "not running.[/yellow] Start the watcher with: "
+                        "[info]otto queue run --concurrent N[/info] "
+                        "for safe cleanup, or send SIGTERM to the child process group manually."
+                    )
+                    return
+                error_console.print(
+                    f"[error]task {task_id} is {status}; only queued tasks can be removed directly.[/error]"
+                )
+                sys.exit(2)
             if not remove_task(project_dir, task_id):
                 error_console.print(f"[error]No such task: {task_id!r}[/error]")
                 sys.exit(2)
@@ -688,7 +721,7 @@ def register_queue_commands(main: click.Group) -> None:
                 console.print(
                     f"  [yellow]Task [info]{task_id}[/info] is marked {status}, but the worker is "
                     "not running.[/yellow] Start the watcher with: "
-                    "[info]otto queue run --break-lock --concurrent N[/info] "
+                    "[info]otto queue run --concurrent N[/info] "
                     "for safe cleanup, or send SIGTERM to the child process group manually."
                 )
                 return
@@ -833,7 +866,7 @@ def register_queue_commands(main: click.Group) -> None:
     @click.option("--done", "scope_done", is_flag=True,
                   help="Remove worktrees for tasks with status=done (default)")
     @click.option("--all", "scope_all", is_flag=True,
-                  help="Also include failed/cancelled/removed tasks")
+                  help="Also include failed/cancelled/removed/interrupted tasks")
     @click.option("--force", is_flag=True, help="Remove even if worktree is dirty")
     def cleanup(task_ids: tuple[str, ...], scope_done: bool, scope_all: bool, force: bool) -> None:
         """Explicitly remove worktrees for done/failed tasks.
@@ -845,7 +878,7 @@ def register_queue_commands(main: click.Group) -> None:
         \b
         Examples:
             otto queue cleanup --done       # remove done-task worktrees
-            otto queue cleanup --all        # also failed/cancelled/removed
+            otto queue cleanup --all        # also failed/cancelled/removed/interrupted
             otto queue cleanup t1 t2        # specific tasks
         """
         from otto.queue.schema import append_command, load_queue, load_state, remove_task, write_state
@@ -861,12 +894,19 @@ def register_queue_commands(main: click.Group) -> None:
         targets: list[Any] = []
         statuses_in_scope = {"done"}
         if scope_all:
-            statuses_in_scope = {"done", "failed", "cancelled", "removed"}
+            statuses_in_scope = QUEUE_CLEANUP_STATUSES
         if task_ids:
             for tid in task_ids:
                 t = next((t for t in tasks if t.id == tid), None)
                 if t is None:
                     error_console.print(f"[error]No such task: {tid!r}[/error]")
+                    sys.exit(2)
+                status = task_display_status(state.get("tasks", {}).get(t.id, {}))
+                if status not in QUEUE_CLEANUP_STATUSES:
+                    error_console.print(
+                        "[error]Only terminal tasks can be cleaned up.[/error]\n"
+                        f"  {rich_escape(t.id)} is {rich_escape(status)}; cancel or remove it first."
+                    )
                     sys.exit(2)
                 targets.append(t)
         else:
@@ -949,7 +989,7 @@ def register_queue_commands(main: click.Group) -> None:
 
     # ---- run (the watcher) ----
     @queue.command(context_settings=CONTEXT_SETTINGS)
-    @click.option("--concurrent", "-j", default=None, type=int,
+    @click.option("--concurrent", "-j", default=None, type=click.IntRange(1),
                   help="Max concurrent tasks (default from otto.yaml queue.concurrent)")
     @click.option("--quiet", is_flag=True,
                   help="Suppress watcher event lines (spawn/reap/cancel) on stdout")
@@ -970,7 +1010,7 @@ def register_queue_commands(main: click.Group) -> None:
         exit_when_empty: bool,
     ) -> None:
         """Start the foreground queue watcher. Run in a tmux pane like `vite dev`."""
-        from otto.config import load_config
+        from otto.config import ConfigError, load_config
         from otto.queue.runner import (
             Runner,
             WatcherAlreadyRunning,
@@ -981,10 +1021,14 @@ def register_queue_commands(main: click.Group) -> None:
         # defaults (see _enqueue → `load_config(project_dir / "otto.yaml")`
         # which returns DEFAULT_CONFIG when absent). Be consistent: the
         # watcher uses defaults too if otto.yaml is missing.
-        cfg = load_config(project_dir / "otto.yaml")
+        try:
+            cfg = load_config(project_dir / "otto.yaml")
+        except (ConfigError, ValueError) as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
         rcfg = runner_config_from_otto_config(cfg)
         if concurrent is not None:
-            rcfg.concurrent = max(1, concurrent)
+            rcfg.concurrent = concurrent
         rcfg.exit_when_empty = exit_when_empty
         otto_bin = _resolve_otto_bin()
 

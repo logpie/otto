@@ -14,6 +14,7 @@ manual follow-up after a stopped merge.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import fcntl
 import json
@@ -21,7 +22,6 @@ import logging
 import os
 import re
 import subprocess
-import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,6 +30,7 @@ from typing import Any
 
 from otto import paths
 from otto.merge import git_ops
+from otto.observability import write_json_atomic
 from otto.queue.artifacts import preserve_queue_session_artifacts
 from otto.merge.state import (
     BranchOutcome,
@@ -153,10 +154,12 @@ def _resolve_branches(
     if explicit_ids_or_branches:
         # Either queue task ids or raw branch names
         from otto.queue.schema import load_queue
+        queue_load_error: Exception | None = None
         try:
             tasks = load_queue(project_dir)
         except (OSError, ValueError) as exc:
             logger.warning("could not load queue.yml for explicit-id resolution: %s", exc)
+            queue_load_error = exc
             tasks = []
         by_id = {t.id: t for t in tasks}
         queue_branches = {t.branch for t in tasks if t.branch}
@@ -172,17 +175,28 @@ def _resolve_branches(
                 )
                 branches.append(item)
             else:
+                if queue_load_error is not None:
+                    raise ValueError(
+                        f"could not load queue.yml for task-id resolution: {queue_load_error}"
+                    ) from queue_load_error
                 raise ValueError(f"unknown task id or branch: {item!r}")
 
     if all_done_queue_tasks:
         from otto.queue.schema import load_queue, load_state
         try:
             tasks = load_queue(project_dir)
-            state = load_state(project_dir)
-        except (OSError, ValueError) as exc:
+        except ValueError:
+            raise
+        except OSError as exc:
             logger.warning("could not load queue state for --all resolution: %s", exc)
             tasks = []
             state = {"tasks": {}}
+        else:
+            try:
+                state = load_state(project_dir)
+            except (OSError, ValueError) as exc:
+                logger.warning("could not load queue state for --all resolution: %s", exc)
+                state = {"tasks": {}}
         done_ids = {
             tid for tid, ts in state.get("tasks", {}).items()
             if ts.get("status") == "done"
@@ -501,7 +515,8 @@ def _drain_merge_cancel_commands(project_dir: Path, merge_id: str, state: MergeS
     state_version: int | None = None
     for cmd in commands:
         kind = str(cmd.get("kind") or cmd.get("cmd") or "")
-        if kind == "cancel" and str(cmd.get("run_id") or merge_id) == merge_id:
+        matches_cancel = kind == "cancel" and str(cmd.get("run_id") or "") == merge_id
+        if matches_cancel:
             if not cancelled:
                 _persist_merge_terminal_state(
                     project_dir,
@@ -515,7 +530,7 @@ def _drain_merge_cancel_commands(project_dir: Path, merge_id: str, state: MergeS
             paths.merge_command_acks(project_dir),
             cmd,
             writer_id=f"merge:{merge_id}",
-            outcome="applied" if kind == "cancel" and str(cmd.get("run_id") or merge_id) == merge_id else "ignored",
+            outcome="applied" if matches_cancel else "ignored",
             state_version=state_version,
         )
     if commands:
@@ -685,12 +700,62 @@ async def run_merge(
             status=final_status,
             terminal_outcome=result.state.terminal_outcome,
             updates={
-                "artifacts": _merge_artifacts(project_dir, merge_id),
+                "artifacts": _merge_run_artifacts(project_dir, result.state),
                 "last_event": result.note or result.state.note or final_status,
             },
         )
         _append_merge_history(project_dir, result.state)
         return result
+    except Exception as exc:
+        logger.exception("merge %s failed unexpectedly", merge_id)
+        if not is_terminal_status(str(state.status or "")):
+            _persist_merge_terminal_state(
+                project_dir,
+                state,
+                status="failed",
+                note=f"merge failed: {exc}",
+            )
+        try:
+            publisher.finalize(
+                status=state.status or "failed",
+                terminal_outcome=state.terminal_outcome or _terminal_outcome_for_status(state.status or "failed"),
+                updates={
+                    "artifacts": _merge_run_artifacts(project_dir, state),
+                    "last_event": state.note or str(exc),
+                },
+            )
+        except Exception:
+            logger.exception("failed to finalize merge %s after unexpected error", merge_id)
+        try:
+            _append_merge_history(project_dir, state)
+        except Exception:
+            logger.exception("failed to append merge history for %s after unexpected error", merge_id)
+        raise
+    except (KeyboardInterrupt, asyncio.CancelledError) as exc:
+        logger.warning("merge %s interrupted", merge_id)
+        if not is_terminal_status(str(state.status or "")):
+            _persist_merge_terminal_state(
+                project_dir,
+                state,
+                status="interrupted",
+                note=f"merge interrupted: {exc}",
+            )
+        try:
+            publisher.finalize(
+                status=state.status or "interrupted",
+                terminal_outcome=state.terminal_outcome or _terminal_outcome_for_status(state.status or "interrupted"),
+                updates={
+                    "artifacts": _merge_run_artifacts(project_dir, state),
+                    "last_event": state.note or "merge interrupted",
+                },
+            )
+        except Exception:
+            logger.exception("failed to finalize merge %s after interruption", merge_id)
+        try:
+            _append_merge_history(project_dir, state)
+        except Exception:
+            logger.exception("failed to append merge history for %s after interruption", merge_id)
+        raise
     finally:
         publisher.stop()
 
@@ -911,8 +976,9 @@ async def _run_post_merge_verification(
     from otto.config import resolve_intent
     from otto.certifier import run_agentic_certifier
     intent = resolve_intent(project_dir) or "(no intent.md found)"
+    cert_task: asyncio.Task[Any] | None = None
     try:
-        cert_report = await run_agentic_certifier(
+        cert_task = asyncio.create_task(run_agentic_certifier(
             intent=intent,
             project_dir=project_dir,
             config=config,
@@ -920,7 +986,32 @@ async def _run_post_merge_verification(
             budget=budget,
             stories=deduped,
             merge_context=merge_context,
-        )
+        ))
+        while True:
+            done, _ = await asyncio.wait({cert_task}, timeout=0.2)
+            if cert_task in done:
+                cert_report = await cert_task
+                break
+            if _drain_merge_cancel_commands(project_dir, merge_id, state):
+                cert_task.cancel()
+                try:
+                    await cert_task
+                except asyncio.CancelledError:
+                    pass
+                return _cancelled_merge_result(
+                    project_dir,
+                    state=state,
+                    merge_id=merge_id,
+                    note="merge cancelled during post-merge verification",
+                )
+    except asyncio.CancelledError:
+        if cert_task is not None and not cert_task.done():
+            cert_task.cancel()
+            try:
+                await cert_task
+            except asyncio.CancelledError:
+                pass
+        raise
     except Exception as exc:
         logger.exception("certifier raised during post-merge verification")
         state.cert_passed = False
@@ -929,6 +1020,14 @@ async def _run_post_merge_verification(
             success=False, merge_id=merge_id, state=state,
             cert_passed=False,
             note=f"certifier failed: {exc}",
+        )
+
+    if _drain_merge_cancel_commands(project_dir, merge_id, state):
+        return _cancelled_merge_result(
+            project_dir,
+            state=state,
+            merge_id=merge_id,
+            note="merge cancelled after post-merge verification",
         )
 
     from otto.certifier.report import CertificationOutcome
@@ -1217,6 +1316,13 @@ async def _run_consolidated_agentic_merge(
         pre_diff_files=pre_diff_files,
         budget=budget,
     )
+    if _drain_merge_cancel_commands(project_dir, merge_id, state):
+        return _cancelled_merge_result(
+            project_dir,
+            state=state,
+            merge_id=merge_id,
+            note="merge cancelled after conflict resolution",
+        )
     if not attempt.success:
         conflicted_branch_count = len(
             [outcome for outcome in state.outcomes if outcome.status == "merged_with_markers"]
@@ -1376,12 +1482,20 @@ def _gather_intents(
 ) -> dict[str, str]:
     """Map each branch to its resolved intent (from queue or atomic manifest)."""
     out: dict[str, str] = {}
+    for branch in branches:
+        manifest = find_manifest_for_branch(
+            project_dir=project_dir,
+            branch=branch,
+            queue_task_lookup=queue_lookup,
+        )
+        if manifest and manifest.get("resolved_intent"):
+            out[branch] = str(manifest["resolved_intent"])
     # Queue tasks (best-effort; missing/corrupt queue.yml is not fatal here)
     try:
         from otto.queue.schema import load_queue
         for t in load_queue(project_dir):
             if t.branch in branches and t.resolved_intent:
-                out[t.branch] = t.resolved_intent
+                out.setdefault(t.branch, t.resolved_intent)
     except (OSError, ValueError) as exc:
         logger.debug("intent gathering: skipping queue.yml: %s", exc)
     sessions = paths.sessions_root(project_dir)
@@ -1412,17 +1526,4 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, indent=2, sort_keys=False))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+    write_json_atomic(path, payload, sort_keys=False)

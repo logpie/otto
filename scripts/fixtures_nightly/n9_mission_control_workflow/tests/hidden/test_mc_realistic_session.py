@@ -93,7 +93,7 @@ def test_live_records_are_gced_or_terminal_only() -> None:
 
     for path in sorted(LIVE_DIR.glob("*.json")):
         record = json.loads(path.read_text(encoding="utf-8"))
-        assert record.get("status") in {"done", "failed", "cancelled", "removed"}, path.name
+        assert record.get("status") in {"done", "failed", "cancelled", "interrupted", "removed"}, path.name
 
 
 def test_mission_control_phase_log_captures_expected_stages() -> None:

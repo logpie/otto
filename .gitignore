@@ -6,6 +6,7 @@ __pycache__/
 # Otto runtime (generated during builds)
 otto_logs/
 otto.lock
+# Local source-repo scratch intent; user projects may track intent.md.
 intent.md
 !scripts/fixtures_nightly/*/intent.md
 build-journal.md
@@ -21,6 +22,9 @@ node_modules/
 # Scratch
 qkrem*.md
 summary.json
+audits/
+bench/
+demo-project/
 
 # Otto runtime (auto-managed; safe to edit comments)
 .otto-queue.yml
@@ -34,8 +38,9 @@ summary.json
 .watcher.log
 
 # Behavioral E2E artifacts (per-run, kept for forensics)
+bench-results/*.json
 bench-results/as-user/
-
+bench-results/as-user-nightly/
 bench-results/demo/
 
 # Free-form log scratch dir (per-session, not for git)

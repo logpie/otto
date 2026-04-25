@@ -4,7 +4,6 @@ import json
 import os
 import signal
 import subprocess
-import time
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

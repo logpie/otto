@@ -21,8 +21,9 @@ pytestmark = pytest.mark.tui
 class _EditorPopen:
     calls: list[list[str]] = []
 
-    def __init__(self, argv, *, cwd, stdout, stderr, text, start_new_session) -> None:
-        del cwd, stdout, stderr, text, start_new_session
+    def __init__(self, argv, *, cwd, stdout, stderr, text, start_new_session=False) -> None:
+        assert start_new_session is True
+        del cwd, stdout, stderr, text
         type(self).calls.append(list(argv))
         self.returncode = 0
         self.pid = 5150
@@ -32,6 +33,9 @@ class _EditorPopen:
 
     def communicate(self):
         return ("", "")
+
+    def wait(self):
+        return self.returncode
 
 
 def _write_live_record(repo: Path, *, run_id: str, run_type: str, status: str, primary_log: Path, extra_logs: list[str] | None = None, queue_task_id: str | None = None, pid: int | None = None) -> None:
@@ -775,6 +779,11 @@ async def test_mission_control_history_filters_and_paging_keybinds(tmp_path: Pat
         await pilot.press("f")
         await pilot.pause()
         assert app.state.filters.outcome_filter == "removed"
+        assert app.state.history_page.total_rows == 0
+
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.state.filters.outcome_filter == "other"
         assert app.state.history_page.total_rows == 0
 
         await pilot.press("f")

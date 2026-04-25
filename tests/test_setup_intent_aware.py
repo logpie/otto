@@ -22,7 +22,7 @@ def test_setup_without_intent_md_keeps_generic_claude_md(tmp_bare_git_repo, monk
     monkeypatch.chdir(tmp_bare_git_repo)
     monkeypatch.setattr(cli_setup, "_run_setup_query", fake_run_setup_query)
 
-    result = CliRunner().invoke(main, ["setup"], input="\n", catch_exceptions=False)
+    result = CliRunner().invoke(main, ["setup", "--yes"], catch_exceptions=False)
 
     assert result.exit_code == 0
     assert (tmp_bare_git_repo / "CLAUDE.md").read_text() == GENERIC_CLAUDE_MD
@@ -49,7 +49,7 @@ def test_setup_with_nontrivial_intent_md_generates_product_specific_claude_md(
     monkeypatch.chdir(tmp_bare_git_repo)
     monkeypatch.setattr(cli_setup, "_run_setup_query", fake_run_setup_query)
 
-    result = CliRunner().invoke(main, ["setup"], input="\n", catch_exceptions=False)
+    result = CliRunner().invoke(main, ["setup", "--yes"], catch_exceptions=False)
 
     assert result.exit_code == 0
     content = (tmp_bare_git_repo / "CLAUDE.md").read_text()
@@ -67,7 +67,7 @@ def test_setup_with_trivial_intent_md_keeps_generic_claude_md(tmp_bare_git_repo,
     monkeypatch.chdir(tmp_bare_git_repo)
     monkeypatch.setattr(cli_setup, "_run_setup_query", fake_run_setup_query)
 
-    result = CliRunner().invoke(main, ["setup"], input="\n", catch_exceptions=False)
+    result = CliRunner().invoke(main, ["setup", "--yes"], catch_exceptions=False)
 
     assert result.exit_code == 0
     assert (tmp_bare_git_repo / "CLAUDE.md").read_text() == GENERIC_CLAUDE_MD

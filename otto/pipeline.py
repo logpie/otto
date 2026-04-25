@@ -1470,10 +1470,20 @@ def _write_improvement_report(
     report_path.write_text("\n".join(lines))
 
 
-def _cleanup_orphan_processes(project_dir: Path, process_group_id: int | None = None) -> None:
+def _cleanup_orphan_processes(
+    project_dir: Path,
+    process_group_id: int | None = None,
+    process_start_time_ns: int | None = None,
+) -> None:
     """Kill the spawned agent process group after timeout/crash."""
     if process_group_id is None:
         logger.debug("Orphan-process cleanup skipped: no tracked process group for %s", project_dir)
+        return
+    if not _process_group_identity_matches(process_group_id, process_start_time_ns):
+        logger.warning(
+            "Orphan-process cleanup skipped: process group %d no longer matches tracked agent identity",
+            process_group_id,
+        )
         return
     try:
         import signal
@@ -1497,6 +1507,29 @@ def _cleanup_orphan_processes(project_dir: Path, process_group_id: int | None = 
         logger.debug("Process-group cleanup skipped: permission denied for %d", process_group_id)
     except OSError as exc:
         logger.debug("Process-group cleanup skipped: %s", exc)
+
+
+def _process_group_identity_matches(process_group_id: int, process_start_time_ns: int | None) -> bool:
+    if process_start_time_ns is None:
+        return True
+    try:
+        import psutil
+    except Exception:
+        return True
+
+    try:
+        process = psutil.Process(process_group_id)
+        actual_start_time_ns = int(process.create_time() * 1_000_000_000)
+        if abs(actual_start_time_ns - process_start_time_ns) > 100_000_000:
+            return False
+        try:
+            return os.getpgid(process_group_id) == process_group_id
+        except ProcessLookupError:
+            return False
+    except psutil.NoSuchProcess:
+        return False
+    except Exception:
+        return True
 
 
 

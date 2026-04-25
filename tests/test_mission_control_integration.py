@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -142,9 +143,23 @@ sleep {sleep}
     return fake
 
 
-def _wait_ready(proc: subprocess.Popen[str]) -> None:
-    line = proc.stdout.readline().strip()
-    assert line == "READY"
+def _wait_ready(proc: subprocess.Popen[str], *, timeout_s: float = 5.0) -> None:
+    assert proc.stdout is not None
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            stdout, stderr = proc.communicate(timeout=0.2)
+            raise AssertionError(
+                f"publisher exited before READY: rc={proc.returncode}, "
+                f"stdout={stdout!r}, stderr={stderr!r}"
+            )
+        ready, _, _ = select.select([proc.stdout], [], [], 0.1)
+        if not ready:
+            continue
+        line = proc.stdout.readline().strip()
+        assert line == "READY"
+        return
+    raise AssertionError("timed out waiting for READY")
 
 
 def test_mission_control_multiprocess_registry_integration(tmp_path: Path) -> None:
@@ -217,11 +232,11 @@ def test_mission_control_multiprocess_registry_integration(tmp_path: Path) -> No
         stderr=subprocess.PIPE,
         text=True,
     )
-    _wait_ready(build_proc)
-    _wait_ready(merge_proc)
-    _wait_ready(stale_proc)
-
     try:
+        _wait_ready(build_proc)
+        _wait_ready(merge_proc)
+        _wait_ready(stale_proc)
+
         model = MissionControlModel(repo)
         state = model.initial_state()
         deadline = time.time() + 4.0
@@ -235,9 +250,14 @@ def test_mission_control_multiprocess_registry_integration(tmp_path: Path) -> No
         assert {"build-run", "merge-run", "stale-run"} <= seen
         assert any(item.record.run_type == "queue" for item in state.live_runs.items)
 
-        time.sleep(1.0)
-        state = model.refresh(state)
-        by_id = {item.record.run_id: item for item in state.live_runs.items}
+        deadline = time.time() + 4.0
+        by_id = {}
+        while time.time() < deadline:
+            state = model.refresh(state)
+            by_id = {item.record.run_id: item for item in state.live_runs.items}
+            if by_id.get("build-run") and by_id["build-run"].record.status == "done":
+                break
+            time.sleep(0.1)
         assert by_id["build-run"].record.status == "done"
         assert by_id["merge-run"].record.status in {"running", "done"}
         assert any(item.record.run_type == "queue" for item in state.live_runs.items)

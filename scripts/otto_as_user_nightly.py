@@ -27,6 +27,8 @@ try:
 except ImportError:
     import otto_as_user as base
 
+from real_cost_guard import require_real_cost_opt_in  # noqa: E402
+
 
 REPO_ROOT = SCRIPT_DIR.parent
 FIXTURE_ROOT = REPO_ROOT / "scripts" / "fixtures_nightly"
@@ -602,16 +604,6 @@ def _audit_artifacts_post_run(repo: Path, failures: RunFailures, details: dict[s
     details["audit-merge-state-paths"] = [str(path) for path in merge_state_paths]
     if merge_attempted and not merge_state_paths:
         failures.fail("audit: merge was attempted but otto_logs/merge/<id>/state.json is missing")
-
-
-def _n9_overlap_delay_s() -> float:
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return 0.0
-    raw = os.environ.get("OTTO_N9_QUEUE_OVERLAP_DELAY_S", "60").strip()
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        return 60.0
 
 
 def _argv_invokes_otto_subcommand(argv: list[str], subcommand: str) -> bool:
@@ -2016,6 +2008,7 @@ def run_one_attempt(
         attempt_index=attempt_index,
     ):
         _write_attempt_metadata(artifact_dir, scenario.name, repo, attempt_index)
+        base.prepare_scenario_isolation(base.current_ctx())
         try:
             base.log_line(f"[{scenario.name}] fixture={_fixture_spec(scenario.name).fixture_dir}")
             scenario.setup(repo, provider)
@@ -2159,6 +2152,11 @@ def main(argv: list[str]) -> int:
         print_dry_run(scenarios, args.provider)
         return 0
 
+    try:
+        require_real_cost_opt_in("nightly as-user scenario recording")
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
+    base.ensure_real_otto_cli()
     run_id = base.utc_run_id()
     outcomes: list[NightlyOutcome] = []
     for index, scenario in enumerate(scenarios):

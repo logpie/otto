@@ -53,10 +53,19 @@ def write_text_atomic(path: Path, text: str) -> None:
             os.close(dir_fd)
 
 
-def write_json_atomic(path: Path, data: Any) -> None:
+def write_json_atomic(
+    path: Path,
+    data: Any,
+    *,
+    sort_keys: bool = True,
+    trailing_newline: bool = False,
+) -> None:
     """Atomically replace a JSON file on disk."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
+    text = json.dumps(data, indent=2, sort_keys=sort_keys)
+    if trailing_newline:
+        text += "\n"
+    payload = text.encode("utf-8")
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     dir_fd: int | None = None
     try:

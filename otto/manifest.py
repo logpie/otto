@@ -15,16 +15,15 @@ authoritative record; it mirrors the canonical session-root manifest and adds
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
-import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from otto import paths
+from otto.observability import write_json_atomic
 
 QUEUE_TASK_ENV = "OTTO_QUEUE_TASK_ID"
 QUEUE_PROJECT_DIR_ENV = "OTTO_QUEUE_PROJECT_DIR"
@@ -196,17 +195,4 @@ def now_iso() -> str:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, indent=2, sort_keys=False))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+    write_json_atomic(path, payload, sort_keys=False)

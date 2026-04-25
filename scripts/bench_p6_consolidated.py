@@ -7,14 +7,12 @@ Compares to historical baselines:
 - Post-revert P6 (sequential, Write allowed, $7.52/37min for 2 conflicts)
 - Pre-deletion P6 (consolidated opt-in, $5.12/18min for 2 conflicts)
 
-Run: .venv/bin/python scripts/bench_p6_consolidated.py
+Run: OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/bench_p6_consolidated.py
 """
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -23,7 +21,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from bench_runner import (
+from bench_runner import (  # noqa: E402
     BenchResult,
     OTTO_BIN,
     RESULTS_DIR,
@@ -31,9 +29,12 @@ from bench_runner import (
     log,
     queue_state,
 )
+from bench_costs import merge_cost_from_state_dir  # noqa: E402
+from real_cost_guard import require_real_cost_opt_in  # noqa: E402
 
 
 def main() -> int:
+    require_real_cost_opt_in("P6 consolidated benchmark")
     # Env-controlled: WITH_CERT=1 runs the post-merge cert phase (exercises
     # the merge_context preamble path that replaced triage). Default is
     # --no-certify (just measures merge wall + cost).
@@ -84,31 +85,12 @@ def main() -> int:
     out = (r.stdout or "") + (r.stderr or "")
     log(f"Merge done in {merge_seconds:.0f}s, rc={r.returncode}")
 
-    # Parse cost from outcome notes. The consolidated path emits the SAME
-    # shared-cost note on every conflicted-branch row (one agent call,
-    # cost shared) — dedupe by note string before summing to avoid
-    # multiplying the agent cost by the number of conflicted branches.
-    merge_cost = 0.0
-    cost_re = re.compile(r"cost \$(\d+(?:\.\d+)?)")
-    for state_file in (repo / "otto_logs" / "merge").glob("merge-*/state.json"):
-        try:
-            d = json.loads(state_file.read_text())
-            seen_notes: set[str] = set()
-            for o in d.get("outcomes", []):
-                note = o.get("note") or ""
-                if note in seen_notes:
-                    continue
-                m = cost_re.search(note)
-                if m:
-                    merge_cost += float(m.group(1))
-                    seen_notes.add(note)
-        except Exception:
-            pass
+    merge_cost = merge_cost_from_state_dir(repo / "otto_logs" / "merge")
 
     res = BenchResult(
         name=name,
         started_at=p6_result.started_at,
-        finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         wall_seconds=p6_result.wall_seconds + merge_seconds,
         total_cost_usd=p6_result.total_cost_usd + merge_cost,
         queue_concurrency=3,
@@ -118,7 +100,7 @@ def main() -> int:
         merge_seconds=merge_seconds,
         cert_passed=None,
         notes=[
-            f"F13 consolidated agent-mode merge",
+            "F13 consolidated agent-mode merge",
             f"Branches merged: {failed_branches}",
             f"Phase 1+2 cost (base + improves): ${p6_result.total_cost_usd:.2f}",
             f"Phase 3 cost (consolidated agent merge): ${merge_cost:.2f}",

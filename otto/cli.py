@@ -217,7 +217,8 @@ def dashboard(dashboard_mouse: bool) -> None:
     """Open Mission Control for this project."""
     from otto.tui.mission_control import MissionControlApp
 
-    project_dir = Path.cwd()
+    require_git()
+    project_dir = resolve_project_dir(Path.cwd())
     app = MissionControlApp(project_dir, dashboard_mouse=dashboard_mouse)
     sys.exit(int(app.run(mouse=dashboard_mouse) or 0))
 
@@ -300,6 +301,102 @@ def _record_cli_override(config: dict[str, Any], key: str, value: Any) -> None:
     overrides = config.setdefault("_cli_overrides", {})
     if isinstance(overrides, dict):
         overrides[key] = value
+
+
+def _apply_build_cli_overrides(
+    *,
+    config: dict[str, Any],
+    config_path: Path,
+    no_qa: bool,
+    fast: bool,
+    standard_: bool,
+    thorough: bool,
+    split: bool,
+    rounds: int | None,
+    budget: int | None,
+    max_turns: int | None,
+    model: str | None,
+    provider: str | None,
+    effort: str | None,
+    strict: bool,
+    verbose: bool,
+    debug_unredacted: bool,
+    allow_dirty: bool,
+    resume_state: Any,
+    spec_file: Path | None,
+    intent_source: str,
+    intent_fallback_reason: str,
+) -> tuple[bool, bool, str, dict[str, str]]:
+    """Apply build CLI/checkpoint overrides after any config reload."""
+    config["_intent_source"] = intent_source
+    config["_intent_fallback_reason"] = intent_fallback_reason
+    if spec_file:
+        config["_intent_source"] = "cli-argument"
+
+    resolved_skip_qa, skip_qa_source = _resolve_bool_setting(
+        config=config,
+        config_path=config_path,
+        key="skip_product_qa",
+        cli_enabled=no_qa,
+        cli_label="--no-qa",
+    )
+    config["skip_product_qa"] = resolved_skip_qa
+    resolved_split, _split_source = _resolve_bool_setting(
+        config=config,
+        config_path=config_path,
+        key="split_mode",
+        cli_enabled=split,
+        cli_label="--split",
+    )
+    resolved_split_bool = bool(resolved_split)
+    if resume_state.resumed and resume_state.split_mode is not None:
+        resolved_split_bool = resume_state.split_mode
+
+    sources: dict[str, str] = {}
+    mode_flag = "fast" if fast else ("standard" if standard_ else ("thorough" if thorough else None))
+    if mode_flag:
+        config["certifier_mode"] = mode_flag
+        sources["certifier_mode"] = f"--{mode_flag}"
+    if rounds is not None:
+        config["max_certify_rounds"] = rounds
+        sources["max_certify_rounds"] = "--rounds"
+    elif resume_state.resumed and resume_state.max_rounds:
+        config["max_certify_rounds"] = resume_state.max_rounds
+        sources["max_certify_rounds"] = "checkpoint"
+    if budget is not None:
+        config["run_budget_seconds"] = budget
+        sources["run_budget_seconds"] = "--budget"
+    if max_turns is not None:
+        config["max_turns_per_call"] = max_turns
+        sources["max_turns_per_call"] = "--max-turns"
+    if model:
+        config["model"] = model
+        sources["model"] = "--model"
+        _record_cli_override(config, "model", model)
+    if provider:
+        config["provider"] = provider
+        sources["provider"] = "--provider"
+        _record_cli_override(config, "provider", provider)
+    if effort:
+        config["effort"] = effort
+        sources["effort"] = "--effort"
+        _record_cli_override(config, "effort", effort)
+    if strict:
+        config["strict_mode"] = True
+        sources["strict_mode"] = "--strict"
+    if allow_dirty:
+        config["allow_dirty_repo"] = True
+        sources["allow_dirty_repo"] = "--allow-dirty"
+    if debug_unredacted:
+        config["debug_unredacted"] = True
+        sources["debug_unredacted"] = "--debug-unredacted"
+    config["_verbose"] = bool(verbose)
+
+    from otto.config import get_max_rounds, get_max_turns_per_call
+
+    config["max_certify_rounds"] = get_max_rounds(config)
+    config["max_turns_per_call"] = get_max_turns_per_call(config)
+    return resolved_skip_qa, resolved_split_bool, skip_qa_source, sources
 
 
 @contextmanager
@@ -1160,6 +1257,7 @@ def _build_locked(
     from otto.config import ensure_safe_repo_state
 
     bootstrap_intent = "Bootstrap and maintain the product described in intent.md"
+    split_cli = bool(split)
 
     if spec and spec_file:
         error_console.print("[error]--spec and --spec-file are mutually exclusive.[/error]")
@@ -1293,7 +1391,7 @@ def _build_locked(
     try:
         ensure_safe_repo_state(
             project_dir,
-            allow_dirty=bool(allow_dirty or config.get("allow_dirty_repo")),
+            allow_dirty=bool(resume_state.resumed or allow_dirty or config.get("allow_dirty_repo")),
         )
     except ConfigError as exc:
         if resume_state.run_id:
@@ -1393,36 +1491,37 @@ def _build_locked(
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(2)
     print_resume_status(console, resume_state, resume, expected_command="build")
-    run_id: str = resume_state.run_id or ""
-    if not run_id:
-        run_id = _new_run_id(project_dir)
 
     # No auto-create: `otto.yaml` only exists if the user ran `otto setup`.
     # `load_config` returns built-in defaults + auto-detected project values
     # when the yaml is absent.
-    config["_intent_source"] = intent_source
-    config["_intent_fallback_reason"] = intent_fallback_reason
-    if spec_file:
-        config["_intent_source"] = "cli-argument"
-
-    resolved_skip_qa, skip_qa_source = _resolve_bool_setting(
-        config=config,
-        config_path=config_path,
-        key="skip_product_qa",
-        cli_enabled=no_qa,
-        cli_label="--no-qa",
-    )
-    config["skip_product_qa"] = resolved_skip_qa
-    resolved_split, _split_source = _resolve_bool_setting(
-        config=config,
-        config_path=config_path,
-        key="split_mode",
-        cli_enabled=split,
-        cli_label="--split",
-    )
-    split = bool(resolved_split)
-    if resume_state.resumed and resume_state.split_mode is not None:
-        split = resume_state.split_mode
+    try:
+        resolved_skip_qa, split, skip_qa_source, sources = _apply_build_cli_overrides(
+            config=config,
+            config_path=config_path,
+            no_qa=no_qa,
+            fast=fast,
+            standard_=standard_,
+            thorough=thorough,
+            split=split_cli,
+            rounds=rounds,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            strict=strict,
+            verbose=verbose,
+            debug_unredacted=debug_unredacted,
+            allow_dirty=allow_dirty,
+            resume_state=resume_state,
+            spec_file=spec_file,
+            intent_source=intent_source,
+            intent_fallback_reason=intent_fallback_reason,
+        )
+    except ConfigError as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
 
     if use_spec and resolved_skip_qa:
         source_text = "--no-qa" if skip_qa_source == "--no-qa" else "otto.yaml: skip_product_qa: true"
@@ -1436,60 +1535,6 @@ def _build_locked(
             "[error]--fast, --standard, and --thorough are mutually exclusive.[/error]"
         )
         sys.exit(2)
-
-    # Resolve CLI overrides into config. Track sources so the banner can
-    # show where each active value came from.
-    sources: dict[str, str] = {}
-    mode_flag = "fast" if fast else ("standard" if standard_ else ("thorough" if thorough else None))
-    if mode_flag:
-        config["certifier_mode"] = mode_flag
-        sources["certifier_mode"] = f"--{mode_flag}"
-    if rounds is not None:
-        config["max_certify_rounds"] = rounds
-        sources["max_certify_rounds"] = "--rounds"
-    elif resume_state.resumed and resume_state.max_rounds:
-        config["max_certify_rounds"] = resume_state.max_rounds
-        sources["max_certify_rounds"] = "checkpoint"
-    if budget is not None:
-        config["run_budget_seconds"] = budget
-        sources["run_budget_seconds"] = "--budget"
-    if max_turns is not None:
-        config["max_turns_per_call"] = max_turns
-        sources["max_turns_per_call"] = "--max-turns"
-    if model:
-        config["model"] = model
-        sources["model"] = "--model"
-        _record_cli_override(config, "model", model)
-    if provider:
-        config["provider"] = provider
-        sources["provider"] = "--provider"
-        _record_cli_override(config, "provider", provider)
-    if effort:
-        config["effort"] = effort
-        sources["effort"] = "--effort"
-        _record_cli_override(config, "effort", effort)
-    if strict:
-        config["strict_mode"] = True
-        sources["strict_mode"] = "--strict"
-    if allow_dirty:
-        config["allow_dirty_repo"] = True
-        sources["allow_dirty_repo"] = "--allow-dirty"
-    if debug_unredacted:
-        config["debug_unredacted"] = True
-        sources["debug_unredacted"] = "--debug-unredacted"
-    config["_verbose"] = bool(verbose)
-    from otto.config import get_max_rounds, get_max_turns_per_call
-    try:
-        config["max_certify_rounds"] = get_max_rounds(config)
-        config["max_turns_per_call"] = get_max_turns_per_call(config)
-    except ConfigError as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-
-    _print_config_banner(console, config, sources, config_path)
-    _print_startup_context(console, project_dir, run_id)
-    if debug_unredacted:
-        console.print("  [bold red]UNREDACTED LOGS — do not share[/bold red]")
 
     # Phase 1.2: --in-worktree creates an isolated worktree (in-process chdir,
     # no subprocess re-entry) and runs the rest of the pipeline from there.
@@ -1523,14 +1568,34 @@ def _build_locked(
         # Re-anchor project_dir to the worktree — the rest of the pipeline
         # operates on this isolated checkout.
         project_dir = wt_path
-        if no_qa:
-            config["skip_product_qa"] = True
-        if fast:
-            config["_certifier_mode"] = "fast"
-        elif thorough:
-            config["_certifier_mode"] = "thorough"
-        if rounds is not None:
-            config["max_certify_rounds"] = rounds
+        config_path = project_dir / "otto.yaml"
+        try:
+            resolved_skip_qa, split, skip_qa_source, sources = _apply_build_cli_overrides(
+                config=config,
+                config_path=config_path,
+                no_qa=no_qa,
+                fast=fast,
+                standard_=standard_,
+                thorough=thorough,
+                split=split_cli,
+                rounds=rounds,
+                budget=budget,
+                max_turns=max_turns,
+                model=model,
+                provider=provider,
+                effort=effort,
+                strict=strict,
+                verbose=verbose,
+                debug_unredacted=debug_unredacted,
+                allow_dirty=allow_dirty,
+                resume_state=resume_state,
+                spec_file=spec_file,
+                intent_source=intent_source,
+                intent_fallback_reason=intent_fallback_reason,
+            )
+        except ConfigError as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
 
     # Branch policy (Phase 1.1): if user is on the default branch, create a
     # build/<slug>-<date> branch and switch. If on any other branch, stay put
@@ -1555,6 +1620,15 @@ def _build_locked(
         except RuntimeError as exc:
             error_console.print(f"[error]Branch setup failed: {rich_escape(str(exc))}[/error]")
             sys.exit(1)
+
+    run_id: str = resume_state.run_id or ""
+    if not run_id:
+        run_id = _new_run_id(project_dir)
+
+    _print_config_banner(console, config, sources, config_path)
+    _print_startup_context(console, project_dir, run_id)
+    if debug_unredacted:
+        console.print("  [bold red]UNREDACTED LOGS — do not share[/bold red]")
 
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop, BuildResult
     from otto.budget import RunBudget
@@ -2043,32 +2117,32 @@ def _certify_locked(
 
 
 # Setup command (registered from otto/cli_setup.py)
-from otto.cli_setup import register_setup_command
+from otto.cli_setup import register_setup_command  # noqa: E402
 register_setup_command(main)
 
 # History command (registered from otto/cli_logs.py)
-from otto.cli_logs import register_history_command, register_replay_command
+from otto.cli_logs import register_history_command, register_replay_command  # noqa: E402
 register_history_command(main)
 register_replay_command(main)
 
 # PoW command (registered from otto/cli_pow.py)
-from otto.cli_pow import register_pow_command
+from otto.cli_pow import register_pow_command  # noqa: E402
 register_pow_command(main)
 
 # Improve commands (registered from otto/cli_improve.py)
-from otto.cli_improve import register_improve_commands
+from otto.cli_improve import register_improve_commands  # noqa: E402
 register_improve_commands(main)
 
 # Queue commands (Phase 2 — registered from otto/cli_queue.py)
-from otto.cli_queue import register_queue_commands
+from otto.cli_queue import register_queue_commands  # noqa: E402
 register_queue_commands(main)
 
 # Cleanup command (Mission Control terminal-record GC)
-from otto.cli_cleanup import register_cleanup_command
+from otto.cli_cleanup import register_cleanup_command  # noqa: E402
 register_cleanup_command(main)
 
 # Merge command (Phase 4 — registered from otto/cli_merge.py)
-from otto.cli_merge import register_merge_command
+from otto.cli_merge import register_merge_command  # noqa: E402
 register_merge_command(main)
 
 

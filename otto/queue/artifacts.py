@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from otto import paths
 from otto.manifest import queue_index_path_for
+from otto.observability import write_json_atomic, write_text_atomic
 
 _ARTIFACT_PATH_KEYS = (
     "session_dir",
@@ -18,6 +17,10 @@ _ARTIFACT_PATH_KEYS = (
     "summary_path",
     "checkpoint_path",
     "primary_log_path",
+)
+_TOP_LEVEL_SESSION_PATH_KEYS = (
+    "intent_path",
+    "spec_path",
 )
 
 
@@ -238,6 +241,16 @@ def _repair_history_snapshot_row(
             artifacts[key] = relocated
             changed = True
 
+    for key in _TOP_LEVEL_SESSION_PATH_KEYS:
+        relocated = _relocate_existing_artifact_path(
+            repaired.get(key),
+            old_session_dir=old_session_dir,
+            new_session_dir=new_session_dir,
+        )
+        if repaired.get(key) != relocated:
+            repaired[key] = relocated
+            changed = True
+
     source_extra_logs = artifacts.get("extra_log_paths", repaired.get("extra_log_paths", []))
     relocated_extra_logs = [
         relocated
@@ -337,34 +350,8 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, indent=2, sort_keys=False))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+    write_json_atomic(path, payload, sort_keys=False)
 
 
 def _atomic_write_text(path: Path, payload: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+    write_text_atomic(path, payload)

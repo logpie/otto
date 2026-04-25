@@ -2,6 +2,9 @@
 
 Last updated: 2026-04-23
 
+This is a historical implementation snapshot from the Mission Control branch,
+not a live status page for the current checkout.
+
 ## Branch state
 
 - Branch: `parallel-otto` (worktree at `.worktrees/parallel-otto`)
@@ -131,17 +134,17 @@ otto dashboard
 
 **Run realistic E2E nightly (full fidelity):**
 ```bash
-.venv/bin/python scripts/otto_as_user_nightly.py --scenario N9
+OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/otto_as_user_nightly.py --scenario N9
 ```
 
 **Same but cheap debug iteration:**
 ```bash
-OTTO_DEBUG_FAST=1 .venv/bin/python scripts/otto_as_user_nightly.py --scenario N9
+OTTO_ALLOW_REAL_COST=1 OTTO_DEBUG_FAST=1 .venv/bin/python scripts/otto_as_user_nightly.py --scenario N9
 ```
 
 **All nightlies:**
 ```bash
-.venv/bin/python scripts/otto_as_user_nightly.py
+OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/otto_as_user_nightly.py
 ```
 
 **Daily smoke (Mission Control basic + queue + merge dashboard scenarios):**

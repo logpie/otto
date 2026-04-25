@@ -6,7 +6,7 @@ runs F13 (consolidated agent-mode) salvage, measures wall + cost.
 If F13 takes ~3 min, scaling is roughly proportional (~30s/region).
 If F13 takes ~10 min, there's an overhead floor that doesn't scale down.
 
-Usage: .venv/bin/python scripts/bench_small_conflict.py
+Usage: OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/bench_small_conflict.py
 """
 
 from __future__ import annotations
@@ -21,7 +21,12 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
+
+from real_cost_guard import require_real_cost_opt_in  # noqa: E402
+from bench_costs import merge_cost_from_state_dir  # noqa: E402
 
 
 # Base: a small calculator with 4 functions
@@ -207,10 +212,10 @@ def setup_repo() -> Path:
 
     subprocess.run(["git", "checkout", "-q", "main"], cwd=base, check=True)
 
-    # Set merge_mode: consolidated
-    (base / "otto.yaml").write_text("default_branch: main\n\nqueue:\n  merge_mode: consolidated\n")
+    # Set the target branch; consolidated merge is the default merge path.
+    (base / "otto.yaml").write_text("default_branch: main\n")
     subprocess.run(["git", "add", "otto.yaml"], cwd=base, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "configure consolidated merge"], cwd=base, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "configure otto"], cwd=base, check=True)
 
     return base
 
@@ -242,6 +247,7 @@ def count_conflict_regions(repo: Path, branches: list[str]) -> int:
 
 
 def main() -> int:
+    require_real_cost_opt_in("small conflict benchmark")
     print("Building small synthetic conflict scenario...")
     repo = setup_repo()
     branches = ["feat/power-mod", "feat/sqrt-abs"]
@@ -262,18 +268,7 @@ def main() -> int:
     out = (result.stdout or "") + (result.stderr or "")
     print(f"  done in {wall:.1f}s, rc={result.returncode}")
 
-    # Parse cost
-    cost = 0.0
-    for sf in (repo / "otto_logs" / "merge").glob("merge-*/state.json"):
-        try:
-            d = json.loads(sf.read_text())
-            for o in d.get("outcomes", []):
-                note = o.get("note") or ""
-                if "cost $" in note:
-                    bit = note.split("cost $")[1].split(",")[0].split(")")[0]
-                    cost += float(bit)
-        except Exception:
-            pass
+    cost = merge_cost_from_state_dir(repo / "otto_logs" / "merge")
 
     # Tool counts from log
     log = repo / "otto_logs" / "merge" / "conflict-agent-agentic.log"

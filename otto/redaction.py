@@ -35,8 +35,3 @@ def redact_text(text: str) -> str:
     for pattern, replacement in _TOKEN_PATTERNS:
         redacted = pattern.sub(replacement, redacted)
     return redacted
-
-
-def redact(text: str) -> str:
-    """Backward-compatible alias for callers that prefer ``redact(...)``."""
-    return redact_text(text)

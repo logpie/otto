@@ -83,25 +83,12 @@ git commit. Lets us drive the watcher hard without LLM cost.
 - observability check: state.json child entry shows pre-crash details;
   reaper handles ECHILD safely; no double-spawn
 
-### A10. Worktree contention (same task ID)
-- enqueue task; manually create worktree at expected path before watcher
-  spawns it
-- expected: spawn fails with "branch already checked out" error; task marked
-  failed with clear reason
-- observability check: state.json failure_reason explicit; user can fix
-  with `git worktree remove` and re-enqueue
-
 ### A11. Large queue, limited concurrency
 - enqueue 10 fast fake tasks; concurrency 3
 - expected: at any time ≤3 running; all 10 complete; ordering FIFO modulo
   dependencies
 - observability check: peak running count never exceeds 3 across full ls
   history
-
-### A12. PID-reuse safety
-- not directly testable without a kernel-level race, but verify
-  `child_is_alive` returns False for a recycled PID (use a stub PID
-  reference, simulate by manipulating start_time_ns in state.json)
 
 ### A13. Queue cleanup
 - complete some tasks; `otto queue cleanup --done`
@@ -114,6 +101,16 @@ git commit. Lets us drive the watcher hard without LLM cost.
   false; CLI prints "Worker is not running" hint
 - observability check: enqueue messaging tells user to start watcher
 
+### A15. Fake Otto failure
+- enqueue a fake task configured to fail
+- expected: watcher marks the task failed and preserves useful failure output
+- observability check: state, queue detail, and logs all show the failure
+
+### A16. Dependency cascade
+- enqueue dependent tasks where an upstream task fails
+- expected: dependent tasks do not run after the failed prerequisite
+- observability check: state explains the blocked dependency
+
 ## Set B — Merge mechanics
 
 Hand-crafted git scenarios that exercise merge code paths without any LLM
@@ -123,55 +120,29 @@ where possible. Real LLM only where the agent actually does work.
 - create main + branch1 (touches A.py) + branch2 (touches B.py)
 - run `otto merge build/branch1 build/branch2`
 - expected: both merge cleanly via `git merge --no-ff`; no agent invoked;
-  triage agent runs (LLM)
+  post-merge certifier runs unless the scenario uses `--no-certify`
 - observability check: orchestrator log shows "auto-merged"; no conflict
   agent log
 
-### B2. .gitattributes union driver for intent.md
-- two branches both append to intent.md
-- run merge; expected: union driver concatenates both, no conflict
-- observability check: intent.md has both contents in order
+### B4. `--fast` bails on a synthetic conflict
+- two branches create a conflict; run `otto merge --fast`
+- expected: merge aborts cleanly without an agent call
+- observability check: output mentions the conflict/bail path
 
-### B3. .gitattributes ours driver for otto.yaml
-- two branches both modify otto.yaml differently
-- expected: ours driver keeps target's version
-- observability check: target's otto.yaml unchanged
-
-### B4. Real conflict on application file → conflict agent invoked
+### B5. Real conflict with fake task output + `--fast`
 - two branches both edit the same lines of app.py
-- expected: orchestrator detects conflict, conflict agent invoked, agent
-  resolves (real LLM), validation passes (no scope creep, no diff --check
-  failure, HEAD unchanged), commit made
-- observability check: conflict-agent.log written with full agent output;
-  manifest path tracked
-
-### B5. Conflict agent fails validation → retry from snapshot
-- contrive a scenario where the agent likely creates an out-of-scope edit
-  (or simulate via mock); verify retry-from-snapshot works
-- needs careful test design — likely simulate via patched conflict_agent
-  module with mocked agent that escapes scope
+- expected: `--fast` refuses rather than invoking conflict resolution
+- observability check: no conflict-agent session is created
 
 ### B6. Conflict agent: codex provider gate
 - otto.yaml has provider=codex (not claude); attempt merge with conflicts
 - expected: orchestrator refuses BEFORE first merge with clear message
 - observability check: no partial merges land; message names provider
 
-### B7. `--fast` mode bails on conflict
-- two-conflict scenario; `otto merge --fast`
-- expected: pure git merge attempted; on first conflict, abort, print
-  conflict file list, exit non-zero
-- observability check: no agent invoked; intermediate state cleanly aborted
-
 ### B8. `--no-certify` skips post-merge verification
 - successful merge with `--no-certify`
-- expected: triage agent NOT invoked; no certifier run
+- expected: post-merge certifier NOT invoked
 - observability check: log explicitly notes skip
-
-### B9. `--full-verify` covers full story union
-- successful merge with `--full-verify`
-- expected: certifier verifies all stories from all branches (no
-  skip_likely_safe filtering)
-- observability check: triage plan entries == union of branches' stories
 
 ### B10. `--cleanup-on-success` removes worktrees
 - successful merge with this flag
@@ -190,32 +161,44 @@ where possible. Real LLM only where the agent actually does work.
 - expected: lists pairs with overlap
 - observability check: output sorted, deterministic
 
+### B13. Explicit branch argument
+- pass a branch directly to `otto merge`
+- expected: branch merges without relying on queue task-id lookup
+- observability check: merge state records the explicit branch
+
+### Candidate future fake/local coverage
+- `.gitattributes` union driver for `intent.md`
+- `.gitattributes` ours driver for `otto.yaml`
+- non-fast conflict-agent resolution with a mocked or real agent
+- conflict-agent validation failure from an out-of-scope edit
+- PID-reuse safety and worktree-contention edge cases
+
 ## Set C — Real-LLM full-pipeline scenarios
 
-Cost-controlled. Use simple intents. Each scenario is one full user
-journey from `otto queue build` → `otto merge`.
+Cost-controlled and gated by `OTTO_ALLOW_REAL_COST=1`. These scenarios use
+simple intents and deliberately keep merge certification off so the budget stays
+bounded.
 
-### C1. Two parallel builds + clean merge
-- `otto queue build "make a python calculator"`
-- `otto queue build "make a python fibonacci"` (different files)
-- `otto queue run --concurrent 2` until both done
-- `otto merge --all`
-- expected: both LLM builds succeed; merge clean; triage agent emits
-  reasonable plan; certifier verifies
-- observability check: full chain of logs across queue + merge dirs
+### C1. Single real build through the queue
+- `otto queue build "Create hello.py ..." --as hello-real -- --fast --no-qa`
+- `otto queue run --concurrent 1` until the task is done
+- expected: one real LLM build succeeds, creates a branch/worktree, records
+  positive cost, and leaves no fake-otto markers
+- observability check: queue state, manifest, proof-of-work, and live logs point
+  at the real run
 
-### C2. Two parallel builds with conflict + agent resolution
-- two builds that both touch the same file (e.g., both add a function to
-  utils.py)
-- expected: conflict on utils.py; conflict agent resolves; triage + cert run
-- observability check: conflict-agent.log shows real agent output; merged
-  utils.py contains contributions from both branches
+### C1B. Real build followed by non-agent merge
+- same real queue build path as C1
+- `otto merge --all --no-certify --cleanup-on-success`
+- expected: merge succeeds without a triage/certifier LLM pass, graduates queue
+  artifacts out of the worktree, and cleans up the completed worktree
+- observability check: merged file exists on main, queue task is graduated, and
+  manifest/proof paths still resolve after cleanup
 
-### C3. Real `otto improve` via queue + merge
-- start with a buggy app; `otto queue improve bugs`; merge result
-- expected: improve runs, finds + fixes bug; merge clean
-- observability check: improve logs intact in worktree; merge picks up
-  improvements
+### Candidate future coverage
+- Two parallel real builds + clean merge with certification enabled.
+- Two real builds with conflict + conflict-agent resolution.
+- Real `otto improve bugs` through the queue + merge.
 
 ## Bug-fix protocol
 

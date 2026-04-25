@@ -11,9 +11,9 @@ ONLY set ``self.shutdown_level``; they MUST NOT touch state files.
 Subprocess reaping uses ``os.waitpid(WNOHANG)`` IN the tick, not in a
 SIGCHLD handler.
 
-Process groups: every child spawned with ``preexec_fn=os.setsid``;
+Process groups: every child spawned with ``start_new_session=True``;
 cancel uses ``os.killpg(pgid, SIGTERM)`` with PID-reuse validation
-(pid+pgid+start_time_ns+argv+cwd all match before any kill).
+(pid+pgid+start_time_ns+cwd all match before any kill).
 
 Exclusive lock: ``.otto-queue.lock`` with ``flock(LOCK_EX | LOCK_NB)``.
 A second ``otto queue run`` against the same project refuses to start.
@@ -33,7 +33,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -68,8 +68,13 @@ from otto.runs.registry import (
     update_record,
     write_record,
 )
+from otto.runs.schema import TERMINAL_STATUSES
 
 logger = logging.getLogger("otto.queue.runner")
+
+
+def _json_fingerprint(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
 @dataclass
@@ -112,7 +117,7 @@ def acquire_lock(project_dir: Path) -> Any:
     """
     path = lock_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(path, "w")
+    fh = open(path, "a+")
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
@@ -123,6 +128,8 @@ def acquire_lock(project_dir: Path) -> Any:
                 "stop it before starting a new one"
             ) from exc
         raise
+    fh.seek(0)
+    fh.truncate()
     fh.write(str(os.getpid()))
     fh.flush()
     return fh
@@ -217,7 +224,7 @@ def _token_usage_from_summary(summary: dict[str, Any]) -> dict[str, int]:
 def child_is_alive(child: dict[str, Any]) -> bool:
     """Return True iff the recorded PID still belongs to OUR child.
 
-    Validates pid+pgid+start_time_ns+argv+cwd. Any mismatch → child is
+    Validates pid+pgid+start_time_ns+cwd. Any mismatch → child is
     gone (PID may have been reused by an unrelated process).
     """
     if not child:
@@ -410,9 +417,12 @@ class Runner:
             self._tick()
         except StatePersistenceError:
             logger.exception("state persistence failed; stopping runner")
+            self._abort_after_tick_failure()
             return last_heartbeat, 1, False
         except Exception:
-            logger.exception("tick failed; continuing")
+            logger.exception("tick failed; stopping runner")
+            self._abort_after_tick_failure()
+            return last_heartbeat, 1, False
 
         now = time.monotonic()
         if now - last_heartbeat >= self.config.heartbeat_interval_s:
@@ -420,6 +430,7 @@ class Runner:
                 self._update_watcher_state()
             except StatePersistenceError:
                 logger.exception("state persistence failed during heartbeat; stopping runner")
+                self._abort_after_tick_failure()
                 return last_heartbeat, 1, False
             last_heartbeat = now
 
@@ -437,6 +448,17 @@ class Runner:
             logger.exception("failed to clear watcher state during shutdown")
             return 1
         return 0
+
+    def _abort_after_tick_failure(self) -> None:
+        """Best-effort cleanup when the runner loop cannot safely continue."""
+        try:
+            self._kill_all_in_flight(force=True)
+        except Exception:
+            logger.exception("failed to clean up in-flight queue tasks after tick failure")
+        try:
+            self._clear_watcher_state()
+        except Exception:
+            logger.exception("failed to clear queue watcher state after tick failure")
 
     def _release_lock(self) -> None:
         if self._lock_fh is not None:
@@ -482,16 +504,18 @@ class Runner:
             )
         self._last_logged_cycles = cycle_sets or None
 
-        # Apply commands
         state = load_state(self.project_dir)
+        # Reap before command application so a cancel/remove arriving just
+        # after child exit cannot overwrite an already-successful manifest.
+        self._reap_children(state)
+
+        # Apply commands
         cycle_ids = {tid for cycle in cycles for tid in cycle}
+        known_task_ids = {task.id for task in tasks}
         applied_commands: list[dict[str, Any]] = []
         for cmd in commands:
-            self._apply_command(cmd, state)
+            self._apply_command(cmd, state, known_task_ids=known_task_ids)
             applied_commands.append(cmd)
-
-        # Reap finished children
-        self._reap_children(state)
 
         # Dispatch new work (skip during graceful shutdown)
         if self.shutdown_level is None:
@@ -499,7 +523,11 @@ class Runner:
 
         # Persist state
         self._write_state_or_raise(state)
-        self._repair_terminal_queue_history(tasks, state)
+        maintenance_changed = self._repair_terminal_queue_history(tasks, state)
+        maintenance_changed = self._refresh_queue_run_records(tasks, state) or maintenance_changed
+        maintenance_changed = self._cleanup_removed_task_definitions(tasks, state) or maintenance_changed
+        if maintenance_changed:
+            self._write_state_or_raise(state)
         for cmd in applied_commands:
             append_command_ack(
                 self.project_dir,
@@ -509,7 +537,6 @@ class Runner:
             )
         if command_drain_started:
             finish_command_drain(self.project_dir)
-        self._refresh_queue_run_records(tasks, state)
         if self._should_exit_when_empty(tasks, state):
             logger.info("queue drained; exiting watcher because --exit-when-empty is set")
             self.shutdown_level = "graceful"
@@ -532,12 +559,23 @@ class Runner:
         except (OSError, ValueError) as exc:
             logger.error("startup reconcile: failed to drain commands: %s", exc)
             commands = []
-        for cmd in commands:
-            self._apply_command(cmd, state)
         tasks_by_id = {t.id: t for t in self._load_queue_or_empty(context="startup reconcile")}
         policy = self.config.on_watcher_restart
         for tid, ts in list(state.get("tasks", {}).items()):
             status = ts.get("status")
+            if status == "starting":
+                if queue_index_path_for(self.project_dir, tid) is not None and queue_index_path_for(self.project_dir, tid).exists():
+                    self._finalize_task_from_manifest(ts, tid, exit_code=None)
+                    logger.info("reconciling: task %s completed from manifest while starting", tid)
+                    continue
+                if tid not in tasks_by_id:
+                    _mark_failed(ts, "watcher restart: task was starting but definition is missing")
+                    continue
+                ts["status"] = "queued"
+                ts["child"] = None
+                ts["failure_reason"] = None
+                logger.info("reconciling: task %s was starting with no child; re-queued", tid)
+                continue
             if status not in IN_FLIGHT_STATUSES:
                 continue
             child = ts.get("child") or {}
@@ -585,6 +623,11 @@ class Runner:
                     reason=f"watcher restart with policy={policy}",
                 )
                 continue
+            manifest_path = queue_index_path_for(self.project_dir, tid)
+            if manifest_path is not None and manifest_path.exists():
+                self._finalize_task_from_manifest(ts, tid, exit_code=None)
+                logger.info("reconciling: task %s finalized from queue manifest", tid)
+                continue
             # Child gone — decide based on resumability + checkpoint
             if task is None or not task.resumable:
                 _mark_failed(ts, "watcher restart: child gone, command not resumable")
@@ -605,8 +648,16 @@ class Runner:
                 ts["resumed_from_checkpoint"] = True
             else:
                 _mark_failed(ts, "watcher restart: child gone, no checkpoint")
+        known_task_ids = set(tasks_by_id)
+        for cmd in commands:
+            self._apply_command(cmd, state, known_task_ids=known_task_ids)
         self._write_state_or_raise(state)
-        self._repair_terminal_queue_history(list(tasks_by_id.values()), state)
+        tasks = list(tasks_by_id.values())
+        maintenance_changed = self._repair_terminal_queue_history(tasks, state)
+        maintenance_changed = self._refresh_queue_run_records(tasks, state) or maintenance_changed
+        maintenance_changed = self._cleanup_removed_task_definitions(tasks, state) or maintenance_changed
+        if maintenance_changed:
+            self._write_state_or_raise(state)
         for cmd in commands:
             append_command_ack(
                 self.project_dir,
@@ -616,12 +667,15 @@ class Runner:
             )
         if command_drain_started:
             finish_command_drain(self.project_dir)
-        self._refresh_queue_run_records(list(tasks_by_id.values()), state)
 
     # ---- command application ----
 
     def _apply_command(
-        self, cmd: dict[str, Any], state: dict[str, Any],
+        self,
+        cmd: dict[str, Any],
+        state: dict[str, Any],
+        *,
+        known_task_ids: set[str] | None = None,
     ) -> None:
         kind = str(cmd.get("kind") or cmd.get("cmd") or "").strip()
         tid = cmd.get("id")
@@ -634,6 +688,9 @@ class Runner:
         if not isinstance(tid, str) or not tid:
             logger.warning("command missing/invalid 'id': %r", cmd)
             return
+        if tid not in state.get("tasks", {}) and known_task_ids is not None and tid not in known_task_ids:
+            logger.warning("command ignored for unknown task id %s", tid)
+            return
         ts = state["tasks"].setdefault(tid, {"status": "queued"})
         status = ts.get("status", "queued")
         if kind == "cancel":
@@ -641,6 +698,9 @@ class Runner:
                 logger.warning("cancel ignored for %s in status=%s", tid, status)
                 return
             if status == "running":
+                if self._finalize_running_child_if_finished(tid, ts):
+                    logger.info("cancel ignored for %s after child finalized as %s", tid, ts.get("status"))
+                    return
                 child = ts.get("child") or {}
                 if kill_child_safely(child, signal.SIGTERM):
                     logger.info("cancel: sent SIGTERM to pgid %d (%s)",
@@ -651,8 +711,8 @@ class Runner:
                 ts["terminal_status"] = "cancelled"
                 ts["failure_reason"] = "cancelled by user"
                 return
-            if self._remove_task_definition(tid) is None:
-                return
+            self._snapshot_task_definition(tid, ts)
+            ts["definition_removal_pending"] = True
             ts["status"] = "cancelled"
             ts["finished_at"] = now_iso()
             ts["child"] = None
@@ -661,20 +721,27 @@ class Runner:
             if status == "removed":
                 logger.warning("remove ignored for %s in status=removed", tid)
                 return
-            if status in {"done", "failed", "cancelled"}:
+            if status in TERMINAL_STATUSES:
                 logger.warning("remove ignored for %s in terminal status=%s; use cleanup", tid, status)
                 return
-            if self._remove_task_definition(tid) is None:
-                return
             if status == "running":
+                if self._finalize_running_child_if_finished(tid, ts):
+                    logger.info("remove ignored for %s after child finalized as %s", tid, ts.get("status"))
+                    return
+                self._snapshot_task_definition(tid, ts)
+                ts["definition_removal_pending"] = True
                 child = ts.get("child") or {}
                 if kill_child_safely(child, signal.SIGTERM):
                     logger.info("remove: sent SIGTERM to %s before removal", tid)
                 self._mark_terminating(ts, final_status="removed", reason=ts.get("failure_reason"))
                 return
             if status == "terminating":
+                self._snapshot_task_definition(tid, ts)
+                ts["definition_removal_pending"] = True
                 ts["terminal_status"] = "removed"
                 return
+            self._snapshot_task_definition(tid, ts)
+            ts["definition_removal_pending"] = True
             ts["status"] = "removed"
             ts["finished_at"] = now_iso()
             ts.pop("terminal_status", None)
@@ -689,6 +756,7 @@ class Runner:
             ts["child"] = None
             ts["failure_reason"] = None
             ts["resumed_from_checkpoint"] = True
+            ts.pop("history_appended", None)
         elif kind == "cleanup":
             if status not in {"done", "failed", "cancelled", "removed", INTERRUPTED_STATUS}:
                 logger.warning("cleanup ignored for %s in status=%s", tid, status)
@@ -757,6 +825,8 @@ class Runner:
             elapsed = (now - t0).total_seconds()
             if elapsed < timeout:
                 continue
+            if self._finalize_running_child_if_finished(tid, ts):
+                continue
             child = ts.get("child") or {}
             logger.warning(
                 "task %s exceeded timeout (%.0fs > %.0fs); SIGTERM",
@@ -769,19 +839,45 @@ class Runner:
                 reason=f"timed out after {elapsed:.0f}s (limit {timeout:.0f}s)",
             )
 
+    def _finalize_running_child_if_finished(self, task_id: str, ts: dict[str, Any]) -> bool:
+        """Finalize a just-exited running child before cancel/remove/timeout wins.
+
+        `_reap_children` already runs before commands and timeouts. This second
+        non-blocking check closes the small race where the child exits after the
+        first reap pass returned 0 but before a destructive transition is applied.
+        """
+        if ts.get("status") != "running":
+            return False
+        child = ts.get("child") or {}
+        pid = child.get("pid")
+        if not isinstance(pid, int):
+            return False
+        try:
+            wpid, wstatus = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            if child_is_alive(child):
+                return False
+            self._finalize_task_from_manifest(ts, task_id)
+            self._join_output_pump(pid)
+            return True
+        if wpid == 0:
+            return False
+        exit_code = int(os.waitstatus_to_exitcode(wstatus))
+        self._finalize_task_from_manifest(ts, task_id, exit_code=exit_code)
+        self._join_output_pump(pid)
+        return True
+
     # ---- reap finished children ----
 
     def _reap_children(self, state: dict[str, Any]) -> None:
         """Non-blocking reap of any exited children. Reads their manifests."""
-        # Snapshot in-flight tasks so we can iterate without mutation issues
+        # Snapshot in-flight tasks so we can iterate without mutation issues.
+        # Reap before timeout enforcement; otherwise a child that already exited
+        # successfully can be failed by a delayed watcher tick.
         in_flight = [
             (tid, ts) for tid, ts in state["tasks"].items()
             if ts.get("status") in IN_FLIGHT_STATUSES
         ]
-        # Enforce per-task wall-clock timeout. SIGTERM hung tasks so they
-        # transition to "terminating" and free their concurrency slot.
-        if self.config.task_timeout_s is not None:
-            self._enforce_task_timeouts(in_flight)
         for tid, ts in in_flight:
             status = ts.get("status")
             child = ts.get("child") or {}
@@ -829,6 +925,12 @@ class Runner:
                 )
             else:
                 logger.info("reaped %s: failed (%s)", tid, ts.get("failure_reason"))
+        if self.config.task_timeout_s is not None:
+            still_in_flight = [
+                (tid, ts) for tid, ts in state["tasks"].items()
+                if ts.get("status") in IN_FLIGHT_STATUSES
+            ]
+            self._enforce_task_timeouts(still_in_flight)
 
     # ---- dispatch new work ----
 
@@ -860,17 +962,13 @@ class Runner:
             # Dispatch
             try:
                 self._spawn(task, state)
-                try:
-                    self._write_state_or_raise(state)
-                except StatePersistenceError:
-                    self._terminate_spawned_child_after_persist_failure(task.id, state)
-                    raise
                 slots -= 1
             except StatePersistenceError:
                 raise
             except Exception as exc:
-                _mark_failed(ts, f"spawn failed: {exc}")
-                state["tasks"][task.id] = ts
+                current_ts = state["tasks"].get(task.id) or ts
+                _mark_failed(current_ts, f"spawn failed: {exc}")
+                state["tasks"][task.id] = current_ts
                 logger.exception("failed to spawn %s", task.id)
 
     def _deps_satisfied(self, task: QueueTask, state: dict[str, Any]) -> bool:
@@ -955,10 +1053,10 @@ class Runner:
             "child": None,
             "failure_reason": None,
         }
-        queue_schema.write_state(self.project_dir, state)
+        self._write_state_or_raise(state)
         self._write_queue_run_record(task, state["tasks"][task.id], status="starting")
 
-        # Spawn with own process group (setsid) so cancel can killpg cleanly
+        # Spawn in its own process group so cancel can killpg cleanly.
         env = {
             **os.environ,
             "OTTO_INTERNAL_QUEUE_RUNNER": "1",
@@ -973,7 +1071,7 @@ class Runner:
         popen_kwargs: dict[str, Any] = {
             "cwd": str(wt_path),
             "env": env,
-            "preexec_fn": os.setsid,
+            "start_new_session": True,
             # A watcher can outlive the web/terminal process that launched it.
             # Do not let spawned Python children inherit a closed fd 0; Python
             # can fail during interpreter startup before Otto writes artifacts.
@@ -1003,7 +1101,7 @@ class Runner:
             "exit_code": None,
             "child": {
                 "pid": proc.pid,
-                "pgid": proc.pid,  # setsid → pgid == pid
+                "pgid": proc.pid,  # start_new_session=True -> pgid == pid
                 "start_time_ns": start_time_ns,
                 "argv": argv,
                 "cwd": str(wt_path),
@@ -1013,7 +1111,15 @@ class Runner:
             "duration_s": None,
             "failure_reason": None,
         }
-        self._write_queue_run_record(task, state["tasks"][task.id], status="running")
+        try:
+            self._write_state_or_raise(state)
+        except StatePersistenceError:
+            self._terminate_spawned_child_after_persist_failure(task.id, state)
+            raise
+        try:
+            self._write_queue_run_record(task, state["tasks"][task.id], status="running")
+        except Exception:
+            logger.exception("failed to update queue run record after spawn; continuing")
         logger.info("spawned %s: pid=%d, branch=%s", task.id, proc.pid, branch)
 
     def _recover_child_run_id(self, task: QueueTask, ts: dict[str, Any]) -> str | None:
@@ -1067,15 +1173,21 @@ class Runner:
             return attempt_run_id
         return str(ts.get("child_run_id") or "").strip()
 
-    def _history_snapshot_exists(self, run_id: str) -> bool:
+    def _history_snapshot_matches(self, run_id: str, status: str) -> bool:
         from otto.runs.history import read_history_rows
 
         dedupe_key = f"terminal_snapshot:{run_id}"
-        return any(
-            str(row.get("dedupe_key") or "") == dedupe_key
-            for row in read_history_rows(paths.history_jsonl(self.project_dir))
-            if isinstance(row, dict)
-        )
+        expected_outcome = _terminal_outcome_for_status(status)
+        for row in reversed(read_history_rows(paths.history_jsonl(self.project_dir))):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("dedupe_key") or "") != dedupe_key:
+                continue
+            return (
+                str(row.get("status") or "") == status
+                and (row.get("terminal_outcome") or None) == expected_outcome
+            )
+        return False
 
     def _queue_run_artifacts(self, task: QueueTask, ts: dict[str, Any]) -> dict[str, Any]:
         self._reconcile_task_identity(task, ts)
@@ -1243,22 +1355,28 @@ class Runner:
                 "pgid": child.get("pgid"),
                 "process_start_time_ns": child.get("start_time_ns"),
             })
+        elif status == "starting":
+            record.writer = {
+                "kind": "pending-child",
+                "writer_id": record.writer.get("writer_id"),
+            }
         record.timing["heartbeat_interval_s"] = self.config.heartbeat_interval_s
         write_record(self.project_dir, record)
 
-    def _refresh_queue_run_records(self, tasks: list[QueueTask], state: dict[str, Any]) -> None:
+    def _refresh_queue_run_records(self, tasks: list[QueueTask], state: dict[str, Any]) -> bool:
+        changed = False
         tasks_by_id = {task.id: task for task in tasks}
         for task_id, ts in state.get("tasks", {}).items():
             task = tasks_by_id.get(task_id)
             if task is None:
                 continue
+            before = _json_fingerprint(ts)
             self._reconcile_task_identity(task, ts)
             attempt_run_id = self._queue_record_run_id(ts)
             if not attempt_run_id:
+                changed = changed or _json_fingerprint(ts) != before
                 continue
             status = str(ts.get("status") or "queued")
-            if status == "starting":
-                status = "running"
             try:
                 update_record(
                     self.project_dir,
@@ -1278,13 +1396,13 @@ class Runner:
                     heartbeat=status in IN_FLIGHT_STATUSES,
                 )
             except FileNotFoundError:
-                if (
-                    status in {"done", "failed", "cancelled", "removed", INTERRUPTED_STATUS}
-                    and (ts.get("history_appended") or self._history_snapshot_exists(attempt_run_id))
-                ):
+                if status in TERMINAL_STATUSES and self._history_snapshot_matches(attempt_run_id, status):
                     ts["history_appended"] = True
+                    changed = changed or _json_fingerprint(ts) != before
                     continue
                 self._write_queue_run_record(task, ts, status=status)
+            changed = changed or _json_fingerprint(ts) != before
+        return changed
 
     def _start_output_pump(self, task_id: str, proc: subprocess.Popen[Any]) -> None:
         stdout = getattr(proc, "stdout", None)
@@ -1312,9 +1430,8 @@ class Runner:
 
     def _kill_all_in_flight(self, *, force: bool = False) -> None:
         state = load_state(self.project_dir)
-        tasks_by_id = {
-            task.id: task for task in self._load_queue_or_empty(context="shutdown interrupt")
-        }
+        tasks = self._load_queue_or_empty(context="shutdown interrupt")
+        tasks_by_id = {task.id: task for task in tasks}
         for tid, ts in state["tasks"].items():
             if ts.get("status") not in IN_FLIGHT_STATUSES:
                 continue
@@ -1338,7 +1455,13 @@ class Runner:
                 if kill_child_safely(child, signal.SIGKILL):
                     ts["sigkill_sent_at"] = now_iso()
                     logger.warning("immediate shutdown sent SIGKILL to task %s", tid)
+                self._finish_terminating(ts)
         self._write_state_or_raise(state)
+        maintenance_changed = self._repair_terminal_queue_history(tasks, state)
+        maintenance_changed = self._refresh_queue_run_records(tasks, state) or maintenance_changed
+        maintenance_changed = self._cleanup_removed_task_definitions(tasks, state) or maintenance_changed
+        if maintenance_changed:
+            self._write_state_or_raise(state)
 
     def _terminate_spawned_child_after_persist_failure(
         self,
@@ -1485,19 +1608,65 @@ class Runner:
         ts.pop("terminating_since", None)
         ts.pop("sigkill_sent_at", None)
 
+    def _snapshot_task_definition(self, task_id: str, ts: dict[str, Any]) -> None:
+        if isinstance(ts.get("task_definition"), dict):
+            return
+        tasks = {task.id: task for task in self._load_queue_or_empty(context="task definition snapshot")}
+        task = tasks.get(task_id)
+        if task is None:
+            return
+        ts["task_definition"] = {
+            key: value
+            for key, value in asdict(task).items()
+            if value is not None and value != []
+        }
+
+    def _task_from_state_snapshot(self, task_id: str, ts: dict[str, Any]) -> QueueTask | None:
+        raw = ts.get("task_definition")
+        if not isinstance(raw, dict):
+            return None
+        argv = raw.get("command_argv")
+        if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+            logger.warning("queue task %s has invalid persisted task_definition", task_id)
+            return None
+        return QueueTask(
+            id=str(raw.get("id") or task_id),
+            command_argv=list(argv),
+            after=list(raw.get("after") or []),
+            resumable=bool(raw.get("resumable", True)),
+            added_at=str(raw.get("added_at") or ""),
+            resolved_intent=raw.get("resolved_intent"),
+            focus=raw.get("focus"),
+            target=raw.get("target"),
+            spec_file_path=raw.get("spec_file_path"),
+            branch=raw.get("branch"),
+            worktree=raw.get("worktree"),
+            notes=raw.get("notes"),
+        )
+
+    def _task_for_terminal_state(
+        self,
+        task_id: str,
+        ts: dict[str, Any],
+        tasks_by_id: dict[str, QueueTask] | None = None,
+    ) -> QueueTask | None:
+        if tasks_by_id is not None and task_id in tasks_by_id:
+            return tasks_by_id[task_id]
+        return self._task_from_state_snapshot(task_id, ts)
+
     def _finalize_queue_attempt(self, task_id: str, ts: dict[str, Any]) -> None:
         status = str(ts.get("status") or "")
-        if status not in {"done", "failed", "cancelled", "removed", INTERRUPTED_STATUS}:
+        if status not in TERMINAL_STATUSES:
             return
         tasks = {task.id: task for task in self._load_queue_or_empty(context="queue attempt finalize")}
-        task = tasks.get(task_id)
+        task = self._task_for_terminal_state(task_id, ts, tasks)
         if task is None:
             return
         self._reconcile_task_identity(task, ts)
         attempt_run_id = self._queue_record_run_id(ts)
         if not attempt_run_id:
             return
-        if ts.get("history_appended") or self._history_snapshot_exists(attempt_run_id):
+        if self._history_snapshot_matches(attempt_run_id, status):
             ts["history_appended"] = True
             return
         terminal_outcome = _terminal_outcome_for_status(status)
@@ -1523,25 +1692,53 @@ class Runner:
                 terminal_outcome=terminal_outcome,
                 updates={"timing": {"heartbeat_interval_s": self.config.heartbeat_interval_s}},
             )
-        self._append_queue_history_snapshot(
-            task,
-            ts,
-            run_id=attempt_run_id,
-            status=status,
-            terminal_outcome=terminal_outcome,
-        )
+        try:
+            self._append_queue_history_snapshot(
+                task,
+                ts,
+                run_id=attempt_run_id,
+                status=status,
+                terminal_outcome=terminal_outcome,
+            )
+        except Exception:
+            logger.exception("failed to append terminal history for queue task %s; will retry", task_id)
+            return
         ts["history_appended"] = True
 
-    def _repair_terminal_queue_history(self, tasks: list[QueueTask], state: dict[str, Any]) -> None:
+    def _repair_terminal_queue_history(self, tasks: list[QueueTask], state: dict[str, Any]) -> bool:
+        changed = False
         tasks_by_id = {task.id: task for task in tasks}
         for task_id, ts in state.get("tasks", {}).items():
-            task = tasks_by_id.get(task_id)
+            task = self._task_for_terminal_state(task_id, ts, tasks_by_id)
             if task is None:
                 continue
             status = str(ts.get("status") or "")
-            if status not in {"done", "failed", "cancelled", "removed", INTERRUPTED_STATUS}:
+            if status not in TERMINAL_STATUSES:
                 continue
+            before = _json_fingerprint(ts)
             self._finalize_queue_attempt(task_id, ts)
+            changed = changed or _json_fingerprint(ts) != before
+        return changed
+
+    def _cleanup_removed_task_definitions(self, tasks: list[QueueTask], state: dict[str, Any]) -> bool:
+        changed = False
+        tasks_by_id = {task.id: task for task in tasks}
+        for task_id, ts in list(state.get("tasks", {}).items()):
+            if task_id not in tasks_by_id:
+                if ts.get("definition_removal_pending") and ts.get("status") in {"cancelled", "removed"}:
+                    ts.pop("definition_removal_pending", None)
+                    changed = True
+                continue
+            if not ts.get("definition_removal_pending"):
+                continue
+            if ts.get("status") not in {"cancelled", "removed"}:
+                continue
+            if self._queue_record_run_id(ts) and not ts.get("history_appended"):
+                continue
+            if self._remove_task_definition(task_id) is not None:
+                ts.pop("definition_removal_pending", None)
+                changed = True
+        return changed
 
     def _write_state_or_raise(self, state: dict[str, Any]) -> None:
         try:
@@ -1561,10 +1758,16 @@ def runner_config_from_otto_config(config: dict[str, Any]) -> RunnerConfig:
         raise ValueError("queue.concurrent must be >= 1")
     raw_timeout = q.get("task_timeout_s", 1800.0)
     task_timeout: float | None
-    if raw_timeout is None or raw_timeout == 0 or raw_timeout is False:
+    if raw_timeout is None:
         task_timeout = None  # explicit opt-out
     else:
-        task_timeout = float(raw_timeout)
+        if (
+            not isinstance(raw_timeout, (int, float))
+            or isinstance(raw_timeout, bool)
+            or float(raw_timeout) < 0.0
+        ):
+            raise ValueError("queue.task_timeout_s must be a number >= 0, or null")
+        task_timeout = None if float(raw_timeout) == 0.0 else float(raw_timeout)
     return RunnerConfig(
         concurrent=concurrent,
         worktree_dir=str(q.get("worktree_dir", ".worktrees")),

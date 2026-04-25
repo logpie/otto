@@ -33,6 +33,10 @@ STORIES_TESTED: 2
 STORIES_PASSED: 2
 STORY_RESULT: crud | PASS | Create/Read work | including edge cases
 STORY_RESULT: search | PASS | Search by tag|title returns correct results
+COVERAGE_OBSERVED:
+- Exercised mocked CRUD and search stories
+COVERAGE_GAPS:
+- Did not model deeper product-specific coverage in this mocked transcript
 VERDICT: PASS
 DIAGNOSIS: null
 """
@@ -67,6 +71,10 @@ Fixed code.
 
 STORY_RESULT: crud | PASS | Still works
 STORY_RESULT: auth | FAIL | Still broken
+COVERAGE_OBSERVED:
+- Exercised mocked CRUD and auth stories
+COVERAGE_GAPS:
+- Did not model deeper product-specific coverage in this mocked transcript
 VERDICT: FAIL
 DIAGNOSIS: Auth remains broken after fix attempt
 """
@@ -140,6 +148,10 @@ STORIES_TESTED: 2
 STORIES_PASSED: 1
 STORY_RESULT: crud | PASS | Works
 STORY_RESULT: auth | FAIL | Missing check
+COVERAGE_OBSERVED:
+- Exercised mocked CRUD and auth stories in round 1
+COVERAGE_GAPS:
+- Did not model deeper product-specific coverage in this mocked transcript
 VERDICT: FAIL
 DIAGNOSIS: Auth broken
 
@@ -150,6 +162,10 @@ STORIES_TESTED: 2
 STORIES_PASSED: 2
 STORY_RESULT: crud | PASS | Works
 STORY_RESULT: auth | PASS | Fixed
+COVERAGE_OBSERVED:
+- Exercised mocked CRUD and auth stories in round 2
+COVERAGE_GAPS:
+- Did not model deeper product-specific coverage in this mocked transcript
 VERDICT: PASS
 DIAGNOSIS: null
 """
@@ -248,6 +264,10 @@ STORIES_TESTED: 2
 STORIES_PASSED: 2
 STORY_RESULT:  | PASS | Ghost entry with empty id
 STORY_RESULT: real-story | PASS | Real story that works
+COVERAGE_OBSERVED:
+- Exercised mocked empty-id and real story entries
+COVERAGE_GAPS:
+- Did not model deeper product-specific coverage in this mocked transcript
 VERDICT: PASS
 DIAGNOSIS: null
 """
@@ -267,6 +287,10 @@ CERTIFY_ROUND: 1
 STORIES_TESTED: 1
 STORIES_PASSED: 1
 STORY_RESULT: | PASS | only ghost
+COVERAGE_OBSERVED:
+- Exercised mocked empty story id entry
+COVERAGE_GAPS:
+- Did not model deeper product-specific coverage in this mocked transcript
 VERDICT: PASS
 DIAGNOSIS: null
 """
@@ -291,6 +315,10 @@ class TestZeroStoriesVerdictPass:
 CERTIFY_ROUND: 1
 STORIES_TESTED: 0
 STORIES_PASSED: 0
+COVERAGE_OBSERVED:
+- Exercised mocked zero-story certifier output
+COVERAGE_GAPS:
+- Did not model deeper product-specific coverage in this mocked transcript
 VERDICT: PASS
 DIAGNOSIS: null
 """
@@ -805,6 +833,10 @@ CERTIFY_ROUND: 1
 STORIES_TESTED: 2
 STORY_RESULT: crud | PASS | Works
 STORY_RESULT: auth | FAIL | Broken
+COVERAGE_OBSERVED:
+- Exercised mocked CRUD and auth stories in round 1
+COVERAGE_GAPS:
+- Did not model deeper product-specific coverage in this mocked transcript
 VERDICT: FAIL
 DIAGNOSIS: Auth broken
 
@@ -812,6 +844,10 @@ CERTIFY_ROUND: 2
 STORIES_TESTED: 2
 STORY_RESULT: crud | PASS | Works
 STORY_RESULT: auth | PASS | Fixed
+COVERAGE_OBSERVED:
+- Exercised mocked CRUD and auth stories in round 2
+COVERAGE_GAPS:
+- Did not model deeper product-specific coverage in this mocked transcript
 VERDICT: PASS
 DIAGNOSIS: null
 """
@@ -2177,7 +2213,12 @@ class TestCriticalWriteFailures:
             return real_write_json_file(path, data, strict=strict)
 
         with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(
-            "STORY_RESULT: smoke | PASS | ok\nVERDICT: PASS\n"
+            "STORY_RESULT: smoke | PASS | ok\n"
+            "COVERAGE_OBSERVED:\n"
+            "- Exercised mocked smoke story\n"
+            "COVERAGE_GAPS:\n"
+            "- Did not model deeper product-specific coverage in this mocked transcript\n"
+            "VERDICT: PASS\n"
         )), patch("otto.observability.write_json_file", side_effect=fake_write_json_file):
             with pytest.raises(RuntimeError, match="Failed to write checkpoint"):
                 await build_agentic_v3("test", tmp_git_repo, {})
@@ -2630,6 +2671,30 @@ class TestResolveResume:
         state = resolve_resume(tmp_path, resume=True, expected_command="build")
         assert not state.resumed
         assert state.start_round == 1
+
+    def test_load_checkpoint_scans_active_session_if_pointer_missing(self, tmp_path):
+        """A crash between checkpoint write and paused-pointer write must still be resumable."""
+        import json
+        from otto import paths
+        from otto.checkpoint import load_checkpoint
+
+        session_id = "2026-04-25-010203-abcdef"
+        paths.ensure_session_scaffold(tmp_path, session_id)
+        paths.session_checkpoint(tmp_path, session_id).write_text(json.dumps({
+            "run_id": session_id,
+            "command": "build",
+            "status": "paused",
+            "session_id": "sdk-session-1",
+            "current_round": 2,
+            "total_cost": 1.25,
+            "updated_at": "2026-04-25T01:02:03Z",
+        }))
+
+        checkpoint = load_checkpoint(tmp_path)
+
+        assert checkpoint is not None
+        assert checkpoint["run_id"] == session_id
+        assert checkpoint["agent_session_id"] == "sdk-session-1"
 
     def test_stale_checkpoint_cleared_when_not_resuming(self, tmp_path):
         """Checkpoint exists but user ran without --resume → it's cleared."""
@@ -3218,6 +3283,107 @@ class TestBuildResume:
         assert result.exit_code == 0
         build_agent.assert_called_once()
 
+    def test_improve_refuses_dirty_repo_before_branch_creation(self, tmp_git_repo):
+        from otto.cli_improve import _run_improve_locked
+
+        tracked = tmp_git_repo / "tracked.txt"
+        tracked.write_text("seed\n")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_git_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "seed tracked"], cwd=tmp_git_repo, check=True)
+        tracked.write_text("dirty edit\n")
+        resume_state = SimpleNamespace(
+            resumed=False,
+            max_rounds=0,
+            split_mode=None,
+            focus="",
+            certifier_mode="",
+            run_id="",
+            session_started_at=None,
+            start_round=1,
+            total_cost=0.0,
+            total_duration=0.0,
+            rounds=[],
+            agent_session_id="",
+        )
+
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/dirty") as create_branch:
+            with pytest.raises(SystemExit) as exc:
+                _run_improve_locked(
+                    project_dir=tmp_git_repo,
+                    intent="demo app",
+                    rounds=1,
+                    focus=None,
+                    certifier_mode="fast",
+                    command_label="Improve",
+                    command_id="improve.bugs",
+                    subcommand="bugs",
+                    target=None,
+                    split=False,
+                    resume=False,
+                    resume_state=resume_state,
+                    run_id="improve-run-1",
+                )
+
+        assert exc.value.code == 2
+        create_branch.assert_not_called()
+
+    def test_improve_honors_allow_dirty_repo_config_before_branch_creation(self, tmp_git_repo):
+        from otto.cli_improve import _run_improve_locked
+
+        (tmp_git_repo / "otto.yaml").write_text("allow_dirty_repo: true\n", encoding="utf-8")
+        tracked = tmp_git_repo / "tracked.txt"
+        tracked.write_text("seed\n")
+        subprocess.run(["git", "add", "tracked.txt", "otto.yaml"], cwd=tmp_git_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "seed tracked"], cwd=tmp_git_repo, check=True)
+        tracked.write_text("dirty edit\n")
+        resume_state = SimpleNamespace(
+            resumed=False,
+            max_rounds=0,
+            split_mode=None,
+            focus="",
+            certifier_mode="",
+            run_id="",
+            session_started_at=None,
+            start_round=1,
+            total_cost=0.0,
+            total_duration=0.0,
+            rounds=[],
+            agent_session_id="",
+        )
+
+        async def _fake_build_agentic_v3(*_args, **_kwargs):
+            return BuildResult(
+                passed=True,
+                build_id="improve-run-1",
+                total_cost=0.0,
+                total_duration=1.0,
+                tasks_passed=0,
+                tasks_failed=0,
+            )
+
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/dirty") as create_branch:
+            with patch("otto.pipeline.build_agentic_v3", side_effect=_fake_build_agentic_v3) as build_agent:
+                with pytest.raises(SystemExit) as exc:
+                    _run_improve_locked(
+                        project_dir=tmp_git_repo,
+                        intent="demo app",
+                        rounds=1,
+                        focus=None,
+                        certifier_mode="fast",
+                        command_label="Improve",
+                        command_id="improve.bugs",
+                        subcommand="bugs",
+                        target=None,
+                        split=False,
+                        resume=False,
+                        resume_state=resume_state,
+                        run_id="improve-run-1",
+                    )
+
+        assert exc.value.code == 0
+        create_branch.assert_called_once()
+        build_agent.assert_called_once()
+
     def test_certify_cli_exposes_break_lock_flag(self):
         """Standalone certify should expose the manual lock escape hatch."""
         from click.testing import CliRunner
@@ -3275,6 +3441,80 @@ class TestCliProjectRootResolution:
 
         assert result.exit_code == 0
         assert captured["project_dir"] == tmp_git_repo.resolve()
+
+    def test_build_in_worktree_preserves_cli_overrides_after_config_reload(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        (tmp_git_repo / "otto.yaml").write_text(
+            "model: yaml-model\n"
+            "provider: claude\n"
+            "max_turns_per_call: 99\n",
+            encoding="utf-8",
+        )
+        captured: dict[str, object] = {}
+        run_id_dirs: list[Path] = []
+        saved_cwd = Path.cwd()
+        monkeypatch.chdir(tmp_git_repo)
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            del intent, kwargs
+            captured["project_dir"] = project_dir
+            captured["config"] = dict(config)
+            return BuildResult(
+                passed=True,
+                build_id="run-1",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        def fake_new_run_id(project_dir=None):
+            run_id_dirs.append(Path(project_dir))
+            return "run-1"
+
+        try:
+            with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build), patch(
+                "otto.cli._new_run_id",
+                side_effect=fake_new_run_id,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "build",
+                        "test intent",
+                        "--in-worktree",
+                        "--budget",
+                        "123",
+                        "--max-turns",
+                        "17",
+                        "--model",
+                        "cli-model",
+                        "--provider",
+                        "codex",
+                        "--effort",
+                        "high",
+                        "--strict",
+                        "--allow-dirty",
+                        "--fast",
+                    ],
+                    catch_exceptions=False,
+                )
+        finally:
+            os.chdir(saved_cwd)
+
+        assert result.exit_code == 0, result.output
+        config = captured["config"]
+        assert Path(captured["project_dir"]).is_relative_to(tmp_git_repo / ".worktrees")
+        assert run_id_dirs == [captured["project_dir"]]
+        assert config["run_budget_seconds"] == 123
+        assert config["max_turns_per_call"] == 17
+        assert config["model"] == "cli-model"
+        assert config["provider"] == "codex"
+        assert config["effort"] == "high"
+        assert config["strict_mode"] is True
+        assert config["allow_dirty_repo"] is True
+        assert config["certifier_mode"] == "fast"
 
     def test_improve_uses_repo_root_from_subdirectory(self, tmp_git_repo, monkeypatch):
         from click.testing import CliRunner
@@ -3596,7 +3836,7 @@ class TestCliProjectRootResolution:
 
         monkeypatch.chdir(tmp_git_repo)
         with patch("otto.agent.run_agent_query", side_effect=capture_query):
-            result = CliRunner().invoke(main, ["build", "--resume", "--allow-dirty"], catch_exceptions=False)
+            result = CliRunner().invoke(main, ["build", "--resume"], catch_exceptions=False)
 
         assert result.exit_code == 0
         # intent.md is unchanged (not re-appended)
@@ -3981,7 +4221,7 @@ class TestCliProjectRootResolution:
              patch("otto.pipeline.run_certify_fix_loop", side_effect=fake_loop):
             result = CliRunner().invoke(
                 main,
-                ["improve", "bugs", "--split", "--resume", "--allow-dirty"],
+                ["improve", "bugs", "--split", "--resume"],
                 catch_exceptions=False,
             )
         assert result.exit_code == 0
@@ -3995,7 +4235,7 @@ class TestCliProjectRootResolution:
              patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = CliRunner().invoke(
                 main,
-                ["improve", "bugs", "--resume", "--allow-dirty"],
+                ["improve", "bugs", "--resume"],
                 catch_exceptions=False,
             )
         assert result.exit_code == 0

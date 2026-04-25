@@ -24,21 +24,6 @@ def make_mock_query(text, cost=0.50, session_id="test-session", assistant_messag
     result_msg.result = None
     result_msg.total_cost_usd = cost
     result_msg.usage = None
-    if (
-        "STORY_RESULT:" in text
-        and "COVERAGE_OBSERVED:" not in text
-        and "COVERAGE_GAPS:" not in text
-        and "VERDICT:" in text
-    ):
-        coverage_block = (
-            "COVERAGE_OBSERVED:\n"
-            "- Exercised the mocked story markers in this test transcript\n"
-            "COVERAGE_GAPS:\n"
-            "- Did not model additional product-specific coverage in this mocked test transcript\n"
-        )
-        prefix, verdict = text.rsplit("VERDICT:", 1)
-        text = f"{prefix}{coverage_block}VERDICT:{verdict}"
-
     async def mock_query(prompt, options, **kwargs):
         from otto.agent import AssistantMessage, ResultMessage, TextBlock
         on_message = kwargs.get("on_message")

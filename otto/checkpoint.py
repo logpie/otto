@@ -625,13 +625,34 @@ def _load_legacy_checkpoint(project_dir: Path) -> dict[str, Any] | None:
     return data
 
 
+def _scan_active_session_checkpoint(project_dir: Path) -> dict[str, Any] | None:
+    candidates: list[tuple[str, float, str, dict[str, Any]]] = []
+    for cp_path in paths.sessions_root(project_dir).glob("*/checkpoint.json"):
+        try:
+            data = json.loads(cp_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+        if data.get("status") not in ("in_progress", "paused"):
+            continue
+        try:
+            mtime = cp_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        candidates.append((str(data.get("updated_at") or ""), mtime, str(cp_path), data))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][3]
+
+
 def load_checkpoint(project_dir: Path, run_id: str | None = None) -> dict[str, Any] | None:
     """Load checkpoint if one exists and is active (in_progress or paused).
 
     Tries in order:
       1. explicit run_id (if provided)
       2. `paused` pointer → session_dir/checkpoint.json
-      3. Legacy otto_logs/checkpoint.json (for upgrade safety)
+      3. active session checkpoint scan (crash between checkpoint and pointer write)
+      4. Legacy otto_logs/checkpoint.json (for upgrade safety)
     """
     if run_id:
         cp_path = _checkpoint_path_for(project_dir, run_id)
@@ -653,7 +674,11 @@ def load_checkpoint(project_dir: Path, run_id: str | None = None) -> dict[str, A
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
 
-    # 3: legacy fallback.
+    scanned = _scan_active_session_checkpoint(project_dir)
+    if scanned is not None:
+        return _normalize_checkpoint_data(scanned)
+
+    # 4: legacy fallback.
     legacy = _load_legacy_checkpoint(project_dir)
     if legacy is not None:
         return _normalize_checkpoint_data(legacy)

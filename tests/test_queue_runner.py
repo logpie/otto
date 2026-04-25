@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from otto import paths as _paths
+from otto.queue.runtime import INTERRUPTED_STATUS
 import otto.queue.runner as runner_module
 from otto.queue.runner import (
     Runner,
@@ -39,6 +40,7 @@ from otto.queue.schema import (
     commands_processing_path,
     load_queue,
     load_state,
+    remove_task,
     write_state,
 )
 from tests._helpers import init_repo
@@ -51,6 +53,20 @@ def test_acquire_lock_succeeds_first_time(tmp_path: Path):
     fh = acquire_lock(tmp_path)
     assert fh is not None
     fh.close()
+
+
+def test_failed_queue_lock_acquire_does_not_truncate_holder(tmp_path: Path):
+    fh = acquire_lock(tmp_path)
+    try:
+        lock = runner_module.lock_path(tmp_path)
+        before = lock.read_text(encoding="utf-8")
+
+        with pytest.raises(WatcherAlreadyRunning):
+            acquire_lock(tmp_path)
+
+        assert lock.read_text(encoding="utf-8") == before
+    finally:
+        fh.close()
 
 
 def test_acquire_lock_refuses_second_holder(tmp_path: Path):
@@ -68,6 +84,41 @@ def test_acquire_lock_releasable(tmp_path: Path):
     # After close, lock can be re-acquired
     fh2 = acquire_lock(tmp_path)
     fh2.close()
+
+
+def test_run_iteration_tick_failure_cleans_up_in_flight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = init_repo(tmp_path)
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    calls: list[str] = []
+    monkeypatch.setattr(runner, "_tick", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(runner, "_kill_all_in_flight", lambda *, force=False: calls.append(f"kill:{force}"))
+    monkeypatch.setattr(runner, "_clear_watcher_state", lambda: calls.append("clear"))
+
+    _last_heartbeat, exit_code, done = runner._run_iteration(123.0)
+
+    assert exit_code == 1
+    assert done is False
+    assert calls == ["kill:True", "clear"]
+
+
+def test_run_iteration_heartbeat_failure_cleans_up_in_flight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = init_repo(tmp_path)
+    runner = Runner(repo, RunnerConfig(heartbeat_interval_s=0.0), otto_bin="/bin/true")
+    calls: list[str] = []
+    monkeypatch.setattr(runner, "_tick", lambda: None)
+    monkeypatch.setattr(
+        runner,
+        "_update_watcher_state",
+        lambda: (_ for _ in ()).throw(runner_module.StatePersistenceError("disk full")),
+    )
+    monkeypatch.setattr(runner, "_kill_all_in_flight", lambda *, force=False: calls.append(f"kill:{force}"))
+    monkeypatch.setattr(runner, "_clear_watcher_state", lambda: calls.append("clear"))
+
+    _last_heartbeat, exit_code, done = runner._run_iteration(0.0)
+
+    assert exit_code == 1
+    assert done is False
+    assert calls == ["kill:True", "clear"]
 
 
 # ---------- child_is_alive (PID-reuse safety) ----------
@@ -539,11 +590,99 @@ def test_finalize_queue_attempt_surfaces_unexpected_finalize_errors(tmp_path: Pa
         "finished_at": "2026-04-23T00:00:05Z",
     }
 
-    monkeypatch.setattr(Runner, "_history_snapshot_exists", lambda self, run_id: False)
+    monkeypatch.setattr(Runner, "_history_snapshot_matches", lambda self, run_id, status: False)
     monkeypatch.setattr(runner_module, "finalize_record", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 
     with pytest.raises(RuntimeError, match="boom"):
         runner._finalize_queue_attempt("t1", ts)
+
+
+def test_finalize_queue_attempt_retries_history_append_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from otto.runs.history import read_history_rows
+
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    ))
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+    ts = {
+        "status": "done",
+        "attempt_run_id": "run-123",
+        "child": None,
+        "failure_reason": None,
+        "started_at": "2026-04-23T00:00:00Z",
+        "finished_at": "2026-04-23T00:00:05Z",
+    }
+    calls = 0
+    original_append = runner._append_queue_history_snapshot
+
+    def flaky_append(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("disk full")
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_append_queue_history_snapshot", flaky_append)
+
+    runner._finalize_queue_attempt("t1", ts)
+    assert ts.get("history_appended") is not True
+    assert not _paths.history_jsonl(repo).exists()
+
+    runner._repair_terminal_queue_history(load_queue(repo), {"tasks": {"t1": ts}})
+
+    assert calls == 2
+    assert ts["history_appended"] is True
+    rows = read_history_rows(_paths.history_jsonl(repo))
+    assert any(row.get("run_id") == "run-123" and row.get("status") == "done" for row in rows)
+
+
+def test_finalize_queue_attempt_uses_persisted_task_definition_after_queue_cleanup(
+    tmp_path: Path,
+):
+    from otto.runs.history import read_history_rows
+
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+        resolved_intent="build test",
+    )
+    append_task(repo, task)
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+    state = load_state(repo)
+    ts = state["tasks"].setdefault("t1", {})
+    runner._snapshot_task_definition("t1", ts)
+    remove_task(repo, "t1")
+    ts.update({
+        "status": "removed",
+        "attempt_run_id": "run-removed",
+        "child": None,
+        "failure_reason": "removed by user",
+        "started_at": "2026-04-23T00:00:00Z",
+        "finished_at": "2026-04-23T00:00:05Z",
+    })
+
+    runner._finalize_queue_attempt("t1", ts)
+
+    assert ts["history_appended"] is True
+    rows = read_history_rows(_paths.history_jsonl(repo))
+    row = next(row for row in rows if row.get("run_id") == "run-removed")
+    assert row["status"] == "removed"
+    assert row["command"] == "build test"
+    assert row["queue_task_id"] == "t1"
+    assert row["intent"] == "build test"
+    assert row["branch"] == "build/t1-test"
+    assert row["worktree"].endswith(".worktrees/t1")
+    assert row["resumable"] is True
 
 
 def test_runner_respects_concurrent_cap(tmp_path: Path):
@@ -804,8 +943,16 @@ def test_runner_sets_queue_project_dir_env_on_spawn(tmp_path: Path, monkeypatch:
     captured_env: dict[str, str] = {}
     captured_stdin: Any = None
 
-    def fake_popen(argv: list[str], *, cwd: str, env: dict[str, str], preexec_fn: Any, stdin: Any):  # type: ignore[no-untyped-def]
+    def fake_popen(
+        argv: list[str],
+        *,
+        cwd: str,
+        env: dict[str, str],
+        start_new_session: bool,
+        stdin: Any,
+    ):  # type: ignore[no-untyped-def]
         nonlocal captured_stdin
+        assert start_new_session is True
         captured_env.update(env)
         captured_stdin = stdin
 
@@ -846,6 +993,96 @@ def test_runner_sets_queue_project_dir_env_on_spawn(tmp_path: Path, monkeypatch:
         runner._lock_fh.close()
 
 
+def test_spawn_persists_running_state_before_return(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    )
+    state: dict[str, Any] = {"tasks": {}}
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    from otto import worktree as wt_mod
+
+    monkeypatch.setattr(wt_mod, "add_worktree", lambda **_kwargs: None)
+
+    class _StubProc:
+        pid = 12345
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", lambda *_args, **_kwargs: _StubProc())
+    monkeypatch.setattr(runner, "_write_queue_run_record", lambda *_args, **_kwargs: None)
+
+    writes: list[dict[str, Any]] = []
+
+    def capture_write_state(project_dir: Path, next_state: dict[str, Any]) -> None:
+        assert project_dir == repo
+        writes.append(json.loads(json.dumps(next_state)))
+        write_state(project_dir, next_state)
+
+    monkeypatch.setattr(runner_module, "write_state", capture_write_state)
+
+    runner._spawn(task, state)
+
+    assert [item["tasks"]["t1"]["status"] for item in writes] == ["starting", "running"]
+    persisted = load_state(repo)["tasks"]["t1"]
+    assert persisted["status"] == "running"
+    assert persisted["child"]["pid"] == 12345
+
+
+def test_starting_queue_record_is_not_fallback_killable(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    )
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = {
+        "status": "starting",
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": None,
+    }
+
+    runner._write_queue_run_record(task, state, status="starting")
+
+    record = json.loads(_paths.live_run_path(repo, "2026-04-23-010203-abc123").read_text(encoding="utf-8"))
+    assert record["writer"]["kind"] == "pending-child"
+    assert "pgid" not in record["writer"]
+
+
+def test_spawn_failure_after_starting_preserves_attempt_run_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    ))
+    from otto import worktree as wt_mod
+
+    monkeypatch.setattr(wt_mod, "add_worktree", lambda **_kwargs: None)
+
+    def _popen_fails(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("exec failed")
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", _popen_fails)
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/does-not-exist")
+
+    runner._tick()
+
+    task_state = load_state(repo)["tasks"]["t1"]
+    assert task_state["status"] == "failed"
+    assert task_state["attempt_run_id"]
+    record = json.loads(_paths.live_run_path(repo, task_state["attempt_run_id"]).read_text(encoding="utf-8"))
+    assert record["status"] == "failed"
+    assert "exec failed" in record["last_event"]
+
+
 # ---------- runner_config_from_otto_config ----------
 
 
@@ -860,12 +1097,25 @@ def test_runner_config_from_otto_config():
     assert cfg.concurrent == 5
     assert cfg.worktree_dir == ".my-trees"
     assert cfg.on_watcher_restart == "fail"
+    assert cfg.task_timeout_s == 1800.0
 
 
 @pytest.mark.parametrize("bad_concurrent", [0, -2, True, "3"])
 def test_runner_config_rejects_bad_concurrency(bad_concurrent: object):
     with pytest.raises(ValueError, match="queue.concurrent"):
         runner_config_from_otto_config({"queue": {"concurrent": bad_concurrent}})
+
+
+@pytest.mark.parametrize("bad_timeout", [-1, False, True, "30"])
+def test_runner_config_rejects_bad_task_timeout(bad_timeout: object):
+    with pytest.raises(ValueError, match="queue.task_timeout_s"):
+        runner_config_from_otto_config({"queue": {"task_timeout_s": bad_timeout}})
+
+
+@pytest.mark.parametrize("raw_timeout", [None, 0])
+def test_runner_config_allows_disabling_task_timeout(raw_timeout: object):
+    cfg = runner_config_from_otto_config({"queue": {"task_timeout_s": raw_timeout}})
+    assert cfg.task_timeout_s is None
 
 
 def test_runner_config_falls_back_to_defaults_with_empty_queue():
@@ -875,7 +1125,7 @@ def test_runner_config_falls_back_to_defaults_with_empty_queue():
     assert cfg.on_watcher_restart == "resume"
 
 
-def test_run_logs_and_continues_after_tick_exception(tmp_path: Path, caplog):
+def test_run_logs_and_stops_after_tick_exception(tmp_path: Path, caplog):
     repo = init_repo(tmp_path)
     cfg = RunnerConfig(poll_interval_s=0.01, heartbeat_interval_s=10.0)
     runner = Runner(repo, cfg, otto_bin="/bin/true")
@@ -889,9 +1139,9 @@ def test_run_logs_and_continues_after_tick_exception(tmp_path: Path, caplog):
 
     runner._tick = flaky_tick  # type: ignore[method-assign]
     with caplog.at_level("ERROR", logger="otto.queue.runner"):
-        assert runner.run() == 0
-    assert seen["count"] >= 2
-    assert "tick failed; continuing" in caplog.text
+        assert runner.run() == 1
+    assert seen["count"] == 1
+    assert "tick failed; stopping runner" in caplog.text
 
 
 def test_tick_logs_malformed_queue_yml_and_continues_after_fix(
@@ -995,7 +1245,7 @@ def test_run_exits_on_state_persistence_failure_after_spawn(
 
     def flaky_write_state(project_dir: Path, state: dict[str, Any]) -> None:
         calls["count"] += 1
-        if calls["count"] == 3:
+        if calls["count"] == 4:
             raise OSError("disk full")
         real_write_state(project_dir, state)
 
@@ -1016,6 +1266,55 @@ def test_run_exits_on_state_persistence_failure_after_spawn(
     for proc in child_procs:
         with pytest.raises(ProcessLookupError):
             os.kill(proc.pid, 0)
+
+
+def test_spawn_keeps_child_tracked_when_running_record_update_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    )
+    state: dict[str, Any] = {"tasks": {}}
+    runner = Runner(
+        repo,
+        RunnerConfig(),
+        otto_bin=[sys.executable, "-c", "import time; time.sleep(30)"],
+    )
+    child: dict[str, Any] | None = None
+
+    try:
+        def fail_running_record(
+            task_arg: QueueTask,
+            state_arg: dict[str, Any],
+            *,
+            status: str,
+        ) -> None:
+            del task_arg, state_arg
+            if status == "running":
+                raise OSError("index unavailable")
+
+        monkeypatch.setattr(runner, "_write_queue_run_record", fail_running_record)
+
+        with caplog.at_level("ERROR", logger="otto.queue.runner"):
+            runner._spawn(task, state)
+
+        child = state["tasks"]["t1"]["child"]
+        assert state["tasks"]["t1"]["status"] == "running"
+        assert child_is_alive(child)
+        assert "failed to update queue run record after spawn; continuing" in caplog.text
+    finally:
+        if child and child_is_alive(child):
+            kill_child_safely(child, signal.SIGTERM)
+            try:
+                os.waitpid(int(child["pid"]), 0)
+            except (ChildProcessError, ProcessLookupError):
+                pass
 
 
 def test_reap_children_keeps_running_task_when_echild_child_is_still_alive(
@@ -1148,6 +1447,18 @@ def test_cancel_done_task_is_noop_with_warning(tmp_path: Path, caplog):
     assert "cancel ignored for done1 in status=done" in caplog.text
 
 
+def test_unknown_command_does_not_create_ghost_task(tmp_path: Path, caplog):
+    repo = init_repo(tmp_path)
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+
+    with caplog.at_level("WARNING", logger="otto.queue.runner"):
+        runner._apply_command({"cmd": "cancel", "id": "ghost"}, state, known_task_ids=set())
+
+    assert state["tasks"] == {}
+    assert "unknown task id ghost" in caplog.text
+
+
 def test_cancel_queued_task_removes_queue_entry(tmp_path: Path):
     repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
@@ -1162,6 +1473,8 @@ def test_cancel_queued_task_removes_queue_entry(tmp_path: Path):
     runner._apply_command({"cmd": "cancel", "id": "queued1"}, state)
 
     assert state["tasks"]["queued1"]["status"] == "cancelled"
+    assert load_queue(repo) != []
+    assert runner._cleanup_removed_task_definitions(load_queue(repo), state) is True
     assert load_queue(repo) == []
 
 
@@ -1191,6 +1504,61 @@ def test_resume_command_requeues_interrupted_task(tmp_path: Path):
     assert state["tasks"]["resume1"]["finished_at"] is None
 
 
+def test_resume_command_allows_superseding_terminal_history(tmp_path: Path):
+    from otto.runs.history import append_history_snapshot, read_history_rows
+
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="resume1",
+        command_argv=["build", "x"],
+        resumable=True,
+        branch="build/resume1",
+        worktree=".worktrees/resume1",
+    ))
+    run_id = "2026-04-23-010203-abc123"
+    append_history_snapshot(
+        repo,
+        {
+            "run_id": run_id,
+            "domain": "queue",
+            "run_type": "queue",
+            "command": "build",
+            "status": INTERRUPTED_STATUS,
+            "terminal_outcome": INTERRUPTED_STATUS,
+            "dedupe_key": f"terminal_snapshot:{run_id}",
+        },
+    )
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["resume1"] = {
+        "status": INTERRUPTED_STATUS,
+        "attempt_run_id": run_id,
+        "started_at": "2026-04-19T00:00:00Z",
+        "finished_at": "2026-04-19T00:05:00Z",
+        "failure_reason": "interrupted by watcher shutdown; resume available",
+        "history_appended": True,
+    }
+
+    runner._apply_command({"cmd": "resume", "id": "resume1"}, state)
+    assert "history_appended" not in state["tasks"]["resume1"]
+
+    state["tasks"]["resume1"].update({
+        "status": "done",
+        "finished_at": runner_module.now_iso(),
+        "cost_usd": 0.0,
+        "duration_s": 1.0,
+    })
+    runner._finalize_queue_attempt("resume1", state["tasks"]["resume1"])
+
+    rows = [
+        row
+        for row in read_history_rows(_paths.history_jsonl(repo))
+        if row.get("dedupe_key") == f"terminal_snapshot:{run_id}"
+    ]
+    assert [row["status"] for row in rows] == [INTERRUPTED_STATUS, "done"]
+    assert state["tasks"]["resume1"]["history_appended"] is True
+
+
 def test_resume_command_ignores_non_interrupted_task(tmp_path: Path, caplog):
     repo = init_repo(tmp_path)
     runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
@@ -1218,7 +1586,22 @@ def test_remove_command_updates_queue_yml_for_live_task(tmp_path: Path):
     runner._apply_command({"cmd": "remove", "id": "rm1"}, state)
 
     assert state["tasks"]["rm1"]["status"] == "removed"
+    assert load_queue(repo) != []
+    assert runner._cleanup_removed_task_definitions(load_queue(repo), state) is True
     assert load_queue(repo) == []
+
+
+def test_cleanup_removed_task_definition_converges_when_queue_entry_already_absent(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["rm1"] = {
+        "status": "removed",
+        "definition_removal_pending": True,
+    }
+
+    assert runner._cleanup_removed_task_definitions(load_queue(repo), state) is True
+    assert "definition_removal_pending" not in state["tasks"]["rm1"]
 
 
 def test_remove_done_task_is_noop_with_cleanup_warning(tmp_path: Path, caplog):
@@ -1360,7 +1743,8 @@ def test_immediate_shutdown_force_escalates_to_sigkill(tmp_path: Path, monkeypat
 
     updated = load_state(repo)["tasks"]["build1"]
     assert sent == [signal.SIGTERM, signal.SIGKILL]
-    assert updated["sigkill_sent_at"]
+    assert updated["status"] == INTERRUPTED_STATUS
+    assert updated["child"] is None
 
 
 def test_spawn_uses_snapshotted_branch_when_intent_matches(tmp_path: Path, monkeypatch):
@@ -1523,6 +1907,106 @@ def test_reconcile_marks_failed_when_no_checkpoint(tmp_path: Path):
         assert "no checkpoint" in state2["tasks"]["b1"]["failure_reason"]
     finally:
         runner._lock_fh.close()
+
+
+def test_reconcile_requeues_starting_task_without_child(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="b1", command_argv=["build", "x"], resumable=True,
+        branch="build/b1", worktree=".worktrees/b1",
+    ))
+    state = load_state(repo)
+    state["tasks"]["b1"] = {
+        "status": "starting",
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": None,
+    }
+    write_state(repo, state)
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume", poll_interval_s=0.1), otto_bin="/bin/true")
+
+    runner._reconcile_on_startup()
+
+    task_state = load_state(repo)["tasks"]["b1"]
+    assert task_state["status"] == "queued"
+    assert task_state["attempt_run_id"] == "2026-04-23-010203-abc123"
+    assert task_state["child"] is None
+
+
+def test_reconcile_finalizes_dead_child_from_queue_manifest(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="b1", command_argv=["build", "x"], resumable=True,
+        branch="build/b1", worktree=".worktrees/b1",
+    ))
+    state = load_state(repo)
+    state["tasks"]["b1"] = {
+        "status": "running",
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": {"pid": 1, "pgid": 1, "start_time_ns": 0, "argv": ["dead"], "cwd": "/tmp"},
+    }
+    write_state(repo, state)
+    _write_queue_manifest(repo, "b1", exit_status="success")
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume", poll_interval_s=0.1), otto_bin="/bin/true")
+
+    runner._reconcile_on_startup()
+
+    task_state = load_state(repo)["tasks"]["b1"]
+    assert task_state["status"] == "done"
+    assert task_state["manifest_path"]
+    assert task_state["child"] is None
+
+
+def test_reconcile_applies_cancel_after_terminal_manifest_finalization(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="b1", command_argv=["build", "x"], resumable=True,
+        branch="build/b1", worktree=".worktrees/b1",
+    ))
+    state = load_state(repo)
+    state["tasks"]["b1"] = {
+        "status": "running",
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": {"pid": 1, "pgid": 1, "start_time_ns": 0, "argv": ["dead"], "cwd": "/tmp"},
+    }
+    write_state(repo, state)
+    _write_queue_manifest(repo, "b1", exit_status="success")
+    append_command(repo, {"schema_version": 1, "command_id": "cmd-1", "kind": "cancel", "id": "b1"})
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume", poll_interval_s=0.1), otto_bin="/bin/true")
+
+    runner._reconcile_on_startup()
+
+    task_state = load_state(repo)["tasks"]["b1"]
+    assert task_state["status"] == "done"
+    assert task_state["failure_reason"] is None
+    assert task_state["child"] is None
+
+
+def test_reconcile_applies_resume_after_interrupted_terminating_finalizes(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="b1", command_argv=["build", "x"], resumable=True,
+        branch="build/b1", worktree=".worktrees/b1",
+    ))
+    state = load_state(repo)
+    state["tasks"]["b1"] = {
+        "status": "terminating",
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "started_at": "2026-04-23T00:00:00Z",
+        "finished_at": None,
+        "child": {"pid": 1, "pgid": 1, "start_time_ns": 0, "argv": ["dead"], "cwd": "/tmp"},
+        "terminal_status": INTERRUPTED_STATUS,
+        "failure_reason": "interrupted by watcher shutdown",
+    }
+    write_state(repo, state)
+    append_command(repo, {"schema_version": 1, "command_id": "cmd-1", "kind": "resume", "id": "b1"})
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume", poll_interval_s=0.1), otto_bin="/bin/true")
+
+    runner._reconcile_on_startup()
+
+    task_state = load_state(repo)["tasks"]["b1"]
+    assert task_state["status"] == "queued"
+    assert task_state["resumed_from_checkpoint"] is True
+    assert task_state["child"] is None
 
 
 def test_reconcile_requeues_when_checkpoint_exists(tmp_path: Path):
@@ -1766,9 +2250,201 @@ def test_reconcile_and_tick_preserve_running_orphaned_child_until_manifest_final
             pass
 
 
+def test_reap_processes_completed_child_before_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    _write_queue_manifest(repo, "t1", exit_status="success")
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "running",
+        "started_at": "2026-04-19T00:00:00Z",
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": {"pid": 12345, "pgid": 12345, "start_time_ns": 1, "argv": ["done"], "cwd": str(repo)},
+    }
+    write_state(repo, state)
+    monkeypatch.setattr(runner_module.os, "waitpid", lambda _pid, _flags: (12345, 0))
+    runner = Runner(repo, RunnerConfig(task_timeout_s=1.0), otto_bin="/bin/true")
+
+    state = load_state(repo)
+    runner._reap_children(state)
+
+    assert state["tasks"]["t1"]["status"] == "done"
+    assert state["tasks"]["t1"].get("terminal_status") is None
+
+
+def test_tick_reaps_completed_child_before_applying_cancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    _write_queue_manifest(repo, "t1", exit_status="success")
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "running",
+        "started_at": runner_module.now_iso(),
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": {"pid": 12345, "pgid": 12345, "start_time_ns": 1, "argv": ["done"], "cwd": str(repo)},
+    }
+    write_state(repo, state)
+    append_command(repo, {"schema_version": 1, "command_id": "cmd-1", "kind": "cancel", "id": "t1"})
+    monkeypatch.setattr(runner_module.os, "waitpid", lambda _pid, _flags: (12345, 0))
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+
+    runner._tick()
+
+    task_state = load_state(repo)["tasks"]["t1"]
+    assert task_state["status"] == "done"
+    assert task_state["failure_reason"] is None
+
+
+def test_cancel_rechecks_child_exit_race_before_killing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    _write_queue_manifest(repo, "t1", exit_status="success")
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "running",
+        "started_at": runner_module.now_iso(),
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": {"pid": 12345, "pgid": 12345, "start_time_ns": 1, "argv": ["done"], "cwd": str(repo)},
+    }
+    write_state(repo, state)
+    append_command(repo, {"schema_version": 1, "command_id": "cmd-1", "kind": "cancel", "id": "t1"})
+    wait_results = iter([(0, 0), (12345, 0)])
+    monkeypatch.setattr(runner_module.os, "waitpid", lambda _pid, _flags: next(wait_results))
+    monkeypatch.setattr(
+        runner_module,
+        "kill_child_safely",
+        lambda _child, _sig=signal.SIGTERM: (_ for _ in ()).throw(AssertionError("cancel killed exited child")),
+    )
+    runner = Runner(repo, RunnerConfig(concurrent=1, task_timeout_s=None), otto_bin="/bin/true")
+
+    runner._tick()
+
+    task_state = load_state(repo)["tasks"]["t1"]
+    assert task_state["status"] == "done"
+    assert task_state["failure_reason"] is None
+
+
+def test_timeout_rechecks_child_exit_race_before_failing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    _write_queue_manifest(repo, "t1", exit_status="success")
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "running",
+        "started_at": "2026-04-19T00:00:00Z",
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": {"pid": 12345, "pgid": 12345, "start_time_ns": 1, "argv": ["done"], "cwd": str(repo)},
+    }
+    write_state(repo, state)
+    wait_results = iter([(0, 0), (12345, 0)])
+    monkeypatch.setattr(runner_module.os, "waitpid", lambda _pid, _flags: next(wait_results))
+    monkeypatch.setattr(
+        runner_module,
+        "kill_child_safely",
+        lambda _child, _sig=signal.SIGTERM: (_ for _ in ()).throw(AssertionError("timeout killed exited child")),
+    )
+    runner = Runner(repo, RunnerConfig(concurrent=1, task_timeout_s=1.0), otto_bin="/bin/true")
+
+    state_for_reap = load_state(repo)
+    runner._reap_children(state_for_reap)
+
+    assert state_for_reap["tasks"]["t1"]["status"] == "done"
+    assert state_for_reap["tasks"]["t1"].get("terminal_status") is None
+
+
+def test_remove_running_task_keeps_definition_until_terminal_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "running",
+        "started_at": runner_module.now_iso(),
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": {"pid": 12345, "pgid": 12345, "start_time_ns": 1, "argv": ["sleep"], "cwd": str(repo)},
+    }
+    write_state(repo, state)
+    append_command(repo, {"schema_version": 1, "command_id": "cmd-1", "kind": "remove", "id": "t1"})
+    wait_results = iter([(0, 0), (0, 0), (12345, 0)])
+    monkeypatch.setattr(runner_module.os, "waitpid", lambda _pid, _flags: next(wait_results))
+    monkeypatch.setattr(runner_module, "kill_child_safely", lambda _child, _sig=signal.SIGTERM: True)
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+
+    runner._tick()
+    assert [task.id for task in load_queue(repo)] == ["t1"]
+    assert load_state(repo)["tasks"]["t1"]["status"] == "terminating"
+
+    runner._tick()
+    assert load_state(repo)["tasks"]["t1"]["status"] == "removed"
+    assert load_queue(repo) == []
+
+
+def test_immediate_shutdown_finalizes_queue_live_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    )
+    append_task(repo, task)
+    task_state = {
+        "status": "running",
+        "started_at": runner_module.now_iso(),
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": {"pid": 12345, "pgid": 12345, "start_time_ns": 1, "argv": ["sleep"], "cwd": str(repo)},
+    }
+    state = load_state(repo)
+    state["tasks"]["t1"] = dict(task_state)
+    write_state(repo, state)
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+    runner._write_queue_run_record(task, task_state, status="running")
+    monkeypatch.setattr(runner_module, "kill_child_safely", lambda _child, _sig=signal.SIGTERM: True)
+
+    runner._kill_all_in_flight(force=True)
+
+    task_state = load_state(repo)["tasks"]["t1"]
+    assert task_state["status"] == INTERRUPTED_STATUS
+    record = json.loads(_paths.live_run_path(repo, "2026-04-23-010203-abc123").read_text(encoding="utf-8"))
+    assert record["status"] == INTERRUPTED_STATUS
+    assert record["terminal_outcome"] == INTERRUPTED_STATUS
+
+
 def test_tick_history_repair_waits_for_successful_state_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     repo = init_repo(tmp_path)
-    append_task(repo, QueueTask(id="t1", command_argv=["build", "x"]))
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
     state = load_state(repo)
     state["tasks"]["t1"] = {
         "status": "done",
@@ -1801,7 +2477,12 @@ def test_startup_reconcile_history_repair_waits_for_successful_state_write(
     monkeypatch: pytest.MonkeyPatch,
 ):
     repo = init_repo(tmp_path)
-    append_task(repo, QueueTask(id="t1", command_argv=["build", "x"]))
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
     state = load_state(repo)
     state["tasks"]["t1"] = {
         "status": "failed",
@@ -1827,3 +2508,82 @@ def test_startup_reconcile_history_repair_waits_for_successful_state_write(
     assert not _paths.history_jsonl(repo).exists()
     persisted = load_state(repo)
     assert persisted["tasks"]["t1"].get("history_appended") is not True
+
+
+def test_tick_persists_terminal_history_repair_state(tmp_path: Path):
+    from otto.runs.history import read_history_rows
+
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "done",
+        "finished_at": "2026-04-23T00:00:00Z",
+        "child": None,
+        "cost_usd": 0.0,
+        "duration_s": 0.0,
+        "failure_reason": None,
+        "attempt_run_id": "run-789",
+    }
+    write_state(repo, state)
+
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    runner._tick()
+
+    persisted = load_state(repo)
+    assert persisted["tasks"]["t1"]["history_appended"] is True
+    rows = read_history_rows(_paths.history_jsonl(repo))
+    assert any(row.get("run_id") == "run-789" and row.get("status") == "done" for row in rows)
+
+
+def test_replayed_noop_command_is_acked_and_clears_processing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="resume1",
+        command_argv=["build", "x"],
+        resumable=True,
+        branch="build/resume1",
+        worktree=".worktrees/resume1",
+    ))
+    state = load_state(repo)
+    state["tasks"]["resume1"] = {
+        "status": INTERRUPTED_STATUS,
+        "started_at": "2026-04-19T00:00:00Z",
+        "finished_at": "2026-04-19T00:05:00Z",
+        "failure_reason": "interrupted by watcher shutdown; resume available",
+    }
+    write_state(repo, state)
+    cmd = append_command(repo, {"cmd": "resume", "id": "resume1"})
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    runner.shutdown_level = "graceful"
+    real_ack = runner_module.append_command_ack
+    calls = 0
+
+    def flaky_ack(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("ack disk full")
+        return real_ack(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "append_command_ack", flaky_ack)
+
+    with pytest.raises(OSError, match="ack disk full"):
+        runner._tick()
+
+    assert load_state(repo)["tasks"]["resume1"]["status"] == "queued"
+    assert runner_module.queue_schema.commands_processing_path(repo).exists()
+
+    runner._tick()
+
+    assert calls == 2
+    assert not runner_module.queue_schema.commands_processing_path(repo).exists()
+    assert cmd["command_id"] in runner_module.queue_schema.load_command_ack_ids(repo)

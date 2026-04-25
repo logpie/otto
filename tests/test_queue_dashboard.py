@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import asyncio
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ from textual.widgets import SelectionList
 from otto.queue.dashboard import (
     ResumeSelectionApp,
     _print_dashboard_closed_notice,
+    _run_dashboard_async,
 )
 from otto.queue.schema import QueueTask
 from tests._helpers import init_repo
@@ -46,6 +49,32 @@ def test_print_dashboard_closed_notice_skips_clean_exit() -> None:
 
     assert printed is False
     assert stream.getvalue() == ""
+
+
+@pytest.mark.asyncio
+async def test_dashboard_close_does_not_request_runner_shutdown(tmp_path: Path) -> None:
+    class FakeRunner:
+        shutdown_level = None
+        observed_shutdown_level = "unset"
+
+        async def run_async(self) -> int:
+            await asyncio.sleep(0.01)
+            self.observed_shutdown_level = self.shutdown_level
+            return 0
+
+    class FakeApp:
+        dashboard_mouse = False
+        project_dir = tmp_path
+        state = SimpleNamespace(live_runs=SimpleNamespace(active_count=1))
+
+        async def run_async(self, *, mouse: bool) -> int:
+            assert mouse is False
+            return 0
+
+    runner = FakeRunner()
+
+    assert await _run_dashboard_async(FakeApp(), runner, quiet=True) == 0
+    assert runner.observed_shutdown_level is None
 
 
 @pytest.mark.asyncio

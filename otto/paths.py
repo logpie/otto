@@ -666,19 +666,6 @@ def _write_lock_record_fd(fd: int, record: dict[str, object]) -> None:
     os.fsync(fd)
 
 
-def _path_points_to_fd(path: Path, fd: int | None) -> bool:
-    if fd is None:
-        return False
-    try:
-        path_stat = os.stat(path)
-        fd_stat = os.fstat(fd)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return False
-    return path_stat.st_ino == fd_stat.st_ino and path_stat.st_dev == fd_stat.st_dev
-
-
 def _warn_best_effort_lock_once() -> None:
     global _BEST_EFFORT_LOCK_WARNING_EMITTED
     if _BEST_EFFORT_LOCK_WARNING_EMITTED:
@@ -708,6 +695,52 @@ def acquire_project_lock(
     if not has_kernel_lock:
         _warn_best_effort_lock_once()
 
+    if has_kernel_lock:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError:
+            raise LockBusy({})
+
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                holder = _read_lock_record_fd(fd)
+                raise LockBusy(holder)
+            except OSError:
+                holder = _read_lock_record_fd(fd)
+                raise LockBusy(holder)
+
+            holder = _read_lock_record_fd(fd)
+            holder_pid = int(holder.get("pid", 0) or 0)
+            if holder and break_stale:
+                logger.warning("stale lock from pid=%s (flock released) — reusing lock file", holder_pid)
+            elif holder and not break_stale:
+                raise LockBusy(holder)
+
+            handle = LockHandle(
+                _path=lock_path,
+                _fd=fd,
+                _pid=os.getpid(),
+                _started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                _command=command,
+                _nonce=uuid.uuid4().hex,
+            )
+            _write_lock_record_fd(fd, {
+                "pid": handle._pid,
+                "started_at": handle._started_at,
+                "command": handle._command,
+                "nonce": handle._nonce,
+                "session_id": None,
+            })
+            return handle
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+
     holder: dict = {}
     for attempt in range(8):
         fd: int | None = None
@@ -726,32 +759,11 @@ def acquire_project_lock(
                 holder = {}
                 raise LockBusy(holder)
 
-            if has_kernel_lock:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    holder = _read_lock_record_fd(fd)
-                    os.close(fd)
-                    raise LockBusy(holder)
-                except OSError:
-                    holder = _read_lock_record_fd(fd)
-                    os.close(fd)
-                    raise LockBusy(holder)
-
             holder = _read_lock_record_fd(fd)
             holder_pid = int(holder.get("pid", 0) or 0)
             if not break_stale:
                 os.close(fd)
                 raise LockBusy(holder)
-
-            if has_kernel_lock:
-                logger.warning("stale lock from pid=%s (flock released) — breaking", holder_pid)
-                try:
-                    if _path_points_to_fd(lock_path, fd):
-                        os.unlink(lock_path)
-                finally:
-                    os.close(fd)
-                continue
 
             if _pid_alive(holder_pid):
                 os.close(fd)
@@ -769,19 +781,6 @@ def acquire_project_lock(
             except OSError:
                 raise LockBusy(holder)
             continue
-
-        if has_kernel_lock:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                try:
-                    os.close(fd)
-                finally:
-                    try:
-                        lock_path.unlink()
-                    except OSError:
-                        pass
-                raise
 
         handle = LockHandle(
             _path=lock_path,
@@ -808,10 +807,11 @@ def acquire_project_lock(
                     os.close(fd)
                 except OSError:
                     pass
-            try:
-                lock_path.unlink()
-            except OSError:
-                pass
+            if not has_kernel_lock:
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
             raise
         return handle
 
@@ -824,15 +824,14 @@ def break_project_lock(project_dir: Path) -> dict[str, object]:
     if not lock_path.exists():
         return {}
 
-    holder = _read_lock_record_path(lock_path)
-    holder_pid = int(holder.get("pid", 0) or 0)
-
     if fcntl is not None:
         try:
             fd = os.open(lock_path, os.O_RDWR)
         except FileNotFoundError:
             return {}
         try:
+            holder = _read_lock_record_fd(fd)
+            holder_pid = int(holder.get("pid", 0) or 0)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
@@ -852,8 +851,7 @@ def break_project_lock(project_dir: Path) -> dict[str, object]:
                     f"command={holder.get('command')!r}."
                 )
 
-            if _path_points_to_fd(lock_path, fd):
-                os.unlink(lock_path)
+            _write_lock_record_fd(fd, {})
             return holder
         finally:
             try:
@@ -861,6 +859,8 @@ def break_project_lock(project_dir: Path) -> dict[str, object]:
             except OSError:
                 pass
 
+    holder = _read_lock_record_path(lock_path)
+    holder_pid = int(holder.get("pid", 0) or 0)
     if holder_pid and _pid_alive(holder_pid):
         raise LockBreakError(
             f"Refusing to break a live lock held by pid={holder_pid} "

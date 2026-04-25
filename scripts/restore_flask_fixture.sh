@@ -3,16 +3,17 @@
 #
 # Saves you from re-running phase 1+2 ($5+ and 5min). The bundle contains:
 # - main branch (with base merged)
-# - improve/imp-tags-2026-04-20 (failed cert, has commits)
-# - improve/imp-priority-2026-04-20 (failed cert, has commits)
-# - build/base-2026-04-20
+# - improve/imp-tags-* (failed cert, has commits)
+# - improve/imp-priority-* (failed cert, has commits)
+# - build/base-*
 #
 # Usage:
 #   ./scripts/restore_flask_fixture.sh /tmp/my-merge-test
 #   cd /tmp/my-merge-test
-#   echo -e "default_branch: main\n\nqueue:\n  merge_mode: consolidated" > otto.yaml
+#   printf "default_branch: main\n" > otto.yaml
 #   git add otto.yaml && git commit -q -m "test config"
-#   otto merge improve/imp-tags-2026-04-20 improve/imp-priority-2026-04-20 --no-certify
+#   git branch
+#   otto merge <restored-tags-branch> <restored-priority-branch> --no-certify
 
 set -euo pipefail
 
@@ -42,12 +43,22 @@ git config user.email "fixture@bench"
 git config user.name "Fixture"
 git fetch -q "$BUNDLE" '*:refs/fixture-tmp/*'
 git update-ref refs/heads/main refs/fixture-tmp/refs/fixtures/main
-for tid in tags priority; do
-  git update-ref "refs/heads/improve/imp-$tid-2026-04-20" \
-    "refs/fixture-tmp/refs/heads/improve/imp-$tid-2026-04-20"
-done
-git update-ref refs/heads/build/base-2026-04-20 \
-  refs/fixture-tmp/refs/heads/build/base-2026-04-20
+
+restore_branch() {
+  local pattern="$1"
+  mapfile -t refs < <(git for-each-ref --format='%(refname)' "refs/fixture-tmp/refs/heads/$pattern")
+  if [ "${#refs[@]}" -ne 1 ]; then
+    echo "Expected exactly one bundle ref for $pattern, found ${#refs[@]}" >&2
+    printf '  %s\n' "${refs[@]}" >&2
+    exit 1
+  fi
+  local branch="${refs[0]#refs/fixture-tmp/refs/heads/}"
+  git update-ref "refs/heads/$branch" "${refs[0]}"
+}
+
+restore_branch 'improve/imp-tags-*'
+restore_branch 'improve/imp-priority-*'
+restore_branch 'build/base-*'
 git for-each-ref refs/fixture-tmp/ --format='%(refname)' | xargs -n1 -I{} git update-ref -d {} 2>/dev/null || true
 git checkout -q main
 git reset -q --hard main

@@ -61,10 +61,36 @@ def test_cleanup_live_record_removes_abandoned_non_terminal(tmp_path: Path, monk
 
     removed = cleanup_live_record(tmp_path, "atomic-run")
 
-    assert removed.status == "running"
+    assert removed.status == "interrupted"
+    assert removed.terminal_outcome == "interrupted"
     assert read_live_records(tmp_path) == []
     tombstones = paths.run_gc_tombstones_jsonl(tmp_path).read_text(encoding="utf-8")
     assert "atomic-run" in tombstones
+
+
+def test_cleanup_live_record_removes_stale_non_terminal(tmp_path: Path, monkeypatch) -> None:
+    record = make_run_record(
+        project_dir=tmp_path,
+        run_id="atomic-run",
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="build",
+        status="running",
+        cwd=tmp_path,
+        adapter_key="atomic.build",
+    )
+    write_record(tmp_path, record)
+    monkeypatch.setattr("otto.runs.registry.writer_identity_gone_or_stale", lambda writer: True)
+
+    cleaned = cleanup_live_record(tmp_path, "atomic-run")
+
+    assert cleaned.status == "interrupted"
+    assert cleaned.terminal_outcome == "interrupted"
+    assert read_live_records(tmp_path) == []
+    tombstones = paths.run_gc_tombstones_jsonl(tmp_path).read_text(encoding="utf-8")
+    assert "atomic-run" in tombstones
+    assert "interrupted" in tombstones
 
 
 def test_cleanup_live_record_rejects_terminal_run_while_writer_alive(tmp_path: Path, monkeypatch) -> None:

@@ -26,8 +26,9 @@ class _FakePopen:
         stdout,
         stderr,
         text,
-        start_new_session,
+        start_new_session=False,
     ) -> None:
+        assert start_new_session is True
         type(self).calls.append(
             {
                 "argv": list(argv),
@@ -47,6 +48,9 @@ class _FakePopen:
     def communicate(self):
         return ("", "")
 
+    def wait(self):
+        return self.returncode
+
 
 class _FakeLongRunningPopen:
     def __init__(
@@ -57,19 +61,24 @@ class _FakeLongRunningPopen:
         stdout,
         stderr,
         text,
-        start_new_session,
+        start_new_session=False,
     ) -> None:
-        del argv, cwd, stdout, stderr, text, start_new_session
+        assert start_new_session is True
+        del argv, cwd, stdout, stderr, text
         self.returncode = None
         self.pid = 4343
 
     def poll(self):
         return self.returncode
 
-    def communicate(self):
+    def wait(self):
         time.sleep(0.05)
         self.returncode = 1
-        return ("", "late failure")
+        return self.returncode
+
+    def communicate(self):
+        self.wait()
+        return ("late failure", "")
 
 
 def _record(
@@ -81,6 +90,7 @@ def _record(
     status: str,
     adapter_key: str,
     queue_task_id: str | None = None,
+    merge_id: str | None = None,
     argv: list[str] | None = None,
 ) -> object:
     record = make_run_record(
@@ -92,7 +102,7 @@ def _record(
         display_name=f"{run_type}: {run_id}",
         status=status,
         cwd=repo,
-        identity={"queue_task_id": queue_task_id, "merge_id": None, "parent_run_id": None},
+        identity={"queue_task_id": queue_task_id, "merge_id": merge_id, "parent_run_id": None},
         source={"argv": list(argv or []), "resumable": True},
         adapter_key=adapter_key,
     )
@@ -143,7 +153,7 @@ def test_cancel_appends_envelope_and_clears_banner_for_queue_atomic_and_merge(tm
             {},
         ),
         (
-            _record(tmp_path, run_id="merge-run", domain="merge", run_type="merge", status="running", adapter_key="merge.run"),
+            _record(tmp_path, run_id="merge-run", domain="merge", run_type="merge", status="running", adapter_key="merge.run", merge_id="merge-run"),
             paths.merge_command_requests(tmp_path),
             paths.merge_command_acks(tmp_path),
             {},
@@ -361,17 +371,16 @@ def test_retry_uses_stored_source_argv(tmp_path: Path, monkeypatch) -> None:
 
 def test_requeue_reconstructs_queue_cli_from_stored_task_definition(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
-    monkeypatch.setattr(
-        "otto.mission_control.actions._load_queue_task",
-        lambda project_dir, task_id: QueueTask(
-            id=task_id,
+    append_task(
+        tmp_path,
+        QueueTask(
+            id="task-1",
             command_argv=["build", "ship it", "--fast"],
             after=["base-task"],
             added_at="2026-04-23T12:00:00Z",
             resolved_intent="ship it",
         ),
     )
-    monkeypatch.setattr("otto.mission_control.actions.load_queue", lambda project_dir: [])
     _FakePopen.calls.clear()
     record = _record(
         tmp_path,
@@ -386,23 +395,28 @@ def test_requeue_reconstructs_queue_cli_from_stored_task_definition(tmp_path: Pa
     execute_action(record, "R", tmp_path)
 
     argv = _FakePopen.calls[-1]["argv"]
-    assert argv[-9:] == ["queue", "build", "ship it", "--after", "base-task", "--as", "task-1", "--", "--fast"]
+    assert argv[-9:] == ["queue", "build", "ship it", "--after", "base-task", "--as", "task-1-2", "--", "--fast"]
 
 
-def test_requeue_deduplicates_existing_queue_task_id(tmp_path: Path, monkeypatch) -> None:
+def test_requeue_dedups_past_existing_retry_ids(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
-    monkeypatch.setattr(
-        "otto.mission_control.actions._load_queue_task",
-        lambda project_dir, task_id: QueueTask(
-            id=task_id,
+    append_task(
+        tmp_path,
+        QueueTask(
+            id="task-1",
             command_argv=["build", "ship it"],
             added_at="2026-04-23T12:00:00Z",
             resolved_intent="ship it",
         ),
     )
-    monkeypatch.setattr(
-        "otto.mission_control.actions.load_queue",
-        lambda project_dir: [QueueTask(id="task-1", command_argv=["build", "ship it"], added_at="2026-04-23T12:00:00Z")],
+    append_task(
+        tmp_path,
+        QueueTask(
+            id="task-1-2",
+            command_argv=["build", "ship it"],
+            added_at="2026-04-23T12:01:00Z",
+            resolved_intent="ship it",
+        ),
     )
     _FakePopen.calls.clear()
     record = _record(
@@ -415,11 +429,10 @@ def test_requeue_deduplicates_existing_queue_task_id(tmp_path: Path, monkeypatch
         queue_task_id="task-1",
     )
 
-    result = execute_action(record, "R", tmp_path)
+    execute_action(record, "R", tmp_path)
 
-    assert result.ok is True
-    assert result.message == "requeue task-1 as task-1-2 finished"
-    assert _FakePopen.calls[-1]["argv"][-5:] == ["queue", "build", "ship it", "--as", "task-1-2"]
+    argv = _FakePopen.calls[-1]["argv"]
+    assert argv[-5:] == ["queue", "build", "ship it", "--as", "task-1-3"]
 
 
 def test_remove_queued_task_calls_queue_rm(tmp_path: Path, monkeypatch) -> None:

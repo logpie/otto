@@ -503,6 +503,7 @@ def test_history_outcome_removed_filters_correctly(tmp_path: Path) -> None:
 
     assert [item.row.run_id for item in state.history_page.items] == ["removed-run"]
     assert model.cycle_outcome_filter(state).filters.outcome_filter == "other"
+    assert model.cycle_outcome_filter(state).filters.outcome_filter == "all"
 
 
 def test_history_unknown_outcome_buckets_to_other_and_warns_once(caplog) -> None:

@@ -36,7 +36,7 @@ if [ -n "${FAKE_OTTO_PRINT:-}" ]; then
 fi
 
 # Make a real change + commit (so merge has something to merge)
-if [ -z "${FAKE_OTTO_NO_COMMIT:-}" ] && [ -d .git ] || git rev-parse --git-dir >/dev/null 2>&1; then
+if [ -z "${FAKE_OTTO_NO_COMMIT:-}" ] && { [ -d .git ] || git rev-parse --git-dir >/dev/null 2>&1; }; then
   TASK_TOKEN="${OTTO_QUEUE_TASK_ID:-unknown}"
   TOUCH_PATH="${FAKE_OTTO_TOUCH:-fake-otto-output.txt}"
   TOUCH_PATH="${TOUCH_PATH//\{task_id\}/$TASK_TOKEN}"
@@ -77,28 +77,44 @@ if [ -z "${FAKE_OTTO_NO_MANIFEST:-}" ]; then
     BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
     HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
     NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    cat > "$MANIFEST_DIR/manifest.json" <<EOF
-{
-  "command": "${CMD}",
-  "argv": ["${CMD}"],
-  "queue_task_id": "${TASK_ID}",
-  "run_id": "fake-${TASK_ID}",
-  "branch": "${BRANCH}",
-  "checkpoint_path": null,
-  "proof_of_work_path": null,
-  "cost_usd": ${FAKE_OTTO_COST:-0.42},
-  "duration_s": ${FAKE_OTTO_DURATION:-1.0},
-  "started_at": "${NOW}",
-  "finished_at": "${NOW}",
-  "head_sha": "${HEAD_SHA}",
-  "resolved_intent": "${1:-}",
-  "focus": null,
-  "target": null,
-  "exit_status": "${EXIT_STATUS}",
-  "schema_version": 1,
-  "extra": {}
+    FAKE_OTTO_CMD="$CMD" \
+    FAKE_OTTO_TASK_ID="$TASK_ID" \
+    FAKE_OTTO_BRANCH="$BRANCH" \
+    FAKE_OTTO_NOW="$NOW" \
+    FAKE_OTTO_HEAD_SHA="$HEAD_SHA" \
+    FAKE_OTTO_RESOLVED_INTENT="${1:-}" \
+    FAKE_OTTO_EXIT_STATUS="$EXIT_STATUS" \
+    python3 - "$MANIFEST_DIR/manifest.json" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+cmd = os.environ.get("FAKE_OTTO_CMD", "")
+data = {
+    "command": cmd,
+    "argv": [cmd],
+    "queue_task_id": os.environ.get("FAKE_OTTO_TASK_ID", ""),
+    "run_id": f"fake-{os.environ.get('FAKE_OTTO_TASK_ID', '')}",
+    "branch": os.environ.get("FAKE_OTTO_BRANCH", ""),
+    "checkpoint_path": None,
+    "proof_of_work_path": None,
+    "cost_usd": float(os.environ.get("FAKE_OTTO_COST", "0.42")),
+    "duration_s": float(os.environ.get("FAKE_OTTO_DURATION", "1.0")),
+    "started_at": os.environ.get("FAKE_OTTO_NOW", ""),
+    "finished_at": os.environ.get("FAKE_OTTO_NOW", ""),
+    "head_sha": os.environ.get("FAKE_OTTO_HEAD_SHA", ""),
+    "resolved_intent": os.environ.get("FAKE_OTTO_RESOLVED_INTENT", ""),
+    "focus": None,
+    "target": None,
+    "exit_status": os.environ.get("FAKE_OTTO_EXIT_STATUS", "success"),
+    "schema_version": 1,
+    "extra": {},
 }
-EOF
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+PY
   fi
 fi
 

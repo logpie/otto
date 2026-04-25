@@ -26,11 +26,11 @@ from cast_utils import (
     CURSOR_HIDE,
     CURSOR_SHOW,
     cast_output,
-    find_first_frame,
     find_last_frame,
     mouse_disable_codes,
     mouse_enable_codes,
 )
+from real_cost_guard import require_real_cost_opt_in
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -814,13 +814,27 @@ def classify_failure(
         return "INFRA"
     if "Please run /login" in text:
         return "INFRA"
-    if re.search(r"rate limit", text, re.IGNORECASE):
-        return "INFRA"
-    if re.search(r"(?:429.{0,80}(?:throttle|rate)|(?:throttle|rate).{0,80}429)", text, re.IGNORECASE | re.DOTALL):
-        return "INFRA"
-
     costs = _extract_cost_values(run_result.details)
     zero_cost = any(abs(cost) <= 1e-9 for cost in costs)
+    provider_context = re.search(
+        r"(?:anthropic|claude|codex|openai|provider|subscription|quota)",
+        text,
+        re.IGNORECASE,
+    )
+    provider_rate_limit = re.search(
+        r"(?:rate limit|too many requests|429|throttle)",
+        text,
+        re.IGNORECASE,
+    )
+    if provider_context and provider_rate_limit:
+        return "INFRA"
+    generic_transient_429 = re.search(
+        r"(?:429.{0,80}(?:throttle|rate|too many requests)|(?:throttle|rate|too many requests).{0,80}429)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if generic_transient_429 and zero_cost:
+        return "INFRA"
     smoking_gun = (
         "Command failed with exit code 1" in text
         and "Check stderr output for details" in text
@@ -1055,10 +1069,6 @@ def load_summary(repo: Path) -> dict[str, Any]:
     return read_json(latest_session_dir(repo) / "summary.json")
 
 
-def load_manifest(repo: Path) -> dict[str, Any]:
-    return read_json(latest_session_dir(repo) / "manifest.json")
-
-
 def find_worktree(repo: Path, *, prefix: str) -> Path:
     matches = sorted(
         path for path in (repo / ".worktrees").glob(f"{prefix}*") if path.is_dir()
@@ -1097,14 +1107,6 @@ def queue_build(repo: Path, task_id: str, provider: str, intent: str, *extra_inn
     run_checked(argv, cwd=repo, env=current_ctx().env)
 
 
-def queue_improve_bugs(repo: Path, task_id: str, provider: str, focus: str | None = None, *extra_inner: str) -> None:
-    argv = [str(OTTO_BIN), "queue", "improve", "bugs"]
-    if focus:
-        argv.append(focus)
-    argv.extend(["--as", task_id, "--", "--provider", provider, *extra_inner])
-    run_checked(argv, cwd=repo, env=current_ctx().env)
-
-
 def load_queue_state(repo: Path) -> dict[str, Any]:
     state_path = repo / ".otto-queue-state.json"
     if not state_path.exists():
@@ -1133,7 +1135,7 @@ def append_cancel_envelope_and_wait_for_ack(
     from otto import paths
     from otto.runs.registry import (
         HEARTBEAT_INTERVAL_S,
-        append_jsonl_row,
+        append_command_request,
         load_command_ack_ids,
         load_live_record,
         utc_now_iso,
@@ -1144,7 +1146,7 @@ def append_cancel_envelope_and_wait_for_ack(
     live_record = load_live_record(repo, run_id)
     heartbeat_s = max(float(live_record.timing.get("heartbeat_interval_s") or HEARTBEAT_INTERVAL_S), 0.1)
     command_id = f"{int(time.time() * 1000)}-{os.getpid()}-1"
-    append_jsonl_row(
+    append_command_request(
         request_path,
         {
             "schema_version": 1,
@@ -2438,7 +2440,7 @@ def verify_d5(repo: Path, run_result: RunResult) -> VerifyResult:
     forced = strip_ansi(str(run_result.details.get("forced_output", "")))
     if "Checkpoint command mismatch" not in rejected:
         return VerifyResult(False, "D5 expected cross-command resume rejection without force")
-    if "Checkpoint is from" not in forced and run_result.returncode != 0:
+    if "Checkpoint is from" not in forced or run_result.returncode != 0:
         return VerifyResult(False, "D5 expected forced cross-command resume to get past the mismatch gate")
     return VerifyResult(True, "cross-command resume gate and override both exercised")
 
@@ -2539,7 +2541,7 @@ def verify_e4(repo: Path, run_result: RunResult) -> VerifyResult:
     if len(lines) < 2:
         return VerifyResult(False, f"E4 expected >=2 memory entries, got {len(lines)}")
     if not run_result.details.get("injected_marker"):
-        return VerifyResult(True, "memory file recorded across runs", ["prompt marker not observed in messages.jsonl"])
+        return VerifyResult(False, "E4 expected prior certification history in the second certifier prompt")
     return VerifyResult(True, "cross-run memory recorded and re-injected")
 
 
@@ -3427,9 +3429,14 @@ def run_one_scenario_attempt(
 
 def record_one_scenario(asciinema_bin: Path, scenario: Scenario, run_id: str, provider: str) -> ScenarioOutcome:
     artifact_dir = DEFAULT_ARTIFACT_ROOT / run_id / scenario.name
-    repo_path = Path(tempfile.mkdtemp(prefix=f"o{scenario.name.lower()}-", dir="/tmp"))
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    scenario.setup(repo_path, provider)
+
+    def prepare_attempt_repo() -> Path:
+        repo_path = Path(tempfile.mkdtemp(prefix=f"o{scenario.name.lower()}-", dir="/tmp"))
+        scenario.setup(repo_path, provider)
+        return repo_path
+
+    repo_path = prepare_attempt_repo()
 
     first_run_result, first_verify_result, first_recording_name = run_one_scenario_attempt(
         asciinema_bin,
@@ -3472,11 +3479,12 @@ def record_one_scenario(asciinema_bin: Path, scenario: Scenario, run_id: str, pr
         flush=True,
     )
     time.sleep(INFRA_RETRY_DELAY_S)
+    retry_repo_path = prepare_attempt_repo()
     retry_run_result, retry_verify_result, retry_recording_name = run_one_scenario_attempt(
         asciinema_bin,
         scenario,
         provider,
-        repo_path,
+        retry_repo_path,
         artifact_dir,
         attempt_index=2,
     )
@@ -3496,7 +3504,7 @@ def record_one_scenario(asciinema_bin: Path, scenario: Scenario, run_id: str, pr
         )
 
     retry_classification = classify_failure(
-        latest_narrative_log(repo_path),
+        latest_narrative_log(retry_repo_path),
         Path(retry_run_result.debug_log),
         retry_run_result,
     )
@@ -3542,6 +3550,10 @@ def main(argv: list[str]) -> int:
         if len(argv) not in {5, 6}:
             raise SystemExit("usage: _internal-run <scenario> <repo> <artifact_dir> <provider> [attempt_index]")
         attempt_index = int(argv[5]) if len(argv) == 6 else 1
+        try:
+            require_real_cost_opt_in("as-user internal scenario run")
+        except SystemExit as exc:
+            return int(exc.code) if isinstance(exc.code, int) else 2
         ensure_real_otto_cli()
         return internal_run_scenario(argv[1], Path(argv[2]), Path(argv[3]), argv[4], attempt_index)
 
@@ -3552,6 +3564,10 @@ def main(argv: list[str]) -> int:
     if args.scenario_delay < 0:
         raise SystemExit("--scenario-delay must be >= 0")
 
+    try:
+        require_real_cost_opt_in("as-user scenario recording")
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
     ensure_real_otto_cli()
     scenarios = select_scenarios(mode=args.mode, scenario_csv=args.scenario, group_csv=args.group)
     asciinema_bin = install_asciinema()

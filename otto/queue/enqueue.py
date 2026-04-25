@@ -54,7 +54,13 @@ def enqueue_task(
     except Exception as exc:  # pragma: no cover - best-effort filesystem setup
         warnings.append(f"bookkeeping setup skipped: {exc}")
 
-    existing = load_queue(project_dir)
+    try:
+        existing = load_queue(project_dir)
+    except ValueError as exc:
+        message = str(exc)
+        if not message.startswith("queue.yml is malformed"):
+            message = f"queue.yml is malformed: {message}"
+        raise ValueError(message) from exc
     existing_ids = [task.id for task in existing]
     task_id = generate_task_id(
         intent=intent,

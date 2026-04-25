@@ -92,9 +92,10 @@ def register_merge_command(main: click.Group) -> None:
         """Land queued / built branches into the target branch.
 
         Python-driven git merge. The conflict agent is invoked ONLY when
-        git can't auto-merge — clean merges burn $0. After all branches
-        merge, the certifier verifies the union of merged branches'
-        stories; it skips per-story when the merge diff doesn't touch the
+        git can't auto-merge — clean git merge/conflict detection burns $0.
+        By default, post-merge certification can still spend unless
+        --no-certify is set. The certifier verifies the union of merged
+        branches' stories; it skips per-story when the merge diff doesn't touch the
         story's feature, and flags genuine cross-branch contradictions
         for human review.
 
@@ -105,7 +106,7 @@ def register_merge_command(main: click.Group) -> None:
             otto merge --all --no-certify
             otto merge --all --fast        # pure git, bail on conflict
         """
-        from otto.config import load_config
+        from otto.config import ConfigError, load_config, resolve_project_dir
         from otto.merge.orchestrator import (
             MergeAlreadyRunning,
             MergeOptions,
@@ -113,10 +114,14 @@ def register_merge_command(main: click.Group) -> None:
             run_merge,
         )
 
-        project_dir = Path.cwd()
-        # `load_config` returns DEFAULT_CONFIG when otto.yaml is absent — be
-        # consistent with `otto queue build|run`, which also tolerate it.
-        config = load_config(project_dir / "otto.yaml")
+        try:
+            project_dir = resolve_project_dir(Path.cwd())
+            # `load_config` returns DEFAULT_CONFIG when otto.yaml is absent — be
+            # consistent with `otto queue build|run`, which also tolerate it.
+            config = load_config(project_dir / "otto.yaml")
+        except (ConfigError, ValueError) as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
         # Defensive: if a user upgraded otto without re-running `otto setup`,
         # their .gitignore / .gitattributes may not be configured, making
         # working_tree_clean and the bookkeeping-driver precondition fail.
@@ -161,15 +166,18 @@ def register_merge_command(main: click.Group) -> None:
         _install_merge_logging(project_dir)
 
         try:
-            with merge_lock(project_dir):
-                result = asyncio.run(run_merge(
-                    project_dir=project_dir,
-                    config=config,
-                    options=opts,
-                    explicit_ids_or_branches=list(ids_or_branches) or None,
-                    all_done_queue_tasks=all_done,
-                    budget=budget,
-                ))
+            from otto.cli import _signal_interrupt_guard
+
+            with _signal_interrupt_guard():
+                with merge_lock(project_dir):
+                    result = asyncio.run(run_merge(
+                        project_dir=project_dir,
+                        config=config,
+                        options=opts,
+                        explicit_ids_or_branches=list(ids_or_branches) or None,
+                        all_done_queue_tasks=all_done,
+                        budget=budget,
+                    ))
         except MergeAlreadyRunning as exc:
             error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
             sys.exit(1)

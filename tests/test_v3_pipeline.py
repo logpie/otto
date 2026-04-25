@@ -16,7 +16,7 @@ import pytest
 from otto.agent import AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock
 from otto import paths as _paths
 from otto.pipeline import _ack_atomic_cancel_commands, _commit_artifacts, build_agentic_v3, run_certify_fix_loop
-from otto.runs.registry import HEARTBEAT_INTERVAL_S, append_jsonl_row
+from otto.runs.registry import HEARTBEAT_INTERVAL_S, append_command_request
 from tests.conftest import make_mock_query as _make_mock_query
 
 # `tmp_git_repo` fixture comes from tests/conftest.py.
@@ -439,7 +439,7 @@ def test_atomic_cancel_ack_waits_for_durable_checkpoint(tmp_git_repo, monkeypatc
         "kind": "cancel",
         "requested_at": "2026-04-23T00:00:00Z",
     }
-    append_jsonl_row(_paths.session_command_requests(tmp_git_repo, run_id), request)
+    append_command_request(_paths.session_command_requests(tmp_git_repo, run_id), request)
 
     real_writer = checkpoint_module.write_cancel_checkpoint_marker
 
@@ -470,7 +470,7 @@ async def test_silent_atomic_run_polls_cancel_on_heartbeat(tmp_git_repo):
 
     async def _enqueue_cancel() -> None:
         await asyncio.sleep(0.1)
-        append_jsonl_row(
+        append_command_request(
             _paths.session_command_requests(tmp_git_repo, run_id),
             {
                 "schema_version": 1,
@@ -511,7 +511,7 @@ async def test_cancelled_atomic_run_appends_terminal_history_snapshot(tmp_git_re
 
     async def _enqueue_cancel() -> None:
         await asyncio.sleep(0.1)
-        append_jsonl_row(
+        append_command_request(
             _paths.session_command_requests(tmp_git_repo, run_id),
             {
                 "schema_version": 1,
@@ -802,22 +802,11 @@ class TestV3PipelineFail:
         assert result.tasks_passed == 2
         assert result.tasks_failed == 2
 
-    @pytest.mark.asyncio
-    async def test_fail_checkpoint(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
-            result = await build_agentic_v3("test", tmp_git_repo, {})
-
         from otto import paths as _paths
         build_dir = _paths.build_dir(tmp_git_repo, result.build_id)
         cp = json.loads((build_dir / "checkpoint.json").read_text())
         assert cp["passed"] is False
 
-    @pytest.mark.asyncio
-    async def test_fail_pow_shows_failures(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
-            result = await build_agentic_v3("test", tmp_git_repo, {})
-
-        from otto import paths as _paths
         pow_data = json.loads(
             (_paths.certify_dir(tmp_git_repo, result.build_id) / "proof-of-work.json").read_text()
         )
@@ -825,12 +814,6 @@ class TestV3PipelineFail:
         failed = [s for s in pow_data["stories"] if not s["passed"]]
         assert len(failed) == 2
 
-    @pytest.mark.asyncio
-    async def test_fail_history_entry(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
-            await build_agentic_v3("test", tmp_git_repo, {})
-
-        from otto import paths as _paths
         entry = json.loads(
             _paths.history_jsonl(tmp_git_repo).read_text().strip()
         )

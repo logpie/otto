@@ -71,7 +71,7 @@ otto queue run --concurrent 3               # foreground watcher dispatches up t
 otto merge --all                            # land all done tasks into main
 ```
 
-The watcher spawns each task in `.worktrees/<task-id>/` so they can build, test, and commit in isolation. `otto merge` does Python-driven `git merge --no-ff`; clean merges burn $0. When git can't auto-merge, otto commits all marker-laden merges first, then runs ONE agent session that resolves every conflict globally — full Bash + project test command + cross-branch context. After all branches land, the certifier verifies the merged story union in one call. Its merge-context preamble prunes unaffected stories inline and flags genuine cross-branch contradictions for human review.
+The watcher spawns each task in `.worktrees/<task-id>/` so they can build, test, and commit in isolation. `otto merge` does Python-driven `git merge --no-ff`; clean git merge/conflict detection burns $0, while the default post-merge certifier can spend unless you pass `--no-certify`. When git can't auto-merge, otto commits all marker-laden merges first, then runs ONE agent session that resolves every conflict globally — full Bash + project test command + cross-branch context. After all branches land, the certifier verifies the merged story union in one call. Its merge-context preamble prunes unaffected stories inline and flags genuine cross-branch contradictions for human review.
 
 **`otto dashboard`** opens **Mission Control** — a persistent 3-pane Textual TUI that's the human operator surface for one project. Live Runs / History / Detail+Logs in one screen, sitting on top of a canonical run registry that normalizes state across `build` / `improve` / `certify` / `queue` / `merge`.
 
@@ -81,7 +81,7 @@ otto cleanup <run_id>           # remove a stale terminal record
 otto queue dashboard            # legacy alias — opens Mission Control with a queue filter
 ```
 
-Cross-process discovery: any `otto build` started in another shell appears in the TUI within 1-2 seconds. Cancel via `c` (durable command envelope, not SIGTERM), resume via `r`, multi-select with `space` then merge with `m`. Open any artifact in `$EDITOR` with `e`. Reader-only TUI — every mutation is either a durable append-only command or a CLI shell-out, so the TUI never corrupts domain state. No daemon — close the TUI when you're done; background CLI runs continue.
+Cross-process discovery: any `otto build` started in another shell appears in the TUI within 1-2 seconds. Cancel via `c` (durable command envelope, with SIGTERM only as a stale-writer fallback), resume via `r`, multi-select with `space` then merge with `m`. Open any artifact in `$EDITOR` with `e`. The TUI model reads registry state; mutations go through durable append-only commands or CLI shell-outs so the TUI does not write domain state directly. No daemon — close the TUI when you're done; background CLI runs continue.
 
 ## Why Otto
 
@@ -89,7 +89,7 @@ Not an editor, not an IDE agent. A **reliability harness** around Claude Code (o
 
 ### Evidence-based trust — proof-of-work, not just green checks
 
-Every certification produces a **proof-of-work** artifact: an HTML report with embedded screenshots, a browser-walkthrough video, and per-story JSON. You can audit a 30-minute autonomous run by opening one HTML file. Evidence a human can verify, not just "all tests pass."
+Every certification produces a **proof-of-work** artifact: an HTML/JSON report with per-story evidence. Standard and thorough UI runs include screenshots or browser walkthrough recordings when visual evidence is collected; fast mode keeps evidence text-first. You can audit a 30-minute autonomous run by opening one HTML file. Evidence a human can verify, not just "all tests pass."
 
 ### Build → Certify → Fix loop (independent verification)
 
@@ -155,7 +155,7 @@ Legend: `✓` documented · `~` partial or different approach · `✗` absent or
 
 | | Otto | Symphony | Devin | Cursor | Factory |
 |---|---|---|---|---|---|
-| Multi-agent parallel execution (different tasks or competing solutions) | ✗ single agent | ✓ BEAM concurrency | ✓ "multiple Devins in parallel" | ✓ git-worktree parallel agents | ✓ coordinator dispatches many droids |
+| Multi-agent parallel execution (different tasks or competing solutions) | ✓ queue worktrees for parallel tasks; no competing-solution tournament yet | ✓ BEAM concurrency | ✓ "multiple Devins in parallel" | ✓ git-worktree parallel agents | ✓ coordinator dispatches many droids |
 | Ticket-tracker integration (Linear / Jira) | ✗ | ✓ Linear-native | ✓ | ~ GitHub-centric | ✓ |
 | Auto-apply human reviewer comments from PR | ✗ | ✗ | ✓ "Autofixes Review Comments" | ~ @cursor mention | ~ @droid mention |
 | Code-review bot for other humans' PRs | ✗ | ✗ | ✓ Devin Review | ~ BugBot | ✓ Review Droid inline comments |
@@ -188,7 +188,8 @@ What's specific to otto: a separate LLM agent that generates its own test storie
 
 ```bash
 # Install
-uv pip install -e ".[claude]"
+uv sync --extra claude
+uv run otto --help
 
 # Build from scratch (greenfield)
 cd your-project && git init
@@ -266,7 +267,7 @@ Certify any project — independent, builder-blind verification. Tests the produ
 The intent describes what the product should do. The certifier generates test stories from it.
 
 ```bash
-otto certify                                            # reads intent.md or README.md — standard mode (default)
+otto certify                                            # reads intent.md or README.md — fast mode (default)
 otto certify "notes API with auth, CRUD, and search"    # explicit intent
 otto certify --fast                                     # quick smoke test
 otto certify --standard                                 # subagents + screenshots, no adversarial probing
@@ -274,7 +275,7 @@ otto certify --thorough                                 # adversarial: edge case
 otto certify --strict                                   # require two consecutive PASS runs
 ```
 
-Supported flags: `--fast`, `--standard`, `--thorough`, `--budget`, `--model`, `--provider`, `--effort`, `--break-lock`.
+Supported flags: `--fast`, `--standard`, `--thorough`, `--strict`, `--budget`, `--max-turns`, `--model`, `--provider`, `--effort`, `--break-lock`.
 
 ### `otto improve`
 
@@ -348,7 +349,7 @@ Queue wrapper syntax is strict: the positional intent/focus/goal comes before `-
 
 ### `otto merge`
 
-Land queued / built branches into the target branch. Uses Python-driven `git merge --no-ff`; only invokes the LLM conflict-resolution agent when git can't auto-merge — clean merges burn $0.
+Land queued / built branches into the target branch. Uses Python-driven `git merge --no-ff`; clean git merging and conflict detection burn $0, and the LLM conflict-resolution agent only runs when git can't auto-merge. By default `otto merge` still runs post-merge certification unless you pass `--no-certify`.
 
 ```bash
 otto merge --all                              # merge all done queue tasks into target
@@ -389,6 +390,7 @@ Show build history with results, cost, and duration.
 ```bash
 otto history             # show recent builds
 otto history -n 20       # show last 20 builds
+```
 
 ### `otto pow`
 
@@ -398,7 +400,6 @@ Open the latest proof-of-work report, or print/open a specific session's report.
 otto pow
 otto pow 2026-04-21-010203-abcdef
 otto pow 2026-04-21-010203-abcdef --print
-```
 ```
 
 ### `otto replay`
@@ -414,7 +415,7 @@ Writes `narrative.regenerated.log` alongside the original (never overwrites).
 
 ### `otto setup`
 
-Generate a `CLAUDE.md` file with project conventions for the coding agent, plus an `otto.yaml` with all control knobs commented. Reads the project structure and detects test frameworks automatically.
+Generate a `CLAUDE.md` file with project conventions for the coding agent, plus an `otto.yaml` with all control knobs commented. Reads the project structure, detects test frameworks automatically, and makes one provider-backed agent call to draft `CLAUDE.md`.
 
 ```bash
 otto setup
@@ -444,23 +445,17 @@ provider: claude                  # claude | codex
 # effort: null                    # low | medium | high | max (provider-specific)
 
 # ─── Per-agent overrides (inherit global if not set) ─────────────────
-agents:
-  build:
-    provider: claude
-    model: opus
-  certifier:
-    provider: claude
-    model: sonnet
-    effort: low                    # certifier doesn't need deep reasoning
-  spec:
-    provider: claude
-    model: sonnet
-#  fix:     {provider: null, model: null, effort: null}
+# agents:
+#   build:     {provider: null, model: null, effort: null}
+#   certifier: {provider: null, model: null, effort: null}
+#   spec:      {provider: null, model: null, effort: null}
+#   fix:       {provider: null, model: null, effort: null}
 
 # ─── Budgets & caps ──────────────────────────────────────────────────
 run_budget_seconds: 3600      # total wall-clock (primary knob)
 # spec_timeout: 600                # cap on the spec-agent call only
 # max_certify_rounds: 8            # max certify→fix loop iterations
+# max_turns_per_call: 200          # guardrail for agent loops
 
 # ─── Per-invocation defaults (CLI typically overrides) ───────────────
 # certifier_mode: fast             # fast | standard | thorough
@@ -475,6 +470,8 @@ run_budget_seconds: 3600      # total wall-clock (primary knob)
 #   concurrent: 3                  # default --concurrent for `otto queue run`
 #   worktree_dir: .worktrees       # where per-task worktrees live
 #   on_watcher_restart: resume     # resume | fail
+#   task_timeout_s: 1800.0         # per-task timeout; 0/null disables
+#   merge_certifier_mode: standard # fast | standard | thorough
 #   bookkeeping_files:             # NOT committed to task branches
 #     - intent.md
 #     - otto.yaml
@@ -482,12 +479,13 @@ run_budget_seconds: 3600      # total wall-clock (primary knob)
 
 ### Timeout semantics
 
-Only two timeout knobs, both orthogonal:
+Timeout knobs are orthogonal:
 
 | Knob | Scope | Default |
 |---|---|---|
-| `run_budget_seconds` | Total wall-clock across the whole `otto build` / `otto certify` / `otto improve` run. If exhausted, the run pauses with a resumable checkpoint. | `3600` (1h) |
+| `run_budget_seconds` | Total wall-clock across the whole `otto build` / `otto certify` / `otto improve` run. Build/improve exhaustion pauses with a resumable checkpoint; standalone or queued certify must be rerun on timeout. | `3600` (1h) |
 | `spec_timeout` | Per-phase cap on the spec-agent call specifically. Applied as `min(run_budget_remaining, spec_timeout)`. | `600` (10m) |
+| `queue.task_timeout_s` | Per-task wall-clock cap for `otto queue run` child processes. Set `0` or `null` to disable. | `1800` (30m) |
 
 Previous `certifier_timeout` and `agent_timeout` keys have been removed — `run_budget_seconds` replaces them end-to-end.
 
@@ -499,7 +497,7 @@ Previous `certifier_timeout` and `agent_timeout` keys have been removed — `run
 | `standard` | `certifier.md` — subagents + screenshots, ~2 min | Real verification without adversarial probing |
 | `thorough` | `certifier-thorough.md` — adversarial, edge cases, code review, ~5 min | Production-grade QA |
 
-`otto build` defaults to `fast` unless a mode flag or `otto.yaml` override says otherwise. Standalone `otto certify` defaults to `standard` when no mode flag is given.
+`otto build` and standalone `otto certify` default to `fast` unless a mode flag or `otto.yaml` override says otherwise.
 
 All three modes respect the spec (if `--spec` was used): scope-creep features in "Must NOT Have Yet" are reported as `STORY_RESULT: scope-creep-<slug> | WARN` in any mode.
 
@@ -512,7 +510,7 @@ Otto supports two agent providers:
 | `claude` (default) | Claude Code CLI via Agent SDK | `provider: claude` |
 | `codex` | OpenAI Codex CLI | `provider: codex` |
 
-Both providers use the same prompts, certification loop, and output parsing. Switch providers by changing one line in `otto.yaml`.
+Both providers use the same prompts, certification loop, and output parsing for build/certify-style agent calls. Non-fast merge conflict resolution currently requires `provider: claude` because the conflict resolver enforces a stricter tool-control contract; use `otto merge --fast` with `provider: codex`.
 
 ### Auto-detection
 
@@ -665,7 +663,7 @@ the conflict agent runs project tests.
 ## Project structure
 
 ```
-otto/                        ~16k lines
+otto/                        ~30k lines
   pipeline.py                Build pipeline, certify-fix loop
   paths.py                   Single choke point for all otto_logs/ paths + project lock
   logstream.py               Streaming SDK event normalizer → narrative.log + messages.jsonl
@@ -697,14 +695,15 @@ otto/                        ~16k lines
     stories.py               Collect stories from merged branches + manifests
     state.py                 BranchOutcome + per-merge state.json
   worktree.py                Atomic-CLI worktree setup (--in-worktree path)
-tests/                       575 tests, ~10k lines
+tests/                       ~950 test functions, ~23k lines
   _helpers.py                Shared init_repo factory used across test files
 ```
 
 ## Requirements
 
 - Python 3.11+
-- [Claude Code CLI](https://claude.ai/code) installed and authenticated
+- [Claude Code CLI](https://claude.ai/code) installed and authenticated when using `provider: claude`
+- Codex CLI installed and authenticated when using `provider: codex`
 - Git repository
 
 ## License

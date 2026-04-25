@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import select
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -34,8 +36,23 @@ from otto.merge import git_ops
 from otto.merge.state import MergeState, find_latest_merge_id, load_state
 from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
 from otto.runs.history import append_history_snapshot, read_history_rows
-from otto.runs.registry import load_live_record
+from otto.runs.registry import append_command_request, load_live_record
 from tests._helpers import init_repo
+
+
+def _readline_with_timeout(proc: subprocess.Popen[str], *, timeout_s: float = 5.0) -> str:
+    assert proc.stdout is not None
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            stdout, stderr = proc.communicate(timeout=0.2)
+            raise AssertionError(
+                f"process exited before line: rc={proc.returncode}, stdout={stdout!r}, stderr={stderr!r}"
+            )
+        ready, _, _ = select.select([proc.stdout], [], [], 0.1)
+        if ready:
+            return proc.stdout.readline().strip()
+    raise AssertionError("timed out waiting for subprocess line")
 
 
 def _init_repo_with_gitattributes(tmp_path: Path) -> Path:
@@ -77,6 +94,24 @@ def _seed_queue_task(repo: Path, *, task_id: str, worktree: Path) -> None:
         branch=f"build/{task_id}",
         worktree=str(worktree.relative_to(repo)),
     ))
+
+
+def test_gather_intents_uses_queue_manifest_after_queue_definition_removed(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    manifest_path = paths.queue_manifest_path(repo, "task-1")
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps({
+        "branch": "build/task-1",
+        "resolved_intent": "ship the queued feature",
+    }), encoding="utf-8")
+
+    intents = orchestrator_module._gather_intents(
+        repo,
+        ["build/task-1"],
+        {"build/task-1": "task-1"},
+    )
+
+    assert intents == {"build/task-1": "ship the queued feature"}
 
 
 def _config_codex_provider() -> dict[str, Any]:
@@ -150,6 +185,25 @@ def test_merge_refuses_unknown_branch(tmp_path: Path):
         ))
 
 
+def test_merge_reports_malformed_queue_for_unknown_explicit_task(tmp_path: Path):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    (repo / ".otto-queue.yml").write_text(
+        "schema_version: 1\n"
+        "tasks:\n"
+        "  - id: broken\n"
+        "    added_at: 2026-04-21T00:00:00Z\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="could not load queue.yml for task-id resolution"):
+        asyncio.run(run_merge(
+            project_dir=repo,
+            config=_config_no_bookkeeping(),
+            options=MergeOptions(target="main", no_certify=True),
+            explicit_ids_or_branches=["broken"],
+        ))
+
+
 def test_merge_refuses_unmanaged_local_branch_by_default(tmp_path: Path):
     repo = _init_repo_with_gitattributes(tmp_path)
     _make_branch(repo, "feature/random", "a.txt", "A\n")
@@ -218,6 +272,7 @@ def test_fast_mode_bails_on_conflict(tmp_path: Path):
     repo = _init_repo_with_gitattributes(tmp_path)
     _make_branch(repo, "feat-a", "f.txt", "A's content\n")
     _make_branch(repo, "feat-b", "f.txt", "B's content\n")
+    target_head_before = git_ops.head_sha(repo)
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_no_bookkeeping(),
@@ -230,6 +285,9 @@ def test_fast_mode_bails_on_conflict(tmp_path: Path):
     statuses = [o.status for o in result.state.outcomes]
     assert "merged" in statuses
     assert "agent_giveup" in statuses
+    # Current merge semantics are incremental, not transactional: clean
+    # branches merged before a later conflict remain on the target branch.
+    assert git_ops.head_sha(repo) != target_head_before
     # Working tree should be left dirty for manual resolution.
     assert git_ops.merge_in_progress(repo)
     git_ops.merge_abort(repo)  # cleanup
@@ -492,6 +550,94 @@ def test_conflict_resolved_merge_still_runs_cleanup_on_success(
     assert cleanup_calls == [{"feat-a": "task-a", "feat-b": "task-b"}]
 
 
+def test_merge_honors_cancel_after_conflict_agent_returns_before_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _init_repo_with_gitattributes(tmp_path)
+    (repo / "shared.txt").write_text("base\n")
+    subprocess.run(["git", "add", "shared.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add shared fixture"], cwd=repo, check=True)
+
+    subprocess.run(["git", "checkout", "-b", "feat-a"], cwd=repo, capture_output=True, check=True)
+    (repo / "shared.txt").write_text("feat-a\n")
+    subprocess.run(["git", "add", "shared.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat-a change"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True, check=True)
+
+    subprocess.run(["git", "checkout", "-b", "feat-b"], cwd=repo, capture_output=True, check=True)
+    (repo / "shared.txt").write_text("feat-b\n")
+    subprocess.run(["git", "add", "shared.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat-b change"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True, check=True)
+    head_during_cancel: list[str] = []
+
+    async def fake_resolve_all_conflicts(*, project_dir: Path, config: dict[str, Any], ctx, **kwargs):
+        del config, ctx, kwargs
+        (project_dir / "shared.txt").write_text("resolved\n")
+        head_during_cancel.append(subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_dir,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip())
+        append_command_request(
+            paths.merge_command_requests(project_dir),
+            {
+                "schema_version": 1,
+                "command_id": "cmd-conflict-cancel",
+                "run_id": "merge-cancel-after-agent",
+                "domain": "merge",
+                "kind": "cancel",
+                "args": {},
+            },
+        )
+        return conflict_agent.ConflictResolutionAttempt(
+            success=True,
+            note="resolved for cancel test",
+            cost_usd=1.23,
+            edited_files={"shared.txt"},
+        )
+
+    add_calls: list[list[str]] = []
+    real_add_paths = git_ops.add_paths
+
+    def fake_add_paths(project_dir: Path, paths_arg: list[str]):
+        add_calls.append(paths_arg)
+        return real_add_paths(project_dir, paths_arg)
+
+    monkeypatch.setattr(conflict_agent, "resolve_all_conflicts", fake_resolve_all_conflicts)
+    monkeypatch.setattr("otto.merge.orchestrator.new_merge_id", lambda: "merge-cancel-after-agent")
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.add_paths", fake_add_paths)
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
+        explicit_ids_or_branches=["feat-a", "feat-b"],
+    ))
+
+    assert result.success is False
+    assert result.state.status == "cancelled"
+    assert result.note == "merge cancelled after conflict resolution"
+    assert add_calls == [["shared.txt"]]
+    assert len(head_during_cancel) == 1
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip() == head_during_cancel[0]
+    assert "resolve conflicts" not in subprocess.run(
+        ["git", "log", "--oneline", "-5"],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+
+
 # ---------- bookkeeping precondition ----------
 
 
@@ -658,6 +804,167 @@ def test_post_merge_verification_writes_merged_from_to_summary(
     assert result.success is True
     summary = json.loads((session_dir / "summary.json").read_text())
     assert summary["merged_from"] == ["add", "feature/random"]
+
+
+def test_post_merge_verification_honors_cancel_after_certifier_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.collect_stories_from_branches",
+        lambda **kwargs: [{"story_id": "story-a", "summary": "summary"}],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.dedupe_stories",
+        lambda stories: (stories, []),
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.changed_files_between",
+        lambda *args, **kwargs: ["app/csv.py"],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.head_sha",
+        lambda *args, **kwargs: "new-head",
+    )
+    monkeypatch.setattr("otto.config.resolve_intent", lambda project_dir: "intent")
+
+    async def fake_run_agentic_certifier(**kwargs):
+        append_command_request(
+            paths.merge_command_requests(tmp_path),
+            {
+                "schema_version": 1,
+                "command_id": "cmd-cert-cancel",
+                "run_id": "merge-test",
+                "domain": "merge",
+                "kind": "cancel",
+                "args": {},
+            },
+        )
+        return CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            story_results=[{"story_id": "story-a", "verdict": "PASS", "passed": True}],
+            run_id="cert-1",
+        )
+
+    monkeypatch.setattr("otto.certifier.run_agentic_certifier", fake_run_agentic_certifier)
+
+    state = MergeState(
+        merge_id="merge-test",
+        started_at="2026-04-20T00:00:00Z",
+        target="main",
+        target_head_before="old-head",
+    )
+
+    result = asyncio.run(_run_post_merge_verification(
+        project_dir=tmp_path,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main"),
+        state=state,
+        merge_id="merge-test",
+        branches=["feat-a"],
+        queue_lookup={},
+        target_head_before="old-head",
+    ))
+
+    assert result.success is False
+    assert result.state.status == "cancelled"
+    assert result.state.terminal_outcome == "cancelled"
+    assert result.note == "merge cancelled after post-merge verification"
+
+
+def test_post_merge_verification_interrupts_running_certifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.collect_stories_from_branches",
+        lambda **kwargs: [{"story_id": "story-a", "summary": "summary"}],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.dedupe_stories",
+        lambda stories: (stories, []),
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.changed_files_between",
+        lambda *args, **kwargs: ["app/csv.py"],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.head_sha",
+        lambda *args, **kwargs: "new-head",
+    )
+    monkeypatch.setattr("otto.config.resolve_intent", lambda project_dir: "intent")
+    cancelled = False
+
+    async def fake_run_agentic_certifier(**kwargs):
+        nonlocal cancelled
+        append_command_request(
+            paths.merge_command_requests(tmp_path),
+            {
+                "schema_version": 1,
+                "command_id": "cmd-cert-cancel-running",
+                "run_id": "merge-test",
+                "domain": "merge",
+                "kind": "cancel",
+                "args": {},
+            },
+        )
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    monkeypatch.setattr("otto.certifier.run_agentic_certifier", fake_run_agentic_certifier)
+
+    state = MergeState(
+        merge_id="merge-test",
+        started_at="2026-04-20T00:00:00Z",
+        target="main",
+        target_head_before="old-head",
+    )
+
+    result = asyncio.run(_run_post_merge_verification(
+        project_dir=tmp_path,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main"),
+        state=state,
+        merge_id="merge-test",
+        branches=["feat-a"],
+        queue_lookup={},
+        target_head_before="old-head",
+    ))
+
+    assert cancelled is True
+    assert result.success is False
+    assert result.state.status == "cancelled"
+    assert result.state.terminal_outcome == "cancelled"
+    assert result.note == "merge cancelled during post-merge verification"
+
+
+def test_merge_cancel_command_requires_matching_run_id(tmp_path: Path):
+    from otto.runs.registry import read_jsonl_rows
+
+    append_command_request(
+        paths.merge_command_requests(tmp_path),
+        {
+            "schema_version": 1,
+            "command_id": "cmd-missing-run-id",
+            "domain": "merge",
+            "kind": "cancel",
+            "args": {},
+        },
+    )
+    state = MergeState(
+        merge_id="merge-active",
+        started_at="2026-04-20T00:00:00Z",
+        target="main",
+        target_head_before="old-head",
+    )
+
+    cancelled = orchestrator_module._drain_merge_cancel_commands(tmp_path, "merge-active", state)
+
+    assert cancelled is False
+    assert state.status == "running"
+    rows = read_jsonl_rows(paths.merge_command_acks(tmp_path))
+    assert rows[-1]["outcome"] == "ignored"
 
 
 def test_merge_state_persisted_to_disk(tmp_path: Path):
@@ -956,8 +1263,7 @@ with merge_lock(Path(sys.argv[1])):
         text=True,
     )
     try:
-        assert proc.stdout is not None
-        assert proc.stdout.readline().strip() == "locked"
+        assert _readline_with_timeout(proc) == "locked"
         with pytest.raises(MergeAlreadyRunning, match="another otto merge is in progress"):
             with merge_lock(repo):
                 pass
@@ -1142,6 +1448,7 @@ def test_merge_stops_publisher_when_body_raises(tmp_path: Path, monkeypatch: pyt
     class _FakePublisher:
         def __init__(self) -> None:
             self.stopped = False
+            self.finalize_kwargs: dict[str, object] | None = None
 
         def __enter__(self):
             return self
@@ -1150,7 +1457,7 @@ def test_merge_stops_publisher_when_body_raises(tmp_path: Path, monkeypatch: pyt
             self.stopped = True
 
         def finalize(self, **kwargs):
-            raise AssertionError("finalize should not run")
+            self.finalize_kwargs = kwargs
 
     publisher = _FakePublisher()
 
@@ -1184,3 +1491,62 @@ def test_merge_stops_publisher_when_body_raises(tmp_path: Path, monkeypatch: pyt
         )
 
     assert publisher.stopped is True
+    assert publisher.finalize_kwargs is not None
+    assert publisher.finalize_kwargs["status"] == "failed"
+
+
+def test_merge_finalizes_interrupted_when_body_receives_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakePublisher:
+        def __init__(self) -> None:
+            self.stopped = False
+            self.finalize_kwargs: dict[str, object] | None = None
+
+        def __enter__(self):
+            return self
+
+        def stop(self) -> None:
+            self.stopped = True
+
+        def finalize(self, **kwargs):
+            self.finalize_kwargs = kwargs
+
+    publisher = _FakePublisher()
+
+    monkeypatch.setattr("otto.runs.registry.garbage_collect_live_records", lambda project_dir: [])
+    monkeypatch.setattr("otto.merge.orchestrator._repair_merge_history", lambda project_dir: None)
+    monkeypatch.setattr("otto.config.agent_provider", lambda config: "claude")
+    monkeypatch.setattr(
+        "otto.config.repo_preflight_issues",
+        lambda project_dir: {"blocking": [], "dirty": [], "dirty_files": []},
+    )
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.current_branch", lambda project_dir: "main")
+    monkeypatch.setattr("otto.merge.orchestrator._resolve_branches", lambda *args, **kwargs: (["feature/a"], {}))
+    monkeypatch.setattr("otto.merge.orchestrator.new_merge_id", lambda: "merge-keyboard")
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.head_sha", lambda project_dir: "abc123")
+    monkeypatch.setattr("otto.merge.orchestrator._drain_merge_cancel_commands", lambda *args, **kwargs: False)
+    monkeypatch.setattr("otto.merge.orchestrator.publisher_for", lambda *args, **kwargs: publisher)
+
+    async def _interrupt(**kwargs):
+        raise KeyboardInterrupt("sigterm")
+
+    monkeypatch.setattr("otto.merge.orchestrator._run_consolidated_agentic_merge", _interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(
+            run_merge(
+                project_dir=tmp_path,
+                config={},
+                options=MergeOptions(target="main"),
+                explicit_ids_or_branches=["feature/a"],
+            )
+        )
+
+    state = load_state(tmp_path, "merge-keyboard")
+    assert state.status == "interrupted"
+    assert state.terminal_outcome == "interrupted"
+    assert publisher.stopped is True
+    assert publisher.finalize_kwargs is not None
+    assert publisher.finalize_kwargs["status"] == "interrupted"

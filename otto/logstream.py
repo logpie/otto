@@ -868,8 +868,8 @@ class NarrativeFormatter:
                     and certify_round_count >= 1
                     and certify_round_count <= self._agent_dispatch_count):
                 prose_lines = [
-                    l.strip() for l in text.split("\n")
-                    if l.strip() and not _is_marker(l.strip())
+                    line.strip() for line in text.split("\n")
+                    if line.strip() and not _is_marker(line.strip())
                 ]
                 for s in prose_lines:
                     self._write(f"{ts} {text_glyph} {_truncate_at_word(s)}")
@@ -928,8 +928,8 @@ class NarrativeFormatter:
                     break
             if is_subagent:
                 prose = "\n".join(
-                    l for l in content.split("\n")
-                    if l.strip() and not _is_marker(l.strip())
+                    line for line in content.split("\n")
+                    if line.strip() and not _is_marker(line.strip())
                 ).strip()
                 if prose:
                     flat = " ".join(prose.split())
@@ -977,7 +977,7 @@ class NarrativeFormatter:
 
         # Glob — show just "(N files)".
         if tool_name == "Glob":
-            lines = [l for l in content.split("\n") if l.strip()]
+            lines = [line for line in content.split("\n") if line.strip()]
             self._write(f"{ts} \u2190 ({len(lines)} files)")
             return
 

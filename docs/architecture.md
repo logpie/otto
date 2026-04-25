@@ -23,7 +23,8 @@ Two subsystems built on top of the core build/certify/improve flows:
   + foreground watcher that spawns one `otto` subprocess per task into its own
   git worktree on its own branch. Crash-safe via PID-reuse-safe child tracking.
 - **Merge** (`otto/merge/`): Python-driven `git merge --no-ff` orchestrator.
-  Clean merges burn $0 (no LLM). When git can't auto-merge, otto commits
+  Clean git merge/conflict detection burns $0; default post-merge
+  certification can spend unless `--no-certify` is set. When git can't auto-merge, otto commits
   marker-laden merges to preserve history, then invokes ONE agent session
   with full project context (Bash + test command + cross-branch context)
   to resolve every conflict globally. The agent self-corrects within its
@@ -76,7 +77,7 @@ Two subsystems built on top of the core build/certify/improve flows:
 otto build "bookmark manager with tags"
 │
 ├─ Load build.md prompt (explore → build → test → certify → fix → report)
-├─ Pre-fill certifier prompt (certifier-thorough.md with {intent})
+├─ Pre-fill certifier prompt (mode resolved from CLI/config; fast by default)
 ├─ Inject cross-run memory (if enabled)
 │
 └─ Single agent session ──────────────────────────────────────┐
@@ -93,7 +94,7 @@ otto build "bookmark manager with tags"
      │                                     │                    │
      ├─ 4. Read findings ◄────────────────┘                    │
      ├─ 5. If FAIL: fix code, commit, re-dispatch certifier    │
-     ├─ 6. Repeat until two consecutive PASSes                 │
+     ├─ 6. Repeat until PASS (or two consecutive PASSes with --strict)
      └─ 7. Report structured markers ─────────────────────────┘
                     │
                     ▼
@@ -147,7 +148,7 @@ otto improve bugs "error handling" -n 5
      ├─ 1. Explore project                                    │
      ├─ 2. Dispatch certifier subagent                        │
      ├─ 3. Read findings, fix, re-dispatch                    │
-     ├─ 4. Repeat until two consecutive PASSes                │
+     ├─ 4. Repeat until PASS (or two consecutive PASSes with --strict)
      └─ 5. Report markers ───────────────────────────────────┘
                     │
      Agent IS the memory (single session, auto-compact)
@@ -175,12 +176,14 @@ otto improve bugs "error handling" -n 5
               │  Runner._tick():           │
               │    begin_command_drain()   │
               │    load_queue()            │
+              │    reap_children()         │
               │    apply_command(...)      │
+              │    dispatch_new()          │
+              │    repair history records  │
+              │    refresh live records     │
+              │    cleanup removed defs     │
               │    persist state + acks     │
               │    finish_command_drain()  │
-              │    enforce_timeouts()      │
-              │    reap_children()         │
-              │    dispatch_new()          │
               └────────┬───────────────────┘
                        │  (Popen with PGID for safe cleanup)
               ┌────────▼─────────────────────────────────────┐
@@ -214,11 +217,11 @@ otto improve bugs "error handling" -n 5
   than mutating state directly — the watcher is the single writer.
 - Each task gets its own git worktree at `.worktrees/<task-id>/` and its own
   branch (`build/<slug>-<date>` or `improve/...`). Bookkeeping files
-  (`intent.md`, `otto.yaml`) are NOT committed to task branches —
-  they're shared project state, not per-task work.
+  (`intent.md`, `otto.yaml`) are snapshotted for task context and kept out of
+  task commits by default — they're shared project state, not per-task work.
 - Watcher supports an optional per-task wall-clock timeout
-  (`queue.task_timeout_s`; unset in the default template, 1800s fallback in
-  the runner) that SIGTERMs hung children so they free their concurrency slot.
+  (`queue.task_timeout_s`; default template value 1800s, set to `0` or `null`
+  to disable) that SIGTERMs hung children so they free their concurrency slot.
 - On watcher restart, in-flight tasks are either resumed (default,
   `on_watcher_restart: resume`) by reconciling state.json against live PIDs
   or marked failed (`fail`).
@@ -323,10 +326,10 @@ with a clear "another otto merge is in progress" error.
 
 **Validation guarantees** (`conflict_agent.validate_post_agent`):
 
-1. Out-of-scope edits — `post_diff − pre_diff ⊆ expected_uu_files`
+1. Out-of-scope edits — `post_diff − pre_diff ⊆ edit_scope.allowed_files`
 2. No new untracked files (build artifacts caught here; otto's
    `setup_gitignore.py` adds common patterns to keep this from tripping)
-3. No conflict markers remain — direct content scan of `expected_uu_files`
+3. No conflict markers remain — direct content scan of `edit_scope.primary_files`
    (markers live in committed files where `git diff --check` is blind);
    ANY column-zero `<<<<<<<` / `=======` / `>>>>>>>` line fails closed,
    including partial / mangled marker remnants
@@ -485,12 +488,15 @@ Run `find otto/ -name "*.py" -not -path "*__pycache__*" | xargs wc -l | sort -rn
 ## Error Handling
 
 Centralized in `run_agent_with_timeout()`:
-- **Timeout**: Derived from `RunBudget.for_call()` — the one timeout knob is
-  `run_budget_seconds` (default 3600s), a wall-clock cap on the whole
-  `otto build` / `otto certify` / `otto improve` invocation. Per-call timeouts
-  shrink naturally as budget drains. `spec_timeout` (default 600s) is the
-  only per-phase cap, applied inline in the spec agent call as
-  `min(budget.remaining, spec_timeout)`. Orphan processes cleaned up.
+- **Agent-run timeout**: Derived from `RunBudget.for_call()` —
+  `run_budget_seconds` (default 3600s) is the wall-clock cap on a standalone
+  `otto build` / `otto certify` / `otto improve` invocation. Build/improve
+  exhaustion writes a resumable checkpoint; standalone or queued certify must
+  be rerun on timeout. Per-call timeouts shrink naturally as budget drains.
+  `spec_timeout` (default 600s) caps the
+  spec agent call inline as `min(budget.remaining, spec_timeout)`.
+  Queue-backed child processes also have the watcher-level
+  `queue.task_timeout_s` cap described above. Orphan processes are cleaned up.
 - **Agent crash**: `AgentCallError` raised with preserved `session_id` from
   streaming state so `--resume` can continue the SDK conversation. Callers
   retry up to 2x for transient errors (not budget exhaustion).
@@ -531,7 +537,8 @@ All artifacts from one invocation live under `otto_logs/sessions/<id>/`.
 | Cost (in-flight)? | `otto_logs/latest/checkpoint.json` → `total_cost` |
 | Queue task status? | `otto queue ls` / `otto queue show <id>` / `.otto-queue-state.json` |
 | Why didn't a queue task start? | watcher stdout (spawn / reap / timeout / cancel events) |
-| Per-task manifest? | `<worktree>/otto_logs/sessions/<id>/manifest.json` |
+| Queue task manifest? | `otto_logs/queue/<task-id>/manifest.json` |
+| Session manifest? | `<worktree>/otto_logs/sessions/<id>/manifest.json` |
 | Merge orchestrator events? | `otto_logs/merge/<merge-id>/merge.log` |
 | Per-merge state + outcomes? | `otto_logs/merge/<merge-id>/state.json` |
 

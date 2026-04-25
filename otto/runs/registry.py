@@ -6,7 +6,6 @@ import json
 import os
 import secrets
 import sys
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from otto import paths
+from otto.observability import write_json_atomic
 from otto.runs.schema import RunRecord, is_terminal_status
 
 try:
@@ -135,9 +135,10 @@ def garbage_collect_live_records(
     *,
     terminal_retention_s: float = 24 * 60 * 60,
     reserve_retention_s: float = 60 * 60,
+    stale_nonterminal_retention_s: float | None = None,
     now: datetime | None = None,
 ) -> list[str]:
-    """Remove old terminal live records and stale reservations."""
+    """Remove old terminal records, stale interrupted records, and stale reservations."""
     now_dt = now or datetime.now(timezone.utc)
     removed: list[str] = []
     live_dir = paths.live_runs_dir(project_dir)
@@ -150,6 +151,21 @@ def garbage_collect_live_records(
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
             if not is_terminal_status(record.status):
+                if stale_nonterminal_retention_s is None:
+                    continue
+                if not writer_identity_gone_or_stale(record.writer):
+                    continue
+                heartbeat_at = _parse_iso(
+                    record.timing.get("heartbeat_at") or record.timing.get("updated_at")
+                )
+                if heartbeat_at is None:
+                    continue
+                if (now_dt - heartbeat_at).total_seconds() < stale_nonterminal_retention_s:
+                    continue
+                _mark_stale_nonterminal_interrupted(record, now_dt=now_dt)
+                _append_tombstone(project_dir, record)
+                path.unlink(missing_ok=True)
+                removed.append(record.run_id)
                 continue
             if not writer_identity_gone_or_stale(record.writer):
                 continue
@@ -172,12 +188,16 @@ def garbage_collect_live_records(
 
 
 def cleanup_live_record(project_dir: Path, run_id: str) -> RunRecord:
-    """Remove one terminal or abandoned live record and append a GC tombstone."""
+    """Remove one terminal or stale/abandoned live record and append a tombstone."""
     path = paths.live_run_path(project_dir, run_id)
     with _directory_scan_lock(project_dir, exclusive=True):
         if not path.exists():
             raise FileNotFoundError(run_id)
         record = _read_record_path(path)
+        if not is_terminal_status(record.status):
+            if not writer_identity_gone_or_stale(record.writer):
+                raise ValueError("writer still alive — wait for finalization")
+            _mark_stale_nonterminal_interrupted(record)
         if not writer_identity_gone_or_stale(record.writer):
             raise ValueError("writer still alive — wait for finalization")
         if not is_terminal_status(record.status):
@@ -192,6 +212,19 @@ def load_live_record(project_dir: Path, run_id: str) -> RunRecord:
     if not path.exists():
         raise FileNotFoundError(run_id)
     return _read_record_path(path)
+
+
+def _mark_stale_nonterminal_interrupted(
+    record: RunRecord,
+    *,
+    now_dt: datetime | None = None,
+) -> None:
+    now = (now_dt or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    record.status = "interrupted"
+    record.terminal_outcome = "interrupted"
+    record.timing["finished_at"] = record.timing.get("finished_at") or now
+    record.timing["updated_at"] = now
+    record.last_event = record.last_event or "writer disappeared before finalization"
 
 
 def current_writer_identity(writer_id: str) -> dict[str, Any]:
@@ -407,6 +440,25 @@ def append_jsonl_row(path: Path, row: dict[str, Any]) -> dict[str, Any]:
         finally:
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return dict(row)
+
+
+def append_command_request(request_path: Path, row: dict[str, Any]) -> dict[str, Any]:
+    """Append a command request under the same sidecar lock used by drains."""
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = request_path.with_suffix(request_path.suffix + ".lock")
+    payload = json.dumps(row, separators=(",", ":"), sort_keys=False) + "\n"
+    with lock_path.open("a", encoding="utf-8") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with request_path.open("a", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     return dict(row)
 
 
@@ -654,21 +706,7 @@ def _read_record_path(path: Path) -> RunRecord:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, indent=2, sort_keys=False))
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_json_atomic(path, payload, sort_keys=False, trailing_newline=True)
 
 
 def _reservation_path(project_dir: Path, run_id: str) -> Path:

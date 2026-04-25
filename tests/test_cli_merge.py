@@ -31,7 +31,15 @@ def test_merge_all_with_malformed_queue_yml_returns_cli_error(tmp_path: Path):
     code, out = _run(["merge", "--all", "--no-certify"], cwd=repo)
 
     assert code == 2
-    assert "no branches to merge" in out
+    assert "queue.yml is malformed" in out
+
+
+def test_merge_outside_git_repo_shows_clean_error(tmp_path: Path):
+    code, out = _run(["merge", "--all", "--no-certify"], cwd=tmp_path)
+
+    assert code == 2
+    assert "Not a git repository" in out
+    assert "Traceback" not in out
 
 
 def test_merge_resume_option_is_not_registered(tmp_path: Path):
@@ -49,8 +57,10 @@ def test_merge_summary_uses_warning_icon_for_merged_with_markers(
     monkeypatch,
 ):
     repo = init_repo(tmp_path)
+    seen: dict[str, object] = {}
 
     async def fake_run_merge(**kwargs):
+        seen.update(kwargs)
         return MergeRunResult(
             success=True,
             merge_id="merge-test",
@@ -73,6 +83,8 @@ def test_merge_summary_uses_warning_icon_for_merged_with_markers(
     code, out = _run(["merge", "--all", "--no-certify"], cwd=repo)
 
     assert code == 0
+    assert seen["all_done_queue_tasks"] is True
+    assert seen["explicit_ids_or_branches"] is None
     assert "⚠ feature/conflict (merged_with_markers)" in out
 
 
@@ -81,6 +93,7 @@ def test_merge_allow_any_branch_flag_reaches_orchestrator(tmp_path: Path, monkey
     seen: dict[str, object] = {}
 
     async def fake_run_merge(**kwargs):
+        seen["explicit_ids_or_branches"] = kwargs["explicit_ids_or_branches"]
         seen["options"] = kwargs["options"]
         return MergeRunResult(
             success=True,
@@ -94,7 +107,33 @@ def test_merge_allow_any_branch_flag_reaches_orchestrator(tmp_path: Path, monkey
     code, _out = _run(["merge", "feature/random", "--allow-any-branch", "--no-certify"], cwd=repo)
 
     assert code == 0
+    assert seen["explicit_ids_or_branches"] == ["feature/random"]
     assert getattr(seen["options"], "allow_any_branch") is True
+
+
+def test_merge_from_subdirectory_uses_repo_root(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+    nested = repo / "src" / "pkg"
+    nested.mkdir(parents=True)
+    seen: dict[str, object] = {}
+
+    async def fake_run_merge(**kwargs):
+        seen["project_dir"] = kwargs["project_dir"]
+        seen["explicit_ids_or_branches"] = kwargs["explicit_ids_or_branches"]
+        return MergeRunResult(
+            success=True,
+            merge_id="merge-test",
+            state=MergeState(merge_id="merge-test", target="main", outcomes=[]),
+            note="ok",
+        )
+
+    monkeypatch.setattr("otto.merge.orchestrator.run_merge", fake_run_merge)
+
+    code, out = _run(["merge", "feature/random", "--allow-any-branch", "--no-certify"], cwd=nested)
+
+    assert code == 0, out
+    assert seen["project_dir"] == repo.resolve()
+    assert seen["explicit_ids_or_branches"] == ["feature/random"]
 
 
 def test_merge_summary_lists_batch_pow_paths(tmp_path: Path, monkeypatch):

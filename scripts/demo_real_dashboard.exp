@@ -7,10 +7,19 @@
 
 set timeout 900
 set repo [lindex $argv 0]
-set OTTO "/Users/yuxuan/work/cc-autonomous/.worktrees/parallel-otto/.venv/bin/otto"
+if {[info exists env(OTTO_BIN)] && $env(OTTO_BIN) ne ""} {
+    set OTTO $env(OTTO_BIN)
+} else {
+    set OTTO "otto"
+}
 
 if { $repo eq "" } {
     puts "usage: demo_real_dashboard.exp <repo-dir>"
+    exit 2
+}
+
+if {![info exists env(OTTO_ALLOW_REAL_COST)] || $env(OTTO_ALLOW_REAL_COST) ne "1"} {
+    puts "refusing to run real-LLM demo without OTTO_ALLOW_REAL_COST=1"
     exit 2
 }
 
@@ -22,7 +31,13 @@ proc run_clean {args} {
     eval spawn $args
     expect eof
     catch close
-    catch wait
+    if {[catch wait wait_result]} {
+        error "wait failed for $args: $wait_result"
+    }
+    set status [lindex $wait_result 3]
+    if {$status != 0} {
+        error "command failed with exit $status: $args"
+    }
 }
 
 puts "\n========= STEP 1/4: enqueue 3 builds =========\n"

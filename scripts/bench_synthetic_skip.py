@@ -16,7 +16,7 @@ actually steers the cert agent's behavior.
 Success criterion: cert PoW must contain ≥1 STORY_RESULT with
 verdict=SKIPPED for stories whose files don't appear in the merge diff.
 
-Usage: .venv/bin/python scripts/bench_synthetic_skip.py
+Usage: OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/bench_synthetic_skip.py
 """
 
 from __future__ import annotations
@@ -30,9 +30,12 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from bench_runner import BenchResult, OTTO_BIN, RESULTS_DIR, log
+from bench_runner import BenchResult, OTTO_BIN, RESULTS_DIR, log, proof_of_work_path  # noqa: E402
+from real_cost_guard import require_real_cost_opt_in  # noqa: E402
 
 
 def run(cmd: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -344,6 +347,7 @@ def _read_latest_merge_state(repo: Path) -> dict | None:
 
 def main() -> int:
     name = "synthetic-skip"
+    require_real_cost_opt_in("synthetic skip benchmark")
     log(f"Running {name}: deterministic test of SKIPPED in post-merge cert")
     t0 = time.time()
 
@@ -370,7 +374,7 @@ def main() -> int:
         skipped_stories: list[dict] = []
         all_stories: list[dict] = []
         if cert_run_id:
-            pow_file = repo / "otto_logs" / "certifier" / cert_run_id / "proof-of-work.json"
+            pow_file = proof_of_work_path(repo, cert_run_id)
             if pow_file.exists():
                 try:
                     pow_data = json.loads(pow_file.read_text())
@@ -414,7 +418,7 @@ def main() -> int:
         res = BenchResult(
             name=name,
             started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t0)),
-            finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             wall_seconds=time.time() - t0,
             total_cost_usd=merge_cost,
             queue_concurrency=0,

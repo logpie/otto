@@ -4,11 +4,13 @@ e2e-scenarios.md for the scenario catalogue.
 Usage:
     .venv/bin/python scripts/e2e_runner.py A1     # one scenario
     .venv/bin/python scripts/e2e_runner.py A      # all of set A
-    .venv/bin/python scripts/e2e_runner.py all
+    .venv/bin/python scripts/e2e_runner.py all    # fake/local scenarios only
+    OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/e2e_runner.py real
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -28,6 +30,13 @@ from e2e_harness import (
     task_status,
     wait_for,
 )
+from real_cost_guard import require_real_cost_opt_in
+
+
+def _child_process_is_alive(child: dict[str, object]) -> bool:
+    from otto.queue.runner import child_is_alive
+
+    return child_is_alive(child)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -253,8 +262,10 @@ def scenario_a9(results: list[Result]) -> None:
             s2 = repo.state()
             v = s2["tasks"]["victim"]
             ok(f"post-restart status: {v.get('status')}; reason: {v.get('failure_reason')!r}")
-            # We just want to confirm the watcher didn't crash — exact behavior
-            # depends on reconciliation policy. State must be consistent.
+            if v.get("status") == "running":
+                child = v.get("child")
+                assert isinstance(child, dict) and _child_process_is_alive(child), \
+                    f"stale running state after restart: {v}"
             assert v.get("status") in {"running", "failed", "cancelled", "done"}, \
                 f"impossible state after restart: {v}"
         finally:
@@ -442,7 +453,6 @@ def scenario_b6_codex_provider_gate(results: list[Result]) -> None:
     with scenario("B6: codex provider gate", results), make_repo("b6-") as repo:
         _make_two_done_branches(repo)
         (repo.path / "otto.yaml").write_text("provider: codex\n")
-        # We should be able to commit otto.yaml (it's now first-touch ignored... wait no, .gitignore lists otto.yaml? no)
         repo.git("add", "otto.yaml")
         repo.git("commit", "-q", "-m", "use codex provider")
         r = repo.otto("merge", "--all", "--no-certify", check=False)
@@ -564,9 +574,6 @@ def scenario_b12_post_merge_preview(results: list[Result]) -> None:
 # Set C — Real LLM full pipeline
 # ════════════════════════════════════════════════════════════════════════
 
-import os as _os
-
-
 def real_repo(prefix: str = "otto-e2e-real-") -> Repo:
     """Like make_repo but does NOT set OTTO_BIN to fake-otto. Uses real otto."""
     r = make_repo(prefix)
@@ -575,17 +582,17 @@ def real_repo(prefix: str = "otto-e2e-real-") -> Repo:
 
 def real_otto_run(repo: Repo, *args: str, **kwargs):  # type: ignore
     """Run the real otto binary in this repo (no OTTO_BIN override)."""
-    full_env = {**_os.environ}
+    full_env = {**os.environ}
     full_env.pop("OTTO_BIN", None)  # ensure no override
     if kwargs.get("env"):
         full_env.update(kwargs.pop("env"))
-    return repo.run(str(OTTO_BIN), *args, env=full_env, **kwargs)
+    return repo.run(str(OTTO_BIN), *args, env=full_env, fake_otto=False, **kwargs)
 
 
 def start_real_watcher(repo: Repo, *, concurrent: int = 2) -> Watcher:
     """Like start_watcher but no OTTO_BIN env (uses real otto for spawned children)."""
     log_path = repo.path / ".watcher.log"
-    env = {**_os.environ}
+    env = {**os.environ}
     env.pop("OTTO_BIN", None)
     proc = subprocess.Popen(
         [str(OTTO_BIN), "queue", "run", "--concurrent", str(concurrent)],
@@ -606,8 +613,15 @@ def scenario_c1_single_real_build(results: list[Result]) -> None:
     with scenario("C1: real single build via queue", results), real_repo("c1-") as repo:
         # Tiny intent that should cost ~$1-2
         base_sha = repo.git("rev-parse", "HEAD").stdout.strip()
-        real_otto_run(repo, "queue", "build", "--", "--fast", "--no-qa",
-                      "make calc.py with add(a,b) returning a+b and a unit test")
+        real_otto_run(
+            repo,
+            "queue",
+            "build",
+            "make calc.py with add(a,b) returning a+b and a unit test",
+            "--",
+            "--fast",
+            "--no-qa",
+        )
         info("enqueued; starting watcher")
         w = start_real_watcher(repo, concurrent=1)
         try:
@@ -640,8 +654,15 @@ def scenario_c1_single_real_build(results: list[Result]) -> None:
 def scenario_c1b_merge_after_real_build(results: list[Result]) -> None:
     """C1b: After C1, run otto merge --all --no-certify on the result."""
     with scenario("C1b: merge real build (no LLM merge)", results), real_repo("c1b-") as repo:
-        real_otto_run(repo, "queue", "build", "--", "--fast", "--no-qa",
-                      "make calc.py with add(a,b) returning a+b and a unit test")
+        real_otto_run(
+            repo,
+            "queue",
+            "build",
+            "make calc.py with add(a,b) returning a+b and a unit test",
+            "--",
+            "--fast",
+            "--no-qa",
+        )
         w = start_real_watcher(repo, concurrent=1)
         try:
             wait_for(
@@ -693,23 +714,39 @@ SCENARIOS = {
     "C1B": scenario_c1b_merge_after_real_build,
 }
 
+REAL_SCENARIOS = {"C1", "C1B"}
 
-def main() -> int:
-    args = sys.argv[1:]
+
+def select_scenarios(args: list[str]) -> list[str]:
     if not args:
         args = ["all"]
     selected: list[str] = []
     for arg in args:
         if arg.lower() == "all":
-            selected.extend(sorted(SCENARIOS.keys()))
+            selected.extend(sorted(name for name in SCENARIOS if name not in REAL_SCENARIOS))
+        elif arg.lower() in {"real", "all-real"}:
+            selected.extend(sorted(REAL_SCENARIOS))
         elif arg.upper() in SCENARIOS:
             selected.append(arg.upper())
         elif len(arg) == 1 and arg.upper() in {"A", "B"}:
             prefix = arg.upper()
             selected.extend(sorted(s for s in SCENARIOS if s.startswith(prefix)))
         else:
-            print(f"unknown scenario: {arg!r}", file=sys.stderr)
-            return 2
+            raise ValueError(f"unknown scenario: {arg!r}")
+    return selected
+
+
+def main() -> int:
+    try:
+        selected = select_scenarios(sys.argv[1:])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if REAL_SCENARIOS.intersection(selected):
+        try:
+            require_real_cost_opt_in("real E2E scenario(s)")
+        except SystemExit as exc:
+            return int(exc.code or 2)
     results: list[Result] = []
     for name in selected:
         SCENARIOS[name](results)

@@ -4,7 +4,7 @@ Slug from intent (or mode + counter). Dedup against ALL prior IDs in
 queue.yml regardless of status — task IDs are permanent for the file's
 lifetime. This prevents manifest path collisions and state-key shadowing
 when a user re-enqueues an intent that matches a previously-removed task's
-slug. (Codex round 3 finding from plan-gate.)
+slug.
 
 Reserved words (`ls`, `show`, `rm`, `cancel`, `run`) are refused to keep
 CLI parsing unambiguous.
