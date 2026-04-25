@@ -1,4 +1,4 @@
-import type {ApiErrorBody, OutcomeFilter, QueuePayload, RunTypeFilter} from "./types";
+import type {ApiErrorBody, CertificationPolicy, ImproveSubcommand, JobCommand, OutcomeFilter, QueuePayload, RunTypeFilter} from "./types";
 
 export interface StateQuery {
   type: RunTypeFilter;
@@ -47,15 +47,15 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 }
 
 export function buildQueuePayload(args: {
-  command: "build" | "improve" | "certify";
-  subcommand: "bugs" | "feature" | "target";
+  command: JobCommand;
+  subcommand: ImproveSubcommand;
   intent: string;
   taskId: string;
   after: string;
   provider: string;
   model: string;
   effort: string;
-  fast: boolean;
+  certification: CertificationPolicy;
 }): QueuePayload {
   const payload: QueuePayload = {extra_args: []};
   const after = splitCsv(args.after);
@@ -64,7 +64,8 @@ export function buildQueuePayload(args: {
   if (args.provider) payload.extra_args.push("--provider", args.provider);
   if (args.model) payload.extra_args.push("--model", args.model);
   if (args.effort) payload.extra_args.push("--effort", args.effort);
-  if (args.fast) payload.extra_args.push("--fast");
+  const certificationFlag = certificationArg(args.command, args.subcommand, args.certification);
+  if (certificationFlag) payload.extra_args.push(certificationFlag);
 
   if (args.command === "build") {
     payload.intent = args.intent;
@@ -75,6 +76,15 @@ export function buildQueuePayload(args: {
     payload.intent = args.intent;
   }
   return payload;
+}
+
+function certificationArg(command: JobCommand, subcommand: ImproveSubcommand, certification: CertificationPolicy): string | null {
+  if (!certification) return null;
+  if (certification === "skip") return command === "build" ? "--no-qa" : null;
+  if (command === "build" || command === "certify" || (command === "improve" && subcommand === "bugs")) {
+    return `--${certification}`;
+  }
+  return null;
 }
 
 function splitCsv(value: string): string[] {

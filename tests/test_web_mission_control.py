@@ -1224,6 +1224,52 @@ def test_web_queue_rejects_unknown_after_dependency(tmp_path: Path) -> None:
     assert load_queue(repo) == []
 
 
+def test_web_queue_rejects_invalid_inner_command_args(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    response = TestClient(create_app(repo)).post(
+        "/api/queue/improve",
+        json={
+            "subcommand": "feature",
+            "focus": "add saved views",
+            "extra_args": ["--fast"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Unsupported options for `otto improve feature`" in response.json()["message"]
+    assert "--fast" in response.json()["message"]
+    assert load_queue(repo) == []
+
+
+def test_web_state_exposes_effective_project_defaults(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "otto.yaml").write_text(
+        "\n".join([
+            "provider: codex",
+            "model: gpt-5.4",
+            "effort: high",
+            "certifier_mode: standard",
+            "skip_product_qa: true",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+    defaults = state["project"]["defaults"]
+
+    assert defaults["provider"] == "codex"
+    assert defaults["model"] == "gpt-5.4"
+    assert defaults["reasoning_effort"] == "high"
+    assert defaults["certifier_mode"] == "standard"
+    assert defaults["skip_product_qa"] is True
+    assert defaults["config_file_exists"] is True
+    assert defaults["config_error"] is None
+
+
 def test_web_landing_does_not_show_diff_errors_for_queued_future_branches(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)

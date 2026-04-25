@@ -6,6 +6,7 @@ import type {
   ActionState,
   ArtifactContentResponse,
   ArtifactRef,
+  CertificationPolicy,
   CommandBacklogItem,
   DiffResponse,
   HistoryItem,
@@ -1862,7 +1863,7 @@ function JobDialog({project, onClose, onQueued, onError}: {
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
-  const [fast, setFast] = useState(true);
+  const [certification, setCertification] = useState<CertificationPolicy>("");
   const [targetConfirmed, setTargetConfirmed] = useState(false);
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -1873,6 +1874,12 @@ function JobDialog({project, onClose, onQueued, onError}: {
   useEffect(() => {
     setTargetConfirmed(false);
   }, [project?.path]);
+
+  useEffect(() => {
+    if (!certificationPolicyAllowed(command, subcommand, certification)) {
+      setCertification("");
+    }
+  }, [certification, command, subcommand]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1887,7 +1894,17 @@ function JobDialog({project, onClose, onQueued, onError}: {
     setStatus("queueing");
     setSubmitting(true);
     try {
-      const payload = buildQueuePayload({command, subcommand, intent: intent.trim(), taskId: taskId.trim(), after, provider, model, effort, fast});
+      const payload = buildQueuePayload({
+        command,
+        subcommand,
+        intent: intent.trim(),
+        taskId: taskId.trim(),
+        after,
+        provider,
+        model,
+        effort,
+        certification,
+      });
       const result = await api<QueueResult>(`/api/queue/${command}`, {method: "POST", body: JSON.stringify(payload)});
       await onQueued(result.message);
     } catch (error) {
@@ -1967,14 +1984,14 @@ function JobDialog({project, onClose, onQueued, onError}: {
           <div className="field-grid">
             <label>Provider
               <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
-                <option value="">Project default</option>
+                <option value="">{providerDefaultLabel(project)}</option>
                 <option value="codex">Codex</option>
                 <option value="claude">Claude</option>
               </select>
             </label>
             <label>Reasoning effort
               <select data-testid="job-effort-select" value={effort} onChange={(event) => setEffort(event.target.value)}>
-                <option value="">Project default</option>
+                <option value="">{effortDefaultLabel(project)}</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
@@ -1983,12 +2000,27 @@ function JobDialog({project, onClose, onQueued, onError}: {
             </label>
           </div>
           <label>Model
-            <input value={model} type="text" placeholder="provider default" onChange={(event) => setModel(event.target.value)} />
+            <input value={model} type="text" placeholder={modelDefaultPlaceholder(project)} onChange={(event) => setModel(event.target.value)} />
           </label>
-          <label className="check-label">
-            <input checked={fast} type="checkbox" onChange={(event) => setFast(event.target.checked)} />
-            Fast mode
-          </label>
+          {certificationOptions(command, subcommand, project).length > 0 ? (
+            <label>Certification
+              <select
+                data-testid="job-certification-select"
+                value={certification}
+                onChange={(event) => setCertification(event.target.value as CertificationPolicy)}
+              >
+                {certificationOptions(command, subcommand, project).map((option) => (
+                  <option key={option.value || "inherit"} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <span className="field-hint">{certificationHelp(command, subcommand, certification, project)}</span>
+            </label>
+          ) : (
+            <div className="static-field" data-testid="job-certification-static">
+              <span>Evaluation policy</span>
+              <strong>{staticCertificationLabel(command, subcommand)}</strong>
+            </div>
+          )}
         </details>
         <footer>
           <span id="jobDialogStatus" className="muted" aria-live="polite">{status}</span>
@@ -1997,6 +2029,86 @@ function JobDialog({project, onClose, onQueued, onError}: {
       </form>
     </div>
   );
+}
+
+function certificationOptions(
+  command: JobCommand,
+  subcommand: ImproveSubcommand,
+  project: StateResponse["project"] | undefined,
+): Array<{value: CertificationPolicy; label: string}> {
+  if (command === "improve" && subcommand !== "bugs") return [];
+  const inherited = command === "improve" && subcommand === "bugs"
+    ? "Inherit: thorough bug certification (improve default)"
+    : certificationDefaultLabel(project);
+  const options: Array<{value: CertificationPolicy; label: string}> = [
+    {value: "", label: inherited},
+    {value: "fast", label: "Fast certification (--fast)"},
+    {value: "standard", label: "Standard certification (--standard)"},
+    {value: "thorough", label: "Thorough certification (--thorough)"},
+  ];
+  if (command === "build") {
+    options.push({value: "skip", label: "Skip certification (--no-qa)"});
+  }
+  return options;
+}
+
+function certificationPolicyAllowed(command: JobCommand, subcommand: ImproveSubcommand, policy: CertificationPolicy): boolean {
+  if (!policy) return true;
+  if (policy === "skip") return command === "build";
+  return command === "build" || command === "certify" || (command === "improve" && subcommand === "bugs");
+}
+
+function providerDefaultLabel(project: StateResponse["project"] | undefined): string {
+  const defaults = project?.defaults;
+  if (!defaults) return "Inherit from otto.yaml";
+  return `Inherit: ${titleCase(defaults.provider || "claude")} (${configSourceLabel(defaults.config_file_exists)})`;
+}
+
+function effortDefaultLabel(project: StateResponse["project"] | undefined): string {
+  const defaults = project?.defaults;
+  if (!defaults) return "Inherit from otto.yaml";
+  const effort = defaults.reasoning_effort ? titleCase(defaults.reasoning_effort) : "Provider default";
+  return `Inherit: ${effort} (${configSourceLabel(defaults.config_file_exists)})`;
+}
+
+function modelDefaultPlaceholder(project: StateResponse["project"] | undefined): string {
+  const model = project?.defaults?.model;
+  return model ? `project default: ${model}` : "provider default";
+}
+
+function certificationDefaultLabel(project: StateResponse["project"] | undefined): string {
+  const defaults = project?.defaults;
+  if (!defaults) return "Inherit certification policy";
+  const policy = defaults.skip_product_qa ? "skip certification" : `${defaults.certifier_mode || "fast"} certification`;
+  return `Inherit: ${policy} (${configSourceLabel(defaults.config_file_exists)})`;
+}
+
+function certificationHelp(
+  command: JobCommand,
+  subcommand: ImproveSubcommand,
+  certification: CertificationPolicy,
+  project: StateResponse["project"] | undefined,
+): string {
+  if (certification === "skip") return "Build runs without post-build product certification.";
+  if (certification) return "Applies only to the certification phase for this queued job.";
+  const defaults = project?.defaults;
+  if (defaults?.config_error) return `Using built-in defaults because otto.yaml could not be read: ${defaults.config_error}`;
+  if (command === "improve" && subcommand === "bugs") return "Improve bugs defaults to thorough certification unless you choose fast or standard here.";
+  return "Inherits certifier_mode and skip_product_qa from otto.yaml, then built-in defaults.";
+}
+
+function staticCertificationLabel(command: JobCommand, subcommand: ImproveSubcommand): string {
+  if (command === "improve" && subcommand === "feature") return "Feature improvement uses hillclimb evaluation";
+  if (command === "improve" && subcommand === "target") return "Target improvement uses target evaluation";
+  return "Managed by this command";
+}
+
+function configSourceLabel(configFileExists: boolean): string {
+  return configFileExists ? "otto.yaml" : "built-in default";
+}
+
+function titleCase(value: string): string {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
 
 function ConfirmDialog({confirm, pending, onCancel, onConfirm}: {

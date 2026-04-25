@@ -504,7 +504,6 @@ def scenario_job_submit_matrix(ctx: ScenarioContext) -> None:
         provider="codex",
         model="gpt-5.4",
         effort="high",
-        fast=True,
     )
     wait_text("queued improve-saved-views")
 
@@ -514,23 +513,33 @@ def scenario_job_submit_matrix(ctx: ScenarioContext) -> None:
         intent="Certify the checkout workflow against the product spec.",
         provider="claude",
         effort="medium",
-        fast=True,
+        certification="standard",
     )
     wait_text("queued certify-checkout")
+
+    queue_job_from_dialog(
+        command="build",
+        task_id="build-without-cert",
+        intent="Add an import preview screen.",
+        certification="skip",
+    )
+    wait_text("queued build-without-cert")
 
     tasks = {task.id: task for task in load_queue(repo)}
     improve = tasks["improve-saved-views"]
     certify = tasks["certify-checkout"]
+    build = tasks["build-without-cert"]
     assert improve.command_argv[:3] == ["improve", "feature", "Add saved dashboard views with named filters."], improve
     assert improve.after == ["base-task"], improve
     assert improve.focus == "Add saved dashboard views with named filters.", improve
     assert improve.resumable is True
-    assert_cli_args(improve.command_argv, {"--provider": "codex", "--model": "gpt-5.4", "--effort": "high"}, flags=["--fast"])
+    assert_cli_args(improve.command_argv, {"--provider": "codex", "--model": "gpt-5.4", "--effort": "high"})
     assert certify.command_argv[:2] == ["certify", "Certify the checkout workflow against the product spec."], certify
     assert certify.resumable is False
-    assert_cli_args(certify.command_argv, {"--provider": "claude", "--effort": "medium"}, flags=["--fast"])
+    assert_cli_args(certify.command_argv, {"--provider": "claude", "--effort": "medium"}, flags=["--standard"])
+    assert build.command_argv == ["build", "Add an import preview screen.", "--no-qa"], build
     state = api_json(ctx, "api/state")
-    assert state["watcher"]["counts"]["queued"] == 3
+    assert state["watcher"]["counts"]["queued"] == 4
     screenshot(ctx, "job-submit-matrix.png")
 
 
@@ -598,7 +607,7 @@ def scenario_control_tour(ctx: ScenarioContext) -> None:
     browser("select", "[data-testid='job-provider-select']", "codex")
     browser("select", "[data-testid='job-effort-select']", "high")
     browser("find", "label", "Model", "fill", "gpt-5.4")
-    browser("find", "label", "Fast mode", "click")
+    wait_text("Evaluation policy")
     assert_submit_enabled("Queue job")
     browser("find", "role", "button", "click", "--name", "Close")
     assert_page_lacks("New queue job")
@@ -1107,7 +1116,7 @@ def queue_job_from_dialog(
     provider: str = "",
     model: str = "",
     effort: str = "",
-    fast: bool = True,
+    certification: str = "",
 ) -> None:
     browser("find", "testid", "new-job-button", "click")
     wait_text("New queue job")
@@ -1117,7 +1126,7 @@ def queue_job_from_dialog(
         wait_text("Improve mode")
         browser("select", "[data-testid='job-improve-mode-select']", subcommand)
     browser("find", "label", "Intent / focus", "fill", intent)
-    if task_id or after or provider or effort or model or not fast:
+    if task_id or after or provider or effort or model or certification:
         browser("find", "text", "Advanced options", "click")
         if task_id:
             browser("find", "label", "Task id", "fill", task_id)
@@ -1129,8 +1138,8 @@ def queue_job_from_dialog(
             browser("select", "[data-testid='job-effort-select']", effort)
         if model:
             browser("find", "label", "Model", "fill", model)
-        if not fast:
-            browser("find", "label", "Fast mode", "click")
+        if certification:
+            browser("select", "[data-testid='job-certification-select']", certification)
     assert_submit_enabled("Queue job")
     browser("find", "role", "button", "click", "--name", "Queue job")
 

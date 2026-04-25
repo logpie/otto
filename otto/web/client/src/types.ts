@@ -2,6 +2,17 @@ export type RunTypeFilter = "all" | "build" | "improve" | "certify" | "merge" | 
 export type OutcomeFilter = "all" | "success" | "failed" | "interrupted" | "cancelled" | "removed" | "other";
 export type JobCommand = "build" | "improve" | "certify";
 export type ImproveSubcommand = "bugs" | "feature" | "target";
+export type CertificationPolicy = "" | "fast" | "standard" | "thorough" | "skip";
+
+export interface ProjectDefaults {
+  provider: string;
+  model: string | null;
+  reasoning_effort: string | null;
+  certifier_mode: string;
+  skip_product_qa: boolean;
+  config_file_exists: boolean;
+  config_error: string | null;
+}
 
 export interface ProjectInfo {
   path: string;
@@ -9,6 +20,7 @@ export interface ProjectInfo {
   branch: string | null;
   dirty: boolean;
   head_sha: string | null;
+  defaults?: ProjectDefaults;
 }
 
 export interface ManagedProjectInfo extends ProjectInfo {

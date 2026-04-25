@@ -6,6 +6,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from otto.config import DEFAULTS
+from otto.config import agent_effort
+from otto.config import agent_model
+from otto.config import agent_provider
+from otto.config import load_config
+from otto.config import resolve_certifier_mode
 from otto.mission_control.actions import ActionResult, ActionState
 from otto.mission_control.model import (
     ArtifactRef,
@@ -27,6 +33,7 @@ def serialize_project(project_dir: Path) -> dict[str, Any]:
         "branch": _git_output(project_dir, ["branch", "--show-current"]) or None,
         "dirty": bool(_git_output(project_dir, ["status", "--porcelain"])),
         "head_sha": _git_output(project_dir, ["rev-parse", "--short", "HEAD"]) or None,
+        "defaults": _project_defaults(project_dir),
     }
 
 
@@ -257,6 +264,32 @@ def _argv_option(argv: Any, *names: str) -> str | None:
                 if value:
                     return value
     return None
+
+
+def _project_defaults(project_dir: Path) -> dict[str, Any]:
+    config_path = project_dir / "otto.yaml"
+    config_exists = config_path.exists()
+    try:
+        config = load_config(config_path)
+        return {
+            "provider": agent_provider(config),
+            "model": agent_model(config),
+            "reasoning_effort": agent_effort(config),
+            "certifier_mode": resolve_certifier_mode(config),
+            "skip_product_qa": bool(config.get("skip_product_qa")),
+            "config_file_exists": config_exists,
+            "config_error": None,
+        }
+    except Exception as exc:
+        return {
+            "provider": DEFAULTS["provider"],
+            "model": DEFAULTS["model"],
+            "reasoning_effort": DEFAULTS["effort"],
+            "certifier_mode": DEFAULTS["certifier_mode"],
+            "skip_product_qa": DEFAULTS["skip_product_qa"],
+            "config_file_exists": config_exists,
+            "config_error": str(exc),
+        }
 
 
 def _git_output(project_dir: Path, args: list[str]) -> str:

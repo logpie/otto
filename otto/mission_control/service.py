@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import click
+
 from otto.config import load_config
 from otto.config import repo_preflight_issues
 from otto.config import resolve_intent_for_enqueue
@@ -568,10 +570,12 @@ class MissionControlService:
         try:
             if command == "build":
                 intent = _required_str(payload.get("intent"), "intent")
+                raw_args = [intent, *extra_args]
+                _validate_inner_command_args("build", raw_args)
                 result = enqueue_task(
                     self.project_dir,
                     command="build",
-                    raw_args=[intent, *extra_args],
+                    raw_args=raw_args,
                     intent=intent,
                     explicit_intent=intent,
                     after=after,
@@ -587,6 +591,7 @@ class MissionControlService:
                 if focus_or_goal:
                     raw_args.append(focus_or_goal)
                 raw_args.extend(extra_args)
+                _validate_inner_command_args("improve", raw_args)
                 snapshot_intent = resolve_intent_for_enqueue(self.project_dir)
                 result = enqueue_task(
                     self.project_dir,
@@ -605,6 +610,7 @@ class MissionControlService:
                 resolved = resolve_intent_for_enqueue(self.project_dir, explicit=intent)
                 raw_args = [intent] if intent else []
                 raw_args.extend(extra_args)
+                _validate_inner_command_args("certify", raw_args)
                 result = enqueue_task(
                     self.project_dir,
                     command="certify",
@@ -1911,6 +1917,38 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         raise MissionControlServiceError("expected a list of strings", status_code=400)
     return [str(item) for item in value if str(item).strip()]
+
+
+def _validate_inner_command_args(command: str, raw_args: list[str]) -> None:
+    """Validate web-queued passthrough args before writing a queue task."""
+    try:
+        from otto.cli import main
+
+        if command == "improve":
+            subcommand = raw_args[0] if raw_args else ""
+            improve_group = main.commands["improve"]
+            target = improve_group.commands[str(subcommand)]
+            argv = raw_args[1:]
+            label = f"otto improve {subcommand}"
+        else:
+            target = main.commands[command]
+            argv = raw_args
+            label = f"otto {command}"
+        ctx = click.Context(target, info_name=target.name)
+        target.parse_args(ctx, list(argv))
+    except KeyError as exc:
+        raise MissionControlServiceError(f"Unsupported queue command: {command}", status_code=400) from exc
+    except click.UsageError as exc:
+        message = exc.format_message().strip()
+        if message.startswith("Error: "):
+            message = message[len("Error: "):]
+        raise MissionControlServiceError(
+            f"Unsupported options for `{label}`: {message}",
+            status_code=400,
+        ) from exc
+    finally:
+        if "ctx" in locals():
+            ctx.close()
 
 
 def _tail_text(path: Path, *, limit: int = 4000) -> str:
