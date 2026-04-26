@@ -358,35 +358,225 @@ see W11-CRITICAL-1 below). Verdict: **FAIL** (7 soft-assert failures collected).
 
 ---
 
+## W2 findings
+
+Run id: `2026-04-26-020826-9de329` (`bench-results/web-as-user/2026-04-26-020826-9de329/W2/`).
+Wall time: 165s (2 of 3 builds drained successfully ~$0.40 each, third was cancelled).
+Verdict: **FAIL** (6 soft-assert failures collected).
+
+### W2-CRITICAL-1: Cancelled queue task vanishes — no live row, no history row, but its manifest entry leaks in queue state
+
+- **Severity:** CRITICAL — silently breaks operator audit. The user cancels a queued job; the UI's POST returns 200; the cancelled task then disappears from /api/state entirely. No history row, no live row, but it lingers in the queue-state JSON with a missing manifest.
+- **Symptom:** After enqueueing 3 builds (W2_INTENT_A/B/C) and cancelling the 3rd via `/api/runs/<run_id>/actions/cancel`, the final state shows only 2 history rows (both `success`) and no rows at all for the cancelled task. Yet `artifact_mine_pass` reports
+  > `queue task 'add-a-date-utility-module-that-exports-221a3c' listed in state but has no manifest at /var/folders/.../otto_logs/queue/add-a-date-utility-module-that-exports-221a3c/manifest.json`
+  Confirmed by `final-state.json` history queue rows = 2 (only the two non-cancelled builds), and zero rows with `terminal_outcome=cancelled` or `status=cancelled`.
+- **Reproduction:** W2 step 6→7. Compare against W12a where atomic-domain cancellation DOES surface in history (`atomic | cancelled | cancelled`), so the bug is specifically queue-domain.
+- **Hypothesis:** `MissionControlService.execute(..., "cancel")` for queue domain unsubscribes the task from the live registry but skips writing a terminal history row. Likely in `otto/mission_control/service.py` near the queue cancel branch (~line 1678). Atomic-domain has a separate adapter that DOES write the history.
+- **Suggested fix:** in the queue-domain cancel handler, write a terminal history row with `terminal_outcome="cancelled"` and `status="cancelled"` before unsubscribing from live. Also clean up the queue manifest entry so artifact-mine-pass stops complaining about missing manifests.
+
+### W2-IMPORTANT-1: Browser auto-fetches `GET /api/runs/queue-compat:<task-id>?...` and gets 404
+
+- **Severity:** IMPORTANT
+- **Symptom:** Console error during W2:
+  > `Failed to load resource: the server responded with a status of 404 (Not Found)
+  >  http://127.0.0.1:53320/api/runs/queue-compat%3Acreate-a-tiny-calculator-html-page-with-c53170?type=all&outcome=all&query=&active_only=false&history_page_size=25`
+  The SPA tries to look up a queue-compat:* run via the per-run detail endpoint with `/api/state` query params appended (looks like a URL routing mistake — the query params suggest the SPA was building a /api/state URL but routed to /api/runs/<id>).
+- **Reproduction:** W2 step 5–7. Triggered when the user clicks/inspects the cancelled queue row before it disappears. See `bench-results/web-as-user/2026-04-26-020826-9de329/W2/console.json` and `network-errors.json`.
+- **Hypothesis:** `otto/web/client/src/api.ts` (or a hook in App.tsx) constructs a per-run URL but appends `/api/state` query params instead of using bare `/api/runs/<id>`. Possibly the run-id selector swaps to a queue-compat alias that the backend doesn't accept on the `/api/runs/{run_id}` route.
+- **Suggested fix:** strip `?type/outcome/...` from the `/api/runs/<id>` request, or accept queue-compat run-IDs at that endpoint and resolve to the underlying run.
+
+### W2-IMPORTANT-2: 30-second `wait_until="networkidle"` page.goto often does not settle
+
+- **Severity:** IMPORTANT — affects external automation as well as Playwright tests
+- **Symptom:** In W12b and W13, `page.goto(url, wait_until="networkidle", timeout=30_000)` raised `Page.goto: Timeout 30000ms exceeded.` even when the page eventually loaded (the test's downstream assertions found the React shell up).
+- **Reproduction:** Re-run any scenario that does `page.goto(networkidle)` against an MC backend with an in-flight queue. See `/tmp/w12b.log` line `shell load failed: Page.goto: Timeout 30000ms exceeded`.
+- **Hypothesis:** Mission Control opens persistent SSE / long-poll connections (event stream, etc.) that prevent the network ever reaching "idle." A page that never has 0 in-flight requests for 500ms can't satisfy networkidle.
+- **Suggested fix:** the SPA should not hold a connection open before user interaction. Either use Server-Sent Events with `Connection: close` semantics for the initial page load, or document `wait_until="domcontentloaded"` as the canonical strategy for browser automation. Update the recorded-fixture browser tests + this harness accordingly.
+
+### W2-IMPORTANT-3: Watcher concurrency runs cancelled-and-other-jobs in parallel — Step 5 cancellation racing with the watcher's pickup
+
+- **Severity:** IMPORTANT (or NOTE)
+- **Symptom:** When 3 jobs were enqueued and watcher started, all 3 (potentially) entered "running" within seconds. The harness saw `running, running` immediately after `cancel POST status=200`, indicating the cancel was applied to a queued task but the watcher still ran the other two. Total wall to drain ~2:18 — both ran sequentially-ish.
+- **Reproduction:** W2 step 5 — `non_terminal=2 statuses=['running', 'running']` for ~2 minutes.
+- **Hypothesis:** The mission-control watcher started with default `--concurrent 2` from the Web `Start watcher` button (which we never specified). For 3 jobs that's: cancel #3, run #1 + #2 concurrently. Behaviour is correct; the surfacing on the UI may be confusing because the user expected sequential drain.
+- **Suggested fix:** make the default concurrency value visible in the JobDialog or the start-watcher dropdown so the user knows "Start watcher (concurrent=2)" before clicking.
+
+### W2-IMPORTANT-4: artifact-mine reports session-dir mismatch (W1-IMPORTANT-3 reproduces; queue + cancelled-task surfaces)
+
+- **Severity:** IMPORTANT
+- **Symptom:** Same root cause as W1-IMPORTANT-3 — every queue-domain run lives under `<project>/.worktrees/<task>/otto_logs/sessions/<run_id>/` but the harness invariant scan looks under `<project>/otto_logs/sessions/<run_id>/`.
+- **Confirmed in:** W2 (2 entries) + W12b (2 entries: queue-run + merge-run) + W13 (1 entry).
+- **Suggested fix:** see W1-IMPORTANT-3 — `paths.session_dir(...)` must consider the live record's `cwd` for queue/merge domains.
+
+### W2-NOTE-1: "Otto is committing runtime bookkeeping files…" message fires twice on first build (W1-NOTE-1 reproduces, also from CLI path)
+
+- **Severity:** NOTE
+- **Symptom:** `Otto is committing runtime bookkeeping files…` printed twice during W2 step 2 (enqueue). Also surfaces from the CLI in W12b (`cli-queue.log`).
+- **Suggested fix:** see W1-NOTE-1 — silent no-op when nothing to commit.
+
+---
+
+## W12a findings
+
+Run id: `2026-04-26-020429-ea7b5e` (`bench-results/web-as-user/2026-04-26-020429-ea7b5e/W12a/`).
+Wall time: 18s — fast because we cancelled the CLI build immediately.
+Verdict: **PASS** (no soft-assert failures collected).
+
+### Confirmations (no new bugs, but corroborates earlier findings)
+
+- **Atomic-domain cancellation works correctly** — the CLI subprocess died within ~6s of the UI POST cancel (cli exit code=0), and the history row appeared with `terminal_outcome=cancelled`, `status=cancelled`. This is the **counter-example** that proves W2-CRITICAL-1 is queue-domain-specific.
+- **W11-IMPORTANT-2 (atomic vs build naming)** confirmed: standalone `otto build` consistently exposes `domain="atomic"` in `/api/state`. Public-API rename or doc still pending. Harness now defensively accepts both `"atomic"` and `"build"` to avoid the W11 trap.
+- **No console errors, no network errors, no page errors** during W12a.
+
+### W12a-NOTE-1: Cancel response payload's `severity:"information"` may mislead the user
+
+- **Severity:** NOTE
+- **Symptom:** `POST /api/runs/<id>/actions/cancel` returns
+  ```
+  {"ok":true,"message":null,"severity":"information","modal_title":null,"modal_message":null,"refresh":true,"clear_banner":true}
+  ```
+  The `severity:"information"` and `message:null` give no positive confirmation that the cancel completed (vs. only "the cancel was *requested*").
+- **Reproduction:** W12a step 5.
+- **Hypothesis:** The cancel handler returns the same envelope shape regardless of action, with `message=null` for "successful, no banner needed." Result: the SPA shows nothing after a successful cancel — the user clicks Cancel, sees nothing, then realizes the row disappeared.
+- **Suggested fix:** include a `message:"Run X cancelled"` for `severity:"information"` so the SPA can flash a toast confirming the action.
+
+---
+
+## W12b findings
+
+Run id: `2026-04-26-020508-3bc491` (`bench-results/web-as-user/2026-04-26-020508-3bc491/W12b/`).
+Wall time: 156s (queue-CLI enqueue → web watcher start → build+cert ~2:09 → merge from UI 200 → branch landed).
+Verdict: **FAIL** (3 soft-assert failures collected; the merge actually succeeded — see git-log.txt).
+
+### W12b-IMPORTANT-1: `page.goto wait_until="networkidle"` times out (cross-link to W2-IMPORTANT-2)
+
+- **Severity:** IMPORTANT
+- **Symptom:** First failure: `shell load failed: Page.goto: Timeout 30000ms exceeded.` Yet downstream steps succeeded — the page DID load, networkidle just never fired. See W2-IMPORTANT-2 for root-cause hypothesis.
+- **Reproduction:** W12b step 2. Same backend, same SPA — the symptom is intermittent depending on backend chattiness.
+
+### W12b-IMPORTANT-2: artifact-mine reports session-dir mismatch — including for **merge** runs (extends W1-IMPORTANT-3)
+
+- **Severity:** IMPORTANT
+- **Symptom:**
+  > `live run 'merge-1777169263-43042-04899947' has no session dir at /var/folders/.../otto-mc-web-rd10h2yl/otto_logs/sessions/merge-1777169263-43042-04899947`
+  Merge actions create a synthetic live record (run_id starts with `merge-`) but no real session_dir under `<project>/otto_logs/sessions/`. The W1-IMPORTANT-3 fix needs to handle merge-domain too: either (a) merge runs should not get session-dir invariants applied, or (b) merge runs should write to a sessions dir for completeness (so audits can trace them).
+- **Reproduction:** W12b step 6 (merge POST → live record appears).
+- **Suggested fix:** in `paths.session_dir_for_run_record(record)`, return None for merge-domain (no session) and have `artifact_mine_pass` skip the assertion when None. Or write a stub `summary.json` in `otto_logs/sessions/merge-*/` for merges.
+
+### W12b confirmations
+
+- **Queue-CLI → web → merge round-trip works end-to-end.** `otto queue build ... --as w12b-task` enqueues; web SPA shows the row immediately; watcher kicks off the build (which committed `c7072c3 feat: add /version endpoint`); merge POST returns 200; merge history row appears within ≤3s; git log shows `Merge branch 'build/w12b-task-2026-04-25'` landed on main.
+- **Cost:** ~$0.40 (build $0.07 + certify $0.33 — from `otto pow`-style summary in narrative).
+- **No console errors, no page errors, no unexpected 4xx/5xx during W12b.**
+- **`otto queue build` returned rc=0 in <1s** — fast and quiet. Worker-not-running banner is correct.
+
+---
+
+## W13 findings
+
+Run id: `2026-04-26-021154-ccc09b` (`bench-results/web-as-user/2026-04-26-021154-ccc09b/W13/`).
+Wall time: 165s (started a 4-test TODO build, "killed" backend at +13s, restarted on new port, run survived to terminal=success).
+Verdict: **FAIL** (4 soft-assert failures collected).
+
+### W13-INFRA-1: ScenarioContext does not expose the in-process backend handle — true SIGTERM-style outage cannot be issued
+
+- **Severity:** INFRA (harness limitation, not Otto bug)
+- **Symptom:** The W13 implementation cannot reach `backend.stop()` because the harness creates the backend in `run_one_scenario` and only forwards `web_url`/`web_port` to the scenario context. Workaround: spin up a SECOND backend (`backend_b`) on a different port against the same `project_dir`, "outage" simulated by switching the browser between them. The build's queue/registry state (in `<project_dir>/otto_logs/`) is shared via filesystem, so survivability is verified — but we don't actually exercise the uvicorn shutdown path.
+- **Suggested fix:** add `backend` (or at least `backend.stop`) to `ScenarioContext`. Then add a true sub-test where we call `backend.stop()`, verify uvicorn terminates cleanly + sockets release, then start a fresh `start_backend(...)` against the same project dir.
+
+### W13-CRITICAL-1: Inspector tab buttons (Diff / Proof / Artifacts) are click-blocked — W1-CRITICAL-1 reproduces post-restart, also blocked by `app-shell` overlay
+
+- **Severity:** CRITICAL — same fundamental bug as W1-CRITICAL-1, now reproduced on a *fresh* page-load (post-restart) and with a NEW intercepting element: `<div class="app-shell">…</div> intercepts pointer events`.
+- **Symptom:** Walking Logs/Diff/Proof drawers post-restart: Logs click works (screenshot `05-drawer-logs.png` exists), Diff and Proof clicks fail with the same log-pane intercept error from W1-CRITICAL-1, then degrade further to `<div class="app-shell">…</div> intercepts pointer events` (a parent-level overlay also catching clicks). See `/tmp/w13.log` lines 8-26.
+- **Reproduction:** W13 step 6 — after `backend_b` restart, click Logs (works) → click Diff (fails on log-pane) → click Proof (fails on log-pane → degrades to app-shell intercept).
+- **Hypothesis:** Same as W1-CRITICAL-1 (log-pane stacking). Additional regression: an `.app-shell` overlay (likely the modal-backdrop sibling W11-CRITICAL-2 mentioned) also catches subsequent clicks.
+- **Suggested fix:** see W1-CRITICAL-1; additionally inspect `.app-shell` z-index/pointer-events when an inspector dialog is open.
+
+### W13-IMPORTANT-1: Console 404 on `/api/runs/queue-compat:<task>?...` reproduces (cross-link to W2-IMPORTANT-1)
+
+- **Severity:** IMPORTANT
+- **Symptom:** Same as W2-IMPORTANT-1 — the SPA fetches `/api/runs/queue-compat:build-a-small-todo-list-app-with-html-bb07f8?type=all&outcome=all&query=&active_only=false&history_page_size=25` and gets 404. Triggered when the user inspects the (long-running) queue-compat row.
+- **Reproduction:** W13 step 4–6.
+
+### W13-IMPORTANT-2: Mission Control event stream sparse / does not record per-build progress events
+
+- **Severity:** IMPORTANT
+- **Symptom:** After backend restart, `/api/events?limit=200` returned only 2 entries, both `kind: "watcher.started"`. The build that completed during the outage produced no events visible to the post-restart UI. Pre-outage events file: not directly inspected (cleaned up by tempdir). Post-restart `events.jsonl` had 2 items total covering ~130s of activity including a successful build-+-certify run.
+- **Reproduction:** W13 step 8 — `(artifact_dir / "post-restart-events.json")` shows `items: [{"kind": "watcher.started", ...}, {"kind": "watcher.started", ...}]`, both at `created_at: "2026-04-26T02:12:03.166362Z"` (before the restart). Nothing for the run that completed.
+- **Hypothesis:** Mission Control's event log only records lifecycle events (watcher start/stop, queue add/remove) — not run progress events (build started, certify started, terminal). For an "outage recovery" UX where the user reopens after a crash, that means the timeline is empty post-restart even though work has happened.
+- **Suggested fix:** emit per-run lifecycle events (`run.started`, `run.terminal`, `run.merged`, `run.cancelled`) into the same `events.jsonl`. Alternatively, document that the event log is *not* the source of truth for run history, and the UI's Live/History tabs are. Even then, post-outage UX would benefit from at least one event saying "run X completed during outage."
+
+### W13-IMPORTANT-3: artifact-mine session-dir mismatch (W1-IMPORTANT-3 reproduces — for atomic-from-web build, run_id matches a worktree session dir)
+
+- **Severity:** IMPORTANT
+- **Symptom:** Same as W1-IMPORTANT-3 — even for builds submitted via the web JobDialog (which become queue-compat:* runs), the session_dir lives in the worktree.
+
+### W13 confirmations
+
+- **Run survived backend restart**: the queue task `2026-04-26-021203-262134` started on backend A (port 54366) at 02:12:03, transitioned to "running" before the simulated outage at 02:12:08, and was visible in `live` on backend B (port 54444) immediately on reopen. Final outcome `success` was recorded in history. The `.worktrees/build-a-small-todo-list-app-with-html-bb07f8/` build artifacts are intact.
+- **Cost:** ~$0.40-$0.50 (TODO app build + 1 certify round, all 4 stories PASS).
+- **JobDialog submit + watcher start + drawer open all worked** post-restart.
+
+### W13-NOTE-1: Harness bug (NOT Otto): event-stream check used `body["events"]` but `/api/events` returns `body["items"]`
+
+- **Severity:** NOTE (harness fix, not Otto bug)
+- **Symptom:** My W13 soft-assert read `events_count = len(ev_body.get("events") or [])` but the API actually returns `{"items": [...], "total_count": N, ...}`. So the "0 events" message is a false negative. Real count was 2.
+- **Suggested fix:** in `scripts/web_as_user.py` `_run_w13`, read `len(ev_body.get("items") or [])`.
+
+---
+
 ## Summary
 
 | Run | Verdict | Wall time | Bugs (C/I/N) | Cost (live) |
 |-----|---------|-----------|---------------|-------------|
-| W1  | FAIL    | 222s      | 1 / 4 / 3     | LLM: 1 kanban build (Sonnet, ~$0.5–1.5 est.) |
-| W11 | FAIL    | ~180s     | 2 / 4 / 1     | LLM: 1 GET /tasks endpoint (Sonnet, ~$0.3–1 est.) |
+| W1   | FAIL    | 222s      | 1 / 4 / 3     | LLM: 1 kanban build (Sonnet, ~$0.5–1.5 est.) |
+| W11  | FAIL    | ~180s     | 2 / 4 / 1     | LLM: 1 GET /tasks endpoint (Sonnet, ~$0.3–1 est.) |
+| W2   | FAIL    | 165s      | 1 / 4 / 1     | LLM: 2 of 3 builds completed (~$0.40 each) + 1 cancelled |
+| W12a | PASS    | 18s       | 0 / 0 / 1     | LLM: 1 build cancelled within 11s of start (~$0.05) |
+| W12b | FAIL    | 156s      | 0 / 2 / 0     | LLM: 1 build + cert + merge (~$0.40) |
+| W13  | FAIL    | 165s      | 1 / 3 / 1     | LLM: 1 TODO build + cert (~$0.40-$0.50) |
 
-Total findings: **3 CRITICAL, 8 IMPORTANT, 4 NOTE** — see sections above.
+Total findings (across all 6 runs): **5 CRITICAL, 17 IMPORTANT, 6 NOTE**.
 
-Cost actually spent: not directly captured (no /api/state cost streaming
-in either run — see W1-NOTE-3). Estimate ≤ $3 across both runs based on
-how short both LLM builds were (W1 build+verify in 3:11, W11 build in
-~2:00 wall time).
+(Some findings reproduce across scenarios — e.g. W1-CRITICAL-1 also surfaces in W13;
+W1-IMPORTANT-3 surfaces in W2/W12b/W13. The reproduction breadth is itself a
+data point: regressions like the log-pane stacking issue affect every flow that
+opens an inspector. Counted once each at the **first** observation; reproductions
+flagged inline.)
+
+Cost actually spent: **~$2.10** total across the four new scenarios
+(W2 ≈ $0.85 for 2 builds; W12a ≈ $0.05 quick cancel; W12b ≈ $0.40 build+merge;
+W13 ≈ $0.50 TODO build + cert + outage).
 
 ### INFRA-class issues observed
 
 - **Bundle freshness check trips on uncommitted client edits** (pre-existing
   on this branch — not a new bug, but blocks any harness that doesn't set
   `OTTO_WEB_SKIP_FRESHNESS=1`). The harness defaults are correct here.
-- No rate-limit or 429 observed in this smoke run.
-- No 4xx/5xx in either run's network-errors.json.
-- Console log clean in both (console.json empty).
-- No page errors.
+- **W13-INFRA-1**: ScenarioContext does not expose the backend handle; W13
+  cannot test true uvicorn shutdown. Workaround: parallel backend on a new
+  port. Plumbing fix needed.
+- **`page.goto wait_until="networkidle"` 30s timeout** — affects external
+  automation; reclassified as W2-IMPORTANT-2.
+- No rate-limit or 429 observed across any of the four runs.
+- 4xx network errors observed: 1 in W2 (`/api/runs/queue-compat:...?...` 404
+  — see W2-IMPORTANT-1). Same in W13.
+- Console errors observed: same 404s as above (only on W2 + W13).
+- No page errors anywhere.
+- **Orphan `otto queue run --no-dashboard --concurrent N` watchers persist across temp-dir cleanup** (W11-IMPORTANT-4 reproduces in W2). After W2 finished, `ps aux | grep "otto queue run"` showed two new orphans pointing at the now-deleted W2 tempdir. This is the same backend.stop() doesn't-signal-watcher bug.
 
-### Reproduction one-liner
+### Reproduction one-liner (now covers W1+W11+W2+W12a+W12b+W13)
 
 ```
 OTTO_WEB_SKIP_FRESHNESS=1 OTTO_ALLOW_REAL_COST=1 OTTO_BROWSER_SKIP_BUILD=1 \
-  .venv/bin/python scripts/web_as_user.py --scenario W1,W11 --provider claude
+  .venv/bin/python scripts/web_as_user.py --scenario W1,W2,W11,W12a,W12b,W13 --provider claude
+```
+
+Or one at a time (faster to triage failures):
+
+```
+OTTO_WEB_SKIP_FRESHNESS=1 OTTO_ALLOW_REAL_COST=1 OTTO_BROWSER_SKIP_BUILD=1 \
+  .venv/bin/python scripts/web_as_user.py --scenario W2 --provider claude
 ```
 
 Artifacts under `bench-results/web-as-user/<utc-id>/<scenario>/`.
