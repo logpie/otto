@@ -45,3 +45,7 @@ bench-results/demo/
 
 # Free-form log scratch dir (per-session, not for git)
 logs/
+
+# Phase 5 live-harness artifacts (videos/screenshots/logs from real-LLM runs)
+# — local evidence only; pushed via PR description, not git.
+bench-results/

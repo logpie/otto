@@ -1968,7 +1968,14 @@ def test_spawn_uses_snapshotted_branch_when_intent_matches(tmp_path: Path, monke
         def __init__(self, pid: int) -> None:
             self.pid = pid
 
-    def fake_add_worktree(*, project_dir: Path, worktree_path: Path, branch: str) -> None:
+    def fake_add_worktree(
+        *,
+        project_dir: Path,
+        worktree_path: Path,
+        branch: str,
+        base_ref: str | None = None,
+    ) -> None:
+        del project_dir, base_ref
         captured_branches.append(branch)
         worktree_path.mkdir(parents=True, exist_ok=True)
 

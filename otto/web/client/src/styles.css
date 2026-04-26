@@ -1,19 +1,184 @@
 :root {
-  color-scheme: light;
+  /* `light dark` lets the OS nudge UA-managed UI (form widgets, scrollbars)
+     into a system-appropriate scheme even though the explicit token set
+     below is light-only for now. mc-audit a11y A11Y-22. A full dark token
+     set is a future cluster — at minimum this stops Otto from actively
+     rejecting the user's preference. */
+  color-scheme: light dark;
   --bg: #f7f8fa;
   --surface: #ffffff;
   --surface-alt: #f4f7fb;
   --line: #d5dce6;
   --text: #18202a;
-  --muted: #647180;
+  /* Darkened muted/amber/magenta tokens to clear AA on every surface tint
+     used in the app (white, --surface-alt, #f8fafc, #eef1f5). mc-audit
+     a11y A11Y-12, A11Y-13, visual-coherence #11. */
+  --muted: #4b5563;
   --accent: #0f766e;
   --accent-strong: #115e59;
   --blue: #1d4ed8;
   --green: #15803d;
-  --amber: #a16207;
+  --amber: #854d0e;
   --red: #b91c1c;
-  --magenta: #a21caf;
+  --magenta: #86198f;
   --shadow: 0 10px 30px rgba(24, 32, 42, 0.09);
+  /* Focus-ring color: #1d4ed8 (deep blue) provides ≥3:1 contrast against
+     every primary CTA background in the app (--accent #0f766e, --red #b91c1c,
+     and white). Outline-offset keeps the ring visible against tinted
+     backgrounds. mc-audit a11y K-15. */
+  --focus-ring: #1d4ed8;
+
+  /* ---------------------------------------------------------------- *
+   * Visual-coherence design tokens (mc-audit visual-coherence cluster
+   * F4–F12 IMPORTANT). One source of truth for status colours, type
+   * scale, spacing, and radii. New work MUST use the tokens below
+   * rather than raw hex / px literals so the system stays coherent.
+   * ---------------------------------------------------------------- */
+
+  /* Type scale (6 steps). Replaces the previous ad-hoc 10-step scale
+     that mixed 10/11/12/13/14/15/16/18/20/22 px. Inherited body sizes
+     stay 14px. */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-md: 18px;
+  --text-lg: 22px;
+  --text-xl: 28px;
+
+  /* Spacing scale (8px grid). Allow 4px as the half-grid for tight
+     pill paddings; everything else snaps to 8/12/16/24/32. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radii — three steps. 4 for inputs/refresh chips, 8 for cards/
+     dialogs, 12 for the run-inspector overlay. 999 stays for pills
+     (defined inline at use sites). */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Semantic status colour tokens. One token per tone × surface so
+     the same "pass" tint never drifts between contexts. The -fg
+     variants keep the AA-darkened palette tones already in --green
+     etc.; the -bg variants are the soft tints used for badges; the
+     -border variants are the slightly darker line for tinted card
+     borders. mc-audit visual-coherence F9. */
+  --color-success-fg: var(--green);
+  --color-success-bg: #dcfce7;
+  --color-success-border: #bbf7d0;
+
+  --color-warning-fg: var(--amber);
+  --color-warning-bg: #fef3c7;
+  --color-warning-border: #fde68a;
+
+  --color-danger-fg: var(--red);
+  --color-danger-bg: #fee2e2;
+  --color-danger-border: #fecaca;
+
+  --color-info-fg: var(--blue);
+  --color-info-bg: #dbeafe;
+  --color-info-border: #bfdbfe;
+
+  /* Hover tint reused by clickable rows and selected list items. */
+  --hover-bg: #e8f3f1;
+
+  /* Disabled idiom — applied globally below via [disabled] /
+     [aria-disabled="true"]. mc-audit visual-coherence F4. */
+  --disabled-opacity: 0.55;
+
+  /* Toolbar form-control height — input + button match exactly so the
+     baseline never jaggies. mc-audit visual-coherence F11. */
+  --control-height: 32px;
+}
+
+@media (prefers-color-scheme: dark) {
+  /*
+   * Minimum dark-mode acknowledgement (mc-audit a11y A11Y-22). The full
+   * Otto color system has not yet been authored for dark mode; the goal
+   * here is simply to make sure the app remains legible if the OS forces
+   * dark UA defaults onto our system-fallback layers (form fields, etc.).
+   * Backgrounds stay light so contrast tokens above remain valid. A
+   * proper dark mode is tracked as a future cluster.
+   */
+  :root {
+    /* Keep tokens largely the same but let the body background follow OS;
+       form fields will pick up `color-scheme: light dark`. */
+    color-scheme: light dark;
+  }
+}
+
+/* Visually-hidden helper used by SR-only labels and the skip link
+   default state. Does NOT remove the element from the AT tree. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skip-link — first focusable element in the tree, hidden until focused.
+   Per mc-audit a11y A11Y-08 / K-09. */
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 8px;
+  padding: 10px 14px;
+  background: var(--surface);
+  color: var(--text);
+  border: 2px solid var(--focus-ring);
+  border-radius: 6px;
+  font-weight: 600;
+  text-decoration: none;
+  z-index: 1000;
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  top: 8px;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Cell-overflow helper: replaces previous `title=`-on-truncated-cell
+   pattern. Visually clips overflow with ellipsis but exposes the full
+   text via aria-label (set by the React component). mc-audit a11y A11Y-23. */
+.cell-overflow {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+/* Row-link button used inside <td> cells. Made to look like inline text so
+   the visual rhythm of the table is preserved while screen readers hear a
+   real activator. mc-audit a11y A11Y-04. */
+.row-link {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline dotted transparent;
+  text-underline-offset: 2px;
+}
+
+.row-link:hover:not(:disabled),
+.row-link:focus-visible {
+  text-decoration-color: var(--accent);
 }
 
 * {
@@ -71,19 +236,68 @@ button:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
+/* Canonical disabled idiom (mc-audit visual-coherence F4). One pattern
+   for every interactive primitive — buttons, links, list rows, custom
+   roles. Older variants that overrode background/colour are gone so
+   "disabled" reads identically across the surface. The .tab override
+   below keeps the striped affordance for inactive-vs-disabled tabs. */
+[disabled],
+[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: var(--disabled-opacity);
+}
+
 button:disabled {
   cursor: not-allowed;
-  color: #9aa4b2;
-  background: #eef1f5;
+  opacity: var(--disabled-opacity);
+}
+
+/*
+ * Pressed-state feedback. mc-audit microinteractions C1 / visual-coherence
+ * flagged that no `:active` rule exists anywhere — meaning a click on a slow
+ * network looks identical to a click that was lost. The translateY+filter
+ * combo gives ~16ms tactile feedback before the network response arrives.
+ *
+ * `prefers-reduced-motion` users keep the brightness change but skip the
+ * geometric shift, since translation can trigger vestibular discomfort.
+ */
+button:active:not(:disabled),
+[role="button"]:active:not(:disabled),
+a:active {
+  transform: translateY(1px);
+  filter: brightness(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button:active:not(:disabled),
+  [role="button"]:active:not(:disabled),
+  a:active {
+    transform: none;
+  }
+}
+
+/* Focus-ring rules. Use --focus-ring and a generous offset so the ring is
+   visible against EVERY background in the app — including the primary CTA
+   (--accent #0f766e) which is dark teal. mc-audit a11y K-15. The double-
+   layer outline (white inner + colored outer) makes the ring visible
+   against both light and dark backgrounds without an extra DOM node. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.95);
 }
 
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
-[tabindex]:focus-visible {
-  outline: 3px solid #2563eb;
+[tabindex]:focus-visible,
+.row-link:focus-visible {
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
+  /* The white halo layer gives the focus ring 3:1 contrast against the
+     dark teal primary CTA without altering layout. */
+  box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.95);
 }
 
 .primary {
@@ -166,7 +380,7 @@ textarea:focus-visible,
 
 .project-meta dt {
   color: #cbd5e1;
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
 }
 
@@ -365,9 +579,36 @@ textarea:focus-visible,
 .filters,
 .toolbar-actions {
   display: flex;
-  align-items: end;
+  /* mc-audit visual-coherence F11: end-aligned a 34px input vs button
+     produced a baseline jaggy because the input has internal V-padding
+     and the button centers via flex. Center-align so inner text sits on
+     the same baseline regardless of internal padding. */
+  align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+/* mc-audit visual-coherence F10 — status icon prefix used by every
+   status badge (.task-status, .review-check span, .proof-story span,
+   etc.) so the tone is not communicated by colour alone. The glyph
+   inherits colour from its parent badge so we don't drift between
+   the icon hue and the label hue. */
+.status-icon {
+  display: inline-block;
+  font-weight: 700;
+  margin-right: 2px;
+}
+
+/* Toolbar inputs/buttons share an explicit height so the baseline lines
+   up at the pixel level. mc-audit visual-coherence F11. */
+.toolbar .filters > label > input,
+.toolbar .filters > label > select,
+.toolbar .filters > button,
+.toolbar-actions > button {
+  height: var(--control-height);
+  min-height: var(--control-height);
+  line-height: 1;
+  vertical-align: middle;
 }
 
 label {
@@ -381,7 +622,10 @@ select,
 input,
 textarea {
   min-height: 34px;
-  padding: 7px 9px;
+  /* mc-audit visual-coherence F7 — snap to 8/8 grid; the previous 7×9
+     was 1px off the grid both axes and produced jaggy baselines
+     against neighbouring buttons. */
+  padding: 6px 8px;
 }
 
 textarea {
@@ -482,7 +726,7 @@ textarea {
 }
 
 .focus-copy h2 {
-  font-size: 20px;
+  font-size: 22px;
 }
 
 .focus-copy p {
@@ -568,6 +812,81 @@ textarea {
   min-height: 460px;
 }
 
+/* mc-audit error-empty-states #11: filter-aware empty banner above the
+   board grid. Distinguishes "no tasks at all" from "filters hiding all
+   tasks" so the user gets a relevant action (Clear filters / Queue job). */
+.task-board-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin: 8px 12px 0;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.task-board-empty.task-board-empty-filtered-empty {
+  border-color: var(--color-warning-fg);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+}
+
+.task-board-empty-action {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.task-board-empty-action.primary {
+  background: var(--accent);
+  color: var(--surface);
+  border-color: var(--accent);
+}
+
+/* mc-audit codex-first-time-user #19: queued-task placeholder in the
+   detail panel when a card without a runId is selected. */
+.queued-task-detail h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.queued-task-subtitle {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.queued-task-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
+.queued-task-meta dt {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.queued-task-meta dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.queued-task-next-action {
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
 .task-board {
   min-height: 0;
   display: grid;
@@ -626,7 +945,10 @@ textarea {
 }
 
 .task-card.selected,
-.task-card:hover {
+.task-card:hover,
+.task-card:has(.task-card-main:hover),
+.task-card:has(.task-card-toggle:hover),
+.task-card:has(.task-card-cancel:hover) {
   border-color: var(--accent);
 }
 
@@ -780,9 +1102,44 @@ textarea {
   border-radius: 999px;
   background: var(--surface-alt);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
+  /* Border default for non-toned status (so toned ones look intentional). */
+  border: 1px solid transparent;
+}
+
+/* mc-audit info-density #3: tone classes for task-status badges so
+   ready/blocked/running/failed/cancelled scan distinctly. Colour values
+   reuse existing palette tokens (--green/--amber/--red/--blue) on tinted
+   backgrounds to keep AA contrast on light surfaces. */
+.task-status.status-tone-success {
+  background: var(--color-success-bg);
+  color: var(--color-success-fg);
+  border-color: var(--color-success-border);
+}
+
+.task-status.status-tone-running {
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
+  border-color: var(--color-info-border);
+}
+
+.task-status.status-tone-warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+  border-color: var(--color-warning-border);
+}
+
+.task-status.status-tone-danger {
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+  border-color: var(--color-danger-border);
+}
+
+.task-status.status-tone-neutral {
+  background: var(--surface-alt);
+  color: var(--muted);
 }
 
 .task-card-meta {
@@ -816,18 +1173,127 @@ textarea {
   white-space: normal;
 }
 
+/* mc-audit info-density #2: typed chips so the meta row is not a wall of
+   identical unlabeled pills. Each chip kind has a distinct hue so files
+   (blue), stories (green), cost (amber), and time (neutral) scan apart at
+   a glance. The icon glyph keeps the chip identifiable when colour is not
+   conveyed (colour-blind users / monochrome rendering). */
+.task-card-meta .task-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-weight: 500;
+}
+
+.task-card-meta .task-chip-files {
+  background: rgba(37, 99, 235, 0.10);
+  color: #1d4ed8;
+}
+
+.task-card-meta .task-chip-stories {
+  background: rgba(15, 118, 110, 0.10);
+  color: #0f766e;
+}
+
+.task-card-meta .task-chip-cost {
+  background: rgba(202, 138, 4, 0.10);
+  color: #92400e;
+}
+
+.task-card-meta .task-chip-time {
+  background: var(--surface-alt);
+  color: var(--muted);
+}
+
+.task-card-meta .task-chip-status {
+  background: var(--surface-alt);
+  color: var(--muted);
+}
+
+.task-chip-icon {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1;
+}
+
 .task-card-toggle {
   min-height: 26px;
   justify-self: start;
   padding: 0 8px;
   color: var(--muted);
   font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* mc-audit W8-CRITICAL-1: per-row Cancel button. Sibling of `.task-card-main`
+   so it gets its own tab stop in the row's focus chain — keyboard users
+   pressing Tab from the main card button land on this Cancel target
+   instead of walking past the row into the inspector's
+   `review-next-action-button`. Visually distinct (danger tone) so the
+   destructive nature is signalled in addition to colour. */
+.task-card-cancel {
+  justify-self: start;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--red, #c0392b);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--red, #c0392b);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.task-card-cancel:hover {
+  background: var(--red, #c0392b);
+  color: var(--surface, #fff);
+}
+
+.task-card-cancel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* mc-audit microinteractions I5: chevron uses a 0deg → 90deg rotation
+   when the drawer expands so the toggle communicates state visually
+   without relying on a text label swap alone. */
+.task-card-toggle-chevron {
+  display: inline-block;
+  font-size: 14px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 180ms ease-out;
+}
+
+.task-card-toggle[aria-expanded="true"] .task-card-toggle-chevron {
+  transform: rotate(90deg);
+}
+
+/* mc-audit microinteractions I5: animatable grid-template-rows transition
+   (0fr → 1fr) so the drawer height interpolates smoothly without
+   measuring at runtime. ≤200ms for snappy feel. The inner .task-card-drawer
+   needs `min-height: 0` + `overflow: hidden` for the clip to work. */
+.task-card-drawer-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 180ms ease-out;
+}
+
+.task-card-drawer-wrap[data-expanded="true"] {
+  grid-template-rows: 1fr;
 }
 
 .task-card-drawer {
+  min-height: 0;
+  overflow: hidden;
   display: grid;
-  gap: 7px;
-  padding-top: 7px;
+  gap: var(--space-2);
+}
+
+.task-card-drawer-wrap[data-expanded="true"] .task-card-drawer {
+  padding-top: var(--space-2);
   border-top: 1px solid var(--line);
 }
 
@@ -1011,7 +1477,9 @@ textarea {
 
 .history-activity.selected,
 .history-activity:hover {
-  background: #e8f3f1;
+  /* mc-audit visual-coherence F5: hover tint shared with tbody tr via
+     the --hover-bg token. */
+  background: var(--hover-bg);
 }
 
 .diagnostics-layout {
@@ -1021,26 +1489,46 @@ textarea {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 14px;
   padding: 14px;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .diagnostics-workspace {
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  min-height: auto;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
   gap: 14px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .diagnostics-grid {
   min-height: 0;
+  flex: 0 0 auto;
   display: grid;
-  grid-template-rows: auto minmax(190px, 0.8fr) minmax(170px, 0.7fr) minmax(220px, 1fr);
+  grid-auto-rows: minmax(min-content, auto);
   gap: 14px;
 }
 
+.diagnostics-workspace > .detail {
+  flex: 0 0 auto;
+}
+
 .health-grid {
-  grid-template-rows: minmax(300px, auto) minmax(220px, 0.8fr) minmax(220px, 1fr);
+  grid-template-rows: none;
+}
+
+.diagnostics-grid > .panel {
+  grid-template-rows: auto auto;
+}
+
+.diagnostics-grid > .live-panel,
+.diagnostics-grid > .timeline-panel,
+.diagnostics-grid > .history-panel {
+  min-height: 220px;
+}
+
+.diagnostics-grid > .history-panel {
+  min-height: 280px;
 }
 
 .system-health {
@@ -1155,9 +1643,10 @@ button.diagnostic-card {
   display: grid;
   justify-items: start;
   gap: 3px;
-  padding: 9px 10px;
+  /* mc-audit visual-coherence F7: snap to 8px/12px grid. */
+  padding: 8px 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   text-align: left;
 }
@@ -1181,7 +1670,7 @@ button.diagnostic-card {
 
 .diagnostic-card span {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -1299,21 +1788,21 @@ button.diagnostic-card {
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  padding: 9px 10px;
-  border-radius: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
   font-size: 12px;
 }
 
 .status-banner.error {
-  border: 1px solid #fecaca;
-  background: #fef2f2;
-  color: #7f1d1d;
+  border: 1px solid var(--color-danger-border);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
 }
 
 .status-banner.warning {
-  border: 1px solid #f4d58d;
-  background: #fff8e1;
-  color: #713f12;
+  border: 1px solid var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .runtime-banner span {
@@ -1413,7 +1902,13 @@ h2 {
 }
 
 .table-wrap {
+  min-height: 0;
   overflow: auto;
+}
+
+.history-panel {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 table {
@@ -1449,7 +1944,8 @@ tbody tr {
 
 tbody tr:hover,
 tbody tr.selected {
-  background: #e8f3f1;
+  /* mc-audit visual-coherence F5: shared --hover-bg token. */
+  background: var(--hover-bg);
 }
 
 .timeline-panel {
@@ -1485,7 +1981,7 @@ tbody tr.selected {
 }
 
 .timeline-item strong {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .timeline-item span,
@@ -1523,9 +2019,9 @@ tbody tr.selected {
 }
 
 .timeline-warning {
-  border-bottom: 1px solid #f4d58d;
-  background: #fff8e1;
-  color: #713f12;
+  border-bottom: 1px solid var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .status-running,
@@ -1570,7 +2066,7 @@ tbody tr.selected {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  padding: 9px 12px;
+  padding: 8px 12px;
   color: var(--muted);
   cursor: pointer;
   list-style: none;
@@ -1596,7 +2092,7 @@ tbody tr.selected {
 
 .detail-body h3 {
   margin: 0 0 8px;
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .detail-body dl {
@@ -1711,7 +2207,7 @@ tbody tr.selected {
 }
 
 .advanced-actions summary {
-  padding: 9px 12px;
+  padding: 8px 12px;
   color: var(--muted);
   cursor: pointer;
   font-size: 12px;
@@ -1800,9 +2296,9 @@ tbody tr.selected {
   grid-template-columns: 44px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
-  padding: 7px 8px;
+  padding: var(--space-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
 }
 
@@ -1812,11 +2308,11 @@ tbody tr.selected {
 
 .review-blockers {
   margin: 0;
-  padding: 7px 8px 7px 26px;
-  border: 1px solid #f4d58d;
-  border-radius: 6px;
-  background: #fff8e1;
-  color: #713f12;
+  padding: 8px 8px 8px 26px;
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .review-grid {
@@ -1861,7 +2357,7 @@ tbody tr.selected {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 7px 8px;
+  padding: var(--space-2);
   color: var(--muted);
   cursor: pointer;
   list-style: none;
@@ -1888,9 +2384,9 @@ tbody tr.selected {
   grid-template-columns: 48px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
-  padding: 7px 8px;
+  padding: var(--space-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
 }
 
@@ -1899,7 +2395,7 @@ tbody tr.selected {
   place-items: center;
   min-height: 22px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -1913,49 +2409,49 @@ tbody tr.selected {
 }
 
 .check-pass > span {
-  background: #dcfce7;
-  color: var(--green);
+  background: var(--color-success-bg);
+  color: var(--color-success-fg);
 }
 
 .check-warn > span,
 .check-pending > span {
-  background: #fff8e1;
-  color: var(--amber);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .check-fail > span {
-  background: #fef2f2;
-  color: var(--red);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
 }
 
 .check-info > span {
-  background: #dbeafe;
-  color: var(--blue);
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
 }
 
 .review-note {
-  padding: 7px 8px;
-  border-radius: 6px;
-  background: #fef2f2;
-  color: #7f1d1d;
+  padding: 8px 8px;
+  border-radius: var(--radius-md);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
 }
 
 .failure-summary {
   display: grid;
   gap: 6px;
-  border: 1px solid #fecaca;
+  border: 1px solid var(--color-danger-border);
 }
 
 .failure-summary strong {
-  color: #991b1b;
+  color: var(--color-danger-fg);
 }
 
 .failure-summary pre {
   max-height: 180px;
   margin: 2px 0 0;
-  padding: 9px 10px;
+  padding: 8px 12px;
   overflow: auto;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 
 .proof-failure .failure-summary {
@@ -1972,9 +2468,9 @@ tbody tr.selected {
 .recovery-note {
   display: grid;
   gap: 3px;
-  border: 1px solid #bfdbfe;
-  background: #eff6ff;
-  color: #1e3a8a;
+  border: 1px solid var(--color-info-border);
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
 }
 
 .review-files {
@@ -2005,9 +2501,9 @@ tbody tr.selected {
 }
 
 .review-evidence .missing {
-  border-color: #f4d58d;
-  color: #713f12;
-  background: #fff8e1;
+  border-color: var(--color-warning-border);
+  color: var(--color-warning-fg);
+  background: var(--color-warning-bg);
 }
 
 .review-inline-action {
@@ -2050,6 +2546,29 @@ tbody tr.selected {
   font-weight: 600;
 }
 
+/* mc-audit microinteractions I7: a disabled tab (e.g. Diff while the run
+   has no branch yet) must look obviously different from a merely-inactive
+   tab. The base button:disabled rule sets a flat grey background that is
+   nearly identical to .tab's --surface-alt, making the two states
+   indistinguishable. Override with a striped background, lower opacity,
+   strikethrough text, and not-allowed cursor so operators know the tab
+   cannot be activated. */
+.tab:disabled,
+.tab[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+  text-decoration: line-through;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      #eef1f5 0,
+      #eef1f5 6px,
+      #e3e7ee 6px,
+      #e3e7ee 12px
+    );
+  color: #9aa4b2;
+}
+
 .run-inspector {
   position: fixed;
   left: 254px;
@@ -2063,7 +2582,7 @@ tbody tr.selected {
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
 }
@@ -2076,6 +2595,12 @@ tbody tr.selected {
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
   background: #fbfcfd;
+  /* Defensive stacking: keep the heading (and its tablist) above the
+     body's <pre> log/diff content. A stacking context change in
+     `.run-inspector-body` (or any descendant) cannot push the body's
+     content over the tab buttons. mc-audit W1-CRITICAL-1. */
+  position: relative;
+  z-index: 1;
 }
 
 .run-inspector-heading h2,
@@ -2098,6 +2623,12 @@ tbody tr.selected {
   min-height: 0;
   display: grid;
   overflow: hidden;
+  /* Anchor the body in its own stacking layer below the heading. Pairs
+     with the `position: relative; z-index: 1` on `.run-inspector-heading`
+     so the body's <pre> can never overlap the tab toolbar even if a
+     descendant introduces a new stacking context. mc-audit W1-CRITICAL-1. */
+  position: relative;
+  z-index: 0;
 }
 
 .run-inspector .log-viewer,
@@ -2380,9 +2911,9 @@ tbody tr.selected {
   display: grid;
   gap: 2px;
   min-width: 0;
-  padding: 8px;
+  padding: var(--space-2);
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--surface-alt);
 }
 
@@ -2414,7 +2945,7 @@ tbody tr.selected {
   align-items: center;
   min-height: 32px;
   padding: 6px 10px;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--line);
   background: var(--surface-alt);
   color: var(--text);
@@ -2430,10 +2961,10 @@ tbody tr.selected {
 .proof-story {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 10px;
-  padding: 10px;
+  gap: var(--space-3);
+  padding: var(--space-3);
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--surface-alt);
 }
 
@@ -2444,26 +2975,26 @@ tbody tr.selected {
   border-radius: 999px;
   background: #e5e7eb;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
   text-align: center;
   text-transform: uppercase;
 }
 
 .proof-story.story-pass > span {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--color-success-bg);
+  color: var(--color-success-fg);
 }
 
 .proof-story.story-warn > span,
 .proof-story.story-skipped > span {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .proof-story.story-fail > span {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
 }
 
 .proof-story strong,
@@ -2492,13 +3023,13 @@ tbody tr.selected {
   justify-items: start;
   height: auto;
   min-height: 50px;
-  padding: 9px 10px;
+  padding: 8px 12px;
   text-align: left;
 }
 
 .proof-artifacts button.selected {
   border-color: var(--accent);
-  background: #ecfdf5;
+  background: var(--color-success-bg);
 }
 
 .proof-artifacts span {
@@ -2523,10 +3054,10 @@ tbody tr.selected {
 }
 
 .proof-content-heading span {
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 999px;
-  background: #fff8e1;
-  color: var(--amber);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
   font-size: 12px;
   font-weight: 700;
 }
@@ -2535,8 +3066,8 @@ tbody tr.selected {
   min-height: 0;
   margin: 0;
   overflow: auto;
-  padding: 12px;
-  border-radius: 7px;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
   background: #0b1020;
   color: #e5e7eb;
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -2664,7 +3195,7 @@ tbody tr.selected {
   height: auto;
   min-height: 34px;
   margin-bottom: 6px;
-  padding: 7px 9px;
+  padding: 6px 8px;
   border-color: rgba(148, 163, 184, 0.28);
   background: rgba(148, 163, 184, 0.08);
   color: #cbd5e1;
@@ -2712,6 +3243,69 @@ tbody tr.selected {
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   color: #fecaca;
   background: rgba(185, 28, 28, 0.18);
+}
+
+.diff-freshness {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(15, 23, 42, 0.8);
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.diff-freshness-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+
+.diff-freshness-meta .diff-warning {
+  color: #fde68a;
+}
+
+.diff-refresh-button {
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(15, 23, 42, 0.6);
+  color: #e2e8f0;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.diff-refresh-button:hover {
+  background: rgba(30, 41, 59, 0.8);
+}
+
+.diff-truncation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(120, 53, 15, 0.18);
+  color: #fed7aa;
+  font-size: 12px;
+}
+
+.diff-truncation button {
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 200, 100, 0.3);
+  background: rgba(120, 53, 15, 0.4);
+  color: #fde68a;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.diff-truncation button:hover {
+  background: rgba(146, 64, 14, 0.6);
 }
 
 .diff-add,
@@ -2816,6 +3410,11 @@ tbody tr.selected {
   opacity: 0;
   transform: translateY(8px);
   transition: opacity 0.16s ease, transform 0.16s ease;
+  /* mc-audit microinteractions I8: layout the message + close-button so the
+     ✕ stays at the right edge regardless of message length. */
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
 }
 
 #toast.visible {
@@ -2823,12 +3422,34 @@ tbody tr.selected {
   transform: translateY(0);
 }
 
+#toast .toast-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#toast .toast-close {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  margin: -2px -4px -2px 0;
+  cursor: pointer;
+}
+
+#toast .toast-close:hover:not(:disabled) {
+  color: white;
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .toast-error {
-  background: #7f1d1d !important;
+  background: var(--color-danger-fg) !important;
 }
 
 .toast-warning {
-  background: #713f12 !important;
+  background: var(--color-warning-fg) !important;
 }
 
 .modal-backdrop {
@@ -2844,7 +3465,15 @@ tbody tr.selected {
 .job-dialog,
 .confirm-dialog {
   width: min(560px, calc(100vw - 28px));
+  /* W7-IMPORTANT-1: use the dynamic viewport unit (`dvh`) so the dialog
+     accounts for mobile browser UI chrome (Safari/Chrome bottom bars).
+     `100vh` measures the *largest* viewport size on iOS Safari which can
+     leave the submit button below the fold once the URL bar expands. The
+     `vh` fallback is provided for browsers without `dvh` support. The
+     extra 80px subtraction guarantees the sticky footer keeps clearance
+     even when keyboards/toolbars eat the bottom edge. */
   max-height: calc(100vh - 28px);
+  max-height: calc(100dvh - 28px);
   overflow: auto;
   display: grid;
   gap: 12px;
@@ -2853,6 +3482,21 @@ tbody tr.selected {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+/* W7-IMPORTANT-1: pin the JobDialog footer to the bottom of the scrolling
+   modal so the primary "Queue job" button remains reachable on small
+   viewports without scrolling. The footer participates in the dialog's
+   grid layout but uses `position: sticky` to stay anchored at the bottom
+   of the visible area while the form fields above scroll. */
+.job-dialog footer {
+  position: sticky;
+  bottom: 0;
+  background: var(--surface);
+  margin: 0 -16px -16px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  z-index: 1;
 }
 
 .confirm-dialog {
@@ -2879,6 +3523,22 @@ tbody tr.selected {
   color: var(--muted);
 }
 
+/* mc-audit microinteractions I6: in danger-tone confirms the Cancel button
+   gets explicit "safe-choice" emphasis (heavier outline + bolder text) so a
+   panicked user can spot the abort path next to the red destructive CTA.
+   Non-danger Cancel buttons keep the default appearance. */
+.confirm-dialog .confirm-dialog-cancel.cancel-emphasis {
+  border: 2px solid #1f2937;
+  background: var(--surface);
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.confirm-dialog .confirm-dialog-cancel.cancel-emphasis:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: #0f172a;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2897,9 +3557,9 @@ tbody tr.selected {
 .static-field {
   display: grid;
   gap: 4px;
-  padding: 9px 10px;
+  padding: 8px 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: #fff;
 }
 
@@ -2910,7 +3570,7 @@ tbody tr.selected {
 }
 
 .static-field strong {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .job-advanced {
@@ -2968,16 +3628,16 @@ tbody tr.selected {
   display: grid;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  background: #eff6ff;
-  color: #1e3a8a;
+  border: 1px solid var(--color-info-border);
+  border-radius: var(--radius-md);
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
 }
 
 .target-dirty {
-  border-color: #f4d58d;
-  background: #fff8e1;
-  color: #713f12;
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .target-guard strong,
@@ -3005,7 +3665,7 @@ tbody tr.selected {
 
 .target-confirm {
   color: inherit;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 @media (max-width: 1500px) and (min-width: 981px) {
@@ -3038,6 +3698,29 @@ tbody tr.selected {
     position: static;
     height: auto;
     min-height: 520px;
+  }
+}
+
+/* mc-audit microinteractions / heavy-user theme — ensure no horizontal
+   scroll at the mini/MBA/iPhone breakpoints. Below 1024px the sidebar
+   stacks above the main content rather than competing for horizontal
+   real estate. The 980px block below carries the rest of the cascade
+   (toolbar, task-board, diagnostics-summary). The catch-all at the top
+   prevents accidental overflow on intermediate widths. */
+html, body {
+  overflow-x: hidden;
+}
+
+@media (max-width: 1024px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    min-height: 100vh;
+    height: auto;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
   }
 }
 
@@ -3136,7 +3819,7 @@ tbody tr.selected {
   }
 
   .project-meta dt {
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .toolbar,
@@ -3271,4 +3954,851 @@ tbody tr.selected {
     border-right: 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   }
+}
+
+/*
+ * mc-spinner — pure CSS rotating ring used by <Spinner /> in
+ * components/Spinner.tsx. The animation lives in CSS rather than SVG so
+ * `currentColor` carries the parent text colour (works on light buttons,
+ * primary CTAs, danger CTAs, dark sidebar buttons) without reskinning per
+ * site. mc-audit microinteractions C3.
+ */
+@keyframes mc-spin {
+  to { transform: rotate(360deg); }
+}
+
+.mc-spinner {
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 6px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  animation: mc-spin 0.8s linear infinite;
+}
+
+.mc-spinner-sm { width: 12px; height: 12px; border-width: 2px; }
+.mc-spinner-md { width: 16px; height: 16px; border-width: 2px; }
+.mc-spinner-lg { width: 22px; height: 22px; border-width: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-spinner {
+    animation-duration: 1.6s;
+  }
+}
+
+/*
+ * JobDialog inline validation hint — surfaces the *reason* the submit button
+ * is disabled (mc-audit microinteractions I1). Sits between the textarea and
+ * the dialog footer so keyboard users encounter it in tab order before the
+ * disabled submit.
+ */
+.job-dialog-validation {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+  font-size: 12px;
+}
+
+/*
+ * Job-queue grace banner — 3-second cancellable countdown shown between Submit
+ * and the actual POST (mc-audit codex-destructive-action-safety #7). The
+ * banner sits above the footer so the [Cancel] button is the first action a
+ * user reaches with the keyboard if they had second thoughts.
+ */
+.job-grace-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+  font-size: 14px;
+}
+
+.job-grace-banner strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.job-grace-cancel {
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-warning-fg);
+  background: #ffffff;
+  color: var(--color-warning-fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.job-grace-cancel:hover {
+  background: var(--color-warning-bg);
+}
+
+/* History pagination — sits below the run-history table. Power users with
+ * 200+ runs need fast access to all pages; the previously-shipped
+ * `total_rows=247` pill displayed the count but offered no navigation
+ * (mc-audit codex-state-management #6, heavy-user CRITICAL).
+ *
+ * Inputs reuse existing button/input styling; we only declare layout
+ * here so existing token theme changes still apply.
+ */
+.history-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--panel-border, #e5e7eb);
+  font-size: 12px;
+}
+
+.history-pagination-status {
+  color: var(--muted-text, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+.history-pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.history-pagination-controls button[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.history-pagination-jump,
+.history-pagination-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.history-pagination-jump input {
+  width: 56px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Boot-loading gate — rendered until `/api/projects` resolves the first
+ * time. Prevents the main shell from rendering with project=undefined,
+ * which previously let users open the New job dialog and queue requests
+ * that 409'd on the server. mc-audit codex-first-time-user.md #1.
+ */
+.app-shell.boot-loading {
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+}
+
+.boot-loading-panel {
+  display: grid;
+  gap: 12px;
+  max-width: 520px;
+  padding: 28px 32px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.boot-loading-mark {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.boot-loading-panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.boot-loading-error {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+  font-size: 14px;
+}
+
+/*
+ * Job dialog pre-submit summary — surfaces provider/model/effort/verification
+ * outside the Advanced disclosure so cost-affecting defaults are not
+ * hidden. mc-audit codex-first-time-user.md #2.
+ */
+.job-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  font-size: 12px;
+}
+
+.job-summary strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.job-summary > span {
+  color: var(--muted);
+  flex: 1 1 240px;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-summary-edit {
+  margin-left: auto;
+  min-height: 24px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+/*
+ * Recovery action bar — primary contextual recovery action surfaced above
+ * the review packet for failed/paused/interrupted runs. The full action
+ * list still lives under "Advanced run actions" below. mc-audit
+ * codex-first-time-user.md #14.
+ */
+.recovery-action-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--color-warning-bg);
+}
+
+.recovery-action-bar button {
+  min-height: 30px;
+  padding: 4px 12px;
+  font-size: 14px;
+}
+
+/*
+ * Dirty-file list inside JobDialog target-guard — list up to five files
+ * with overflow indicator, then an actionable hint. mc-audit
+ * codex-first-time-user.md #10.
+ */
+.target-dirty-files {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+  font-size: 12px;
+}
+
+.target-dirty-files ul {
+  margin: 0;
+  padding-left: 18px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.target-dirty-files li {
+  line-height: 1.6;
+}
+
+/*
+ * Launcher form/status tweaks — error variant + empty-state CTA. mc-audit
+ * codex-first-time-user.md #5/#15.
+ */
+.launcher-status-error {
+  color: var(--color-danger-fg);
+  font-weight: 500;
+}
+
+[data-testid="launcher-empty-state"] {
+  display: grid;
+  gap: 6px;
+}
+
+[data-testid="launcher-empty-state"] strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+[data-testid="launcher-empty-state"] p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+/*
+ * Touch-target enlargement for mobile viewports. WCAG 2.2 AA requires
+ * 24×24 minimum, AAA requires 44×44; iOS HIG recommends 44×44. mc-audit
+ * a11y A11Y-25. We bump primary interactive controls to ≥44px on
+ * <=768px viewports so single-tap precision is reliable on phones.
+ */
+@media (max-width: 768px) {
+  button,
+  select,
+  input,
+  textarea,
+  .row-link {
+    min-height: 44px;
+  }
+
+  .view-tabs button {
+    min-height: 44px;
+  }
+
+  /* Inline icon-style helpers (job-summary edit, etc.) get a slightly
+     smaller floor so they don't overwhelm the layout but still hit AA. */
+  .job-summary-edit {
+    min-height: 36px;
+  }
+}
+
+/*
+ * Honor `prefers-reduced-motion` globally. We had a `.mc-spinner` carve-out
+ * earlier in the file; this is the catch-all for any `transition` /
+ * `animation` we might add later (mc-audit a11y A11Y-21). Spinner exception
+ * stays — a slowed spinner is more useful than a still one.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .mc-spinner {
+    animation-duration: 1.6s !important;
+  }
+}
+
+/*
+ * The main-shell-content wrapper needs `inert` to actually disable its
+ * subtree from focus. Modern browsers handle this natively; we add the
+ * visual cue (slight desaturation) so sighted users can also tell the
+ * area is non-interactive when an overlay is open.
+ *
+ * Defense-in-depth (mc-audit W13-CRITICAL-1): also disable pointer events
+ * on the inert subtree. The `inert` attribute prevents focus and user
+ * activation, but script-driven clicks (Playwright's `Locator.click()`
+ * and similar tooling) bypass that gate. Setting `pointer-events: none`
+ * ensures any click that lands inside an inert container is dropped at
+ * the platform level — preventing surprise side-effects from buttons
+ * that are visually buried under a fixed-position overlay.
+ */
+.main-shell-content[inert],
+.sidebar[inert],
+[data-mc-inspector][inert] {
+  filter: saturate(0.8);
+  pointer-events: none;
+}
+
+/*
+ * Focus halo overrides for elements where the standard halo collides with
+ * tight layouts. The disclosure summary needs the box-shadow to NOT be
+ * applied because the inset shadow is already in use; we keep the outline
+ * but drop the halo for these specific cases.
+ */
+details > summary:focus-visible {
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------------------ *
+ * Long-string overflow utilities (mc-audit codex-long-string-overflow #6-#14)
+ *
+ * Shared helpers for free-text fields that may receive arbitrarily long
+ * tokens (URLs, branch names, error messages with no spaces). Apply
+ * `mc-wrap-anywhere` to any inline span/strong/p/code that is unbounded
+ * by sibling structure but bounded by a parent column. Combine with
+ * `mc-line-clamp-3` for headline-style fields that should clip with an
+ * expand affordance (the markup pattern is `<details>`-based — caller
+ * provides a summary + body).
+ *
+ * Why anywhere + min-width:0: flex/grid items have a default
+ * `min-width: auto` which prevents overflow:hidden and overflow-wrap
+ * from firing once their intrinsic min-content exceeds the column.
+ * ------------------------------------------------------------------ */
+.mc-wrap-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.mc-line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* #6 — Toast: cap height with internal scroll, wrap long URLs/errors. */
+#toast {
+  max-height: min(40vh, 280px);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+/* #7 — Sticky last-error/result banners: span column must wrap, and the
+ * total banner height is capped so a 5KB error never pushes the main
+ * workflow offscreen. The grid already provides `minmax(0, 1fr)` on
+ * the message column; we just need overflow-wrap + a max-height on the
+ * inner span (so the dismiss button stays visible). */
+.status-banner > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+  max-height: 9.6em; /* ~6 lines at 1.4 line-height */
+  overflow-y: auto;
+}
+
+.status-banner > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  align-self: start;
+}
+
+.status-banner > button {
+  align-self: start;
+}
+
+/* #8 — Job dialog status (footer span) wraps and has its own max-height
+ * so a long API error never crowds the submit button out of the modal.
+ * The footer is a flex row — its min-content is governed by its
+ * children, so we relax the status span's flex floor. */
+.job-dialog footer {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.job-dialog footer #jobDialogStatus,
+.job-dialog footer .muted {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-height: 6.4em;
+  overflow-y: auto;
+}
+
+.job-dialog footer button {
+  flex: 0 0 auto;
+}
+
+.job-dialog .field-hint {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.job-dialog-validation {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* #9 — Confirm dialog body & bulk landing rows: long branch names and
+ * task ids must break at any character so they can never overflow the
+ * 440px modal column. */
+.confirm-dialog .confirm-body,
+.confirm-dialog .confirm-body-text,
+.confirm-dialog .confirm-error,
+.confirm-dialog .confirm-error span,
+.confirm-dialog .confirm-ack span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.confirm-bulk-list,
+.confirm-bulk-list ul,
+.confirm-bulk-row,
+.confirm-bulk-row-head,
+.confirm-bulk-row-files,
+.confirm-bulk-row-files li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.confirm-bulk-row-head code,
+.confirm-bulk-row-files code {
+  display: inline;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+}
+
+/* #10 — Review packet headline / summary / next-step / failure must
+ * wrap consistently. The existing `.review-head strong, .review-head
+ * span` rule clipped to ellipsis without affordance — switch to a
+ * line-clamp + wrap-anywhere so long headlines wrap to a few lines and
+ * the user can read the rest. The `title` attribute already provides a
+ * tooltip on hover/focus, so no markup change is required for
+ * read-only access. */
+.review-head strong,
+.review-head span {
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.review-next-step span,
+.review-blockers li,
+.review-check p,
+.review-check strong,
+.failure-summary span,
+.failure-summary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.review-grid strong {
+  /* Replace nowrap+ellipsis with wrap-anywhere so long values are
+   * fully readable instead of silently clipped. Keep the field-name
+   * column bounded by the existing grid-template. */
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* #12 — Changed-file list (review packet) and diff_command code:
+ *  - <li> must wrap-anywhere so long paths don't overflow the drawer.
+ *  - <code> for diff_command must be a block so its `text-overflow:
+ *    ellipsis` actually fires (inline elements ignore it), or wrap.
+ *    We choose wrap so the operator can read the entire command. */
+.review-files li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.review-packet code {
+  /* Override the older inline ellipsis rule for the diff_command code
+   * block sitting at the bottom of the Changed Files drawer — it is
+   * effectively a one-line code snippet that benefits from wrap rather
+   * than silent truncation. */
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Keep inline `<code>` runs inside review-head/check text inline. The
+ * block override above only matters for the standalone diff_command;
+ * scope the inline wrap fallback to inline contexts. */
+.review-head code,
+.review-check code,
+.review-next-step code,
+.failure-summary code {
+  display: inline;
+  white-space: normal;
+}
+
+/* #14 — Diff toolbar: the right-hand `<span>{branch} → {target}</span>`
+ * is a flex item without `min-width: 0`, so a long branch name pushes
+ * the strong label off-screen. Constrain it. */
+.diff-toolbar {
+  min-width: 0;
+}
+
+.diff-toolbar > strong {
+  flex: 0 0 auto;
+}
+
+.diff-toolbar > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+ * Heavy-user paper-cut #2: sortable history headers
+ * ========================================================================== */
+.history-th-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.history-th-sortable.active {
+  color: var(--text);
+}
+
+.history-sort-button {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.history-sort-button:hover {
+  text-decoration: underline;
+}
+
+/* ==========================================================================
+ * Heavy-user paper-cut #6: log search box inside the inspector Logs tab
+ * ========================================================================== */
+.log-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(15, 23, 42, 0.6);
+}
+
+.log-search input[type="search"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.8);
+  color: #e5e7eb;
+}
+
+.log-search input[type="search"]:focus {
+  outline: 2px solid #60a5fa;
+  outline-offset: 1px;
+}
+
+.log-search-count {
+  flex: 0 0 auto;
+  min-width: 60px;
+  text-align: right;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.log-search button {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  font-size: 12px;
+  background: rgba(15, 23, 42, 0.8);
+  color: #e5e7eb;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.log-search button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+mark.log-search-match {
+  background: #fef08a;
+  color: #1f2937;
+  padding: 0;
+}
+
+mark.log-search-match.active {
+  background: #f97316;
+  color: #ffffff;
+  outline: 1px solid #fdba74;
+}
+
+/* ==========================================================================
+ * Heavy-user paper-cut #4: command palette (Cmd-K project switcher)
+ * ========================================================================== */
+.command-palette {
+  width: min(560px, calc(100vw - 28px));
+  max-height: min(70vh, 540px);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.command-palette header {
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.command-palette header input {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.command-palette header input:focus {
+  outline: 2px solid #2563eb;
+  outline-offset: 1px;
+}
+
+.command-palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  flex: 1 1 auto;
+}
+
+.command-palette-row {
+  margin: 0;
+}
+
+.command-palette-row-button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.command-palette-row-button:disabled {
+  cursor: default;
+  color: var(--muted);
+}
+
+.command-palette-row.highlighted .command-palette-row-button {
+  background: rgba(37, 99, 235, 0.1);
+}
+
+.command-palette-row-button strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.command-palette-row-button code {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  grid-column: 1 / 2;
+  grid-row: 2 / 3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-palette-badge {
+  grid-column: 2 / 3;
+  grid-row: 1 / 3;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.15);
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.command-palette-empty {
+  padding: 16px;
+  color: var(--muted);
+  text-align: center;
+  list-style: none;
+}
+
+.command-palette-footer {
+  padding: 6px 12px;
+  border-top: 1px solid var(--line);
+  background: rgba(15, 23, 42, 0.04);
+  color: var(--muted);
+  font-size: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Codex error-empty-states #1: sticky banner shown when /api/state polls
+ * have failed CONNECTION_LOST_THRESHOLD times in a row. The banner sits
+ * at the very top of the app shell so it is visible regardless of which
+ * view the user has open, and stays put while they scroll. The banner
+ * is deliberately loud (red bg) since it indicates the rest of the page
+ * is showing stale data. */
+.connection-lost-banner {
+  position: sticky;
+  top: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #b91c1c;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.15);
+}
+
+.connection-lost-banner .connection-lost-message {
+  flex: 0 1 auto;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.connection-lost-banner .connection-lost-retry {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.connection-lost-banner .connection-lost-retry:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.connection-lost-banner .connection-lost-retry:disabled {
+  opacity: 0.7;
+  cursor: progress;
 }

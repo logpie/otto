@@ -41,13 +41,31 @@ class BuildResult:
 
 
 def _stories_to_journeys(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert story results to journey dicts for BuildResult."""
-    return [
-        {"name": s.get("summary", s.get("story_id", "")),
-         "passed": s.get("passed", False),
-         "story_id": s.get("story_id", "")}
-        for s in stories
-    ]
+    """Convert story results to journey dicts for BuildResult.
+
+    Carries `verdict` (PASS/WARN/FAIL/...) so downstream renderers can
+    distinguish WARN observations from PASS. Without this, the improve
+    report rendered all `passed`-truthy stories with a green check —
+    silently misrepresenting WARN-level certifier observations as
+    fully-met requirements (W3-IMPORTANT-3).
+    """
+    journeys: list[dict[str, Any]] = []
+    for s in stories:
+        verdict = s.get("verdict")
+        if not verdict:
+            verdict = "PASS" if s.get("passed") else "FAIL"
+            if s.get("warn"):
+                verdict = "WARN"
+        verdict_str = str(verdict).upper()
+        journeys.append(
+            {
+                "name": s.get("summary", s.get("story_id", "")),
+                "passed": s.get("passed", False),
+                "verdict": verdict_str,
+                "story_id": s.get("story_id", ""),
+            }
+        )
+    return journeys
 
 
 def _write_session_summary(
@@ -715,10 +733,20 @@ async def build_agentic_v3(
     if not session_id:
         from otto.runs.registry import allocate_run_id
         session_id = allocate_run_id(project_dir)
-    paths.ensure_session_scaffold(project_dir, session_id, phase="build")
+    # W3-IMPORTANT-5: improve runs must keep their agent stream + checkpoint
+    # phase under improve/, not build/. The previous code unconditionally wrote
+    # to build/narrative.log even for `otto improve`, leaving the session
+    # split-brained: outputs in improve/, stream in build/, phase tagged
+    # "build". Pick the per-session subdir from prompt_mode.
+    _stream_phase = "improve" if prompt_mode == "improve" else "build"
+    paths.ensure_session_scaffold(project_dir, session_id, phase=_stream_phase)
     build_id = session_id                 # kept as a local alias for logs
     checkpoint_run_id = session_id
-    build_dir = paths.build_dir(project_dir, session_id)
+    build_dir = (
+        paths.improve_dir(project_dir, session_id)
+        if _stream_phase == "improve"
+        else paths.build_dir(project_dir, session_id)
+    )
     # Point `latest` at this session so users can `tail -f $(readlink latest)/build/live.log`.
     paths.set_pointer(project_dir, paths.LATEST_POINTER, session_id)
     runtime_path = _write_runtime_artifact(project_dir, session_id)
@@ -729,7 +757,7 @@ async def build_agentic_v3(
             run_id=session_id,
             command=command,
             intent=intent,
-            primary_phase="build",
+            primary_phase=_stream_phase,
             spec_path=str(config.get("_spec_path") or "").strip() or None,
         )
         if publisher is not None:
@@ -881,7 +909,7 @@ async def build_agentic_v3(
         def _cp(
             status: str,
             session_id: str = "",
-            phase: str = "build",
+            phase: str = _stream_phase,
             current_round: int = 0,
             rounds: list[dict[str, Any]] | None = None,
             child_session_ids: list[str] | None = None,
@@ -938,7 +966,7 @@ async def build_agentic_v3(
                 project_dir,
                 run_id=checkpoint_run_id,
                 session_dir=paths.session_dir(project_dir, checkpoint_run_id),
-                phase="build",
+                phase=_stream_phase,
                 checkpoint_path=paths.session_checkpoint(project_dir, checkpoint_run_id),
             )
         if _ack_atomic_cancel_commands(project_dir, build_id):
@@ -2046,7 +2074,7 @@ async def run_certify_fix_loop(
                     "stories_tested": len(stories),
                     "stories_passed": len(stories) - len(failures),
                     "cost": float(report.cost_usd),
-                    "duration_s": float(report.duration_s),
+                    "duration_s": float(getattr(report, "duration_s", 0.0) or 0.0),
                     "result": result_str,
                     "failing_story_ids": list(failing_story_ids),
                     "diagnosis": diagnosis_text,

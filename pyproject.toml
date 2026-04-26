@@ -29,6 +29,14 @@ dev = [
     "pytest>=9.0",
     "pytest-asyncio>=1.0",
     "httpx>=0.24",
+    # Browser test harness for Mission Control UI (Phase 3 of plan-mc-audit.md).
+    # Pin minor versions: pytest-playwright tracks playwright-python closely,
+    # and a future minor that ships breaking page-fixture changes shouldn't
+    # silently land on `uv pip install -e ".[dev]"`.
+    "pytest-playwright>=0.7,<0.8",
+    "playwright>=1.50,<1.60",
+    # Deterministic timestamps for browser snapshot/visual-regression tests.
+    "freezegun>=1.5,<2.0",
 ]
 
 [project.scripts]
@@ -47,14 +55,34 @@ build-backend = "setuptools.build_meta"
 include = ["otto*"]
 
 [tool.setuptools.package-data]
-"otto.web" = ["static/*", "static/assets/*"]
+# Recursive glob: any future nested asset directory (fonts/, images/,
+# locale/, etc.) is automatically packaged. The `**/*` form is supported
+# by setuptools >=69 (already pinned in [build-system]).
+"otto.web" = ["static/**/*"]
 "otto.prompts" = ["*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
-addopts = ["-m", "not tui"]
+# Default suite excludes:
+#   - `tui`: legacy Textual TUI tests (Mission Control is moving to web)
+#   - `browser`: Playwright browser tests (run via `pytest -m browser`,
+#     which also opts the playwright plugin in via `-p playwright`)
+# The playwright plugin is *disabled* in the default suite because it
+# pre-registers async fixtures that conflict with pytest-asyncio's loop
+# management ("Cannot run the event loop while another loop is running").
+addopts = ["-m", "not tui and not browser", "-p", "no:playwright"]
 markers = [
     "tui: legacy Textual TUI tests; excluded from the default suite because Mission Control is moving to web",
+    "browser: Playwright-driven Mission Control browser tests; excluded from the default suite (run with `pytest -m browser -p playwright`)",
 ]
+
+# Tell type-checkers (pyright/basedpyright) that `tests/` is a package root so
+# imports like `from tests.browser._helpers.server import MCBackend` and the
+# relative `from ._helpers.server import MCBackend` (used inside
+# `tests/browser/conftest.py`) resolve cleanly. pytest already discovers these
+# at runtime via the package `__init__.py` files.
+[tool.pyright]
+include = ["otto", "tests", "scripts"]
+extraPaths = [".", "scripts"]

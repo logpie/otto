@@ -36,7 +36,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from otto.config import DEFAULTS
 from otto.manifest import queue_index_path_for
@@ -587,13 +587,46 @@ class Runner:
         cycle_ids = {tid for cycle in cycles for tid in cycle}
         known_task_ids = {task.id for task in tasks}
         applied_commands: list[dict[str, Any]] = []
+        applied_command_ids: set[str] = set()
         for cmd in commands:
             self._apply_command(cmd, state, known_task_ids=known_task_ids)
             applied_commands.append(cmd)
+            cid = str(cmd.get("command_id") or "")
+            if cid:
+                applied_command_ids.add(cid)
+
+        # Late-drain hook: closes the cancel-vs-dispatch race. A cancel POST
+        # that lands *after* the first drain (above) but *before* a queued
+        # task's spawn would otherwise be deferred to the next tick — by
+        # which time the task is already running. `_dispatch_new` invokes
+        # this callback right before each `queued` task evaluation so a
+        # late cancel applied here flips the task's status before spawn.
+        # mc-audit live W2-IMPORTANT-3.
+        nonlocal_state = {"started": command_drain_started}
+
+        def late_drain() -> None:
+            try:
+                late_commands = begin_command_drain(self.project_dir)
+            except (OSError, ValueError) as exc:
+                logger.error("failed to re-drain commands before dispatch: %s", exc)
+                return
+            nonlocal_state["started"] = (
+                nonlocal_state["started"]
+                or queue_schema.commands_processing_path(self.project_dir).exists()
+            )
+            for cmd in late_commands:
+                cid = str(cmd.get("command_id") or "")
+                if cid and cid in applied_command_ids:
+                    continue
+                self._apply_command(cmd, state, known_task_ids=known_task_ids)
+                applied_commands.append(cmd)
+                if cid:
+                    applied_command_ids.add(cid)
 
         # Dispatch new work (skip during graceful shutdown)
         if self.shutdown_level is None:
-            self._dispatch_new(tasks, state, cycle_ids)
+            self._dispatch_new(tasks, state, cycle_ids, late_drain=late_drain)
+        command_drain_started = nonlocal_state["started"]
 
         # Persist state
         self._write_state_or_raise(state)
@@ -1024,9 +1057,24 @@ class Runner:
     # ---- dispatch new work ----
 
     def _dispatch_new(
-        self, tasks: list[QueueTask], state: dict[str, Any], cycle_ids: set[str],
+        self,
+        tasks: list[QueueTask],
+        state: dict[str, Any],
+        cycle_ids: set[str],
+        *,
+        late_drain: Callable[[], None] | None = None,
     ) -> None:
-        """Spawn child processes for queued tasks with satisfied dependencies."""
+        """Spawn child processes for queued tasks with satisfied dependencies.
+
+        ``late_drain`` (W2-IMPORTANT-3): invoked once before the queue scan,
+        and again before each candidate's spawn. Drains any cancel/remove
+        commands that arrived after the tick's first drain. Without this,
+        a cancel posted in the small window between the first command-drain
+        and dispatch would be deferred to the next tick — by which time the
+        target task is already spawned.
+        """
+        if late_drain is not None:
+            late_drain()
         in_flight = self._count_in_flight(state)
         slots = self.config.concurrent - in_flight
         if slots <= 0:
@@ -1034,6 +1082,11 @@ class Runner:
         for task in tasks:
             if slots <= 0:
                 break
+            # Re-check for late commands (cancel/remove) before *each*
+            # spawn so newly-arrived cancels apply against the freshest
+            # task list. Cheap when the commands.jsonl is empty.
+            if late_drain is not None:
+                late_drain()
             ts = state["tasks"].get(task.id) or {"status": "queued"}
             if ts.get("status") != "queued":
                 continue
@@ -1114,7 +1167,15 @@ class Runner:
             raise RuntimeError(f"task {task.id!r} missing branch snapshot")
         branch = task.branch
         try:
-            add_worktree(project_dir=self.project_dir, worktree_path=wt_path, branch=branch)
+            # base_ref is set when this task should iterate on a prior run's
+            # branch (W3-CRITICAL-1). Default None preserves git's "branch
+            # from HEAD" behaviour.
+            add_worktree(
+                project_dir=self.project_dir,
+                worktree_path=wt_path,
+                branch=branch,
+                base_ref=task.base_ref,
+            )
         except WorktreeAlreadyCheckedOut:
             # Branch already in another worktree — likely from a prior crash
             # the user didn't clean up. Fail this task with a clear reason.
@@ -1358,7 +1419,20 @@ class Runner:
         wt_path = self._worktree_for(task)
         session_dir = paths.session_dir(wt_path, session_run_id) if session_run_id else paths.sessions_root(wt_path)
         manifest_path = ts.get("manifest_path") or (session_dir / "manifest.json")
-        primary_log = paths.build_dir(wt_path, session_run_id) / "narrative.log" if session_run_id else None
+        primary_log = None
+        if session_run_id:
+            # W3-IMPORTANT-5: improve runs write narrative.log under improve/,
+            # not build/. Prefer build/ (the legacy location for build runs)
+            # but fall back to improve/ so queue task displays for `otto
+            # improve` resolve a real log instead of a phantom build path.
+            build_log = paths.build_dir(wt_path, session_run_id) / "narrative.log"
+            improve_log = paths.improve_dir(wt_path, session_run_id) / "narrative.log"
+            if build_log.exists():
+                primary_log = build_log
+            elif improve_log.exists():
+                primary_log = improve_log
+            else:
+                primary_log = build_log  # default presented even when missing
         return {
             "session_dir": str(session_dir),
             "manifest_path": str(manifest_path) if manifest_path else None,
@@ -1852,6 +1926,7 @@ class Runner:
             spec_file_path=raw.get("spec_file_path"),
             branch=raw.get("branch"),
             worktree=raw.get("worktree"),
+            base_ref=raw.get("base_ref"),
             notes=raw.get("notes"),
         )
 
@@ -1876,6 +1951,13 @@ class Runner:
         self._reconcile_task_identity(task, ts)
         attempt_run_id = self._queue_record_run_id(ts)
         if not attempt_run_id:
+            # Task reached terminal status without ever starting (e.g. a
+            # queued task that was cancelled before dispatch). There is no
+            # live record to finalize, but we still owe the operator a
+            # history row — otherwise the cancelled task vanishes from
+            # /api/state entirely (W2-CRITICAL-1). Synthesize a stable
+            # run_id so the snapshot dedupes across maintenance ticks.
+            self._finalize_unstarted_queue_task(task, task_id, ts, status=status)
             return
         if self._history_snapshot_matches(attempt_run_id, status):
             ts["history_appended"] = True
@@ -1916,6 +1998,49 @@ class Runner:
             return
         ts["history_appended"] = True
 
+    def _finalize_unstarted_queue_task(
+        self,
+        task: QueueTask,
+        task_id: str,
+        ts: dict[str, Any],
+        *,
+        status: str,
+    ) -> None:
+        """Append a history snapshot for a task that terminated before dispatch.
+
+        Used when the operator cancels a `queued` task that never spawned a
+        child process. Since there is no `attempt_run_id` (and thus no live
+        record), we synthesize a stable synthetic run_id keyed on the task
+        id + added_at so the same row dedupes across repeat maintenance
+        ticks. Skips the live-record finalize step entirely — there is no
+        live record to update.
+        """
+        synthetic_run_id = str(ts.get("synthetic_history_run_id") or "").strip()
+        if not synthetic_run_id:
+            added_at = str(ts.get("added_at") or task.added_at or "").strip()
+            suffix = added_at.replace(":", "").replace("-", "").replace("T", "").replace("Z", "")
+            synthetic_run_id = f"queue-cancel:{task_id}" if not suffix else f"queue-cancel:{task_id}:{suffix}"
+            ts["synthetic_history_run_id"] = synthetic_run_id
+        if self._history_snapshot_matches(synthetic_run_id, status):
+            ts["history_appended"] = True
+            return
+        terminal_outcome = _terminal_outcome_for_status(status)
+        try:
+            self._append_queue_history_snapshot(
+                task,
+                ts,
+                run_id=synthetic_run_id,
+                status=status,
+                terminal_outcome=terminal_outcome,
+            )
+        except Exception:
+            logger.exception(
+                "failed to append terminal history for unstarted queue task %s; will retry",
+                task_id,
+            )
+            return
+        ts["history_appended"] = True
+
     def _repair_terminal_queue_history(self, tasks: list[QueueTask], state: dict[str, Any]) -> bool:
         changed = False
         tasks_by_id = {task.id: task for task in tasks}
@@ -1944,8 +2069,19 @@ class Runner:
                 continue
             if ts.get("status") not in {"cancelled", "removed"}:
                 continue
-            if self._queue_record_run_id(ts) and not ts.get("history_appended"):
-                continue
+            # Wait for the terminal history snapshot before removing the
+            # task definition. Both real attempt runs and synthetic
+            # cancel-before-start rows need history to land first; otherwise
+            # the cancelled task would vanish from /api/state entirely
+            # (W2-CRITICAL-1). For unstarted cancels (no attempt run id),
+            # opportunistically run finalize here so callers that bypass
+            # _repair_terminal_queue_history (e.g. unit tests, edge-case
+            # restart paths) still produce a history row before cleanup.
+            if not ts.get("history_appended"):
+                if not self._queue_record_run_id(ts):
+                    self._finalize_queue_attempt(task_id, ts)
+                if not ts.get("history_appended"):
+                    continue
             if self._remove_task_definition(task_id) is not None:
                 ts.pop("definition_removal_pending", None)
                 changed = True

@@ -398,7 +398,18 @@ def _legacy_queue_record(project_dir, task, task_state, now):
     checkpoint_path = checkpoint_path_for_task(project_dir, task)
     queue_manifest = queue_index_path_for(project_dir, task.id)
     child_manifest = session_dir / "manifest.json" if session_run_id else None
-    primary_log_path = paths.build_dir(worktree_path, session_run_id) / "narrative.log" if session_run_id else None
+    # W3-IMPORTANT-5: prefer build/narrative.log; fall back to improve/ for
+    # `otto improve` queue tasks whose stream now lives under improve/.
+    primary_log_path = None
+    if session_run_id:
+        build_log = paths.build_dir(worktree_path, session_run_id) / "narrative.log"
+        improve_log = paths.improve_dir(worktree_path, session_run_id) / "narrative.log"
+        if build_log.exists():
+            primary_log_path = build_log
+        elif improve_log.exists():
+            primary_log_path = improve_log
+        else:
+            primary_log_path = build_log
     extra_log_paths: list[str] = []
     if status in {"failed", "cancelled", INTERRUPTED_STATUS} and not (primary_log_path and primary_log_path.exists()):
         for candidate in (paths.logs_dir(project_dir) / "web" / "watcher.log", paths.queue_dir(project_dir) / "watcher.log"):
@@ -415,7 +426,14 @@ def _legacy_queue_record(project_dir, task, task_state, now):
         domain="queue",
         run_type="queue",
         command=" ".join(task.command_argv[:2]) if task.command_argv else "queue",
-        display_name=f"{task.id}: legacy queue mode",
+        # W3-IMPORTANT-7: keep the user-facing display name free of internal
+        # mode flags. The Recent Activity feed renders display_name + " started"
+        # — the prior "<task>: legacy queue mode" leaked an internal flag into
+        # operator-facing copy and read like a deprecation warning. The
+        # compatibility detail is still surfaced via `compatibility_warning` in
+        # identity (used by the side-panel "compat:" line in detail_panel_renderer
+        # and as a UI badge), so nothing is lost — only the leak is fixed.
+        display_name=task.id,
         status=status,
         cwd=worktree_path,
         identity={

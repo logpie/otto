@@ -2,24 +2,62 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from pathlib import Path
 import re
 import subprocess
-from typing import Any
+from typing import Any, AsyncIterator
 
-from fastapi import Body, FastAPI, Query
+from fastapi import Body, FastAPI, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from otto.mission_control.serializers import serialize_project
 from otto.mission_control.service import (
     MissionControlService,
     MissionControlServiceError,
     filters_from_params,
+    terminate_watcher_blocking,
 )
+from otto.setup_gitignore import OTTO_PATTERNS
+from otto.web.bundle import verify_bundle_freshness
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 PROJECT_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+# Cache headers ----------------------------------------------------------
+# The SPA shell (`index.html`) must always be fresh: it embeds the *current*
+# hashed asset references; a stale shell will request assets that no longer
+# exist after a rebuild. The hashed asset bundles are content-addressed
+# (Vite emits `index-<hash>.js`) so they are safe to cache forever.
+_CACHE_NO_STORE = "no-store"
+_CACHE_IMMUTABLE = "public, max-age=31536000, immutable"
+
+
+class _CacheHeaderStaticFiles(StaticFiles):
+    """``StaticFiles`` subclass that sets correct Cache-Control per path.
+
+    Subclassing rather than middleware keeps caching logic next to the
+    response that owns the etag/last-modified headers it interacts with.
+    """
+
+    async def get_response(self, path: str, scope: Scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        normalized = path.lstrip("/")
+        if normalized in {"", "index.html"}:
+            response.headers["Cache-Control"] = _CACHE_NO_STORE
+        elif normalized.startswith("assets/"):
+            response.headers["Cache-Control"] = _CACHE_IMMUTABLE
+        else:
+            # build-stamp.json or future top-level files: stay safe.
+            response.headers["Cache-Control"] = _CACHE_NO_STORE
+        return response
 
 
 def create_app(
@@ -33,17 +71,78 @@ def create_app(
     projects_root = (Path(projects_root).expanduser() if projects_root else Path.home() / "otto-projects").resolve(strict=False)
     service = None if project_launcher else MissionControlService(project_dir, queue_compat=queue_compat)
     static_dir = Path(__file__).resolve().parent / "static"
-    app = FastAPI(title="Otto Mission Control", version="0.1.0")
+    # Fail fast if the bundle is stale / broken / missing. See
+    # `otto/web/bundle.py` for the env-var overrides.
+    verify_bundle_freshness(static_dir=static_dir)
+
+    # Track every project this app has ever been bound to so that on
+    # FastAPI shutdown we can iterate through them and force-terminate any
+    # watcher subprocess that is still alive (W11-IMPORTANT-4 — orphan
+    # watchers survived `backend.stop()`). Production paths and the test
+    # harness both rely on this list.
+    tracked_projects: list[Path] = []
+
+    def _track_project(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = Path(path).resolve(strict=False)
+        for existing in tracked_projects:
+            if existing == resolved:
+                return
+        tracked_projects.append(resolved)
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            # Best-effort: stop every watcher this app launched. This must
+            # not raise — uvicorn shutdown swallows lifespan exceptions but
+            # logging the error is more useful than silent failure.
+            for tracked in list(_app.state.tracked_projects):
+                try:
+                    outcome = terminate_watcher_blocking(tracked, reason="backend shutdown")
+                except Exception as exc:  # pragma: no cover — defensive
+                    _LOGGER.warning("watcher cleanup failed for %s: %s", tracked, exc)
+                    continue
+                if outcome.get("terminated"):
+                    _LOGGER.info(
+                        "terminated orphan watcher pid=%s pgid=%s escalated=%s for %s",
+                        outcome.get("pid"),
+                        outcome.get("pgid"),
+                        outcome.get("escalated"),
+                        tracked,
+                    )
+
+    app = FastAPI(title="Otto Mission Control", version="0.1.0", lifespan=_lifespan)
+
+    # W10-CRITICAL-1/2: every /api/ JSON response must be ``no-store`` so a
+    # second tab polling the same backend cannot get stale state from a
+    # browser/intermediary cache. Without this, propagation of cross-tab
+    # mutations (queue submit, cancel, merge) silently misses operator B —
+    # they keep seeing pre-mutation state until the cached entry expires.
+    @app.middleware("http")
+    async def _no_store_for_api(request: Request, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = _CACHE_NO_STORE
+            response.headers["Pragma"] = "no-cache"
+        return response
+
     app.state.project_dir = None if project_launcher else project_dir
     app.state.projects_root = projects_root
     app.state.project_launcher = project_launcher
     app.state.service = service
+    app.state.tracked_projects = tracked_projects
+    if not project_launcher:
+        _track_project(project_dir)
 
     def _set_project(next_project_dir: Path) -> dict[str, Any]:
         resolved = Path(next_project_dir).expanduser().resolve(strict=False)
         _ensure_git_project(resolved)
         app.state.project_dir = resolved
         app.state.service = MissionControlService(resolved, queue_compat=queue_compat)
+        _track_project(resolved)
         return serialize_project(resolved)
 
     def _service() -> MissionControlService:
@@ -60,7 +159,12 @@ def create_app(
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(static_dir / "index.html")
+        # The shell HTML must never be cached — it embeds the current
+        # hashed asset filenames; a stale shell points at deleted assets.
+        return FileResponse(
+            static_dir / "index.html",
+            headers={"Cache-Control": _CACHE_NO_STORE},
+        )
 
     @app.get("/api/project")
     def project() -> dict[str, Any]:
@@ -110,6 +214,7 @@ def create_app(
         outcome_filter: str = Query("all", alias="outcome"),
         query: str = "",
         history_page: int = 0,
+        history_page_size: int | None = None,
     ) -> dict[str, Any]:
         filters = filters_from_params(
             active_only=active_only,
@@ -117,6 +222,7 @@ def create_app(
             outcome_filter=outcome_filter,
             query=query,
             history_page=history_page,
+            history_page_size=history_page_size,
         )
         return _service().state(filters)
 
@@ -127,12 +233,14 @@ def create_app(
         outcome_filter: str = Query("all", alias="outcome"),
         query: str = "",
         history_page: int = 0,
+        history_page_size: int | None = None,
     ) -> dict[str, Any]:
         filters = filters_from_params(
             type_filter=type_filter,
             outcome_filter=outcome_filter,
             query=query,
             history_page=history_page,
+            history_page_size=history_page_size,
         )
         return _service().detail(run_id, filters)
 
@@ -147,6 +255,14 @@ def create_app(
     @app.get("/api/runs/{run_id}/artifacts/{artifact_index}/content")
     def run_artifact_content(run_id: str, artifact_index: int) -> dict[str, Any]:
         return _service().artifact_content(run_id, artifact_index)
+
+    @app.get("/api/runs/{run_id}/artifacts/{artifact_index}/raw")
+    def run_artifact_raw(run_id: str, artifact_index: int) -> FileResponse:
+        # cluster-evidence-trustworthiness #6: image/video/PDF artifacts
+        # are served as raw bytes here so the SPA can ``<img src=...>``
+        # them instead of decoding through JSON.
+        path, mime = _service().artifact_raw_path(run_id, artifact_index)
+        return FileResponse(path, media_type=mime)
 
     @app.get("/api/runs/{run_id}/proof-report")
     def run_proof_report(run_id: str) -> HTMLResponse:
@@ -170,12 +286,16 @@ def create_app(
 
     @app.post("/api/runs/{run_id}/actions/{action}")
     def run_action(run_id: str, action: str, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+        expected_target = payload.get("expected_target_sha")
+        expected_branch = payload.get("expected_branch_sha")
         return _service().execute(
             run_id,
             action,
             selected_queue_task_ids=payload.get("selected_queue_task_ids"),
             artifact_index=payload.get("artifact_index"),
             action_payload=payload,
+            expected_target_sha=str(expected_target) if isinstance(expected_target, str) and expected_target.strip() else None,
+            expected_branch_sha=str(expected_branch) if isinstance(expected_branch, str) and expected_branch.strip() else None,
         )
 
     @app.post("/api/actions/merge-all")
@@ -221,7 +341,7 @@ def create_app(
     def queue(command: str, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
         return _service().enqueue(command, payload)
 
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    app.mount("/static", _CacheHeaderStaticFiles(directory=static_dir), name="static")
     return app
 
 
@@ -256,10 +376,12 @@ def _create_managed_project(root: Path, name: str) -> Path:
         _run_git(path, "config", "user.name", "Otto")
         (path / "README.md").write_text(f"# {name.strip()}\n\nManaged by Otto.\n", encoding="utf-8")
         (path / "otto.yaml").write_text("default_branch: main\nqueue:\n  bookkeeping_files: []\n", encoding="utf-8")
-        (path / ".gitignore").write_text(
-            "\n".join(["otto_logs/", ".worktrees/", ".otto-queue*.lock"]) + "\n",
-            encoding="utf-8",
-        )
+        # Cover all Otto runtime artifacts so untracked queue/state files
+        # don't dirty the project tree on first enqueue (W11-CRITICAL-1).
+        # Single source of truth is otto.setup_gitignore.OTTO_PATTERNS so a
+        # new runtime artifact only needs to be added in one place.
+        gitignore_lines = ["# Otto runtime (auto-managed; safe to edit comments)", *OTTO_PATTERNS]
+        (path / ".gitignore").write_text("\n".join(gitignore_lines) + "\n", encoding="utf-8")
         _run_git(path, "add", ".")
         _run_git(path, "commit", "-q", "-m", "Initial Otto project")
     except Exception as exc:

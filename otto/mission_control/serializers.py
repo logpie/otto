@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,9 @@ from otto.config import get_spec_timeout
 from otto.config import load_config
 from otto.config import resolve_certifier_mode
 from otto.mission_control.actions import ActionResult, ActionState
+from otto.setup_gitignore import (
+    is_otto_owned_path as _is_otto_owned_path,
+)
 from otto.mission_control.model import (
     ArtifactRef,
     DetailView,
@@ -30,16 +35,55 @@ from otto.mission_control.model import (
 from otto.runs.schema import RunRecord
 
 
+# Otto's own runtime files (re-exported from ``setup_gitignore`` for the
+# dirty-target preflight). Centralising the pattern list there ensures the
+# JobDialog preflight (W11-CRITICAL-1) and the merge-action preflight
+# (W5-CRITICAL-1, ``config.repo_preflight_issues``) classify Otto-owned
+# untracked paths the same way. ``_OTTO_OWNED_DIRTY_PATTERNS`` stays
+# importable here for back-compat with tests that referenced the symbol.
 def serialize_project(project_dir: Path) -> dict[str, Any]:
     project_dir = Path(project_dir).resolve(strict=False)
     return {
         "path": str(project_dir),
         "name": project_dir.name,
         "branch": _git_output(project_dir, ["branch", "--show-current"]) or None,
-        "dirty": bool(_git_output(project_dir, ["status", "--porcelain"])),
+        "dirty": _project_is_user_dirty(project_dir),
         "head_sha": _git_output(project_dir, ["rev-parse", "--short", "HEAD"]) or None,
         "defaults": _project_defaults(project_dir),
     }
+
+
+def _project_is_user_dirty(project_dir: Path) -> bool:
+    """True if the project tree has user-owned uncommitted state.
+
+    Excludes Otto-owned untracked runtime files (queue state, otto_logs/,
+    .worktrees/, watcher log) so the JobDialog dirty-target preflight does
+    not fire for files Otto wrote itself between enqueues
+    (W11-CRITICAL-1). Tracked-file modifications and any non-Otto
+    untracked path still mark the project dirty.
+    """
+    porcelain = _git_output(project_dir, ["status", "--porcelain"])
+    if not porcelain:
+        return False
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        # Porcelain v1 format: "XY path" with X/Y status codes in cols 0/1.
+        status = line[:2]
+        path = line[3:].strip() if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1].strip()
+        if not path:
+            return True
+        # Only the "?? path" untracked rows are eligible for the
+        # Otto-owned exemption. Modifications to a tracked Otto runtime
+        # file (theoretical — should never happen if .gitignore is right)
+        # would still flag dirty so we notice the regression.
+        if status != "??":
+            return True
+        if not _is_otto_owned_path(path):
+            return True
+    return False
 
 
 def serialize_filters(filters: MissionControlFilters) -> dict[str, Any]:
@@ -49,6 +93,7 @@ def serialize_filters(filters: MissionControlFilters) -> dict[str, Any]:
         "outcome": filters.outcome_filter,
         "query": filters.query,
         "history_page": filters.history_page,
+        "history_page_size": filters.history_page_size,
     }
 
 
@@ -176,13 +221,59 @@ def serialize_detail(detail: DetailView) -> dict[str, Any]:
 
 
 def serialize_artifact(artifact: ArtifactRef, index: int) -> dict[str, Any]:
-    return {
+    """Serialize an ``ArtifactRef`` with size/mtime/sha provenance.
+
+    Cluster-evidence-trustworthiness #7: artifact lists used to expose
+    only label/path/kind/exists. The UI now wants size, mtime, and a
+    short SHA so the operator can spot stale or tampered artifacts and
+    sort by size/age. We compute these here so every callsite (proof
+    pane, artifact pane, review packet evidence) gets them for free.
+
+    Tradeoffs:
+    * Size and mtime are O(1) ``stat`` calls.
+    * SHA-256 is a full file read; we cap it at 16MB and skip larger
+      files / directories so the artifact list stays cheap to render.
+    * For directories (``kind == "directory"``) we report size/mtime of
+      the dir entry but skip the SHA — directory hashing has no
+      universal definition and the UI doesn't render it.
+    """
+    payload: dict[str, Any] = {
         "index": index,
         "label": artifact.label,
         "path": artifact.path,
         "kind": artifact.kind,
         "exists": artifact.exists,
+        "size_bytes": None,
+        "mtime": None,
+        "sha256": None,
     }
+    if not artifact.exists:
+        return payload
+    try:
+        candidate = Path(artifact.path)
+    except (TypeError, ValueError):
+        return payload
+    try:
+        stat = candidate.stat()
+    except OSError:
+        return payload
+    payload["size_bytes"] = stat.st_size
+    payload["mtime"] = (
+        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    if candidate.is_file() and stat.st_size <= 16 * 1024 * 1024:
+        try:
+            hasher = hashlib.sha256()
+            with candidate.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    hasher.update(chunk)
+            payload["sha256"] = hasher.hexdigest()
+        except OSError:
+            payload["sha256"] = None
+    return payload
 
 
 def serialize_action_state(action: ActionState) -> dict[str, Any]:

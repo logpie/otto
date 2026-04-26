@@ -1,5 +1,6 @@
 """Shared test fixtures for otto tests."""
 
+import os
 import subprocess
 from unittest.mock import MagicMock
 
@@ -40,6 +41,39 @@ def make_mock_query(text, cost=0.50, session_id="test-session", assistant_messag
         return text, cost, result_msg
 
     return mock_query
+
+
+@pytest.fixture(autouse=True)
+def block_real_claude_sdk_calls(monkeypatch):
+    """Fail fast if a unit test accidentally reaches the real Claude SDK.
+
+    Tests that need SDK-shaped events should monkeypatch ``otto.agent._sdk_query``
+    with a fake stream, as the integration fixtures do. Real provider calls
+    remain opt-in for explicit dogfood scripts via OTTO_ALLOW_REAL_COST.
+    """
+    if (
+        os.environ.get("OTTO_ALLOW_REAL_COST") == "1"
+        or os.environ.get("OTTO_ALLOW_REAL_PROVIDER_IN_TESTS") == "1"
+    ):
+        return
+
+    try:
+        import otto.agent as agent
+    except Exception:
+        return
+    if getattr(agent, "_sdk_query", None) is None:
+        return
+
+    async def blocked_sdk_query(*, prompt, options):
+        del prompt, options
+        test_name = os.environ.get("PYTEST_CURRENT_TEST", "unknown test")
+        raise AssertionError(
+            "test attempted to call the real Claude SDK without installing a fake "
+            f"agent stream: {test_name}"
+        )
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(agent, "_sdk_query", blocked_sdk_query)
 
 
 def pytest_collection_modifyitems(items):

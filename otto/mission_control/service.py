@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import signal
 import subprocess
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -81,6 +84,16 @@ class LogReadResult:
     next_offset: int
     text: str
     exists: bool
+    # Total size of the log file at read time. The client uses this to render
+    # "Final · {total_bytes}" headers and to detect "we are caught up" without
+    # having to do a second HEAD request.  ``0`` when the file is missing or
+    # the slice came from an in-memory fallback.
+    total_bytes: int = 0
+    # ``True`` when ``next_offset == total_bytes`` after this slice — i.e. the
+    # caller has read every byte we currently know about. Lets the client stop
+    # polling once a terminal run has been fully drained without inferring it
+    # from sentinel offsets.
+    eof: bool = False
 
 
 class MissionControlService:
@@ -89,9 +102,24 @@ class MissionControlService:
     def __init__(self, project_dir: Path, *, queue_compat: bool = True) -> None:
         self.project_dir = Path(project_dir).resolve(strict=False)
         self.model = MissionControlModel(self.project_dir, queue_compat=queue_compat)
+        # mc-audit live W13-IMPORTANT-2: the events log only recorded watcher
+        # lifecycle (started/stopped); a real build-and-cert happening in the
+        # watcher subprocess never showed up. Track the last-seen status per
+        # run-id so each refresh can emit `run.started` / `run.terminal` /
+        # `run.cancelled` / `run.failed` events into events.jsonl. Bootstrap
+        # is lazy — the first refresh seeds the table without emitting (we
+        # don't know which were already-known on startup) so we never spam
+        # events for runs that completed before MC came online.
+        self._lifecycle_seen_states: dict[str, str] = {}
+        self._lifecycle_bootstrapped: bool = False
 
     def state(self, filters: MissionControlFilters | None = None) -> dict[str, Any]:
         state = self._state(filters)
+        # mc-audit live W13-IMPORTANT-2: emit run.* events BEFORE serializing
+        # `events` so the just-fired transition is visible in the same /api/state
+        # response. Watcher/landing/runtime status do not depend on events so
+        # ordering relative to them is irrelevant.
+        self._emit_run_lifecycle_events(state)
         payload = serialize_state(self.project_dir, state)
         watcher = self.watcher_status()
         landing = self.landing_status()
@@ -100,6 +128,103 @@ class MissionControlService:
         payload["runtime"] = self.runtime_status(watcher=watcher, landing=landing)
         payload["events"] = self.events(limit=50)
         return payload
+
+    def _emit_run_lifecycle_events(self, state: MissionControlState) -> None:
+        """Detect run-start / run-terminal transitions and append events.
+
+        We compare the current set of live-record statuses with the previously
+        observed set. Three cases emit events:
+
+        * run.started  — a run-id we have never seen before is in a non-terminal
+          state. (A run-id observed first in terminal state never emits start;
+          we still emit terminal so post-outage timelines are not blank.)
+        * run.<terminal_outcome>  — a previously non-terminal run-id transitioned
+          to a terminal status. ``terminal_outcome`` (or status) drives the
+          event kind: ``run.completed`` / ``run.failed`` / ``run.cancelled`` /
+          ``run.interrupted`` / ``run.terminal``. This is the cluster of events
+          the W13 outage-recovery scenario needed.
+
+        Bootstrap: the very first call seeds ``_lifecycle_seen_states`` without
+        emitting. Otherwise an MC server starting after a long-running queue
+        would emit a flurry of stale events.
+        """
+
+        try:
+            from otto.runs.schema import is_terminal_status
+        except ImportError:  # pragma: no cover — defensive
+            return
+
+        current: dict[str, str] = {}
+        for item in state.live_runs.items:
+            record = item.record
+            run_id = record.run_id
+            if not run_id:
+                continue
+            current[run_id] = record.status or ""
+
+        if not self._lifecycle_bootstrapped:
+            self._lifecycle_seen_states = dict(current)
+            self._lifecycle_bootstrapped = True
+            return
+
+        for item in state.live_runs.items:
+            record = item.record
+            run_id = record.run_id
+            if not run_id:
+                continue
+            status = record.status or ""
+            previous = self._lifecycle_seen_states.get(run_id)
+            terminal_now = is_terminal_status(status)
+            terminal_before = bool(previous) and is_terminal_status(previous)
+
+            if previous is None and not terminal_now:
+                self._record_event(
+                    kind="run.started",
+                    severity="info",
+                    message=f"{record.display_name or record.command or 'run'} started",
+                    run_id=run_id,
+                    task_id=str(record.identity.get("queue_task_id") or "") or None,
+                    details={
+                        "domain": record.domain,
+                        "run_type": record.run_type,
+                        "command": record.command,
+                        "branch": record.git.get("branch"),
+                        "status": status,
+                    },
+                )
+            elif terminal_now and not terminal_before:
+                outcome = (record.terminal_outcome or status or "terminal").strip() or "terminal"
+                kind_suffix = outcome.replace(" ", "_").lower()
+                kind = f"run.{kind_suffix}" if kind_suffix else "run.terminal"
+                severity = (
+                    "success"
+                    if outcome in {"success", "succeeded", "passed", "completed"}
+                    else "error"
+                    if outcome in {"failed", "failure", "error"}
+                    else "warning"
+                    if outcome in {"cancelled", "interrupted", "removed"}
+                    else "info"
+                )
+                self._record_event(
+                    kind=kind,
+                    severity=severity,
+                    message=(
+                        f"{record.display_name or record.command or 'run'} "
+                        f"{outcome}"
+                    ),
+                    run_id=run_id,
+                    task_id=str(record.identity.get("queue_task_id") or "") or None,
+                    details={
+                        "domain": record.domain,
+                        "run_type": record.run_type,
+                        "command": record.command,
+                        "branch": record.git.get("branch"),
+                        "status": status,
+                        "terminal_outcome": record.terminal_outcome,
+                    },
+                )
+
+        self._lifecycle_seen_states = current
 
     def detail(self, run_id: str, filters: MissionControlFilters | None = None) -> dict[str, Any]:
         detail = self._detail_view(run_id, filters)
@@ -122,7 +247,7 @@ class MissionControlService:
         if fallback is not None:
             return asdict(fallback)
         if not detail.log_paths:
-            return asdict(LogReadResult(None, offset, offset, "", False))
+            return asdict(LogReadResult(None, offset, offset, "", False, total_bytes=0, eof=True))
         index = min(max(log_index, 0), len(detail.log_paths) - 1)
         path = self._validated_artifact_path(detail.log_paths[index])
         return asdict(self._read_file_slice(path, offset=max(0, offset), limit_bytes=limit_bytes))
@@ -142,6 +267,17 @@ class MissionControlService:
         filters: MissionControlFilters | None = None,
         limit_bytes: int = 256_000,
     ) -> dict[str, Any]:
+        """Return the artifact body, with MIME-aware binary handling.
+
+        Cluster-evidence-trustworthiness #6: previously every artifact was
+        decoded as UTF-8 with replacement and shoved into a `<pre>`, so a
+        screenshot or recording rendered as several pages of replacement
+        characters. We now sniff MIME before decoding and return a
+        ``previewable`` flag plus ``mime_type`` / ``size_bytes`` so the
+        client can render image/video previews via ``<img src=...>`` (or
+        link to the raw artifact endpoint) and avoid garbage text for
+        non-previewable binaries.
+        """
         detail = self._detail_view(run_id, filters)
         if artifact_index < 0 or artifact_index >= len(detail.artifacts):
             raise MissionControlServiceError("artifact index out of range", status_code=404)
@@ -149,12 +285,55 @@ class MissionControlService:
         path = self._validated_artifact_path(artifact.path)
         if path.is_dir():
             raise MissionControlServiceError("artifact is a directory", status_code=400)
+        size_bytes = path.stat().st_size if path.exists() else 0
+        mime_type = _detect_mime_type(path)
+        is_text = _looks_like_text(path, mime_type=mime_type)
+        artifact_payload = serialize_artifact(artifact, artifact_index)
+        if not is_text:
+            # Binary: don't ship a decoded body — give the client a download
+            # link via the existing artifacts endpoint and let it render an
+            # image/video preview when the MIME is one we can inline.
+            return {
+                "artifact": artifact_payload,
+                "content": "",
+                "truncated": False,
+                "previewable": False,
+                "mime_type": mime_type,
+                "size_bytes": size_bytes,
+            }
         read = self._read_file_slice(path, offset=0, limit_bytes=limit_bytes)
         return {
-            "artifact": serialize_artifact(artifact, artifact_index),
+            "artifact": artifact_payload,
             "content": read.text,
-            "truncated": read.next_offset < (path.stat().st_size if path.exists() else read.next_offset),
+            "truncated": read.next_offset < size_bytes if size_bytes else False,
+            "previewable": True,
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
         }
+
+    def artifact_raw_path(
+        self,
+        run_id: str,
+        artifact_index: int,
+        *,
+        filters: MissionControlFilters | None = None,
+    ) -> tuple[Path, str]:
+        """Return the on-disk path + MIME for an artifact (for binary serving).
+
+        Cluster-evidence-trustworthiness #6: binary artifacts (PNG, WEBM,
+        PDF) need a real file response so the client can ``<img src=...>``
+        them instead of decoding the bytes through JSON. The path is
+        sandbox-validated through ``_validated_artifact_path`` exactly
+        like ``artifact_content`` does.
+        """
+        detail = self._detail_view(run_id, filters)
+        if artifact_index < 0 or artifact_index >= len(detail.artifacts):
+            raise MissionControlServiceError("artifact index out of range", status_code=404)
+        artifact = detail.artifacts[artifact_index]
+        path = self._validated_artifact_path(artifact.path)
+        if not path.exists() or path.is_dir():
+            raise MissionControlServiceError("artifact not found", status_code=404)
+        return path, _detect_mime_type(path)
 
     def proof_report_path(
         self,
@@ -225,6 +404,7 @@ class MissionControlService:
             else _branch_diff(self.project_dir, branch, target)
         )
         text = ""
+        full_text = ""
         truncated = False
         command = (
             _optional_str(diff.get("command"))
@@ -239,10 +419,26 @@ class MissionControlService:
             if text_result["error"] is not None:
                 diff = {**diff, "error": text_result["error"]}
             else:
-                text = str(text_result["text"])
-                if len(text) > limit_chars:
-                    text = text[:limit_chars]
+                full_text = str(text_result["text"])
+                if len(full_text) > limit_chars:
+                    text = full_text[:limit_chars]
                     truncated = True
+                else:
+                    text = full_text
+        # Freshness metadata: SHAs are captured at fetch time so the merge
+        # action can later validate that nothing has moved underneath the
+        # operator. ``errors`` records *which* lookup failed so the UI can
+        # surface a targeted warning instead of a vague "diff unavailable".
+        target_sha, branch_sha, merge_base, sha_errors = _diff_freshness_shas(
+            self.project_dir,
+            branch=branch,
+            target=target,
+            merge_info=merge_info,
+        )
+        fetched_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        full_size_chars = len(full_text)
+        shown_hunks = text.count("\n@@ ") + (1 if text.startswith("@@ ") else 0)
+        total_hunks = full_text.count("\n@@ ") + (1 if full_text.startswith("@@ ") else 0)
         return {
             "run_id": detail.run_id,
             "branch": branch,
@@ -253,6 +449,15 @@ class MissionControlService:
             "text": text,
             "error": diff["error"],
             "truncated": truncated,
+            "fetched_at": fetched_at,
+            "target_sha": target_sha,
+            "branch_sha": branch_sha,
+            "merge_base": merge_base,
+            "limit_chars": limit_chars,
+            "full_size_chars": full_size_chars,
+            "shown_hunks": shown_hunks,
+            "total_hunks": total_hunks,
+            "errors": sha_errors,
         }
 
     def execute(
@@ -263,6 +468,8 @@ class MissionControlService:
         selected_queue_task_ids: list[str] | None = None,
         artifact_index: int | None = None,
         action_payload: dict[str, Any] | None = None,
+        expected_target_sha: str | None = None,
+        expected_branch_sha: str | None = None,
         filters: MissionControlFilters | None = None,
     ) -> dict[str, Any]:
         key = _action_key(action)
@@ -278,6 +485,11 @@ class MissionControlService:
             if merge_info is not None:
                 target = str(merge_info.get("target") or _merge_target(self.project_dir))
                 raise MissionControlServiceError(f"Already merged into {target}.", status_code=409)
+            self._validate_expected_diff_shas(
+                detail,
+                expected_target_sha=expected_target_sha,
+                expected_branch_sha=expected_branch_sha,
+            )
             _ensure_merge_unblocked(self.project_dir)
 
         selected_artifact_path = None
@@ -317,6 +529,64 @@ class MissionControlService:
             },
         )
         return payload
+
+    def _validate_expected_diff_shas(
+        self,
+        detail: DetailView,
+        *,
+        expected_target_sha: str | None,
+        expected_branch_sha: str | None,
+    ) -> None:
+        """Reject the merge if the live SHAs disagree with what the operator reviewed.
+
+        Called only on the merge action and only when the client sends
+        ``expected_target_sha`` / ``expected_branch_sha`` from its most-recent
+        diff fetch. The intent is the safety hatch for the diff-freshness
+        contract: if the target branch has moved or the audit branch has
+        been amended since the diff snapshot, the operator is shown a 409
+        explaining what changed and asked to refetch the diff. Power users
+        who want to skip the gate simply omit the SHAs from their POST.
+        """
+        expected_target = (expected_target_sha or "").strip().lower() or None
+        expected_branch = (expected_branch_sha or "").strip().lower() or None
+        if not expected_target and not expected_branch:
+            return
+        target = _review_target(self.project_dir, detail.record)
+        branch = _optional_str(detail.record.git.get("branch"))
+        # Resolve the *current* refs to compare against the snapshot.
+        current_target_sha, target_err = _resolve_sha(self.project_dir, target) if target else (None, "target ref is empty")
+        current_branch_sha: str | None = None
+        branch_err: str | None = None
+        if branch and branch != target:
+            current_branch_sha, branch_err = _resolve_sha(self.project_dir, branch)
+        if expected_target and target_err and current_target_sha is None:
+            raise MissionControlServiceError(
+                f"Could not resolve current target {target}: {target_err}. Re-fetch the diff and try again.",
+                status_code=409,
+            )
+        if expected_branch and branch_err and current_branch_sha is None:
+            raise MissionControlServiceError(
+                f"Could not resolve current branch {branch}: {branch_err}. Re-fetch the diff and try again.",
+                status_code=409,
+            )
+        if expected_target and current_target_sha and expected_target != current_target_sha.lower():
+            raise MissionControlServiceError(
+                (
+                    f"Target branch {target} has moved since you reviewed the diff "
+                    f"(diff was at {expected_target[:7]}, now {current_target_sha[:7]}). "
+                    "Re-fetch the diff to confirm what will be merged."
+                ),
+                status_code=409,
+            )
+        if expected_branch and current_branch_sha and expected_branch != current_branch_sha.lower():
+            raise MissionControlServiceError(
+                (
+                    f"Branch {branch} has moved since you reviewed the diff "
+                    f"(diff was at {expected_branch[:7]}, now {current_branch_sha[:7]}). "
+                    "Re-fetch the diff to confirm what will be merged."
+                ),
+                status_code=409,
+            )
 
     def merge_all(self) -> dict[str, Any]:
         _ensure_merge_unblocked(self.project_dir)
@@ -769,6 +1039,16 @@ class MissionControlService:
                 if subcommand not in {"bugs", "feature", "target"}:
                     raise MissionControlServiceError("unsupported improve subcommand", status_code=400)
                 focus_or_goal = _optional_str(payload.get("focus") or payload.get("goal"))
+                # W3-CRITICAL-1: improve must iterate on a prior run's branch,
+                # not fork from main and re-collide on the same files. The web
+                # JobDialog selects a prior run and posts its run id; we
+                # resolve that to a branch ref and pass it as the worktree's
+                # base_ref so the new improve branch is rooted on the prior
+                # build's tip. Falls back to git's default (HEAD/main) when
+                # the operator submits without selecting a prior run, which
+                # preserves backwards compat for projects with no history.
+                prior_run_id = _optional_str(payload.get("prior_run_id"))
+                base_ref = self._resolve_prior_run_branch(prior_run_id) if prior_run_id else None
                 raw_args = [subcommand]
                 if focus_or_goal:
                     raw_args.append(focus_or_goal)
@@ -786,6 +1066,7 @@ class MissionControlService:
                     resumable=True,
                     focus=focus_or_goal if subcommand in {"bugs", "feature"} else None,
                     target=focus_or_goal if subcommand == "target" else None,
+                    base_ref=base_ref,
                 )
             elif command == "certify":
                 intent = _optional_str(payload.get("intent"))
@@ -830,6 +1111,56 @@ class MissionControlService:
         )
         return response
 
+    def _resolve_prior_run_branch(self, prior_run_id: str) -> str:
+        """Look up the branch for a prior run id.
+
+        Searches live records first (handles "still-warm" runs that haven't
+        been GC'd yet), then falls back to history rows. Raises a 400 if the
+        run isn't found or doesn't have a recorded branch — the operator
+        explicitly selected this run, so a silent fallback to main would
+        re-open W3-CRITICAL-1.
+        """
+        run_id = prior_run_id.strip()
+        if not run_id:
+            raise MissionControlServiceError("prior_run_id is empty", status_code=400)
+        # Live records are the freshest source — if the prior build just
+        # finished its branch is already recorded there with the writer's tip.
+        try:
+            from otto.runs.registry import read_live_records
+            for record in read_live_records(self.project_dir):
+                if record.run_id == run_id:
+                    branch = str((record.git or {}).get("branch") or "").strip()
+                    if branch:
+                        return branch
+                    raise MissionControlServiceError(
+                        f"prior run {run_id!r} has no recorded branch", status_code=400
+                    )
+        except MissionControlServiceError:
+            raise
+        except Exception:  # pragma: no cover — defensive; fall through to history
+            pass
+        # History fallback — completed runs that have aged out of the live
+        # registry still appear in cross-sessions/history.jsonl.
+        try:
+            from otto.runs.history import load_project_history_rows
+            for row in load_project_history_rows(self.project_dir):
+                row_run_id = str(row.get("run_id") or "").strip()
+                if row_run_id != run_id:
+                    continue
+                branch = str((row.get("git") or {}).get("branch") or row.get("branch") or "").strip()
+                if branch:
+                    return branch
+                raise MissionControlServiceError(
+                    f"prior run {run_id!r} has no recorded branch", status_code=400
+                )
+        except MissionControlServiceError:
+            raise
+        except Exception:  # pragma: no cover — defensive
+            pass
+        raise MissionControlServiceError(
+            f"prior run {run_id!r} not found in live or history records", status_code=404
+        )
+
     def _state(self, filters: MissionControlFilters | None) -> MissionControlState:
         return self.model.initial_state(filters=filters or MissionControlFilters())
 
@@ -854,7 +1185,8 @@ class MissionControlService:
 
     def _read_file_slice(self, path: Path, *, offset: int, limit_bytes: int) -> LogReadResult:
         if not path.exists() or not path.is_file():
-            return LogReadResult(str(path), offset, offset, "", False)
+            return LogReadResult(str(path), offset, offset, "", False, total_bytes=0, eof=True)
+        total_bytes = path.stat().st_size
         with path.open("rb") as handle:
             handle.seek(offset)
             chunk = handle.read(max(1, limit_bytes))
@@ -865,6 +1197,8 @@ class MissionControlService:
             next_offset=next_offset,
             text=chunk.decode("utf-8", errors="replace"),
             exists=True,
+            total_bytes=total_bytes,
+            eof=next_offset >= total_bytes,
         )
 
     def _record_event(
@@ -957,17 +1291,30 @@ def filters_from_params(
     outcome_filter: str = "all",
     query: str = "",
     history_page: int = 0,
+    history_page_size: int | None = None,
 ) -> MissionControlFilters:
     if type_filter not in {"all", "build", "improve", "certify", "merge", "queue"}:
         raise MissionControlServiceError("invalid type filter", status_code=400)
     if outcome_filter not in {"all", "success", "failed", "interrupted", "cancelled", "removed", "other"}:
         raise MissionControlServiceError("invalid outcome filter", status_code=400)
+    # Whitelist the page-size choices so a malformed/hostile URL cannot ask
+    # for an unbounded slice. Any other value falls back to the model
+    # default. Mirrors the front-end <select> options.
+    normalized_page_size: int | None = None
+    if history_page_size is not None:
+        try:
+            candidate = int(history_page_size)
+        except (TypeError, ValueError):
+            candidate = 0
+        if candidate in {10, 25, 50, 100}:
+            normalized_page_size = candidate
     return MissionControlFilters(
         active_only=bool(active_only),
         type_filter=type_filter,  # type: ignore[arg-type]
         outcome_filter=outcome_filter,  # type: ignore[arg-type]
         query=str(query or ""),
         history_page=max(0, int(history_page or 0)),
+        history_page_size=normalized_page_size,
     )
 
 
@@ -2148,6 +2495,15 @@ def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
         stories_tested = len(stories)
     if stories and stories_passed is None:
         stories_passed = sum(1 for story in stories if story.get("status") in {"pass", "warn"})
+    # Cluster-evidence-trustworthiness #4: Mission Control had been
+    # flattening the certification down to final stories + counts, hiding
+    # earlier rounds and their per-round evidence. The proof-of-work JSON
+    # already carries `round_history` (see otto/certifier/__init__.py
+    # `_round_history`); we surface it through the review packet so the
+    # client can render a per-round tab strip with verdict, timestamp,
+    # cost, and per-round story slices instead of pretending every cert
+    # was a single round.
+    rounds = _certification_round_history(proof_json)
     return {
         "stories_passed": stories_passed,
         "stories_tested": stories_tested,
@@ -2160,7 +2516,60 @@ def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
         "summary_path": _optional_str(getattr(record, "artifacts", {}).get("summary_path")),
         "stories": stories,
         "proof_report": proof_report,
+        "rounds": rounds,
     }
+
+
+def _certification_round_history(proof_json: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Normalize ``round_history`` from proof-of-work.json for the UI.
+
+    The certifier writes a richer object per round; the client only needs
+    a stable subset. We pass through the fields needed to render a round
+    tab (`round`, `verdict`, counts, `diagnosis`, durations, costs) plus
+    `failing_story_ids` / `warn_story_ids` so the UI can call out the
+    deltas across rounds. ``stories`` (per-round) is omitted here because
+    the certifier only stores aggregated story IDs in the history; the
+    full per-round story payload remains in the HTML report.
+    """
+    if not isinstance(proof_json, dict):
+        return []
+    raw_rounds = proof_json.get("round_history")
+    if not isinstance(raw_rounds, list):
+        return []
+    rounds: list[dict[str, Any]] = []
+    for entry in raw_rounds:
+        if not isinstance(entry, dict):
+            continue
+        rounds.append(
+            {
+                "round": _int_or_none(entry.get("round")),
+                "verdict": _optional_str(entry.get("verdict")) or "unknown",
+                "stories_tested": _int_or_none(entry.get("stories_tested")),
+                "passed_count": _int_or_none(entry.get("passed_count")),
+                "failed_count": _int_or_none(entry.get("failed_count")),
+                "warn_count": _int_or_none(entry.get("warn_count")),
+                "failing_story_ids": [
+                    str(item) for item in (entry.get("failing_story_ids") or []) if item
+                ],
+                "warn_story_ids": [
+                    str(item) for item in (entry.get("warn_story_ids") or []) if item
+                ],
+                "diagnosis": _optional_str(entry.get("diagnosis")),
+                "duration_s": entry.get("duration_s") if isinstance(entry.get("duration_s"), (int, float)) else None,
+                "duration_human": _optional_str(entry.get("duration_human")),
+                "cost_usd": entry.get("cost_usd") if isinstance(entry.get("cost_usd"), (int, float)) else None,
+                "cost_estimated": bool(entry.get("cost_estimated")),
+                "fix_commits": [str(item) for item in (entry.get("fix_commits") or []) if item],
+                "fix_diff_stat": _optional_str(entry.get("fix_diff_stat")),
+                "still_failing_after_fix": [
+                    str(item) for item in (entry.get("still_failing_after_fix") or []) if item
+                ],
+                "subagent_errors": [
+                    str(item) for item in (entry.get("subagent_errors") or []) if item
+                ],
+            }
+        )
+    return rounds
 
 
 def _certification_stories(source: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -2238,14 +2647,92 @@ def _summary_for_record(record: Any) -> dict[str, Any] | None:
 
 
 def _proof_report_info(project_dir: Path, record: Any) -> dict[str, Any]:
+    """Return proof-of-work locations + provenance metadata.
+
+    Cluster-evidence-trustworthiness #3: the proof drawer was previously
+    cached by artifact index alone and the server accepted the first
+    matching proof file without checking that ``run_context.run_id``
+    actually matched the run we're rendering. We now thread the
+    proof-of-work's own provenance (`generated_at`, `run_id`,
+    `session_id`, `branch`, `head_sha`), the file mtime, and a content
+    SHA-256 into the response so the client can:
+
+    * invalidate its cached proof content when ``version`` (from
+      run_context) changes, and
+    * warn the operator when the proof's recorded ``run_id`` does not
+      match the run record being viewed (stale or mis-routed file).
+    """
     json_path, html_path = _proof_report_paths(project_dir, record)
     run_id = str(getattr(record, "run_id", "") or "")
-    return {
+    payload: dict[str, Any] = {
         "json_path": str(json_path) if json_path is not None else None,
         "html_path": str(html_path) if html_path is not None else None,
         "html_url": f"/api/runs/{quote(run_id, safe='')}/proof-report" if html_path is not None else None,
         "available": html_path is not None,
+        # Provenance — populated below from the JSON when present so the
+        # UI never has to guess whether the file it just rendered actually
+        # belongs to this run.
+        "generated_at": None,
+        "run_id": None,
+        "session_id": None,
+        "branch": None,
+        "head_sha": None,
+        "file_mtime": None,
+        "sha256": None,
+        "run_id_matches": None,
     }
+    if json_path is not None:
+        payload.update(_proof_provenance(json_path, expected_run_id=run_id))
+    return payload
+
+
+def _proof_provenance(json_path: Path, *, expected_run_id: str) -> dict[str, Any]:
+    """Extract provenance metadata from a proof-of-work.json file."""
+    info: dict[str, Any] = {
+        "generated_at": None,
+        "run_id": None,
+        "session_id": None,
+        "branch": None,
+        "head_sha": None,
+        "file_mtime": None,
+        "sha256": None,
+        "run_id_matches": None,
+    }
+    try:
+        stat = json_path.stat()
+        info["file_mtime"] = (
+            datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    except OSError:
+        return info
+    try:
+        raw_bytes = json_path.read_bytes()
+    except OSError:
+        return info
+    try:
+        info["sha256"] = hashlib.sha256(raw_bytes).hexdigest()
+    except Exception:  # pragma: no cover — defensive
+        info["sha256"] = None
+    parsed = _read_json_object(json_path)
+    if not isinstance(parsed, dict):
+        return info
+    info["generated_at"] = _optional_str(parsed.get("generated_at"))
+    run_context = parsed.get("run_context") if isinstance(parsed.get("run_context"), dict) else {}
+    info["run_id"] = _optional_str(run_context.get("run_id"))
+    info["session_id"] = _optional_str(run_context.get("session_id"))
+    info["branch"] = _optional_str(run_context.get("git_branch"))
+    info["head_sha"] = _optional_str(run_context.get("git_commit_sha"))
+    expected = (expected_run_id or "").strip()
+    if expected and info["run_id"]:
+        info["run_id_matches"] = info["run_id"] == expected
+    elif expected and not info["run_id"]:
+        # No proof-side run_id to compare; treat as unknown rather than
+        # outright mismatch so legacy reports don't trip the UI warning.
+        info["run_id_matches"] = None
+    return info
 
 
 def _rewrite_proof_report_links(html: str, run_id: str) -> str:
@@ -2379,6 +2866,124 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+# ---------------------------------------------------------------------------
+# MIME / binary detection (cluster-evidence-trustworthiness #6)
+# ---------------------------------------------------------------------------
+
+# Magic-byte fingerprints for the binary formats we care about. Order
+# matters: PNG/GIF/JPG/PDF/WEBM/MP4/WEBP are checked before we fall back
+# to a null-byte sniff. We deliberately don't pull `python-magic` in —
+# the dependency is heavy and these prefixes cover every binary the
+# certifier emits today.
+_BINARY_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"%PDF-", "application/pdf"),
+    (b"\x1aE\xdf\xa3", "video/webm"),
+    (b"RIFF", None),  # follow-up sniff for WEBP / WAV
+)
+
+
+def _detect_mime_type(path: Path) -> str:
+    """Return a best-effort MIME type for ``path``.
+
+    Tries (1) magic-byte sniff on the first 16 bytes for the binary
+    formats we ship, (2) extension-based ``mimetypes.guess_type``,
+    (3) ``application/octet-stream`` as the safe default.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(64)
+    except OSError:
+        head = b""
+    for prefix, mime in _BINARY_MAGIC:
+        if head.startswith(prefix):
+            if prefix == b"RIFF" and len(head) >= 12 and head[8:12] == b"WEBP":
+                return "image/webp"
+            if mime is not None:
+                return mime
+            break
+    guess, _encoding = mimetypes.guess_type(str(path))
+    if guess:
+        return guess
+    return "application/octet-stream"
+
+
+def _looks_like_text(path: Path, *, mime_type: str | None = None) -> bool:
+    """True when ``path`` should be served as a UTF-8-decoded text body.
+
+    A file is treated as text when:
+    * the MIME type starts with ``text/`` or is one of a small allowlist
+      of structured-text MIMEs (``application/json``, ``...xml``), OR
+    * the first 1KB contains no NUL byte and decodes cleanly as UTF-8.
+
+    This deliberately treats unknown empty files (size 0) as text so
+    placeholder logs render as "No content" rather than as a download.
+    """
+    mime = mime_type or _detect_mime_type(path)
+    if mime.startswith("text/"):
+        return True
+    if mime in {
+        "application/json",
+        "application/xml",
+        "application/x-yaml",
+        "application/x-sh",
+        "application/javascript",
+    }:
+        return True
+    try:
+        with path.open("rb") as handle:
+            sample = handle.read(1024)
+    except OSError:
+        return False
+    if not sample:
+        return True  # empty file: nothing binary to render
+    if b"\x00" in sample:
+        return False
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _file_provenance(path: Path) -> dict[str, Any]:
+    """Return ``{size_bytes, mtime, sha256}`` for ``path`` (best-effort).
+
+    Cluster-evidence-trustworthiness #7: artifact lists previously only
+    exposed label/path/kind/exists. We add size/mtime/sha so the UI can
+    render columns + tooltips that let the operator spot stale or
+    tampered artifacts. The SHA is computed lazily on each read; for
+    the typical certifier output (KB-MB sized JSON/PNG/log files) this
+    is cheap. We truncate to 12 hex chars for display elsewhere — the
+    full hash is still returned so callers can verify integrity.
+    """
+    info: dict[str, Any] = {"size_bytes": None, "mtime": None, "sha256": None}
+    try:
+        stat = path.stat()
+    except OSError:
+        return info
+    info["size_bytes"] = stat.st_size
+    info["mtime"] = (
+        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    if path.is_file() and stat.st_size <= 16 * 1024 * 1024:
+        try:
+            hasher = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    hasher.update(chunk)
+            info["sha256"] = hasher.hexdigest()
+        except OSError:
+            info["sha256"] = None
+    return info
+
+
 def _queue_failure_log_fallback(
     project_dir: Path,
     record: Any,
@@ -2402,12 +3007,15 @@ def _queue_failure_log_fallback(
     raw = text.encode("utf-8", errors="replace")
     start = max(0, min(offset, len(raw)))
     chunk = raw[start : start + max(1, limit_bytes)]
+    next_offset = start + len(chunk)
     return LogReadResult(
         path=str(path),
         offset=start,
-        next_offset=start + len(chunk),
+        next_offset=next_offset,
         text=chunk.decode("utf-8", errors="replace"),
         exists=True,
+        total_bytes=len(raw),
+        eof=next_offset >= len(raw),
     )
 
 
@@ -2569,6 +3177,152 @@ def _event_severity(payload: dict[str, Any]) -> str:
     return "success"
 
 
+def terminate_watcher_blocking(
+    project_dir: Path,
+    *,
+    grace: float = 3.0,
+    reason: str = "backend shutdown",
+) -> dict[str, Any]:
+    """Force-terminate any watcher subprocess this project owns.
+
+    Reads the supervisor metadata, sends ``SIGTERM`` to the watcher's
+    process group (the watcher is launched with ``start_new_session=True``
+    so its grandchildren — e.g. an in-flight ``otto build`` — share the
+    pgid). Waits up to ``grace`` seconds for the leader to exit, then
+    escalates to ``SIGKILL`` on the same pgid.
+
+    Idempotent: if no supervisor metadata exists, or the watcher pid is
+    already dead, returns a status dict with ``terminated=False`` and
+    no side effects beyond a stop-record write.
+
+    Returned dict keys:
+    - ``terminated`` (bool): whether we sent any signal
+    - ``pid`` (int | None): the watcher leader pid we targeted
+    - ``pgid`` (int | None): the process group we signalled
+    - ``escalated`` (bool): whether SIGKILL was needed after the grace
+    - ``error`` (str | None): unexpected OS error string if any
+
+    Used by:
+    - ``MCBackend.stop()`` (test harness) to ensure no orphan survives a
+      tempdir teardown.
+    - FastAPI shutdown lifespan in ``otto/web/app.py`` for production.
+    """
+
+    result: dict[str, Any] = {
+        "terminated": False,
+        "pid": None,
+        "pgid": None,
+        "escalated": False,
+        "error": None,
+    }
+    try:
+        metadata, _err = read_supervisor(project_dir)
+    except Exception as exc:  # pragma: no cover — defensive
+        result["error"] = f"supervisor read failed: {exc}"
+        return result
+    if not metadata:
+        return result
+    pid = metadata.get("watcher_pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return result
+    result["pid"] = pid
+    if not _pid_alive(pid):
+        # Already dead — record the stop so health probes stop reporting it.
+        try:
+            record_watcher_stop(project_dir, target_pid=pid, reason=f"{reason} (already dead)")
+        except Exception:
+            pass
+        return result
+
+    pgid = _safe_getpgid(pid)
+    result["pgid"] = pgid
+    target_for_signal = pgid if pgid is not None else pid
+    signaller = os.killpg if pgid is not None else os.kill
+    try:
+        signaller(target_for_signal, signal.SIGTERM)
+        result["terminated"] = True
+    except ProcessLookupError:
+        try:
+            record_watcher_stop(project_dir, target_pid=pid, reason=f"{reason} (lookup miss)")
+        except Exception:
+            pass
+        return result
+    except OSError as exc:
+        result["error"] = f"SIGTERM failed: {exc}"
+        return result
+
+    deadline = time.monotonic() + max(0.0, grace)
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.05)
+
+    if _pid_alive(pid):
+        # Escalate to SIGKILL on the same target.
+        try:
+            signaller(target_for_signal, signal.SIGKILL)
+            result["escalated"] = True
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            result["error"] = f"SIGKILL failed: {exc}"
+        # Final brief wait for the kernel to reap.
+        kill_deadline = time.monotonic() + 1.0
+        while time.monotonic() < kill_deadline:
+            if not _pid_alive(pid):
+                break
+            time.sleep(0.05)
+
+    try:
+        record_watcher_stop(project_dir, target_pid=pid, reason=reason)
+    except Exception:
+        pass
+    return result
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if ``pid`` is a running, non-zombie process.
+
+    A zombie process still answers ``os.kill(pid, 0)`` until its parent
+    reaps it, but it consumes no resources and should not block shutdown.
+    We try ``psutil`` first to detect zombies; if psutil isn't available
+    or fails, fall back to ``os.kill(pid, 0)`` semantics.
+    """
+
+    try:
+        import psutil  # local import keeps this helper standalone
+    except ImportError:  # pragma: no cover — psutil is a runtime dep
+        psutil = None  # type: ignore[assignment]
+
+    if psutil is not None:
+        try:
+            proc = psutil.Process(pid)
+            return proc.status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.AccessDenied:
+            return True
+        except Exception:
+            pass  # fall through to os.kill
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _safe_getpgid(pid: int) -> int | None:
+    try:
+        return os.getpgid(pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return None
+
+
 def _watcher_stop_identity_issue(project_dir: Path, pid: int, health: dict[str, Any]) -> str | None:
     lock_pid = _int_or_none(health.get("lock_pid"))
     if lock_pid == pid:
@@ -2602,7 +3356,19 @@ def _merge_preflight(project_dir: Path) -> dict[str, Any]:
             "merge_blockers": [f"merge preflight failed: {exc}"],
             "dirty_files": [],
         }
-    blockers = [*issues.get("blocking", []), *issues.get("dirty", [])]
+    # The merge action MUST refuse on user-owned untracked files in the
+    # project root (W5-CRITICAL-1). build/improve preflights tolerate
+    # untracked-only state via ``ensure_safe_repo_state``; the merge
+    # action does not, because landing code while the operator has
+    # uncommitted user files is the silent-merge footgun the W5 bench
+    # uncovered. ``untracked`` lives in its own preflight category so
+    # the merge consumer can opt in without changing build/improve
+    # semantics.
+    blockers = [
+        *issues.get("blocking", []),
+        *issues.get("dirty", []),
+        *issues.get("untracked", []),
+    ]
     return {
         "merge_blocked": bool(blockers),
         "merge_blockers": blockers,
@@ -2734,6 +3500,117 @@ def _branch_diff_text(project_dir: Path, branch: str | None, target: str) -> dic
         detail = (result.stderr or result.stdout or f"git diff exited {result.returncode}").strip()
         return {"text": "", "error": detail}
     return {"text": result.stdout, "error": None}
+
+
+def _resolve_sha(project_dir: Path, ref: str) -> tuple[str | None, str | None]:
+    """Resolve ``ref`` to a 40-char SHA via ``git rev-parse``.
+
+    Returns ``(sha, error)``. ``error`` is ``None`` on success and a
+    short human-readable string when the lookup failed (so the UI can
+    distinguish "branch missing" from "git unavailable").
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return None, "ref is empty"
+    resolved_ref = _git_diff_ref(project_dir, ref)
+    result = git_ops.run_git(project_dir, "rev-parse", "--verify", "--quiet", f"{resolved_ref}^{{commit}}")
+    if not result.ok:
+        detail = (result.stderr or result.stdout or f"rev-parse exited {result.returncode}").strip()
+        return None, detail or f"could not resolve {ref}"
+    sha = result.stdout.strip()
+    if not sha:
+        return None, f"could not resolve {ref}"
+    return sha, None
+
+
+def _resolve_merge_base(project_dir: Path, target: str, branch: str) -> tuple[str | None, str | None]:
+    target_ref = _git_diff_ref(project_dir, target)
+    branch_ref = _git_diff_ref(project_dir, branch)
+    result = git_ops.run_git(project_dir, "merge-base", target_ref, branch_ref)
+    if not result.ok:
+        detail = (result.stderr or result.stdout or f"merge-base exited {result.returncode}").strip()
+        return None, detail or f"could not compute merge-base({target}, {branch})"
+    sha = result.stdout.strip()
+    if not sha:
+        return None, f"could not compute merge-base({target}, {branch})"
+    return sha, None
+
+
+def _diff_freshness_shas(
+    project_dir: Path,
+    *,
+    branch: str | None,
+    target: str,
+    merge_info: dict[str, Any] | None,
+) -> tuple[str | None, str | None, str | None, list[str]]:
+    """Capture target HEAD, branch HEAD, and merge-base SHAs at fetch time.
+
+    For already-merged tasks we prefer the recorded SHAs from the merge
+    state (``target_head_before`` / ``merge_commit``) over re-resolving
+    the live refs — those refs may have moved on past the merge.
+    Returns ``(target_sha, branch_sha, merge_base, errors)``.
+    """
+    errors: list[str] = []
+    target_sha: str | None = None
+    branch_sha: str | None = None
+    merge_base: str | None = None
+    if merge_info is not None:
+        # Merged task: snapshot what was actually merged. The "target_sha"
+        # is the target HEAD at merge time; the "branch_sha" is the merge
+        # commit's second parent (the tip of the branch as merged); the
+        # merge-base is recorded as ``diff_base`` when available.
+        target_sha = _optional_str(merge_info.get("target_head_before"))
+        merge_commit = _optional_str(merge_info.get("merge_commit"))
+        if merge_commit:
+            branch_tip = _merge_commit_branch_parent(project_dir, merge_commit)
+            branch_sha = branch_tip or merge_commit
+        else:
+            branch_sha = None
+        merge_base = _optional_str(merge_info.get("diff_base")) or target_sha
+        if target_sha is None:
+            errors.append("target_head_before missing from merge state")
+        if branch_sha is None:
+            errors.append("merge_commit missing from merge state")
+        return target_sha, branch_sha, merge_base, errors
+
+    # Live diff path: rev-parse each ref. Lookups fail independently so the
+    # UI can warn the operator about exactly which side is unverifiable.
+    if not target:
+        errors.append("target ref is empty")
+    else:
+        target_sha, err = _resolve_sha(project_dir, target)
+        if err:
+            errors.append(f"target {target}: {err}")
+    branch_str = (branch or "").strip()
+    if not branch_str or branch_str == target:
+        # Same-branch diff is empty; nothing meaningful to report.
+        pass
+    else:
+        branch_sha, err = _resolve_sha(project_dir, branch_str)
+        if err:
+            errors.append(f"branch {branch_str}: {err}")
+    if target and branch_str and branch_str != target and target_sha and branch_sha:
+        merge_base, err = _resolve_merge_base(project_dir, target, branch_str)
+        if err:
+            errors.append(f"merge-base: {err}")
+    return target_sha, branch_sha, merge_base, errors
+
+
+def _merge_commit_branch_parent(project_dir: Path, merge_commit: str) -> str | None:
+    """Return the second parent of ``merge_commit`` (tip of merged branch).
+
+    ``merge --no-ff`` produces a commit whose first parent is the target's
+    prior HEAD and whose second parent is the merged-in branch tip. For
+    fast-forward merges there is only one parent and the branch tip equals
+    the merge commit itself.
+    """
+    result = git_ops.run_git(project_dir, "rev-list", "--parents", "-n", "1", merge_commit)
+    if not result.ok:
+        return None
+    parts = result.stdout.strip().split()
+    if len(parts) >= 3:
+        return parts[2]
+    return None
 
 
 def _git_diff_ref(project_dir: Path, ref: str) -> str:

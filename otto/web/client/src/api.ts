@@ -5,18 +5,71 @@ export interface StateQuery {
   outcome: OutcomeFilter;
   query: string;
   activeOnly: boolean;
+  // 1-based page in the UI (server is 0-based — we subtract on send).
+  // Optional so detail/non-history call sites can omit it.
+  historyPage?: number;
+  // Allowed values: 10 / 25 / 50 / 100. Anything else is rejected by the
+  // server and falls back to the model default. See codex-state-management
+  // #6 — the server already accepts these params, the client just never
+  // sent them, leaving power users stuck on page 1.
+  historyPageSize?: number;
 }
 
 export class ApiError extends Error {
   status: number;
   severity: string;
+  // Original server-provided message preserved for tests/logging. The
+  // `.message` is replaced with a friendlier mapping by `friendlyApiMessage`
+  // when one of the recognized status codes hits.
+  rawMessage: string;
 
   constructor(message: string, status: number, severity = "error") {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.severity = severity;
+    this.rawMessage = message;
   }
+}
+
+/**
+ * Map common project-launcher / generic API failures to actionable copy.
+ *
+ * Pulled from mc-audit codex-first-time-user.md #24/#15/#16: launcher errors
+ * surface raw `HTTP <status>` strings (or unhelpful server text) without
+ * recovery hints. Mapping at the API boundary means every caller (project
+ * create, project select, queue, watcher, ...) gets the same friendly copy
+ * for free instead of duplicating switch-on-status in each component.
+ */
+export function friendlyApiMessage(status: number, raw: string, context?: {projectName?: string; projectPath?: string}): string {
+  const trimmed = (raw || "").trim();
+  const lowered = trimmed.toLowerCase();
+  if (status === 409) {
+    if (context?.projectName) {
+      return `A project named "${context.projectName}" already exists. Choose a different name or open the existing one.`;
+    }
+    return trimmed || "That name or path is already in use.";
+  }
+  if (status === 400) {
+    if (context?.projectPath || lowered.includes("not a git repository")) {
+      const where = context?.projectPath || trimmed.replace(/^[^:]*:\s*/, "");
+      return `${where || "That path"} isn't a valid git repo. Make sure it exists and contains a .git directory.`;
+    }
+    return trimmed || "Request was invalid.";
+  }
+  if (status === 403) {
+    if (context?.projectPath) {
+      return `Permission denied at ${context.projectPath}. Check directory permissions, or pick a different path.`;
+    }
+    return trimmed || "Permission denied.";
+  }
+  if (status === 404) {
+    return trimmed || "The requested resource was not found.";
+  }
+  if (status >= 500) {
+    return `Server error: ${trimmed || `HTTP ${status}`}. Try again or check the server log.`;
+  }
+  return trimmed || `HTTP ${status}`;
 }
 
 export function stateQueryParams(query: StateQuery): URLSearchParams {
@@ -25,7 +78,39 @@ export function stateQueryParams(query: StateQuery): URLSearchParams {
   params.set("outcome", query.outcome);
   params.set("query", query.query);
   params.set("active_only", query.activeOnly ? "true" : "false");
+  // The server uses 0-based history pages; the UI presents 1-based pages
+  // because that's what humans expect. Translate at the boundary so the
+  // rest of the front end can keep speaking 1-based.
+  if (query.historyPage && query.historyPage > 1) {
+    params.set("history_page", String(query.historyPage - 1));
+  }
+  if (query.historyPageSize && query.historyPageSize > 0) {
+    params.set("history_page_size", String(query.historyPageSize));
+  }
   return params;
+}
+
+/**
+ * Per-run detail URL builder.
+ *
+ * The detail endpoint (`GET /api/runs/{run_id}`) is per-run — it must NOT
+ * inherit state-pane filter params (`type` / `outcome` / `query` /
+ * `active_only` / `history_page`). Earlier code reused `stateQueryParams`
+ * here, which appended state-pane filters even for detail fetches. With
+ * synthetic queue-compat run-ids (e.g. `queue-compat:<task>`) the resulting
+ * URL is misrouted on the server and returns 404 (see live-findings
+ * W2-IMPORTANT-1 / W13-IMPORTANT-1). The detail endpoint accepts only
+ * `history_page_size` here so the inspector can show consistent paging if
+ * a future detail-side history slice is added.
+ */
+export function runDetailUrl(runId: string, opts: {historyPageSize?: number} = {}): string {
+  const params = new URLSearchParams();
+  if (opts.historyPageSize && opts.historyPageSize > 0) {
+    params.set("history_page_size", String(opts.historyPageSize));
+  }
+  const qs = params.toString();
+  const base = `/api/runs/${encodeURIComponent(runId)}`;
+  return qs ? `${base}?${qs}` : base;
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -41,7 +126,9 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   }
   if (!response.ok) {
     const body = (data || {}) as ApiErrorBody;
-    throw new ApiError(body.message || `HTTP ${response.status}`, response.status, body.severity || "error");
+    const raw = body.message || `HTTP ${response.status}`;
+    const friendly = friendlyApiMessage(response.status, raw);
+    throw new ApiError(friendly, response.status, body.severity || "error");
   }
   return data as T;
 }
@@ -68,6 +155,7 @@ export function buildQueuePayload(args: {
   certification: CertificationPolicy;
   planning: PlanningMode;
   specFilePath: string;
+  priorRunId?: string;
 }): QueuePayload {
   const payload: QueuePayload = {extra_args: []};
   const after = splitCsv(args.after);
@@ -105,6 +193,10 @@ export function buildQueuePayload(args: {
   } else if (args.command === "improve") {
     payload.subcommand = args.subcommand;
     if (args.intent) payload.focus = args.intent;
+    // W3-CRITICAL-1: server uses prior_run_id to base the improve worktree
+    // on the prior run's branch instead of forking from main and colliding
+    // on the same files. Optional — server falls back to main when omitted.
+    if (args.priorRunId) payload.prior_run_id = args.priorRunId;
   } else if (args.intent) {
     payload.intent = args.intent;
   }
