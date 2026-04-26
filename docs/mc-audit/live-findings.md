@@ -682,6 +682,93 @@ Findings below are from the second run unless noted.
 
 ---
 
+## W4 findings
+
+W4 = Merge happy path: enqueue tiny `hello.py` build via UI → wait
+success → click Merge action → confirm branch landed in `main`.
+
+Run id: `2026-04-26-053237-7087ed/W4`. Verdict: **FAIL** in 736s. Cost
+spent on real LLM: **$0.00** (the build never reached the queue, so the
+agent never ran). Of the 7 soft-asserts that fired, all 7 cascade from a
+single root cause.
+
+### W4-CRITICAL-1: Step 1 race — `wait_for_function('#root.children > 0')` returns against the loading skeleton, then every subsequent interaction misses
+
+- **Severity:** CRITICAL — full reproduction of W3-CRITICAL-2 in W4 (and W5). $0 no-op runs are a tax on every CI cycle that uses this harness.
+- **Symptom:** After `page.goto(...)` the harness's only readiness probe is `document.querySelector('#root')?.children.length > 0`. The MC SPA renders a `<div>Loading Mission Control…</div>` card into `#root` long before the actionable shell mounts, so the probe returns true within ~50ms. `_enqueue_via_dialog_full` then immediately calls `page.locator('[data-testid="mission-new-job-button"]').first` — the button doesn't exist yet, `failures.fail("new-job button missing (enqueue w4-build)")` fires, and the rest of the scenario cascades:
+  - `could not enqueue W4 build` (consequence)
+  - `start-watcher click failed (W4): element is not enabled` (Start watcher is correctly disabled while the queue is empty)
+  - `build outcome=None (need success to merge)` (no build was ever queued)
+  - `no merge history row appeared in 90s` (consequence)
+  - `main commit count did not grow: pre=1 post=1` (consequence)
+  - `hello.py not present on main after merge (rc=128)` (consequence)
+  - Screenshot evidence: `bench-results/web-as-user/2026-04-26-053237-7087ed/W4/01-shell.png` shows ONLY the "Loading Mission Control…" card; the very next screenshot, `03-watcher.png`, taken ~95s later, shows the fully-rendered shell with the `New job` button.
+  - `final-state.json` confirms no work ever reached the backend: `runtime.files.queue.exists=False`, `history.items=[]`, `live.items=[]`, `watcher.health.state="stopped"`.
+- **Reproduction:** `OTTO_ALLOW_REAL_COST=1 OTTO_WEB_SKIP_FRESHNESS=1 .venv/bin/python scripts/web_as_user.py --scenario W4 --provider claude` against any clean tempdir.
+- **Hypothesis:** `scripts/web_as_user.py` lines 2772-2776 (W4) and 2992-2996 (W5) use only the bare `#root` probe — they never landed the workaround that already exists in W3 (lines 2459-2474), W1 (line 503), W11 (line 810), W2 (line 1320), W12a/b (lines 1602/1826), W13 (line 2058), W6 (line 3217), W7 (line 3466), W8 (line 3899): a follow-up `wait_for_selector('[data-testid="mission-new-job-button"], [data-testid="new-job-button"], [data-testid="launcher-subhead"]', timeout=20_000)`. W4/W5 are the only two scenarios that omit it.
+- **Suggested fix (harness, trivial):** Add the same 8-line follow-up wait after `wait_for_function` in `_run_w4` and `_run_w5`. Example for W4:
+  ```python
+  page.wait_for_function(
+      "document.querySelector('#root')?.children.length > 0",
+      timeout=15_000,
+  )
+  page.wait_for_selector(
+      '[data-testid="mission-new-job-button"], '
+      '[data-testid="new-job-button"], '
+      '[data-testid="launcher-subhead"]',
+      timeout=20_000,
+  )
+  ```
+- **Suggested fix (SPA, durable):** As recommended in W3-CRITICAL-2, add `data-state="loading|ready"` (or a distinct `data-testid="mission-shell"`) to the rendered shell so any external automation has one deterministic probe and doesn't need scenario-by-scenario fixes. `otto/web/client/src/App.tsx`.
+- **Why CRITICAL even though it's a harness regression:** The same pattern keeps re-occurring across scenarios because the SPA exposes no first-class readiness signal. Every new automation (browser tests, MCP tooling, smoke tests, Phase 5 scenarios) pays the same tax. This is the second re-occurrence after W3-CRITICAL-2; harness-level fixes won't stop the third.
+
+### W4-IMPORTANT-1: `_enqueue_via_dialog_full` swallows the failure — caller adds a duplicate `soft_assert` that will never fire correctly
+
+- **Severity:** IMPORTANT — the noise makes the failure harder to triage.
+- **Symptom:** `_enqueue_via_dialog_full` calls `failures.fail("new-job button missing (enqueue w4-build)")` *internally* and returns `False`. The caller then calls `failures.soft_assert(ok, "could not enqueue W4 build")` (line 2793), which adds a *second* failure with a different message describing the same root cause. The summary now lists two failures for one bug, plus a third (`start watcher click failed`) that's also a downstream effect — total of 7 soft-asserts for what's really 1 bug. Compare W4 step-by-step: 7 listed failures, 1 actual bug.
+- **Reproduction:** Any failed enqueue in W4/W5/W6/W7/W8.
+- **Hypothesis:** `_enqueue_via_dialog_full` was refactored to record its own failure inside the helper, but the callsites still wrap it in `soft_assert(ok, ...)` from before the refactor.
+- **Suggested fix:** Pick one. Either remove the `failures.fail(...)` from inside the helper (let the caller decide), OR remove the `soft_assert(ok, ...)` at every callsite. The callers I see (W4 line 2793, W5 line 3011, W6, W7, W8) all duplicate the message.
+
+---
+
+## W5 findings
+
+W5 = Merge blocked: enqueue tiny `ping.py` build → success → seed
+`DIRTY_FILE.txt` in target → click Merge → expect 409 with reason → no
+merge happens.
+
+Run id: `2026-04-26-054529-06158f/W5`. Verdict: **FAIL** in 653s. Cost
+spent on real LLM: **$0.00** (same root cause as W4 — never enqueued).
+
+### W5-CRITICAL-1: Same Step-1 race as W4 (and W3) — never reached the merge-blocking logic
+
+- **Severity:** CRITICAL — same root cause, same cascade. Counted once, but worth noting that the *interesting* scenario (does the backend block merge with a sensible reason?) is never even exercised.
+- **Symptom:** Identical to W4-CRITICAL-1. `01-shell.png` shows the loading skeleton only. The 6 cascading soft-asserts:
+  - `new-job button missing (enqueue w5-build)`
+  - `could not enqueue W5 build`
+  - `start watcher click failed (W5): element is not enabled`
+  - `W5 build outcome=None (need success to attempt merge)`
+  - `expected 409/400 (merge blocked); got 0`  ← because `build_run_id` was `None`, the merge POST was *skipped* (`if build_run_id:` guard at line 3057). `merge_status` defaulted to `0` and the assertion fired against the placeholder.
+  - `merge-blocked reason did not mention dirty/blocked/merge/repo: ` ← consequence of the same skipped POST.
+- **Reproduction:** `OTTO_ALLOW_REAL_COST=1 OTTO_WEB_SKIP_FRESHNESS=1 .venv/bin/python scripts/web_as_user.py --scenario W5 --provider claude`.
+- **Suggested fix:** Same as W4-CRITICAL-1. After the harness fix, this scenario will actually exercise the merge-block path; the underlying merge/dirt-detection logic in the backend was *not* tested in this run.
+
+### W5-IMPORTANT-1: When `build_run_id` is `None`, the harness silently skips the merge POST and reports a misleading `expected 409/400; got 0`
+
+- **Severity:** IMPORTANT — masks "we never asked the server" as "the server returned 0", which sends triage in the wrong direction.
+- **Symptom:** Lines 3055-3069: `merge_status = 0`, `if build_run_id: merge_status, merge_body = _post_action(...)`, then unconditionally `failures.soft_assert(merge_status in (409, 400), f"expected 409/400; got {merge_status}")`. When `build_run_id` is `None` (e.g. because the build never ran), the assertion fires with `got 0` even though no HTTP call was made. Compare W4 (line 2826-2845): `if build_run_id:` guards the POST AND the legal-actions check, but the failure messages still imply the merge was attempted.
+- **Reproduction:** Any W5 run where the build doesn't reach a terminal outcome.
+- **Suggested fix:** Add an explicit early-out / different failure message when `build_run_id is None`: `failures.fail("could not attempt merge — build never produced a run_id")`. Don't conflate "no attempt" with "attempt returned 0".
+
+### W5-NOTE-1: Recovering from a $0 cascade requires reading the harness source
+
+- **Severity:** NOTE.
+- **Symptom:** When the cascade fires, the human reading the FAIL summary sees 6 soft-asserts but no clear "this is the same Step-1 race you saw last time". The fix is in scripts/web_as_user.py at a specific line; without that knowledge, every scenario added looks like a new bug.
+- **Suggested fix:** Add a top-of-scenario readiness helper `_wait_for_mc_shell_ready(page, failures)` that all scenarios call. One implementation, one bug fix when the SPA gains a real readiness marker.
+
+---
+
 ## Summary
 
 | Run | Verdict | Wall time | Bugs (C/I/N) | Cost (live) |
@@ -693,8 +780,10 @@ Findings below are from the second run unless noted.
 | W12b | FAIL    | 156s      | 0 / 2 / 0     | LLM: 1 build + cert + merge (~$0.40) |
 | W13  | FAIL    | 165s      | 1 / 3 / 1     | LLM: 1 TODO build + cert (~$0.40-$0.50) |
 | W3   | FAIL    | 305s (run 2; run 1 = 208s no-op)    | 2 / 7 / 2     | LLM: 1 greet build + 1 improve (~$0.83 = $0.36 build + $0.47 improve) |
+| W4   | FAIL    | 736s      | 1 / 1 / 0     | $0.00 — Step-1 race; no LLM ever invoked (W4-CRITICAL-1 reproduces W3-CRITICAL-2) |
+| W5   | FAIL    | 653s      | 1 / 1 / 1     | $0.00 — same Step-1 race; merge-block path never exercised |
 
-Total findings (across all 7 runs): **7 CRITICAL, 24 IMPORTANT, 8 NOTE**.
+Total findings (across all 9 runs): **9 CRITICAL, 26 IMPORTANT, 9 NOTE**.
 
 (Some findings reproduce across scenarios — e.g. W1-CRITICAL-1 also surfaces in W13;
 W1-IMPORTANT-3 surfaces in W2/W12b/W13. The reproduction breadth is itself a
@@ -705,7 +794,8 @@ flagged inline.)
 Cost actually spent: **~$2.93** total
 (W2 ≈ $0.85 for 2 builds; W12a ≈ $0.05 quick cancel; W12b ≈ $0.40 build+merge;
 W13 ≈ $0.50 TODO build + cert + outage; W3 ≈ $0.83 for 1 greet build + 1 improve.
-W3 first attempt was $0.00 — never enqueued anything, see W3-CRITICAL-2).
+W3 first attempt was $0.00 — never enqueued anything, see W3-CRITICAL-2.
+W4 and W5 also $0.00 each — same Step-1 race, see W4-CRITICAL-1 / W5-CRITICAL-1).
 
 ### INFRA-class issues observed
 
