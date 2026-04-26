@@ -769,6 +769,131 @@ spent on real LLM: **$0.00** (same root cause as W4 — never enqueued).
 
 ---
 
+## Harness migration (post-audit)
+
+The W3/W4/W5-CRITICAL-1 race against the loading skeleton was eliminated
+at the harness layer by switching every `wait_for_function('#root.children > 0')`
+probe to a single shared helper:
+
+```python
+def _wait_for_mc_ready(page: Any, *, timeout_ms: int = 20_000) -> None:
+    page.wait_for_selector(
+        '[data-mc-shell="ready"], [data-testid="launcher-subhead"]',
+        timeout=timeout_ms,
+    )
+```
+
+The `data-mc-shell="ready"` attribute was already added to the SPA as the
+W3-CRITICAL-2 fix (cluster G). All 13 readiness sites in
+`scripts/web_as_user.py` now use the helper (W1, W11, W2, W12a, W12b,
+W13×2, W3, W4, W5, W6, W7, W8). Bare `#root.children > 0` no longer
+appears in the harness.
+
+Also: `_enqueue_via_dialog_full` was changed to record diagnostic
+`failures.note(...)` instead of `failures.fail(...)` on internal
+failures, so the caller's single `failures.soft_assert(ok, "could not
+enqueue …")` is the canonical failure entry — fixes W4-IMPORTANT-1
+double-soft-assert.
+
+## W4 findings (re-run)
+
+Re-ran with the harness migration in place.
+
+Run id: `2026-04-26-060444-2326ae/W4`. Verdict: **PASS** in 78s. Cost
+spent on real LLM: **~$0.23** (one tiny `hello.py` build, ~54s, $0.23
+per `final-state.json` `cost_usd`).
+
+The Step-1 race is gone. The merge happy path now actually exercises
+the backend:
+
+- `pre-merge-git-log.txt` → 2 commits on `main`
+- `post-merge-git-log.txt` → 4 commits on `main`, with
+  `Merge branch 'build/add-a-tiny-python-module-hello-py-…'` and
+  `Add hello.py module exporting hello() returning 'world'`
+- `merge-response.json` → `{"ok":true,"message":"merge … finished",…}`
+- `hello-py-in-main.txt` → file present
+- No console errors, no page errors, no network 4xx.
+
+No new bugs found in W4 — the merge-happy path is correct.
+
+## W5 findings (re-run)
+
+Re-ran with the harness migration in place. Now exercises the actual
+merge-block path (the original $0 race never reached this logic).
+
+Run id: `2026-04-26-060606-9cd966/W5`. Verdict: **FAIL** in 72s. Cost
+spent on real LLM: **~$0.23** (one tiny `ping.py` build, ~54s).
+
+### W5-CRITICAL-1 (post-rerun, replaces the harness-only finding): Merge of a successful build branch ignores untracked files in the project root and lands a "blocked" merge as success
+
+- **Severity:** CRITICAL — silent merge of work that the operator
+  intentionally guarded against. Untracked files in the working tree
+  (a real stop-the-world signal in any merge UX) are completely ignored
+  by Otto's merge preflight.
+- **Symptom:**
+  1. The harness builds `ping.py` to a worktree (success, run_id
+     `2026-04-26-060618-469e1f`).
+  2. Writes `DIRTY_FILE.txt` (untracked) to the project root before
+     attempting the merge.
+  3. Captures `pre-merge-git-status.txt` confirming the dirt:
+     ```
+     ?? DIRTY_FILE.txt
+     ```
+  4. POSTs `/api/runs/<id>/actions/merge`. Server returns **HTTP 200**:
+     ```json
+     {"ok":true,"message":"merge add-a-tiny-python-module-ping-py-e93a94 finished",
+      "severity":"information","modal_title":null,"modal_message":null,
+      "refresh":true,"clear_banner":false}
+     ```
+  5. `final-state.json` confirms a `merge` live row with
+     `terminal_outcome: "success"` and `last_event: "all clean merges,
+     cert skipped per --fast"`.
+  6. `git show main:ping.py` succeeds (rc=0) — `ping.py` is now on
+     `main` despite the dirty tree.
+- **Reproduction:** `OTTO_ALLOW_REAL_COST=1 OTTO_WEB_SKIP_FRESHNESS=1
+  .venv/bin/python scripts/web_as_user.py --scenario W5 --provider claude`.
+- **Hypothesis:** Otto's merge preflight (the `all clean merges` path)
+  considers a project root "clean" when there are no *modified* tracked
+  files, but does not detect *untracked* files in the project root or
+  the worktree. Either the preflight invokes `git diff --quiet` (which
+  ignores untracked) instead of `git status --porcelain` (which would
+  list `??`), or the preflight only looks at the inside of the build's
+  `.worktrees/<task>/` and never inspects the project root.
+- **Suggested fix:** Add `git status --porcelain` (or `--ignored=no
+  --untracked-files=normal`) to the merge preflight. If any untracked
+  files exist in the project root that are not in `.gitignore`, return
+  HTTP 409 with body `{"reason": "project root has untracked files",
+  "files": [...]}` and surface as a banner in MC. Same check should run
+  for modified-but-unstaged tracked files. If untracked-in-root is
+  *intentionally* ignored, document why (and fix W5 to test a
+  modified-tracked file instead).
+- **Why this is the real bug, not the harness:** With the readiness
+  probe fixed, the harness now reaches the actual merge logic and
+  produces a clean 4-step trace: build → seed dirt → POST merge →
+  merge succeeds anyway. This is the merge-block invariant the
+  scenario was designed to test, and Otto fails it.
+
+### W5-IMPORTANT-1 (post-rerun): merge response shape doesn't expose blocked-merge reason
+
+- **Severity:** IMPORTANT — even if the preflight were fixed, the
+  current response envelope (`{ok, message, severity, modal_title,
+  modal_message, refresh, clear_banner}`) doesn't have a structured
+  field for "merge was blocked because X". The harness has to scrape
+  `message`/`modal_message` text for substrings like `"dirty"`,
+  `"blocked"`, `"merge"`, `"repo"` to know what happened. Suggest
+  adding `blocked: bool` and `block_reason: str | null` to the
+  response so MC and external automation can render the banner from
+  structured data.
+- **Reproduction:** Inspect any `/api/runs/<id>/actions/merge` response.
+
+### W5-NOTE-1 (post-rerun): repeated 404 on `/api/runs/queue-compat:<task-id>?...`
+
+- **Severity:** NOTE — already filed as **W2-IMPORTANT-1**. Reproduces
+  here. Console error in `console.json`. Cross-link only; not a new
+  finding.
+
+---
+
 ## Summary
 
 | Run | Verdict | Wall time | Bugs (C/I/N) | Cost (live) |
@@ -780,10 +905,14 @@ spent on real LLM: **$0.00** (same root cause as W4 — never enqueued).
 | W12b | FAIL    | 156s      | 0 / 2 / 0     | LLM: 1 build + cert + merge (~$0.40) |
 | W13  | FAIL    | 165s      | 1 / 3 / 1     | LLM: 1 TODO build + cert (~$0.40-$0.50) |
 | W3   | FAIL    | 305s (run 2; run 1 = 208s no-op)    | 2 / 7 / 2     | LLM: 1 greet build + 1 improve (~$0.83 = $0.36 build + $0.47 improve) |
-| W4   | FAIL    | 736s      | 1 / 1 / 0     | $0.00 — Step-1 race; no LLM ever invoked (W4-CRITICAL-1 reproduces W3-CRITICAL-2) |
-| W5   | FAIL    | 653s      | 1 / 1 / 1     | $0.00 — same Step-1 race; merge-block path never exercised |
+| W4   | PASS (rerun; orig FAIL/736s harness-race) | 78s | 0 / 0 / 0 | LLM: 1 hello build ($0.23) |
+| W5   | FAIL (rerun; orig FAIL/653s harness-race) | 72s | 1 / 1 / 1 | LLM: 1 ping build ($0.23) — merge-block invariant violated |
 
-Total findings (across all 9 runs): **9 CRITICAL, 26 IMPORTANT, 9 NOTE**.
+Total findings (across all 9 runs): **9 CRITICAL, 26 IMPORTANT, 9 NOTE**
+(unchanged in count — the W4/W5 reruns *replace* the prior harness-only
+findings; the W4 race is now resolved at source, the W5 race resolved
+revealed one new merge-preflight CRITICAL + one IMPORTANT, see
+"W5 findings (re-run)" above).
 
 (Some findings reproduce across scenarios — e.g. W1-CRITICAL-1 also surfaces in W13;
 W1-IMPORTANT-3 surfaces in W2/W12b/W13. The reproduction breadth is itself a
@@ -791,11 +920,12 @@ data point: regressions like the log-pane stacking issue affect every flow that
 opens an inspector. Counted once each at the **first** observation; reproductions
 flagged inline.)
 
-Cost actually spent: **~$2.93** total
+Cost actually spent: **~$3.39** total
 (W2 ≈ $0.85 for 2 builds; W12a ≈ $0.05 quick cancel; W12b ≈ $0.40 build+merge;
-W13 ≈ $0.50 TODO build + cert + outage; W3 ≈ $0.83 for 1 greet build + 1 improve.
+W13 ≈ $0.50 TODO build + cert + outage; W3 ≈ $0.83 for 1 greet build + 1 improve;
+W4 rerun ≈ $0.23 for hello build; W5 rerun ≈ $0.23 for ping build.
 W3 first attempt was $0.00 — never enqueued anything, see W3-CRITICAL-2.
-W4 and W5 also $0.00 each — same Step-1 race, see W4-CRITICAL-1 / W5-CRITICAL-1).
+W4/W5 first attempts were also $0.00 — harness Step-1 race; see harness-migration section.).
 
 ### INFRA-class issues observed
 

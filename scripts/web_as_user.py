@@ -407,6 +407,25 @@ def _safe_screenshot(page: Any, artifact_dir: Path, name: str) -> Optional[Path]
         return None
 
 
+def _wait_for_mc_ready(page: Any, *, timeout_ms: int = 20_000) -> None:
+    """Wait until the Mission Control SPA shell is ready for interaction.
+
+    Uses the durable ``data-mc-shell="ready"`` attribute introduced for
+    W3-CRITICAL-2 (cluster G ready marker). Falls back to the launcher
+    subhead testid so launcher-mode entries (which intentionally do not
+    flip ``data-mc-shell``) still resolve.
+
+    The bare ``#root.children > 0`` probe used previously raced the
+    ``"Loading Mission Control…"`` skeleton card and short-circuited
+    before any actionable UI mounted (W3-CRITICAL-2, W4-CRITICAL-1,
+    W5-CRITICAL-1).
+    """
+    page.wait_for_selector(
+        '[data-mc-shell="ready"], [data-testid="launcher-subhead"]',
+        timeout=timeout_ms,
+    )
+
+
 def _api_get(base_url: str, path: str, *, timeout: float = 10.0) -> tuple[int, Any]:
     """Tiny stdlib HTTP GET to avoid an extra dep."""
     import urllib.request
@@ -498,11 +517,9 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 failures.fail(f"page.goto failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-loaded")
 
-            # Wait for hydration
+            # Wait for the SPA shell to be ready (W3-CRITICAL-2 fix).
             try:
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0", timeout=15_000
-                )
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"react never hydrated: {exc}")
 
@@ -807,9 +824,7 @@ def _run_w11(ctx: ScenarioContext) -> ScenarioRunResult:
             _log("Step 1+2: page.goto, verify shell")
             try:
                 page.goto(ctx.web_url, wait_until="networkidle", timeout=30_000)
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0", timeout=15_000
-                )
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell")
@@ -1317,10 +1332,7 @@ def _run_w2(ctx: ScenarioContext) -> ScenarioRunResult:
             _log("Step 1: page.goto + verify shell")
             try:
                 page.goto(ctx.web_url, wait_until="networkidle", timeout=30_000)
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0",
-                    timeout=15_000,
-                )
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell")
@@ -1599,10 +1611,7 @@ def _run_w12a(ctx: ScenarioContext) -> ScenarioRunResult:
             _log("Step 2: page.goto + verify shell")
             try:
                 page.goto(ctx.web_url, wait_until="networkidle", timeout=30_000)
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0",
-                    timeout=15_000,
-                )
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell")
@@ -1823,10 +1832,7 @@ def _run_w12b(ctx: ScenarioContext) -> ScenarioRunResult:
             _log("Step 2: page.goto + verify shell")
             try:
                 page.goto(ctx.web_url, wait_until="networkidle", timeout=30_000)
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0",
-                    timeout=15_000,
-                )
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell")
@@ -2055,10 +2061,7 @@ def _run_w13(ctx: ScenarioContext) -> ScenarioRunResult:
             _log("Step 1: page.goto + start a real build via JobDialog")
             try:
                 page.goto(ctx.web_url, wait_until="networkidle", timeout=30_000)
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0",
-                    timeout=15_000,
-                )
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell-pre")
@@ -2145,10 +2148,7 @@ def _run_w13(ctx: ScenarioContext) -> ScenarioRunResult:
                 _log("Step 4: reopen browser to backend_b")
                 try:
                     page.goto(backend_b.url, wait_until="networkidle", timeout=30_000)
-                    page.wait_for_function(
-                        "document.querySelector('#root')?.children.length > 0",
-                        timeout=15_000,
-                    )
+                    _wait_for_mc_ready(page)
                 except Exception as exc:  # noqa: BLE001
                     failures.fail(f"shell load on backend_b failed: {exc}")
                 _safe_screenshot(page, artifact_dir, "04-post-restart")
@@ -2339,13 +2339,21 @@ def _enqueue_via_dialog_full(
     artifact_dir: Path,
     screenshot_idx: int,
 ) -> bool:
-    """Open JobDialog, optionally switch command/subcommand, fill intent, submit."""
+    """Open JobDialog, optionally switch command/subcommand, fill intent, submit.
+
+    Returns True on success, False on any failure. Records a single
+    diagnostic ``failures.note`` describing the specific reason; the
+    caller is expected to wrap this with one ``failures.soft_assert(ok,
+    ...)``. (W4-IMPORTANT-1: previously we recorded a hard ``fail``
+    here and the caller added a duplicate ``soft_assert`` — surfacing
+    the same root cause as two separate findings.)
+    """
     try:
         new_job = page.locator(
             '[data-testid="mission-new-job-button"], [data-testid="new-job-button"]'
         ).first
         if new_job.count() == 0:
-            failures.fail(f"new-job button missing (enqueue {label})")
+            failures.note(f"enqueue {label}: new-job button not present")
             return False
         new_job.click(timeout=5_000)
         page.wait_for_selector('[data-testid="job-dialog-intent"]', timeout=10_000)
@@ -2361,7 +2369,7 @@ def _enqueue_via_dialog_full(
         _safe_screenshot(page, artifact_dir, f"{screenshot_idx:02d}-dialog-{label}")
         submit = page.locator('[data-testid="job-dialog-submit-button"]')
         if submit.count() == 0:
-            failures.fail(f"submit button missing (enqueue {label})")
+            failures.note(f"enqueue {label}: submit button missing")
             return False
         submit.click(timeout=5_000)
         try:
@@ -2372,7 +2380,7 @@ def _enqueue_via_dialog_full(
             pass
         return True
     except Exception as exc:  # noqa: BLE001
-        failures.fail(f"enqueue {label} failed: {exc}")
+        failures.note(f"enqueue {label}: exception — {exc}")
         return False
 
 
@@ -2456,22 +2464,7 @@ def _run_w3(ctx: ScenarioContext) -> ScenarioRunResult:
             _log("Step 1: open MC")
             try:
                 page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0",
-                    timeout=15_000,
-                )
-                # Skeleton ("Loading Mission Control…") populates #root before
-                # actionable UI exists. Wait for the actual New job button to
-                # appear (or the launcher), to avoid racing the workspace boot.
-                try:
-                    page.wait_for_selector(
-                        '[data-testid="mission-new-job-button"], '
-                        '[data-testid="new-job-button"], '
-                        '[data-testid="launcher-subhead"]',
-                        timeout=20_000,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    failures.note(f"actionable UI did not appear in 20s: {exc}")
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell")
@@ -2770,10 +2763,7 @@ def _run_w4(ctx: ScenarioContext) -> ScenarioRunResult:
             _log("Step 1: open MC")
             try:
                 page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0",
-                    timeout=15_000,
-                )
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell")
@@ -2990,10 +2980,7 @@ def _run_w5(ctx: ScenarioContext) -> ScenarioRunResult:
             _log("Step 1: open MC + enqueue build")
             try:
                 page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0",
-                    timeout=15_000,
-                )
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell")
@@ -3214,10 +3201,7 @@ def _run_w6(ctx: ScenarioContext) -> ScenarioRunResult:
             _log("Step 1: open MC")
             try:
                 page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0",
-                    timeout=15_000,
-                )
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell")
@@ -3463,10 +3447,7 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
             _safe_screenshot(page, artifact_dir, "01-mobile-loaded")
 
             try:
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0",
-                    timeout=15_000,
-                )
+                _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"react never hydrated on mobile: {exc}")
 
@@ -3896,16 +3877,8 @@ def _run_w8(ctx: ScenarioContext) -> ScenarioRunResult:
             _log("Step 1: open MC, verify shell ready marker")
             try:
                 page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_function(
-                    "document.querySelector('#root')?.children.length > 0",
-                    timeout=15_000,
-                )
-                # cluster G ready marker
-                try:
-                    page.wait_for_selector('[data-mc-shell="ready"]', timeout=5_000)
-                    _log("  [data-mc-shell=ready] present")
-                except Exception as exc:  # noqa: BLE001
-                    failures.note(f"shell ready marker missing: {exc}")
+                _wait_for_mc_ready(page)
+                _log("  mc shell ready (data-mc-shell=ready or launcher)")
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell")
