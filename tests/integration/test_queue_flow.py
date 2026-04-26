@@ -26,7 +26,7 @@ def test_queue_run_cli_dispatches_real_worktree_child_and_drains_queue(
     run = cli_in_repo(
         repo,
         ["queue", "run", "--no-dashboard", "--exit-when-empty", "--concurrent", "1"],
-        env={"OTTO_BIN": str(fake_otto), "OTTO_NO_TUI": "1"},
+        env={"OTTO_BIN": str(fake_otto)},
     )
 
     task = load_queue(repo)[0]

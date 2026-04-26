@@ -16,8 +16,6 @@ dependencies = [
     "psutil>=5.9",
     "fastapi>=0.100",
     "uvicorn>=0.23",
-    # SearchableLog overrides private Log internals; stay on the known-working 8.x line.
-    "textual>=8.2.4,<9",
 ]
 
 [project.optional-dependencies]
@@ -66,15 +64,13 @@ testpaths = ["tests"]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 # Default suite excludes:
-#   - `tui`: legacy Textual TUI tests (Mission Control is moving to web)
 #   - `browser`: Playwright browser tests (run via `pytest -m browser`,
 #     which also opts the playwright plugin in via `-p playwright`)
 # The playwright plugin is *disabled* in the default suite because it
 # pre-registers async fixtures that conflict with pytest-asyncio's loop
 # management ("Cannot run the event loop while another loop is running").
-addopts = ["-m", "not tui and not browser", "-p", "no:playwright"]
+addopts = ["-m", "not browser", "-p", "no:playwright"]
 markers = [
-    "tui: legacy Textual TUI tests; excluded from the default suite because Mission Control is moving to web",
     "browser: Playwright-driven Mission Control browser tests; excluded from the default suite (run with `pytest -m browser -p playwright`)",
 ]
 

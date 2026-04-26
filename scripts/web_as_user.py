@@ -2,9 +2,7 @@
 """Phase 5 live web-as-user harness for Mission Control.
 
 Drives a real browser (Playwright) against a real `otto web` server backed by
-a throwaway git project running real LLM builds. Mirrors the patterns in
-`scripts/otto_as_user.py` (TUI harness) and `scripts/otto_as_user_nightly.py`
-(N9 operator-day pattern that W11 emulates).
+a throwaway git project running real LLM builds.
 
 Per `plan-mc-audit.md` Phase 5:
 
@@ -4632,7 +4630,7 @@ def _run_w10(ctx: ScenarioContext) -> ScenarioRunResult:
                     try:
                         # Look for ANY DOM evidence of the run id. Two paths:
                         # (1) a [data-run-id="X"] attribute on a task card.
-                        # (2) the textual run id in any task-board cell.
+                        # (2) the visible run id in any task-board cell.
                         count = page_b.evaluate(
                             "(rid) => {"
                             "  if (!rid) return 0;"

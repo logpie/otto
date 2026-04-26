@@ -375,27 +375,13 @@ def register_queue_commands(main: click.Group) -> None:
         """
 
     @queue.command(context_settings=CONTEXT_SETTINGS)
-    @click.option("--dashboard-mouse", is_flag=True,
-                  help="Enable mouse capture (loses terminal copy in most terminals)")
-    def dashboard(dashboard_mouse: bool) -> None:
-        """Open the live queue dashboard in Mission Control filtered to queue runs.
-
-        \b
-            otto queue dashboard                  # re-open the live queue UI
-            otto queue dashboard --dashboard-mouse
-
-        This viewer can cancel or resume queue runs when the watcher is active.
-        Quit with `q`.
-        """
-        from otto.queue.dashboard import run_dashboard_viewer
-
-        project_dir = _project_dir()
-        sys.exit(
-            run_dashboard_viewer(
-                project_dir,
-                dashboard_mouse=dashboard_mouse,
-            )
+    def dashboard() -> None:
+        """Deprecated queue TUI command."""
+        _project_dir()
+        error_console.print(
+            "[error]`otto queue dashboard` has been removed. Use `otto web` for Mission Control.[/error]"
         )
+        sys.exit(2)
 
     # ---- enqueue: build ----
     @queue.command(
@@ -777,11 +763,10 @@ def register_queue_commands(main: click.Group) -> None:
             otto queue resume                  # resume all tasks with a checkpoint
             otto queue resume labels           # resume one task
             otto queue resume labels,due       # resume multiple tasks
-            otto queue resume --select         # pick from a checkbox list
+            otto queue resume --select         # removed; use explicit ids or `otto web`
 
         Resumed tasks move to the head of the queue and restart with `--resume`.
         """
-        from otto.queue.dashboard import select_resume_tasks
         from otto.queue.schema import append_command, load_state, reorder_tasks
 
         project_dir = _project_dir()
@@ -803,20 +788,11 @@ def register_queue_commands(main: click.Group) -> None:
 
         selected_ids = _parse_resume_task_args(task_ids)
         if select:
-            if not resumable_ids:
-                console.print("  Resume-eligible tasks exist, but none have a resumable checkpoint.")
-                return
-            selected_ids = select_resume_tasks(
-                project_dir,
-                [
-                    tasks_by_id[task_id]
-                    for task_id in resumable_ids
-                    if task_id in tasks_by_id
-                ],
+            error_console.print(
+                "[error]`otto queue resume --select` has been removed with the TUI. "
+                "Pass task IDs explicitly or use `otto web`.[/error]"
             )
-            if not selected_ids:
-                console.print("  Resume selection cancelled.")
-                return
+            sys.exit(2)
         elif not selected_ids:
             selected_ids = list(resumable_ids)
             if not selected_ids:
@@ -1012,9 +988,7 @@ def register_queue_commands(main: click.Group) -> None:
     @click.option("--quiet", is_flag=True,
                   help="Suppress watcher event lines (spawn/reap/cancel) on stdout")
     @click.option("--no-dashboard", is_flag=True,
-                  help="Force the prefixed-stdout watcher instead of the Textual dashboard")
-    @click.option("--dashboard-mouse", is_flag=True,
-                  help="Enable mouse capture (loses terminal copy in most terminals)")
+                  help="Deprecated no-op; the watcher always uses prefixed stdout")
     @click.option(
         "--exit-when-empty",
         is_flag=True,
@@ -1024,7 +998,6 @@ def register_queue_commands(main: click.Group) -> None:
         concurrent: int | None,
         quiet: bool,
         no_dashboard: bool,
-        dashboard_mouse: bool,
         exit_when_empty: bool,
     ) -> None:
         """Start the foreground queue watcher. Run in a tmux pane like `vite dev`."""
@@ -1049,32 +1022,6 @@ def register_queue_commands(main: click.Group) -> None:
             rcfg.concurrent = concurrent
         rcfg.exit_when_empty = exit_when_empty
         otto_bin = _resolve_otto_bin()
-
-        use_tui = (
-            not no_dashboard
-            and sys.stdout.isatty()
-            and not os.environ.get("OTTO_NO_TUI")
-        )
-        if use_tui:
-            try:
-                from otto.queue.dashboard import run_dashboard
-            except ImportError:
-                use_tui = False
-            else:
-                try:
-                    sys.exit(
-                        run_dashboard(
-                            project_dir,
-                            concurrent=rcfg.concurrent,
-                            quiet=quiet,
-                            dashboard_mouse=dashboard_mouse,
-                            runner_config=rcfg,
-                            otto_bin=otto_bin,
-                        )
-                    )
-                except WatcherAlreadyRunning as exc:
-                    error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-                    sys.exit(1)
 
         # Install handlers so watcher's spawn/reap/cancel/heartbeat events
         # appear on stdout (and persist to otto_logs/queue/watcher.log).

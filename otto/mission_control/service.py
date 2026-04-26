@@ -1,4 +1,4 @@
-"""Shared Mission Control service for non-TUI clients."""
+"""Shared Mission Control service for web and CLI clients."""
 
 from __future__ import annotations
 
@@ -880,7 +880,6 @@ class MissionControlService:
         log_path = paths.logs_dir(self.project_dir) / "web" / "watcher.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
-        env["OTTO_NO_TUI"] = "1"
         try:
             with log_path.open("a", encoding="utf-8") as log:
                 log.write(f"\n[{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}] starting {' '.join(argv)}\n")

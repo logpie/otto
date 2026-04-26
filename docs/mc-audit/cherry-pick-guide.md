@@ -163,7 +163,7 @@ git log --reverse --pretty=format:'git cherry-pick %h  # %s' 6b275a72b..c69ddc68
 - **All commits land on `worktree-i2p`** in the i2p worktree at `/Users/yuxuan/work/cc-autonomous/.claude/worktrees/i2p` (not in the main worktree). The `origin/i2p` ref tracks them.
 - **Bundle assets in `otto/web/static/assets/`** are committed binary; cherry-picks that touch React source must be followed by `npm run web:build` to keep the bundle in sync (or accept that the next CI build will rebuild them anyway). The cluster C bundle freshness check will refuse to start `otto web` if source ≠ bundle.
 - **Pyproject changes** in `dca7cc11d` add `pytest-playwright`, `playwright`, `freezegun` to dev deps. If cherry-picking only a subset, you may need to manually add these.
-- **`tests/browser/`** package requires `pytest-playwright` plugin. Add `[tool.pytest.ini_options] addopts = ["-m", "not tui and not browser", "-p", "no:playwright"]` to keep default suite green; run browser tests via `pytest -m browser -p playwright`.
+- **`tests/browser/`** package requires `pytest-playwright` plugin. Add `[tool.pytest.ini_options] addopts = ["-m", "not browser", "-p", "no:playwright"]` to keep default suite green; run browser tests via `pytest -m browser -p playwright`.
 - **`scripts/web_as_user.py` + `scripts/web_record_fixture.py`** require `OTTO_ALLOW_REAL_COST=1` env to run (they can spend real LLM budget).
 - **`docs/mc-audit/`** docs are durable reference material — not strictly needed if cherry-picking only fixes, but useful for future audits.
 - **Worktree pollution**: a separate process during this session left untracked files at the repo root (`architecture.md`, `tasks.json`, `plan-*.md`, `weather2/`, etc.). I never staged those — they're not in any commit.

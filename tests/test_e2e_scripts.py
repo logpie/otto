@@ -97,12 +97,6 @@ def test_e2e_runner_child_liveness_delegates_to_queue_runner(monkeypatch) -> Non
     assert calls == [{"pid": 123}, {"pid": 456}]
 
 
-def test_demo_real_dashboard_expect_requires_real_cost_before_spawn() -> None:
-    text = (SCRIPTS_DIR / "demo_real_dashboard.exp").read_text(encoding="utf-8")
-
-    assert text.index("OTTO_ALLOW_REAL_COST") < text.index("spawn ")
-
-
 def test_bench_flask_fixture_queue_branches_uses_queue_definition(tmp_path: Path) -> None:
     from otto.queue.schema import QueueTask, append_task
     from tests._helpers import init_repo

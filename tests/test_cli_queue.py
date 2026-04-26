@@ -58,9 +58,12 @@ def _write_watcher_state(
 
 
 def _read_queue_commands(repo: Path) -> list[dict]:
+    path = repo / COMMANDS_FILE
+    if not path.exists():
+        return []
     return [
         json.loads(line)
-        for line in (repo / COMMANDS_FILE).read_text().splitlines()
+        for line in path.read_text().splitlines()
         if line.strip()
     ]
 
@@ -958,24 +961,23 @@ def test_queue_cancel_with_watcher_refuses_finished_task(tmp_path: Path, monkeyp
     assert not (repo / COMMANDS_FILE).exists()
 
 
-def test_queue_dashboard_no_active_watcher_errors(tmp_path: Path):
+def test_queue_dashboard_removed_points_to_web(tmp_path: Path):
     repo = init_repo(tmp_path)
 
     code, out, _ = _run(["queue", "dashboard"], cwd=repo)
 
-    assert code == 1
-    assert "No active queue watcher found." in out
-    assert "otto queue run --concurrent N" in out
+    assert code == 2
+    assert "`otto queue dashboard` has been removed" in out
+    assert "otto web" in out
 
 
-def test_queue_dashboard_help_shows_examples(tmp_path: Path):
+def test_queue_dashboard_help_points_to_deprecation(tmp_path: Path):
     repo = init_repo(tmp_path)
 
     code, out, _ = _run(["queue", "dashboard", "--help"], cwd=repo)
 
     assert code == 0
-    assert "otto queue dashboard" in out
-    assert "live queue dashboard" in out
+    assert "Deprecated queue TUI command" in out
 
 
 def test_queue_run_rejects_zero_concurrency(tmp_path: Path):
@@ -1137,7 +1139,7 @@ def test_queue_resume_explicit_failed_task_rejects_stale_checkpoint(tmp_path: Pa
     assert not (repo / COMMANDS_FILE).exists()
 
 
-def test_queue_resume_select_uses_picker(monkeypatch, tmp_path: Path):
+def test_queue_resume_select_reports_removed_selector(tmp_path: Path):
     repo = init_repo(tmp_path)
     _run(["queue", "build", "labels"], cwd=repo)
     _run(["queue", "build", "due"], cwd=repo)
@@ -1154,23 +1156,15 @@ def test_queue_resume_select_uses_picker(monkeypatch, tmp_path: Path):
             "due": {"status": "interrupted"},
         },
     )
-    monkeypatch.setattr(
-        "otto.queue.dashboard.select_resume_tasks",
-        lambda project_dir, tasks: ["due"],
-    )
-
     code, out, _ = _run(["queue", "resume", "--select"], cwd=repo)
 
-    assert code == 0
-    assert "Marked due to resume" in out
+    assert code == 2
+    assert "`otto queue resume --select` has been removed" in out
+    assert "otto web" in out
     tasks = load_queue(repo)
-    assert [task.id for task in tasks] == ["due", "labels"]
+    assert [task.id for task in tasks] == ["labels", "due"]
     cmds = _read_queue_commands(repo)
-    assert len(cmds) == 1
-    assert cmds[0]["cmd"] == "resume"
-    assert cmds[0]["id"] == "due"
-    assert cmds[0]["schema_version"] == 1
-    assert cmds[0]["command_id"].startswith("queue-cmd-")
+    assert cmds == []
 
 
 def test_queue_rm_rejects_unknown_task(tmp_path: Path):
@@ -1200,12 +1194,12 @@ def test_resolve_otto_bin_fallback_returns_argv(monkeypatch, tmp_path: Path):
     assert cli_queue_module._resolve_otto_bin() == [str(fake_python), "-m", "otto.cli"]
 
 
-def test_queue_run_help_shows_dashboard_mouse_and_exit_flags(tmp_path: Path):
+def test_queue_run_help_shows_stdout_watcher_and_exit_flags(tmp_path: Path):
     repo = init_repo(tmp_path)
     code, out, _ = _run(["queue", "run", "--help"], cwd=repo)
     help_text = " ".join(out.split()).replace("in- flight", "in-flight")
     assert code == 0
-    assert "--dashboard-mouse" in help_text
-    assert "loses terminal copy in most terminals" in help_text
+    assert "--dashboard-mouse" not in help_text
+    assert "watcher always uses prefixed stdout" in help_text
     assert "--exit-when-empty" in help_text
     assert "Exit cleanly once the queue has no queued or in-flight tasks" in help_text

@@ -424,7 +424,7 @@ The `_service()` helper guards every endpoint that needs a project: if no projec
   }
   ```
 - **Side effects**:
-  - Subprocess spawn: `otto queue run --no-dashboard --concurrent N [--exit-when-empty]`, `start_new_session=True`, env `OTTO_NO_TUI=1`, cwd=`project_dir`.
+  - Subprocess spawn: `otto queue run --no-dashboard --concurrent N [--exit-when-empty]`, `start_new_session=True`, cwd=`project_dir`.
   - Appends to `otto_logs/web/watcher.log` (creates dir).
   - Writes supervisor metadata.
   - Records `mission-control/events.jsonl` entries (`watcher.start.skipped` | `watcher.started` | `watcher.start.failed` | `watcher.start.blocked` | `watcher.launch.requested`).

@@ -36,29 +36,33 @@ def test_python_module_cli_merge_help_exits_zero() -> None:
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_dashboard_uses_repo_root_from_nested_directory(tmp_path: Path, monkeypatch) -> None:
+def test_dashboard_alias_opens_web_from_nested_directory(tmp_path: Path, monkeypatch) -> None:
     repo = init_repo(tmp_path)
     nested = repo / "pkg" / "subdir"
     nested.mkdir(parents=True)
     seen: dict[str, object] = {}
 
-    class FakeMissionControlApp:
-        def __init__(self, project_dir: Path, *, dashboard_mouse: bool = False):
-            seen["project_dir"] = project_dir
-            seen["dashboard_mouse"] = dashboard_mouse
+    def fake_create_app(project_dir: Path, **kwargs):
+        seen["project_dir"] = project_dir
+        seen["kwargs"] = kwargs
+        return object()
 
-        def run(self, *, mouse: bool = False) -> int:
-            seen["mouse"] = mouse
-            return 0
+    def fake_uvicorn_run(app, **kwargs):
+        seen["app"] = app
+        seen["uvicorn"] = kwargs
 
-    monkeypatch.setattr("otto.tui.mission_control.MissionControlApp", FakeMissionControlApp)
+    monkeypatch.setattr("otto.web.app.create_app", fake_create_app)
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
 
     saved_cwd = Path.cwd()
     os.chdir(nested)
     try:
-        result = CliRunner().invoke(main, ["dashboard"], catch_exceptions=False)
+        result = CliRunner().invoke(main, ["dashboard", "--no-open"], catch_exceptions=False)
     finally:
         os.chdir(saved_cwd)
 
     assert result.exit_code == 0
-    assert seen == {"project_dir": repo.resolve(), "dashboard_mouse": False, "mouse": False}
+    assert seen["project_dir"] == nested
+    assert seen["uvicorn"]["host"] == "127.0.0.1"
+    assert seen["uvicorn"]["port"] == 8765
+    assert "`otto dashboard` is deprecated" in result.output

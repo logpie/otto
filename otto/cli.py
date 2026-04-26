@@ -211,16 +211,39 @@ def main():
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
-@click.option("--dashboard-mouse", is_flag=True,
-              help="Enable mouse capture (loses terminal copy in most terminals)")
-def dashboard(dashboard_mouse: bool) -> None:
-    """Open Mission Control for this project."""
-    from otto.tui.mission_control import MissionControlApp
-
-    require_git()
-    project_dir = resolve_project_dir(Path.cwd())
-    app = MissionControlApp(project_dir, dashboard_mouse=dashboard_mouse)
-    sys.exit(int(app.run(mouse=dashboard_mouse) or 0))
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address.")
+@click.option("--port", default=8765, show_default=True, type=int, help="Bind port.")
+@click.option("--open/--no-open", "open_browser", default=True, show_default=True,
+              help="Open the browser after the server starts.")
+@click.option("--allow-remote", is_flag=True,
+              help="Allow binding to a non-localhost address.")
+@click.option("--project-launcher", is_flag=True,
+              help="Start at the managed project launcher instead of selecting the current directory.")
+@click.option("--projects-root", default="~/otto-projects", show_default=True,
+              type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+              help="Managed projects root used by the launcher.")
+@click.option("--cwd-project", is_flag=True,
+              help="Use the current directory as the active project even for remote binds.")
+def dashboard(
+    host: str,
+    port: int,
+    open_browser: bool,
+    allow_remote: bool,
+    project_launcher: bool,
+    projects_root: Path,
+    cwd_project: bool,
+) -> None:
+    """Compatibility alias for `otto web`."""
+    console.print("  `otto dashboard` is deprecated; opening web Mission Control.")
+    _run_web_command(
+        host=host,
+        port=port,
+        open_browser=open_browser,
+        allow_remote=allow_remote,
+        project_launcher=project_launcher,
+        projects_root=projects_root,
+        cwd_project=cwd_project,
+    )
 
 
 @main.command("web", context_settings=CONTEXT_SETTINGS)
@@ -247,6 +270,27 @@ def web_command(
     cwd_project: bool,
 ) -> None:
     """Open local web Mission Control for this project."""
+    _run_web_command(
+        host=host,
+        port=port,
+        open_browser=open_browser,
+        allow_remote=allow_remote,
+        project_launcher=project_launcher,
+        projects_root=projects_root,
+        cwd_project=cwd_project,
+    )
+
+
+def _run_web_command(
+    *,
+    host: str,
+    port: int,
+    open_browser: bool,
+    allow_remote: bool,
+    project_launcher: bool,
+    projects_root: Path,
+    cwd_project: bool,
+) -> None:
     remote_bind = host not in {"127.0.0.1", "localhost", "::1"}
     if remote_bind and not allow_remote:
         error_console.print(
