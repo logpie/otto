@@ -1268,6 +1268,7 @@ export function App() {
             <RunDetailPanel
               detail={detail}
               landing={landing}
+              inspectorOpen={inspectorOpen}
               onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
               onShowProof={showProof}
               onShowLogs={showLogs}
@@ -1307,6 +1308,7 @@ export function App() {
               <RunDetailPanel
                 detail={detail}
                 landing={landing}
+                inspectorOpen={inspectorOpen}
                 onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
                 onShowProof={showProof}
                 onShowLogs={showLogs}
@@ -2280,9 +2282,10 @@ function EventTimeline({events}: {events: StateResponse["events"] | undefined}) 
   );
 }
 
-function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact}: {
+function RunDetailPanel({detail, landing, inspectorOpen, onRunAction, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact}: {
   detail: RunDetail | null;
   landing: LandingState | undefined;
+  inspectorOpen: boolean;
   onRunAction: (action: string, label?: string) => void;
   onShowProof: () => void;
   onShowLogs: () => void;
@@ -2322,12 +2325,22 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
             </details>
             <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
           </div>
-          <div className="detail-inspector-actions" role="group" aria-label="Evidence shortcuts">
-            <button className="primary" type="button" data-testid="open-proof-button" onClick={onShowProof}>Review result</button>
-            <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Code changes</button>
-            <button type="button" data-testid="open-logs-button" onClick={onShowLogs}>Logs</button>
-            <button type="button" data-testid="open-artifacts-button" onClick={onShowArtifacts}>Artifacts</button>
-          </div>
+          {/* When the inspector is open, the fixed-position inspector overlay
+              covers this row of shortcut buttons. Leaving them in the DOM
+              causes Playwright (and any script-driven click) to resolve them
+              as visible while the actual click is intercepted by the
+              overlay — see mc-audit W13-CRITICAL-1. The inspector ships its
+              own tablist (Result / Code changes / Logs / Artifacts) so
+              hiding these shortcuts while the inspector is open is the
+              correct UX too. */}
+          {!inspectorOpen && (
+            <div className="detail-inspector-actions" role="group" aria-label="Evidence shortcuts">
+              <button className="primary" type="button" data-testid="open-proof-button" onClick={onShowProof}>Review result</button>
+              <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Code changes</button>
+              <button type="button" data-testid="open-logs-button" onClick={onShowLogs}>Logs</button>
+              <button type="button" data-testid="open-artifacts-button" onClick={onShowArtifacts}>Artifacts</button>
+            </div>
+          )}
         </>
       ) : (
         <div className="detail-body empty" data-testid="run-detail-empty">

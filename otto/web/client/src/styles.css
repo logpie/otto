@@ -3133,11 +3133,20 @@ tbody tr.selected {
  * subtree from focus. Modern browsers handle this natively; we add the
  * visual cue (slight desaturation) so sighted users can also tell the
  * area is non-interactive when an overlay is open.
+ *
+ * Defense-in-depth (mc-audit W13-CRITICAL-1): also disable pointer events
+ * on the inert subtree. The `inert` attribute prevents focus and user
+ * activation, but script-driven clicks (Playwright's `Locator.click()`
+ * and similar tooling) bypass that gate. Setting `pointer-events: none`
+ * ensures any click that lands inside an inert container is dropped at
+ * the platform level — preventing surprise side-effects from buttons
+ * that are visually buried under a fixed-position overlay.
  */
 .main-shell-content[inert],
 .sidebar[inert],
 [data-mc-inspector][inert] {
   filter: saturate(0.8);
+  pointer-events: none;
 }
 
 /*
