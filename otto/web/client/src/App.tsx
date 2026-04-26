@@ -6,9 +6,11 @@ import type {PillTone} from "./components/Pill";
 import {BrandMark} from "./components/BrandMark";
 import {HelpOverlay} from "./components/HelpOverlay";
 import {LauncherExplainer} from "./components/launcher/LauncherExplainer";
+import {ToastDisplay} from "./components/ToastDisplay";
 import {TaskQueueList} from "./components/tasks/TaskQueueList";
 import {TopBar} from "./components/topbar/TopBar";
 import {ProjectLauncher} from "./components/launcher/ProjectLauncher";
+import {InertEffect, LiveRegion} from "./components/a11y";
 import {
   CommandList,
   FocusMetric,
@@ -2327,40 +2329,7 @@ export function App() {
   );
 }
 
-/**
- * mc-audit microinteractions I8: shared toast renderer with hover-to-pause
- * and a manual ✕ dismiss button. Lives outside the App component so both
- * the launcher view (line ~1470) and the workspace view (line ~1690) can
- * use the same markup without duplication.
- */
-export function ToastDisplay({toast, onMouseEnter, onMouseLeave, onDismiss}: {
-  toast: ToastState | null;
-  onMouseEnter: () => void;
-  onMouseLeave: () => void;
-  onDismiss: () => void;
-}) {
-  if (!toast) return null;
-  return (
-    <div
-      id="toast"
-      className={`visible toast-${toast.severity}`}
-      role="status"
-      aria-live="polite"
-      data-testid="toast"
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-    >
-      <span className="toast-message">{toast.message}</span>
-      <button
-        type="button"
-        className="toast-close"
-        data-testid="toast-close"
-        aria-label="Dismiss notification"
-        onClick={onDismiss}
-      >×</button>
-    </div>
-  );
-}
+// ToastDisplay moved to components/ToastDisplay.tsx
 
 // ProjectMeta moved to components/launcher/ProjectLauncher.tsx
 
@@ -6951,53 +6920,7 @@ export function selectOnKeyboard(event: {key: string; preventDefault: () => void
   onSelect();
 }
 
-/**
- * Toggle the `inert` attribute on every element matching `selector`. Used
- * to make sidebars / main content / inspector quiet for AT and keyboard
- * users when an overlay (inspector / job dialog / confirm dialog) takes
- * focus. Replacing the previous `aria-hidden` toggle pattern, which broke
- * when the inspector itself was a child of `<main>` (mc-audit a11y A11Y-01,
- * A11Y-02). `inert` removes the entire subtree from focus, click, and AT
- * tree — exactly the semantics we want.
- */
-export function InertEffect({active, selector}: {active: boolean; selector: string}) {
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector));
-    if (!nodes.length) return;
-    const previous = nodes.map((node) => node.hasAttribute("inert"));
-    if (active) {
-      for (const node of nodes) node.setAttribute("inert", "");
-    } else {
-      for (const node of nodes) node.removeAttribute("inert");
-    }
-    return () => {
-      nodes.forEach((node, idx) => {
-        if (previous[idx]) node.setAttribute("inert", "");
-        else node.removeAttribute("inert");
-      });
-    };
-  }, [active, selector]);
-  return null;
-}
-
-/**
- * Polite singleton aria-live region. mc-audit a11y A11Y-10.
- */
-export function LiveRegion({message}: {message: string}) {
-  return (
-    <div
-      id="mc-live-region"
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-      className="sr-only"
-      data-testid="mc-live-region"
-    >
-      {message}
-    </div>
-  );
-}
+// InertEffect + LiveRegion moved to components/a11y.tsx
 
 /**
  * Per-view document.title. mc-audit a11y A11Y-09.
