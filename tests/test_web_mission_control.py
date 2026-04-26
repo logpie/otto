@@ -7,6 +7,7 @@ import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -32,6 +33,10 @@ def _init_repo(repo: Path) -> None:
     (repo / "README.md").write_text("# web\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+
+
+def _client(project_dir: Path, **kwargs: Any) -> TestClient:
+    return TestClient(create_app(project_dir, **kwargs))
 
 
 def _set_origin_head(repo: Path, branch: str) -> None:
@@ -144,7 +149,7 @@ def test_web_detail_exposes_split_phase_routing_and_timeline(tmp_path: Path) -> 
     record.terminal_outcome = "success"
     write_record(repo, record)
 
-    detail = TestClient(create_app(repo)).get(f"/api/runs/{run_id}").json()
+    detail = _client(repo).get(f"/api/runs/{run_id}").json()
 
     assert detail["build_config"]["split_mode"] is True
     assert detail["build_config"]["agents"]["build"]["provider"] == "codex"
@@ -209,7 +214,7 @@ def test_web_detail_exposes_improve_split_as_evaluate_and_improve(tmp_path: Path
     record.terminal_outcome = "success"
     write_record(repo, record)
 
-    detail = TestClient(create_app(repo)).get(f"/api/runs/{run_id}").json()
+    detail = _client(repo).get(f"/api/runs/{run_id}").json()
 
     assert detail["build_config"]["command_family"] == "improve"
     assert detail["build_config"]["provider"] == "codex"
@@ -227,7 +232,7 @@ def test_web_project_launcher_starts_without_selected_project(tmp_path: Path) ->
     projects_root = tmp_path / "managed"
     _init_repo(host)
 
-    client = TestClient(create_app(host, project_launcher=True, projects_root=projects_root))
+    client = _client(host, project_launcher=True, projects_root=projects_root)
 
     projects = client.get("/api/projects").json()
     assert projects["launcher_enabled"] is True
@@ -245,7 +250,7 @@ def test_web_projects_endpoint_has_no_root_side_effect_without_launcher(tmp_path
     projects_root = tmp_path / "managed"
     _init_repo(repo)
 
-    response = TestClient(create_app(repo, projects_root=projects_root)).get("/api/projects")
+    response = _client(repo, projects_root=projects_root).get("/api/projects")
 
     assert response.status_code == 200
     payload = response.json()
@@ -260,7 +265,7 @@ def test_web_project_launcher_creates_managed_git_project(tmp_path: Path) -> Non
     projects_root = tmp_path / "managed"
     _init_repo(host)
 
-    client = TestClient(create_app(host, project_launcher=True, projects_root=projects_root))
+    client = _client(host, project_launcher=True, projects_root=projects_root)
     response = client.post("/api/projects/create", json={"name": "Expense Approval Portal"})
 
     assert response.status_code == 200
@@ -285,7 +290,7 @@ def test_web_project_launcher_can_clear_selected_project(tmp_path: Path) -> None
     projects_root = tmp_path / "managed"
     _init_repo(host)
 
-    client = TestClient(create_app(host, project_launcher=True, projects_root=projects_root))
+    client = _client(host, project_launcher=True, projects_root=projects_root)
     created = client.post("/api/projects/create", json={"name": "Expense Approval Portal"}).json()
     assert created["project"]["name"] == "expense-approval-portal"
 
@@ -307,7 +312,7 @@ def test_web_project_launcher_rejects_selection_outside_managed_root(tmp_path: P
     _init_repo(host)
     _init_repo(outside)
 
-    client = TestClient(create_app(host, project_launcher=True, projects_root=projects_root))
+    client = _client(host, project_launcher=True, projects_root=projects_root)
     response = client.post("/api/projects/select", json={"path": str(outside)})
 
     assert response.status_code == 403
@@ -319,7 +324,7 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     _init_repo(repo)
     _write_run(repo)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
     assert state["project"]["branch"] == "main"
     assert state["live"]["active_count"] == 1
@@ -386,7 +391,7 @@ def test_web_review_packet_includes_story_details_and_html_report(tmp_path: Path
         encoding="utf-8",
     )
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     packet = client.get("/api/runs/build-web").json()["review_packet"]
 
     assert packet["certification"]["stories_tested"] == 2
@@ -432,7 +437,7 @@ def test_web_review_packet_includes_explicit_product_handoff(tmp_path: Path) -> 
     )
     _write_run(repo)
 
-    packet = TestClient(create_app(repo)).get("/api/runs/build-web").json()["review_packet"]
+    packet = _client(repo).get("/api/runs/build-web").json()["review_packet"]
     handoff = packet["product_handoff"]
 
     assert handoff["kind"] == "cli"
@@ -471,7 +476,7 @@ def test_web_review_packet_detects_product_handoff_from_readme(tmp_path: Path) -
     (repo / "expense_portal").mkdir()
     _write_run(repo)
 
-    packet = TestClient(create_app(repo)).get("/api/runs/build-web").json()["review_packet"]
+    packet = _client(repo).get("/api/runs/build-web").json()["review_packet"]
     handoff = packet["product_handoff"]
 
     assert handoff["kind"] == "web"
@@ -490,7 +495,7 @@ def test_web_run_detail_is_not_hidden_by_list_filters(tmp_path: Path) -> None:
     _init_repo(repo)
     _write_run(repo)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
 
     detail = client.get("/api/runs/build-web?type=merge&query=no-match").json()
 
@@ -575,7 +580,7 @@ def test_web_state_marks_abandoned_legacy_queue_runs_stale(tmp_path: Path) -> No
             },
         },
     )
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
 
     row = state["live"]["items"][0]
@@ -625,7 +630,7 @@ def test_web_state_marks_abandoned_starting_queue_runs_stale(tmp_path: Path) -> 
         },
     )
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
 
     row = state["live"]["items"][0]
     assert row["run_id"] == "starting-task-run"
@@ -673,7 +678,7 @@ def test_web_keeps_failed_queue_tasks_inspectable_for_requeue(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
 
     assert [(item["display_id"], item["display_status"]) for item in state["live"]["items"]] == [("failed-task", "failed")]
@@ -735,7 +740,7 @@ def test_web_failed_queue_run_with_checkpoint_prefers_resume(tmp_path: Path) -> 
         },
     )
 
-    detail = TestClient(create_app(repo)).get("/api/runs/failed-task-run?type=merge").json()
+    detail = _client(repo).get("/api/runs/failed-task-run?type=merge").json()
     actions = {action["key"]: action for action in detail["legal_actions"]}
 
     assert detail["display_status"] == "failed"
@@ -798,7 +803,7 @@ def test_web_paused_spec_review_exposes_approve_and_regenerate_actions(tmp_path:
         },
     )
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
     paused_item = next(item for item in state["live"]["items"] if item["run_id"] == run_id)
     assert state["live"]["active_count"] == 0
@@ -854,7 +859,7 @@ def test_web_failed_queue_run_prefers_existing_primary_log(tmp_path: Path) -> No
     )
     write_record(repo, record)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     detail = client.get(f"/api/runs/{run_id}").json()
     logs = client.get(f"/api/runs/{run_id}/logs?offset=0").json()
 
@@ -904,7 +909,7 @@ def test_web_failed_queue_fallback_uses_latest_exact_task_block(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    detail = TestClient(create_app(repo)).get("/api/runs/failed-task-run").json()
+    detail = _client(repo).get("/api/runs/failed-task-run").json()
 
     assert detail["review_packet"]["failure"]["reason"] == "OSError: [Errno 9] current descriptor"
     assert "prefix collision" not in detail["review_packet"]["failure"]["excerpt"]
@@ -930,7 +935,7 @@ def test_web_cleaned_failed_queue_history_is_audit_only(tmp_path: Path) -> None:
         ),
     )
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
     detail = client.get("/api/runs/run-cleaned-failed").json()
     actions = {action["key"]: action for action in detail["legal_actions"]}
@@ -1005,7 +1010,7 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
         ),
     )
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
 
     assert state["landing"]["counts"] == {"ready": 1, "merged": 1, "blocked": 0, "total": 2}
     by_id = {item["task_id"]: item for item in state["landing"]["items"]}
@@ -1017,7 +1022,7 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     assert by_id["merged-task"]["label"] == "Landed"
     assert by_id["merged-task"]["merge_id"] == "merge-merged"
 
-    detail = TestClient(create_app(repo)).get("/api/runs/run-merged").json()
+    detail = _client(repo).get("/api/runs/run-merged").json()
     actions = {action["key"]: action for action in detail["legal_actions"]}
     assert detail["landing_state"] == "merged"
     assert detail["review_packet"]["headline"] == "Already merged into main"
@@ -1079,7 +1084,7 @@ def test_web_landed_task_uses_merge_state_diff_after_source_branch_deleted(tmp_p
         ),
     )
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     item = client.get("/api/state").json()["landing"]["items"][0]
     packet = client.get("/api/runs/run-merged").json()["review_packet"]
     checks = {check["key"]: check for check in packet["checks"]}
@@ -1139,7 +1144,7 @@ def test_web_merge_action_rejects_already_merged_task(tmp_path: Path, monkeypatc
         lambda project_dir: {"merge_blocked": False, "merge_blockers": [], "dirty_files": []},
     )
 
-    response = TestClient(create_app(repo)).post("/api/runs/run-merged/actions/merge", json={})
+    response = _client(repo).post("/api/runs/run-merged/actions/merge", json={})
 
     assert response.status_code == 409
     assert response.json()["message"] == "Already merged into main."
@@ -1182,7 +1187,7 @@ def test_web_merge_action_reports_already_merged_before_dirty_repo(tmp_path: Pat
         lambda project_dir: {"merge_blocked": True, "merge_blockers": ["dirty"], "dirty_files": ["README.md"]},
     )
 
-    response = TestClient(create_app(repo)).post("/api/runs/run-merged/actions/merge", json={})
+    response = _client(repo).post("/api/runs/run-merged/actions/merge", json={})
 
     assert response.status_code == 409
     assert response.json()["message"] == "Already merged into main."
@@ -1225,7 +1230,7 @@ def test_web_landing_ignores_merge_state_for_different_target(tmp_path: Path) ->
         ),
     )
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
 
     assert state["landing"]["target"] == "main"
     assert state["landing"]["counts"]["ready"] == 1
@@ -1274,7 +1279,7 @@ def test_web_landing_ignores_unreachable_merge_commit(tmp_path: Path) -> None:
         ),
     )
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
 
     assert state["landing"]["counts"]["ready"] == 1
     assert state["landing"]["counts"]["merged"] == 0
@@ -1316,7 +1321,7 @@ def test_web_landing_and_detail_show_review_packet_changed_files(tmp_path: Path)
         },
     )
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
     item = state["landing"]["items"][0]
 
@@ -1375,7 +1380,7 @@ def test_web_landing_surfaces_diff_errors(tmp_path: Path) -> None:
             "tasks": {"ready-task": {"status": "done", "attempt_run_id": "run-ready"}},
         },
     )
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
     detail = client.get("/api/runs/run-ready").json()
 
@@ -1431,7 +1436,7 @@ def test_web_landing_target_preserves_detected_branch_path(tmp_path: Path) -> No
         },
     )
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
 
     assert state["landing"]["target"] == "fix/codex-provider-i2p"
     assert state["landing"]["counts"]["ready"] == 1
@@ -1469,7 +1474,7 @@ def test_web_landing_blocks_merge_when_project_has_tracked_changes(tmp_path: Pat
     )
     (repo / "README.md").write_text("# web\n\nlocal runtime state\n", encoding="utf-8")
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
 
     assert state["landing"]["counts"]["ready"] == 1
     assert state["landing"]["merge_blocked"] is True
@@ -1513,7 +1518,7 @@ def test_web_review_packet_blocks_landing_when_project_has_tracked_changes(tmp_p
     )
     (repo / "README.md").write_text("# web\n\nlocal runtime state\n", encoding="utf-8")
 
-    detail = TestClient(create_app(repo)).get("/api/runs/run-ready").json()
+    detail = _client(repo).get("/api/runs/run-ready").json()
     packet = detail["review_packet"]
     checks = {check["key"]: check for check in packet["checks"]}
 
@@ -1536,7 +1541,7 @@ def test_web_merge_all_rejects_dirty_project_before_launch(tmp_path: Path) -> No
     _init_repo(repo)
     (repo / "README.md").write_text("# web\n\nlocal runtime state\n", encoding="utf-8")
 
-    response = TestClient(create_app(repo)).post("/api/actions/merge-all", json={})
+    response = _client(repo).post("/api/actions/merge-all", json={})
 
     assert response.status_code == 409
     assert "Merge blocked by local repository state" in response.json()["message"]
@@ -1555,7 +1560,7 @@ def test_web_runtime_issue_prefers_recovery_for_interrupted_merge(tmp_path: Path
         },
     )
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
 
     assert state["runtime"]["issues"][0]["label"] == "Landing recovery available"
     issue = next(item for item in state["runtime"]["issues"] if item["label"] == "Landing recovery available")
@@ -1578,7 +1583,7 @@ def test_web_merge_recovery_routes_record_actions(tmp_path: Path, monkeypatch) -
 
     monkeypatch.setattr("otto.mission_control.service.execute_merge_abort", _fake_abort)
     monkeypatch.setattr("otto.mission_control.service.execute_merge_recover", _fake_recover)
-    client = TestClient(create_app(repo))
+    client = _client(repo)
 
     abort = client.post("/api/actions/merge-abort", json={})
     recover = client.post("/api/actions/merge-recover", json={})
@@ -1610,7 +1615,7 @@ def test_web_resolve_release_recovers_interrupted_merge(tmp_path: Path, monkeypa
         lambda project_dir, *, post_result=None: calls.append(str(project_dir)) or ActionResult(ok=True, message="recovery launched", refresh=True),
     )
 
-    response = TestClient(create_app(repo)).post("/api/actions/resolve-release", json={})
+    response = _client(repo).post("/api/actions/resolve-release", json={})
 
     assert response.status_code == 200
     assert response.json()["message"] == "recovery launched"
@@ -1650,7 +1655,7 @@ def test_web_resolve_release_cleans_superseded_failed_tasks(tmp_path: Path, monk
         lambda project_dir, task_ids, *, post_result=None: calls.append(list(task_ids)) or ActionResult(ok=True, message="cleanup launched", refresh=True),
     )
 
-    response = TestClient(create_app(repo)).post("/api/actions/resolve-release", json={})
+    response = _client(repo).post("/api/actions/resolve-release", json={})
 
     assert response.status_code == 200
     assert response.json()["message"] == "cleanup launched"
@@ -1662,7 +1667,7 @@ def test_web_artifact_content_rejects_paths_outside_project(tmp_path: Path) -> N
     _init_repo(repo)
     _write_run(repo, outside_artifact="/etc/passwd")
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     artifacts = client.get("/api/runs/build-web/artifacts").json()["artifacts"]
     outside = next(item for item in artifacts if item["label"] == "summary")
     response = client.get(f"/api/runs/build-web/artifacts/{outside['index']}/content")
@@ -1674,7 +1679,7 @@ def test_web_queue_build_enqueues_without_click_context(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     response = client.post(
         "/api/queue/build",
         json={
@@ -1719,7 +1724,7 @@ def test_web_queue_build_spec_defaults_to_web_review_mode(tmp_path: Path) -> Non
     repo = tmp_path / "repo"
     _init_repo(repo)
 
-    response = TestClient(create_app(repo)).post(
+    response = _client(repo).post(
         "/api/queue/build",
         json={
             "intent": "add reports",
@@ -1738,7 +1743,7 @@ def test_web_queue_build_spec_defaults_to_web_review_mode(tmp_path: Path) -> Non
         "--spec-review-mode",
         "web",
     ]
-    config = TestClient(create_app(repo)).get("/api/state").json()["live"]["items"][0]["build_config"]
+    config = _client(repo).get("/api/state").json()["live"]["items"][0]["build_config"]
     assert config["planning"] == "spec_review"
 
 
@@ -1746,7 +1751,7 @@ def test_web_queue_accepts_split_mode_and_phase_provider_args(tmp_path: Path) ->
     repo = tmp_path / "repo"
     _init_repo(repo)
 
-    response = TestClient(create_app(repo)).post(
+    response = _client(repo).post(
         "/api/queue/build",
         json={
             "intent": "add saved searches",
@@ -1770,7 +1775,7 @@ def test_web_queue_accepts_split_mode_and_phase_provider_args(tmp_path: Path) ->
     assert response.status_code == 200
     task = load_queue(repo)[0]
     assert "--split" in task.command_argv
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
     config = state["live"]["items"][0]["build_config"]
     assert config["split_mode"] is True
     assert config["agents"]["build"]["provider"] == "codex"
@@ -1783,7 +1788,7 @@ def test_web_queue_accepts_improve_improver_provider_args(tmp_path: Path) -> Non
     repo = tmp_path / "repo"
     _init_repo(repo)
 
-    response = TestClient(create_app(repo)).post(
+    response = _client(repo).post(
         "/api/queue/improve",
         json={
             "subcommand": "feature",
@@ -1806,7 +1811,7 @@ def test_web_queue_accepts_improve_improver_provider_args(tmp_path: Path) -> Non
     assert response.status_code == 200
     task = load_queue(repo)[0]
     assert "--improver-provider" in task.command_argv
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
     config = state["live"]["items"][0]["build_config"]
     assert config["command_family"] == "improve"
     assert config["provider"] == "codex"
@@ -1818,7 +1823,7 @@ def test_web_queue_rejects_unknown_after_dependency(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
 
-    response = TestClient(create_app(repo)).post(
+    response = _client(repo).post(
         "/api/queue/improve",
         json={
             "subcommand": "feature",
@@ -1837,7 +1842,7 @@ def test_web_queue_rejects_invalid_inner_command_args(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
 
-    response = TestClient(create_app(repo)).post(
+    response = _client(repo).post(
         "/api/queue/improve",
         json={
             "subcommand": "feature",
@@ -1882,7 +1887,7 @@ def test_web_state_exposes_effective_project_defaults(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
     defaults = state["project"]["defaults"]
 
     assert defaults["provider"] == "codex"
@@ -1958,7 +1963,7 @@ def test_web_state_exposes_queue_task_build_config(tmp_path: Path) -> None:
     )
     write_queue_state(repo, {"schema_version": 1, "watcher": None, "tasks": {}})
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
     live_config = state["live"]["items"][0]["build_config"]
     landing_config = state["landing"]["items"][0]["build_config"]
@@ -2001,7 +2006,7 @@ def test_web_landing_does_not_show_diff_errors_for_queued_future_branches(tmp_pa
     )
     write_queue_state(repo, {"schema_version": 1, "watcher": None, "tasks": {}})
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
     item = state["landing"]["items"][0]
 
     assert item["queue_status"] == "queued"
@@ -2025,7 +2030,7 @@ def test_web_review_packet_does_not_diff_queued_future_branch(tmp_path: Path) ->
     )
     write_queue_state(repo, {"schema_version": 1, "watcher": None, "tasks": {}})
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
     run_id = state["live"]["items"][0]["run_id"]
     detail = client.get(f"/api/runs/{run_id}").json()
@@ -2051,7 +2056,7 @@ def test_web_records_queue_events_and_exposes_operator_timeline(tmp_path: Path) 
     repo = tmp_path / "repo"
     _init_repo(repo)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     response = client.post(
         "/api/queue/build",
         json={
@@ -2083,7 +2088,7 @@ def test_web_events_endpoint_reports_malformed_rows_without_breaking_state(tmp_p
     path.write_text('not-json\n{"schema_version":[],"message":"old event"}\n', encoding="utf-8")
     append_event(repo, kind="watcher.stop.skipped", message="watcher is not running")
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
 
     assert state["events"]["malformed_count"] == 1
     assert state["events"]["total_count"] == 2
@@ -2101,7 +2106,7 @@ def test_web_events_tail_preserves_boundary_aligned_rows(tmp_path: Path, monkeyp
     path.write_text(first + "\n" + second + "\n", encoding="utf-8")
     monkeypatch.setattr("otto.mission_control.events.MAX_EVENT_TAIL_BYTES", len(second) + 1)
 
-    events = TestClient(create_app(repo)).get("/api/events").json()
+    events = _client(repo).get("/api/events").json()
 
     assert events["truncated"] is True
     assert events["items"][0]["message"] == "second"
@@ -2135,7 +2140,7 @@ def test_web_history_detail_recovers_provider_from_manifest_argv(tmp_path: Path)
         ),
     )
 
-    detail = TestClient(create_app(repo)).get("/api/runs/run-history").json()
+    detail = _client(repo).get("/api/runs/run-history").json()
 
     assert detail["provider"] == "codex"
     assert detail["reasoning_effort"] == "high"
@@ -2176,7 +2181,7 @@ def test_web_history_usage_reads_merge_summary_extra_artifact(tmp_path: Path) ->
         ),
     )
 
-    state = TestClient(create_app(repo)).get("/api/state?type=merge").json()
+    state = _client(repo).get("/api/state?type=merge").json()
 
     assert state["history"]["items"][0]["cost_display"] == "2.0K in / 300 out"
 
@@ -2217,7 +2222,7 @@ def test_web_project_stats_include_claude_cache_token_fields(tmp_path: Path) -> 
         ),
     )
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
 
     usage = state["history"]["items"][0]["token_usage"]
     assert usage["cache_creation_input_tokens"] == 84864
@@ -2246,7 +2251,7 @@ def test_web_merge_run_review_packet_is_landing_audit_not_landable(tmp_path: Pat
     record.terminal_outcome = "success"
     write_record(repo, record)
 
-    detail = TestClient(create_app(repo)).get("/api/runs/merge-audit").json()
+    detail = _client(repo).get("/api/runs/merge-audit").json()
     packet = detail["review_packet"]
     checks = {check["key"]: check for check in packet["checks"]}
 
@@ -2297,7 +2302,7 @@ def test_web_merge_history_review_packet_uses_persisted_target(tmp_path: Path) -
         ),
     )
 
-    packet = TestClient(create_app(repo)).get("/api/runs/merge-release?type=merge").json()["review_packet"]
+    packet = _client(repo).get("/api/runs/merge-release?type=merge").json()["review_packet"]
 
     assert packet["headline"] == "Landed in release/1.0"
     assert packet["changes"]["target"] == "release/1.0"
@@ -2341,7 +2346,7 @@ def test_web_merge_action_uses_fast_merge_and_reports_immediate_failure(tmp_path
         lambda project_dir: {"merge_blocked": False, "merge_blockers": [], "dirty_files": []},
     )
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     response = client.post("/api/runs/queue-done/actions/merge", json={})
 
     assert response.status_code == 200
@@ -2395,7 +2400,7 @@ def test_web_merge_action_records_late_background_failure(tmp_path: Path, monkey
         lambda project_dir: {"merge_blocked": False, "merge_blockers": [], "dirty_files": []},
     )
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     response = client.post("/api/runs/queue-done/actions/merge", json={})
 
     assert response.status_code == 200
@@ -2411,7 +2416,7 @@ def test_web_state_includes_watcher_status(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
     assert state["watcher"]["alive"] is False
     assert state["watcher"]["counts"]["queued"] == 0
@@ -2431,7 +2436,7 @@ def test_web_runtime_surfaces_state_and_command_recovery_issues(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    state = TestClient(create_app(repo)).get("/api/state").json()
+    state = _client(repo).get("/api/state").json()
     labels = [issue["label"] for issue in state["runtime"]["issues"]]
 
     assert state["runtime"]["status"] == "attention"
@@ -2476,7 +2481,7 @@ def test_web_can_stop_stale_but_live_watcher_process(tmp_path: Path, monkeypatch
     monkeypatch.setattr("otto.mission_control.service._pid_alive", lambda _pid: not killed)
 
     try:
-        client = TestClient(create_app(repo))
+        client = _client(repo)
         state = client.get("/api/state").json()
         assert state["watcher"]["alive"] is False
         assert state["watcher"]["health"]["state"] == "stale"
@@ -2520,7 +2525,7 @@ def test_web_refuses_to_stop_unverified_live_watcher_pid(tmp_path: Path, monkeyp
     monkeypatch.setattr("otto.mission_control.service._safe_getpgid", lambda _pid: None)
     monkeypatch.setattr("otto.mission_control.service._pid_alive", lambda _pid: not killed)
 
-    response = TestClient(create_app(repo)).post("/api/watcher/stop", json={})
+    response = _client(repo).post("/api/watcher/stop", json={})
 
     assert response.status_code == 409
     assert "could not verify" in response.json()["message"]
@@ -2564,7 +2569,7 @@ def test_web_allows_stop_for_supervised_live_watcher_pid(tmp_path: Path, monkeyp
     monkeypatch.setattr("otto.mission_control.service._safe_getpgid", lambda _pid: None)
     monkeypatch.setattr("otto.mission_control.service._pid_alive", lambda _pid: not killed)
 
-    response = TestClient(create_app(repo)).post("/api/watcher/stop", json={})
+    response = _client(repo).post("/api/watcher/stop", json={})
 
     assert response.status_code == 200
     assert response.json()["message"] == "watcher stop requested"
@@ -2598,7 +2603,7 @@ def test_web_does_not_stop_stale_watcher_pid_without_held_lock(tmp_path: Path, m
     monkeypatch.setattr("otto.mission_control.runtime.os.kill", fake_kill)
     monkeypatch.setattr("otto.mission_control.service.os.kill", fake_kill)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
     assert state["watcher"]["health"]["state"] == "stopped"
     assert state["watcher"]["health"]["watcher_pid"] == pid
@@ -2617,7 +2622,7 @@ def test_web_ignores_unheld_queue_lock_pid(tmp_path: Path) -> None:
     lock = acquire_lock(repo)
     lock.close()
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     state = client.get("/api/state").json()
 
     assert state["watcher"]["health"]["state"] == "stopped"
@@ -2630,7 +2635,7 @@ def test_web_reports_held_queue_lock_as_stale_runtime(tmp_path: Path) -> None:
     _init_repo(repo)
     lock = acquire_lock(repo)
     try:
-        client = TestClient(create_app(repo))
+        client = _client(repo)
         state = client.get("/api/state").json()
     finally:
         lock.close()
@@ -2656,7 +2661,7 @@ def test_web_start_watcher_blocks_when_runtime_is_stale(tmp_path: Path, monkeypa
 
     monkeypatch.setattr("otto.mission_control.service.subprocess.Popen", _UnexpectedPopen)
     try:
-        client = TestClient(create_app(repo))
+        client = _client(repo)
         response = client.post("/api/watcher/start", json={"concurrent": 2})
     finally:
         lock.close()
@@ -2687,7 +2692,7 @@ def test_web_start_watcher_launches_background_process(tmp_path: Path, monkeypat
     monkeypatch.setattr("otto.mission_control.service.subprocess.Popen", _FakePopen)
     monkeypatch.setattr("otto.mission_control.service.time.sleep", lambda _seconds: None)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     response = client.post("/api/watcher/start", json={"concurrent": 2, "exit_when_empty": True})
 
     assert response.status_code == 200
@@ -2722,7 +2727,7 @@ def test_web_start_watcher_uses_configured_default_concurrency(tmp_path: Path, m
     monkeypatch.setattr("otto.mission_control.service.subprocess.Popen", _FakePopen)
     monkeypatch.setattr("otto.mission_control.service.time.sleep", lambda _seconds: None)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     response = client.post("/api/watcher/start", json={})
 
     assert response.status_code == 200
@@ -2759,7 +2764,7 @@ def test_web_start_watcher_reports_started_when_state_becomes_alive(tmp_path: Pa
     monkeypatch.setattr("otto.mission_control.service.subprocess.Popen", _FakePopen)
     monkeypatch.setattr("otto.mission_control.service.time.sleep", fake_sleep)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     response = client.post("/api/watcher/start", json={"concurrent": 2})
 
     assert response.status_code == 200
@@ -2786,7 +2791,7 @@ def test_web_start_watcher_records_immediate_failure(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr("otto.mission_control.service.subprocess.Popen", _FailedPopen)
 
-    client = TestClient(create_app(repo))
+    client = _client(repo)
     response = client.post("/api/watcher/start", json={"concurrent": 2})
 
     assert response.status_code == 500
