@@ -1744,6 +1744,13 @@ class Runner:
         self._reconcile_task_identity(task, ts)
         attempt_run_id = self._queue_record_run_id(ts)
         if not attempt_run_id:
+            # Task reached terminal status without ever starting (e.g. a
+            # queued task that was cancelled before dispatch). There is no
+            # live record to finalize, but we still owe the operator a
+            # history row — otherwise the cancelled task vanishes from
+            # /api/state entirely (W2-CRITICAL-1). Synthesize a stable
+            # run_id so the snapshot dedupes across maintenance ticks.
+            self._finalize_unstarted_queue_task(task, task_id, ts, status=status)
             return
         if self._history_snapshot_matches(attempt_run_id, status):
             ts["history_appended"] = True
@@ -1784,6 +1791,49 @@ class Runner:
             return
         ts["history_appended"] = True
 
+    def _finalize_unstarted_queue_task(
+        self,
+        task: QueueTask,
+        task_id: str,
+        ts: dict[str, Any],
+        *,
+        status: str,
+    ) -> None:
+        """Append a history snapshot for a task that terminated before dispatch.
+
+        Used when the operator cancels a `queued` task that never spawned a
+        child process. Since there is no `attempt_run_id` (and thus no live
+        record), we synthesize a stable synthetic run_id keyed on the task
+        id + added_at so the same row dedupes across repeat maintenance
+        ticks. Skips the live-record finalize step entirely — there is no
+        live record to update.
+        """
+        synthetic_run_id = str(ts.get("synthetic_history_run_id") or "").strip()
+        if not synthetic_run_id:
+            added_at = str(ts.get("added_at") or task.added_at or "").strip()
+            suffix = added_at.replace(":", "").replace("-", "").replace("T", "").replace("Z", "")
+            synthetic_run_id = f"queue-cancel:{task_id}" if not suffix else f"queue-cancel:{task_id}:{suffix}"
+            ts["synthetic_history_run_id"] = synthetic_run_id
+        if self._history_snapshot_matches(synthetic_run_id, status):
+            ts["history_appended"] = True
+            return
+        terminal_outcome = _terminal_outcome_for_status(status)
+        try:
+            self._append_queue_history_snapshot(
+                task,
+                ts,
+                run_id=synthetic_run_id,
+                status=status,
+                terminal_outcome=terminal_outcome,
+            )
+        except Exception:
+            logger.exception(
+                "failed to append terminal history for unstarted queue task %s; will retry",
+                task_id,
+            )
+            return
+        ts["history_appended"] = True
+
     def _repair_terminal_queue_history(self, tasks: list[QueueTask], state: dict[str, Any]) -> bool:
         changed = False
         tasks_by_id = {task.id: task for task in tasks}
@@ -1812,8 +1862,19 @@ class Runner:
                 continue
             if ts.get("status") not in {"cancelled", "removed"}:
                 continue
-            if self._queue_record_run_id(ts) and not ts.get("history_appended"):
-                continue
+            # Wait for the terminal history snapshot before removing the
+            # task definition. Both real attempt runs and synthetic
+            # cancel-before-start rows need history to land first; otherwise
+            # the cancelled task would vanish from /api/state entirely
+            # (W2-CRITICAL-1). For unstarted cancels (no attempt run id),
+            # opportunistically run finalize here so callers that bypass
+            # _repair_terminal_queue_history (e.g. unit tests, edge-case
+            # restart paths) still produce a history row before cleanup.
+            if not ts.get("history_appended"):
+                if not self._queue_record_run_id(ts):
+                    self._finalize_queue_attempt(task_id, ts)
+                if not ts.get("history_appended"):
+                    continue
             if self._remove_task_definition(task_id) is not None:
                 ts.pop("definition_removal_pending", None)
                 changed = True
