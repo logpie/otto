@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "web:build": "vite build --config otto/web/client/vite.config.ts",
-    "web:typecheck": "tsc -p otto/web/client/tsconfig.json --noEmit"
+    "web:build": "npm run web:typecheck && vite build --config otto/web/client/vite.config.ts",
+    "web:typecheck": "tsc -p otto/web/client/tsconfig.json --noEmit",
+    "web:verify": "npm run web:build && (python3 scripts/check_bundle_committed.py || python scripts/check_bundle_committed.py)"
   },
   "dependencies": {
     "react": "^19.2.3",

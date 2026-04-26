@@ -44,6 +44,7 @@ def serialize_filters(filters: MissionControlFilters) -> dict[str, Any]:
         "outcome": filters.outcome_filter,
         "query": filters.query,
         "history_page": filters.history_page,
+        "history_page_size": filters.history_page_size,
     }
 
 

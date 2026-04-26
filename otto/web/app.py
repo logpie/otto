@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import Body, FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from otto.mission_control.serializers import serialize_project
 from otto.mission_control.service import (
@@ -17,9 +18,39 @@ from otto.mission_control.service import (
     MissionControlServiceError,
     filters_from_params,
 )
+from otto.web.bundle import verify_bundle_freshness
 
 
 PROJECT_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+# Cache headers ----------------------------------------------------------
+# The SPA shell (`index.html`) must always be fresh: it embeds the *current*
+# hashed asset references; a stale shell will request assets that no longer
+# exist after a rebuild. The hashed asset bundles are content-addressed
+# (Vite emits `index-<hash>.js`) so they are safe to cache forever.
+_CACHE_NO_STORE = "no-store"
+_CACHE_IMMUTABLE = "public, max-age=31536000, immutable"
+
+
+class _CacheHeaderStaticFiles(StaticFiles):
+    """``StaticFiles`` subclass that sets correct Cache-Control per path.
+
+    Subclassing rather than middleware keeps caching logic next to the
+    response that owns the etag/last-modified headers it interacts with.
+    """
+
+    async def get_response(self, path: str, scope: Scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        normalized = path.lstrip("/")
+        if normalized in {"", "index.html"}:
+            response.headers["Cache-Control"] = _CACHE_NO_STORE
+        elif normalized.startswith("assets/"):
+            response.headers["Cache-Control"] = _CACHE_IMMUTABLE
+        else:
+            # build-stamp.json or future top-level files: stay safe.
+            response.headers["Cache-Control"] = _CACHE_NO_STORE
+        return response
 
 
 def create_app(
@@ -33,6 +64,9 @@ def create_app(
     projects_root = (Path(projects_root).expanduser() if projects_root else Path.home() / "otto-projects").resolve(strict=False)
     service = None if project_launcher else MissionControlService(project_dir, queue_compat=queue_compat)
     static_dir = Path(__file__).resolve().parent / "static"
+    # Fail fast if the bundle is stale / broken / missing. See
+    # `otto/web/bundle.py` for the env-var overrides.
+    verify_bundle_freshness(static_dir=static_dir)
     app = FastAPI(title="Otto Mission Control", version="0.1.0")
     app.state.project_dir = None if project_launcher else project_dir
     app.state.projects_root = projects_root
@@ -60,7 +94,12 @@ def create_app(
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(static_dir / "index.html")
+        # The shell HTML must never be cached — it embeds the current
+        # hashed asset filenames; a stale shell points at deleted assets.
+        return FileResponse(
+            static_dir / "index.html",
+            headers={"Cache-Control": _CACHE_NO_STORE},
+        )
 
     @app.get("/api/project")
     def project() -> dict[str, Any]:
@@ -110,6 +149,7 @@ def create_app(
         outcome_filter: str = Query("all", alias="outcome"),
         query: str = "",
         history_page: int = 0,
+        history_page_size: int | None = None,
     ) -> dict[str, Any]:
         filters = filters_from_params(
             active_only=active_only,
@@ -117,6 +157,7 @@ def create_app(
             outcome_filter=outcome_filter,
             query=query,
             history_page=history_page,
+            history_page_size=history_page_size,
         )
         return _service().state(filters)
 
@@ -127,12 +168,14 @@ def create_app(
         outcome_filter: str = Query("all", alias="outcome"),
         query: str = "",
         history_page: int = 0,
+        history_page_size: int | None = None,
     ) -> dict[str, Any]:
         filters = filters_from_params(
             type_filter=type_filter,
             outcome_filter=outcome_filter,
             query=query,
             history_page=history_page,
+            history_page_size=history_page_size,
         )
         return _service().detail(run_id, filters)
 
@@ -196,7 +239,7 @@ def create_app(
     def queue(command: str, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
         return _service().enqueue(command, payload)
 
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    app.mount("/static", _CacheHeaderStaticFiles(directory=static_dir), name="static")
     return app
 
 

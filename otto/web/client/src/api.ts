@@ -5,6 +5,14 @@ export interface StateQuery {
   outcome: OutcomeFilter;
   query: string;
   activeOnly: boolean;
+  // 1-based page in the UI (server is 0-based — we subtract on send).
+  // Optional so detail/non-history call sites can omit it.
+  historyPage?: number;
+  // Allowed values: 10 / 25 / 50 / 100. Anything else is rejected by the
+  // server and falls back to the model default. See codex-state-management
+  // #6 — the server already accepts these params, the client just never
+  // sent them, leaving power users stuck on page 1.
+  historyPageSize?: number;
 }
 
 export class ApiError extends Error {
@@ -25,6 +33,15 @@ export function stateQueryParams(query: StateQuery): URLSearchParams {
   params.set("outcome", query.outcome);
   params.set("query", query.query);
   params.set("active_only", query.activeOnly ? "true" : "false");
+  // The server uses 0-based history pages; the UI presents 1-based pages
+  // because that's what humans expect. Translate at the boundary so the
+  // rest of the front end can keep speaking 1-based.
+  if (query.historyPage && query.historyPage > 1) {
+    params.set("history_page", String(query.historyPage - 1));
+  }
+  if (query.historyPageSize && query.historyPageSize > 0) {
+    params.set("history_page_size", String(query.historyPageSize));
+  }
   return params;
 }
 

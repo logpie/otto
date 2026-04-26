@@ -65,7 +65,21 @@ type InspectorMode = "proof" | "logs" | "artifacts" | "diff";
 interface RouteState {
   viewMode: ViewMode;
   selectedRunId: string | null;
+  // 1-based history page persisted in the URL as `?hp=N`. We picked the
+  // short key intentionally — the URL bar is busy and `?history_page=`
+  // would crowd out other params. Default page is 1 and is omitted from
+  // the URL so a stripped link stays clean.
+  historyPage: number;
+  // Persisted page-size selection (10/25/50/100). Optional in the URL —
+  // null means "no override; use the front-end default".
+  historyPageSize: number | null;
 }
+
+// Default page size for History pane. 25 is enough to fill an MBA viewport
+// without scrolling the table off-screen, and is the middle option in the
+// selector so Up/Down arrows on the <select> reach 10 and 50 quickly.
+const DEFAULT_HISTORY_PAGE_SIZE = 25;
+const HISTORY_PAGE_SIZE_OPTIONS: readonly number[] = [10, 25, 50, 100];
 
 // Cap the log buffer at ~1MB of text — the browser can render that without
 // jank, and we display "{N} earlier bytes elided" to make the truncation
@@ -167,12 +181,30 @@ const defaultFilters: Filters = {
 };
 
 function readRouteState(): RouteState {
-  if (typeof window === "undefined") return {viewMode: "tasks", selectedRunId: null};
+  if (typeof window === "undefined") {
+    return {viewMode: "tasks", selectedRunId: null, historyPage: 1, historyPageSize: null};
+  }
   const params = new URLSearchParams(window.location.search);
   return {
     viewMode: params.get("view") === "diagnostics" ? "diagnostics" : "tasks",
     selectedRunId: params.get("run") || null,
+    historyPage: parseHistoryPageParam(params.get("hp")),
+    historyPageSize: parseHistoryPageSizeParam(params.get("ps")),
   };
+}
+
+function parseHistoryPageParam(raw: string | null): number {
+  if (!raw) return 1;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return 1;
+  return parsed;
+}
+
+function parseHistoryPageSizeParam(raw: string | null): number | null {
+  if (!raw) return null;
+  const parsed = Number.parseInt(raw, 10);
+  if (!HISTORY_PAGE_SIZE_OPTIONS.includes(parsed)) return null;
+  return parsed;
 }
 
 function writeRouteState(route: RouteState, mode: "push" | "replace"): void {
@@ -183,6 +215,18 @@ function writeRouteState(route: RouteState, mode: "push" | "replace"): void {
     url.searchParams.set("run", route.selectedRunId);
   } else {
     url.searchParams.delete("run");
+  }
+  // Drop the page param when on page 1; the URL stays clean for the common
+  // case and copy-paste links from page 1 don't accumulate `?hp=1` cruft.
+  if (route.historyPage > 1) {
+    url.searchParams.set("hp", String(route.historyPage));
+  } else {
+    url.searchParams.delete("hp");
+  }
+  if (route.historyPageSize && route.historyPageSize !== DEFAULT_HISTORY_PAGE_SIZE) {
+    url.searchParams.set("ps", String(route.historyPageSize));
+  } else {
+    url.searchParams.delete("ps");
   }
   const next = `${url.pathname}${url.search}${url.hash}`;
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
@@ -238,6 +282,26 @@ export function App() {
   const logPollVisibleRef = useRef(true);
   const selectedRunIdRef = useRef<string | null>(initialRoute.selectedRunId);
   const viewModeRef = useRef<ViewMode>(initialRoute.viewMode);
+  // History pagination state. We keep refs alongside the state so the
+  // route-writer (which is shared with selectedRunId / viewMode) sees the
+  // current value without having to re-derive every dependency. 1-based.
+  const [historyPage, setHistoryPage] = useState<number>(initialRoute.historyPage);
+  const [historyPageSize, setHistoryPageSize] = useState<number>(
+    initialRoute.historyPageSize ?? DEFAULT_HISTORY_PAGE_SIZE,
+  );
+  const historyPageRef = useRef<number>(initialRoute.historyPage);
+  const historyPageSizeRef = useRef<number>(initialRoute.historyPageSize ?? DEFAULT_HISTORY_PAGE_SIZE);
+
+  // currentRouteState is the single source of truth for what the URL reflects;
+  // every push/replace passes through it so we don't accidentally drop a
+  // param that other code paths persist. The page-size is only persisted
+  // when it differs from the default — see writeRouteState's `?ps=` rules.
+  const currentRouteState = useCallback((): RouteState => ({
+    viewMode: viewModeRef.current,
+    selectedRunId: selectedRunIdRef.current,
+    historyPage: historyPageRef.current,
+    historyPageSize: historyPageSizeRef.current === DEFAULT_HISTORY_PAGE_SIZE ? null : historyPageSizeRef.current,
+  }), []);
 
   useEffect(() => {
     selectedRunIdRef.current = selectedRunId;
@@ -248,28 +312,41 @@ export function App() {
   }, [viewMode]);
 
   useEffect(() => {
-    writeRouteState({viewMode: viewModeRef.current, selectedRunId: selectedRunIdRef.current}, "replace");
+    historyPageRef.current = historyPage;
+  }, [historyPage]);
+
+  useEffect(() => {
+    historyPageSizeRef.current = historyPageSize;
+  }, [historyPageSize]);
+
+  useEffect(() => {
+    writeRouteState(currentRouteState(), "replace");
     const onPopState = () => {
       const next = readRouteState();
       viewModeRef.current = next.viewMode;
       selectedRunIdRef.current = next.selectedRunId;
+      historyPageRef.current = next.historyPage;
+      const nextSize = next.historyPageSize ?? DEFAULT_HISTORY_PAGE_SIZE;
+      historyPageSizeRef.current = nextSize;
       setViewMode(next.viewMode);
       setSelectedRunId(next.selectedRunId);
+      setHistoryPage(next.historyPage);
+      setHistoryPageSize(nextSize);
       setInspectorOpen(false);
       setJobOpen(false);
       setConfirm(null);
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [currentRouteState]);
 
   const navigateView = useCallback((nextView: ViewMode) => {
     if (nextView === viewModeRef.current) return;
     viewModeRef.current = nextView;
     setViewMode(nextView);
     setInspectorOpen(false);
-    writeRouteState({viewMode: nextView, selectedRunId: selectedRunIdRef.current}, "push");
-  }, []);
+    writeRouteState(currentRouteState(), "push");
+  }, [currentRouteState]);
 
   const showToast = useCallback((message: string, severity: ToastState["severity"] = "information") => {
     if (severity === "error") setLastError(message);
@@ -302,8 +379,8 @@ export function App() {
     }
     selectedRunIdRef.current = runId;
     setSelectedRunId(runId);
-    writeRouteState({viewMode: viewModeRef.current, selectedRunId: runId}, "push");
-  }, []);
+    writeRouteState(currentRouteState(), "push");
+  }, [currentRouteState]);
 
   const executeConfirmedAction = useCallback(async () => {
     // `confirmLockRef` is the synchronous half of the dedup. `confirmPending`
@@ -392,11 +469,14 @@ export function App() {
   }, [inspectorMode, inspectorOpen]);
 
   const refreshDetail = useCallback(async (runId: string) => {
-    const params = stateQueryParams(filters).toString();
+    // Detail responses don't carry the history page slice, but the server
+    // accepts the params and we send them so a future detail-side feature
+    // can rely on the same query convention.
+    const params = stateQueryParams({...filters, historyPage, historyPageSize}).toString();
     const nextDetail = await api<RunDetail>(`/api/runs/${encodeURIComponent(runId)}?${params}`);
     if (selectedRunIdRef.current !== runId) return;
     setDetail(nextDetail);
-  }, [filters]);
+  }, [filters, historyPage, historyPageSize]);
 
   const loadProjects = useCallback(async () => {
     const next = await api<ProjectsResponse>("/api/projects");
@@ -424,7 +504,7 @@ export function App() {
         setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
         return;
       }
-      const next = await api<StateResponse>(`/api/state?${stateQueryParams(filters).toString()}`);
+      const next = await api<StateResponse>(`/api/state?${stateQueryParams({...filters, historyPage, historyPageSize}).toString()}`);
       setData(next);
       setLastError(null);
       const visible = visibleRunIds(next);
@@ -437,7 +517,7 @@ export function App() {
         if (current && visible.has(current)) return current;
         const nextRunId = next.live.items[0]?.run_id || next.landing.items.find((item) => item.run_id)?.run_id || next.history.items[0]?.run_id || null;
         selectedRunIdRef.current = nextRunId;
-        writeRouteState({viewMode: viewModeRef.current, selectedRunId: nextRunId}, "replace");
+        writeRouteState(currentRouteState(), "replace");
         return nextRunId;
       });
       setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
@@ -445,7 +525,7 @@ export function App() {
       setRefreshStatus("error");
       showToast(errorMessage(error), "error");
     }
-  }, [filters, loadProjects, refreshDetail, selectedRunId, showToast]);
+  }, [filters, historyPage, historyPageSize, loadProjects, refreshDetail, selectedRunId, showToast, currentRouteState]);
 
   useEffect(() => {
     void refresh(false);
@@ -497,12 +577,12 @@ export function App() {
         setDiffContent(null);
         setProofArtifactIndex(null);
         setInspectorOpen(false);
-        writeRouteState({viewMode: viewModeRef.current, selectedRunId: null}, "replace");
+        writeRouteState(currentRouteState(), "replace");
         return;
       }
       showToast(errorMessage(error), "error");
     });
-  }, [refreshDetail, selectedRunId, showToast]);
+  }, [refreshDetail, selectedRunId, showToast, currentRouteState]);
 
   // Log polling with three controls the simple `setInterval` version lacked:
   //   1. Exponential backoff on consecutive errors (1.2s -> 2s -> 5s -> ...).
@@ -769,7 +849,11 @@ export function App() {
     selectedRunIdRef.current = null;
     setViewMode("tasks");
     setSelectedRunId(null);
-    writeRouteState({viewMode: "tasks", selectedRunId: null}, "replace");
+    historyPageRef.current = 1;
+    historyPageSizeRef.current = DEFAULT_HISTORY_PAGE_SIZE;
+    setHistoryPage(1);
+    setHistoryPageSize(DEFAULT_HISTORY_PAGE_SIZE);
+    writeRouteState({viewMode: "tasks", selectedRunId: null, historyPage: 1, historyPageSize: null}, "replace");
     showToast(`Created ${result.project?.name || "project"}`);
     await refresh(true);
   }, [refresh, showToast]);
@@ -789,7 +873,11 @@ export function App() {
     selectedRunIdRef.current = null;
     setViewMode("tasks");
     setSelectedRunId(null);
-    writeRouteState({viewMode: "tasks", selectedRunId: null}, "replace");
+    historyPageRef.current = 1;
+    historyPageSizeRef.current = DEFAULT_HISTORY_PAGE_SIZE;
+    setHistoryPage(1);
+    setHistoryPageSize(DEFAULT_HISTORY_PAGE_SIZE);
+    writeRouteState({viewMode: "tasks", selectedRunId: null, historyPage: 1, historyPageSize: null}, "replace");
     showToast(`Opened ${result.project?.name || "project"}`);
     await refresh(true);
   }, [refresh, showToast]);
@@ -821,9 +909,60 @@ export function App() {
     viewModeRef.current = "tasks";
     selectedRunIdRef.current = null;
     setViewMode("tasks");
-    writeRouteState({viewMode: "tasks", selectedRunId: null}, "replace");
+    historyPageRef.current = 1;
+    historyPageSizeRef.current = DEFAULT_HISTORY_PAGE_SIZE;
+    setHistoryPage(1);
+    setHistoryPageSize(DEFAULT_HISTORY_PAGE_SIZE);
+    writeRouteState({viewMode: "tasks", selectedRunId: null, historyPage: 1, historyPageSize: null}, "replace");
     showToast("Choose a project");
   }, [showToast]);
+
+  // Wrap setFilters so any filter change resets the history page back to 1.
+  // Without this, filtering on page 5 with 0 matches would render an
+  // empty table without an obvious explanation. Page-size changes go
+  // through `changeHistoryPageSize` and also reset to page 1.
+  const updateFilters = useCallback((next: Filters) => {
+    setFilters((prev) => {
+      const sameType = prev.type === next.type;
+      const sameOutcome = prev.outcome === next.outcome;
+      const sameQuery = prev.query === next.query;
+      const sameActive = prev.activeOnly === next.activeOnly;
+      // Only reset the page when something actually changed; React would
+      // otherwise reset on every parent rerender that re-passes the same
+      // filters object.
+      if (!(sameType && sameOutcome && sameQuery && sameActive)) {
+        historyPageRef.current = 1;
+        setHistoryPage(1);
+        writeRouteState({...currentRouteState(), historyPage: 1}, "replace");
+      }
+      return next;
+    });
+  }, [currentRouteState]);
+
+  const changeHistoryPage = useCallback((nextPage: number) => {
+    const totalPages = Math.max(1, data?.history.total_pages || 1);
+    const clamped = Math.max(1, Math.min(nextPage, totalPages));
+    if (clamped === historyPageRef.current) return;
+    historyPageRef.current = clamped;
+    setHistoryPage(clamped);
+    // Page changes are real navigation steps — push so the browser Back
+    // button reverses them. Filters, by contrast, replace.
+    writeRouteState({...currentRouteState(), historyPage: clamped}, "push");
+  }, [data?.history.total_pages, currentRouteState]);
+
+  const changeHistoryPageSize = useCallback((nextSize: number) => {
+    if (!HISTORY_PAGE_SIZE_OPTIONS.includes(nextSize)) return;
+    if (nextSize === historyPageSizeRef.current) return;
+    historyPageSizeRef.current = nextSize;
+    historyPageRef.current = 1;
+    setHistoryPageSize(nextSize);
+    setHistoryPage(1);
+    writeRouteState({
+      ...currentRouteState(),
+      historyPage: 1,
+      historyPageSize: nextSize === DEFAULT_HISTORY_PAGE_SIZE ? null : nextSize,
+    }, "replace");
+  }, [currentRouteState]);
 
   if (projectsState?.launcher_enabled && !data) {
     return (
@@ -879,7 +1018,7 @@ export function App() {
           refreshStatus={refreshStatus}
           refreshPending={refreshInFlight.pending}
           viewMode={viewMode}
-          onChange={setFilters}
+          onChange={updateFilters}
           onRefresh={onManualRefresh}
           onViewChange={navigateView}
         />
@@ -955,7 +1094,19 @@ export function App() {
                 <DiagnosticsSummary data={data} onSelect={selectRun} />
                 <LiveRuns items={data?.live.items || []} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
                 <EventTimeline events={data?.events} />
-                <History items={data?.history.items || []} totalRows={data?.history.total_rows || 0} selectedRunId={selectedRunId} onSelect={selectRun} />
+                <History
+                  items={data?.history.items || []}
+                  totalRows={data?.history.total_rows || 0}
+                  page={data?.history.page != null ? data.history.page + 1 : historyPage}
+                  totalPages={data?.history.total_pages || 1}
+                  pageSize={data?.history.page_size || historyPageSize}
+                  requestedPage={historyPage}
+                  loaded={data != null}
+                  selectedRunId={selectedRunId}
+                  onSelect={selectRun}
+                  onChangePage={changeHistoryPage}
+                  onChangePageSize={changeHistoryPageSize}
+                />
               </div>
               <RunDetailPanel
                 detail={detail}
@@ -1658,9 +1809,59 @@ function LiveRuns({items, landing, selectedRunId, onSelect}: {
   );
 }
 
-function History({items, totalRows, selectedRunId, onSelect}: {items: HistoryItem[]; totalRows: number; selectedRunId: string | null; onSelect: (runId: string) => void}) {
+function History({
+  items,
+  totalRows,
+  page,
+  totalPages,
+  pageSize,
+  requestedPage,
+  loaded,
+  selectedRunId,
+  onSelect,
+  onChangePage,
+  onChangePageSize,
+}: {
+  items: HistoryItem[];
+  totalRows: number;
+  page: number;
+  totalPages: number;
+  pageSize: number;
+  // The page the *user* asked for, in 1-based terms. May exceed totalPages
+  // if a stale deep-link was pasted; in that case the server clamps and
+  // returns the last valid page in `page`, and we render a recovery hint.
+  requestedPage: number;
+  // Whether we have a server response yet. Drives the "loading" copy when
+  // navigating between pages so the table doesn't flash to "No matching
+  // history" while the next response is in flight.
+  loaded: boolean;
+  selectedRunId: string | null;
+  onSelect: (runId: string) => void;
+  onChangePage: (nextPage: number) => void;
+  onChangePageSize: (nextSize: number) => void;
+}) {
+  // Local mirror for the jump-to-page input. Plain text input so the user
+  // can clear it without us snapping back to the canonical page; we commit
+  // on Enter or blur.
+  const [jumpDraft, setJumpDraft] = useState<string>(String(page));
+  useEffect(() => {
+    setJumpDraft(String(page));
+  }, [page]);
+
+  const requestedOutOfRange = loaded && requestedPage > totalPages;
+  const showRecovery = requestedOutOfRange && totalRows > 0;
+
+  const commitJump = () => {
+    const parsed = Number.parseInt(jumpDraft, 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      setJumpDraft(String(page));
+      return;
+    }
+    onChangePage(parsed);
+  };
+
   return (
-    <section className="panel" aria-labelledby="historyHeading">
+    <section className="panel history-panel" aria-labelledby="historyHeading">
       <div className="panel-heading">
         <h2 id="historyHeading">Run History</h2>
         <span className="pill">{totalRows}</span>
@@ -1677,7 +1878,17 @@ function History({items, totalRows, selectedRunId, onSelect}: {items: HistoryIte
             </tr>
           </thead>
           <tbody>
-            {items.length ? items.map((item) => (
+            {showRecovery ? (
+              <tr>
+                <td colSpan={5} className="empty-cell" data-testid="history-out-of-range">
+                  Page {requestedPage} doesn&rsquo;t exist; only {totalPages} {totalPages === 1 ? "page" : "pages"} available.
+                  {" "}
+                  <button type="button" data-testid="history-recover-button" onClick={() => onChangePage(1)}>
+                    Jump to page 1
+                  </button>
+                </td>
+              </tr>
+            ) : items.length ? items.map((item) => (
               <tr
                 key={item.run_id}
                 className={item.run_id === selectedRunId ? "selected" : ""}
@@ -1695,11 +1906,73 @@ function History({items, totalRows, selectedRunId, onSelect}: {items: HistoryIte
                 <td>{item.cost_display || "-"}</td>
               </tr>
             )) : (
-              <tr><td colSpan={5} className="empty-cell">No matching history.</td></tr>
+              <tr><td colSpan={5} className="empty-cell">{loaded ? "No matching history." : "Loading…"}</td></tr>
             )}
           </tbody>
         </table>
       </div>
+      {(totalRows > 0 || totalPages > 1) && (
+        <nav
+          className="history-pagination"
+          data-testid="history-pagination"
+          aria-label="History pagination"
+        >
+          <span className="history-pagination-status" data-testid="history-pagination-status">
+            Page {page} of {totalPages} &middot; {totalRows} {totalRows === 1 ? "run" : "runs"}
+          </span>
+          <div className="history-pagination-controls">
+            <button
+              type="button"
+              data-testid="history-prev-button"
+              disabled={page <= 1}
+              aria-disabled={page <= 1}
+              onClick={() => onChangePage(page - 1)}
+            >
+              &larr; Previous
+            </button>
+            <label className="history-pagination-jump">
+              Go to
+              <input
+                type="number"
+                min={1}
+                max={totalPages}
+                value={jumpDraft}
+                data-testid="history-jump-input"
+                aria-label="Jump to page"
+                onChange={(event) => setJumpDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitJump();
+                  }
+                }}
+                onBlur={commitJump}
+              />
+            </label>
+            <button
+              type="button"
+              data-testid="history-next-button"
+              disabled={page >= totalPages}
+              aria-disabled={page >= totalPages}
+              onClick={() => onChangePage(page + 1)}
+            >
+              Next &rarr;
+            </button>
+            <label className="history-pagination-size">
+              Per page
+              <select
+                value={pageSize}
+                data-testid="history-page-size-select"
+                onChange={(event) => onChangePageSize(Number.parseInt(event.target.value, 10))}
+              >
+                {HISTORY_PAGE_SIZE_OPTIONS.map((option) => (
+                  <option value={option} key={option}>{option}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </nav>
+      )}
     </section>
   );
 }

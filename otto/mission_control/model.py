@@ -187,6 +187,11 @@ class MissionControlFilters:
     outcome_filter: OutcomeFilter = "all"
     query: str = ""
     history_page: int = 0
+    # Optional per-request page size override. None means "use the model
+    # default" (currently 50 for TUI, web client passes its own selection).
+    # See mc-audit codex-state-management #6: web pagination relies on this
+    # for the page-size selector.
+    history_page_size: int | None = None
 
 
 @dataclass(slots=True)
@@ -379,14 +384,19 @@ class MissionControlModel:
         history_rows = self._dedupe_history_rows(load_project_history_rows(self.project_dir))
         history_items = self._build_history_items(history_rows, filters)
         total_rows = len(history_items)
-        total_pages = max(1, (total_rows + self.history_page_size - 1) // self.history_page_size) if total_rows else 1
+        # Per-request page size overrides the model default. Clamp to a sane
+        # range so a stale URL like ?ps=999999 cannot ask the server to
+        # serialize an unbounded slice.
+        page_size = filters.history_page_size or self.history_page_size
+        page_size = max(1, min(int(page_size), 200))
+        total_pages = max(1, (total_rows + page_size - 1) // page_size) if total_rows else 1
         page = min(max(filters.history_page, 0), max(0, total_pages - 1))
         filters.history_page = page
-        start = page * self.history_page_size
+        start = page * page_size
         history_view = HistoryView(
-            items=history_items[start:start + self.history_page_size],
+            items=history_items[start:start + page_size],
             page=page,
-            page_size=self.history_page_size,
+            page_size=page_size,
             total_rows=total_rows,
             total_pages=total_pages,
         )

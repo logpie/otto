@@ -2649,3 +2649,53 @@ tbody tr.selected {
   color: #78350f;
   font-size: 12px;
 }
+
+/* History pagination — sits below the run-history table. Power users with
+ * 200+ runs need fast access to all pages; the previously-shipped
+ * `total_rows=247` pill displayed the count but offered no navigation
+ * (mc-audit codex-state-management #6, heavy-user CRITICAL).
+ *
+ * Inputs reuse existing button/input styling; we only declare layout
+ * here so existing token theme changes still apply.
+ */
+.history-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--panel-border, #e5e7eb);
+  font-size: 12px;
+}
+
+.history-pagination-status {
+  color: var(--muted-text, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+.history-pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.history-pagination-controls button[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.history-pagination-jump,
+.history-pagination-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.history-pagination-jump input {
+  width: 56px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

@@ -55,7 +55,10 @@ build-backend = "setuptools.build_meta"
 include = ["otto*"]
 
 [tool.setuptools.package-data]
-"otto.web" = ["static/*", "static/assets/*"]
+# Recursive glob: any future nested asset directory (fonts/, images/,
+# locale/, etc.) is automatically packaged. The `**/*` form is supported
+# by setuptools >=69 (already pinned in [build-system]).
+"otto.web" = ["static/**/*"]
 "otto.prompts" = ["*.md"]
 
 [tool.pytest.ini_options]

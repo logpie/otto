@@ -802,17 +802,30 @@ def filters_from_params(
     outcome_filter: str = "all",
     query: str = "",
     history_page: int = 0,
+    history_page_size: int | None = None,
 ) -> MissionControlFilters:
     if type_filter not in {"all", "build", "improve", "certify", "merge", "queue"}:
         raise MissionControlServiceError("invalid type filter", status_code=400)
     if outcome_filter not in {"all", "success", "failed", "interrupted", "cancelled", "removed", "other"}:
         raise MissionControlServiceError("invalid outcome filter", status_code=400)
+    # Whitelist the page-size choices so a malformed/hostile URL cannot ask
+    # for an unbounded slice. Any other value falls back to the model
+    # default. Mirrors the front-end <select> options.
+    normalized_page_size: int | None = None
+    if history_page_size is not None:
+        try:
+            candidate = int(history_page_size)
+        except (TypeError, ValueError):
+            candidate = 0
+        if candidate in {10, 25, 50, 100}:
+            normalized_page_size = candidate
     return MissionControlFilters(
         active_only=bool(active_only),
         type_filter=type_filter,  # type: ignore[arg-type]
         outcome_filter=outcome_filter,  # type: ignore[arg-type]
         query=str(query or ""),
         history_page=max(0, int(history_page or 0)),
+        history_page_size=normalized_page_size,
     )
 
 
