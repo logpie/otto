@@ -175,7 +175,10 @@ def test_queue_improve_bugs(tmp_path: Path):
     tasks = load_queue(repo)
     assert tasks[0].command_argv[:2] == ["improve", "bugs"]
     assert tasks[0].focus == "error handling"
-    assert tasks[0].resolved_intent == "a product"
+    # W3-IMPORTANT-1: improve resolved_intent prefers focus over the
+    # snapshot intent so the task board / agent context describes what
+    # the user actually asked for, not the project's README.
+    assert tasks[0].resolved_intent == "error handling"
 
 
 def test_queue_improve_target_focus_not_set(tmp_path: Path):

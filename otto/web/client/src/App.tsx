@@ -1665,7 +1665,7 @@ export function App() {
           <button type="button" data-testid="switch-project-button" onClick={() => void switchProject()}>Switch project</button>
         )}
         <button className="primary" type="button" data-testid="new-job-button" onClick={openJobDialog}>New job</button>
-        <button type="button" data-testid="start-watcher-button" disabled={!canStartWatcher(data) || watcherInFlight.pending} aria-describedby="watcher-action-hint" aria-busy={watcherInFlight.pending} title={data?.runtime.supervisor.start_blocked_reason || watcher?.health.next_action || ""} onClick={() => void runWatcherAction("start")}>{watcherInFlight.pending ? <><Spinner /> Starting…</> : "Start watcher"}</button>
+        <button type="button" data-testid="start-watcher-button" disabled={!canStartWatcher(data) || watcherInFlight.pending} aria-describedby="watcher-action-hint" aria-busy={watcherInFlight.pending} title={startWatcherTooltip(data)} onClick={() => void runWatcherAction("start")}>{watcherInFlight.pending ? <><Spinner /> Starting…</> : "Start watcher"}</button>
         <button type="button" data-testid="stop-watcher-button" disabled={!canStopWatcher(data) || watcherInFlight.pending} aria-describedby="watcher-action-hint" aria-busy={watcherInFlight.pending} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>{watcherInFlight.pending ? <><Spinner /> Stopping…</> : "Stop watcher"}</button>
         <p id="watcher-action-hint" className="sidebar-hint">{watcherHint}</p>
       </aside>
@@ -5295,6 +5295,22 @@ function canStartWatcher(data?: StateResponse | null): boolean {
   const queued = Number(data?.watcher.counts.queued || 0);
   const backlog = Number(data?.runtime.command_backlog.pending || 0) + Number(data?.runtime.command_backlog.processing || 0);
   return Boolean(data?.runtime.supervisor.can_start && (queued > 0 || backlog > 0));
+}
+
+// W3-IMPORTANT-6: when the Start watcher button is disabled because the
+// watcher is already running, the previous tooltip leaked the Stop button's
+// next_action ("Stop watcher to pause queue dispatch.") onto the Start
+// control. That read as "do this to start" — the opposite of what the
+// disabled state meant. Compose a Start-specific tooltip so the title and
+// the visible label agree.
+function startWatcherTooltip(data?: StateResponse | null): string {
+  const blocked = data?.runtime.supervisor.start_blocked_reason || "";
+  if (blocked) return blocked;
+  if (data?.watcher.health.state === "running") return "Watcher already running.";
+  if (data?.watcher.health.state === "stale") return "Stop the stale watcher before starting another one.";
+  // Falls back to the shared next_action only when the action is actually
+  // about starting (state is "stopped" or unknown).
+  return data?.watcher.health.next_action || "";
 }
 
 function canStopWatcher(data?: StateResponse | null): boolean {

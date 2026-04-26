@@ -560,6 +560,30 @@ def _run_improve_locked(
     duration = result.total_duration or (time.time() - start)
     default_branch = str(config.get("default_branch") or "main")
 
+    # W3-IMPORTANT-2: build-journal.md must exist after EVERY improve so
+    # operators always have the round-by-round index documented in CLAUDE.md.
+    # The agent-driven path (build_agentic_v3 with prompt_mode="improve")
+    # never calls append_journal — only the system-driven run_certify_fix_loop
+    # does. Even the system path skips the journal when the loop bails on
+    # first-round PASS without entering the fix branch. Seed/append a final
+    # row here so single-round PASS, multi-round PASS, and FAIL all leave a
+    # journal behind.
+    try:
+        from otto.journal import append_journal
+        verdict = "PASS" if result.passed else "FAIL"
+        rounds = result.rounds or 1
+        append_journal(
+            project_dir,
+            f"round-{rounds:03d}",
+            f"{command_label.lower()} complete",
+            verdict,
+            float(result.total_cost or 0.0),
+            session_id=result.build_id,
+        )
+    except OSError:
+        # Journal is best-effort; never fail the improve over a write error.
+        pass
+
     # --- Write report ---
     report_lines = [
         f"# {command_label} Report",
@@ -581,7 +605,23 @@ def _run_improve_locked(
 
     report_lines.append("## Summary")
     report_lines.append(f"- **Result:** {'PASSED' if result.passed else 'FAILED'}")
-    report_lines.append(f"- **Stories:** {result.tasks_passed}/{result.tasks_passed + result.tasks_failed}")
+    # W3-IMPORTANT-4: WARN-level certifier observations are stored with
+    # `passed=True` (so they don't fail the run) but they are NOT met
+    # requirements. The prior `Stories: 5/5` line counted WARNs in the
+    # numerator, contradicting the certifier's narrative `(3/5)`. Split
+    # the count by verdict so operators see the real shape of the result.
+    pass_count = sum(1 for j in result.journeys if str(j.get("verdict") or "").upper() == "PASS")
+    warn_count = sum(1 for j in result.journeys if str(j.get("verdict") or "").upper() == "WARN")
+    fail_count = sum(1 for j in result.journeys if str(j.get("verdict") or "").upper() in {"FAIL", "FLAG_FOR_HUMAN"})
+    if warn_count or (pass_count + warn_count + fail_count > 0):
+        report_lines.append(
+            f"- **Stories:** {pass_count} PASS / {warn_count} WARN / {fail_count} FAIL"
+        )
+    else:
+        # Fallback for legacy/empty journeys: keep the old aggregate ratio.
+        report_lines.append(
+            f"- **Stories:** {result.tasks_passed}/{result.tasks_passed + result.tasks_failed}"
+        )
     report_lines.append(f"- **Rounds:** {result.rounds}")
     report_lines.append(f"- **Cost:** ${result.total_cost:.2f}")
     report_lines.append(f"- **Duration:** {duration / 60:.1f} min")

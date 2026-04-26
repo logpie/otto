@@ -63,8 +63,22 @@ def enqueue_task(
             message = f"queue.yml is malformed: {message}"
         raise ValueError(message) from exc
     existing_ids = [task.id for task in existing]
+    # W3-IMPORTANT-1: For improve tasks, the user-supplied focus is the only
+    # discriminator that distinguishes one improve from another. Using the
+    # snapshot intent (often the project README/intent.md) for slug derivation
+    # collapses every improve into the project-name slug and surfaces the
+    # README as the task's "intent" in the task board / agent context. Prefer
+    # focus-or-target when provided so each improve gets a meaningful id and
+    # resolved_intent.
+    slug_source = intent
+    stored_intent: str | None = intent
+    if command == "improve":
+        focus_or_target = (focus or target or "").strip() or None
+        if focus_or_target:
+            slug_source = focus_or_target
+            stored_intent = focus_or_target
     task_id = generate_task_id(
-        intent=intent,
+        intent=slug_source,
         command=command,
         existing_ids=existing_ids,
         explicit_as=explicit_as,
@@ -80,7 +94,7 @@ def enqueue_task(
         after=after,
         resumable=resumable,
         added_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        resolved_intent=intent,
+        resolved_intent=stored_intent,
         focus=focus,
         target=target,
         branch=compute_branch_name(command, task_id),

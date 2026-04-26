@@ -1335,7 +1335,20 @@ class Runner:
         wt_path = self._worktree_for(task)
         session_dir = paths.session_dir(wt_path, session_run_id) if session_run_id else paths.sessions_root(wt_path)
         manifest_path = ts.get("manifest_path") or (session_dir / "manifest.json")
-        primary_log = paths.build_dir(wt_path, session_run_id) / "narrative.log" if session_run_id else None
+        primary_log = None
+        if session_run_id:
+            # W3-IMPORTANT-5: improve runs write narrative.log under improve/,
+            # not build/. Prefer build/ (the legacy location for build runs)
+            # but fall back to improve/ so queue task displays for `otto
+            # improve` resolve a real log instead of a phantom build path.
+            build_log = paths.build_dir(wt_path, session_run_id) / "narrative.log"
+            improve_log = paths.improve_dir(wt_path, session_run_id) / "narrative.log"
+            if build_log.exists():
+                primary_log = build_log
+            elif improve_log.exists():
+                primary_log = improve_log
+            else:
+                primary_log = build_log  # default presented even when missing
         return {
             "session_dir": str(session_dir),
             "manifest_path": str(manifest_path) if manifest_path else None,
