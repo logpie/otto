@@ -894,6 +894,402 @@ spent on real LLM: **~$0.23** (one tiny `ping.py` build, ~54s).
 
 ---
 
+## W7 findings
+
+**Run:** `bench-results/web-as-user/2026-04-26-064245-3bc698/W7/`
+**Verdict:** FAIL — 239s wall, **success** terminal_outcome ($0.6161 spend)
+**Browser:** webkit + `playwright.devices["iPhone 14"]` (390×664, dpr=3)
+
+### W7-IMPORTANT-1: Submit button lives at y=674 in a 664px viewport — partly off-screen on iPhone 14
+
+- **Severity:** IMPORTANT — Apple's 1st-party device profile renders the
+  primary CTA below the fold without an obvious scroll affordance.
+- **Evidence:** `touch-target-submit.json` →
+  `{"x": 266.95, "y": 673.95, "width": 92.05, "height": 44}` against a
+  documented viewport of `{"w": 390, "h": 664}`. The submit button's top
+  is **9.95 px below the bottom of the viewport** at default zoom.
+- **Impact:** First-time mobile users may not realise the JobDialog
+  needs to be scrolled before the Submit button is reachable. Tap area
+  itself meets HIG (44×44), but the discoverability is broken.
+- **Reproduction:** Same as the run command, then inspect the saved
+  `touch-target-submit.json` + `04-mobile-submitted.png`.
+- **Suggestion:** Pin the dialog footer (or shrink the form) so the
+  submit button is always above the fold on the smallest supported
+  viewport.
+
+### W7-NOTE-1: queue-compat 404 reproduces on webkit (W2-IMPORTANT-1)
+
+- **Severity:** NOTE — already filed as **W2-IMPORTANT-1**. Reproduces
+  on webkit, on iPhone 14, on the queue domain. The console error gates
+  the verdict to FAIL: `console errors during W7; see console.json`.
+- **Evidence:** `console.json` contains exactly one error:
+  `Failed to load resource: 404` for
+  `/api/runs/queue-compat%3Abuild-a-small-kanban-board-web-app-with-4a6d9e?history_page_size=25`.
+
+### W7 confirmations (no new bugs)
+
+- New-job button on mobile is `354 × 44` — meets HIG. _Touch-target check
+  passed._
+- Page hydrates and `data-mc-shell="ready"` probe works on webkit. _The
+  Cluster G probe is webkit-compatible._
+- `page.tap()` works for both new-job and submit (no fallback to
+  `click()` was needed in this run).
+- After reload, mobile shell still loads. Build artifacts (kanban HTML
+  + JS) appear in project_dir.
+
+---
+
+## W8 findings
+
+**Run:** `bench-results/web-as-user/2026-04-26-064711-b13414/W8/`
+**Verdict:** FAIL — 231s wall, all 3 jobs reached `success` terminal_outcome
+($0.9863 spend across 3 builds)
+**Driver:** keyboard-only (Cmd+K, Tab, Enter, Cmd+Enter, Escape)
+
+### W8-IMPORTANT-1: JobDialog ignored Cmd+Enter from textarea — only Tab→Enter on submit button worked
+
+- **Severity:** IMPORTANT — the documented power-user shortcut for
+  submitting a long intent without releasing the keyboard does not
+  actually fire.
+- **Evidence:** `debug.log` shows two of the three submit attempts
+  failed with `Cmd+Enter / Enter ignored`:
+  - Attempt (a): "submitting via Cmd+Enter from textarea" → JobDialog
+    still open after timeout.
+  - Attempt (c): same path → same failure.
+  - Attempt (b): used **Tab → Enter on submit button** instead → worked.
+  Final `debug.log` summary line: `JobDialog still open after keyboard
+  submit (a) — Cmd+Enter / Enter ignored` and same for (c).
+- **Impact:** The on-the-record Mission Control accelerator
+  (`Cmd+Enter` to submit) is broken for the JobDialog textarea. Users
+  who learn the shortcut from any code-gen tool (where this is
+  universal) will think MC is unresponsive.
+- **Reproduction:** Open new-job dialog, focus the intent textarea,
+  press Cmd+Enter (mac) / Ctrl+Enter (linux). Dialog stays open, no
+  submit fires.
+- **Suggestion:** Wire the JobDialog `<textarea>` `onKeyDown` to handle
+  `(metaKey||ctrlKey) && key==='Enter'` → click the submit button.
+
+### W8-CRITICAL-1: Keyboard "cancel" landed on `review-next-action-button`, NOT the queue row's cancel — destructive-action affordance has wrong tab order
+
+- **Severity:** CRITICAL — pressing Enter on what the user intended to
+  be "cancel a queued task" actually pressed the Inspector's
+  `review-next-action-button`, which can fire merge / next-step actions.
+- **Evidence:** `debug.log` Step 5:
+  ```
+  candidates: running=2026-04-26-064809-6f3682
+              cancel=queue-compat:add-a-date-utility-module-that-exports-221a3c
+  pressed Enter on focused cancel candidate testid='review-next-action-button'
+  ```
+  And `cancel-summary.json`:
+  ```json
+  {"running_run_id": "2026-04-26-064809-6f3682",
+   "cancelled_run_id": "queue-compat:add-a-date-utility-module-that-exports-221a3c",
+   "kb_cancel_ok": true, "cancel_via": "keyboard"}
+  ```
+  → harness reports cancel "succeeded" but the actual focused element
+  was the Inspector's *next action* button, not a cancel button. Focus
+  walking via Tab from the queue row landed on a button labeled
+  "Review result" / "Run more" rather than a discoverable cancel. See
+  `focus-chains.json` `b-tab-to-newjob` for the focus walk.
+- **Impact:** A keyboard user who attempts to cancel a queued task
+  using only Tab+Enter will instead activate the inspector's
+  next-action affordance — for some flows that's a merge or auto-fix
+  trigger. **This is data-loss-adjacent** because the user's mental
+  model says "I just cancelled the job" but the system says "I just
+  approved the next step."
+- **Reproduction:** Focus a queue task card via Tab, then continue
+  pressing Tab looking for a cancel affordance. The focus order
+  surfaces inspector buttons (open-proof, open-logs, open-artifacts,
+  review-next-action) BEFORE any cancel.
+- **Suggestion:** Add a per-row cancel affordance with a stable testid
+  (`task-card-cancel-<id>`) that lives in the focus chain immediately
+  after the task card itself, before any inspector tabs.
+
+### W8-IMPORTANT-2: First Tab from `<body>` lands on `BUTTON#new-job-button`, NOT the documented "skip to main content" link
+
+- **Severity:** IMPORTANT — accessibility regression. The skip-link is
+  registered (`A#skip-link|Skip to main content`) but it is the SECOND
+  tab stop, not the first.
+- **Evidence:** `focus-chains.json` `a-tab-to-newjob`:
+  ```
+  BODY → A#skip-link → BUTTON#new-job-button → BUTTON#tasks-tab → ...
+  ```
+  Wait, actually re-reading: `BODY` is index 0 (initial focus), then
+  Tab #1 = `A#skip-link`. So skip-link IS first. But notice: the
+  `b-tab-to-newjob` chain shows the same chain interleaved with
+  inspector buttons that do NOT belong in primary nav. **Re-classify:
+  this isn't first-tab order, it's the issue that inspector buttons
+  inject themselves into the nav order even when the inspector isn't
+  open.**
+- **Reclassified note:** The actual finding is below in W8-NOTE-1.
+
+### W8-NOTE-1: Cmd-K opened command palette and was used as a workaround to enqueue jobs (worked) — but no first-class "new job" keyboard shortcut
+
+- **Severity:** NOTE — Cmd-K palette has an entry that filters to
+  "new job" and pressing Enter opens the dialog. It WORKS, but it's a
+  workaround. There is no documented `n` / `N` / `Cmd+J` / similar
+  direct accelerator for "new job."
+- **Evidence:** `debug.log` shows all three enqueues going through
+  `Cmd-K` → palette → type "new job" → Enter. `02-dialog-a.png` etc
+  confirm the dialog opened via that path.
+- **Suggestion:** Document Cmd-K-then-"new job" as the canonical
+  keyboard path, OR add a top-level `n` accelerator.
+
+### W8-NOTE-2: queue-compat 404 reproduces (W2-IMPORTANT-1)
+
+- **Severity:** NOTE — same `queue-compat:<task>?history_page_size=25`
+  404 console error gates the verdict to FAIL.
+- **Evidence:** `console.json` (1 error of this shape).
+
+### W8 confirmations (no new bugs)
+
+- All 3 keyboard-enqueued jobs reached `success` terminal_outcome.
+- Watcher start via Tab → Enter on `mission-start-watcher-button`
+  works correctly (Step 4).
+- Build cost is similar to W2 ($0.99 vs ~$0.80 — same intents, same
+  shape).
+
+---
+
+## W9 findings
+
+**Run:** `bench-results/web-as-user/2026-04-26-065120-3382c0/W9/`
+**Verdict:** FAIL — 161s wall, build reached `success` ($0.4149 spend)
+**Test:** Submit calculator build, hide tab via `visibilityState="hidden"` for
+120s, restore, verify SPA recovered.
+
+### W9-CRITICAL-1: Polling completely halts under hidden visibility AND fires a 175-poll burst on restore (no debounce)
+
+- **Severity:** CRITICAL — both legs of this finding are bugs:
+  - **Leg 1**: Under `visibilityState="hidden"`, the SPA stops polling
+    `/api/state` entirely. Plot of poll counts in 10s buckets:
+    ```
+    t=  0- 10s : 8 polls   (active)
+    t= 10- 20s : 6 polls   (active, last "before hide" snapshot)
+    t= 20-130s : 0 polls   ← 110 seconds of silence
+    t=130-140s : 175 polls ← single 10s burst on visibility restore
+    t=150-160s : 34 polls
+    ```
+    From `bench-results/.../W9/poll-log.json` (223 polls total over
+    ~159s of recorded session).
+  - **Leg 2**: When visibility flips back to `visible`, the SPA fires
+    175 `/api/state` requests in a single 10-second window — no
+    debounce, no rate limiter. This is request-flood territory: a user
+    backgrounding 4 MC tabs and switching back to all of them at once
+    would fire ~700 simultaneous requests against the in-process
+    server.
+- **Impact:**
+  - On Leg 1: the user sees a stale SPA for the entire hide window —
+    if the build completes during hide AND the user returns BEFORE
+    visibility is restored to "visible", they'd see the stale "running"
+    state. The harness verified this: `Step 9: notifications fired=0`
+    (the heavy-user notification path NEVER fires because visibility
+    flips BACK to visible BEFORE the run drops out of live[]).
+  - On Leg 2: a real user backgrounding the tab on a low-power device
+    would hit a 175-request thundering herd on resume. On Otto's
+    in-process backend this is harmless; on a hosted deployment it
+    would gate behind rate limits or trigger autoscaling.
+- **Evidence:**
+  - `poll-stats.json` → `polls_during_hide_window: 6` (the 6 are from
+    the first 10s of the hide window — after that, zero).
+  - `poll-log.json` → 223-entry timeline.
+  - `visibility-log.json` → confirms `hidden` and `visible` events
+    landed at the expected times.
+  - `notifications.json` → empty (Notification API spy fired zero
+    times because the run completed during the *visible* phase).
+- **Reproduction:**
+  ```
+  OTTO_ALLOW_REAL_COST=1 OTTO_WEB_SKIP_FRESHNESS=1 \
+    .venv/bin/python scripts/web_as_user.py --scenario W9 --provider claude
+  ```
+  Inspect `poll-log.json` after.
+- **Suggestion:**
+  - For Leg 1: Allow polling under hidden but with a longer interval
+    (e.g. 30s instead of 5s). This keeps state warm enough to fire the
+    completion notification.
+  - For Leg 2: Add request coalescing on visibility resume. One catch-up
+    poll should suffice; React Query / SWR have built-in patterns for
+    this (`focusThrottleInterval`).
+
+### W9-IMPORTANT-1: Polling did not visibly resume in 15s after restore — 0 polls in the harness's post-restore window
+
+- **Severity:** IMPORTANT — this is technically a sub-finding of
+  W9-CRITICAL-1 above. The poll burst (175 polls) happens BEFORE the
+  harness samples its 15s window, then dies down. So when the harness
+  asked "did polling resume in the 15s after I returned?", the answer
+  was 0. The poll-log shows the polls ARE happening (175 of them) but
+  they all fire in the very first second after restore, then taper off.
+- **Evidence:** `debug.log`:
+  `[06:53:49] [W9]   polls in 15s after restore=0`. But `poll-log.json`
+  shows 175 polls fired between t=130-140s (the burst window). The
+  `polls_at_restore` snapshot was taken AFTER the burst already
+  happened.
+- **Impact:** The `polls in 15s after restore` metric is misleading —
+  but the underlying behaviour (catastrophic burst + die) is the real
+  bug.
+
+### W9-IMPORTANT-2: Completed run still appears in `live[]` after `terminal_outcome` is set in `history[]` — stale state
+
+- **Severity:** IMPORTANT — duplicate of state-coherence violation. A
+  run that has reached terminal MUST be removed from `live[]`. The
+  harness saw the run in BOTH `live[]` and `history[]` simultaneously.
+- **Evidence:** `debug.log`:
+  `Step 8: state coherence — no stale duplicates`
+  `live_dupes=1 hist_match=1`. And `final-state.json` confirms one row
+  in each.
+- **Impact:** UI shows the run twice — once as "running" in the live
+  pane, once as "success" in the history pane. Confusing for users.
+  Also indicates the backend's live → history transition is not atomic.
+- **Reproduction:** `cat .../W9/final-state.json | jq '.live.items + .history.items | map(select(.run_id=="2026-04-26-065128-c86cde")) | length'` → 2.
+
+### W9-NOTE-1: Background-tab notification did not fire (semantic correctness, not a bug)
+
+- **Severity:** NOTE — captured as a NOTE because the Notification
+  spy's expected condition (`document.visibilityState === "hidden"
+  AND a live row drops out`) was not met during this run. The build
+  completed AFTER visibility was restored, so the hook correctly did
+  not fire. Logged as a confirmation that the notification gate
+  works as documented in App.tsx.
+- **Evidence:** `notifications.json` is `[]`; `visibility-log.json`
+  shows hide at t≈11s and restore at t≈131s; `final-state.json` shows
+  `terminal_outcome=success` was committed at ~t=159s — well after
+  visibility had been restored.
+
+### W9-NOTE-2: queue-compat 404 reproduces (W2-IMPORTANT-1)
+
+- **Severity:** NOTE — same console error.
+
+### W9 confirmations (no new bugs)
+
+- The visibility-injection technique (`Object.defineProperty` +
+  `dispatchEvent('visibilitychange')`) successfully stubs the API for
+  Otto's React hook. The hook IS reading visibility and acting on it.
+- Notification API spy (`window.__otto_notifs__`) install path works
+  via `add_init_script`.
+
+---
+
+## W10 findings
+
+**Run:** `bench-results/web-as-user/2026-04-26-070607-e9770c/W10/`
+**Verdict:** FAIL — 74s wall, run was cancelled (intended)
+**Cost:** $0.0000 (cancelled before any tokens billed — agent had not yet
+emitted output)
+**Setup:** Two browser contexts, two pages, one backend. Tab A submits +
+starts watcher. Tab B watches and cancels.
+
+### W10-CRITICAL-1: Tab B did not display the running run within 30s of submit (cross-tab live state never propagated to DOM)
+
+- **Severity:** CRITICAL — the canonical "two operators on one project"
+  collaboration story is broken. A run started in tab A is not visible
+  in tab B's task board within a generous 30-second window.
+- **Evidence:**
+  - `metrics.json` →
+    `"target_run_id": "2026-04-26-070614-4ae32c"`,
+    `"propagation_to_B_s": null`.
+  - The harness polled `/api/state` on the backend AND polled tab B's
+    DOM for `[data-run-id="<id>"]` or any `task-board` cell containing
+    the run id. The backend showed the run as `running` within seconds
+    (`running_seen=True` in `debug.log`). But tab B's DOM never
+    rendered that run.
+  - `bench-results/.../W10/tab-b/03-after-propagation.png` confirms
+    the empty state.
+- **Impact:** Two-operator workflows are silently broken. Operator B
+  may submit a duplicate of A's job because they cannot see A's job in
+  their task board.
+- **Reproduction:**
+  ```
+  OTTO_ALLOW_REAL_COST=1 OTTO_WEB_SKIP_FRESHNESS=1 \
+    .venv/bin/python scripts/web_as_user.py --scenario W10 --provider claude
+  ```
+- **Suggestion:** Tab B's `useState` poll loop probably IS running
+  (poll-log not captured here, but the backend was reachable). Either
+  (a) the cross-tab state-sync hook is filtering the new row out, OR
+  (b) the task-board renderer is keyed off a session/context cookie
+  that differs between tabs. Inspect the `useTrackCompletions` hook
+  and the project-selection logic in tab B.
+
+### W10-CRITICAL-2: Tab A did not reflect tab-B-issued cancellation within 30s (mutation propagation broken in both directions)
+
+- **Severity:** CRITICAL — companion to W10-CRITICAL-1. Cancel issued
+  via tab B's `fetch()` (cookies/headers/origin = tab B) returned
+  `status:200, ok:true`. Backend committed the cancel
+  (`terminal_outcome:"cancelled"` confirmed at Step 6). But tab A's
+  task board never showed the row as cancelled within 30s.
+- **Evidence:**
+  - `metrics.json` →
+    `"cancel_status": 200`,
+    `"cancel_propagation_to_A_s": null`,
+    `"terminal_outcome": "cancelled"`.
+  - `debug.log`:
+    ```
+    Step 4: cancel status=200 body={"ok":true,"message":null,...}
+    Step 5: cancel_seen_in_a=False propagation_s=None
+    ```
+- **Impact:** Same workflow risk as W10-CRITICAL-1. Operator A
+  watching tab A would see the run as "running" indefinitely after
+  Operator B cancelled it from tab B, until they reload the page.
+
+### W10-IMPORTANT-1: Cancel against an unstarted (queued, no watcher) task returns `200 OK` with `severity:warning, ok:false` — semantically a 409 dressed as a 200
+
+- **Severity:** IMPORTANT — a soft failure with HTTP 200 is misleading
+  for any non-React client (CLI, integration, Otto's own scripts).
+- **Evidence:** From the first attempt (`/tmp/w10-attempt1.out`, no
+  watcher started), cancel response:
+  ```json
+  {"ok": false,
+   "message": "cancel request is still pending with no fallback process group",
+   "severity": "warning",
+   "modal_title": null,
+   "modal_message": null,
+   "refresh": true,
+   "clear_banner": true}
+  ```
+- **Impact:** Returning 200 + `ok:false` is the same anti-pattern
+  flagged for merge in W5-IMPORTANT-1. CLI consumers and external
+  automation rely on the HTTP status code for retry / abort decisions.
+- **Suggestion:** Return `409 Conflict` (or `202 Accepted` if the
+  cancel is asynchronous), and surface a structured `state` field
+  (e.g. `"queued_no_pid"`) instead of a free-text `message`.
+
+### W10-IMPORTANT-2: queue task in `live` state has no manifest on disk — artifact-mine catches it
+
+- **Severity:** IMPORTANT — surfaced by `artifact_mine_pass`:
+  `queue task 'add-a-endpoint-that-returns-hello-world-aae0c7' listed
+  in state but has no manifest at .../otto_logs/queue/<id>/manifest.json`.
+- **Impact:** Cross-link to W1-IMPORTANT-3 / W2-IMPORTANT-4 — the
+  queue/session-dir mismatch repros for cancel-before-completion runs
+  too. The queue task was registered in state but its manifest was
+  never written (or was written to a different location). External
+  consumers (artifact mining, post-hoc analysis) cannot find the
+  on-disk evidence.
+
+### W10-NOTE-1: queue-compat 404 reproduces in BOTH tabs (W2-IMPORTANT-1)
+
+- **Severity:** NOTE — the same 404 error fires on each tab
+  independently. `tab-a/console.json` has 1, `tab-b/console.json` has
+  1. The error gates each tab's verdict to FAIL.
+
+### W10 confirmations
+
+- The `pages_two`-style fixture pattern (two `browser.new_context()`
+  → two pages on one backend) works in the script-driven harness.
+- Backend cancel path itself works: `terminal_outcome:"cancelled"`
+  was committed within 60 seconds of the cancel POST.
+- Tab B's `fetch()` from page-context successfully reaches the
+  backend and triggers cancel — proving the backend will accept
+  cross-tab mutations.
+
+### W10 historical attempt
+
+- **First attempt** (`/tmp/w10-attempt1.out`, run id
+  `2026-04-26-065410-...`) ran without starting the watcher and
+  surfaced the W10-IMPORTANT-1 cancel-pending finding above. Killed
+  after Step 6 stalled at `live_statuses=['queued']` for ~8 minutes.
+  No LLM cost (job never spawned).
+
+---
+
 ## Summary
 
 | Run | Verdict | Wall time | Bugs (C/I/N) | Cost (live) |
@@ -907,12 +1303,16 @@ spent on real LLM: **~$0.23** (one tiny `ping.py` build, ~54s).
 | W3   | FAIL    | 305s (run 2; run 1 = 208s no-op)    | 2 / 7 / 2     | LLM: 1 greet build + 1 improve (~$0.83 = $0.36 build + $0.47 improve) |
 | W4   | PASS (rerun; orig FAIL/736s harness-race) | 78s | 0 / 0 / 0 | LLM: 1 hello build ($0.23) |
 | W5   | FAIL (rerun; orig FAIL/653s harness-race) | 72s | 1 / 1 / 1 | LLM: 1 ping build ($0.23) — merge-block invariant violated |
+| W7   | FAIL (live, mobile webkit) | 239s | 0 / 1 / 1 | LLM: 1 kanban build on iPhone 14 ($0.6161) |
+| W8   | FAIL (live, keyboard-only) | 231s | 1 / 1 / 2 | LLM: 3 of 3 jobs completed via keyboard ($0.9863 across 3 builds) |
+| W9   | FAIL (live, hide+restore)  | 161s | 1 / 2 / 2 | LLM: 1 calculator build ($0.4149) |
+| W10  | FAIL (live, two-tab)       | 74s  | 2 / 2 / 1 | LLM: 1 hello-world build, cancelled before tokens billed ($0.0000) |
 
-Total findings (across all 9 runs): **9 CRITICAL, 26 IMPORTANT, 9 NOTE**
-(unchanged in count — the W4/W5 reruns *replace* the prior harness-only
+Total findings (across all 13 runs): **13 CRITICAL, 32 IMPORTANT, 15 NOTE**
+(W7+W8+W9+W10 added: 4 CRITICAL, 6 IMPORTANT, 6 NOTE on top of the
+prior 9 / 26 / 9. W4/W5 reruns *replace* the prior harness-only
 findings; the W4 race is now resolved at source, the W5 race resolved
-revealed one new merge-preflight CRITICAL + one IMPORTANT, see
-"W5 findings (re-run)" above).
+revealed one new merge-preflight CRITICAL + one IMPORTANT.)
 
 (Some findings reproduce across scenarios — e.g. W1-CRITICAL-1 also surfaces in W13;
 W1-IMPORTANT-3 surfaces in W2/W12b/W13. The reproduction breadth is itself a
@@ -920,12 +1320,14 @@ data point: regressions like the log-pane stacking issue affect every flow that
 opens an inspector. Counted once each at the **first** observation; reproductions
 flagged inline.)
 
-Cost actually spent: **~$3.39** total
+Cost actually spent: **~$5.41** total
 (W2 ≈ $0.85 for 2 builds; W12a ≈ $0.05 quick cancel; W12b ≈ $0.40 build+merge;
 W13 ≈ $0.50 TODO build + cert + outage; W3 ≈ $0.83 for 1 greet build + 1 improve;
-W4 rerun ≈ $0.23 for hello build; W5 rerun ≈ $0.23 for ping build.
-W3 first attempt was $0.00 — never enqueued anything, see W3-CRITICAL-2.
-W4/W5 first attempts were also $0.00 — harness Step-1 race; see harness-migration section.).
+W4 rerun ≈ $0.23 for hello build; W5 rerun ≈ $0.23 for ping build;
+W7 ≈ $0.62 for kanban-on-mobile; W8 ≈ $0.99 for 3 keyboard-driven jobs;
+W9 ≈ $0.41 for calculator + hide+restore; W10 ≈ $0.00 (cancelled before tokens billed).
+W3/W4/W5 first attempts were also $0.00 — harness Step-1 race; see harness-migration section.
+W10 first attempt was also $0.00 — no watcher started, job stuck queued; see W10 historical attempt.).
 
 ### INFRA-class issues observed
 
@@ -946,11 +1348,12 @@ W4/W5 first attempts were also $0.00 — harness Step-1 race; see harness-migrat
 - **W3-INFRA-1**: pytest result for product verification not captured in artifacts (Step 7 logs the call but never writes pytest.log).
 - **Loading-Mission-Control race (W3-CRITICAL-2)** also affects external automation generally — the SPA needs a `data-state="ready"` marker on the shell so any tool can probe deterministically. The harness now waits for `mission-new-job-button|new-job-button|launcher-subhead` as a workaround; this should be folded into the recommended probe.
 
-### Reproduction one-liner (now covers W1+W11+W2+W3+W12a+W12b+W13)
+### Reproduction one-liner (now covers W1+W11+W2+W3+W7+W8+W9+W10+W12a+W12b+W13)
 
 ```
 OTTO_WEB_SKIP_FRESHNESS=1 OTTO_ALLOW_REAL_COST=1 OTTO_BROWSER_SKIP_BUILD=1 \
-  .venv/bin/python scripts/web_as_user.py --scenario W1,W2,W3,W11,W12a,W12b,W13 --provider claude
+  .venv/bin/python scripts/web_as_user.py \
+    --scenario W1,W2,W3,W7,W8,W9,W10,W11,W12a,W12b,W13 --provider claude
 ```
 
 Or one at a time (faster to triage failures):
