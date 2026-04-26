@@ -842,13 +842,23 @@ export function App() {
     // gate per existing UX), stop goes through the confirm modal but the
     // trigger button must also disable for the duration of the POST, not just
     // the modal pause. mc-audit microinteractions C2 / first-time-user #14.
+    // mc-audit live W11-IMPORTANT-3: any rejection (silent enqueue failure,
+    // already-running watcher, supervisor lockout) must surface a toast so
+    // the operator never gets stuck staring at a disabled button with no
+    // feedback. The catch wraps the POST so caller `void` semantics still
+    // work but never silently swallow an error.
     const execute = () => watcherInFlight.run(async () => {
-      const result = await api<ActionResult | {message?: string}>(`/api/watcher/${action}`, {
-        method: "POST",
-        body: action === "start" ? JSON.stringify({concurrent: 2}) : "{}",
-      });
-      showToast(result.message || `watcher ${action} requested`);
-      await refresh(true);
+      try {
+        const result = await api<ActionResult | {message?: string}>(`/api/watcher/${action}`, {
+          method: "POST",
+          body: action === "start" ? JSON.stringify({concurrent: 2}) : "{}",
+        });
+        showToast(result.message || `watcher ${action} requested`);
+        await refresh(true);
+      } catch (error) {
+        showToast(`watcher ${action} failed: ${errorMessage(error)}`, "error");
+        throw error;
+      }
     });
     if (action === "stop") {
       // mc-audit codex-destructive-action-safety #5: build the confirm body
@@ -957,7 +967,11 @@ export function App() {
   const project = data?.project;
   const watcher = data?.watcher;
   const landing = data?.landing;
-  const active = activeCount(watcher);
+  // mc-audit live W11-IMPORTANT-1: in-flight must include atomic-domain runs
+  // (standalone `otto build` etc.), not just queue counts. The server already
+  // computes `live.active_count` across every domain — prefer that and fall
+  // back to watcher counts only if `live` is missing (early hydration).
+  const active = data?.live?.active_count ?? activeCount(watcher);
   const watcherHint = watcherControlHint(data);
   // `modalOpen` is reserved for the topmost overlay (job/confirm dialogs)
   // that needs the rest of the page to be inert. The inspector has its own
@@ -1833,7 +1847,18 @@ function MissionFocus({data, lastError, resultBanner, watcherPending, landPendin
             data-testid="mission-start-watcher-button"
             disabled={!canStartWatcher(data) || watcherPending}
             aria-busy={watcherPending}
-            title="Start the watcher process to run queued jobs."
+            // mc-audit live W11-IMPORTANT-3: when the button is disabled the
+            // user still hovers asking "why?". Surface the supervisor's
+            // start_blocked_reason / next_action via title so the disabled
+            // state is self-explanatory ("watcher already running", "no
+            // queued tasks", etc.) instead of generic.
+            title={
+              watcherPending
+                ? "Starting watcher…"
+                : (data?.runtime.supervisor.start_blocked_reason
+                    || data?.watcher.health.next_action
+                    || "Start the watcher process to run queued jobs.")
+            }
             onClick={onStartWatcher}
           >
             {watcherPending
@@ -2316,7 +2341,7 @@ function RunDetailPanel({detail, landing, inspectorOpen, onRunAction, onShowProo
                 <h3>{detail.title || detail.run_id}</h3>
                 <dl>
                   <dt>Run</dt><dd>{detail.run_id}</dd>
-                  <dt>Type</dt><dd>{detail.domain} / {detail.run_type}</dd>
+                  <dt>Type</dt><dd data-testid="run-detail-type">{domainLabel(detail.domain)} / {detail.run_type}</dd>
                   <dt>Branch</dt><dd>{detail.branch || "-"}</dd>
                   <dt>Worktree</dt><dd>{detail.worktree || detail.cwd || "-"}</dd>
                   <dt>Provider</dt><dd>{providerLine(detail)}</dd>
@@ -3436,12 +3461,12 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
             data-testid="job-dialog-intent"
             rows={5}
             placeholder={intentPlaceholderMap[command]}
-            aria-describedby={submitDisabled ? "jobDialogValidationHint" : undefined}
+            aria-describedby={submitDisabled && !submitting && pendingSeconds === null ? "jobDialogValidationHint" : undefined}
             aria-invalid={intentRequired ? true : undefined}
             onChange={(event) => setIntent(event.target.value)}
           />
         </label>
-        {submitDisabled && !submitting && (
+        {submitDisabled && !submitting && pendingSeconds === null && (
           <p id="jobDialogValidationHint" className="job-dialog-validation" data-testid="job-dialog-validation-hint" aria-live="polite">
             {intentRequired
               ? `Describe the requested outcome (${intentLabelMap[command].toLowerCase()}) to enable queueing.`
@@ -4056,6 +4081,17 @@ function refreshIntervalMs(data: StateResponse | null): number {
   return Math.max(700, Math.min(5000, Number(data?.live.refresh_interval_s || 1.5) * 1000));
 }
 
+// mc-audit live W11-IMPORTANT-2: standalone `otto build` registers as
+// `domain="atomic"` in the live registry, but every user-facing label calls
+// it "build". Alias the domain at the UI surface so external automation +
+// the type filter share consistent terminology with what the user sees.
+// Other domains (queue, merge, supervisor) pass through unchanged.
+export function domainLabel(domain: string | null | undefined): string {
+  if (!domain) return "-";
+  if (domain === "atomic") return "build";
+  return domain;
+}
+
 function activeCount(watcher?: WatcherInfo): number {
   const counts = watcher?.counts || {};
   return Number(counts.running || 0)
@@ -4133,7 +4169,10 @@ function workflowHealth(data: StateResponse | null): {
       runtimeTone: "warning",
     };
   }
-  const active = activeCount(data?.watcher);
+  // mc-audit live W11-IMPORTANT-1: prefer the server-side cross-domain
+  // active count so atomic-domain runs (standalone otto build) flow through
+  // the diagnostics overview.
+  const active = data?.live?.active_count ?? activeCount(data?.watcher);
   const attentionKeys = new Set<string>();
   for (const item of data?.live.items || []) {
     if (isAttentionStatus(item.display_status)) attentionKeys.add(item.queue_task_id || item.run_id);

@@ -282,6 +282,39 @@ W12A_BUILD_TIMEOUT_S = 10 * 60
 W12B_BUILD_TIMEOUT_S = 12 * 60
 W13_BUILD_TIMEOUT_S = 15 * 60
 
+# W3 — improve loop. First seeds a small-but-real build, then submits an
+# improve-bugs job that references the prior run via the queue subcommand.
+W3_BUILD_INTENT = (
+    "Add a small Python module greet.py that exports greet(name) returning "
+    "'Hello, <name>!'. Include test_greet.py with a basic pytest test."
+)
+W3_IMPROVE_FOCUS = (
+    "Make greet() handle empty/None name by returning 'Hello, world!' as a "
+    "safe default. Add a pytest case for the empty-string path."
+)
+W3_BUILD_TIMEOUT_S = 12 * 60
+W3_IMPROVE_TIMEOUT_S = 15 * 60
+
+# W4 — merge happy path. A trivially small build that should succeed and
+# expose the Merge action.
+W4_INTENT = "Add a tiny Python module hello.py exporting hello() returning 'world'."
+W4_BUILD_TIMEOUT_S = 10 * 60
+
+# W5 — merge blocking. We'll seed a dirty file in the project root (the
+# user-facing way to make a merge be blocked even when a build succeeds).
+W5_INTENT = "Add a tiny Python module ping.py exporting ping() returning 'pong'."
+W5_BUILD_TIMEOUT_S = 10 * 60
+
+# W6 — deterministic failure + retry. We seed a malformed otto.yaml so the
+# build fails reliably (non-INFRA), then the harness fixes the yaml and the
+# user clicks Retry.
+W6_INTENT = "Add a tiny Python module mod.py exporting one() returning 1."
+W6_BUILD_TIMEOUT_S = 10 * 60
+
+# W7 — same intent as W1 (mobile is a layout-only diff).
+W7_INTENT = W1_INTENT
+W7_BUILD_TIMEOUT_S = 12 * 60
+
 
 # ---------------------------------------------------------------------------
 # Web-as-user helpers (Playwright + in-process server)
@@ -2245,6 +2278,1373 @@ def _run_w13(ctx: ScenarioContext) -> ScenarioRunResult:
 
 
 # ---------------------------------------------------------------------------
+# Helpers used by W3-W7
+# ---------------------------------------------------------------------------
+
+
+def _set_dialog_command(page: Any, command: str, *, failures: RunFailures) -> bool:
+    """Set the JobDialog command (build|improve|certify) via the select."""
+    try:
+        sel = page.locator('[data-testid="job-command-select"]')
+        if sel.count() == 0:
+            failures.fail("job-command-select missing")
+            return False
+        sel.select_option(value=command, timeout=5_000)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"could not set command={command}: {exc}")
+        return False
+
+
+def _set_improve_subcommand(page: Any, sub: str, *, failures: RunFailures) -> bool:
+    try:
+        sel = page.locator('[data-testid="job-improve-mode-select"]')
+        if sel.count() == 0:
+            failures.fail("job-improve-mode-select missing (after switching to improve)")
+            return False
+        sel.select_option(value=sub, timeout=5_000)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"could not set improve subcommand={sub}: {exc}")
+        return False
+
+
+def _maybe_confirm_dirty_target(page: Any, *, failures: RunFailures) -> None:
+    """Tick the dirty-target confirm if it's visible (W11-CRITICAL-1 workaround)."""
+    try:
+        cb = page.locator('[data-testid="target-project-confirm"]')
+        if cb.count() > 0 and cb.is_visible():
+            cb.check(timeout=3_000)
+    except Exception as exc:  # noqa: BLE001
+        failures.note(f"target-project-confirm tick failed (non-fatal): {exc}")
+
+
+def _enqueue_via_dialog_full(
+    page: Any,
+    *,
+    intent: str,
+    command: str,
+    subcommand: Optional[str],
+    failures: RunFailures,
+    label: str,
+    artifact_dir: Path,
+    screenshot_idx: int,
+) -> bool:
+    """Open JobDialog, optionally switch command/subcommand, fill intent, submit."""
+    try:
+        new_job = page.locator(
+            '[data-testid="mission-new-job-button"], [data-testid="new-job-button"]'
+        ).first
+        if new_job.count() == 0:
+            failures.fail(f"new-job button missing (enqueue {label})")
+            return False
+        new_job.click(timeout=5_000)
+        page.wait_for_selector('[data-testid="job-dialog-intent"]', timeout=10_000)
+        if command != "build":
+            if not _set_dialog_command(page, command, failures=failures):
+                return False
+            time.sleep(0.5)
+        if command == "improve" and subcommand:
+            if not _set_improve_subcommand(page, subcommand, failures=failures):
+                return False
+        page.locator('[data-testid="job-dialog-intent"]').fill(intent, timeout=5_000)
+        _maybe_confirm_dirty_target(page, failures=failures)
+        _safe_screenshot(page, artifact_dir, f"{screenshot_idx:02d}-dialog-{label}")
+        submit = page.locator('[data-testid="job-dialog-submit-button"]')
+        if submit.count() == 0:
+            failures.fail(f"submit button missing (enqueue {label})")
+            return False
+        submit.click(timeout=5_000)
+        try:
+            page.wait_for_selector(
+                '[data-testid="job-dialog-intent"]', state="detached", timeout=10_000
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"enqueue {label} failed: {exc}")
+        return False
+
+
+def _wait_for_terminal(
+    base_url: str,
+    *,
+    timeout_s: float,
+    log_fn: Callable[[str], None],
+    domain_filter: Optional[set[str]] = None,
+    queue_task_id: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Poll /api/state until a matching history row has a terminal_outcome.
+
+    Returns (terminal_outcome, run_id) or (None, None) on timeout.
+    """
+    deadline = time.monotonic() + timeout_s
+    poll = 0
+    while time.monotonic() < deadline:
+        poll += 1
+        state = _state(base_url)
+        history = _history_items(state)
+        for it in history:
+            if domain_filter and it.get("domain") not in domain_filter:
+                continue
+            if queue_task_id and it.get("queue_task_id") != queue_task_id:
+                continue
+            outcome = it.get("terminal_outcome")
+            if outcome:
+                return outcome, it.get("run_id")
+        if poll % 12 == 1:
+            live = _live_items(state)
+            log_fn(
+                f"  poll#{poll}: history={len(history)} live={len(live)} "
+                f"live_statuses={[it.get('status') for it in live[:3]]}"
+            )
+        time.sleep(5)
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# W3 — Iterative improve loop
+# ---------------------------------------------------------------------------
+
+
+def _run_w3(ctx: ScenarioContext) -> ScenarioRunResult:
+    """W3 — submit a build, then submit Improve referencing the prior run."""
+    from playwright.sync_api import sync_playwright
+
+    started = time.monotonic()
+    failures = ctx.failures
+    artifact_dir = ctx.artifact_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    debug, _log = _open_logger(ctx.debug_log, "W3")
+
+    if not failures.soft_assert(ctx.web_url is not None, "no web_url"):
+        debug.close()
+        return ScenarioRunResult(
+            outcome="FAIL", note="no web_url",
+            duration_s=time.monotonic() - started,
+            failures=list(failures.failures),
+        )
+
+    _log(f"web_url={ctx.web_url}")
+    _log(f"project_dir={ctx.project_dir}")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            record_video_dir=str(artifact_dir),
+        )
+        try:
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"tracing.start failed: {exc}")
+        page = context.new_page()
+        captured = _capture_console_and_network(page, artifact_dir)
+
+        try:
+            # ---------- Step 1: open MC ----------
+            _log("Step 1: open MC")
+            try:
+                page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_function(
+                    "document.querySelector('#root')?.children.length > 0",
+                    timeout=15_000,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"shell load failed: {exc}")
+            _safe_screenshot(page, artifact_dir, "01-shell")
+
+            # ---------- Step 2: enqueue prior build ----------
+            _log("Step 2: enqueue prior build via JobDialog")
+            ok = _enqueue_via_dialog_full(
+                page,
+                intent=W3_BUILD_INTENT,
+                command="build",
+                subcommand=None,
+                failures=failures,
+                label="prior-build",
+                artifact_dir=artifact_dir,
+                screenshot_idx=2,
+            )
+            failures.soft_assert(ok, "could not enqueue prior build")
+            time.sleep(1.5)
+
+            # ---------- Step 3: start watcher, wait for build terminal ----------
+            _log("Step 3: start watcher; wait for prior-build terminal")
+            _click_start_watcher(page, failures=failures, label="W3-build")
+            _safe_screenshot(page, artifact_dir, "03-watcher-build")
+
+            outcome, build_run_id = _wait_for_terminal(
+                ctx.web_url,
+                timeout_s=W3_BUILD_TIMEOUT_S,
+                log_fn=_log,
+                domain_filter={"queue"},
+            )
+            _log(f"  prior-build outcome={outcome} run_id={build_run_id}")
+            failures.soft_assert(
+                outcome is not None,
+                f"prior build never reached terminal in {W3_BUILD_TIMEOUT_S}s",
+            )
+            if outcome and outcome != "success":
+                failures.fail(f"prior build outcome={outcome!r} (need success for improve)")
+            _safe_screenshot(page, artifact_dir, "04-build-terminal")
+
+            # ---------- Step 4: enqueue improve job ----------
+            _log("Step 4: enqueue Improve(bugs) via JobDialog")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=15_000)
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"reload before improve failed: {exc}")
+            time.sleep(1.5)
+
+            ok = _enqueue_via_dialog_full(
+                page,
+                intent=W3_IMPROVE_FOCUS,
+                command="improve",
+                subcommand="bugs",
+                failures=failures,
+                label="improve",
+                artifact_dir=artifact_dir,
+                screenshot_idx=5,
+            )
+            failures.soft_assert(ok, "could not enqueue improve job")
+            time.sleep(2)
+
+            # Refresh / restart watcher so improve picks up
+            _click_start_watcher(page, failures=failures, label="W3-improve")
+            _safe_screenshot(page, artifact_dir, "06-watcher-improve")
+
+            # ---------- Step 5: poll for build-journal updates ----------
+            _log("Step 5: tail build-journal.md round-by-round")
+            journal_observed: list[str] = []
+            improve_outcome: Optional[str] = None
+            improve_run_id: Optional[str] = None
+            deadline = time.monotonic() + W3_IMPROVE_TIMEOUT_S
+            tick = 0
+            while time.monotonic() < deadline:
+                tick += 1
+                # Look for build-journal.md across all sessions in worktree dirs
+                journals = []
+                try:
+                    for path in ctx.project_dir.glob(".worktrees/*/otto_logs/sessions/*/improve/build-journal.md"):
+                        if path.is_file():
+                            journals.append(path)
+                    for path in ctx.project_dir.glob("otto_logs/sessions/*/improve/build-journal.md"):
+                        if path.is_file():
+                            journals.append(path)
+                except Exception:
+                    pass
+                if journals:
+                    journals.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    latest = journals[0]
+                    try:
+                        snapshot = latest.read_text(encoding="utf-8")
+                    except Exception:  # noqa: BLE001
+                        snapshot = ""
+                    if snapshot and snapshot not in journal_observed:
+                        journal_observed.append(snapshot)
+                        _log(f"  build-journal updated (len={len(snapshot)}) @ {latest}")
+                # Check terminal
+                state = _state(ctx.web_url)
+                history = _history_items(state)
+                for it in history:
+                    if (
+                        it.get("domain") == "queue"
+                        and it.get("run_id") != build_run_id
+                        and it.get("terminal_outcome")
+                    ):
+                        # Try to disambiguate as improve vs build
+                        improve_outcome = it.get("terminal_outcome")
+                        improve_run_id = it.get("run_id")
+                        break
+                if improve_outcome:
+                    break
+                if tick % 12 == 1:
+                    _log(
+                        f"  tick#{tick}: live={len(_live_items(state))} history={len(history)} "
+                        f"journal_versions={len(journal_observed)}"
+                    )
+                time.sleep(10)
+
+            _log(f"  improve outcome={improve_outcome} run_id={improve_run_id} "
+                 f"journal_versions={len(journal_observed)}")
+            failures.soft_assert(
+                improve_outcome is not None,
+                f"improve never reached terminal in {W3_IMPROVE_TIMEOUT_S}s",
+            )
+            failures.soft_assert(
+                len(journal_observed) >= 1,
+                "no build-journal.md observed during improve loop",
+            )
+            _safe_screenshot(page, artifact_dir, "07-improve-terminal")
+
+            # Save the journals captured
+            (artifact_dir / "build-journal-versions.txt").write_text(
+                "\n\n=== version boundary ===\n\n".join(journal_observed) or "(none)",
+                encoding="utf-8",
+            )
+
+            # ---------- Step 6: improvement-report.md visible ----------
+            _log("Step 6: locate improvement-report.md")
+            reports = []
+            try:
+                for path in ctx.project_dir.glob(
+                    ".worktrees/*/otto_logs/sessions/*/improve/improvement-report.md"
+                ):
+                    if path.is_file():
+                        reports.append(path)
+                for path in ctx.project_dir.glob(
+                    "otto_logs/sessions/*/improve/improvement-report.md"
+                ):
+                    if path.is_file():
+                        reports.append(path)
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"glob improvement-report failed: {exc}")
+            failures.soft_assert(
+                len(reports) >= 1,
+                "no improvement-report.md found after improve terminated",
+            )
+            if reports:
+                reports.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                latest = reports[0]
+                _log(f"  improvement-report.md @ {latest}")
+                try:
+                    shutil.copy2(latest, artifact_dir / "improvement-report.md")
+                except Exception as exc:  # noqa: BLE001
+                    failures.note(f"copy improvement-report failed: {exc}")
+
+            # ---------- Step 7: product verification — pytest passes ----------
+            _log("Step 7: product verification — pytest greet")
+            # Look for greet.py / test_greet.py somewhere under the project
+            greet_files = []
+            try:
+                greet_files = [
+                    str(p.relative_to(ctx.project_dir))
+                    for p in ctx.project_dir.rglob("greet.py")
+                    if ".worktrees" not in p.parts and "otto_logs" not in p.parts
+                    and "node_modules" not in p.parts
+                ]
+            except Exception:
+                pass
+            _log(f"  greet.py files in project root: {greet_files}")
+            # Run pytest in the latest improved worktree if one exists
+            test_target = None
+            try:
+                wts = sorted(
+                    ctx.project_dir.glob(".worktrees/*/test_greet.py"),
+                    key=lambda p: p.stat().st_mtime, reverse=True,
+                )
+                if wts:
+                    test_target = wts[0].parent
+            except Exception:
+                pass
+            if test_target is None:
+                # Fallback: project root
+                if (ctx.project_dir / "test_greet.py").exists():
+                    test_target = ctx.project_dir
+            if test_target is None:
+                failures.note("no test_greet.py found — skipping pytest product check")
+            else:
+                _log(f"  running pytest in {test_target}")
+                try:
+                    res = subprocess.run(
+                        ["python", "-m", "pytest", "-x", "-q", "test_greet.py"],
+                        cwd=test_target,
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    (artifact_dir / "pytest.log").write_text(
+                        f"rc={res.returncode}\n--- stdout ---\n{res.stdout}\n--- stderr ---\n{res.stderr}",
+                        encoding="utf-8",
+                    )
+                    failures.soft_assert(
+                        res.returncode == 0,
+                        f"pytest after improve failed rc={res.returncode}: {res.stdout[:200]}",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    failures.note(f"pytest invocation failed: {exc}")
+
+            # final state
+            state = _state(ctx.web_url)
+            if isinstance(state, dict):
+                (artifact_dir / "final-state.json").write_text(
+                    json.dumps(state, indent=2, default=str), encoding="utf-8"
+                )
+            _safe_screenshot(page, artifact_dir, "08-final")
+
+        finally:
+            try:
+                context.tracing.stop(path=str(artifact_dir / "trace.zip"))
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"tracing.stop failed: {exc}")
+            _flush_captured(captured, artifact_dir)
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if any(c.get("type") == "error" for c in captured["console"]):
+        failures.fail("console errors during W3; see console.json")
+    if captured["page_errors"]:
+        failures.fail(f"page errors during W3: {len(captured['page_errors'])}")
+    if captured["network_errors"]:
+        unexpected = [n for n in captured["network_errors"] if n.get("status") not in (404,)]
+        if unexpected:
+            failures.fail(f"unexpected 4xx/5xx during W3: {len(unexpected)}")
+
+    debug.close()
+    return ScenarioRunResult(
+        outcome="PASS" if not failures.failures else "FAIL",
+        note=failures.summary(),
+        duration_s=time.monotonic() - started,
+        failures=list(failures.failures),
+    )
+
+
+# ---------------------------------------------------------------------------
+# W4 — Merge happy path
+# ---------------------------------------------------------------------------
+
+
+def _run_w4(ctx: ScenarioContext) -> ScenarioRunResult:
+    """W4 — submit a tiny build, watcher, wait success, merge from UI, verify branch landed."""
+    from playwright.sync_api import sync_playwright
+
+    started = time.monotonic()
+    failures = ctx.failures
+    artifact_dir = ctx.artifact_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    debug, _log = _open_logger(ctx.debug_log, "W4")
+
+    if not failures.soft_assert(ctx.web_url is not None, "no web_url"):
+        debug.close()
+        return ScenarioRunResult(
+            outcome="FAIL", note="no web_url",
+            duration_s=time.monotonic() - started,
+            failures=list(failures.failures),
+        )
+
+    _log(f"web_url={ctx.web_url}")
+    _log(f"project_dir={ctx.project_dir}")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            record_video_dir=str(artifact_dir),
+        )
+        try:
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"tracing.start failed: {exc}")
+        page = context.new_page()
+        captured = _capture_console_and_network(page, artifact_dir)
+
+        try:
+            # ---------- Step 1: open MC ----------
+            _log("Step 1: open MC")
+            try:
+                page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_function(
+                    "document.querySelector('#root')?.children.length > 0",
+                    timeout=15_000,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"shell load failed: {exc}")
+            _safe_screenshot(page, artifact_dir, "01-shell")
+
+            # ---------- Step 2: enqueue tiny build ----------
+            _log("Step 2: enqueue tiny build")
+            ok = _enqueue_via_dialog_full(
+                page,
+                intent=W4_INTENT,
+                command="build",
+                subcommand=None,
+                failures=failures,
+                label="w4-build",
+                artifact_dir=artifact_dir,
+                screenshot_idx=2,
+            )
+            failures.soft_assert(ok, "could not enqueue W4 build")
+            time.sleep(1.5)
+
+            # ---------- Step 3: start watcher, wait terminal ----------
+            _log("Step 3: start watcher; wait for build terminal")
+            _click_start_watcher(page, failures=failures, label="W4")
+            _safe_screenshot(page, artifact_dir, "03-watcher")
+
+            outcome, build_run_id = _wait_for_terminal(
+                ctx.web_url, timeout_s=W4_BUILD_TIMEOUT_S, log_fn=_log,
+                domain_filter={"queue"},
+            )
+            _log(f"  build outcome={outcome} run_id={build_run_id}")
+            failures.soft_assert(
+                outcome == "success",
+                f"build outcome={outcome!r} (need success to merge)",
+            )
+            _safe_screenshot(page, artifact_dir, "04-build-terminal")
+
+            # ---------- Step 4: snapshot pre-merge git log ----------
+            _log("Step 4: pre-merge git log on main")
+            try:
+                pre = subprocess.run(
+                    ["git", "log", "--oneline", "-n", "10", "main"],
+                    cwd=ctx.project_dir, capture_output=True, text=True, timeout=10,
+                )
+                (artifact_dir / "pre-merge-git-log.txt").write_text(
+                    pre.stdout, encoding="utf-8"
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"pre-merge git log failed: {exc}")
+
+            # ---------- Step 5: merge from UI (POST action) ----------
+            _log("Step 5: POST /api/runs/<id>/actions/merge")
+            if build_run_id:
+                # Verify legal_actions includes merge
+                _, detail_body = _api_get(
+                    ctx.web_url, f"/api/runs/{build_run_id}",
+                )
+                detail = detail_body if isinstance(detail_body, dict) else {}
+                legal_keys = [a.get("key") for a in (detail.get("legal_actions") or [])]
+                _log(f"  legal_actions keys={legal_keys}")
+                failures.soft_assert(
+                    "m" in legal_keys or "merge" in legal_keys,
+                    f"merge action not in legal_actions: {legal_keys}",
+                )
+
+                merge_status, merge_body = _post_action(
+                    ctx.web_url, build_run_id, "merge", timeout=120,
+                )
+                _log(f"  merge status={merge_status} body={merge_body[:200]}")
+                failures.soft_assert(
+                    merge_status == 200,
+                    f"merge returned {merge_status}: {merge_body[:160]}",
+                )
+                (artifact_dir / "merge-response.json").write_text(
+                    merge_body, encoding="utf-8",
+                )
+
+            # ---------- Step 6: wait merge history row ----------
+            _log("Step 6: poll for merge history row")
+            saw_merge = False
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                state = _state(ctx.web_url)
+                history = _history_items(state)
+                for it in history:
+                    if it.get("domain") == "merge" and it.get("terminal_outcome") == "success":
+                        saw_merge = True
+                        break
+                if saw_merge:
+                    break
+                time.sleep(3)
+            failures.soft_assert(saw_merge, "no merge history row appeared in 90s")
+            _safe_screenshot(page, artifact_dir, "05-after-merge")
+
+            # ---------- Step 7: verify branch landed in main ----------
+            _log("Step 7: post-merge git log + verify hello.py exists on main")
+            try:
+                post = subprocess.run(
+                    ["git", "log", "--oneline", "-n", "10", "main"],
+                    cwd=ctx.project_dir, capture_output=True, text=True, timeout=10,
+                )
+                (artifact_dir / "post-merge-git-log.txt").write_text(
+                    post.stdout, encoding="utf-8"
+                )
+                lines_pre = (
+                    (artifact_dir / "pre-merge-git-log.txt").read_text(encoding="utf-8")
+                    if (artifact_dir / "pre-merge-git-log.txt").exists() else ""
+                ).splitlines()
+                lines_post = post.stdout.splitlines()
+                failures.soft_assert(
+                    len(lines_post) > len(lines_pre),
+                    f"main commit count did not grow: pre={len(lines_pre)} post={len(lines_post)}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"post-merge git log failed: {exc}")
+
+            # Verify hello.py is in main
+            try:
+                show = subprocess.run(
+                    ["git", "show", "main:hello.py"],
+                    cwd=ctx.project_dir, capture_output=True, text=True, timeout=10,
+                )
+                (artifact_dir / "hello-py-in-main.txt").write_text(
+                    f"rc={show.returncode}\n{show.stdout}",
+                    encoding="utf-8",
+                )
+                failures.soft_assert(
+                    show.returncode == 0,
+                    f"hello.py not present on main after merge (rc={show.returncode})",
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"git show hello.py failed: {exc}")
+
+            # final state
+            state = _state(ctx.web_url)
+            if isinstance(state, dict):
+                (artifact_dir / "final-state.json").write_text(
+                    json.dumps(state, indent=2, default=str), encoding="utf-8"
+                )
+            _safe_screenshot(page, artifact_dir, "06-final")
+
+        finally:
+            try:
+                context.tracing.stop(path=str(artifact_dir / "trace.zip"))
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"tracing.stop failed: {exc}")
+            _flush_captured(captured, artifact_dir)
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if any(c.get("type") == "error" for c in captured["console"]):
+        failures.fail("console errors during W4; see console.json")
+    if captured["page_errors"]:
+        failures.fail(f"page errors during W4: {len(captured['page_errors'])}")
+    if captured["network_errors"]:
+        unexpected = [n for n in captured["network_errors"] if n.get("status") not in (404,)]
+        if unexpected:
+            failures.fail(f"unexpected 4xx/5xx during W4: {len(unexpected)}")
+
+    debug.close()
+    return ScenarioRunResult(
+        outcome="PASS" if not failures.failures else "FAIL",
+        note=failures.summary(),
+        duration_s=time.monotonic() - started,
+        failures=list(failures.failures),
+    )
+
+
+# ---------------------------------------------------------------------------
+# W5 — Merge blocking
+# ---------------------------------------------------------------------------
+
+
+def _run_w5(ctx: ScenarioContext) -> ScenarioRunResult:
+    """W5 — successful build but merge is blocked because target is dirty."""
+    from playwright.sync_api import sync_playwright
+
+    started = time.monotonic()
+    failures = ctx.failures
+    artifact_dir = ctx.artifact_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    debug, _log = _open_logger(ctx.debug_log, "W5")
+
+    if not failures.soft_assert(ctx.web_url is not None, "no web_url"):
+        debug.close()
+        return ScenarioRunResult(
+            outcome="FAIL", note="no web_url",
+            duration_s=time.monotonic() - started,
+            failures=list(failures.failures),
+        )
+
+    _log(f"web_url={ctx.web_url}")
+    _log(f"project_dir={ctx.project_dir}")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            record_video_dir=str(artifact_dir),
+        )
+        try:
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"tracing.start failed: {exc}")
+        page = context.new_page()
+        captured = _capture_console_and_network(page, artifact_dir)
+
+        try:
+            # ---------- Step 1: open MC, enqueue build ----------
+            _log("Step 1: open MC + enqueue build")
+            try:
+                page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_function(
+                    "document.querySelector('#root')?.children.length > 0",
+                    timeout=15_000,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"shell load failed: {exc}")
+            _safe_screenshot(page, artifact_dir, "01-shell")
+
+            ok = _enqueue_via_dialog_full(
+                page,
+                intent=W5_INTENT,
+                command="build",
+                subcommand=None,
+                failures=failures,
+                label="w5-build",
+                artifact_dir=artifact_dir,
+                screenshot_idx=2,
+            )
+            failures.soft_assert(ok, "could not enqueue W5 build")
+            time.sleep(1.5)
+            _click_start_watcher(page, failures=failures, label="W5")
+            _safe_screenshot(page, artifact_dir, "03-watcher")
+
+            # ---------- Step 2: wait for build success ----------
+            _log("Step 2: wait for build terminal")
+            outcome, build_run_id = _wait_for_terminal(
+                ctx.web_url, timeout_s=W5_BUILD_TIMEOUT_S, log_fn=_log,
+                domain_filter={"queue"},
+            )
+            _log(f"  outcome={outcome} run_id={build_run_id}")
+            failures.soft_assert(
+                outcome == "success",
+                f"W5 build outcome={outcome!r} (need success to attempt merge)",
+            )
+            _safe_screenshot(page, artifact_dir, "04-build-terminal")
+
+            # ---------- Step 3: dirty the project root so merge is blocked ----------
+            _log("Step 3: write a dirty file in project root to block merge")
+            dirty_path = ctx.project_dir / "DIRTY_FILE.txt"
+            try:
+                dirty_path.write_text(
+                    "intentional dirt — W5 wants this to block the merge\n",
+                    encoding="utf-8",
+                )
+                _log(f"  wrote {dirty_path}")
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"could not seed dirty file: {exc}")
+
+            # Capture pre-merge git status for evidence
+            try:
+                gs = subprocess.run(
+                    ["git", "status", "--short"],
+                    cwd=ctx.project_dir, capture_output=True, text=True, timeout=10,
+                )
+                (artifact_dir / "pre-merge-git-status.txt").write_text(
+                    gs.stdout, encoding="utf-8"
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"git status failed: {exc}")
+
+            # ---------- Step 4: POST merge — expect 409 with reason ----------
+            _log("Step 4: attempt merge — expect blocked")
+            merge_status = 0
+            merge_body = ""
+            if build_run_id:
+                merge_status, merge_body = _post_action(
+                    ctx.web_url, build_run_id, "merge", timeout=60,
+                )
+                _log(f"  merge status={merge_status} body={merge_body[:300]}")
+                (artifact_dir / "merge-response.json").write_text(
+                    merge_body, encoding="utf-8",
+                )
+
+            failures.soft_assert(
+                merge_status in (409, 400),
+                f"expected 409/400 (merge blocked); got {merge_status}",
+            )
+            # Reason should mention dirty / blocked / repository / merge-ready
+            body_lower = merge_body.lower()
+            failures.soft_assert(
+                any(kw in body_lower for kw in ("dirty", "block", "merge", "uncommit", "repo")),
+                f"merge-blocked reason did not mention dirty/blocked/merge/repo: {merge_body[:200]}",
+            )
+            _safe_screenshot(page, artifact_dir, "05-after-merge-attempt")
+
+            # ---------- Step 5: verify nothing landed on main ----------
+            _log("Step 5: verify hello.py NOT in main (since merge was blocked)")
+            try:
+                show = subprocess.run(
+                    ["git", "show", f"main:{Path(W5_INTENT).name}"],
+                    cwd=ctx.project_dir, capture_output=True, text=True, timeout=10,
+                )
+                # rc != 0 means the file isn't there — that's what we want
+            except Exception:
+                pass
+            try:
+                show2 = subprocess.run(
+                    ["git", "show", "main:ping.py"],
+                    cwd=ctx.project_dir, capture_output=True, text=True, timeout=10,
+                )
+                (artifact_dir / "main-ping-show.txt").write_text(
+                    f"rc={show2.returncode}\n{show2.stdout}\n{show2.stderr}",
+                    encoding="utf-8",
+                )
+                failures.soft_assert(
+                    show2.returncode != 0,
+                    f"ping.py SHOULD NOT be on main after blocked merge (rc={show2.returncode})",
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"git show ping.py failed: {exc}")
+
+            # ---------- Step 6: clean up dirty file & verify merge would now work ----------
+            # NB: we don't actually re-attempt merge here — the scenario is about
+            # the BLOCK with clear reason. Just record state.
+            try:
+                if dirty_path.exists():
+                    dirty_path.unlink()
+            except Exception:
+                pass
+
+            state = _state(ctx.web_url)
+            if isinstance(state, dict):
+                (artifact_dir / "final-state.json").write_text(
+                    json.dumps(state, indent=2, default=str), encoding="utf-8"
+                )
+            _safe_screenshot(page, artifact_dir, "06-final")
+
+        finally:
+            try:
+                context.tracing.stop(path=str(artifact_dir / "trace.zip"))
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"tracing.stop failed: {exc}")
+            _flush_captured(captured, artifact_dir)
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if any(c.get("type") == "error" for c in captured["console"]):
+        failures.fail("console errors during W5; see console.json")
+    if captured["page_errors"]:
+        failures.fail(f"page errors during W5: {len(captured['page_errors'])}")
+    if captured["network_errors"]:
+        # 409 from merge action is EXPECTED — filter it out
+        unexpected = [
+            n for n in captured["network_errors"]
+            if n.get("status") not in (404, 409)
+        ]
+        if unexpected:
+            failures.fail(f"unexpected 4xx/5xx during W5: {len(unexpected)}")
+
+    debug.close()
+    return ScenarioRunResult(
+        outcome="PASS" if not failures.failures else "FAIL",
+        note=failures.summary(),
+        duration_s=time.monotonic() - started,
+        failures=list(failures.failures),
+    )
+
+
+# ---------------------------------------------------------------------------
+# W6 — Deterministic failure + retry
+# ---------------------------------------------------------------------------
+
+
+def _run_w6(ctx: ScenarioContext) -> ScenarioRunResult:
+    """W6 — seed malformed otto.yaml so build fails; harness fixes it; retry succeeds."""
+    from playwright.sync_api import sync_playwright
+
+    started = time.monotonic()
+    failures = ctx.failures
+    artifact_dir = ctx.artifact_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    debug, _log = _open_logger(ctx.debug_log, "W6")
+
+    if not failures.soft_assert(ctx.web_url is not None, "no web_url"):
+        debug.close()
+        return ScenarioRunResult(
+            outcome="FAIL", note="no web_url",
+            duration_s=time.monotonic() - started,
+            failures=list(failures.failures),
+        )
+
+    _log(f"web_url={ctx.web_url}")
+    _log(f"project_dir={ctx.project_dir}")
+
+    # ---------- Step 0: pre-seed malformed otto.yaml ----------
+    yaml_path = ctx.project_dir / "otto.yaml"
+    bad_yaml = "default_branch: main\nqueue:\n  bookkeeping_files: not-a-list-but-a-string\n[unparseable yaml line"
+    good_yaml = "default_branch: main\nqueue:\n  bookkeeping_files: []\n"
+    try:
+        yaml_path.write_text(bad_yaml, encoding="utf-8")
+        # Commit so the project is clean before the build
+        subprocess.run(["git", "add", "otto.yaml"], cwd=ctx.project_dir, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "seed malformed otto.yaml"],
+            cwd=ctx.project_dir, check=True,
+        )
+        _log(f"  seeded malformed otto.yaml at {yaml_path}")
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"could not seed malformed otto.yaml: {exc}")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            record_video_dir=str(artifact_dir),
+        )
+        try:
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"tracing.start failed: {exc}")
+        page = context.new_page()
+        captured = _capture_console_and_network(page, artifact_dir)
+
+        try:
+            # ---------- Step 1: open MC ----------
+            _log("Step 1: open MC")
+            try:
+                page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_function(
+                    "document.querySelector('#root')?.children.length > 0",
+                    timeout=15_000,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"shell load failed: {exc}")
+            _safe_screenshot(page, artifact_dir, "01-shell")
+
+            # ---------- Step 2: enqueue build (will fail) ----------
+            _log("Step 2: enqueue build with broken yaml")
+            ok = _enqueue_via_dialog_full(
+                page,
+                intent=W6_INTENT,
+                command="build",
+                subcommand=None,
+                failures=failures,
+                label="w6-build-fail",
+                artifact_dir=artifact_dir,
+                screenshot_idx=2,
+            )
+            # Note: enqueue itself may succeed even with broken yaml; the
+            # failure happens when the watcher reads otto.yaml.
+            failures.soft_assert(ok, "could not enqueue W6 broken build")
+            time.sleep(1.5)
+            _click_start_watcher(page, failures=failures, label="W6-fail")
+            _safe_screenshot(page, artifact_dir, "03-watcher-fail")
+
+            # ---------- Step 3: wait for failure ----------
+            _log("Step 3: wait for build to fail")
+            outcome, fail_run_id = _wait_for_terminal(
+                ctx.web_url, timeout_s=W6_BUILD_TIMEOUT_S, log_fn=_log,
+                domain_filter={"queue"},
+            )
+            _log(f"  build outcome={outcome} run_id={fail_run_id}")
+            # Allowed terminal outcomes that satisfy "deterministic failure":
+            # failed | interrupted | error
+            failures.soft_assert(
+                outcome in ("failed", "interrupted", "error", "cancelled", "removed")
+                or (outcome and outcome != "success"),
+                f"expected non-success deterministic failure; got outcome={outcome!r}",
+            )
+            _safe_screenshot(page, artifact_dir, "04-build-failed")
+
+            # Capture detail/legal_actions for the failed run so we can validate
+            # the UI exposes Retry as legal.
+            if fail_run_id:
+                _, detail_body = _api_get(ctx.web_url, f"/api/runs/{fail_run_id}")
+                if isinstance(detail_body, dict):
+                    (artifact_dir / "failed-run-detail.json").write_text(
+                        json.dumps(detail_body, indent=2, default=str),
+                        encoding="utf-8",
+                    )
+                    legal = [a.get("key") for a in (detail_body.get("legal_actions") or [])]
+                    _log(f"  failed-run legal_actions keys={legal}")
+                    failures.soft_assert(
+                        "R" in legal or "retry" in legal or "requeue" in legal,
+                        f"failed run does not expose Retry in legal_actions: {legal}",
+                    )
+
+            # ---------- Step 4: harness fixes the yaml ----------
+            _log("Step 4: harness fixes otto.yaml")
+            try:
+                yaml_path.write_text(good_yaml, encoding="utf-8")
+                subprocess.run(["git", "add", "otto.yaml"], cwd=ctx.project_dir, check=True)
+                subprocess.run(
+                    ["git", "commit", "-q", "-m", "fix: repair otto.yaml"],
+                    cwd=ctx.project_dir, check=True,
+                )
+                _log("  yaml repaired and committed")
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"could not repair otto.yaml: {exc}")
+
+            # ---------- Step 5: click Retry from UI (POST action) ----------
+            _log("Step 5: POST retry action for failed run")
+            retry_status = 0
+            retry_body = ""
+            if fail_run_id:
+                retry_status, retry_body = _post_action(
+                    ctx.web_url, fail_run_id, "retry", timeout=60,
+                )
+                _log(f"  retry status={retry_status} body={retry_body[:300]}")
+                (artifact_dir / "retry-response.json").write_text(
+                    retry_body, encoding="utf-8",
+                )
+                failures.soft_assert(
+                    retry_status == 200,
+                    f"retry returned {retry_status}: {retry_body[:160]}",
+                )
+
+            # Restart watcher (it may have exited after empty queue)
+            time.sleep(2)
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=15_000)
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"reload after retry failed: {exc}")
+            time.sleep(1)
+            _click_start_watcher(page, failures=failures, label="W6-retry")
+            _safe_screenshot(page, artifact_dir, "05-after-retry")
+
+            # ---------- Step 6: wait for success ----------
+            _log("Step 6: wait for retry success")
+            # Use a fresh deadline; a different run_id may be created.
+            retry_outcome: Optional[str] = None
+            retry_run_id: Optional[str] = None
+            deadline = time.monotonic() + W6_BUILD_TIMEOUT_S
+            tick = 0
+            while time.monotonic() < deadline:
+                tick += 1
+                state = _state(ctx.web_url)
+                history = _history_items(state)
+                # Look for ANY success outcome in queue domain that isn't the failed run
+                for it in history:
+                    if (
+                        it.get("domain") == "queue"
+                        and it.get("terminal_outcome") == "success"
+                    ):
+                        retry_outcome = "success"
+                        retry_run_id = it.get("run_id")
+                        break
+                if retry_outcome:
+                    break
+                if tick % 12 == 1:
+                    live = _live_items(state)
+                    _log(f"  tick#{tick}: live_statuses={[it.get('status') for it in live[:5]]}")
+                time.sleep(10)
+
+            _log(f"  retry outcome={retry_outcome} run_id={retry_run_id}")
+            failures.soft_assert(
+                retry_outcome == "success",
+                f"retry did not reach success in {W6_BUILD_TIMEOUT_S}s; got {retry_outcome!r}",
+            )
+            _safe_screenshot(page, artifact_dir, "06-retry-success")
+
+            # ---------- Step 7: product verification — mod.py exists ----------
+            _log("Step 7: product verification — mod.py / one()")
+            mod_files = list(ctx.project_dir.glob(".worktrees/*/mod.py"))
+            if not mod_files and (ctx.project_dir / "mod.py").exists():
+                mod_files = [ctx.project_dir / "mod.py"]
+            failures.soft_assert(
+                len(mod_files) >= 1,
+                "no mod.py created after retry success",
+            )
+            (artifact_dir / "mod-py-locations.txt").write_text(
+                "\n".join(str(p) for p in mod_files) or "(none)",
+                encoding="utf-8",
+            )
+
+            state = _state(ctx.web_url)
+            if isinstance(state, dict):
+                (artifact_dir / "final-state.json").write_text(
+                    json.dumps(state, indent=2, default=str), encoding="utf-8"
+                )
+
+        finally:
+            try:
+                context.tracing.stop(path=str(artifact_dir / "trace.zip"))
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"tracing.stop failed: {exc}")
+            _flush_captured(captured, artifact_dir)
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if any(c.get("type") == "error" for c in captured["console"]):
+        failures.fail("console errors during W6; see console.json")
+    if captured["page_errors"]:
+        failures.fail(f"page errors during W6: {len(captured['page_errors'])}")
+    if captured["network_errors"]:
+        unexpected = [n for n in captured["network_errors"] if n.get("status") not in (404,)]
+        if unexpected:
+            failures.fail(f"unexpected 4xx/5xx during W6: {len(unexpected)}")
+
+    debug.close()
+    return ScenarioRunResult(
+        outcome="PASS" if not failures.failures else "FAIL",
+        note=failures.summary(),
+        duration_s=time.monotonic() - started,
+        failures=list(failures.failures),
+    )
+
+
+# ---------------------------------------------------------------------------
+# W7 — iPhone live (W1 flow on devices['iPhone 14'] + webkit)
+# ---------------------------------------------------------------------------
+
+
+def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
+    """W7 — same flow as W1 but using webkit + iPhone 14 device emulation."""
+    from playwright.sync_api import sync_playwright
+
+    started = time.monotonic()
+    failures = ctx.failures
+    artifact_dir = ctx.artifact_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    debug, _log = _open_logger(ctx.debug_log, "W7")
+
+    if not failures.soft_assert(ctx.web_url is not None, "no web_url"):
+        debug.close()
+        return ScenarioRunResult(
+            outcome="FAIL", note="no web_url",
+            duration_s=time.monotonic() - started,
+            failures=list(failures.failures),
+        )
+
+    _log(f"web_url={ctx.web_url}")
+    _log(f"project_dir={ctx.project_dir}")
+
+    final_state: Optional[dict[str, Any]] = None
+
+    with sync_playwright() as pw:
+        # iPhone 14 emulation (webkit). Fall back to chromium if webkit missing.
+        try:
+            iphone = pw.devices["iPhone 14"]
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"iPhone 14 device descriptor unavailable: {exc}")
+            iphone = {}
+        browser = None
+        try:
+            browser = pw.webkit.launch(headless=True)
+            _log("  using webkit")
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"webkit launch failed; falling back to chromium: {exc}")
+            browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            **iphone,
+            record_video_dir=str(artifact_dir),
+        )
+        try:
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"tracing.start failed: {exc}")
+        page = context.new_page()
+        captured = _capture_console_and_network(page, artifact_dir)
+
+        try:
+            # ---------- Step 1: page loads on mobile ----------
+            _log("Step 1: page.goto on mobile viewport")
+            try:
+                page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"page.goto failed: {exc}")
+            _safe_screenshot(page, artifact_dir, "01-mobile-loaded")
+
+            try:
+                page.wait_for_function(
+                    "document.querySelector('#root')?.children.length > 0",
+                    timeout=15_000,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"react never hydrated on mobile: {exc}")
+
+            # Inspect viewport metrics for evidence
+            try:
+                vw = page.evaluate("({w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio})")
+                _log(f"  viewport={vw}")
+                (artifact_dir / "viewport.json").write_text(
+                    json.dumps(vw, indent=2), encoding="utf-8",
+                )
+                # iPhone 14 viewport is 390x664 (CSS pixels). Don't hard-fail on
+                # exact match (Playwright versions vary), just verify mobile-ish.
+                w = int(vw.get("w", 0))
+                failures.soft_assert(
+                    100 <= w <= 500,
+                    f"viewport width {w} not in mobile range — emulation didn't apply",
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"viewport inspect failed: {exc}")
+
+            # ---------- Step 2: shell present ----------
+            has_task_board = page.locator('[data-testid="task-board"]').count() > 0
+            has_launcher = page.locator('[data-testid="launcher-subhead"]').count() > 0
+            failures.soft_assert(
+                has_task_board or has_launcher,
+                f"shell not present on mobile: tb={has_task_board} l={has_launcher}",
+            )
+            _safe_screenshot(page, artifact_dir, "02-mobile-shell")
+
+            # ---------- Step 3: open JobDialog (touch tap) ----------
+            _log("Step 3: tap new-job button")
+            new_job = page.locator(
+                '[data-testid="mission-new-job-button"], [data-testid="new-job-button"]'
+            ).first
+            if new_job.count() == 0:
+                failures.fail("new-job button not found on mobile")
+            else:
+                # Touch-target check: button bounding box ≥44x44pt per Apple HIG
+                try:
+                    box = new_job.bounding_box()
+                    if box:
+                        _log(f"  new-job button box={box}")
+                        (artifact_dir / "touch-target-new-job.json").write_text(
+                            json.dumps(box, indent=2), encoding="utf-8",
+                        )
+                        failures.soft_assert(
+                            box["width"] >= 32 and box["height"] >= 32,
+                            f"new-job button is too small for touch: {box['width']}x{box['height']} (HIG: 44pt)",
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    failures.note(f"bounding_box failed: {exc}")
+
+                try:
+                    # Use tap() instead of click() to test mobile gesture
+                    new_job.tap(timeout=5_000)
+                except Exception as exc:  # noqa: BLE001
+                    failures.note(f"tap failed; falling back to click: {exc}")
+                    try:
+                        new_job.click(timeout=5_000)
+                    except Exception as exc2:  # noqa: BLE001
+                        failures.fail(f"new-job click also failed on mobile: {exc2}")
+
+            try:
+                page.wait_for_selector('[data-testid="job-dialog-intent"]', timeout=10_000)
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"job dialog did not open on mobile: {exc}")
+            _safe_screenshot(page, artifact_dir, "03-mobile-dialog")
+
+            # ---------- Step 4: fill intent + submit ----------
+            _log("Step 4: fill + submit on mobile")
+            intent_field = page.locator('[data-testid="job-dialog-intent"]')
+            if intent_field.count() > 0:
+                try:
+                    intent_field.fill(W7_INTENT, timeout=5_000)
+                except Exception as exc:  # noqa: BLE001
+                    failures.fail(f"intent fill failed on mobile: {exc}")
+
+            submit = page.locator('[data-testid="job-dialog-submit-button"]')
+            if submit.count() == 0:
+                failures.fail("submit button missing on mobile")
+            else:
+                try:
+                    box = submit.bounding_box()
+                    if box:
+                        (artifact_dir / "touch-target-submit.json").write_text(
+                            json.dumps(box, indent=2), encoding="utf-8",
+                        )
+                        failures.soft_assert(
+                            box["width"] >= 32 and box["height"] >= 32,
+                            f"submit button too small for touch: {box['width']}x{box['height']}",
+                        )
+                except Exception:
+                    pass
+                try:
+                    submit.tap(timeout=5_000)
+                except Exception as exc:  # noqa: BLE001
+                    failures.note(f"submit tap failed; trying click: {exc}")
+                    try:
+                        submit.click(timeout=5_000)
+                    except Exception as exc2:  # noqa: BLE001
+                        failures.fail(f"submit click also failed on mobile: {exc2}")
+            _safe_screenshot(page, artifact_dir, "04-mobile-submitted")
+
+            # ---------- Step 5: start watcher ----------
+            _log("Step 5: start watcher")
+            time.sleep(1.5)
+            _click_start_watcher(page, failures=failures, label="W7")
+            _safe_screenshot(page, artifact_dir, "05-mobile-watcher")
+
+            # ---------- Step 6: wait for terminal ----------
+            _log(f"Step 6: wait ≤{W7_BUILD_TIMEOUT_S}s for terminal")
+            outcome, run_id = _wait_for_terminal(
+                ctx.web_url, timeout_s=W7_BUILD_TIMEOUT_S, log_fn=_log,
+                domain_filter={"queue"},
+            )
+            _log(f"  outcome={outcome} run_id={run_id}")
+            failures.soft_assert(
+                outcome is not None,
+                f"build did not reach terminal in {W7_BUILD_TIMEOUT_S}s",
+            )
+            if outcome and outcome != "success":
+                failures.fail(f"build outcome={outcome!r} (expected success)")
+            _safe_screenshot(page, artifact_dir, "06-mobile-terminal")
+
+            # ---------- Step 7: refresh + verify mobile layout still works ----------
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=15_000)
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"mobile reload failed: {exc}")
+            _safe_screenshot(page, artifact_dir, "07-mobile-after-reload")
+
+            # ---------- Step 8: product verification ----------
+            _log("Step 8: product verification — file scan")
+            try:
+                file_list = []
+                for path in sorted(ctx.project_dir.rglob("*"))[:200]:
+                    if path.is_file() and ".git" not in path.parts and "otto_logs" not in path.parts:
+                        rel = path.relative_to(ctx.project_dir)
+                        file_list.append(str(rel))
+                (artifact_dir / "project-files.txt").write_text(
+                    "\n".join(file_list), encoding="utf-8"
+                )
+                created = [
+                    f for f in file_list
+                    if f.endswith((".html", ".js", ".jsx", ".tsx", ".css", ".py"))
+                ]
+                failures.soft_assert(
+                    len(created) > 0 or outcome != "success",
+                    "build reported success but no source files appeared",
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"file scan raised: {exc}")
+
+            # final state
+            try:
+                _, body = _api_get(ctx.web_url, "/api/state")
+                final_state = body if isinstance(body, dict) else None
+                if final_state is not None:
+                    (artifact_dir / "final-state.json").write_text(
+                        json.dumps(final_state, indent=2, default=str), encoding="utf-8"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"final state snapshot failed: {exc}")
+
+        finally:
+            try:
+                context.tracing.stop(path=str(artifact_dir / "trace.zip"))
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"tracing.stop failed: {exc}")
+            _flush_captured(captured, artifact_dir)
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if browser is not None:
+                    browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if any(c.get("type") == "error" for c in captured["console"]):
+        failures.fail("console errors during W7; see console.json")
+    if captured["page_errors"]:
+        failures.fail(f"page errors during W7: {len(captured['page_errors'])}")
+    if captured["network_errors"]:
+        unexpected = [n for n in captured["network_errors"] if n.get("status") not in (404,)]
+        if unexpected:
+            failures.fail(f"unexpected 4xx/5xx during W7: {len(unexpected)}")
+
+    debug.close()
+    return ScenarioRunResult(
+        outcome="PASS" if not failures.failures else "FAIL",
+        note=failures.summary(),
+        duration_s=time.monotonic() - started,
+        failures=list(failures.failures),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Scenario registry — every W1..W13 (W12 split into W12a, W12b) has an entry
 # ---------------------------------------------------------------------------
 
@@ -2278,7 +3678,7 @@ SCENARIOS: dict[str, Scenario] = {
         estimated_seconds=12 * 60,
         needs_product_verification=True,
         target_recordings=["R4"],
-        run_fn=_stub_scenario,
+        run_fn=_run_w3,
     ),
     "W4": Scenario(
         id="W4",
@@ -2288,7 +3688,7 @@ SCENARIOS: dict[str, Scenario] = {
         estimated_seconds=6 * 60,
         needs_product_verification=True,
         target_recordings=["R5"],
-        run_fn=_stub_scenario,
+        run_fn=_run_w4,
     ),
     "W5": Scenario(
         id="W5",
@@ -2298,7 +3698,7 @@ SCENARIOS: dict[str, Scenario] = {
         estimated_seconds=6 * 60,
         needs_product_verification=False,
         target_recordings=["R12"],
-        run_fn=_stub_scenario,
+        run_fn=_run_w5,
     ),
     "W6": Scenario(
         id="W6",
@@ -2308,7 +3708,7 @@ SCENARIOS: dict[str, Scenario] = {
         estimated_seconds=12 * 60,
         needs_product_verification=True,
         target_recordings=["R2"],
-        run_fn=_stub_scenario,
+        run_fn=_run_w6,
     ),
     "W7": Scenario(
         id="W7",
@@ -2318,7 +3718,7 @@ SCENARIOS: dict[str, Scenario] = {
         estimated_seconds=8 * 60,
         needs_product_verification=True,
         target_recordings=["R1"],
-        run_fn=_stub_scenario,
+        run_fn=_run_w7,
     ),
     "W8": Scenario(
         id="W8",

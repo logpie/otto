@@ -84,9 +84,24 @@ class MissionControlService:
     def __init__(self, project_dir: Path, *, queue_compat: bool = True) -> None:
         self.project_dir = Path(project_dir).resolve(strict=False)
         self.model = MissionControlModel(self.project_dir, queue_compat=queue_compat)
+        # mc-audit live W13-IMPORTANT-2: the events log only recorded watcher
+        # lifecycle (started/stopped); a real build-and-cert happening in the
+        # watcher subprocess never showed up. Track the last-seen status per
+        # run-id so each refresh can emit `run.started` / `run.terminal` /
+        # `run.cancelled` / `run.failed` events into events.jsonl. Bootstrap
+        # is lazy — the first refresh seeds the table without emitting (we
+        # don't know which were already-known on startup) so we never spam
+        # events for runs that completed before MC came online.
+        self._lifecycle_seen_states: dict[str, str] = {}
+        self._lifecycle_bootstrapped: bool = False
 
     def state(self, filters: MissionControlFilters | None = None) -> dict[str, Any]:
         state = self._state(filters)
+        # mc-audit live W13-IMPORTANT-2: emit run.* events BEFORE serializing
+        # `events` so the just-fired transition is visible in the same /api/state
+        # response. Watcher/landing/runtime status do not depend on events so
+        # ordering relative to them is irrelevant.
+        self._emit_run_lifecycle_events(state)
         payload = serialize_state(self.project_dir, state)
         watcher = self.watcher_status()
         landing = self.landing_status()
@@ -95,6 +110,103 @@ class MissionControlService:
         payload["runtime"] = self.runtime_status(watcher=watcher, landing=landing)
         payload["events"] = self.events(limit=50)
         return payload
+
+    def _emit_run_lifecycle_events(self, state: MissionControlState) -> None:
+        """Detect run-start / run-terminal transitions and append events.
+
+        We compare the current set of live-record statuses with the previously
+        observed set. Three cases emit events:
+
+        * run.started  — a run-id we have never seen before is in a non-terminal
+          state. (A run-id observed first in terminal state never emits start;
+          we still emit terminal so post-outage timelines are not blank.)
+        * run.<terminal_outcome>  — a previously non-terminal run-id transitioned
+          to a terminal status. ``terminal_outcome`` (or status) drives the
+          event kind: ``run.completed`` / ``run.failed`` / ``run.cancelled`` /
+          ``run.interrupted`` / ``run.terminal``. This is the cluster of events
+          the W13 outage-recovery scenario needed.
+
+        Bootstrap: the very first call seeds ``_lifecycle_seen_states`` without
+        emitting. Otherwise an MC server starting after a long-running queue
+        would emit a flurry of stale events.
+        """
+
+        try:
+            from otto.runs.schema import is_terminal_status
+        except ImportError:  # pragma: no cover — defensive
+            return
+
+        current: dict[str, str] = {}
+        for item in state.live_runs.items:
+            record = item.record
+            run_id = record.run_id
+            if not run_id:
+                continue
+            current[run_id] = record.status or ""
+
+        if not self._lifecycle_bootstrapped:
+            self._lifecycle_seen_states = dict(current)
+            self._lifecycle_bootstrapped = True
+            return
+
+        for item in state.live_runs.items:
+            record = item.record
+            run_id = record.run_id
+            if not run_id:
+                continue
+            status = record.status or ""
+            previous = self._lifecycle_seen_states.get(run_id)
+            terminal_now = is_terminal_status(status)
+            terminal_before = bool(previous) and is_terminal_status(previous)
+
+            if previous is None and not terminal_now:
+                self._record_event(
+                    kind="run.started",
+                    severity="info",
+                    message=f"{record.display_name or record.command or 'run'} started",
+                    run_id=run_id,
+                    task_id=str(record.identity.get("queue_task_id") or "") or None,
+                    details={
+                        "domain": record.domain,
+                        "run_type": record.run_type,
+                        "command": record.command,
+                        "branch": record.git.get("branch"),
+                        "status": status,
+                    },
+                )
+            elif terminal_now and not terminal_before:
+                outcome = (record.terminal_outcome or status or "terminal").strip() or "terminal"
+                kind_suffix = outcome.replace(" ", "_").lower()
+                kind = f"run.{kind_suffix}" if kind_suffix else "run.terminal"
+                severity = (
+                    "success"
+                    if outcome in {"success", "succeeded", "passed", "completed"}
+                    else "error"
+                    if outcome in {"failed", "failure", "error"}
+                    else "warning"
+                    if outcome in {"cancelled", "interrupted", "removed"}
+                    else "info"
+                )
+                self._record_event(
+                    kind=kind,
+                    severity=severity,
+                    message=(
+                        f"{record.display_name or record.command or 'run'} "
+                        f"{outcome}"
+                    ),
+                    run_id=run_id,
+                    task_id=str(record.identity.get("queue_task_id") or "") or None,
+                    details={
+                        "domain": record.domain,
+                        "run_type": record.run_type,
+                        "command": record.command,
+                        "branch": record.git.get("branch"),
+                        "status": status,
+                        "terminal_outcome": record.terminal_outcome,
+                    },
+                )
+
+        self._lifecycle_seen_states = current
 
     def detail(self, run_id: str, filters: MissionControlFilters | None = None) -> dict[str, Any]:
         detail = self._detail_view(run_id, filters)
