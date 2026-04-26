@@ -70,6 +70,12 @@ type ViewMode = "tasks" | "diagnostics";
 type BoardStage = "attention" | "working" | "ready" | "landed";
 type InspectorMode = "proof" | "logs" | "artifacts" | "diff";
 
+// Sortable columns for the History table. `null` means "no sort applied"
+// (the user has cycled past desc back to default). We keep this small —
+// extra columns can be added by extending the union and historyComparators.
+type HistorySortColumn = "outcome" | "run" | "summary" | "duration" | "usage";
+type HistorySortDir = "asc" | "desc";
+
 interface RouteState {
   viewMode: ViewMode;
   selectedRunId: string | null;
@@ -81,6 +87,18 @@ interface RouteState {
   // Persisted page-size selection (10/25/50/100). Optional in the URL —
   // null means "no override; use the front-end default".
   historyPageSize: number | null;
+  // Heavy-user paper-cut #1 (filters): persist the four toolbar filters in
+  // the URL so a power-user can refresh, back-button, and share filtered
+  // views with a teammate. Defaults match `defaultFilters` and are omitted
+  // from the URL when at default to keep links clean.
+  filterType: RunTypeFilter;
+  filterOutcome: OutcomeFilter;
+  filterQuery: string;
+  filterActiveOnly: boolean;
+  // Heavy-user paper-cut #2 (history sort): URL keys `?hs=col&hd=desc`.
+  // Null means "no sort override" — the server's natural order wins.
+  historySort: HistorySortColumn | null;
+  historySortDir: HistorySortDir | null;
 }
 
 // Default page size for History pane. 25 is enough to fill an MBA viewport
@@ -188,16 +206,59 @@ const defaultFilters: Filters = {
   activeOnly: false,
 };
 
+// Allowed values for the URL-persisted filter params. We validate on read so
+// a hand-crafted URL with `?ft=banana` doesn't crash the SPA — invalid values
+// silently fall back to "all" / defaultFilters.
+const RUN_TYPE_VALUES: readonly RunTypeFilter[] = ["all", "build", "improve", "certify", "merge", "queue"];
+const OUTCOME_VALUES: readonly OutcomeFilter[] = ["all", "success", "failed", "interrupted", "cancelled", "removed", "other"];
+const HISTORY_SORT_COLUMNS: readonly HistorySortColumn[] = ["outcome", "run", "summary", "duration", "usage"];
+
+function defaultRouteState(): RouteState {
+  return {
+    viewMode: "tasks",
+    selectedRunId: null,
+    historyPage: 1,
+    historyPageSize: null,
+    filterType: defaultFilters.type,
+    filterOutcome: defaultFilters.outcome,
+    filterQuery: defaultFilters.query,
+    filterActiveOnly: defaultFilters.activeOnly,
+    historySort: null,
+    historySortDir: null,
+  };
+}
+
 function readRouteState(): RouteState {
-  if (typeof window === "undefined") {
-    return {viewMode: "tasks", selectedRunId: null, historyPage: 1, historyPageSize: null};
-  }
+  if (typeof window === "undefined") return defaultRouteState();
   const params = new URLSearchParams(window.location.search);
+  const ft = params.get("ft");
+  const fo = params.get("fo");
+  const fq = params.get("fq");
+  const fa = params.get("fa");
+  const hs = params.get("hs");
+  const hd = params.get("hd");
+  const filterType = (RUN_TYPE_VALUES as readonly string[]).includes(ft || "")
+    ? (ft as RunTypeFilter)
+    : defaultFilters.type;
+  const filterOutcome = (OUTCOME_VALUES as readonly string[]).includes(fo || "")
+    ? (fo as OutcomeFilter)
+    : defaultFilters.outcome;
+  const historySort = (HISTORY_SORT_COLUMNS as readonly string[]).includes(hs || "")
+    ? (hs as HistorySortColumn)
+    : null;
+  const historySortDir = hd === "asc" || hd === "desc" ? hd : null;
   return {
     viewMode: params.get("view") === "diagnostics" ? "diagnostics" : "tasks",
     selectedRunId: params.get("run") || null,
     historyPage: parseHistoryPageParam(params.get("hp")),
     historyPageSize: parseHistoryPageSizeParam(params.get("ps")),
+    filterType,
+    filterOutcome,
+    filterQuery: fq || defaultFilters.query,
+    filterActiveOnly: fa === "true" ? true : defaultFilters.activeOnly,
+    // sort col without dir or vice-versa is invalid — drop both.
+    historySort: historySort && historySortDir ? historySort : null,
+    historySortDir: historySort && historySortDir ? historySortDir : null,
   };
 }
 
@@ -236,6 +297,37 @@ function writeRouteState(route: RouteState, mode: "push" | "replace"): void {
   } else {
     url.searchParams.delete("ps");
   }
+  // Heavy-user paper-cut #1: filter params. Omit when at default so the
+  // typical URL stays uncluttered. Query string lives at `fq` (not `q`)
+  // because `q` is too generic and would collide with future search needs.
+  if (route.filterType && route.filterType !== defaultFilters.type) {
+    url.searchParams.set("ft", route.filterType);
+  } else {
+    url.searchParams.delete("ft");
+  }
+  if (route.filterOutcome && route.filterOutcome !== defaultFilters.outcome) {
+    url.searchParams.set("fo", route.filterOutcome);
+  } else {
+    url.searchParams.delete("fo");
+  }
+  if (route.filterQuery && route.filterQuery !== defaultFilters.query) {
+    url.searchParams.set("fq", route.filterQuery);
+  } else {
+    url.searchParams.delete("fq");
+  }
+  if (route.filterActiveOnly) {
+    url.searchParams.set("fa", "true");
+  } else {
+    url.searchParams.delete("fa");
+  }
+  // Heavy-user paper-cut #2: history sort. Both keys present-or-absent.
+  if (route.historySort && route.historySortDir) {
+    url.searchParams.set("hs", route.historySort);
+    url.searchParams.set("hd", route.historySortDir);
+  } else {
+    url.searchParams.delete("hs");
+    url.searchParams.delete("hd");
+  }
   const next = `${url.pathname}${url.search}${url.hash}`;
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next === current) return;
@@ -245,7 +337,14 @@ function writeRouteState(route: RouteState, mode: "push" | "replace"): void {
 
 export function App() {
   const initialRoute = useMemo(() => readRouteState(), []);
-  const [filters, setFilters] = useState<Filters>(defaultFilters);
+  // Heavy-user paper-cut #1: hydrate filters from the initial URL so refresh,
+  // back-forward, and shared deep-links land on the same filtered view.
+  const [filters, setFilters] = useState<Filters>(() => ({
+    type: initialRoute.filterType,
+    outcome: initialRoute.filterOutcome,
+    query: initialRoute.filterQuery,
+    activeOnly: initialRoute.filterActiveOnly,
+  }));
   const [data, setData] = useState<StateResponse | null>(null);
   const [projectsState, setProjectsState] = useState<ProjectsResponse | null>(null);
   // `projectsLoaded` flips true the first time `/api/projects` resolves
@@ -298,6 +397,10 @@ export function App() {
   // failed action POST per mc-audit codex-destructive-action-safety #6.
   const refreshRef = useRef<((showStatus?: boolean) => Promise<void>) | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialRoute.viewMode);
+  // Heavy-user paper-cut #4 (Cmd-K palette). Hidden by default, opened by
+  // Cmd/Ctrl+K from anywhere on the page (skipped while a modal is open so
+  // we don't stack a palette on top of a confirm dialog).
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const watcherInFlight = useInFlight();
   const refreshInFlight = useInFlight();
   const mergeAllInFlight = useInFlight();
@@ -326,6 +429,25 @@ export function App() {
   const historyPageRef = useRef<number>(initialRoute.historyPage);
   const historyPageSizeRef = useRef<number>(initialRoute.historyPageSize ?? DEFAULT_HISTORY_PAGE_SIZE);
 
+  // Heavy-user paper-cut #2 (history sort). Sort is applied client-side over
+  // the current page — it is documented in the followups that a server-side
+  // sort would be more honest for "cost desc across all 200+ rows", but
+  // page-local sort already covers the common "I'm scanning this page for
+  // the priciest run" case. Refs let writeRouteState read the current value
+  // without forming a dep cycle, mirroring viewModeRef / historyPageRef.
+  const [historySort, setHistorySort] = useState<HistorySortColumn | null>(initialRoute.historySort);
+  const [historySortDir, setHistorySortDir] = useState<HistorySortDir | null>(initialRoute.historySortDir);
+  const historySortRef = useRef<HistorySortColumn | null>(initialRoute.historySort);
+  const historySortDirRef = useRef<HistorySortDir | null>(initialRoute.historySortDir);
+  // Filter refs — needed because writeRouteState reads from currentRouteState
+  // and the filter state isn't in the existing refs scope. Without this the
+  // route writer would see a stale filter set whenever a non-filter action
+  // (e.g. selectRun) wrote the URL right after a filter change.
+  const filtersRef = useRef<Filters>(filters);
+  useEffect(() => {
+    filtersRef.current = filters;
+  }, [filters]);
+
   // currentRouteState is the single source of truth for what the URL reflects;
   // every push/replace passes through it so we don't accidentally drop a
   // param that other code paths persist. The page-size is only persisted
@@ -335,6 +457,12 @@ export function App() {
     selectedRunId: selectedRunIdRef.current,
     historyPage: historyPageRef.current,
     historyPageSize: historyPageSizeRef.current === DEFAULT_HISTORY_PAGE_SIZE ? null : historyPageSizeRef.current,
+    filterType: filtersRef.current.type,
+    filterOutcome: filtersRef.current.outcome,
+    filterQuery: filtersRef.current.query,
+    filterActiveOnly: filtersRef.current.activeOnly,
+    historySort: historySortRef.current,
+    historySortDir: historySortDirRef.current,
   }), []);
 
   useEffect(() => {
@@ -362,10 +490,25 @@ export function App() {
       historyPageRef.current = next.historyPage;
       const nextSize = next.historyPageSize ?? DEFAULT_HISTORY_PAGE_SIZE;
       historyPageSizeRef.current = nextSize;
+      historySortRef.current = next.historySort;
+      historySortDirRef.current = next.historySortDir;
+      const nextFilters: Filters = {
+        type: next.filterType,
+        outcome: next.filterOutcome,
+        query: next.filterQuery,
+        activeOnly: next.filterActiveOnly,
+      };
+      filtersRef.current = nextFilters;
       setViewMode(next.viewMode);
       setSelectedRunId(next.selectedRunId);
       setHistoryPage(next.historyPage);
       setHistoryPageSize(nextSize);
+      setHistorySort(next.historySort);
+      setHistorySortDir(next.historySortDir);
+      // Heavy-user paper-cut #1: restore filters on Back/Forward so a power
+      // user navigating from a filtered list into a run detail and hitting
+      // Back lands on the same filtered list, not on defaults.
+      setFilters(nextFilters);
       setInspectorOpen(false);
       setJobOpen(false);
       setConfirm(null);
@@ -406,6 +549,11 @@ export function App() {
   const openJobDialog = useCallback(() => {
     setInspectorOpen(false);
     setJobOpen(true);
+    // Heavy-user paper-cut #3: lazy-request notification permission on
+    // first user-initiated action. The browser only allows the prompt as a
+    // direct response to a user gesture; tying it to "open job dialog" /
+    // "start watcher" gives us natural triggers without a popup-on-load.
+    requestNotificationPermissionOnce();
   }, []);
 
   const selectRun = useCallback((runId: string) => {
@@ -641,6 +789,45 @@ export function App() {
     return () => window.clearInterval(interval);
   }, [refresh, data?.live.refresh_interval_s]);
 
+  // Heavy-user paper-cut #3: browser Notification when a long run finishes
+  // while the tab is hidden. We track the previous live-run set; any run
+  // that disappears from "live" (transitioned to a terminal state) AND was
+  // observed live for at least one poll AND was running while the tab was
+  // hidden gets a notification. We request permission lazily on first user
+  // action (job submit / watcher start) — see useEffect below.
+  useNotificationsOnRunFinish(data);
+
+  // Heavy-user paper-cut #4: global Cmd-K / Ctrl-K opens the palette. We
+  // also listen for `Escape` here so the palette closes consistently
+  // independent of focus position. Other typing keys are ignored when an
+  // input or contentEditable is focused so we don't steal "k" from a
+  // search field. See `isTypingTarget`.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const cmdK = (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey
+        && event.key.toLowerCase() === "k";
+      if (cmdK) {
+        // Always intercept — Cmd-K is otherwise the browser's location-bar
+        // shortcut on some platforms, but for an SPA the palette is the
+        // expected affordance. mc-audit cluster G respect: skip when a
+        // higher modal is already open so we never stack two.
+        if (jobOpen || confirm) return;
+        event.preventDefault();
+        setPaletteOpen((prev) => !prev);
+        return;
+      }
+      if (event.key === "Escape" && paletteOpen) {
+        // Palette close is also handled by useDialogFocus inside the
+        // component; we add this guard so an Escape from outside the
+        // palette's focus subtree still closes it.
+        setPaletteOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [jobOpen, confirm, paletteOpen]);
+
   // Manual-refresh handler: wraps `refresh(true)` in a synchronous in-flight
   // latch so the toolbar/launcher Refresh buttons disable while a fetch is in
   // flight. The polling interval above continues uninhibited — only the
@@ -872,6 +1059,11 @@ export function App() {
   }, [data?.landing, mergeAllInFlight, refresh, requestConfirm, showToast]);
 
   const runWatcherAction = useCallback(async (action: "start" | "stop") => {
+    // Heavy-user paper-cut #3: requesting permission on watcher start gives
+    // us a second natural moment to capture consent — in case the user
+    // skipped the New Job dialog and went straight to "start watcher" on a
+    // pre-queued task.
+    requestNotificationPermissionOnce();
     // Both paths share `watcherInFlight` — start fires directly (no confirm
     // gate per existing UX), stop goes through the confirm modal but the
     // trigger button must also disable for the duration of the POST, not just
@@ -1013,7 +1205,7 @@ export function App() {
   // open inspector with a stacked confirm/job still keeps the inspector
   // interactive while the rest of the page goes quiet. mc-audit a11y A11Y-01,
   // A11Y-02.
-  const modalOpen = jobOpen || Boolean(confirm);
+  const modalOpen = jobOpen || Boolean(confirm) || paletteOpen;
   // Sidebar is inert whenever ANY overlay (inspector, job, confirm) is open.
   const sidebarInert = inspectorOpen || modalOpen;
   // The mid-layer (toolbar + main content sans inspector) is inert whenever
@@ -1061,9 +1253,15 @@ export function App() {
     setSelectedRunId(null);
     historyPageRef.current = 1;
     historyPageSizeRef.current = DEFAULT_HISTORY_PAGE_SIZE;
+    historySortRef.current = null;
+    historySortDirRef.current = null;
+    filtersRef.current = defaultFilters;
     setHistoryPage(1);
     setHistoryPageSize(DEFAULT_HISTORY_PAGE_SIZE);
-    writeRouteState({viewMode: "tasks", selectedRunId: null, historyPage: 1, historyPageSize: null}, "replace");
+    setHistorySort(null);
+    setHistorySortDir(null);
+    setFilters(defaultFilters);
+    writeRouteState(defaultRouteState(), "replace");
     showToast(`Created ${result.project?.name || "project"}`);
     await refresh(true);
   }, [refresh, showToast]);
@@ -1085,9 +1283,15 @@ export function App() {
     setSelectedRunId(null);
     historyPageRef.current = 1;
     historyPageSizeRef.current = DEFAULT_HISTORY_PAGE_SIZE;
+    historySortRef.current = null;
+    historySortDirRef.current = null;
+    filtersRef.current = defaultFilters;
     setHistoryPage(1);
     setHistoryPageSize(DEFAULT_HISTORY_PAGE_SIZE);
-    writeRouteState({viewMode: "tasks", selectedRunId: null, historyPage: 1, historyPageSize: null}, "replace");
+    setHistorySort(null);
+    setHistorySortDir(null);
+    setFilters(defaultFilters);
+    writeRouteState(defaultRouteState(), "replace");
     showToast(`Opened ${result.project?.name || "project"}`);
     await refresh(true);
   }, [refresh, showToast]);
@@ -1121,9 +1325,15 @@ export function App() {
     setViewMode("tasks");
     historyPageRef.current = 1;
     historyPageSizeRef.current = DEFAULT_HISTORY_PAGE_SIZE;
+    historySortRef.current = null;
+    historySortDirRef.current = null;
+    filtersRef.current = defaultFilters;
     setHistoryPage(1);
     setHistoryPageSize(DEFAULT_HISTORY_PAGE_SIZE);
-    writeRouteState({viewMode: "tasks", selectedRunId: null, historyPage: 1, historyPageSize: null}, "replace");
+    setHistorySort(null);
+    setHistorySortDir(null);
+    setFilters(defaultFilters);
+    writeRouteState(defaultRouteState(), "replace");
     showToast("Choose a project");
   }, [showToast]);
 
@@ -1131,22 +1341,50 @@ export function App() {
   // Without this, filtering on page 5 with 0 matches would render an
   // empty table without an obvious explanation. Page-size changes go
   // through `changeHistoryPageSize` and also reset to page 1.
+  // Heavy-user paper-cut #1: also persist filter state into the URL so the
+  // power user can refresh / back / share a filtered triage view. We
+  // *replace* not push so debounced typing in the search box doesn't spam
+  // the browser history with one entry per keystroke.
   const updateFilters = useCallback((next: Filters) => {
     setFilters((prev) => {
       const sameType = prev.type === next.type;
       const sameOutcome = prev.outcome === next.outcome;
       const sameQuery = prev.query === next.query;
       const sameActive = prev.activeOnly === next.activeOnly;
-      // Only reset the page when something actually changed; React would
-      // otherwise reset on every parent rerender that re-passes the same
-      // filters object.
-      if (!(sameType && sameOutcome && sameQuery && sameActive)) {
-        historyPageRef.current = 1;
-        setHistoryPage(1);
-        writeRouteState({...currentRouteState(), historyPage: 1}, "replace");
-      }
+      if (sameType && sameOutcome && sameQuery && sameActive) return next;
+      historyPageRef.current = 1;
+      setHistoryPage(1);
+      filtersRef.current = next;
+      writeRouteState({...currentRouteState(), historyPage: 1}, "replace");
       return next;
     });
+  }, [currentRouteState]);
+
+  // Heavy-user paper-cut #2 (history sort): cycle asc → desc → off and
+  // persist into the URL. Each click transitions the sort state through:
+  //   not-this-column            → asc
+  //   this column, asc           → desc
+  //   this column, desc          → cleared
+  // The cleared state writes ?hs= and ?hd= out of the URL — see
+  // writeRouteState — so a "default order" link stays clean.
+  const cycleHistorySort = useCallback((column: HistorySortColumn) => {
+    let nextCol: HistorySortColumn | null;
+    let nextDir: HistorySortDir | null;
+    if (historySortRef.current !== column) {
+      nextCol = column;
+      nextDir = "asc";
+    } else if (historySortDirRef.current === "asc") {
+      nextCol = column;
+      nextDir = "desc";
+    } else {
+      nextCol = null;
+      nextDir = null;
+    }
+    historySortRef.current = nextCol;
+    historySortDirRef.current = nextDir;
+    setHistorySort(nextCol);
+    setHistorySortDir(nextDir);
+    writeRouteState(currentRouteState(), "replace");
   }, [currentRouteState]);
 
   const changeHistoryPage = useCallback((nextPage: number) => {
@@ -1358,9 +1596,12 @@ export function App() {
                   requestedPage={historyPage}
                   loaded={data != null}
                   selectedRunId={selectedRunId}
+                  sortColumn={historySort}
+                  sortDir={historySortDir}
                   onSelect={selectRun}
                   onChangePage={changeHistoryPage}
                   onChangePageSize={changeHistoryPageSize}
+                  onCycleSort={cycleHistorySort}
                 />
               </div>
               <RunDetailPanel
@@ -1418,6 +1659,23 @@ export function App() {
             await refresh();
           }}
           onError={(message) => showToast(message, "error")}
+        />
+      )}
+      {paletteOpen && (
+        <CommandPalette
+          projects={projectsState?.projects || []}
+          currentPath={project?.path || projectsState?.current?.path || null}
+          onSelect={(path) => {
+            setPaletteOpen(false);
+            // Selecting the current project is a no-op; otherwise switch.
+            if (!path) return;
+            const currentPath = project?.path || projectsState?.current?.path || null;
+            if (path === currentPath) return;
+            void selectManagedProject(path).catch((error) => {
+              showToast(errorMessage(error), "error");
+            });
+          }}
+          onClose={() => setPaletteOpen(false)}
         />
       )}
       {confirm && (
@@ -2279,9 +2537,12 @@ function History({
   requestedPage,
   loaded,
   selectedRunId,
+  sortColumn,
+  sortDir,
   onSelect,
   onChangePage,
   onChangePageSize,
+  onCycleSort,
 }: {
   items: HistoryItem[];
   totalRows: number;
@@ -2297,9 +2558,14 @@ function History({
   // history" while the next response is in flight.
   loaded: boolean;
   selectedRunId: string | null;
+  // Heavy-user paper-cut #2: which column the user clicked, and the direction.
+  // Both null → no sort applied (server natural order wins).
+  sortColumn: HistorySortColumn | null;
+  sortDir: HistorySortDir | null;
   onSelect: (runId: string) => void;
   onChangePage: (nextPage: number) => void;
   onChangePageSize: (nextSize: number) => void;
+  onCycleSort: (column: HistorySortColumn) => void;
 }) {
   // Local mirror for the jump-to-page input. Plain text input so the user
   // can clear it without us snapping back to the canonical page; we commit
@@ -2321,6 +2587,40 @@ function History({
     onChangePage(parsed);
   };
 
+  // Heavy-user paper-cut #2: apply local sort when a column is selected.
+  // Sort is page-local (we sort the rows the server gave us); a true
+  // server-side sort across all 200+ rows is in the followups.
+  const sortedItems = useMemo(
+    () => sortHistoryItems(items, sortColumn, sortDir),
+    [items, sortColumn, sortDir],
+  );
+
+  const sortIndicator = (col: HistorySortColumn): string => {
+    if (sortColumn !== col || !sortDir) return "";
+    return sortDir === "asc" ? " ↑" : " ↓";
+  };
+  const ariaSort = (col: HistorySortColumn): "ascending" | "descending" | "none" => {
+    if (sortColumn !== col || !sortDir) return "none";
+    return sortDir === "asc" ? "ascending" : "descending";
+  };
+  const renderSortableTh = (col: HistorySortColumn, label: string) => (
+    <th
+      aria-sort={ariaSort(col)}
+      data-testid={`history-th-${col}`}
+      className={`history-th-sortable ${sortColumn === col && sortDir ? "active" : ""}`}
+    >
+      <button
+        type="button"
+        className="history-sort-button"
+        data-testid={`history-sort-${col}`}
+        aria-label={`Sort by ${label} (${sortColumn === col && sortDir ? sortDir : "asc"} on click)`}
+        onClick={() => onCycleSort(col)}
+      >
+        {label}{sortIndicator(col)}
+      </button>
+    </th>
+  );
+
   return (
     <section className="panel history-panel" aria-labelledby="historyHeading">
       <div className="panel-heading">
@@ -2331,11 +2631,11 @@ function History({
         <table>
           <thead>
             <tr>
-              <th>Outcome</th>
-              <th>Run</th>
-              <th>Summary</th>
-              <th>Duration</th>
-              <th>Usage</th>
+              {renderSortableTh("outcome", "Outcome")}
+              {renderSortableTh("run", "Run")}
+              {renderSortableTh("summary", "Summary")}
+              {renderSortableTh("duration", "Duration")}
+              {renderSortableTh("usage", "Usage")}
             </tr>
           </thead>
           <tbody>
@@ -2349,7 +2649,7 @@ function History({
                   </button>
                 </td>
               </tr>
-            ) : items.length ? items.map((item) => (
+            ) : sortedItems.length ? sortedItems.map((item) => (
               <tr
                 key={item.run_id}
                 className={item.run_id === selectedRunId ? "selected" : ""}
@@ -2442,6 +2742,49 @@ function History({
       )}
     </section>
   );
+}
+
+/**
+ * Heavy-user paper-cut #2: page-local sort. We sort the rows we already
+ * have (the current paginated slice) — server-side sort across all rows is
+ * a followup. Comparators are domain-aware: cost/duration use numeric
+ * values from the API (cost_usd / duration_s), not the display strings,
+ * so "$2" doesn't sort ahead of "$10".
+ */
+function sortHistoryItems(
+  items: HistoryItem[],
+  column: HistorySortColumn | null,
+  dir: HistorySortDir | null,
+): HistoryItem[] {
+  if (!column || !dir || items.length < 2) return items;
+  const factor = dir === "asc" ? 1 : -1;
+  const comparators: Record<HistorySortColumn, (a: HistoryItem, b: HistoryItem) => number> = {
+    outcome: (a, b) => safeCompareString(a.outcome_display || a.terminal_outcome || a.status, b.outcome_display || b.terminal_outcome || b.status),
+    run: (a, b) => safeCompareString(a.queue_task_id || a.run_id, b.queue_task_id || b.run_id),
+    summary: (a, b) => safeCompareString(a.summary, b.summary),
+    duration: (a, b) => safeCompareNumber(a.duration_s, b.duration_s),
+    usage: (a, b) => safeCompareNumber(a.cost_usd, b.cost_usd),
+  };
+  const cmp = comparators[column];
+  // Slice so we never mutate the caller's array — React identity matters
+  // for memoization and for the test harness that snapshots `items`.
+  return [...items].sort((a, b) => cmp(a, b) * factor);
+}
+
+function safeCompareString(a: string | null | undefined, b: string | null | undefined): number {
+  const av = (a || "").toLowerCase();
+  const bv = (b || "").toLowerCase();
+  if (av < bv) return -1;
+  if (av > bv) return 1;
+  return 0;
+}
+
+function safeCompareNumber(a: number | null | undefined, b: number | null | undefined): number {
+  const av = typeof a === "number" && Number.isFinite(a) ? a : Number.NEGATIVE_INFINITY;
+  const bv = typeof b === "number" && Number.isFinite(b) ? b : Number.NEGATIVE_INFINITY;
+  if (av < bv) return -1;
+  if (av > bv) return 1;
+  return 0;
 }
 
 function EventTimeline({events}: {events: StateResponse["events"] | undefined}) {
@@ -2717,6 +3060,64 @@ function LogPane({logState, runActive, onRetry}: {logState: LogState; runActive:
   const headerStatus = describeLogHeader({runActive, status, lastUpdatedAt, pollIntervalMs, displayLines, totalBytes});
   const droppedNote = droppedBytes > 0 ? `${humanBytes(droppedBytes)} earlier bytes elided` : null;
 
+  // Heavy-user paper-cut #6 (log search). Local state — match index advances
+  // through the highlighted regions; Enter / Shift+Enter step through them;
+  // Cmd-F / `/` focuses the search box. The search box is only meaningful
+  // when there's text to search, so we render it inside the populated body.
+  const [search, setSearch] = useState("");
+  const [matchIdx, setMatchIdx] = useState(0);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  // Reset selection when the query changes; keep when the buffer grows so
+  // an active highlight doesn't snap back to 0 every poll tick.
+  useEffect(() => {
+    setMatchIdx(0);
+  }, [search]);
+  const matchCount = useMemo(() => {
+    if (!search || !text) return 0;
+    const needle = search.toLowerCase();
+    const haystack = text.toLowerCase();
+    let count = 0;
+    let cursor = 0;
+    while (cursor < haystack.length) {
+      const found = haystack.indexOf(needle, cursor);
+      if (found < 0) break;
+      count += 1;
+      cursor = found + Math.max(1, needle.length);
+    }
+    return count;
+  }, [text, search]);
+  const focusSearch = useCallback(() => {
+    searchInputRef.current?.focus();
+    searchInputRef.current?.select();
+  }, []);
+  const stepMatch = useCallback((dir: 1 | -1) => {
+    if (!matchCount) return;
+    setMatchIdx((prev) => (prev + dir + matchCount) % matchCount);
+  }, [matchCount]);
+  // Local Cmd-F / "/" interception. Only when this LogPane is mounted +
+  // the inspector body has focus — we attach the listener on the
+  // container so it doesn't fight global Cmd-K. Plain `/` only triggers
+  // when the user is NOT typing in another input.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const onKey = (event: KeyboardEvent) => {
+      const cmdF = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f";
+      if (cmdF) {
+        event.preventDefault();
+        focusSearch();
+        return;
+      }
+      if (event.key === "/" && !isTypingTarget(event.target)) {
+        event.preventDefault();
+        focusSearch();
+      }
+    };
+    container.addEventListener("keydown", onKey);
+    return () => container.removeEventListener("keydown", onKey);
+  }, [focusSearch]);
+
   // Empty/missing/error rendering — these states replace the bare "waiting
   // for output" placeholder with state-specific copy + a recovery action.
   let body: ReactNode;
@@ -2739,6 +3140,15 @@ function LogPane({logState, runActive, onRetry}: {logState: LogState; runActive:
         {status === "loading" ? "Loading log…" : "Log will appear when the agent starts writing."}
       </div>
     );
+  } else if (search) {
+    body = (
+      <pre
+        className="log-pane log-content"
+        tabIndex={0}
+        aria-label="Run log output"
+        data-testid="run-log-pane"
+      >{renderLogTextWithHighlight(text, search, matchIdx)}</pre>
+    );
   } else {
     body = (
       <pre
@@ -2751,7 +3161,7 @@ function LogPane({logState, runActive, onRetry}: {logState: LogState; runActive:
   }
 
   return (
-    <div className="log-viewer">
+    <div className="log-viewer" ref={containerRef}>
       <div className="log-toolbar">
         <strong>Run logs</strong>
         <span data-testid="log-pane-status">{headerStatus}</span>
@@ -2759,9 +3169,117 @@ function LogPane({logState, runActive, onRetry}: {logState: LogState; runActive:
           <span className="log-elided" data-testid="log-pane-elided">{droppedNote}</span>
         )}
       </div>
+      {/* Heavy-user paper-cut #6: in-pane search. Always visible whenever
+          there's a populated log buffer so the user doesn't have to discover
+          a hidden affordance. We hide it when the body is in an empty/error
+          state — there's nothing to search and the input would be confusing. */}
+      {(status === "ok" || (text && status !== "missing" && status !== "error")) && (
+        <div className="log-search" data-testid="log-search">
+          <input
+            ref={searchInputRef}
+            value={search}
+            type="search"
+            placeholder="Search log (Cmd-F / /)"
+            data-testid="log-search-input"
+            aria-label="Search within log"
+            onChange={(event) => setSearch(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                stepMatch(event.shiftKey ? -1 : 1);
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                setSearch("");
+                searchInputRef.current?.blur();
+              }
+            }}
+          />
+          <span className="log-search-count" data-testid="log-search-count">
+            {search
+              ? matchCount
+                ? `${matchIdx + 1} / ${matchCount}`
+                : "0 matches"
+              : ""}
+          </span>
+          <button
+            type="button"
+            data-testid="log-search-prev"
+            disabled={!matchCount}
+            aria-label="Previous match"
+            onClick={() => stepMatch(-1)}
+          >Prev</button>
+          <button
+            type="button"
+            data-testid="log-search-next"
+            disabled={!matchCount}
+            aria-label="Next match"
+            onClick={() => stepMatch(1)}
+          >Next</button>
+        </div>
+      )}
       {body}
     </div>
   );
+}
+
+/**
+ * Heavy-user paper-cut #6: render log text with `<mark>`-wrapped matches.
+ * The Nth match (0-indexed by `activeMatchIdx`) gets an `active` class so
+ * Prev/Next nav can scroll the focused match into view. We don't replace
+ * the existing line-classification (`renderLogText`) — instead we
+ * pre-segment the text by match boundaries and run each segment through
+ * the same line splitter. ANSI color is dropped inside highlighted
+ * segments to keep the implementation simple; the test suite asserts
+ * `<mark>` presence not ANSI nesting.
+ */
+function renderLogTextWithHighlight(text: string, needle: string, activeMatchIdx: number) {
+  if (!needle) return renderLogText(text);
+  const lower = text.toLowerCase();
+  const lowerNeedle = needle.toLowerCase();
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  let matchIndex = 0;
+  let key = 0;
+  while (cursor < text.length) {
+    const found = lower.indexOf(lowerNeedle, cursor);
+    if (found < 0) {
+      nodes.push(<span key={`s-${key++}`}>{text.slice(cursor)}</span>);
+      break;
+    }
+    if (found > cursor) {
+      nodes.push(<span key={`s-${key++}`}>{text.slice(cursor, found)}</span>);
+    }
+    const segment = text.slice(found, found + needle.length);
+    const isActive = matchIndex === activeMatchIdx;
+    nodes.push(
+      <mark
+        key={`m-${key++}`}
+        className={`log-search-match ${isActive ? "active" : ""}`}
+        data-testid={isActive ? "log-search-match-active" : "log-search-match"}
+        ref={isActive ? (el) => {
+          if (el && typeof el.scrollIntoView === "function") {
+            el.scrollIntoView({block: "center", inline: "nearest"});
+          }
+        } : undefined}
+      >{segment}</mark>,
+    );
+    cursor = found + Math.max(1, needle.length);
+    matchIndex += 1;
+  }
+  return nodes;
+}
+
+/**
+ * True when the keydown event target is a text-entry surface — input,
+ * textarea, contentEditable. Used by global hotkeys (`/`, Cmd-K) to stay
+ * out of the user's way while they're typing.
+ */
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!target || !(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (target.isContentEditable) return true;
+  return false;
 }
 
 function describeLogHeader({runActive, status, lastUpdatedAt, pollIntervalMs, displayLines, totalBytes}: {
@@ -5294,4 +5812,231 @@ function errorMessage(error: unknown): string {
 
 function detailWasRemoved(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404;
+}
+
+// ---------------------------------------------------------------------------
+// Heavy-user paper-cut #3 — notifications when long runs finish
+// ---------------------------------------------------------------------------
+
+let _notificationPermissionRequested = false;
+
+/**
+ * Request notification permission on the user's first interaction. Browsers
+ * only allow `Notification.requestPermission()` to fire from a user gesture,
+ * so we tie this to "open job dialog" / "start watcher" — natural moments
+ * the user has signalled intent to track work.
+ *
+ * Idempotent: only fires once per page load. Gracefully degrades when the
+ * Notification API is unavailable (older browsers, secure-context-required
+ * pages) — caller flow is unaffected.
+ */
+function requestNotificationPermissionOnce(): void {
+  if (_notificationPermissionRequested) return;
+  if (typeof window === "undefined") return;
+  const notif = (window as unknown as {Notification?: typeof Notification}).Notification;
+  if (!notif || typeof notif.requestPermission !== "function") return;
+  if (notif.permission !== "default") {
+    _notificationPermissionRequested = true;
+    return;
+  }
+  _notificationPermissionRequested = true;
+  try {
+    const result = notif.requestPermission();
+    // Some older browsers return undefined (callback-only). Both are safe.
+    if (result && typeof (result as Promise<NotificationPermission>).then === "function") {
+      void (result as Promise<NotificationPermission>).catch(() => {/* user denied; degrade silently */});
+    }
+  } catch {
+    // Some embedded browsers throw on requestPermission — never rethrow.
+  }
+}
+
+/**
+ * Track the live run set across polls; when a previously-live run drops out
+ * (i.e. transitioned to a terminal state) AND the tab is currently hidden,
+ * fire a Notification. The set lives in a ref so we re-compute the diff in
+ * place rather than re-creating subscriptions per poll. We also reset the
+ * baseline when the project changes (different `data.project.path`) so a
+ * project switch isn't mis-read as "all runs just finished."
+ */
+function useNotificationsOnRunFinish(data: StateResponse | null): void {
+  const previousLiveIdsRef = useRef<Set<string>>(new Set());
+  const previousProjectRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const projectPath = data?.project?.path || null;
+    if (previousProjectRef.current !== projectPath) {
+      // Project changed (or first hydration). Snapshot the current live set
+      // as the new baseline; do NOT fire notifications for "runs that
+      // disappeared" because they belonged to the previous project.
+      previousProjectRef.current = projectPath;
+      const initial = new Set<string>();
+      for (const item of data?.live.items || []) initial.add(item.run_id);
+      previousLiveIdsRef.current = initial;
+      return;
+    }
+    const currentIds = new Set<string>();
+    for (const item of data?.live.items || []) currentIds.add(item.run_id);
+    const finished: string[] = [];
+    for (const prevId of previousLiveIdsRef.current) {
+      if (!currentIds.has(prevId)) finished.push(prevId);
+    }
+    previousLiveIdsRef.current = currentIds;
+    if (!finished.length) return;
+    const hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+    if (!hidden) return;
+    const notif = (window as unknown as {Notification?: typeof Notification}).Notification;
+    if (!notif) return;
+    if (notif.permission !== "granted") return;
+    try {
+      // One notification per finished batch — multiple completions in a
+      // single poll fire one consolidated message rather than spamming.
+      const body = finished.length === 1
+        ? `Run ${finished[0]} finished.`
+        : `${finished.length} runs finished.`;
+      // eslint-disable-next-line no-new -- side-effect intentional
+      new notif("Otto: build completed", {body});
+    } catch {
+      // Some browsers throw if the page lifecycle frame doesn't permit it.
+    }
+  }, [data]);
+}
+
+// ---------------------------------------------------------------------------
+// Heavy-user paper-cut #4 — Cmd-K command palette
+// ---------------------------------------------------------------------------
+
+interface CommandPaletteProps {
+  projects: ManagedProjectInfo[];
+  currentPath: string | null;
+  onSelect: (path: string | null) => void;
+  onClose: () => void;
+}
+
+/**
+ * Quick project switcher. Cmd-K opens, type to fuzzy-filter (substring on
+ * name + path), Up/Down (or j/k) to navigate, Enter to select, Escape to
+ * close. The current project is rendered with a "current" badge and is
+ * non-selectable to avoid an accidental no-op switch.
+ *
+ * Modal isolation: we render inside `.modal-backdrop` and use
+ * `useDialogFocus`, mirroring JobDialog/ConfirmDialog. The `inertSiblings`
+ * pattern at the App shell respects this: when paletteOpen is true the
+ * sidebar/main go inert, so click-through and tab traversal stay inside.
+ */
+function CommandPalette({projects, currentPath, onSelect, onClose}: CommandPaletteProps) {
+  const [query, setQuery] = useState("");
+  const [highlight, setHighlight] = useState(0);
+  const dialogRef = useDialogFocus<HTMLDivElement>(onClose, false);
+  const filtered = useMemo(() => filterPalette(projects, query), [projects, query]);
+  // Keep the highlight pinned in range when the filter narrows.
+  useEffect(() => {
+    setHighlight(0);
+  }, [query]);
+  const moveHighlight = useCallback((dir: 1 | -1) => {
+    if (!filtered.length) return;
+    setHighlight((prev) => (prev + dir + filtered.length) % filtered.length);
+  }, [filtered.length]);
+  const onBackdropClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    onClose();
+  };
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onBackdropClick} data-testid="command-palette-backdrop">
+      <div
+        ref={dialogRef}
+        className="command-palette"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="commandPaletteHeading"
+        data-testid="command-palette"
+        tabIndex={-1}
+      >
+        <header>
+          <h2 id="commandPaletteHeading" className="sr-only">Command palette</h2>
+          <input
+            value={query}
+            type="search"
+            placeholder="Switch project — type to filter"
+            data-testid="command-palette-input"
+            aria-label="Filter projects"
+            autoFocus
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown" || (event.key === "j" && (event.ctrlKey || event.metaKey))) {
+                event.preventDefault();
+                moveHighlight(1);
+              } else if (event.key === "ArrowUp" || (event.key === "k" && (event.ctrlKey || event.metaKey))) {
+                event.preventDefault();
+                moveHighlight(-1);
+              } else if (event.key === "Enter") {
+                event.preventDefault();
+                const target = filtered[highlight];
+                if (!target) return;
+                if (target.path === currentPath) return; // no-op for current
+                onSelect(target.path);
+              }
+              // Escape is handled by useDialogFocus.
+            }}
+          />
+        </header>
+        <ul className="command-palette-list" data-testid="command-palette-list" role="listbox" aria-label="Recent projects">
+          {filtered.length === 0 && (
+            <li
+              className="command-palette-empty"
+              data-testid="command-palette-empty"
+            >No projects match.</li>
+          )}
+          {filtered.map((project, idx) => {
+            const isCurrent = project.path === currentPath;
+            const isHighlighted = idx === highlight;
+            return (
+              <li
+                key={project.path}
+                role="option"
+                aria-selected={isHighlighted}
+                className={`command-palette-row ${isHighlighted ? "highlighted" : ""} ${isCurrent ? "current" : ""}`}
+                data-testid={`command-palette-row-${project.path}`}
+              >
+                <button
+                  type="button"
+                  className="command-palette-row-button"
+                  data-testid={`command-palette-select-${project.path}`}
+                  disabled={isCurrent}
+                  onMouseEnter={() => setHighlight(idx)}
+                  onClick={() => {
+                    if (isCurrent) return;
+                    onSelect(project.path);
+                  }}
+                >
+                  <strong>{project.name}</strong>
+                  <code>{project.path}</code>
+                  {isCurrent && <span className="command-palette-badge">current</span>}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+        <footer className="command-palette-footer">
+          <span>↑/↓ to navigate · Enter to switch · Esc to close</span>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Substring-everywhere fuzzy filter for the palette. We compare against
+ * lowercased name + path so a query like "kanb" matches "kanban-portal" or
+ * a project under `~/projects/kanban`. Order is preserved (no scoring) —
+ * keeps things predictable for muscle-memory users who recognise the order
+ * of their last 5 projects.
+ */
+function filterPalette(projects: ManagedProjectInfo[], query: string): ManagedProjectInfo[] {
+  const trimmed = query.trim().toLowerCase();
+  if (!trimmed) return projects;
+  return projects.filter((project) => {
+    const haystack = `${project.name || ""} ${project.path || ""}`.toLowerCase();
+    return haystack.includes(trimmed);
+  });
 }
