@@ -209,9 +209,29 @@ def _atomic_detail() -> dict[str, Any]:
             "certification": {
                 "stories_passed": None,
                 "stories_tested": None,
-                "stories_total": None,
-                "verdict": None,
+                "passed": False,
+                "summary_path": None,
+                "stories": [],
+                "proof_report": {
+                    "json_path": None,
+                    "html_path": None,
+                    "html_url": None,
+                    "available": False,
+                },
             },
+            "changes": {
+                "branch": item["branch"],
+                "target": "main",
+                "merged": False,
+                "merge_id": None,
+                "file_count": 0,
+                "files": [],
+                "truncated": False,
+                "diff_command": None,
+                "diff_error": None,
+            },
+            "evidence": [],
+            "failure": None,
         },
         "landing_state": None,
         "merge_info": None,
@@ -259,12 +279,18 @@ def test_inspector_displays_atomic_as_build(
     _install_detail_route(page, _atomic_detail())
 
     # Pre-select the run via URL so the inspector opens immediately on hydrate.
-    page.goto(f"{mc_backend.url}?run={ATOMIC_RUN_ID}", wait_until="networkidle")
+    page.goto(f"{mc_backend.url}?view=tasks&run={ATOMIC_RUN_ID}", wait_until="networkidle")
     page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
     disable_animations(page)
 
+    # The Type field lives inside a collapsed <details> "Run metadata" panel.
+    # The dd element is in the DOM either way (its text content is what we
+    # care about for the rename test) but the parent <details> is closed by
+    # default. Wait for the testid to attach (proves inspector hydrated +
+    # detail loaded), then read text_content directly — visibility is not
+    # required for this assertion since we only validate string content.
     type_dd = page.locator("[data-testid=run-detail-type]")
-    type_dd.wait_for(state="visible", timeout=5_000)
+    type_dd.wait_for(state="attached", timeout=5_000)
     text = (type_dd.text_content() or "").strip()
 
     # Must say "build / build", NOT "atomic / build".

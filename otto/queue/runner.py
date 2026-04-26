@@ -36,7 +36,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from otto.manifest import queue_index_path_for
 from otto import paths
@@ -516,13 +516,46 @@ class Runner:
         cycle_ids = {tid for cycle in cycles for tid in cycle}
         known_task_ids = {task.id for task in tasks}
         applied_commands: list[dict[str, Any]] = []
+        applied_command_ids: set[str] = set()
         for cmd in commands:
             self._apply_command(cmd, state, known_task_ids=known_task_ids)
             applied_commands.append(cmd)
+            cid = str(cmd.get("command_id") or "")
+            if cid:
+                applied_command_ids.add(cid)
+
+        # Late-drain hook: closes the cancel-vs-dispatch race. A cancel POST
+        # that lands *after* the first drain (above) but *before* a queued
+        # task's spawn would otherwise be deferred to the next tick — by
+        # which time the task is already running. `_dispatch_new` invokes
+        # this callback right before each `queued` task evaluation so a
+        # late cancel applied here flips the task's status before spawn.
+        # mc-audit live W2-IMPORTANT-3.
+        nonlocal_state = {"started": command_drain_started}
+
+        def late_drain() -> None:
+            try:
+                late_commands = begin_command_drain(self.project_dir)
+            except (OSError, ValueError) as exc:
+                logger.error("failed to re-drain commands before dispatch: %s", exc)
+                return
+            nonlocal_state["started"] = (
+                nonlocal_state["started"]
+                or queue_schema.commands_processing_path(self.project_dir).exists()
+            )
+            for cmd in late_commands:
+                cid = str(cmd.get("command_id") or "")
+                if cid and cid in applied_command_ids:
+                    continue
+                self._apply_command(cmd, state, known_task_ids=known_task_ids)
+                applied_commands.append(cmd)
+                if cid:
+                    applied_command_ids.add(cid)
 
         # Dispatch new work (skip during graceful shutdown)
         if self.shutdown_level is None:
-            self._dispatch_new(tasks, state, cycle_ids)
+            self._dispatch_new(tasks, state, cycle_ids, late_drain=late_drain)
+        command_drain_started = nonlocal_state["started"]
 
         # Persist state
         self._write_state_or_raise(state)
@@ -940,9 +973,24 @@ class Runner:
     # ---- dispatch new work ----
 
     def _dispatch_new(
-        self, tasks: list[QueueTask], state: dict[str, Any], cycle_ids: set[str],
+        self,
+        tasks: list[QueueTask],
+        state: dict[str, Any],
+        cycle_ids: set[str],
+        *,
+        late_drain: Callable[[], None] | None = None,
     ) -> None:
-        """Spawn child processes for queued tasks with satisfied dependencies."""
+        """Spawn child processes for queued tasks with satisfied dependencies.
+
+        ``late_drain`` (W2-IMPORTANT-3): invoked once before the queue scan,
+        and again before each candidate's spawn. Drains any cancel/remove
+        commands that arrived after the tick's first drain. Without this,
+        a cancel posted in the small window between the first command-drain
+        and dispatch would be deferred to the next tick — by which time the
+        target task is already spawned.
+        """
+        if late_drain is not None:
+            late_drain()
         in_flight = self._count_in_flight(state)
         slots = self.config.concurrent - in_flight
         if slots <= 0:
@@ -950,6 +998,11 @@ class Runner:
         for task in tasks:
             if slots <= 0:
                 break
+            # Re-check for late commands (cancel/remove) before *each*
+            # spawn so newly-arrived cancels apply against the freshest
+            # task list. Cheap when the commands.jsonl is empty.
+            if late_drain is not None:
+                late_drain()
             ts = state["tasks"].get(task.id) or {"status": "queued"}
             if ts.get("status") != "queued":
                 continue

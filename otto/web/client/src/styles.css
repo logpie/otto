@@ -646,6 +646,81 @@ textarea {
   min-height: 0;
 }
 
+/* mc-audit error-empty-states #11: filter-aware empty banner above the
+   board grid. Distinguishes "no tasks at all" from "filters hiding all
+   tasks" so the user gets a relevant action (Clear filters / Queue job). */
+.task-board-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin: 8px 12px 0;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.task-board-empty.task-board-empty-filtered-empty {
+  border-color: var(--amber);
+  background: #fef3c7;
+  color: var(--amber);
+}
+
+.task-board-empty-action {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.task-board-empty-action.primary {
+  background: var(--accent);
+  color: var(--surface);
+  border-color: var(--accent);
+}
+
+/* mc-audit codex-first-time-user #19: queued-task placeholder in the
+   detail panel when a card without a runId is selected. */
+.queued-task-detail h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.queued-task-subtitle {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.queued-task-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
+.queued-task-meta dt {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.queued-task-meta dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.queued-task-next-action {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
 .task-board {
   min-height: 0;
   display: grid;
@@ -796,6 +871,41 @@ textarea {
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
+  /* Border default for non-toned status (so toned ones look intentional). */
+  border: 1px solid transparent;
+}
+
+/* mc-audit info-density #3: tone classes for task-status badges so
+   ready/blocked/running/failed/cancelled scan distinctly. Colour values
+   reuse existing palette tokens (--green/--amber/--red/--blue) on tinted
+   backgrounds to keep AA contrast on light surfaces. */
+.task-status.status-tone-success {
+  background: #dcfce7;
+  color: var(--green);
+  border-color: #bbf7d0;
+}
+
+.task-status.status-tone-running {
+  background: #dbeafe;
+  color: var(--blue);
+  border-color: #bfdbfe;
+}
+
+.task-status.status-tone-warning {
+  background: #fef3c7;
+  color: var(--amber);
+  border-color: #fde68a;
+}
+
+.task-status.status-tone-danger {
+  background: #fee2e2;
+  color: var(--red);
+  border-color: #fecaca;
+}
+
+.task-status.status-tone-neutral {
+  background: var(--surface-alt);
+  color: var(--muted);
 }
 
 .task-card-meta {

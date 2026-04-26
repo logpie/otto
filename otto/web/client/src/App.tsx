@@ -257,6 +257,12 @@ export function App() {
   const [projectsLoaded, setProjectsLoaded] = useState<boolean>(false);
   const [bootError, setBootError] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRoute.selectedRunId);
+  // mc-audit codex-first-time-user #19: when a queued task has no run_id yet
+  // (waiting for the watcher to spawn it), the user should still be able to
+  // click the card to inspect *what* is queued. We store a "selected queued
+  // task" hint here and the RunDetailPanel renders a "Waiting for watcher"
+  // placeholder. Cleared when a real run is selected or polling resolves it.
+  const [selectedQueuedTask, setSelectedQueuedTask] = useState<BoardTask | null>(null);
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [logState, setLogState] = useState<LogState>(initialLogState);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -418,8 +424,36 @@ export function App() {
     }
     selectedRunIdRef.current = runId;
     setSelectedRunId(runId);
+    // Clear queued-task hint — real run selection wins.
+    setSelectedQueuedTask(null);
     writeRouteState(currentRouteState(), "push");
   }, [currentRouteState]);
+
+  // mc-audit codex-first-time-user #19: select a queued task that has no
+  // runId yet. We don't change selectedRunId (no run exists), but the
+  // detail panel reads selectedQueuedTask to render a "waiting" placeholder.
+  const selectQueuedTask = useCallback((task: BoardTask) => {
+    setInspectorOpen(false);
+    setSelectedRunId(null);
+    selectedRunIdRef.current = null;
+    setDetail(null);
+    setSelectedQueuedTask(task);
+  }, []);
+
+  // Auto-promote selectedQueuedTask -> selectedRunId once the watcher picks
+  // up the task and a real run materializes. Without this, the user stays
+  // on the "waiting for watcher" placeholder even after the run is live.
+  // We watch `data` for a live row whose queue_task_id matches the queued
+  // task's id, then call selectRun on that real run id.
+  useEffect(() => {
+    if (!selectedQueuedTask || !data) return;
+    const live = data.live.items.find(
+      (item) => item.queue_task_id === selectedQueuedTask.id && item.run_id,
+    );
+    if (live) {
+      selectRun(live.run_id);
+    }
+  }, [data, selectedQueuedTask, selectRun]);
 
   const executeConfirmedAction = useCallback(async () => {
     // `confirmLockRef` is the synchronous half of the dedup. `confirmPending`
@@ -1278,7 +1312,11 @@ export function App() {
                 data={data}
                 filters={filters}
                 selectedRunId={selectedRunId}
+                selectedQueuedTaskId={selectedQueuedTask?.id || null}
                 onSelect={selectRun}
+                onSelectQueued={selectQueuedTask}
+                onClearFilters={() => updateFilters(defaultFilters)}
+                onNewJob={openJobDialog}
               />
               <RecentActivity events={data?.events} history={data?.history.items || []} selectedRunId={selectedRunId} onSelect={selectRun} />
             </div>
@@ -1286,12 +1324,15 @@ export function App() {
               detail={detail}
               landing={landing}
               inspectorOpen={inspectorOpen}
+              queuedTask={selectedQueuedTask}
+              watcherRunning={data?.watcher.health.state === "running"}
               onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
               onShowProof={showProof}
               onShowLogs={showLogs}
               onShowDiff={showDiff}
               onShowArtifacts={showArtifacts}
               onLoadArtifact={(index) => void loadArtifact(index)}
+              onStartWatcher={() => void runWatcherAction("start")}
             />
           </section>
         ) : (
@@ -1907,13 +1948,24 @@ function FocusMetric({label, value}: {label: string; value: string}) {
   );
 }
 
-function TaskBoard({data, filters, selectedRunId, onSelect}: {
+function TaskBoard({data, filters, selectedRunId, selectedQueuedTaskId, onSelect, onSelectQueued, onClearFilters, onNewJob}: {
   data: StateResponse | null;
   filters: Filters;
   selectedRunId: string | null;
+  // mc-audit codex-first-time-user #19: BoardTask.id of a queued-but-no-runId
+  // card the user has selected. Drives the `selected` highlight on the card
+  // since `selectedRunId` is null in that mode.
+  selectedQueuedTaskId?: string | null;
   onSelect: (runId: string) => void;
+  onSelectQueued?: (task: BoardTask) => void;
+  onClearFilters?: () => void;
+  onNewJob?: () => void;
 }) {
   const columns = taskBoardColumns(data, filters);
+  // mc-audit error-empty-states #11: distinguish *why* the board is empty.
+  // Without this, an empty filter result reads as "No work queued" — telling
+  // the user to queue more work when they actually need to clear filters.
+  const emptyReason = computeBoardEmptyReason(data, filters, columns);
   return (
     <section className="panel task-board-panel" data-testid="task-board" aria-labelledby="taskBoardHeading">
       <div className="panel-heading">
@@ -1922,6 +1974,43 @@ function TaskBoard({data, filters, selectedRunId, onSelect}: {
           <p className="panel-subtitle">{taskBoardSubtitle(data, filters)}</p>
         </div>
       </div>
+      {emptyReason && emptyReason !== "has-tasks" ? (
+        <div
+          className={`task-board-empty task-board-empty-${emptyReason}`}
+          data-testid="task-board-empty"
+          data-empty-reason={emptyReason}
+          role="status"
+        >
+          {emptyReason === "loading" && <span>Loading tasks…</span>}
+          {emptyReason === "no-project" && <span>No project selected.</span>}
+          {emptyReason === "filtered-empty" && (
+            <>
+              <span>No matching tasks.</span>
+              {onClearFilters && (
+                <button
+                  type="button"
+                  className="task-board-empty-action"
+                  data-testid="task-board-empty-clear-filters"
+                  onClick={onClearFilters}
+                >Clear filters</button>
+              )}
+            </>
+          )}
+          {emptyReason === "true-empty" && (
+            <>
+              <span>No work queued. Start a build to populate the board.</span>
+              {onNewJob && (
+                <button
+                  type="button"
+                  className="task-board-empty-action primary"
+                  data-testid="task-board-empty-queue-job"
+                  onClick={onNewJob}
+                >Queue job</button>
+              )}
+            </>
+          )}
+        </div>
+      ) : null}
       <div className="task-board">
         {columns.map((column) => (
           <div className="task-column" key={column.stage}>
@@ -1930,15 +2019,22 @@ function TaskBoard({data, filters, selectedRunId, onSelect}: {
               <strong>{column.items.length}</strong>
             </header>
             <div className="task-list">
-              {column.items.length ? column.items.map((task) => (
-                <TaskCard
-                  key={`${task.source}-${task.id}`}
-                  task={task}
-                  selected={Boolean(task.runId && task.runId === selectedRunId)}
-                  onSelect={onSelect}
-                />
-              )) : (
-                <div className="task-empty">{column.empty}</div>
+              {column.items.length ? column.items.map((task) => {
+                const cardSelected = Boolean(
+                  (task.runId && task.runId === selectedRunId)
+                  || (!task.runId && selectedQueuedTaskId && task.id === selectedQueuedTaskId)
+                );
+                return (
+                  <TaskCard
+                    key={`${task.source}-${task.id}`}
+                    task={task}
+                    selected={cardSelected}
+                    onSelect={onSelect}
+                    {...(onSelectQueued ? {onSelectQueued} : {})}
+                  />
+                );
+              }) : (
+                <div className="task-empty">{columnEmptyCopy(column, emptyReason)}</div>
               )}
             </div>
           </div>
@@ -1948,27 +2044,98 @@ function TaskBoard({data, filters, selectedRunId, onSelect}: {
   );
 }
 
-function TaskCard({task, selected, onSelect}: {
+// mc-audit error-empty-states #11: classify *why* the task board is empty.
+// "filtered-empty" lets the UI offer "Clear filters" instead of misleading
+// "No work queued." copy when the user actually has tasks but they're hidden.
+export type BoardEmptyReason =
+  | "has-tasks"
+  | "loading"
+  | "no-project"
+  | "filtered-empty"
+  | "true-empty";
+
+export function filtersAreActive(filters: Filters): boolean {
+  return (
+    filters.type !== "all"
+    || filters.outcome !== "all"
+    || filters.query.trim() !== ""
+    || filters.activeOnly
+  );
+}
+
+export function computeBoardEmptyReason(
+  data: StateResponse | null,
+  filters: Filters,
+  columns: ReadonlyArray<{items: ReadonlyArray<unknown>}>,
+): BoardEmptyReason {
+  if (!data) return "loading";
+  if (!data.project) return "no-project";
+  const visible = columns.reduce((sum, column) => sum + column.items.length, 0);
+  if (visible > 0) return "has-tasks";
+  // No visible tasks. Are the filters hiding them?
+  if (filtersAreActive(filters)) {
+    // Recompute against default filters: if there ARE tasks then, filters
+    // are doing the hiding.
+    const allColumns = taskBoardColumns(data);
+    const allCount = allColumns.reduce((sum, column) => sum + column.items.length, 0);
+    if (allCount > 0) return "filtered-empty";
+  }
+  return "true-empty";
+}
+
+function columnEmptyCopy(
+  column: {empty: string},
+  reason: BoardEmptyReason | null,
+): string {
+  if (reason === "filtered-empty") return "No matching tasks.";
+  return column.empty;
+}
+
+function TaskCard({task, selected, onSelect, onSelectQueued}: {
   task: BoardTask;
   selected: boolean;
   onSelect: (runId: string) => void;
+  // mc-audit codex-first-time-user #19: handler for cards without a runId
+  // (queued, never picked up). Without this the card's button is disabled
+  // and the user can't open Details. We invoke onSelectQueued so the
+  // detail panel can render a "waiting for watcher" placeholder.
+  onSelectQueued?: (task: BoardTask) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const selectTask = () => task.runId && onSelect(task.runId);
+  const selectTask = () => {
+    if (task.runId) {
+      onSelect(task.runId);
+    } else if (onSelectQueued) {
+      onSelectQueued(task);
+    }
+  };
   const meta = [taskChangeLine(task), task.proof].filter(Boolean);
+  const isQueuedNoRun = !task.runId;
   return (
     <article className={`task-card task-${task.stage} ${selected ? "selected" : ""}`}>
       <button
         className="task-card-main"
         type="button"
-        disabled={!task.runId}
+        // Card is enabled even without runId so the user can open the
+        // queued-task placeholder. Only disable as a last resort: no runId
+        // AND no onSelectQueued handler wired (legacy callers).
+        disabled={isQueuedNoRun && !onSelectQueued}
         data-testid={testIdForTask(task.id)}
+        data-queued-no-run={isQueuedNoRun ? "true" : undefined}
         aria-pressed={selected}
-        aria-label={`${task.title}: ${task.status}`}
+        aria-label={isQueuedNoRun
+          ? `${task.title}: ${task.status} (waiting for watcher)`
+          : `${task.title}: ${task.status}`}
         onClick={selectTask}
       >
         <span className="task-card-top">
-          <span className="task-status">{task.status}</span>
+          {/* mc-audit info-density #3: tone classes so ready/blocked/running/
+              failed/cancelled scan distinctly. Without these, every badge is
+              the same gray pill. */}
+          <span
+            className={`task-status status-tone-${statusTone(task.status, task.stage)}`}
+            data-status-tone={statusTone(task.status, task.stage)}
+          >{task.status}</span>
           <span className="task-card-cta">{task.stage === "ready" ? "Review" : "Details"}</span>
         </span>
         <strong className="task-title" title={task.title}>{task.title}</strong>
@@ -2310,16 +2477,22 @@ function EventTimeline({events}: {events: StateResponse["events"] | undefined}) 
   );
 }
 
-function RunDetailPanel({detail, landing, inspectorOpen, onRunAction, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact}: {
+function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watcherRunning, onRunAction, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact, onStartWatcher}: {
   detail: RunDetail | null;
   landing: LandingState | undefined;
   inspectorOpen: boolean;
+  // mc-audit codex-first-time-user #19: when a queued card without a runId
+  // is selected, render a placeholder explaining that the task is waiting
+  // for the watcher and what the user can do (start the watcher, etc.).
+  queuedTask?: BoardTask | null;
+  watcherRunning?: boolean;
   onRunAction: (action: string, label?: string) => void;
   onShowProof: () => void;
   onShowLogs: () => void;
   onShowDiff: () => void;
   onShowArtifacts: () => void;
   onLoadArtifact: (index: number) => void;
+  onStartWatcher?: () => void;
 }) {
   return (
     <aside className="detail" aria-labelledby="detailHeading" data-testid="run-detail-panel">
@@ -2370,6 +2543,35 @@ function RunDetailPanel({detail, landing, inspectorOpen, onRunAction, onShowProo
             </div>
           )}
         </>
+      ) : queuedTask ? (
+        <div className="detail-body empty queued-task-detail" data-testid="run-detail-queued" data-queued-task-id={queuedTask.id}>
+          <h3>{queuedTask.title}</h3>
+          <p className="queued-task-subtitle">
+            <strong>Waiting for watcher</strong> — this task is queued but no
+            run has started yet. Logs, diffs, and proof become available once
+            the watcher picks it up.
+          </p>
+          <dl className="queued-task-meta">
+            <dt>Status</dt><dd>{queuedTask.status}</dd>
+            {queuedTask.branch && (<><dt>Branch</dt><dd title={queuedTask.branch}>{queuedTask.branch}</dd></>)}
+            <dt>Reason</dt><dd>{queuedTask.reason}</dd>
+            {queuedTask.summary && (<><dt>Intent</dt><dd>{shortText(queuedTask.summary, 240)}</dd></>)}
+          </dl>
+          <p className="queued-task-next-action">
+            <strong>Next:</strong>{" "}
+            {watcherRunning
+              ? "Watcher is running — task should pick up shortly."
+              : "Start the watcher to dispatch this queued task."}
+          </p>
+          {!watcherRunning && onStartWatcher && (
+            <button
+              type="button"
+              className="primary"
+              data-testid="run-detail-queued-start-watcher"
+              onClick={onStartWatcher}
+            >Start watcher</button>
+          )}
+        </div>
       ) : (
         <div className="detail-body empty" data-testid="run-detail-empty">
           Select a task card to review logs, code changes, verification, and next action.
@@ -3879,10 +4081,35 @@ function missionFocus(data: StateResponse | null): {
     };
   }
   if (working) {
+    // mc-audit info-density #6: surface a headline for the *hottest* active
+    // run instead of a bare count. Pick the most recently active live item
+    // (sort by elapsed_s ascending — newest first; fall back to first
+    // working board card). Headline format:
+    //   "<task-id> · <branch> · <elapsed> · <cost> · <last event>"
+    // Each segment is omitted if missing, so the line never reads as "·· ·".
+    const liveActive = data.live.items
+      .filter((item) => item.active || ["starting", "running", "initializing", "terminating"].includes(item.display_status))
+      .slice()
+      .sort((a, b) => Number(a.elapsed_s || 0) - Number(b.elapsed_s || 0));
+    const hottest = liveActive[0];
+    const headline = hottest
+      ? [
+          hottest.queue_task_id || hottest.display_id || hottest.run_id,
+          hottest.branch || null,
+          hottest.elapsed_display || null,
+          hottest.cost_display && hottest.cost_display !== "…" ? hottest.cost_display : null,
+          hottest.overlay?.reason || hottest.last_event || null,
+        ]
+          .filter((segment): segment is string => Boolean(segment && segment.trim()))
+          .join(" · ")
+      : null;
+    const titleSuffix = working === 1 ? "" : "s";
     return {
       kicker: "Working",
-      title: `${working} task${working === 1 ? "" : "s"} in flight`,
-      body: "Runs are active. Review packets will update as tasks finish.",
+      title: headline || `${working} task${titleSuffix} in flight`,
+      body: working > 1
+        ? `${working} tasks active. Review packets will update as tasks finish.`
+        : "Run is active. Review packet will update when it finishes.",
       tone: "info",
       primary: "new",
       working,
@@ -4050,6 +4277,39 @@ function taskChangeLine(task: BoardTask): string {
   return `${task.changedFileCount} file${task.changedFileCount === 1 ? "" : "s"}`;
 }
 
+// mc-audit info-density #3: map a task's status string + stage to a tone
+// keyword so the CSS can colour ready/running/failed/cancelled etc. with
+// distinct hues. Tone values:
+//   success — ready/landed/done/merged
+//   running — starting/running/initializing/terminating/in flight
+//   warning — blocked/queued/waiting/paused/interrupted/stale
+//   danger  — failed/cancelled/removed/error
+//   neutral — anything else
+export function statusTone(
+  status: string,
+  stage: BoardStage,
+): "success" | "running" | "warning" | "danger" | "neutral" {
+  const lower = status.toLowerCase();
+  if (["ready", "landed", "merged", "done", "success"].some((value) => lower.includes(value))) {
+    return "success";
+  }
+  if (["failed", "cancelled", "canceled", "removed", "error"].some((value) => lower.includes(value))) {
+    return "danger";
+  }
+  if (["starting", "running", "initializing", "terminating", "in flight", "in_flight"].some((value) => lower.includes(value))) {
+    return "running";
+  }
+  if (["queued", "waiting", "paused", "interrupted", "stale", "blocked"].some((value) => lower.includes(value))) {
+    return "warning";
+  }
+  // Stage-based fallback for empty/odd statuses.
+  if (stage === "ready") return "success";
+  if (stage === "attention") return "danger";
+  if (stage === "working") return "running";
+  if (stage === "landed") return "success";
+  return "neutral";
+}
+
 function compareBoardTasks(left: BoardTask, right: BoardTask): number {
   const stageOrder: Record<BoardStage, number> = {attention: 0, ready: 1, working: 2, landed: 3};
   const byStage = stageOrder[left.stage] - stageOrder[right.stage];
@@ -4060,7 +4320,16 @@ function compareBoardTasks(left: BoardTask, right: BoardTask): number {
 function taskBoardSubtitle(data: StateResponse | null, filters: Filters = defaultFilters): string {
   if (!data) return "Loading tasks.";
   const total = taskBoardColumns(data, filters).reduce((sum, column) => sum + column.items.length, 0);
-  if (!total) return "No work queued.";
+  if (!total) {
+    // mc-audit error-empty-states #11: don't say "No work queued" when the
+    // user just has filters hiding their work. Pick wording that matches
+    // the empty reason.
+    if (filtersAreActive(filters)) {
+      const all = taskBoardColumns(data).reduce((sum, column) => sum + column.items.length, 0);
+      if (all > 0) return `No tasks match the active filters (${all} hidden).`;
+    }
+    return "No work queued.";
+  }
   const target = data.landing.target || "main";
   return `${total} visible task${total === 1 ? "" : "s"} for ${target}.`;
 }
