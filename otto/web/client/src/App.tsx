@@ -4,6 +4,7 @@ import {ApiError, api, buildQueuePayload, friendlyApiMessage, runDetailUrl, stat
 import {Spinner} from "./components/Spinner";
 import {useInFlight} from "./hooks/useInFlight";
 import {useDebouncedValue} from "./hooks/useDebouncedValue";
+import {useCrossTabChannel} from "./hooks/useCrossTabChannel";
 import type {
   ActionResult,
   ActionState,
@@ -120,6 +121,22 @@ const LOG_POLL_BASE_MS = 1200;
 // "first failure" delay; we cap at 30s so a sustained outage stops hammering
 // the API. On the first successful read we drop back to LOG_POLL_BASE_MS.
 const LOG_POLL_BACKOFF_MS = [2000, 5000, 15000, 30000];
+// W9-CRITICAL-1: cadence used for `/api/state` polling while the tab is
+// hidden. We don't STOP polling (otherwise notification gates and live
+// state go stale for the whole hide window — see live-findings W9), we
+// just slow it down so a backgrounded tab doesn't hammer the server while
+// the user is elsewhere. Browser timer-throttling already brings this
+// close to once-per-minute when truly hidden, but we set it explicitly
+// so the resume catch-up is bounded.
+const STATE_POLL_HIDDEN_MS = 30_000;
+// W9-CRITICAL-1: hard floor between consecutive `/api/state` polls.
+// Defends against the 175-poll-in-10s burst that browsers fire when they
+// unthrottle a previously-hidden tab — without this, accumulated state
+// updates / re-rendered effects can re-fire `refresh()` in a tight loop.
+// 1s is well below LOG_POLL_BASE_MS / refreshIntervalMs() floor (700ms)
+// so it never throttles the steady-state cadence in practice; it only
+// gates the burst.
+const STATE_POLL_MIN_GAP_MS = 1000;
 
 type LogStatus = "idle" | "loading" | "ok" | "missing" | "error";
 
@@ -405,6 +422,12 @@ export function App() {
   // refresh declaration. Used by `executeConfirmedAction` after a
   // failed action POST per mc-audit codex-destructive-action-safety #6.
   const refreshRef = useRef<((showStatus?: boolean) => Promise<void>) | null>(null);
+  // W10-CRITICAL-1/2: ref for the cross-tab BroadcastChannel publisher.
+  // Wired by ``useCrossTabChannel`` once the hook mounts; mutation
+  // callbacks (executeAction, mergeReadyTasks, runWatcherAction, queue
+  // submit) read it through this ref so they don't need to be in
+  // execution-order dependency-graph order with the hook.
+  const crossTabPublishRef = useRef<((kind: import("./hooks/useCrossTabChannel").MutationKind, opts?: {runId?: string; taskId?: string}) => void) | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialRoute.viewMode);
   // Heavy-user paper-cut #4 (Cmd-K palette). Hidden by default, opened by
   // Cmd/Ctrl+K from anywhere on the page (skipped while a modal is open so
@@ -433,6 +456,18 @@ export function App() {
   // implement exponential backoff on errors, so we keep the id outside React.
   const logPollTimeoutRef = useRef<number | null>(null);
   const logPollVisibleRef = useRef(true);
+  // W9-CRITICAL-1: state-poll timer book-keeping. Single timer ref ensures
+  // a re-rendered effect cannot stack a second `setInterval` alongside the
+  // first (which is how visibility-restore previously fired multi-hundred
+  // request bursts). `statePollVisibleRef` mirrors document.visibilityState
+  // so the recursive scheduler can pick the right cadence without forcing
+  // a re-render. `statePollLastAtRef` enforces a 1s minimum gap between
+  // polls (`STATE_POLL_MIN_GAP_MS`) — defense-in-depth against any future
+  // code path that calls into the poll loop too eagerly.
+  const statePollTimerRef = useRef<number | null>(null);
+  const statePollVisibleRef = useRef(true);
+  const statePollLastAtRef = useRef<number>(0);
+  const statePollAbortRef = useRef<AbortController | null>(null);
   const selectedRunIdRef = useRef<string | null>(initialRoute.selectedRunId);
   const viewModeRef = useRef<ViewMode>(initialRoute.viewMode);
   // History pagination state. We keep refs alongside the state so the
@@ -862,10 +897,12 @@ export function App() {
     }
   }, []);
 
-  const refresh = useCallback(async (showStatus = false) => {
+  const refresh = useCallback(async (showStatus = false, signal?: AbortSignal) => {
+    if (signal?.aborted) return;
     if (showStatus) setRefreshStatus("refreshing");
     try {
       const projectStatus = await loadProjects();
+      if (signal?.aborted) return;
       if (projectStatus.launcher_enabled && !projectStatus.current) {
         setData(null);
         setSelectedRunId(null);
@@ -882,7 +919,11 @@ export function App() {
         setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
         return;
       }
-      const next = await api<StateResponse>(`/api/state?${stateQueryParams({...filters, historyPage, historyPageSize}).toString()}`);
+      const next = await api<StateResponse>(
+        `/api/state?${stateQueryParams({...filters, historyPage, historyPageSize}).toString()}`,
+        signal ? {signal} : {},
+      );
+      if (signal?.aborted) return;
       setData(next);
       setLastError(null);
       const visible = visibleRunIds(next);
@@ -900,6 +941,13 @@ export function App() {
       });
       setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
     } catch (error) {
+      // AbortError fires when the visibility-aware poller cancels an
+      // in-flight request (e.g. tab went hidden mid-fetch, or two effect
+      // re-runs raced). Silently swallow — neither the status badge nor
+      // a toast should reflect a deliberate cancellation.
+      if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+        return;
+      }
       setRefreshStatus("error");
       showToast(errorMessage(error), "error");
     }
@@ -912,10 +960,141 @@ export function App() {
     refreshRef.current = refresh;
   }, [refresh]);
 
+  // W10-CRITICAL-1/2: cross-tab mutation broadcast. When a peer tab on
+  // the same origin issues a mutation (queue submit / cancel / merge /
+  // watcher start-stop), it posts a `mc-state-mutation` BroadcastChannel
+  // message; we receive it here and fire an immediate /api/state refresh
+  // instead of waiting up to ~1.5s for the next poll tick. Outgoing
+  // publishes happen at the mutation call sites (executeAction,
+  // mergeReadyTasks, runWatcherAction, JobDialog onQueued) via the
+  // module-scope ref ``crossTabPublishRef`` set up at the top of this
+  // component.
+  const crossTab = useCrossTabChannel(() => {
+    void refreshRef.current?.(false);
+  });
   useEffect(() => {
-    void refresh(false);
-    const interval = window.setInterval(() => void refresh(false), refreshIntervalMs(data));
-    return () => window.clearInterval(interval);
+    crossTabPublishRef.current = crossTab.publish;
+  }, [crossTab.publish]);
+
+  // W9-CRITICAL-1: visibility-aware single-timer poll for `/api/state`.
+  //
+  // The previous implementation used `window.setInterval(refresh, fastMs)`
+  // and relied on the browser's natural timer-throttling under hidden
+  // tabs to slow it down. Two compound bugs resulted:
+  //   1. Hidden behaviour was implementation-defined — Chrome stopped the
+  //      poll entirely (~0 polls during a 110s hide window in W9), leaving
+  //      the SPA stale and the heavy-user notification gate cold.
+  //   2. On visibility restore, the unthrottled timer combined with
+  //      cascading effect re-runs (every state update changed `refresh`'s
+  //      identity, re-firing the effect) to send a 175-poll burst within a
+  //      single 10s window — request-flood territory on hosted backends.
+  //
+  // The replacement schedules ONE recursive `setTimeout` whose cadence
+  // varies with visibility: 1.2-5s while visible (driven by the server's
+  // refresh_interval_s hint), 30s while hidden. A `visibilitychange`
+  // handler aborts any in-flight request, fires a single immediate
+  // catch-up poll on hidden→visible, and reschedules. The
+  // `STATE_POLL_MIN_GAP_MS` floor caps the worst case at one poll/sec
+  // even if multiple call paths race.
+  useEffect(() => {
+    let cancelled = false;
+
+    const cadenceMs = (): number =>
+      statePollVisibleRef.current ? refreshIntervalMs(data) : STATE_POLL_HIDDEN_MS;
+
+    const cancelPending = () => {
+      if (statePollTimerRef.current !== null) {
+        window.clearTimeout(statePollTimerRef.current);
+        statePollTimerRef.current = null;
+      }
+    };
+
+    const fireOnce = async () => {
+      if (cancelled) return;
+      // Hard floor between polls. We don't drop the call entirely — we
+      // reschedule it so the cadence stays approximately on track.
+      const now = Date.now();
+      const sinceLast = now - statePollLastAtRef.current;
+      if (sinceLast < STATE_POLL_MIN_GAP_MS) {
+        scheduleNext(STATE_POLL_MIN_GAP_MS - sinceLast);
+        return;
+      }
+      statePollLastAtRef.current = now;
+      // Cancel any prior in-flight refresh — visibility flips can otherwise
+      // leave the previous fetch hanging while the new one starts, doubling
+      // server load briefly.
+      if (statePollAbortRef.current) {
+        statePollAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      statePollAbortRef.current = controller;
+      try {
+        await refresh(false, controller.signal);
+      } finally {
+        if (statePollAbortRef.current === controller) {
+          statePollAbortRef.current = null;
+        }
+      }
+      if (cancelled) return;
+      scheduleNext(cadenceMs());
+    };
+
+    const scheduleNext = (delayMs: number) => {
+      if (cancelled) return;
+      cancelPending();
+      statePollTimerRef.current = window.setTimeout(() => {
+        statePollTimerRef.current = null;
+        void fireOnce();
+      }, delayMs);
+    };
+
+    const onVisibilityChange = () => {
+      if (typeof document === "undefined") return;
+      const visible = document.visibilityState !== "hidden";
+      const wasVisible = statePollVisibleRef.current;
+      statePollVisibleRef.current = visible;
+      if (visible === wasVisible) return;
+      // Tab transitioned. Cancel any in-flight request (its result may be
+      // about to land in the wrong cadence) and reset the timer at the
+      // new cadence. On hidden→visible we ALSO fire a single immediate
+      // catch-up poll so the user sees fresh state right away — but the
+      // STATE_POLL_MIN_GAP_MS floor + single-timer ref guarantee we never
+      // burst.
+      if (statePollAbortRef.current) {
+        statePollAbortRef.current.abort();
+        statePollAbortRef.current = null;
+      }
+      cancelPending();
+      if (visible) {
+        // Single catch-up. fireOnce() will reschedule after it returns.
+        void fireOnce();
+      } else {
+        scheduleNext(cadenceMs());
+      }
+    };
+
+    // Seed visibility state from the document so the first tick uses the
+    // correct cadence (e.g. tests that pre-set `visibilityState=hidden`).
+    if (typeof document !== "undefined") {
+      statePollVisibleRef.current = document.visibilityState !== "hidden";
+    }
+
+    void fireOnce();
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
+
+    return () => {
+      cancelled = true;
+      cancelPending();
+      if (statePollAbortRef.current) {
+        statePollAbortRef.current.abort();
+        statePollAbortRef.current = null;
+      }
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
+    };
   }, [refresh, data?.live.refresh_interval_s]);
 
   // Heavy-user paper-cut #3: browser Notification when a long run finishes
@@ -1157,6 +1336,10 @@ export function App() {
             body: JSON.stringify(requestPayload),
           });
           handleActionResult(result, `${action} requested`, showToast, setResultBanner);
+          // W10-CRITICAL-2: tell peer tabs about the mutation so a cancel
+          // (or any per-run action) issued from this tab is reflected in
+          // their UI within ~one render frame instead of one poll tick.
+          crossTabPublishRef.current?.("queue.action", {runId});
           if (result.refresh !== false) await refresh(true);
         } catch (err) {
           if (isCancel) {
@@ -1207,6 +1390,9 @@ export function App() {
       onConfirm: () => mergeAllInFlight.run(async () => {
         const result = await api<ActionResult>("/api/actions/merge-all", {method: "POST", body: "{}"});
         handleActionResult(result, "merge all requested", showToast, setResultBanner);
+        // W10-CRITICAL-1/2: notify peer tabs so the landing/task board
+        // reflects the merge before their next poll tick.
+        crossTabPublishRef.current?.("merge-all");
         if (result.refresh !== false) await refresh(true);
       }),
     });
@@ -1234,6 +1420,10 @@ export function App() {
           body: action === "start" ? JSON.stringify({concurrent: 2}) : "{}",
         });
         showToast(result.message || `watcher ${action} requested`);
+        // W10-CRITICAL-1/2: peer tabs need to see watcher start/stop
+        // immediately — a queued task transitioning to running on tab A
+        // should not stay invisible in tab B until the next poll fires.
+        crossTabPublishRef.current?.(action === "start" ? "watcher.start" : "watcher.stop");
         await refresh(true);
       } catch (error) {
         showToast(`watcher ${action} failed: ${errorMessage(error)}`, "error");
@@ -1727,6 +1917,12 @@ export function App() {
                 selectedQueuedTaskId={selectedQueuedTask?.id || null}
                 onSelect={selectRun}
                 onSelectQueued={selectQueuedTask}
+                onCancelRun={(runId, taskTitle) => void runActionForRun(
+                  runId,
+                  "cancel",
+                  actionConfirmationBody("cancel", `Cancel ${taskTitle}`),
+                  "Cancel",
+                )}
                 onClearFilters={() => updateFilters(defaultFilters)}
                 onNewJob={openJobDialog}
               />
@@ -1831,6 +2027,10 @@ export function App() {
           onQueued={async (message) => {
             setJobOpen(false);
             showToast(message || "queued");
+            // W10-CRITICAL-1: tell peer tabs immediately about the new
+            // queued job so their task board renders the row within
+            // a render frame instead of waiting for the next poll.
+            crossTabPublishRef.current?.("queue.submit");
             await refresh();
           }}
           onError={(message) => showToast(message, "error")}
@@ -2443,7 +2643,7 @@ function FocusMetric({label, value}: {label: string; value: string}) {
   );
 }
 
-function TaskBoard({data, filters, selectedRunId, selectedQueuedTaskId, onSelect, onSelectQueued, onClearFilters, onNewJob}: {
+function TaskBoard({data, filters, selectedRunId, selectedQueuedTaskId, onSelect, onSelectQueued, onCancelRun, onClearFilters, onNewJob}: {
   data: StateResponse | null;
   filters: Filters;
   selectedRunId: string | null;
@@ -2453,6 +2653,11 @@ function TaskBoard({data, filters, selectedRunId, selectedQueuedTaskId, onSelect
   selectedQueuedTaskId?: string | null;
   onSelect: (runId: string) => void;
   onSelectQueued?: (task: BoardTask) => void;
+  // mc-audit W8-CRITICAL-1: forwarded to TaskCard so each in-flight row
+  // renders its own discoverable Cancel button. Without this, keyboard
+  // users walk past the row into inspector tabstops and accidentally
+  // fire `review-next-action-button`.
+  onCancelRun?: (runId: string, taskTitle: string) => void;
   onClearFilters?: () => void;
   onNewJob?: () => void;
 }) {
@@ -2526,6 +2731,7 @@ function TaskBoard({data, filters, selectedRunId, selectedQueuedTaskId, onSelect
                     selected={cardSelected}
                     onSelect={onSelect}
                     {...(onSelectQueued ? {onSelectQueued} : {})}
+                    {...(onCancelRun ? {onCancelRun} : {})}
                   />
                 );
               }) : (
@@ -2586,7 +2792,18 @@ function columnEmptyCopy(
   return column.empty;
 }
 
-function TaskCard({task, selected, onSelect, onSelectQueued}: {
+// mc-audit W8-CRITICAL-1: statuses for which an in-flight task can still
+// be cancelled via the watcher. Mirrors the backend's cancel-eligible set
+// so the per-row Cancel button doesn't render for already-finished work.
+// `terminating` is intentionally excluded — it's already cancelling.
+const CANCELLABLE_TASK_STATUSES = new Set([
+  "queued",
+  "starting",
+  "initializing",
+  "running",
+]);
+
+function TaskCard({task, selected, onSelect, onSelectQueued, onCancelRun}: {
   task: BoardTask;
   selected: boolean;
   onSelect: (runId: string) => void;
@@ -2595,6 +2812,16 @@ function TaskCard({task, selected, onSelect, onSelectQueued}: {
   // and the user can't open Details. We invoke onSelectQueued so the
   // detail panel can render a "waiting for watcher" placeholder.
   onSelectQueued?: (task: BoardTask) => void;
+  // mc-audit W8-CRITICAL-1: per-row cancel affordance for in-flight tasks.
+  // Without this, a keyboard user pressing Tab from a queued/running card
+  // walks past the card straight into the inspector's
+  // `review-next-action-button` (which can fire merge / next-step
+  // actions). Pressing Enter there is data-loss-adjacent — the user
+  // thinks they cancelled, the system thinks they approved the next
+  // step. We put a Cancel target directly in the focus chain after the
+  // row's main button, with a stable testid (`task-card-cancel-<id>`)
+  // that cannot collide with inspector tabstops.
+  onCancelRun?: (runId: string, taskTitle: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const selectTask = () => {
@@ -2610,8 +2837,27 @@ function TaskCard({task, selected, onSelect, onSelectQueued}: {
   // "-" placeholder leakage.
   const chips = computeTaskChips(task);
   const isQueuedNoRun = !task.runId;
+  // mc-audit W8-CRITICAL-1: render the per-row Cancel button only when
+  // the task has a runId AND its status is cancel-eligible. The handler
+  // routes through `runActionForRun` so the same confirm-and-POST flow
+  // as the inspector cancel button is used — the row-level affordance
+  // exists purely to give keyboard users a stable, discoverable focus
+  // target adjacent to the card.
+  const cancellable = Boolean(task.runId)
+    && Boolean(onCancelRun)
+    && CANCELLABLE_TASK_STATUSES.has(String(task.status || "").toLowerCase());
   return (
-    <article className={`task-card task-${task.stage} ${selected ? "selected" : ""}`}>
+    <article
+      className={`task-card task-${task.stage} ${selected ? "selected" : ""}`}
+      // W10-CRITICAL-1/2: expose the run id (and the queue task id) on the
+      // rendered card so cross-tab/UI tests can identify "the row for run
+      // X" without relying on text scraping. The TaskCard renders the
+      // *title*, not the run_id, so test harnesses scanning textContent
+      // for a run id never match — they need a stable attribute hook.
+      data-run-id={task.runId || undefined}
+      data-task-id={task.id}
+      data-stage={task.stage}
+    >
       <button
         className="task-card-main"
         type="button"
@@ -2659,6 +2905,32 @@ function TaskCard({task, selected, onSelect, onSelectQueued}: {
           ))}
         </span>
       </button>
+      {/* mc-audit W8-CRITICAL-1: per-row Cancel button for in-flight runs.
+          This button is a SIBLING of `task-card-main`, NOT nested inside
+          it — that gives it its own tab stop so a keyboard user pressing
+          Tab from the row's main button lands on a discoverable cancel
+          target instead of walking past the row into the inspector's
+          `review-next-action-button`. The click handler routes through
+          `onCancelRun` which calls `runActionForRun(runId, "cancel", …)`
+          and triggers the same confirm dialog as the inspector. We
+          stop event propagation defensively so the click cannot bubble
+          to ancestors, and we fire ONLY the cancel POST — never an
+          inspector / next-action POST. */}
+      {cancellable && task.runId && (
+        <button
+          className="task-card-cancel"
+          type="button"
+          data-testid={`task-card-cancel-${task.id.replace(/[^a-zA-Z0-9_-]+/g, "-")}`}
+          aria-label={`Cancel task ${task.title}`}
+          title={`Cancel task ${task.title}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (task.runId && onCancelRun) onCancelRun(task.runId, task.title);
+          }}
+        >
+          Cancel
+        </button>
+      )}
       <button
         className="task-card-toggle"
         type="button"

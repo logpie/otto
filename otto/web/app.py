@@ -9,7 +9,7 @@ import re
 import subprocess
 from typing import Any, AsyncIterator
 
-from fastapi import Body, FastAPI, Query
+from fastapi import Body, FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
@@ -115,6 +115,20 @@ def create_app(
                     )
 
     app = FastAPI(title="Otto Mission Control", version="0.1.0", lifespan=_lifespan)
+
+    # W10-CRITICAL-1/2: every /api/ JSON response must be ``no-store`` so a
+    # second tab polling the same backend cannot get stale state from a
+    # browser/intermediary cache. Without this, propagation of cross-tab
+    # mutations (queue submit, cancel, merge) silently misses operator B —
+    # they keep seeing pre-mutation state until the cached entry expires.
+    @app.middleware("http")
+    async def _no_store_for_api(request: Request, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = _CACHE_NO_STORE
+            response.headers["Pragma"] = "no-cache"
+        return response
+
     app.state.project_dir = None if project_launcher else project_dir
     app.state.projects_root = projects_root
     app.state.project_launcher = project_launcher

@@ -1084,6 +1084,35 @@ textarea {
   gap: 4px;
 }
 
+/* mc-audit W8-CRITICAL-1: per-row Cancel button. Sibling of `.task-card-main`
+   so it gets its own tab stop in the row's focus chain — keyboard users
+   pressing Tab from the main card button land on this Cancel target
+   instead of walking past the row into the inspector's
+   `review-next-action-button`. Visually distinct (danger tone) so the
+   destructive nature is signalled in addition to colour. */
+.task-card-cancel {
+  justify-self: start;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--red, #c0392b);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--red, #c0392b);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.task-card-cancel:hover {
+  background: var(--red, #c0392b);
+  color: var(--surface, #fff);
+}
+
+.task-card-cancel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* mc-audit microinteractions I5: chevron uses a 0deg → 90deg rotation
    when the drawer expands so the toggle communicates state visually
    without relying on a text label swap alone. */
