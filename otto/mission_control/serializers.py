@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import fnmatch
+import hashlib
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,10 @@ from otto.config import agent_provider
 from otto.config import load_config
 from otto.config import resolve_certifier_mode
 from otto.mission_control.actions import ActionResult, ActionState
+from otto.setup_gitignore import (
+    OTTO_OWNED_DIRTY_PATTERNS as _OTTO_OWNED_DIRTY_PATTERNS,
+    is_otto_owned_path as _is_otto_owned_path,
+)
 from otto.mission_control.model import (
     ArtifactRef,
     DetailView,
@@ -26,21 +31,12 @@ from otto.mission_control.model import (
 from otto.runs.schema import RunRecord
 
 
-# Otto's own runtime files at the project root; the dirty-target preflight
-# in JobDialog must not fire when these are the *only* uncommitted files,
-# because Otto created them itself (W11-CRITICAL-1). Keep this list
-# narrowly scoped to project-root state so genuine user edits anywhere
-# else still surface as dirty.
-_OTTO_OWNED_DIRTY_PATTERNS: tuple[str, ...] = (
-    ".otto-queue*",
-    "otto_logs/*",
-    "otto_logs",
-    ".worktrees/*",
-    ".worktrees",
-    ".watcher.log",
-)
-
-
+# Otto's own runtime files (re-exported from ``setup_gitignore`` for the
+# dirty-target preflight). Centralising the pattern list there ensures the
+# JobDialog preflight (W11-CRITICAL-1) and the merge-action preflight
+# (W5-CRITICAL-1, ``config.repo_preflight_issues``) classify Otto-owned
+# untracked paths the same way. ``_OTTO_OWNED_DIRTY_PATTERNS`` stays
+# importable here for back-compat with tests that referenced the symbol.
 def serialize_project(project_dir: Path) -> dict[str, Any]:
     project_dir = Path(project_dir).resolve(strict=False)
     return {
@@ -82,29 +78,6 @@ def _project_is_user_dirty(project_dir: Path) -> bool:
         if status != "??":
             return True
         if not _is_otto_owned_path(path):
-            return True
-    return False
-
-
-def _is_otto_owned_path(path: str) -> bool:
-    norm = path.strip()
-    while norm.startswith("./"):
-        norm = norm[2:]
-    norm = norm.rstrip("/")
-    if not norm:
-        return False
-    for pattern in _OTTO_OWNED_DIRTY_PATTERNS:
-        bare = pattern.rstrip("/").rstrip("*").rstrip("/")
-        if not bare:
-            continue
-        if fnmatch.fnmatch(norm, pattern):
-            return True
-        # Treat the bare prefix as covering descendants too — git's
-        # porcelain reports an untracked directory itself (with a
-        # trailing slash) without enumerating its children.
-        if norm == bare or norm.startswith(bare + "/"):
-            return True
-        if fnmatch.fnmatch(norm, bare):
             return True
     return False
 
@@ -214,13 +187,59 @@ def serialize_detail(detail: DetailView) -> dict[str, Any]:
 
 
 def serialize_artifact(artifact: ArtifactRef, index: int) -> dict[str, Any]:
-    return {
+    """Serialize an ``ArtifactRef`` with size/mtime/sha provenance.
+
+    Cluster-evidence-trustworthiness #7: artifact lists used to expose
+    only label/path/kind/exists. The UI now wants size, mtime, and a
+    short SHA so the operator can spot stale or tampered artifacts and
+    sort by size/age. We compute these here so every callsite (proof
+    pane, artifact pane, review packet evidence) gets them for free.
+
+    Tradeoffs:
+    * Size and mtime are O(1) ``stat`` calls.
+    * SHA-256 is a full file read; we cap it at 16MB and skip larger
+      files / directories so the artifact list stays cheap to render.
+    * For directories (``kind == "directory"``) we report size/mtime of
+      the dir entry but skip the SHA — directory hashing has no
+      universal definition and the UI doesn't render it.
+    """
+    payload: dict[str, Any] = {
         "index": index,
         "label": artifact.label,
         "path": artifact.path,
         "kind": artifact.kind,
         "exists": artifact.exists,
+        "size_bytes": None,
+        "mtime": None,
+        "sha256": None,
     }
+    if not artifact.exists:
+        return payload
+    try:
+        candidate = Path(artifact.path)
+    except (TypeError, ValueError):
+        return payload
+    try:
+        stat = candidate.stat()
+    except OSError:
+        return payload
+    payload["size_bytes"] = stat.st_size
+    payload["mtime"] = (
+        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    if candidate.is_file() and stat.st_size <= 16 * 1024 * 1024:
+        try:
+            hasher = hashlib.sha256()
+            with candidate.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    hasher.update(chunk)
+            payload["sha256"] = hasher.hexdigest()
+        except OSError:
+            payload["sha256"] = None
+    return payload
 
 
 def serialize_action_state(action: ActionState) -> dict[str, Any]:

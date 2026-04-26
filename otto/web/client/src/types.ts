@@ -272,6 +272,13 @@ export interface ArtifactRef {
   path: string;
   kind: string;
   exists: boolean;
+  // Cluster-evidence-trustworthiness #7: artifact provenance — the UI
+  // surfaces these as tooltips + sortable columns so the operator can
+  // spot stale or tampered files. Null when the file is missing or
+  // exceeds the in-line hashing limit (16MB).
+  size_bytes: number | null;
+  mtime: string | null;
+  sha256: string | null;
 }
 
 export interface RunDetail extends RunSummary {
@@ -290,6 +297,47 @@ export interface RunDetail extends RunSummary {
   landing_state: string | null;
   merge_info?: Record<string, unknown> | null;
   record: Record<string, unknown>;
+}
+
+export interface CertificationRound {
+  round: number | null;
+  verdict: string;
+  stories_tested: number | null;
+  passed_count: number | null;
+  failed_count: number | null;
+  warn_count: number | null;
+  failing_story_ids: string[];
+  warn_story_ids: string[];
+  diagnosis: string | null;
+  duration_s: number | null;
+  duration_human: string | null;
+  cost_usd: number | null;
+  cost_estimated: boolean;
+  fix_commits: string[];
+  fix_diff_stat: string | null;
+  still_failing_after_fix: string[];
+  subagent_errors: string[];
+}
+
+export interface ProofReportInfo {
+  json_path: string | null;
+  html_path: string | null;
+  html_url: string | null;
+  available: boolean;
+  // Cluster-evidence-trustworthiness #3: provenance threaded from the
+  // proof-of-work.json. The client invalidates its cached content when
+  // ``sha256`` or ``file_mtime`` changes, and warns when ``run_id``
+  // does not match the run record being viewed (``run_id_matches`` is
+  // false). ``run_id_matches === null`` means we have no proof-side
+  // run_id to compare against (legacy report).
+  generated_at: string | null;
+  run_id: string | null;
+  session_id: string | null;
+  branch: string | null;
+  head_sha: string | null;
+  file_mtime: string | null;
+  sha256: string | null;
+  run_id_matches: boolean | null;
 }
 
 export interface ReviewPacket {
@@ -328,12 +376,11 @@ export interface ReviewPacket {
       surface: string;
       detail: string;
     }>;
-    proof_report: {
-      json_path: string | null;
-      html_path: string | null;
-      html_url: string | null;
-      available: boolean;
-    };
+    // Cluster-evidence-trustworthiness #4: per-round history so the UI
+    // can render round tabs with verdict + counts + diagnosis instead
+    // of pretending every certification was a single round.
+    rounds: CertificationRound[];
+    proof_report: ProofReportInfo;
   };
   changes: {
     branch: string | null;
@@ -390,6 +437,13 @@ export interface ArtifactContentResponse {
   artifact: ArtifactRef;
   content: string;
   truncated: boolean;
+  // Cluster-evidence-trustworthiness #6: server-side MIME detection so
+  // images/videos/PDFs render via their dedicated previewer (or as a
+  // download link) instead of garbage-decoded text. ``previewable``
+  // is true when the body was decoded as UTF-8 text.
+  previewable?: boolean;
+  mime_type?: string;
+  size_bytes?: number;
 }
 
 export interface DiffResponse {

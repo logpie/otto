@@ -242,6 +242,14 @@ def create_app(
     def run_artifact_content(run_id: str, artifact_index: int) -> dict[str, Any]:
         return _service().artifact_content(run_id, artifact_index)
 
+    @app.get("/api/runs/{run_id}/artifacts/{artifact_index}/raw")
+    def run_artifact_raw(run_id: str, artifact_index: int) -> FileResponse:
+        # cluster-evidence-trustworthiness #6: image/video/PDF artifacts
+        # are served as raw bytes here so the SPA can ``<img src=...>``
+        # them instead of decoding through JSON.
+        path, mime = _service().artifact_raw_path(run_id, artifact_index)
+        return FileResponse(path, media_type=mime)
+
     @app.get("/api/runs/{run_id}/proof-report")
     def run_proof_report(run_id: str) -> FileResponse:
         return FileResponse(_service().proof_report_path(run_id), media_type="text/html")

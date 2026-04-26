@@ -534,9 +534,29 @@ def git_dir(project_dir: Path) -> Path:
 
 
 def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
-    """Return dirty-vs-blocking repo-state issues before build/improve runs."""
+    """Return dirty-vs-blocking repo-state issues before build/improve runs.
+
+    Returns a dict with these list keys:
+      - ``blocking``  — fatal repo states (in-progress merge, unmerged
+        paths, git command failures). Always blocks.
+      - ``dirty``     — tracked-file dirt (modified/staged) only. Honours
+        the historical contract that build/improve are tolerant of
+        untracked files (otherwise every project with build artifacts
+        outside .gitignore would refuse to run).
+      - ``untracked`` — user-owned untracked files in the project root,
+        filtered through ``is_otto_owned_path`` so Otto's own runtime
+        files (queue state, otto_logs/, etc.) never slip in. Consumed
+        by callers that *do* care about untracked dirt — currently the
+        merge preflight (W5-CRITICAL-1: an untracked file in the root
+        must block the merge action).
+      - ``dirty_files`` — concrete paths corresponding to ``dirty`` +
+        ``untracked`` entries (capped at 20), for UI surfacing.
+    """
+    from otto.setup_gitignore import is_otto_owned_path
+
     dirty_issues: list[str] = []
     blocking_issues: list[str] = []
+    untracked_issues: list[str] = []
     dirty_files: list[str] = []
 
     worktree = _run_git(project_dir, "diff", "--quiet")
@@ -570,6 +590,46 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
                 f"repository has unmerged paths: {', '.join(conflicted[:5])}"
             )
 
+    # Untracked-but-not-ignored detection. ``--untracked-files=normal``
+    # honours .gitignore, so OTTO_PATTERNS-covered files (queue state,
+    # otto_logs/, etc.) drop out for projects with the standard Otto
+    # ignore. Defence-in-depth: any remaining ``??`` paths still get
+    # filtered through ``is_otto_owned_path`` so a project that dropped
+    # those gitignore entries still doesn't trip on Otto's own files.
+    user_untracked: list[str] = []
+    try:
+        untracked = _run_git(
+            project_dir, "status", "--porcelain", "--untracked-files=normal"
+        )
+    except Exception:
+        untracked = None
+    if untracked is not None:
+        if untracked.returncode == 0:
+            for line in (untracked.stdout or "").splitlines():
+                if not line or not line.startswith("??"):
+                    continue
+                path = line[3:].strip() if len(line) > 3 else ""
+                if not path:
+                    continue
+                if is_otto_owned_path(path):
+                    continue
+                user_untracked.append(path)
+                if len(user_untracked) >= 20:
+                    break
+        else:
+            stderr = (untracked.stderr or "").strip()
+            blocking_issues.append(
+                f"`git status --porcelain --untracked-files=normal` failed: "
+                f"{stderr or 'unknown git error'}"
+            )
+    if user_untracked:
+        preview = ", ".join(user_untracked[:5])
+        if len(user_untracked) > 5:
+            preview += f", ... (+{len(user_untracked) - 5} more)"
+        untracked_issues.append(
+            f"working tree has untracked files: {preview}"
+        )
+
     try:
         current_git_dir = git_dir(project_dir)
     except ConfigError as exc:
@@ -581,9 +641,7 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
 
     if dirty_issues:
         try:
-            # Only surface paths that actually participate in the dirty-tree
-            # refusal. Untracked-only state is tolerated by build/merge
-            # preflight, so don't let it dominate the preview list.
+            # Surface tracked-file changes (modified/staged) first.
             status = _run_git(project_dir, "status", "--porcelain", "--untracked-files=no")
             if status.returncode == 0:
                 for line in (status.stdout or "").splitlines():
@@ -596,8 +654,22 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
                         break
         except Exception:
             dirty_files = []
+    # Always append the user-untracked entries (callers that care
+    # consume them via the ``untracked`` key + the ``dirty_files``
+    # combined preview list). Cap at 20 to keep messages scannable.
+    for path in user_untracked:
+        if path in dirty_files:
+            continue
+        if len(dirty_files) >= 20:
+            break
+        dirty_files.append(path)
 
-    return {"dirty": dirty_issues, "blocking": blocking_issues, "dirty_files": dirty_files}
+    return {
+        "dirty": dirty_issues,
+        "blocking": blocking_issues,
+        "untracked": untracked_issues,
+        "dirty_files": dirty_files,
+    }
 
 
 def ensure_safe_repo_state(project_dir: Path, *, allow_dirty: bool = False) -> None:

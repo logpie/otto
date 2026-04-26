@@ -10,6 +10,7 @@ import type {
   ArtifactContentResponse,
   ArtifactRef,
   CertificationPolicy,
+  CertificationRound,
   CommandBacklogItem,
   DiffResponse,
   HistoryItem,
@@ -24,6 +25,7 @@ import type {
   OutcomeFilter,
   ProjectMutationResponse,
   ProjectsResponse,
+  ProofReportInfo,
   QueueResult,
   RunDetail,
   RunTypeFilter,
@@ -1334,6 +1336,21 @@ export function App() {
     if (proofArtifactIndex === artifact.index && proofContent) return;
     void loadProofArtifact(artifact.index);
   }, [detail, inspectorMode, inspectorOpen, loadProofArtifact, proofArtifactIndex, proofContent]);
+
+  // Cluster-evidence-trustworthiness #3: invalidate the cached proof
+  // content whenever the proof-of-work file's mtime/sha changes (a
+  // re-cert wrote a fresh report) or when the run version bumps. Without
+  // this the drawer keeps showing stale evidence after the certifier
+  // re-runs against the same artifact path.
+  const proofReport = detail?.review_packet?.certification?.proof_report;
+  const proofIdentity = `${detail?.run_id || ""}|${detail?.version ?? ""}|${proofReport?.sha256 || ""}|${proofReport?.file_mtime || ""}`;
+  useEffect(() => {
+    setProofContent(null);
+    setProofArtifactIndex(null);
+    // Effect intentionally depends only on the identity string — we
+    // want a fresh fetch whenever any of the provenance fields move.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proofIdentity]);
 
   const project = data?.project;
   const watcher = data?.watcher;
@@ -3236,6 +3253,7 @@ function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactCo
           <LogPane logState={logState} runActive={detail.active} onRetry={onShowLogs} />
         ) : (
           <ArtifactPane
+            runId={detail.run_id}
             artifacts={detail.artifacts || []}
             selectedArtifactIndex={selectedArtifactIndex}
             artifactContent={artifactContent}
@@ -3521,10 +3539,8 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
   const changedFiles = packet.changes.files.slice(0, 10);
   const evidence = packet.evidence.filter(isReadableArtifact);
   const stories = packet.certification.stories || [];
+  const rounds = packet.certification.rounds || [];
   const proofReport = packet.certification.proof_report;
-  const proofContentIsLog = isLogArtifact(proofContent?.artifact || null);
-  const proofContentText = proofContent?.content || "";
-  const compact = compactLongText(proofContentIsLog ? proofContentText : formatArtifactContent(proofContentText), 20000);
   const proofChecks = packet.failure ? packet.checks.filter((check) => check.key !== "run" && check.key !== "landing") : packet.checks;
   return (
     <div className="proof-pane" data-testid="proof-pane">
@@ -3540,6 +3556,7 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
           <ReviewMetric label="Evidence" value={evidenceLine(packet)} />
         </div>
       </div>
+      <ProofProvenance proofReport={proofReport} runId={detail.run_id} />
       <div className="proof-section" aria-labelledby="proofNextHeading">
         <h3 id="proofNextHeading">Next action</h3>
         <p>{packet.readiness.next_step}</p>
@@ -3551,6 +3568,7 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
           )}
         </div>
       </div>
+      {rounds.length > 1 && <CertificationRoundTabs rounds={rounds} />}
       {packet.failure && (
         <div className="proof-section proof-failure" aria-labelledby="proofFailureHeading">
           <h3 id="proofFailureHeading">What failed</h3>
@@ -3641,18 +3659,168 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
           <p>No readable evidence artifacts are attached.</p>
         )}
       </div>
-      <div className="proof-section proof-content" aria-labelledby="proofContentHeading">
-        <div className="proof-content-heading">
-          <div>
-            <h3 id="proofContentHeading">Evidence content</h3>
-            <p>{proofContent?.artifact.label || "Loading selected evidence artifact"}</p>
-          </div>
-          {proofContent?.truncated || compact.truncated ? <span>truncated</span> : null}
+      <ProofEvidenceContent
+        runId={detail.run_id}
+        artifactIndex={proofArtifactIndex}
+        content={proofContent}
+      />
+    </div>
+  );
+}
+
+/**
+ * Provenance card for the proof-of-work file backing the drawer.
+ *
+ * Cluster-evidence-trustworthiness #3: surfaces the recorded run_id /
+ * branch / head_sha / sha256 / file mtime so the operator can confirm
+ * the rendered evidence belongs to this run. When the proof's
+ * ``run_id`` does not match the run record being viewed (likely a
+ * stale or mis-routed file) we render a prominent warning rather than
+ * silently rendering somebody else's evidence.
+ */
+function ProofProvenance({proofReport, runId}: {proofReport: ProofReportInfo; runId: string}) {
+  if (!proofReport || !proofReport.available) return null;
+  const sha = proofReport.sha256 ? proofReport.sha256.slice(0, 12) : null;
+  const mismatch = proofReport.run_id_matches === false;
+  const branch = proofReport.branch;
+  const head = proofReport.head_sha ? proofReport.head_sha.slice(0, 7) : null;
+  return (
+    <div className="proof-section proof-provenance" data-testid="proof-provenance" aria-label="Proof of work provenance">
+      {mismatch && (
+        <div className="proof-provenance-warning" data-testid="proof-provenance-mismatch" role="alert">
+          ⚠ Proof report records run {proofReport.run_id || "unknown"}, but this view is run {runId}. The evidence below may not belong to this run.
         </div>
-        <pre className={proofContentIsLog ? "log-content" : ""} tabIndex={0} aria-label="Selected evidence content">
-          {compact.text ? (proofContentIsLog ? renderLogText(compact.text) : compact.text) : "Loading evidence content..."}
-        </pre>
+      )}
+      <dl className="proof-provenance-meta">
+        {proofReport.generated_at && <><dt>Generated</dt><dd data-testid="proof-generated-at">{proofReport.generated_at}</dd></>}
+        {proofReport.file_mtime && <><dt>File mtime</dt><dd data-testid="proof-file-mtime">{proofReport.file_mtime}</dd></>}
+        {proofReport.run_id && <><dt>Run id</dt><dd data-testid="proof-run-id">{proofReport.run_id}</dd></>}
+        {proofReport.session_id && <><dt>Session</dt><dd data-testid="proof-session-id">{proofReport.session_id}</dd></>}
+        {branch && <><dt>Branch</dt><dd data-testid="proof-branch">{branch}</dd></>}
+        {head && <><dt>HEAD</dt><dd data-testid="proof-head-sha" title={proofReport.head_sha || ""}>{head}</dd></>}
+        {sha && <><dt>SHA-256</dt><dd data-testid="proof-sha256" title={proofReport.sha256 || ""}>{sha}</dd></>}
+      </dl>
+    </div>
+  );
+}
+
+/**
+ * Per-round certification tabs.
+ *
+ * Cluster-evidence-trustworthiness #4: surface ``round_history`` from
+ * the proof-of-work so a multi-round cert (where round 1 found bugs
+ * and round 2 passed after a fix) shows verdict, counts, durations,
+ * and per-round diagnosis instead of collapsing to the final state.
+ */
+function CertificationRoundTabs({rounds}: {rounds: CertificationRound[]}) {
+  const [activeRound, setActiveRound] = useState<number>(rounds[rounds.length - 1]?.round ?? 1);
+  const active = rounds.find((entry) => entry.round === activeRound) || rounds[rounds.length - 1];
+  return (
+    <div className="proof-section proof-rounds" data-testid="proof-round-tabs" aria-labelledby="proofRoundsHeading">
+      <h3 id="proofRoundsHeading">Certify rounds</h3>
+      <div className="proof-round-tablist" role="tablist">
+        {rounds.map((round) => {
+          const label = `Round ${round.round ?? "?"}`;
+          const verdictClass = round.verdict.toLowerCase() === "passed" ? "passed" : round.verdict.toLowerCase() === "failed" ? "failed" : "unknown";
+          return (
+            <button
+              key={`round-${round.round}`}
+              type="button"
+              role="tab"
+              aria-selected={round.round === active?.round}
+              data-testid={`proof-round-tab-${round.round}`}
+              className={`proof-round-tab proof-round-${verdictClass} ${round.round === active?.round ? "active" : ""}`}
+              onClick={() => setActiveRound(round.round ?? 1)}
+            >
+              <strong>{label}</strong>
+              <span>{round.verdict.toUpperCase()}</span>
+              {round.duration_human && <small>{round.duration_human}</small>}
+            </button>
+          );
+        })}
       </div>
+      {active && (
+        <div className="proof-round-detail" data-testid={`proof-round-detail-${active.round}`}>
+          <dl className="proof-round-meta">
+            <dt>Verdict</dt><dd data-testid="proof-round-verdict">{active.verdict}</dd>
+            {active.stories_tested != null && (<><dt>Stories</dt><dd data-testid="proof-round-stories">{active.passed_count ?? 0} passed / {active.failed_count ?? 0} failed / {active.warn_count ?? 0} warn / {active.stories_tested} tested</dd></>)}
+            {active.duration_human && (<><dt>Duration</dt><dd data-testid="proof-round-duration">{active.duration_human}</dd></>)}
+            {active.cost_usd != null && (<><dt>Cost</dt><dd data-testid="proof-round-cost">${active.cost_usd.toFixed(2)}{active.cost_estimated ? " (est)" : ""}</dd></>)}
+          </dl>
+          {active.diagnosis && <p className="proof-round-diagnosis" data-testid="proof-round-diagnosis">{active.diagnosis}</p>}
+          {active.failing_story_ids.length > 0 && (
+            <div className="proof-round-stories-list">
+              <strong>Failing:</strong>
+              <ul>{active.failing_story_ids.map((id) => <li key={id} data-testid={`proof-round-failing-${id}`}>{id}</li>)}</ul>
+            </div>
+          )}
+          {active.fix_commits.length > 0 && (
+            <div className="proof-round-fix-commits">
+              <strong>Fix commits:</strong>
+              <ul>{active.fix_commits.map((commit) => <li key={commit}><code>{commit}</code></li>)}</ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Render the active proof artifact: text, image, video, or "no preview".
+ *
+ * Cluster-evidence-trustworthiness #6: previously every artifact was
+ * decoded as UTF-8 and shoved into a ``<pre>``. Server-side MIME
+ * detection now tells us whether the body is previewable text. When it
+ * is not, we route image/video MIMEs to ``<img>``/``<video>`` against
+ * the raw artifact endpoint and otherwise show a "no text preview;
+ * download artifact" message with the size + MIME so the operator can
+ * decide what to do.
+ */
+function ProofEvidenceContent({runId, artifactIndex, content}: {
+  runId: string;
+  artifactIndex: number | null;
+  content: ArtifactContentResponse | null;
+}) {
+  const previewable = content ? content.previewable !== false : true;
+  const mime = content?.mime_type || "";
+  const sizeBytes = content?.size_bytes ?? 0;
+  const artifactIsLog = isLogArtifact(content?.artifact || null);
+  const proofContentText = content?.content || "";
+  const compact = compactLongText(artifactIsLog ? proofContentText : formatArtifactContent(proofContentText), 20000);
+  const rawUrl = artifactIndex != null ? `/api/runs/${encodeURIComponent(runId)}/artifacts/${artifactIndex}/raw` : null;
+  return (
+    <div className="proof-section proof-content" aria-labelledby="proofContentHeading">
+      <div className="proof-content-heading">
+        <div>
+          <h3 id="proofContentHeading">Evidence content</h3>
+          <p>{content?.artifact.label || "Loading selected evidence artifact"}</p>
+          {mime && <small data-testid="proof-evidence-mime">{mime}{sizeBytes > 0 ? ` · ${humanBytes(sizeBytes)}` : ""}</small>}
+        </div>
+        {(content?.truncated || compact.truncated) && previewable ? <span>truncated</span> : null}
+      </div>
+      {!content ? (
+        <pre className={artifactIsLog ? "log-content" : ""} tabIndex={0} aria-label="Selected evidence content">Loading evidence content...</pre>
+      ) : !previewable ? (
+        rawUrl && mime.startsWith("image/") ? (
+          <a href={rawUrl} target="_blank" rel="noreferrer">
+            <img src={rawUrl} alt={content.artifact.label} data-testid="proof-evidence-image" className="proof-evidence-image" />
+          </a>
+        ) : rawUrl && mime.startsWith("video/") ? (
+          <video controls data-testid="proof-evidence-video" className="proof-evidence-video">
+            <source src={rawUrl} type={mime} />
+          </video>
+        ) : (
+          <div className="proof-evidence-binary" data-testid="proof-evidence-no-preview">
+            <p>No text preview for {mime || "this artifact"}.</p>
+            {rawUrl && <a href={rawUrl} target="_blank" rel="noreferrer" download data-testid="proof-evidence-download">Download artifact</a>}
+          </div>
+        )
+      ) : (
+        <pre className={artifactIsLog ? "log-content" : ""} tabIndex={0} aria-label="Selected evidence content">
+          {compact.text ? (artifactIsLog ? renderLogText(compact.text) : compact.text) : "(empty)"}
+        </pre>
+      )}
     </div>
   );
 }
@@ -4079,26 +4247,49 @@ function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]
   );
 }
 
-function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoadArtifact, onBack}: {
+function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoadArtifact, onBack, runId}: {
   artifacts: ArtifactRef[];
   selectedArtifactIndex: number | null;
   artifactContent: ArtifactContentResponse | null;
   onLoadArtifact: (index: number) => void;
   onBack: () => void;
+  runId: string;
 }) {
   if (selectedArtifactIndex !== null) {
+    const previewable = artifactContent ? artifactContent.previewable !== false : true;
+    const mime = artifactContent?.mime_type || "";
+    const sizeBytes = artifactContent?.size_bytes ?? 0;
     const artifactIsLog = isLogArtifact(artifactContent?.artifact || null);
     const rawContent = artifactContent?.content || "No content.";
     const compact = compactLongText(artifactIsLog ? rawContent : formatArtifactContent(rawContent), 20000);
+    const rawUrl = `/api/runs/${encodeURIComponent(runId)}/artifacts/${selectedArtifactIndex}/raw`;
     return (
       <div className="artifact-pane">
         <button type="button" onClick={onBack}>Back to artifacts</button>
         <div className="artifact-meta">
-          {artifactContent?.artifact.label || "artifact"} {artifactContent?.truncated || compact.truncated ? "(truncated)" : ""}
+          {artifactContent?.artifact.label || "artifact"} {(artifactContent?.truncated || compact.truncated) && previewable ? "(truncated)" : ""}
+          {mime && <small data-testid="artifact-mime">{` · ${mime}${sizeBytes > 0 ? ` · ${humanBytes(sizeBytes)}` : ""}`}</small>}
         </div>
-        <pre className={artifactIsLog ? "log-content" : ""} tabIndex={0} aria-label="Artifact content">
-          {artifactIsLog ? renderLogText(compact.text) : compact.text}
-        </pre>
+        {!artifactContent ? (
+          <pre tabIndex={0}>Loading…</pre>
+        ) : !previewable ? (
+          mime.startsWith("image/") ? (
+            <a href={rawUrl} target="_blank" rel="noreferrer">
+              <img src={rawUrl} alt={artifactContent.artifact.label} data-testid="artifact-image" className="artifact-image" />
+            </a>
+          ) : mime.startsWith("video/") ? (
+            <video controls data-testid="artifact-video" className="artifact-video"><source src={rawUrl} type={mime} /></video>
+          ) : (
+            <div className="artifact-binary" data-testid="artifact-no-preview">
+              <p>No text preview for {mime || "this artifact"}.</p>
+              <a href={rawUrl} target="_blank" rel="noreferrer" download data-testid="artifact-download">Download artifact</a>
+            </div>
+          )
+        ) : (
+          <pre className={artifactIsLog ? "log-content" : ""} tabIndex={0} aria-label="Artifact content">
+            {artifactIsLog ? renderLogText(compact.text) : compact.text}
+          </pre>
+        )}
       </div>
     );
   }
@@ -4106,13 +4297,33 @@ function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoad
   return (
     <div className="artifact-pane artifact-list">
       {artifacts.map((artifact) => (
-        <button key={artifact.index} type="button" disabled={!isReadableArtifact(artifact)} onClick={() => onLoadArtifact(artifact.index)}>
+        <button
+          key={artifact.index}
+          type="button"
+          disabled={!isReadableArtifact(artifact)}
+          onClick={() => onLoadArtifact(artifact.index)}
+          title={artifactProvenanceTooltip(artifact)}
+          data-testid={`artifact-list-item-${artifact.index}`}
+        >
           <strong>{artifact.label}</strong>
           <span>{artifactKindLabel(artifact)}</span>
+          <small className="artifact-provenance">
+            {artifact.size_bytes != null && <span data-testid={`artifact-size-${artifact.index}`}>{humanBytes(artifact.size_bytes)}</span>}
+            {artifact.mtime && <span data-testid={`artifact-mtime-${artifact.index}`}>{artifact.mtime}</span>}
+            {artifact.sha256 && <span data-testid={`artifact-sha-${artifact.index}`}>{artifact.sha256.slice(0, 12)}</span>}
+          </small>
         </button>
       ))}
     </div>
   );
+}
+
+function artifactProvenanceTooltip(artifact: ArtifactRef): string {
+  const parts: string[] = [artifact.path];
+  if (artifact.size_bytes != null) parts.push(`${artifact.size_bytes.toLocaleString()} bytes`);
+  if (artifact.mtime) parts.push(`mtime ${artifact.mtime}`);
+  if (artifact.sha256) parts.push(`sha256 ${artifact.sha256}`);
+  return parts.join("\n");
 }
 
 // W3-CRITICAL-1: a single prior-run candidate the JobDialog's "Refine which

@@ -9,6 +9,7 @@ Architecture:
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
@@ -965,6 +966,89 @@ def _round_history(
     return history
 
 
+def _write_visual_evidence_manifests(
+    *,
+    evidence_dir: Path | None,
+    base_dir: Path,
+    stories: list[dict[str, Any]],
+    run_id: str,
+    session_id: str,
+    round_history: list[dict[str, Any]],
+    certifier_mode: str,
+) -> None:
+    """Write a sibling ``<artifact>.manifest.json`` next to each visual artifact.
+
+    Cluster-evidence-trustworthiness #8: Mission Control was discovering
+    screenshots/recordings via globbing and rendering only ``name + path
+    + href``; the operator could not verify capture time, story, round,
+    or run identity. We now write a deterministic sibling manifest at
+    proof-of-work generation time so:
+
+    * the UI can validate ``manifest.run_id == record.run_id`` and warn
+      on mismatch (someone copied an old screenshot into this run's
+      evidence dir, etc.), and
+    * downstream tools (audit, replay) can recover the story/round
+      context without re-parsing the proof JSON.
+
+    The manifest is best-effort: failures are logged but do not break
+    the proof-of-work generation. We deliberately do not overwrite an
+    existing manifest with the same SHA (idempotent re-runs).
+
+    NOTE on capture time: the agent SDK doesn't surface a hook we can
+    use to write a manifest at the moment a screenshot is taken. Writing
+    here, when we know the round + story assignment, is the highest-
+    fidelity place we own.
+    """
+    root = evidence_dir or (base_dir / "evidence")
+    if not root.exists() or not root.is_dir():
+        return
+    last_round = round_history[-1].get("round") if round_history else 1
+    artifacts = sorted(root.glob("*.png")) + sorted(root.glob("*.webm"))
+    for artifact_path in artifacts:
+        manifest_path = artifact_path.with_name(artifact_path.name + ".manifest.json")
+        try:
+            captured_at = (
+                datetime.fromtimestamp(artifact_path.stat().st_mtime, tz=timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        except OSError:
+            captured_at = None
+        try:
+            sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except OSError:
+            sha256 = None
+        story_id = ""
+        story_status = ""
+        for story in stories:
+            failure_evidence = Path(str(story.get("failure_evidence") or "").strip()).name.lower()
+            if failure_evidence and failure_evidence == artifact_path.name.lower():
+                story_id = str(story.get("story_id") or "")
+                story_status = str(story.get("status") or "")
+                break
+        manifest = {
+            "schema_version": 1,
+            "captured_at": captured_at,
+            "run_id": run_id,
+            "session_id": session_id,
+            "round": last_round,
+            "story_id": story_id,
+            "story_status": story_status,
+            "sha256": sha256,
+            "size_bytes": (artifact_path.stat().st_size if artifact_path.exists() else None),
+            "viewport": None,  # filled in if/when we hook the capture path
+            "browser": None,
+            "certifier_mode": certifier_mode,
+            "artifact_name": artifact_path.name,
+            "kind": "screenshot" if artifact_path.suffix.lower() == ".png" else "recording",
+        }
+        try:
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            logger.warning("failed to write visual-evidence manifest %s: %s", manifest_path, exc)
+
+
 def _visual_evidence(
     base_dir: Path,
     evidence_dir: Path | None,
@@ -1322,6 +1406,22 @@ def _build_pow_report_data(
         certifier_cost_usd=certifier_cost_usd,
         round_timings=round_timings,
     )
+    # Cluster-evidence-trustworthiness #8: write a sibling manifest next
+    # to each screenshot/recording so Mission Control can validate that
+    # the visual evidence belongs to this run/round/story instead of
+    # trusting a glob-and-pray discovery path.
+    try:
+        _write_visual_evidence_manifests(
+            evidence_dir=evidence_dir,
+            base_dir=report_dir,
+            stories=story_results,
+            run_id=run_id,
+            session_id=session_id,
+            round_history=round_history,
+            certifier_mode=certifier_mode,
+        )
+    except Exception as exc:  # pragma: no cover — defensive, never block report
+        logger.warning("visual-evidence manifest write failed: %s", exc)
     artifacts = _artifacts(
         report_dir=report_dir,
         log_dir=log_dir,

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import mimetypes
 import os
 import signal
 import subprocess
@@ -249,6 +251,17 @@ class MissionControlService:
         filters: MissionControlFilters | None = None,
         limit_bytes: int = 256_000,
     ) -> dict[str, Any]:
+        """Return the artifact body, with MIME-aware binary handling.
+
+        Cluster-evidence-trustworthiness #6: previously every artifact was
+        decoded as UTF-8 with replacement and shoved into a `<pre>`, so a
+        screenshot or recording rendered as several pages of replacement
+        characters. We now sniff MIME before decoding and return a
+        ``previewable`` flag plus ``mime_type`` / ``size_bytes`` so the
+        client can render image/video previews via ``<img src=...>`` (or
+        link to the raw artifact endpoint) and avoid garbage text for
+        non-previewable binaries.
+        """
         detail = self._detail_view(run_id, filters)
         if artifact_index < 0 or artifact_index >= len(detail.artifacts):
             raise MissionControlServiceError("artifact index out of range", status_code=404)
@@ -256,12 +269,55 @@ class MissionControlService:
         path = self._validated_artifact_path(artifact.path)
         if path.is_dir():
             raise MissionControlServiceError("artifact is a directory", status_code=400)
+        size_bytes = path.stat().st_size if path.exists() else 0
+        mime_type = _detect_mime_type(path)
+        is_text = _looks_like_text(path, mime_type=mime_type)
+        artifact_payload = serialize_artifact(artifact, artifact_index)
+        if not is_text:
+            # Binary: don't ship a decoded body — give the client a download
+            # link via the existing artifacts endpoint and let it render an
+            # image/video preview when the MIME is one we can inline.
+            return {
+                "artifact": artifact_payload,
+                "content": "",
+                "truncated": False,
+                "previewable": False,
+                "mime_type": mime_type,
+                "size_bytes": size_bytes,
+            }
         read = self._read_file_slice(path, offset=0, limit_bytes=limit_bytes)
         return {
-            "artifact": serialize_artifact(artifact, artifact_index),
+            "artifact": artifact_payload,
             "content": read.text,
-            "truncated": read.next_offset < (path.stat().st_size if path.exists() else read.next_offset),
+            "truncated": read.next_offset < size_bytes if size_bytes else False,
+            "previewable": True,
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
         }
+
+    def artifact_raw_path(
+        self,
+        run_id: str,
+        artifact_index: int,
+        *,
+        filters: MissionControlFilters | None = None,
+    ) -> tuple[Path, str]:
+        """Return the on-disk path + MIME for an artifact (for binary serving).
+
+        Cluster-evidence-trustworthiness #6: binary artifacts (PNG, WEBM,
+        PDF) need a real file response so the client can ``<img src=...>``
+        them instead of decoding the bytes through JSON. The path is
+        sandbox-validated through ``_validated_artifact_path`` exactly
+        like ``artifact_content`` does.
+        """
+        detail = self._detail_view(run_id, filters)
+        if artifact_index < 0 or artifact_index >= len(detail.artifacts):
+            raise MissionControlServiceError("artifact index out of range", status_code=404)
+        artifact = detail.artifacts[artifact_index]
+        path = self._validated_artifact_path(artifact.path)
+        if not path.exists() or path.is_dir():
+            raise MissionControlServiceError("artifact not found", status_code=404)
+        return path, _detect_mime_type(path)
 
     def proof_report_path(
         self,
@@ -1648,6 +1704,15 @@ def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
         stories_tested = len(stories)
     if stories and stories_passed is None:
         stories_passed = sum(1 for story in stories if story.get("status") in {"pass", "warn"})
+    # Cluster-evidence-trustworthiness #4: Mission Control had been
+    # flattening the certification down to final stories + counts, hiding
+    # earlier rounds and their per-round evidence. The proof-of-work JSON
+    # already carries `round_history` (see otto/certifier/__init__.py
+    # `_round_history`); we surface it through the review packet so the
+    # client can render a per-round tab strip with verdict, timestamp,
+    # cost, and per-round story slices instead of pretending every cert
+    # was a single round.
+    rounds = _certification_round_history(proof_json)
     return {
         "stories_passed": stories_passed,
         "stories_tested": stories_tested,
@@ -1660,7 +1725,60 @@ def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
         "summary_path": _optional_str(getattr(record, "artifacts", {}).get("summary_path")),
         "stories": stories,
         "proof_report": proof_report,
+        "rounds": rounds,
     }
+
+
+def _certification_round_history(proof_json: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Normalize ``round_history`` from proof-of-work.json for the UI.
+
+    The certifier writes a richer object per round; the client only needs
+    a stable subset. We pass through the fields needed to render a round
+    tab (`round`, `verdict`, counts, `diagnosis`, durations, costs) plus
+    `failing_story_ids` / `warn_story_ids` so the UI can call out the
+    deltas across rounds. ``stories`` (per-round) is omitted here because
+    the certifier only stores aggregated story IDs in the history; the
+    full per-round story payload remains in the HTML report.
+    """
+    if not isinstance(proof_json, dict):
+        return []
+    raw_rounds = proof_json.get("round_history")
+    if not isinstance(raw_rounds, list):
+        return []
+    rounds: list[dict[str, Any]] = []
+    for entry in raw_rounds:
+        if not isinstance(entry, dict):
+            continue
+        rounds.append(
+            {
+                "round": _int_or_none(entry.get("round")),
+                "verdict": _optional_str(entry.get("verdict")) or "unknown",
+                "stories_tested": _int_or_none(entry.get("stories_tested")),
+                "passed_count": _int_or_none(entry.get("passed_count")),
+                "failed_count": _int_or_none(entry.get("failed_count")),
+                "warn_count": _int_or_none(entry.get("warn_count")),
+                "failing_story_ids": [
+                    str(item) for item in (entry.get("failing_story_ids") or []) if item
+                ],
+                "warn_story_ids": [
+                    str(item) for item in (entry.get("warn_story_ids") or []) if item
+                ],
+                "diagnosis": _optional_str(entry.get("diagnosis")),
+                "duration_s": entry.get("duration_s") if isinstance(entry.get("duration_s"), (int, float)) else None,
+                "duration_human": _optional_str(entry.get("duration_human")),
+                "cost_usd": entry.get("cost_usd") if isinstance(entry.get("cost_usd"), (int, float)) else None,
+                "cost_estimated": bool(entry.get("cost_estimated")),
+                "fix_commits": [str(item) for item in (entry.get("fix_commits") or []) if item],
+                "fix_diff_stat": _optional_str(entry.get("fix_diff_stat")),
+                "still_failing_after_fix": [
+                    str(item) for item in (entry.get("still_failing_after_fix") or []) if item
+                ],
+                "subagent_errors": [
+                    str(item) for item in (entry.get("subagent_errors") or []) if item
+                ],
+            }
+        )
+    return rounds
 
 
 def _certification_stories(source: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1738,14 +1856,92 @@ def _summary_for_record(record: Any) -> dict[str, Any] | None:
 
 
 def _proof_report_info(project_dir: Path, record: Any) -> dict[str, Any]:
+    """Return proof-of-work locations + provenance metadata.
+
+    Cluster-evidence-trustworthiness #3: the proof drawer was previously
+    cached by artifact index alone and the server accepted the first
+    matching proof file without checking that ``run_context.run_id``
+    actually matched the run we're rendering. We now thread the
+    proof-of-work's own provenance (`generated_at`, `run_id`,
+    `session_id`, `branch`, `head_sha`), the file mtime, and a content
+    SHA-256 into the response so the client can:
+
+    * invalidate its cached proof content when ``version`` (from
+      run_context) changes, and
+    * warn the operator when the proof's recorded ``run_id`` does not
+      match the run record being viewed (stale or mis-routed file).
+    """
     json_path, html_path = _proof_report_paths(project_dir, record)
     run_id = str(getattr(record, "run_id", "") or "")
-    return {
+    payload: dict[str, Any] = {
         "json_path": str(json_path) if json_path is not None else None,
         "html_path": str(html_path) if html_path is not None else None,
         "html_url": f"/api/runs/{quote(run_id, safe='')}/proof-report" if html_path is not None else None,
         "available": html_path is not None,
+        # Provenance — populated below from the JSON when present so the
+        # UI never has to guess whether the file it just rendered actually
+        # belongs to this run.
+        "generated_at": None,
+        "run_id": None,
+        "session_id": None,
+        "branch": None,
+        "head_sha": None,
+        "file_mtime": None,
+        "sha256": None,
+        "run_id_matches": None,
     }
+    if json_path is not None:
+        payload.update(_proof_provenance(json_path, expected_run_id=run_id))
+    return payload
+
+
+def _proof_provenance(json_path: Path, *, expected_run_id: str) -> dict[str, Any]:
+    """Extract provenance metadata from a proof-of-work.json file."""
+    info: dict[str, Any] = {
+        "generated_at": None,
+        "run_id": None,
+        "session_id": None,
+        "branch": None,
+        "head_sha": None,
+        "file_mtime": None,
+        "sha256": None,
+        "run_id_matches": None,
+    }
+    try:
+        stat = json_path.stat()
+        info["file_mtime"] = (
+            datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    except OSError:
+        return info
+    try:
+        raw_bytes = json_path.read_bytes()
+    except OSError:
+        return info
+    try:
+        info["sha256"] = hashlib.sha256(raw_bytes).hexdigest()
+    except Exception:  # pragma: no cover — defensive
+        info["sha256"] = None
+    parsed = _read_json_object(json_path)
+    if not isinstance(parsed, dict):
+        return info
+    info["generated_at"] = _optional_str(parsed.get("generated_at"))
+    run_context = parsed.get("run_context") if isinstance(parsed.get("run_context"), dict) else {}
+    info["run_id"] = _optional_str(run_context.get("run_id"))
+    info["session_id"] = _optional_str(run_context.get("session_id"))
+    info["branch"] = _optional_str(run_context.get("git_branch"))
+    info["head_sha"] = _optional_str(run_context.get("git_commit_sha"))
+    expected = (expected_run_id or "").strip()
+    if expected and info["run_id"]:
+        info["run_id_matches"] = info["run_id"] == expected
+    elif expected and not info["run_id"]:
+        # No proof-side run_id to compare; treat as unknown rather than
+        # outright mismatch so legacy reports don't trip the UI warning.
+        info["run_id_matches"] = None
+    return info
 
 
 def _proof_report_paths(project_dir: Path, record: Any) -> tuple[Path | None, Path | None]:
@@ -1839,6 +2035,124 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return None
     return value if isinstance(value, dict) else None
+
+
+# ---------------------------------------------------------------------------
+# MIME / binary detection (cluster-evidence-trustworthiness #6)
+# ---------------------------------------------------------------------------
+
+# Magic-byte fingerprints for the binary formats we care about. Order
+# matters: PNG/GIF/JPG/PDF/WEBM/MP4/WEBP are checked before we fall back
+# to a null-byte sniff. We deliberately don't pull `python-magic` in —
+# the dependency is heavy and these prefixes cover every binary the
+# certifier emits today.
+_BINARY_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"%PDF-", "application/pdf"),
+    (b"\x1aE\xdf\xa3", "video/webm"),
+    (b"RIFF", None),  # follow-up sniff for WEBP / WAV
+)
+
+
+def _detect_mime_type(path: Path) -> str:
+    """Return a best-effort MIME type for ``path``.
+
+    Tries (1) magic-byte sniff on the first 16 bytes for the binary
+    formats we ship, (2) extension-based ``mimetypes.guess_type``,
+    (3) ``application/octet-stream`` as the safe default.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(64)
+    except OSError:
+        head = b""
+    for prefix, mime in _BINARY_MAGIC:
+        if head.startswith(prefix):
+            if prefix == b"RIFF" and len(head) >= 12 and head[8:12] == b"WEBP":
+                return "image/webp"
+            if mime is not None:
+                return mime
+            break
+    guess, _encoding = mimetypes.guess_type(str(path))
+    if guess:
+        return guess
+    return "application/octet-stream"
+
+
+def _looks_like_text(path: Path, *, mime_type: str | None = None) -> bool:
+    """True when ``path`` should be served as a UTF-8-decoded text body.
+
+    A file is treated as text when:
+    * the MIME type starts with ``text/`` or is one of a small allowlist
+      of structured-text MIMEs (``application/json``, ``...xml``), OR
+    * the first 1KB contains no NUL byte and decodes cleanly as UTF-8.
+
+    This deliberately treats unknown empty files (size 0) as text so
+    placeholder logs render as "No content" rather than as a download.
+    """
+    mime = mime_type or _detect_mime_type(path)
+    if mime.startswith("text/"):
+        return True
+    if mime in {
+        "application/json",
+        "application/xml",
+        "application/x-yaml",
+        "application/x-sh",
+        "application/javascript",
+    }:
+        return True
+    try:
+        with path.open("rb") as handle:
+            sample = handle.read(1024)
+    except OSError:
+        return False
+    if not sample:
+        return True  # empty file: nothing binary to render
+    if b"\x00" in sample:
+        return False
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _file_provenance(path: Path) -> dict[str, Any]:
+    """Return ``{size_bytes, mtime, sha256}`` for ``path`` (best-effort).
+
+    Cluster-evidence-trustworthiness #7: artifact lists previously only
+    exposed label/path/kind/exists. We add size/mtime/sha so the UI can
+    render columns + tooltips that let the operator spot stale or
+    tampered artifacts. The SHA is computed lazily on each read; for
+    the typical certifier output (KB-MB sized JSON/PNG/log files) this
+    is cheap. We truncate to 12 hex chars for display elsewhere — the
+    full hash is still returned so callers can verify integrity.
+    """
+    info: dict[str, Any] = {"size_bytes": None, "mtime": None, "sha256": None}
+    try:
+        stat = path.stat()
+    except OSError:
+        return info
+    info["size_bytes"] = stat.st_size
+    info["mtime"] = (
+        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    if path.is_file() and stat.st_size <= 16 * 1024 * 1024:
+        try:
+            hasher = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    hasher.update(chunk)
+            info["sha256"] = hasher.hexdigest()
+        except OSError:
+            info["sha256"] = None
+    return info
 
 
 def _queue_failure_log_fallback(
@@ -2198,7 +2512,19 @@ def _merge_preflight(project_dir: Path) -> dict[str, Any]:
             "merge_blockers": [f"merge preflight failed: {exc}"],
             "dirty_files": [],
         }
-    blockers = [*issues.get("blocking", []), *issues.get("dirty", [])]
+    # The merge action MUST refuse on user-owned untracked files in the
+    # project root (W5-CRITICAL-1). build/improve preflights tolerate
+    # untracked-only state via ``ensure_safe_repo_state``; the merge
+    # action does not, because landing code while the operator has
+    # uncommitted user files is the silent-merge footgun the W5 bench
+    # uncovered. ``untracked`` lives in its own preflight category so
+    # the merge consumer can opt in without changing build/improve
+    # semantics.
+    blockers = [
+        *issues.get("blocking", []),
+        *issues.get("dirty", []),
+        *issues.get("untracked", []),
+    ]
     return {
         "merge_blocked": bool(blockers),
         "merge_blockers": blockers,

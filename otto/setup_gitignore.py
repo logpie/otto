@@ -25,6 +25,7 @@ Called from:
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import subprocess
 from pathlib import Path
@@ -80,6 +81,54 @@ COMMON_BUILD_ARTIFACT_PATTERNS: tuple[str, ...] = (
     ".idea/",
 )
 COMMON_HEADER = "# Common build artifacts (added by Otto so merge agent test runs don't trip validators)"
+
+
+# Defence-in-depth: even if a project's .gitignore is incomplete or has
+# been edited to drop these entries, callers checking "is the working
+# tree user-dirty?" (JobDialog dirty-target preflight, merge preflight,
+# W5-CRITICAL-1 untracked-aware merge block) must still classify these
+# paths as Otto-owned and not user-owned. The fnmatch patterns below
+# mirror OTTO_PATTERNS but use globbing semantics suitable for
+# `git status --porcelain` output (which lists `??` paths verbatim).
+OTTO_OWNED_DIRTY_PATTERNS: tuple[str, ...] = (
+    ".otto-queue*",
+    "otto_logs/*",
+    "otto_logs",
+    ".worktrees/*",
+    ".worktrees",
+    ".watcher.log",
+)
+
+
+def is_otto_owned_path(path: str) -> bool:
+    """Return True iff a working-tree path is one of Otto's runtime files.
+
+    Used by the dirty-tree refusal layers (JobDialog preflight in
+    ``serializers._project_is_user_dirty`` and the merge-action preflight
+    in ``config.repo_preflight_issues``) to decide whether an untracked
+    entry counts as user-owned (must block) or Otto-owned (must be
+    tolerated).
+    """
+    norm = path.strip()
+    while norm.startswith("./"):
+        norm = norm[2:]
+    norm = norm.rstrip("/")
+    if not norm:
+        return False
+    for pattern in OTTO_OWNED_DIRTY_PATTERNS:
+        bare = pattern.rstrip("/").rstrip("*").rstrip("/")
+        if not bare:
+            continue
+        if fnmatch.fnmatch(norm, pattern):
+            return True
+        # Treat the bare prefix as covering descendants too — git's
+        # porcelain reports an untracked directory itself (with a
+        # trailing slash) without enumerating its children.
+        if norm == bare or norm.startswith(bare + "/"):
+            return True
+        if fnmatch.fnmatch(norm, bare):
+            return True
+    return False
 
 
 def ensure_gitignore(project_dir: Path, *, auto_commit: bool = True) -> bool:

@@ -814,7 +814,16 @@ async def run_merge(
             note=f"must be on {options.target!r}; currently on {cur!r}. Run `git checkout {options.target}` first.",
         )
     preflight = repo_preflight_issues(project_dir)
-    problems = [*preflight["blocking"], *preflight["dirty"]]
+    # W5-CRITICAL-1: the merge orchestrator must mirror the web-action
+    # preflight and refuse on user-owned untracked files too. Without
+    # this, even if the web layer's ``_merge_preflight`` started to
+    # block, a CLI ``otto merge --fast`` would still slip the silent
+    # merge through.
+    problems = [
+        *preflight["blocking"],
+        *preflight["dirty"],
+        *preflight.get("untracked", []),
+    ]
     if problems:
         dirty_files = list(preflight.get("dirty_files", []) or [])
         preview = ", ".join(dirty_files[:5])
