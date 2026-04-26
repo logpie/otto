@@ -3005,7 +3005,7 @@ function DiffPane({diff, onRefresh}: {diff: DiffResponse | null; onRefresh: () =
       </div>
       <div className="diff-toolbar">
         <strong>Code diff</strong>
-        <span>{diff.branch || "-"} → {diff.target}</span>
+        <span title={`${diff.branch || "-"} → ${diff.target}`}>{diff.branch || "-"} → {diff.target}</span>
       </div>
       {truncationBanner ? (
         <div className="diff-truncation" data-testid="diff-truncation">

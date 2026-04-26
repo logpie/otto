@@ -3268,3 +3268,230 @@ tbody tr.selected {
 details > summary:focus-visible {
   box-shadow: none;
 }
+
+/* ------------------------------------------------------------------ *
+ * Long-string overflow utilities (mc-audit codex-long-string-overflow #6-#14)
+ *
+ * Shared helpers for free-text fields that may receive arbitrarily long
+ * tokens (URLs, branch names, error messages with no spaces). Apply
+ * `mc-wrap-anywhere` to any inline span/strong/p/code that is unbounded
+ * by sibling structure but bounded by a parent column. Combine with
+ * `mc-line-clamp-3` for headline-style fields that should clip with an
+ * expand affordance (the markup pattern is `<details>`-based — caller
+ * provides a summary + body).
+ *
+ * Why anywhere + min-width:0: flex/grid items have a default
+ * `min-width: auto` which prevents overflow:hidden and overflow-wrap
+ * from firing once their intrinsic min-content exceeds the column.
+ * ------------------------------------------------------------------ */
+.mc-wrap-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.mc-line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* #6 — Toast: cap height with internal scroll, wrap long URLs/errors. */
+#toast {
+  max-height: min(40vh, 280px);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+/* #7 — Sticky last-error/result banners: span column must wrap, and the
+ * total banner height is capped so a 5KB error never pushes the main
+ * workflow offscreen. The grid already provides `minmax(0, 1fr)` on
+ * the message column; we just need overflow-wrap + a max-height on the
+ * inner span (so the dismiss button stays visible). */
+.status-banner > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+  max-height: 9.6em; /* ~6 lines at 1.4 line-height */
+  overflow-y: auto;
+}
+
+.status-banner > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  align-self: start;
+}
+
+.status-banner > button {
+  align-self: start;
+}
+
+/* #8 — Job dialog status (footer span) wraps and has its own max-height
+ * so a long API error never crowds the submit button out of the modal.
+ * The footer is a flex row — its min-content is governed by its
+ * children, so we relax the status span's flex floor. */
+.job-dialog footer {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.job-dialog footer #jobDialogStatus,
+.job-dialog footer .muted {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-height: 6.4em;
+  overflow-y: auto;
+}
+
+.job-dialog footer button {
+  flex: 0 0 auto;
+}
+
+.job-dialog .field-hint {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.job-dialog-validation {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* #9 — Confirm dialog body & bulk landing rows: long branch names and
+ * task ids must break at any character so they can never overflow the
+ * 440px modal column. */
+.confirm-dialog .confirm-body,
+.confirm-dialog .confirm-body-text,
+.confirm-dialog .confirm-error,
+.confirm-dialog .confirm-error span,
+.confirm-dialog .confirm-ack span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.confirm-bulk-list,
+.confirm-bulk-list ul,
+.confirm-bulk-row,
+.confirm-bulk-row-head,
+.confirm-bulk-row-files,
+.confirm-bulk-row-files li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.confirm-bulk-row-head code,
+.confirm-bulk-row-files code {
+  display: inline;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+}
+
+/* #10 — Review packet headline / summary / next-step / failure must
+ * wrap consistently. The existing `.review-head strong, .review-head
+ * span` rule clipped to ellipsis without affordance — switch to a
+ * line-clamp + wrap-anywhere so long headlines wrap to a few lines and
+ * the user can read the rest. The `title` attribute already provides a
+ * tooltip on hover/focus, so no markup change is required for
+ * read-only access. */
+.review-head strong,
+.review-head span {
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.review-next-step span,
+.review-blockers li,
+.review-check p,
+.review-check strong,
+.failure-summary span,
+.failure-summary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.review-grid strong {
+  /* Replace nowrap+ellipsis with wrap-anywhere so long values are
+   * fully readable instead of silently clipped. Keep the field-name
+   * column bounded by the existing grid-template. */
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* #12 — Changed-file list (review packet) and diff_command code:
+ *  - <li> must wrap-anywhere so long paths don't overflow the drawer.
+ *  - <code> for diff_command must be a block so its `text-overflow:
+ *    ellipsis` actually fires (inline elements ignore it), or wrap.
+ *    We choose wrap so the operator can read the entire command. */
+.review-files li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.review-packet code {
+  /* Override the older inline ellipsis rule for the diff_command code
+   * block sitting at the bottom of the Changed Files drawer — it is
+   * effectively a one-line code snippet that benefits from wrap rather
+   * than silent truncation. */
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Keep inline `<code>` runs inside review-head/check text inline. The
+ * block override above only matters for the standalone diff_command;
+ * scope the inline wrap fallback to inline contexts. */
+.review-head code,
+.review-check code,
+.review-next-step code,
+.failure-summary code {
+  display: inline;
+  white-space: normal;
+}
+
+/* #14 — Diff toolbar: the right-hand `<span>{branch} → {target}</span>`
+ * is a flex item without `min-width: 0`, so a long branch name pushes
+ * the strong label off-screen. Constrain it. */
+.diff-toolbar {
+  min-width: 0;
+}
+
+.diff-toolbar > strong {
+  flex: 0 0 auto;
+}
+
+.diff-toolbar > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
