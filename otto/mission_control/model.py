@@ -17,6 +17,7 @@ from otto.runs.history import load_project_history_rows
 from otto.runs.registry import HEARTBEAT_INTERVAL_S, load_live_record, read_live_records, writer_identity_matches_live_process
 from otto.runs.schema import RunRecord, is_terminal_status
 from otto.mission_control.actions import ActionResult, ActionState
+from otto.token_usage import phase_token_usage_from_messages, total_token_usage_from_phases
 
 PaneName = Literal["live", "history", "detail"]
 TypeFilter = Literal["all", "build", "improve", "certify", "merge", "queue"]
@@ -1479,6 +1480,9 @@ def _token_usage_from_summary_paths(paths: list[Path], *, base_dir: Path | None)
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             continue
         usage = _token_usage_from_mapping(summary)
+        if usage:
+            return usage
+        usage = total_token_usage_from_phases(phase_token_usage_from_messages(candidate.parent))
         if usage:
             return usage
     return {}

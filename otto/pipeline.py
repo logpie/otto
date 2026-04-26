@@ -13,6 +13,11 @@ from typing import TYPE_CHECKING, Any
 
 from otto.agent import AgentCallError
 from otto.logstream import normalize_phase_breakdown
+from otto.token_usage import (
+    TOKEN_USAGE_KEYS,
+    phase_token_usage_from_messages,
+    total_token_usage_from_phases,
+)
 
 if TYPE_CHECKING:
     from otto.budget import RunBudget
@@ -120,7 +125,19 @@ def _write_session_summary(
         summary["head_sha"] = head_sha
     if runtime_path:
         summary["runtime_path"] = runtime_path
-    if breakdown is not None:
+    message_phase_usage = phase_token_usage_from_messages(paths.session_dir(project_dir, session_id))
+    if breakdown is not None or message_phase_usage:
+        if breakdown is None:
+            breakdown = {}
+        if message_phase_usage:
+            breakdown = _merge_phase_token_usage(breakdown, message_phase_usage)
+            total_token_usage = total_token_usage_from_phases(message_phase_usage)
+            if total_token_usage:
+                summary["token_usage"] = total_token_usage
+                for key in TOKEN_USAGE_KEYS:
+                    value = total_token_usage.get(key)
+                    if value:
+                        summary[key] = int(value)
         primary_phase = "build"
         if "build" not in breakdown:
             if "spec" in breakdown:
@@ -143,6 +160,24 @@ def _write_session_summary(
 
 def _round_cost(value: float) -> float:
     return round(float(value), 4)
+
+
+def _merge_phase_token_usage(
+    breakdown: dict[str, dict[str, Any]],
+    phase_usage: dict[str, dict[str, int]],
+) -> dict[str, dict[str, Any]]:
+    merged = {
+        str(phase): dict(data)
+        for phase, data in breakdown.items()
+        if isinstance(data, dict)
+    }
+    for phase, usage in phase_usage.items():
+        entry = merged.setdefault(str(phase), {})
+        for key in TOKEN_USAGE_KEYS:
+            value = usage.get(key)
+            if value and key not in entry:
+                entry[key] = int(value)
+    return merged
 
 def _runtime_metadata(project_dir: Path) -> dict[str, Any]:
     from otto import __version__
