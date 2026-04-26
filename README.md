@@ -190,8 +190,9 @@ Recovery primitives include:
 ## Development
 
 ```bash
-# Python tests
-uv run pytest -q
+# Fast local gates
+uv run python scripts/test_tiers.py smoke
+uv run python scripts/test_tiers.py fast
 
 # Lint
 uv run ruff check otto scripts tests
@@ -202,8 +203,18 @@ npm run web:typecheck
 npm run web:build
 
 # Browser tests
+OTTO_BROWSER_SKIP_BUILD=1 uv run pytest -q -m "browser and smoke" -p playwright
 OTTO_BROWSER_SKIP_BUILD=1 uv run pytest -q -m browser -p playwright
+
+# Pre-push gate
+uv run python scripts/test_tiers.py prepush
 ```
+
+Use the smallest tier that matches the edit while iterating. `smoke` is the
+sub-30-second sanity gate. `fast` skips slow, integration, and heavy system
+suites. Run the full non-browser suite with `uv run pytest -q --maxfail=10`
+before merging broad infra changes, and run browser tests for user-visible web
+behavior.
 
 The committed web bundle in `otto/web/static/` must be rebuilt after changes in `otto/web/client/`.
 

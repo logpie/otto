@@ -2016,7 +2016,7 @@ def _normalize_product_handoff(
     reset = _normalize_commands(data.get("reset") or data.get("reset_commands"))
     try_flows = _normalize_flows(data.get("try_flows") or data.get("flows") or data.get("journeys"))
     sample_data = _normalize_sample_data(data.get("sample_data") or data.get("sample_users") or data.get("fixtures"))
-    urls = _string_list(data.get("urls") or data.get("links"))
+    urls = _coerce_string_list(data.get("urls") or data.get("links"))
     if not urls:
         urls = _urls_from_text(json.dumps(data, default=str))
     task_context = _task_handoff_context(record, certification=certification, changed_files=changed_files, kind=kind)
@@ -2033,7 +2033,7 @@ def _normalize_product_handoff(
         "reset": reset[:6],
         "try_flows": try_flows[:12] or _fallback_try_flows(kind),
         "sample_data": sample_data[:12],
-        "notes": _string_list(data.get("notes") or data.get("known_limitations"))[:10],
+        "notes": _coerce_string_list(data.get("notes") or data.get("known_limitations"))[:10],
     }
 
 
@@ -2327,7 +2327,7 @@ def _normalize_flows(value: Any) -> list[dict[str, Any]]:
                 flows.append({"title": title, "steps": []})
         elif isinstance(item, dict):
             title = _optional_str(item.get("title") or item.get("name") or item.get("summary")) or f"Flow {index}"
-            steps = _string_list(item.get("steps") or item.get("actions"))
+            steps = _coerce_string_list(item.get("steps") or item.get("actions"))
             flows.append({"title": title, "steps": steps[:12]})
     return flows
 
@@ -2427,7 +2427,7 @@ def _sample_data_from_readme(readme: str) -> list[dict[str, str]]:
     return samples[:8]
 
 
-def _string_list(value: Any) -> list[str]:
+def _coerce_string_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value.strip()] if value.strip() else []
     if not isinstance(value, list):

@@ -420,10 +420,12 @@ def test_web_review_packet_includes_explicit_product_handoff(tmp_path: Path) -> 
             {
                 "kind": "cli",
                 "summary": "Try the expense importer CLI.",
+                "urls": "http://127.0.0.1:9001",
                 "launch": [{"label": "Show help", "command": "expense-import --help"}],
-                "try_flows": [{"title": "Import CSV", "steps": ["Run sample import", "Check summary output"]}],
+                "try_flows": [{"title": "Import CSV", "steps": "Run sample import"}],
                 "sample_data": [{"label": "Fixture", "value": "examples/expenses.csv"}],
                 "reset": [{"label": "Clear output", "command": "rm -f out.json"}],
+                "notes": "Use the fixture before trying a custom file.",
             }
         ),
         encoding="utf-8",
@@ -440,6 +442,9 @@ def test_web_review_packet_includes_explicit_product_handoff(tmp_path: Path) -> 
     assert handoff["task_summary"] == "build the web surface"
     assert handoff["task_flows"][0]["title"].startswith("Try this task:")
     assert handoff["try_flows"][0]["title"] == "Import CSV"
+    assert handoff["try_flows"][0]["steps"] == ["Run sample import"]
+    assert handoff["urls"] == ["http://127.0.0.1:9001"]
+    assert handoff["notes"] == ["Use the fixture before trying a custom file."]
     assert handoff["sample_data"][0]["value"] == "examples/expenses.csv"
     assert handoff["reset"][0]["command"] == "rm -f out.json"
 

@@ -2,7 +2,7 @@
 
 **Branch:** `worktree-i2p` → `origin/i2p`
 **Range:** `6b275a72b..c69ddc683` (38 commits, ~26 hours autonomous work)
-**Final state:** 1189 default + 198 browser tests passing; 29/29 CRITICAL closed; ~113/132 IMPORTANT closed.
+**Final state:** 1189 default + 198 browser tests passed on the original audit branch; current post-TUI-removal main expects 1188 default + 198 browser.
 
 For each commit below, `category` indicates whether it's **doc** (no code changes), **infra** (test/build harness), **fix-server** (Python), **fix-client** (TypeScript/React/CSS), **fix-mixed** (both), or **test-only** (live findings, no production fix).
 

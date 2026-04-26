@@ -7,6 +7,51 @@ from unittest.mock import MagicMock
 import pytest
 
 
+SMOKE_TEST_FILES = {
+    "tests/browser/test_smoke.py",
+    "tests/test_agent.py",
+    "tests/test_cli_smoke.py",
+    "tests/test_config.py",
+    "tests/test_mission_control_actions.py",
+    "tests/test_mission_control_model.py",
+    "tests/test_paths.py",
+    "tests/test_queue_schema.py",
+    "tests/test_token_usage_phase_logs.py",
+    "tests/test_web_bundle_freshness.py",
+    "tests/test_web_cache_headers.py",
+}
+
+SMOKE_TEST_NODEIDS = {
+    "tests/test_web_mission_control.py::test_web_project_launcher_starts_without_selected_project",
+    "tests/test_web_mission_control.py::test_web_state_detail_logs_and_artifact_content",
+    "tests/test_web_mission_control.py::test_web_state_includes_watcher_status",
+}
+
+SLOW_TEST_FILES = {
+    "tests/test_watcher_orphan_cleanup.py",
+    "tests/integration/test_queue_flow.py",
+}
+
+SLOW_TEST_NODEIDS = {
+    "tests/test_run_history.py::test_history_append_concurrent_processes",
+    "tests/test_run_registry.py::test_allocate_run_id_multiprocess_race",
+    "tests/test_run_registry.py::test_append_command_request_uses_drain_sidecar_lock",
+    "tests/test_v3_pipeline.py::test_silent_atomic_run_polls_cancel_on_heartbeat",
+    "tests/test_v3_pipeline.py::test_cancelled_atomic_run_appends_terminal_history_snapshot",
+    "tests/test_queue_runner.py::test_child_is_alive_true_for_actual_process",
+    "tests/test_queue_runner.py::test_kill_child_safely_kills_alive_child",
+}
+
+HEAVY_TEST_FILES = {
+    "tests/test_hardening.py",
+    "tests/test_logstream.py",
+    "tests/test_merge_orchestrator.py",
+    "tests/test_queue_runner.py",
+    "tests/test_v3_pipeline.py",
+    "tests/test_web_mission_control.py",
+}
+
+
 def make_mock_query(text, cost=0.50, session_id="test-session", assistant_messages=None):
     """Build a drop-in replacement for `otto.agent.run_agent_query`.
 
@@ -81,8 +126,11 @@ def pytest_collection_modifyitems(items):
 
     Prevents functions like `test_file_path` (imported from otto modules)
     from being collected as tests when imported into test modules.
+    Also marks a small high-signal subset as smoke so day-to-day development
+    can run a sub-minute gate without giving up the full pre-merge suite.
     """
     filtered = []
+    root = None
     for item in items:
         # Only filter Function items (not class-based tests)
         if hasattr(item, "function"):
@@ -91,6 +139,20 @@ def pytest_collection_modifyitems(items):
             # If the function's __module__ doesn't start with "tests.", skip it
             if func_module and not func_module.startswith("tests.") and func_module != item.module.__name__:
                 continue
+        if root is None:
+            root = item.config.rootpath
+        try:
+            relpath = item.path.relative_to(root).as_posix()
+        except ValueError:
+            relpath = item.path.as_posix()
+        if relpath in SMOKE_TEST_FILES or item.nodeid in SMOKE_TEST_NODEIDS:
+            item.add_marker(pytest.mark.smoke)
+        if relpath.startswith("tests/integration/"):
+            item.add_marker(pytest.mark.integration)
+        if relpath in SLOW_TEST_FILES or item.nodeid in SLOW_TEST_NODEIDS:
+            item.add_marker(pytest.mark.slow)
+        if relpath in HEAVY_TEST_FILES:
+            item.add_marker(pytest.mark.heavy)
         filtered.append(item)
     items[:] = filtered
 

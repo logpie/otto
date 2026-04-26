@@ -5,6 +5,17 @@ import {Spinner} from "./components/Spinner";
 import {useInFlight} from "./hooks/useInFlight";
 import {useDebouncedValue} from "./hooks/useDebouncedValue";
 import {useCrossTabChannel} from "./hooks/useCrossTabChannel";
+import {
+  LOG_BUFFER_MAX_BYTES,
+  LOG_POLL_BACKOFF_MS,
+  LOG_POLL_BASE_MS,
+  appendToLogBuffer,
+  bytesToString,
+  countLines,
+  initialLogState,
+  type LogState,
+  type LogStatus,
+} from "./logBuffer";
 import type {
   ActionResult,
   ActionState,
@@ -115,17 +126,6 @@ interface RouteState {
 const DEFAULT_HISTORY_PAGE_SIZE = 25;
 const HISTORY_PAGE_SIZE_OPTIONS: readonly number[] = [10, 25, 50, 100];
 
-// Cap the log buffer at ~1MB of text — the browser can render that without
-// jank, and we display "{N} earlier bytes elided" to make the truncation
-// honest. We chose bytes (not lines) because a runaway log can still emit
-// short lines indefinitely and overrun a line-based cap. See
-// docs/mc-audit/_hunter-findings/codex-long-string-overflow.md finding #1.
-const LOG_BUFFER_MAX_BYTES = 1_048_576;
-const LOG_POLL_BASE_MS = 1200;
-// Backoff schedule when the log fetch fails repeatedly. Index 0 is the
-// "first failure" delay; we cap at 30s so a sustained outage stops hammering
-// the API. On the first successful read we drop back to LOG_POLL_BASE_MS.
-const LOG_POLL_BACKOFF_MS = [2000, 5000, 15000, 30000];
 // W9-CRITICAL-1: cadence used for `/api/state` polling while the tab is
 // hidden. We don't STOP polling (otherwise notification gates and live
 // state go stale for the whole hide window — see live-findings W9), we
@@ -150,72 +150,6 @@ const STATE_POLL_MIN_GAP_MS = 1000;
 // long enough to ride out a single hiccup, short enough to be actionable
 // before the operator notices the page is stale.
 const CONNECTION_LOST_THRESHOLD = 3;
-
-type LogStatus = "idle" | "loading" | "ok" | "missing" | "error";
-
-interface LogState {
-  text: string;
-  totalLines: number;
-  totalBytes: number;
-  droppedBytes: number;
-  path: string | null;
-  status: LogStatus;
-  error: string | null;
-  lastUpdatedAt: number | null;
-  pollIntervalMs: number;
-  consecutiveErrors: number;
-}
-
-const initialLogState: LogState = {
-  text: "",
-  totalLines: 0,
-  totalBytes: 0,
-  droppedBytes: 0,
-  path: null,
-  status: "idle",
-  error: null,
-  lastUpdatedAt: null,
-  pollIntervalMs: LOG_POLL_BASE_MS,
-  consecutiveErrors: 0,
-};
-
-function bytesToString(value: string): number {
-  if (typeof TextEncoder === "undefined") return value.length;
-  return new TextEncoder().encode(value).length;
-}
-
-// Count newline characters (\n). When appending an incremental chunk this
-// gives the number of *additional* lines closed by the chunk, which lets us
-// maintain a running totalLines counter without ever re-splitting the full
-// log. The display rounds up to "1 line" for any non-empty buffer so an
-// always-tailing log doesn't read as "0 lines" until the first newline.
-function countLines(text: string): number {
-  if (!text) return 0;
-  let count = 0;
-  for (let i = 0; i < text.length; i += 1) {
-    if (text.charCodeAt(i) === 10) count += 1;
-  }
-  return count;
-}
-
-function appendToLogBuffer(prev: string, chunk: string, maxBytes: number): {text: string; droppedBytes: number} {
-  if (!chunk) return {text: prev, droppedBytes: 0};
-  const combined = prev + chunk;
-  const combinedBytes = bytesToString(combined);
-  if (combinedBytes <= maxBytes) return {text: combined, droppedBytes: 0};
-  // Drop characters from the front until we are under the cap, then snap to
-  // the next newline so partial lines don't sit at the head of the buffer.
-  // We approximate "bytes" with "characters" for the slice search — exact
-  // byte alignment is not meaningful when the original split between chunks
-  // can already land mid-grapheme.
-  const overshootChars = Math.max(0, combined.length - maxBytes);
-  let cut = overshootChars;
-  const newlineAfterCut = combined.indexOf("\n", cut);
-  if (newlineAfterCut >= 0 && newlineAfterCut - cut < 4096) cut = newlineAfterCut + 1;
-  const truncated = combined.slice(cut);
-  const droppedBytes = bytesToString(combined.slice(0, cut));
-  return {text: truncated, droppedBytes};
-}
 
 interface BoardTask {
   id: string;

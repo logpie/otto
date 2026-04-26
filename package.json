@@ -6,7 +6,11 @@
   "scripts": {
     "web:build": "npm run web:typecheck && vite build --config otto/web/client/vite.config.ts",
     "web:typecheck": "tsc -p otto/web/client/tsconfig.json --noEmit",
-    "web:verify": "npm run web:build && (python3 scripts/check_bundle_committed.py || python scripts/check_bundle_committed.py)"
+    "web:verify": "npm run web:build && (python3 scripts/check_bundle_committed.py || python scripts/check_bundle_committed.py)",
+    "test:smoke": "python scripts/test_tiers.py smoke",
+    "test:fast": "python scripts/test_tiers.py fast",
+    "test:web": "python scripts/test_tiers.py web",
+    "test:prepush": "python scripts/test_tiers.py prepush"
   },
   "dependencies": {
     "react": "^19.2.3",

@@ -26,7 +26,8 @@ Resolve conflicts (none expected vs the i2p divergence point — see below). Run
 npm install   # in case dev deps shifted
 uv sync       # picks up new pytest-playwright/playwright/freezegun
 npm run web:typecheck && npm run web:build
-uv run pytest -q                                   # 1189 expected
+uv run python scripts/test_tiers.py smoke
+uv run pytest -q                                   # 1188 expected after TUI removal
 uv run pytest -q -m browser -p playwright          # 198 expected
 ```
 
@@ -164,7 +165,7 @@ npm run web:build
 
 # 3. Default suite (excludes browser by design)
 OTTO_BROWSER_SKIP_BUILD=1 uv run pytest -q
-# Expected: 1189 passed, 19 deselected
+# Expected: 1188 passed, 198 deselected after TUI removal
 
 # 4. Browser suite (requires playwright browsers — `playwright install chromium webkit` once)
 OTTO_BROWSER_SKIP_BUILD=1 uv run pytest -q -m browser -p playwright

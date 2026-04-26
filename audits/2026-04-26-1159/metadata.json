@@ -1,0 +1,16 @@
+{
+  "stamp": "2026-04-26-1159",
+  "target": "repo-wide test speed and maintainability",
+  "mode": "fix",
+  "hunter_mode": "parallel-read-only",
+  "hunter_reasoning_effort": "high",
+  "rounds_requested": 1,
+  "fix_policy": "all-actionable-low-risk",
+  "test_cmd": "uv run pytest -q --maxfail=10",
+  "new_fast_gates": [
+    "uv run python scripts/test_tiers.py smoke",
+    "uv run python scripts/test_tiers.py fast",
+    "uv run python scripts/test_tiers.py web",
+    "uv run python scripts/test_tiers.py browser-smoke"
+  ]
+}

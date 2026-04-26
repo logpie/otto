@@ -71,6 +71,10 @@ asyncio_default_fixture_loop_scope = "function"
 # management ("Cannot run the event loop while another loop is running").
 addopts = ["-m", "not browser", "-p", "no:playwright"]
 markers = [
+    "smoke: fast, high-signal subset for development loops; run with `python scripts/test_tiers.py smoke`",
+    "heavy: broad system suites that are valuable pre-merge but too expensive for every edit loop",
+    "integration: cross-module tests using real git repos, worktrees, TestClient apps, or fake child processes",
+    "slow: process, timing, multiprocessing, browser-polling, or expensive git/worktree tests",
     "browser: Playwright-driven Mission Control browser tests; excluded from the default suite (run with `pytest -m browser -p playwright`)",
 ]
 

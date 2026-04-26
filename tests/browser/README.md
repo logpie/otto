@@ -9,7 +9,7 @@ against the real built bundle. Phase 3 of `plan-mc-audit.md`.
 # from repo root
 uv pip install -e ".[dev]"            # installs pytest-playwright + playwright + freezegun
 uv run playwright install chromium webkit
-uv run pytest tests/browser/ -v
+uv run pytest tests/browser/ -m browser -p playwright -v
 ```
 
 The first run builds the SPA bundle (`npm run web:typecheck && npm run web:build`)
@@ -20,7 +20,7 @@ once for the session; subsequent runs reuse it.
 For fast iteration when the bundle on disk is known good:
 
 ```bash
-OTTO_BROWSER_SKIP_BUILD=1 uv run pytest tests/browser/ -v
+OTTO_BROWSER_SKIP_BUILD=1 uv run pytest tests/browser/ -m browser -p playwright -v
 ```
 
 The build-bundle fixture still verifies that `otto/web/static/assets/`
@@ -38,7 +38,7 @@ Pass `--tracing=retain-on-failure` to capture a Playwright trace (DOM
 snapshots, network log, screenshots, console) for every failing test:
 
 ```bash
-uv run pytest tests/browser/test_smoke.py --tracing=retain-on-failure
+uv run pytest tests/browser/test_smoke.py -m browser -p playwright --tracing=retain-on-failure
 ```
 
 Open the resulting `test-results/.../trace.zip` with:
