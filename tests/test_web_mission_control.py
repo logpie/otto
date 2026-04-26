@@ -7,9 +7,6 @@ import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
-
-from fastapi.testclient import TestClient
 
 from otto import paths
 from otto.checkpoint import write_checkpoint
@@ -22,79 +19,16 @@ from otto.queue.schema import QueueTask, append_task, load_queue, write_state as
 from otto.runs.history import append_history_snapshot, build_terminal_snapshot
 from otto.runs.registry import make_run_record, update_record, write_record
 from otto.spec import spec_hash
-from otto.web.app import create_app
 
-
-def _init_repo(repo: Path) -> None:
-    repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "web@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Web Test"], cwd=repo, check=True)
-    (repo / "README.md").write_text("# web\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
-
-
-def _client(project_dir: Path, **kwargs: Any) -> TestClient:
-    return TestClient(create_app(project_dir, **kwargs))
-
-
-def _set_origin_head(repo: Path, branch: str) -> None:
-    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
-    subprocess.run(["git", "update-ref", f"refs/remotes/origin/{branch}", sha], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{branch}"],
-        cwd=repo,
-        check=True,
-    )
-
-
-def _create_branch_file(repo: Path, branch: str, filename: str = "feature.txt", content: str = "ready\n") -> None:
-    subprocess.run(["git", "checkout", "-q", "-b", branch], cwd=repo, check=True)
-    (repo / filename).write_text(content, encoding="utf-8")
-    subprocess.run(["git", "add", filename], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", f"add {filename}"], cwd=repo, check=True)
-    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
-
-
-def _write_run(repo: Path, *, run_id: str = "build-web", outside_artifact: str | None = None) -> None:
-    primary_log = paths.build_dir(repo, run_id) / "narrative.log"
-    primary_log.parent.mkdir(parents=True, exist_ok=True)
-    primary_log.write_text("BUILD starting\nSTORY_RESULT: web PASS\n", encoding="utf-8")
-    summary_path = paths.session_summary(repo, run_id)
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps({"verdict": "passed"}), encoding="utf-8")
-    record = make_run_record(
-        project_dir=repo,
-        run_id=run_id,
-        domain="atomic",
-        run_type="build",
-        command="build",
-        display_name="build web",
-        status="running",
-        cwd=repo,
-        source={
-            "argv": ["build", "web"],
-            "provider": "codex",
-            "model": "gpt-5.4",
-            "reasoning_effort": "medium",
-        },
-        git={"branch": "main", "worktree": None},
-        intent={"summary": "build the web surface"},
-        artifacts={
-            "summary_path": outside_artifact or str(summary_path),
-            "primary_log_path": str(primary_log),
-        },
-        metrics={
-            "cost_usd": 0.0,
-            "input_tokens": 1234,
-            "cached_input_tokens": 1000,
-            "output_tokens": 56,
-        },
-        adapter_key="atomic.build",
-        last_event="running tests",
-    )
-    write_record(repo, record)
+from tests._web_mc_helpers import (
+    _app,
+    _client,
+    _client_for_app,
+    _create_branch_file,
+    _init_repo,
+    _set_origin_head,
+    _write_run,
+)
 
 
 def test_web_detail_exposes_split_phase_routing_and_timeline(tmp_path: Path) -> None:
@@ -227,98 +161,6 @@ def test_web_detail_exposes_improve_split_as_evaluate_and_improve(tmp_path: Path
     assert phases[1]["token_usage"]["total_tokens"] == 200
 
 
-def test_web_project_launcher_starts_without_selected_project(tmp_path: Path) -> None:
-    host = tmp_path / "host"
-    projects_root = tmp_path / "managed"
-    _init_repo(host)
-
-    client = _client(host, project_launcher=True, projects_root=projects_root)
-
-    projects = client.get("/api/projects").json()
-    assert projects["launcher_enabled"] is True
-    assert projects["projects_root"] == str(projects_root.resolve())
-    assert projects["current"] is None
-    assert projects["projects"] == []
-
-    state = client.get("/api/state")
-    assert state.status_code == 409
-    assert "No project selected" in state.json()["message"]
-
-
-def test_web_projects_endpoint_has_no_root_side_effect_without_launcher(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    projects_root = tmp_path / "managed"
-    _init_repo(repo)
-
-    response = _client(repo, projects_root=projects_root).get("/api/projects")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["launcher_enabled"] is False
-    assert payload["current"]["path"] == str(repo.resolve())
-    assert payload["projects"] == []
-    assert not projects_root.exists()
-
-
-def test_web_project_launcher_creates_managed_git_project(tmp_path: Path) -> None:
-    host = tmp_path / "host"
-    projects_root = tmp_path / "managed"
-    _init_repo(host)
-
-    client = _client(host, project_launcher=True, projects_root=projects_root)
-    response = client.post("/api/projects/create", json={"name": "Expense Approval Portal"})
-
-    assert response.status_code == 200
-    payload = response.json()
-    project_path = projects_root / "expense-approval-portal"
-    assert payload["project"]["path"] == str(project_path.resolve())
-    assert payload["project"]["branch"] == "main"
-    assert payload["project"]["dirty"] is False
-    assert (project_path / ".git").exists()
-    assert (project_path / "README.md").read_text(encoding="utf-8").startswith("# Expense Approval Portal")
-    assert (project_path / "otto.yaml").exists()
-    head = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=project_path, text=True).strip()
-    assert payload["project"]["head_sha"] == head
-
-    state = client.get("/api/state").json()
-    assert state["project"]["path"] == str(project_path.resolve())
-    assert payload["projects"][0]["path"] == str(project_path.resolve())
-
-
-def test_web_project_launcher_can_clear_selected_project(tmp_path: Path) -> None:
-    host = tmp_path / "host"
-    projects_root = tmp_path / "managed"
-    _init_repo(host)
-
-    client = _client(host, project_launcher=True, projects_root=projects_root)
-    created = client.post("/api/projects/create", json={"name": "Expense Approval Portal"}).json()
-    assert created["project"]["name"] == "expense-approval-portal"
-
-    cleared = client.post("/api/projects/clear", json={})
-
-    assert cleared.status_code == 200
-    payload = cleared.json()
-    assert payload["current"] is None
-    assert payload["projects"][0]["name"] == "expense-approval-portal"
-    state = client.get("/api/state")
-    assert state.status_code == 409
-    assert "No project selected" in state.json()["message"]
-
-
-def test_web_project_launcher_rejects_selection_outside_managed_root(tmp_path: Path) -> None:
-    host = tmp_path / "host"
-    outside = tmp_path / "outside"
-    projects_root = tmp_path / "managed"
-    _init_repo(host)
-    _init_repo(outside)
-
-    client = _client(host, project_launcher=True, projects_root=projects_root)
-    response = client.post("/api/projects/select", json={"path": str(outside)})
-
-    assert response.status_code == 403
-    assert "Managed projects must live under" in response.json()["message"]
-
-
 def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -350,144 +192,6 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     summary = next(item for item in artifacts if item["label"] == "summary")
     content = client.get(f"/api/runs/build-web/artifacts/{summary['index']}/content").json()
     assert '"passed"' in content["content"]
-
-
-def test_web_review_packet_includes_story_details_and_html_report(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _write_run(repo)
-    certify_dir = paths.certify_dir(repo, "build-web")
-    certify_dir.mkdir(parents=True, exist_ok=True)
-    evidence_dir = certify_dir / "evidence"
-    evidence_dir.mkdir()
-    (evidence_dir / "homepage.png").write_bytes(b"fake-png")
-    (certify_dir / "proof-of-work.html").write_text(
-        '<html><body>Proof report <img src="evidence/homepage.png"><a href="../build/narrative.log">log</a></body></html>',
-        encoding="utf-8",
-    )
-    (certify_dir / "proof-of-work.json").write_text(
-        json.dumps(
-            {
-                "stories_tested": 2,
-                "stories_passed": 1,
-                "stories": [
-                    {
-                        "story_id": "save-filter",
-                        "status": "pass",
-                        "claim": "Users can save a filtered dashboard view.",
-                        "observed_result": "Saved view appeared in the view switcher.",
-                        "methodology": "live-ui-events",
-                    },
-                    {
-                        "story_id": "restore-filter",
-                        "status": "fail",
-                        "claim": "Users can restore a saved dashboard view.",
-                        "failure_evidence": "Restore did not apply the owner filter.",
-                        "methodology": "live-ui-events",
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    client = _client(repo)
-    packet = client.get("/api/runs/build-web").json()["review_packet"]
-
-    assert packet["certification"]["stories_tested"] == 2
-    assert packet["certification"]["stories_passed"] == 1
-    assert packet["certification"]["stories"][0]["id"] == "save-filter"
-    assert packet["certification"]["stories"][1]["status"] == "fail"
-    assert packet["certification"]["proof_report"]["html_url"] == "/api/runs/build-web/proof-report"
-    handoff = packet["product_handoff"]
-    assert handoff["task_summary"] == "build the web surface"
-    assert [flow["title"] for flow in handoff["task_flows"][:2]] == [
-        "Users can save a filtered dashboard view.",
-        "Users can restore a saved dashboard view.",
-    ]
-    report = client.get("/api/runs/build-web/proof-report")
-    assert report.status_code == 200
-    assert "Proof report" in report.text
-    assert "/api/runs/build-web/proof-assets/evidence%2Fhomepage.png" in report.text
-    assert "/api/runs/build-web/proof-assets/..%2Fbuild%2Fnarrative.log" in report.text
-    assert client.get("/api/runs/build-web/proof-assets/evidence%2Fhomepage.png").content == b"fake-png"
-    assert "STORY_RESULT: web PASS" in client.get("/api/runs/build-web/proof-assets/..%2Fbuild%2Fnarrative.log").text
-    assert client.get("/api/runs/build-web/evidence/homepage.png").content == b"fake-png"
-
-
-def test_web_review_packet_includes_explicit_product_handoff(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    handoff_dir = repo / ".otto"
-    handoff_dir.mkdir()
-    (handoff_dir / "product-handoff.json").write_text(
-        json.dumps(
-            {
-                "kind": "cli",
-                "summary": "Try the expense importer CLI.",
-                "urls": "http://127.0.0.1:9001",
-                "launch": [{"label": "Show help", "command": "expense-import --help"}],
-                "try_flows": [{"title": "Import CSV", "steps": "Run sample import"}],
-                "sample_data": [{"label": "Fixture", "value": "examples/expenses.csv"}],
-                "reset": [{"label": "Clear output", "command": "rm -f out.json"}],
-                "notes": "Use the fixture before trying a custom file.",
-            }
-        ),
-        encoding="utf-8",
-    )
-    _write_run(repo)
-
-    packet = _client(repo).get("/api/runs/build-web").json()["review_packet"]
-    handoff = packet["product_handoff"]
-
-    assert handoff["kind"] == "cli"
-    assert handoff["label"] == "CLI tool"
-    assert handoff["summary"] == "Try the expense importer CLI."
-    assert handoff["launch"] == [{"label": "Show help", "command": "expense-import --help"}]
-    assert handoff["task_summary"] == "build the web surface"
-    assert handoff["task_flows"][0]["title"].startswith("Try this task:")
-    assert handoff["try_flows"][0]["title"] == "Import CSV"
-    assert handoff["try_flows"][0]["steps"] == ["Run sample import"]
-    assert handoff["urls"] == ["http://127.0.0.1:9001"]
-    assert handoff["notes"] == ["Use the fixture before trying a custom file."]
-    assert handoff["sample_data"][0]["value"] == "examples/expenses.csv"
-    assert handoff["reset"][0]["command"] == "rm -f out.json"
-
-
-def test_web_review_packet_detects_product_handoff_from_readme(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    (repo / "README.md").write_text(
-        "\n".join(
-            [
-                "# Expense Portal",
-                "",
-                "A browser dashboard for reviewing employee expenses.",
-                "",
-                "## Quick Start",
-                "flask --app expense_portal run --port 5000",
-                "flask --app expense_portal init-db",
-                "",
-                "Seed users include Maya Chen manager and Alex Kim employee.",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (repo / "expense_portal").mkdir()
-    _write_run(repo)
-
-    packet = _client(repo).get("/api/runs/build-web").json()["review_packet"]
-    handoff = packet["product_handoff"]
-
-    assert handoff["kind"] == "web"
-    assert handoff["label"] == "Web app"
-    assert handoff["summary"] == "Expense Portal"
-    assert {"label": "Start server", "command": "flask --app expense_portal run --port 5000"} in handoff["launch"]
-    assert {"label": "Reset demo data", "command": "flask --app expense_portal init-db"} in handoff["reset"]
-    assert handoff["task_summary"] == "build the web surface"
-    assert handoff["task_flows"][0]["title"] == "Try this task: build the web surface"
-    assert any("Maya Chen" in item["value"] for item in handoff["sample_data"])
-    assert handoff["try_flows"][0]["title"] == "Open the app"
 
 
 def test_web_run_detail_is_not_hidden_by_list_filters(tmp_path: Path) -> None:
@@ -523,11 +227,11 @@ def test_web_state_marks_abandoned_live_runs_stale_not_active(tmp_path: Path) ->
             },
         },
     )
-    app = create_app(repo)
+    app = _app(repo)
     clock = {"now": datetime(2026, 4, 24, tzinfo=timezone.utc), "monotonic": 0.0}
     app.state.service.model._now_fn = lambda: clock["now"]
     app.state.service.model._monotonic_fn = lambda: clock["monotonic"]
-    client = TestClient(app)
+    client = _client_for_app(app)
 
     client.get("/api/state")
     clock["now"] += timedelta(seconds=16)
