@@ -2451,6 +2451,18 @@ def _run_w3(ctx: ScenarioContext) -> ScenarioRunResult:
                     "document.querySelector('#root')?.children.length > 0",
                     timeout=15_000,
                 )
+                # Skeleton ("Loading Mission Control…") populates #root before
+                # actionable UI exists. Wait for the actual New job button to
+                # appear (or the launcher), to avoid racing the workspace boot.
+                try:
+                    page.wait_for_selector(
+                        '[data-testid="mission-new-job-button"], '
+                        '[data-testid="new-job-button"], '
+                        '[data-testid="launcher-subhead"]',
+                        timeout=20_000,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    failures.note(f"actionable UI did not appear in 20s: {exc}")
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"shell load failed: {exc}")
             _safe_screenshot(page, artifact_dir, "01-shell")

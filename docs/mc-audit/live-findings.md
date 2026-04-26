@@ -525,6 +525,163 @@ Verdict: **FAIL** (4 soft-assert failures collected).
 
 ---
 
+## W3 findings
+
+Two runs collected for W3 (improve loop):
+
+- **First run**: id `2026-04-26-041802-0548fe`, wall time 208s, FAIL with 4 soft-asserts. The harness raced the SPA boot — the `wait_for_function("#root.children.length>0")` returned as soon as the "Loading Mission Control…" skeleton populated the root, *before* the workspace state was ready and the `New job` button was rendered. The whole rest of the run was a no-op because nothing was ever enqueued. Cost: **$0.00** (no LLM calls). The very first thing this exposed (W3-IMPORTANT-1 below) is a real Otto/UI bug worth flagging on its own.
+
+- **Second run**: id `2026-04-26-042240-16857d`, wall time 305s, FAIL with 3 soft-asserts but the build+improve actually completed end-to-end. After hardening the harness wait (now waits for `mission-new-job-button|new-job-button|launcher-subhead` to appear) the scenario reached Step 7. Cost: **$0.83** ($0.36 build + $0.47 improve, both Claude Sonnet via SDK).
+
+Findings below are from the second run unless noted.
+
+### W3-CRITICAL-1: Improve via JobDialog forks from `main`, not from the prior build's branch — collides on the same files
+
+- **Severity:** CRITICAL — silently breaks the documented "iterate on an existing run" promise the JobDialog literally advertises.
+- **Symptom:** After Step 4 (enqueue Improve(bugs) referring to a just-completed build that wrote `greet.py` + `test_greet.py` to branch `build/add-a-small-python-module-greet-py-that-49f59d-2026-04-25`), the improve worker:
+  1. Created a *new* worktree `.worktrees/web-as-user/` rooted at `main` (HEAD = the bookkeeping commit `b74f01b`, no `greet.py`),
+  2. Logged in its own narrative: `"This is a bare project with just a README. I need to create the greet() function and tests."`,
+  3. Wrote brand-new `greet.py` + `test_greet.py` from scratch on branch `improve/web-as-user-2026-04-25`, and
+  4. Marked itself ready to land *alongside* the original build branch.
+  Final-state.json:
+  ```json
+  "landing": {
+    "items": [
+      {"branch": "build/add-a-small-python-module-greet-py-that-49f59d-2026-04-25"},
+      {"branch": "improve/web-as-user-2026-04-25"}
+    ],
+    "collisions": [{"left": "add-a-small-python-module-greet-py-that-49f59d",
+                    "right": "web-as-user", "files": ["greet.py", "test_greet.py"], "file_count": 2}]
+  }
+  ```
+- **Reproduction:** `OTTO_WEB_SKIP_FRESHNESS=1 OTTO_ALLOW_REAL_COST=1 .venv/bin/python scripts/web_as_user.py --scenario W3 --provider claude`. See `bench-results/web-as-user/2026-04-26-042240-16857d/W3/final-state.json` and screenshot `07-improve-terminal.png` (READY 2 with both branches).
+- **Hypothesis:** The web JobDialog enqueues `improve bugs <focus>` exactly the same way it would from CLI, with no concept of a "prior run" reference. `MissionControlService.execute(... command="improve" ...)` (`otto/mission_control/service.py:814–836`) takes only `subcommand` and `focus`/`goal`, then calls `enqueue_task(...)` which spawns a fresh worktree from `main`. There is no plumbing to attach `--reference-run <id>` or to check out the prior build branch as the base. The CLI's standalone `otto improve` works because it operates on the project's *current* working copy (which the user manually leaves on the build branch) — but the queue path always rebases to a fresh worktree, breaking the model.
+- **Suggested fix:** Either:
+  - **Server-side**: the JobDialog should accept a `prior_run_id` (or auto-pick the latest successful build on `main`), have the queue create the improve worktree from `<prior_branch>` instead of `main`, and name the branch `improve/<prior_branch_basename>-<date>` so it logically extends.
+  - **UI**: surface a select like "Refine which run?" populated from history (last N successful builds + improves on this project). Hide it for greenfield projects.
+  - **Stopgap (Mission Control)**: detect that an improve job's "after" landing collides with the still-pending base branch, and surface a banner: "This improve and its base build both touch greet.py. Land base first, then re-queue improve." Or auto-set `after: <prior_task_id>` so the watcher serializes them.
+
+### W3-CRITICAL-2: Loading skeleton races SPA boot — first interaction can fire against a non-actionable shell
+
+- **Severity:** CRITICAL — first run of W3 was a $0 no-op because of this.
+- **Symptom:** The MC SPA renders a `<div>Loading Mission Control…</div>` card into `#root` *before* it reads project state and renders the actionable shell (sidebar, task board, "New job" button). The whole render fits in `#root`, so the standard hydration probe `document.querySelector('#root')?.children.length > 0` returns true after ~50–200 ms while the workspace is still booting (~5–8 s on a fresh tempdir). Any external automation that uses that probe (Playwright, MCP tooling, third-party scripts, smoke tests) will then fire `getByTestId("mission-new-job-button")` and miss because the button doesn't exist yet. Screenshot: `bench-results/web-as-user/2026-04-26-041802-0548fe/W3/01-shell.png` (only "Loading Mission Control…" visible).
+- **Reproduction:** Open `http://127.0.0.1:<port>` in a brand-new browser context against a brand-new project, race a `getByTestId("mission-new-job-button")` against the `#root` populate. The harness fix (now landed in this branch) was to also wait for `[data-testid="mission-new-job-button"], [data-testid="new-job-button"], [data-testid="launcher-subhead"]` — but the *underlying SPA bug* is that the loading card and the actionable shell share `#root` with no marker to differentiate them.
+- **Hypothesis:** `otto/web/client/src/App.tsx` renders the LoadingMissionControl component into the same root before the initial `/api/state` fetch resolves. There is no `data-testid="mission-loading"` or `data-state="loading|ready"` attribute on the shell, and no separate `data-testid="mission-shell-ready"` once it's interactive.
+- **Suggested fix:** Add `data-state="loading|ready"` (or a specific `data-testid="mission-loading"` / `data-testid="mission-shell"`) to the top-level `<div id="root">` child or its immediate body, so external automation has a single deterministic probe. Document the recommended probe in `docs/mc-audit/server-endpoints.md` ("wait for `[data-testid=mission-shell]` before any interaction").
+
+### W3-IMPORTANT-1: Improve task id and resolved_intent default to project name, ignoring user focus
+
+- **Severity:** IMPORTANT — confuses operators reviewing the task board and pollutes the agent's context.
+- **Symptom:** After enqueueing improve via JobDialog with focus `Make greet() handle empty/None name…`, the queue manifest in `.otto-queue.yml` shows:
+  ```
+  - id: web-as-user            # ← project tempdir name, not focus
+    command_argv: [improve, bugs, "Make greet() handle empty/None name..."]
+    resolved_intent: '# web-as-user'   # ← Markdown heading from project name
+    focus: Make greet() handle empty/None name by returning 'Hello, world!'...
+    branch: improve/web-as-user-2026-04-25
+  ```
+  The Task Board displays the card title as **`web-as-user`** (see screenshot `06-watcher-improve.png`); the Recent Activity feed says `web-as-user: improve bugs started`; and the agent's `intent.txt` reads `# web-as-user\n\n## Improvement Focus\nMake greet()...` — a noisy heading prepended to the actual focus.
+- **Reproduction:** Enqueue any improve job from the JobDialog on a project without an `intent.md`. See `.otto-queue.yml`, `06-watcher-improve.png`, and `intent.txt` in the session dir.
+- **Hypothesis:** `enqueue_task(...)` derives the task id by slugifying `intent` when provided, falling back to project basename. For improve, `intent` is empty (only `focus` is set) so it falls back to project name. `resolve_intent_for_enqueue(...)` reads `intent.md` if present and otherwise constructs `# <project_name>` as the snapshot intent.
+- **Suggested fix:** For improve tasks, slugify the `focus` (`make-greet-handle-empty-or-none-name-...`) for the task id and set `intent` to the focus directly (no `# project_name` heading). Or skip the snapshot-intent prepending entirely when `focus` is set — just hand the agent the focus.
+
+### W3-IMPORTANT-2: improve loop never writes `build-journal.md` when fix-loop is single-round
+
+- **Severity:** IMPORTANT — breaks the documented improve UX ("round-by-round index in build-journal.md") and removes the only handoff artifact for partial-progress debugging.
+- **Symptom:** After improve completed (PASS, 1 round), no `build-journal.md` exists anywhere under the session's `improve/` dir. `find <session_dir> -name build-journal.md` returns nothing. The harness's `(artifact_dir / "build-journal-versions.txt")` reads `(none)`. Yet `improvement-report.md` *was* written (so the improve session ran end-to-end), and the project CLAUDE.md documents `improve/build-journal.md` as the round-by-round index.
+- **Reproduction:** Submit an improve job whose first fix-loop pass already passes the certifier (`PASS (3/5)` in this run). Inspect `<session>/improve/`.
+- **Hypothesis:** `pipeline.py` calls `append_journal(...)` only inside the certify→fix loop body (lines 1897, 1930, 2104, 2194). When the loop bails early on first-round PASS, the journal init line (`certify round 1`) IS appended but only on round transition. Looking at the narrative, the agent did `Now dispatching the certifier.` and got `CERTIFY ROUND 1 → PASS (3/5)` — but no journal write fired. Possibly the `append_journal` for the first round is inside the *fix* branch only, not the certify branch.
+- **Suggested fix:** Always seed `build-journal.md` at the start of `improve` (even before round 1), with a header line `## improve bugs — <focus>`. Append a row for round 1 regardless of outcome. This way the journal exists for every improve, even the trivial-pass case, and matches the docs.
+
+### W3-IMPORTANT-3: improvement-report.md misrepresents WARN observations as PASS checkmarks
+
+- **Severity:** IMPORTANT — operator reviewing the report sees five green ✓ rows, but three of them are WARN-level observations the certifier explicitly flagged as out-of-scope edge cases.
+- **Symptom:** `improvement-report.md` (artifact copy in `bench-results/.../W3/improvement-report.md`):
+  ```
+  ## Results
+  - ✓ Empty string, None, and missing argument all correctly return the safe default
+  - ✓ All 4 tests pass including the required empty-string test
+  - ✓ Whitespace-only strings are not stripped or treated as empty, producing ugly output
+  - ✓ Using `if not name` catches all falsy values (0, False, []) not just None/empty-string
+  - ✓ No type validation; arbitrary types accepted via f-string coercion
+  ```
+  The last three rows are clearly *negative* findings (whitespace produces ugly output, falsy-catch is overly broad, no type validation) but rendered with a green check. Compare to the certifier's own narrative diagnosis:
+  ```
+  Three WARN-level observations exist around whitespace handling and overly broad falsy-value matching, but these are edge cases beyond the stated improvement scope.
+  ```
+- **Reproduction:** Run any improve where the certifier returns PASS with WARN-level observations.
+- **Hypothesis:** The report renderer iterates over story results and prints `✓` for everything in the PASS bucket regardless of severity tag. WARN observations should render as `⚠`/`!` and be in their own subsection.
+- **Suggested fix:** Group results by `severity` or `result_type` (PASS / WARN / FAIL) before rendering. Use distinct glyphs. Or split into "Met" / "Observations" sections.
+
+### W3-IMPORTANT-4: improvement-report.md `Stories: 5/5` contradicts certifier narrative `(3/5)`
+
+- **Severity:** IMPORTANT — count is wrong or the categorization is wrong; either way the report doesn't match the narrative log.
+- **Symptom:** `improvement-report.md` says `Stories: 5/5`. The certifier's narrative says `CERTIFY ROUND 1 → PASS (3/5)` — i.e. 3 of 5 stories actually passed; the other 2 were WARN observations. Either the report should say `3/5` or the WARNs shouldn't count toward the denominator.
+- **Reproduction:** Same as W3-IMPORTANT-3.
+- **Suggested fix:** Pick one definition of "passed" and stick with it. If WARN counts as pass, the narrative should also say `5/5`. If WARN does not, the report should say `3/5` and surface WARN count separately.
+
+### W3-IMPORTANT-5: improve mode shows phase=`build` and writes to `build/narrative.log` instead of `improve/`
+
+- **Severity:** IMPORTANT — disagrees with the documented per-session layout (CLAUDE.md says `improve/build-journal.md`, etc.) and breaks downstream tools that filter by `phase`.
+- **Symptom:** The improve session's `checkpoint.json` shows `"phase": "build"` and the agent stream is at `<session>/build/narrative.log`, not `<session>/improve/narrative.log`. Yet the documented per-session layout (CLAUDE.md) lists `improve/improvement-report.md`, `improve/session-report.md`, `improve/build-journal.md`, `improve/current-state.md`, `improve/rounds/<round-id>/` as the canonical improve subdir. So the agent stream lives under `build/` while the *outputs* live under `improve/` — split-brained.
+- **Reproduction:** Enqueue any improve job. `cat <session>/checkpoint.json | grep phase` → `"build"`. `ls <session>/build/` shows the live narrative.
+- **Hypothesis:** `pipeline.py` reuses the build-phase plumbing (single `build/` log dir) for all command modes, with `phase` derived from the inner agent's runtime config. There's no separate `phase: improve` enum.
+- **Suggested fix:** Either (a) rename the agent stream dir to `agent/` (command-agnostic) so `build/` and `improve/` only contain phase-specific outputs, or (b) duplicate-write the agent stream into `improve/agent.log` for improve runs so the whole session is contained in `improve/`.
+
+### W3-IMPORTANT-6: Watcher button stays disabled and labeled "Start watcher" while title says "Stop watcher to pause queue dispatch"
+
+- **Severity:** IMPORTANT — this killed Step 6 of the harness (`start watcher click failed (W3-improve)` was the headline failure) but it's also a real UX bug.
+- **Symptom:** When the watcher is already running, the JobDialog page renders TWO buttons in the sidebar: a disabled `<button data-testid="start-watcher-button">Start watcher</button>` with `title="Stop watcher to pause queue dispatch."` *and* an enabled `<button>Stop watcher</button>` next to it. The disabled "Start watcher" button is contradictory: its label says start, its title says stop. External automation (and humans) reasonably interpret "Start watcher" as the button to click to start work — but it's disabled because the watcher *is* already started, with a tooltip that describes the action of the *other* button. See screenshots `06-watcher-improve.png` and `07-improve-terminal.png`.
+- **Reproduction:** Start the watcher (click "Start watcher" once). Then look at the sidebar.
+- **Hypothesis:** `App.tsx` renders both buttons unconditionally and disables `start-watcher-button` based on `watcher.alive`, but reuses the *Stop* tooltip when disabled — instead of either hiding the button or updating the tooltip to say "Watcher is running" / "Already running".
+- **Suggested fix:** When `watcher.alive`, hide the "Start watcher" button (or render it visually muted with title "Watcher is running"). Don't keep stale tooltip text from the opposite-state action. Only one of `start`/`stop` should be visible at a time.
+
+### W3-IMPORTANT-7: Recent Activity logs `web-as-user: legacy queue mode started` — what is "legacy queue mode"?
+
+- **Severity:** IMPORTANT (or NOTE if intended)
+- **Symptom:** `06-watcher-improve.png` Recent Activity feed shows the line `info  web-as-user: legacy queue mode started  09:24:00 PM`. There is no UI affordance for picking between modes; "legacy" suggests something deprecated leaking into the user-facing event stream.
+- **Reproduction:** Enqueue any queue task; observe Recent Activity.
+- **Hypothesis:** Internal mode flag (`legacy` vs new modular dispatcher?) being event-logged by name. Should either be removed from user-facing feed or renamed if it's meaningful UX.
+- **Suggested fix:** rename to a descriptive label (`queue mode: serial`) or filter out internal-only events from Recent Activity.
+
+### W3-NOTE-1: Narrative log spinner shows stale tool name long after agent has moved on
+
+- **Severity:** NOTE
+- **Symptom:** During the improve phase the narrative log lines for ~2 minutes were:
+  ```
+  [+0:31] • committed to improve/web-as-user-2026-04-25: 823ab65 ...
+  [+0:33] ▸ Now dispatching the certifier.
+  [+0:52] ⋯ building… (52s) · running git add greet.py test_greet.py · 8 tool calls
+  [+1:12] ⋯ building… (1m 12s) · running git add greet.py test_greet.py · 8 tool calls
+  [+1:32] ⋯ building… (1m 32s) · running git add greet.py test_greet.py · 8 tool calls
+  ```
+  The "running git add greet.py test_greet.py" status was the LAST tool call BEFORE the commit; the agent dispatched the certifier 19 s before the spinner started repeating. The spinner is frozen on a stale tool snapshot rather than reflecting the in-flight subagent (certifier) doing real work.
+- **Reproduction:** Tail any otto build/improve narrative log during a long subagent dispatch.
+- **Hypothesis:** The narrative formatter samples `last_tool_name` from the parent agent's checkpoint and keeps printing it during sub-agent windows where no new top-level tool calls happen. There's no plumbing for "subagent active: certifier" status messages.
+- **Suggested fix:** When a subagent is dispatched, emit a `subagent: certifier — running` line and either (a) hide the parent spinner during that window, or (b) say "subagent in progress · n s elapsed" instead of repeating the last unrelated tool name.
+
+### W3-NOTE-2: Console 404 on `/api/runs/queue-compat:<task-id>?...` reproduces (cross-link to W2-IMPORTANT-1, W13-IMPORTANT-1)
+
+- **Severity:** NOTE (already filed)
+- **Symptom:** `network-errors.json` records one `404 http://127.0.0.1:49523/api/runs/queue-compat%3Aadd-a-small-python-module-greet-py-that-49f59d?history_page_size=25`. Same root cause as W2-IMPORTANT-1.
+
+### W3-INFRA-1: pytest result for product verification not captured in artifacts
+
+- **Severity:** INFRA (harness hole, not Otto bug)
+- **Symptom:** Step 7 logs `running pytest in /var/folders/.../web-as-user/` and never writes `pytest.log` to the artifact dir nor logs the rc. The script then jumps straight to the FAIL summary. We don't know if the post-improve `test_greet.py` actually passed because the harness never captured the result.
+- **Reproduction:** Re-run W3.
+- **Hypothesis:** The pytest `subprocess.run(...)` may import-fail or hang silently before the `(artifact_dir / "pytest.log").write_text(...)` line. Could also be that the worktree was concurrently being torn down.
+- **Suggested fix:** Wrap the entire Step 7 try/except so a stale write *always* happens (write `rc=?` even on exception). Pre-write `pytest.log` with `"running..."` immediately so we at least see the harness reached the call.
+
+### W3 confirmations (no new bugs)
+
+- **W1-NOTE-1** (`Otto is committing runtime bookkeeping files…` printed twice on first build) reproduces in W3 — see lines `[04:22:42]` in debug.log.
+- **W2-IMPORTANT-1** (`/api/runs/queue-compat:...` 404) reproduces in W3 — see W3-NOTE-2.
+- **build → certify → success → ready-to-land** path works end-to-end for both queue jobs in this scenario; the issue is purely on the *improve baseline* (W3-CRITICAL-1) and the *artifact/UX* layer.
+- **JobDialog improve mode IS reachable** — testid `job-improve-mode-select` works, command select works, focus textarea works, submit works. So the *form* is fine; the problem is what happens after submit (CRITICAL-1).
+
+---
+
 ## Summary
 
 | Run | Verdict | Wall time | Bugs (C/I/N) | Cost (live) |
@@ -535,8 +692,9 @@ Verdict: **FAIL** (4 soft-assert failures collected).
 | W12a | PASS    | 18s       | 0 / 0 / 1     | LLM: 1 build cancelled within 11s of start (~$0.05) |
 | W12b | FAIL    | 156s      | 0 / 2 / 0     | LLM: 1 build + cert + merge (~$0.40) |
 | W13  | FAIL    | 165s      | 1 / 3 / 1     | LLM: 1 TODO build + cert (~$0.40-$0.50) |
+| W3   | FAIL    | 305s (run 2; run 1 = 208s no-op)    | 2 / 7 / 2     | LLM: 1 greet build + 1 improve (~$0.83 = $0.36 build + $0.47 improve) |
 
-Total findings (across all 6 runs): **5 CRITICAL, 17 IMPORTANT, 6 NOTE**.
+Total findings (across all 7 runs): **7 CRITICAL, 24 IMPORTANT, 8 NOTE**.
 
 (Some findings reproduce across scenarios — e.g. W1-CRITICAL-1 also surfaces in W13;
 W1-IMPORTANT-3 surfaces in W2/W12b/W13. The reproduction breadth is itself a
@@ -544,9 +702,10 @@ data point: regressions like the log-pane stacking issue affect every flow that
 opens an inspector. Counted once each at the **first** observation; reproductions
 flagged inline.)
 
-Cost actually spent: **~$2.10** total across the four new scenarios
+Cost actually spent: **~$2.93** total
 (W2 ≈ $0.85 for 2 builds; W12a ≈ $0.05 quick cancel; W12b ≈ $0.40 build+merge;
-W13 ≈ $0.50 TODO build + cert + outage).
+W13 ≈ $0.50 TODO build + cert + outage; W3 ≈ $0.83 for 1 greet build + 1 improve.
+W3 first attempt was $0.00 — never enqueued anything, see W3-CRITICAL-2).
 
 ### INFRA-class issues observed
 
@@ -564,12 +723,14 @@ W13 ≈ $0.50 TODO build + cert + outage).
 - Console errors observed: same 404s as above (only on W2 + W13).
 - No page errors anywhere.
 - **Orphan `otto queue run --no-dashboard --concurrent N` watchers persist across temp-dir cleanup** (W11-IMPORTANT-4 reproduces in W2). After W2 finished, `ps aux | grep "otto queue run"` showed two new orphans pointing at the now-deleted W2 tempdir. This is the same backend.stop() doesn't-signal-watcher bug.
+- **W3-INFRA-1**: pytest result for product verification not captured in artifacts (Step 7 logs the call but never writes pytest.log).
+- **Loading-Mission-Control race (W3-CRITICAL-2)** also affects external automation generally — the SPA needs a `data-state="ready"` marker on the shell so any tool can probe deterministically. The harness now waits for `mission-new-job-button|new-job-button|launcher-subhead` as a workaround; this should be folded into the recommended probe.
 
-### Reproduction one-liner (now covers W1+W11+W2+W12a+W12b+W13)
+### Reproduction one-liner (now covers W1+W11+W2+W3+W12a+W12b+W13)
 
 ```
 OTTO_WEB_SKIP_FRESHNESS=1 OTTO_ALLOW_REAL_COST=1 OTTO_BROWSER_SKIP_BUILD=1 \
-  .venv/bin/python scripts/web_as_user.py --scenario W1,W2,W11,W12a,W12b,W13 --provider claude
+  .venv/bin/python scripts/web_as_user.py --scenario W1,W2,W3,W11,W12a,W12b,W13 --provider claude
 ```
 
 Or one at a time (faster to triage failures):
