@@ -19,6 +19,35 @@ def _write_phase_usage(session_dir: Path, phase: str, usage: dict[str, int]) -> 
     )
 
 
+def _write_codex_subset_cache_messages(session_dir: Path, phase: str = "build") -> None:
+    phase_dir = session_dir / phase
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    (phase_dir / "messages.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "type": "result",
+                "usage": {
+                    "input_tokens": 1_000,
+                    "cached_input_tokens": 800,
+                    "output_tokens": 50,
+                },
+            }),
+            json.dumps({
+                "type": "phase_end",
+                "phase": phase,
+                "usage": {
+                    "input_tokens": 1_000,
+                    "cache_read_input_tokens": 800,
+                    "cached_input_tokens": 800,
+                    "output_tokens": 50,
+                    "total_tokens": 1_850,
+                },
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_session_summary_includes_tokens_from_phase_messages(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     run_id = "phase-token-run"
@@ -94,32 +123,7 @@ def test_codex_cached_input_tokens_are_not_double_counted(tmp_path: Path) -> Non
     repo = init_repo(tmp_path)
     run_id = "codex-cache-run"
     session_dir = paths.session_dir(repo, run_id)
-    build_dir = session_dir / "build"
-    build_dir.mkdir(parents=True, exist_ok=True)
-    (build_dir / "messages.jsonl").write_text(
-        "\n".join([
-            json.dumps({
-                "type": "result",
-                "usage": {
-                    "input_tokens": 1_000,
-                    "cached_input_tokens": 800,
-                    "output_tokens": 50,
-                },
-            }),
-            json.dumps({
-                "type": "phase_end",
-                "phase": "build",
-                "usage": {
-                    "input_tokens": 1_000,
-                    "cache_read_input_tokens": 800,
-                    "cached_input_tokens": 800,
-                    "output_tokens": 50,
-                    "total_tokens": 1_850,
-                },
-            }),
-        ]) + "\n",
-        encoding="utf-8",
-    )
+    _write_codex_subset_cache_messages(session_dir)
     paths.session_summary(repo, run_id).write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
 
     usage = _token_usage_from_summary_paths([paths.session_summary(repo, run_id)], base_dir=None)
@@ -136,32 +140,7 @@ def test_phase_messages_override_stale_inflated_summary_tokens(tmp_path: Path) -
     repo = init_repo(tmp_path)
     run_id = "stale-summary-cache-run"
     session_dir = paths.session_dir(repo, run_id)
-    build_dir = session_dir / "build"
-    build_dir.mkdir(parents=True, exist_ok=True)
-    (build_dir / "messages.jsonl").write_text(
-        "\n".join([
-            json.dumps({
-                "type": "result",
-                "usage": {
-                    "input_tokens": 1_000,
-                    "cached_input_tokens": 800,
-                    "output_tokens": 50,
-                },
-            }),
-            json.dumps({
-                "type": "phase_end",
-                "phase": "build",
-                "usage": {
-                    "input_tokens": 1_000,
-                    "cache_read_input_tokens": 800,
-                    "cached_input_tokens": 800,
-                    "output_tokens": 50,
-                    "total_tokens": 1_850,
-                },
-            }),
-        ]) + "\n",
-        encoding="utf-8",
-    )
+    _write_codex_subset_cache_messages(session_dir)
     paths.session_summary(repo, run_id).write_text(
         json.dumps({
             "run_id": run_id,
@@ -179,6 +158,51 @@ def test_phase_messages_override_stale_inflated_summary_tokens(tmp_path: Path) -
     usage = _token_usage_from_summary_paths([paths.session_summary(repo, run_id)], base_dir=None)
 
     assert usage == {
+        "input_tokens": 1_000,
+        "cached_input_tokens": 800,
+        "output_tokens": 50,
+        "total_tokens": 1_050,
+    }
+
+
+def test_write_session_summary_phase_messages_replace_stale_breakdown_tokens(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    run_id = "stale-breakdown-cache-run"
+    session_dir = paths.session_dir(repo, run_id)
+    _write_codex_subset_cache_messages(session_dir)
+
+    _write_session_summary(
+        repo,
+        run_id,
+        verdict="passed",
+        passed=True,
+        cost=0.0,
+        duration=1.0,
+        stories_passed=1,
+        stories_tested=1,
+        rounds=1,
+        breakdown={
+            "build": {
+                "duration_s": 1.0,
+                "input_tokens": 1_000,
+                "cache_read_input_tokens": 800,
+                "cached_input_tokens": 800,
+                "output_tokens": 50,
+                "total_tokens": 1_850,
+            }
+        },
+    )
+
+    summary = json.loads(paths.session_summary(repo, run_id).read_text(encoding="utf-8"))
+
+    assert summary["token_usage"] == {
+        "input_tokens": 1_000,
+        "cached_input_tokens": 800,
+        "output_tokens": 50,
+        "total_tokens": 1_050,
+    }
+    assert summary["breakdown"]["build"] == {
+        "duration_s": 1.0,
         "input_tokens": 1_000,
         "cached_input_tokens": 800,
         "output_tokens": 50,

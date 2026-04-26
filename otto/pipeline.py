@@ -174,8 +174,10 @@ def _merge_phase_token_usage(
     for phase, usage in phase_usage.items():
         entry = merged.setdefault(str(phase), {})
         for key in TOKEN_USAGE_KEYS:
+            entry.pop(key, None)
+        for key in TOKEN_USAGE_KEYS:
             value = usage.get(key)
-            if value and key not in entry:
+            if value:
                 entry[key] = int(value)
     return merged
 
@@ -1109,12 +1111,9 @@ async def build_agentic_v3(
                     phase_entry["duration_s"] = round(float(usage["duration_s"]), 1)
                 if isinstance(usage.get("cost_usd"), (int, float)) and float(usage["cost_usd"]) > 0:
                     phase_entry["cost_usd"] = _round_cost(float(usage["cost_usd"]))
-                if isinstance(usage.get("input_tokens"), (int, float)):
-                    phase_entry["input_tokens"] = int(usage["input_tokens"])
-                if isinstance(usage.get("cached_input_tokens"), (int, float)):
-                    phase_entry["cached_input_tokens"] = int(usage["cached_input_tokens"])
-                if isinstance(usage.get("output_tokens"), (int, float)):
-                    phase_entry["output_tokens"] = int(usage["output_tokens"])
+                for key in TOKEN_USAGE_KEYS:
+                    if isinstance(usage.get(key), (int, float)):
+                        phase_entry[key] = int(usage[key])
                 if phase_name == "certify":
                     phase_entry["rounds"] = max(rounds, 1) if rounds > 0 else 1
                 if phase_entry:

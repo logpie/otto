@@ -31,6 +31,7 @@ OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
 RESULTS_DIR = REPO_ROOT / "bench-results"
 
 from otto.runs.schema import TERMINAL_STATUSES  # noqa: E402
+from bench_costs import merge_cost_from_state_dir  # noqa: E402
 from real_cost_guard import require_real_cost_opt_in  # noqa: E402
 
 
@@ -411,32 +412,7 @@ def bench_p2_sequential_baseline(name: str = "P2-todo-sequential-baseline") -> B
 # ------------------- driver -------------------
 
 def _sum_merge_agent_cost(repo: Path) -> float:
-    """Sum the conflict-agent cost across ALL merge runs in this repo.
-
-    Reads `otto_logs/merge/merge-*/state.json` and parses BranchOutcome.note
-    strings for `cost $X.YZ`. The consolidated path emits the SAME shared-
-    cost note on every conflicted-branch row (one agent call, cost shared) —
-    dedupe by note string within a state file before summing to avoid
-    multiplying the agent cost by the number of conflicted branches.
-    """
-    import re
-    cost_re = re.compile(r"cost \$(\d+(?:\.\d+)?)")
-    total = 0.0
-    for state_file in (repo / "otto_logs" / "merge").glob("merge-*/state.json"):
-        try:
-            d = json.loads(state_file.read_text())
-        except Exception:
-            continue
-        seen_notes: set[str] = set()
-        for o in d.get("outcomes", []):
-            note = o.get("note") or ""
-            if not note or note in seen_notes:
-                continue
-            m = cost_re.search(note)
-            if m:
-                total += float(m.group(1))
-                seen_notes.add(note)
-    return total
+    return merge_cost_from_state_dir(repo / "otto_logs" / "merge")
 
 
 def bench_p3_bookmark_parallel_features(name: str = "P3-bookmark-parallel-features") -> BenchResult:

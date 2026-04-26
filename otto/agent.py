@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from otto.observability import iso_timestamp, write_crash_artifact
+from otto.token_usage import TOKEN_USAGE_KEYS
 _SDK_IMPORT_ERROR_MESSAGE = ""
 
 CODEX_STDIO_LIMIT_BYTES = 16 * 1024 * 1024
@@ -621,7 +622,7 @@ async def run_agent_with_timeout(
             for usage_phase, usage in (breakdown_data.get("phase_usage") or {}).items():
                 if usage_phase not in finalize_breakdown or not isinstance(usage, dict):
                     continue
-                for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+                for key in TOKEN_USAGE_KEYS:
                     if isinstance(usage.get(key), (int, float)):
                         finalize_breakdown[usage_phase][key] = int(usage[key])
                 if (

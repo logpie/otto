@@ -46,11 +46,14 @@ def normalize_token_usage(mapping: Any) -> dict[str, int]:
 
 def add_token_usage(target: dict[str, int], usage: dict[str, int] | None) -> None:
     normalized = normalize_token_usage(usage or {})
+    previous_total = int(target.get("total_tokens", 0) or 0)
     for key in TOKEN_USAGE_KEYS:
         if key == "total_tokens":
             continue
         target[key] = int(target.get(key, 0) or 0) + int(normalized.get(key, 0) or 0)
-    target["total_tokens"] = token_total(target)
+    accumulated_total = previous_total + int(normalized.get("total_tokens", 0) or 0)
+    target["total_tokens"] = 0
+    target["total_tokens"] = max(accumulated_total, token_total(target))
 
 
 def token_total(token_usage: dict[str, int] | None) -> int:
@@ -92,7 +95,12 @@ def phase_token_usage_from_messages(session_dir: Path) -> dict[str, dict[str, in
     by_phase: dict[str, dict[str, int]] = {}
     if not session_dir.exists():
         return by_phase
-    for messages_path in sorted(session_dir.glob("*/messages.jsonl")):
+    message_paths = []
+    root_messages = session_dir / "messages.jsonl"
+    if root_messages.exists():
+        message_paths.append(root_messages)
+    message_paths.extend(sorted(session_dir.glob("*/messages.jsonl")))
+    for messages_path in message_paths:
         phase_events: list[tuple[str, dict[str, int], dict[str, Any]]] = []
         result_events: list[dict[str, Any]] = []
         fallback = empty_token_usage()

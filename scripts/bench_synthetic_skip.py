@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -35,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from bench_runner import BenchResult, OTTO_BIN, RESULTS_DIR, log, proof_of_work_path  # noqa: E402
+from bench_costs import merge_cost_from_state_dir  # noqa: E402
 from real_cost_guard import require_real_cost_opt_in  # noqa: E402
 
 
@@ -316,23 +316,7 @@ tasks:
 
 
 def _sum_cost(repo: Path) -> float:
-    cost_re = re.compile(r"cost \$(\d+(?:\.\d+)?)")
-    total = 0.0
-    for state_file in (repo / "otto_logs" / "merge").glob("merge-*/state.json"):
-        try:
-            d = json.loads(state_file.read_text())
-        except Exception:
-            continue
-        seen: set[str] = set()
-        for o in d.get("outcomes", []):
-            note = o.get("note") or ""
-            if not note or note in seen:
-                continue
-            m = cost_re.search(note)
-            if m:
-                total += float(m.group(1))
-                seen.add(note)
-    return total
+    return merge_cost_from_state_dir(repo / "otto_logs" / "merge")
 
 
 def _read_latest_merge_state(repo: Path) -> dict | None:

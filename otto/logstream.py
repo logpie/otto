@@ -42,6 +42,13 @@ from otto.agent import (
 )
 from otto.markers import _STORY_RESULT_RE, _VERDICT_RE, _parse_story_result_fields
 from otto.redaction import redact_text
+from otto.token_usage import (
+    TOKEN_USAGE_KEYS,
+    add_token_usage,
+    empty_token_usage,
+    normalize_token_usage,
+    token_total,
+)
 
 # Certifier-marker lines we elevate in the narrative so humans can scan
 # for them. Order matters — checked as startswith.
@@ -282,18 +289,9 @@ class JsonlMessageWriter:
         self._phase_name = (phase_name or "BUILD").strip().lower()
         self._phase = self._phase_name if self._phase_name in {"build", "certify", "spec"} else "build"
         self._phase_started_monotonic = self._start
-        self._phase_usage_current = {
-            "input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "cached_input_tokens": 0,
-            "output_tokens": 0,
-            "reasoning_tokens": 0,
-            "total_tokens": 0,
-            "cost_usd": 0.0,
-        }
+        self._phase_usage_current = _empty_usage()
         self._phase_usage_totals: dict[str, dict[str, float | int]] = {}
-        self._last_usage_seen: dict[str, float] | None = None
+        self._last_usage_seen: dict[str, float | int] | None = None
         self._tool_by_id: dict[str, str] = {}
         self._agent_input_by_id: dict[str, dict[str, Any]] = {}
         self._subagent_retry_counts: dict[str, int] = {}
@@ -351,30 +349,13 @@ class JsonlMessageWriter:
         if include_open and not self._closed:
             current = data.setdefault(
                 self._phase,
-                {
-                    "duration_s": 0.0,
-                    "input_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
-                    "cached_input_tokens": 0,
-                    "output_tokens": 0,
-                    "reasoning_tokens": 0,
-                    "total_tokens": 0,
-                    "cost_usd": 0.0,
-                },
+                {"duration_s": 0.0, **_empty_usage()},
             )
             current["duration_s"] = float(current.get("duration_s", 0.0)) + max(
                 time.monotonic() - self._phase_started_monotonic,
                 0.0,
             )
-            current["input_tokens"] = int(current.get("input_tokens", 0) or 0) + int(self._phase_usage_current.get("input_tokens", 0) or 0)
-            current["cache_creation_input_tokens"] = int(current.get("cache_creation_input_tokens", 0) or 0) + int(self._phase_usage_current.get("cache_creation_input_tokens", 0) or 0)
-            current["cache_read_input_tokens"] = int(current.get("cache_read_input_tokens", 0) or 0) + int(self._phase_usage_current.get("cache_read_input_tokens", 0) or 0)
-            current["cached_input_tokens"] = int(current.get("cached_input_tokens", 0) or 0) + int(self._phase_usage_current.get("cached_input_tokens", 0) or 0)
-            current["output_tokens"] = int(current.get("output_tokens", 0) or 0) + int(self._phase_usage_current.get("output_tokens", 0) or 0)
-            current["reasoning_tokens"] = int(current.get("reasoning_tokens", 0) or 0) + int(self._phase_usage_current.get("reasoning_tokens", 0) or 0)
-            current["total_tokens"] = int(current.get("total_tokens", 0) or 0) + int(self._phase_usage_current.get("total_tokens", 0) or 0)
-            current["total_tokens"] = _usage_total(current)
+            add_token_usage(current, self._phase_usage_current)
             current["cost_usd"] = float(current.get("cost_usd", 0.0) or 0.0) + float(self._phase_usage_current.get("cost_usd", 0.0) or 0.0)
         return data
 
@@ -414,16 +395,7 @@ class JsonlMessageWriter:
         if duration_s is not None:
             event["duration_s"] = round(float(duration_s), 3)
         if usage is not None:
-            clean_usage = {
-                "input_tokens": int(usage.get("input_tokens", 0) or 0),
-                "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens", 0) or 0),
-                "cache_read_input_tokens": int(usage.get("cache_read_input_tokens", 0) or 0),
-                "cached_input_tokens": int(usage.get("cached_input_tokens", 0) or 0),
-                "output_tokens": int(usage.get("output_tokens", 0) or 0),
-                "reasoning_tokens": int(usage.get("reasoning_tokens", 0) or 0),
-                "total_tokens": int(usage.get("total_tokens", 0) or 0),
-            }
-            clean_usage["total_tokens"] = _usage_total(clean_usage)
+            clean_usage = normalize_token_usage(usage)
             cost_value = usage.get("cost_usd")
             if isinstance(cost_value, int | float):
                 clean_usage["cost_usd"] = round(float(cost_value), 4)
@@ -442,18 +414,8 @@ class JsonlMessageWriter:
     def _usage_delta(self, usage: dict[str, Any] | None) -> dict[str, float | int]:
         if not isinstance(usage, dict):
             return _empty_usage()
-        cache_creation = max(int(usage.get("cache_creation_input_tokens", 0) or 0), 0)
-        cache_read = max(int(usage.get("cache_read_input_tokens", 0) or 0), 0)
-        legacy_cached = max(int(usage.get("cached_input_tokens", 0) or 0), 0)
-        cached_total = max(legacy_cached, cache_creation + cache_read)
-        current = {
-            "input_tokens": max(int(usage.get("input_tokens", usage.get("tokens_in", 0)) or 0), 0),
-            "cache_creation_input_tokens": cache_creation,
-            "cache_read_input_tokens": cache_read,
-            "cached_input_tokens": max(int(usage.get("cached_input_tokens", 0) or 0), 0),
-            "output_tokens": max(int(usage.get("output_tokens", usage.get("tokens_out", 0)) or 0), 0),
-            "reasoning_tokens": max(int(usage.get("reasoning_tokens", 0) or 0), 0),
-            "total_tokens": max(int(usage.get("total_tokens", 0) or 0), 0),
+        current: dict[str, float | int] = {
+            **normalize_token_usage(usage),
             "cost_usd": float(
                 usage.get(
                     "total_cost_usd",
@@ -462,30 +424,22 @@ class JsonlMessageWriter:
                 or 0.0
             ),
         }
-        current["cached_input_tokens"] = cached_total
-        current["total_tokens"] = max(int(current["total_tokens"]), _usage_total(current))
         previous = self._last_usage_seen
         self._last_usage_seen = current
         if previous is None:
             return current
-        monotonic = all(current[key] >= previous.get(key, 0) for key in current)
-        if monotonic and any(current[key] > previous.get(key, 0) for key in current):
-            return {
-                key: (current[key] - previous.get(key, 0))
-                for key in current
-            }
+        monotonic_tokens = all(current[key] >= previous.get(key, 0) for key in TOKEN_USAGE_KEYS)
+        if monotonic_tokens and any(current[key] > previous.get(key, 0) for key in TOKEN_USAGE_KEYS):
+            delta = {key: (current[key] - previous.get(key, 0)) for key in TOKEN_USAGE_KEYS}
+            previous_cost = float(previous.get("cost_usd", 0.0) or 0.0)
+            current_cost = float(current.get("cost_usd", 0.0) or 0.0)
+            delta["cost_usd"] = current_cost - previous_cost if current_cost >= previous_cost else current_cost
+            return delta
         return current
 
     def _record_usage(self, record: dict[str, Any]) -> None:
         delta = self._usage_delta(record.get("usage"))
-        self._phase_usage_current["input_tokens"] += int(delta.get("input_tokens", 0) or 0)
-        self._phase_usage_current["cache_creation_input_tokens"] += int(delta.get("cache_creation_input_tokens", 0) or 0)
-        self._phase_usage_current["cache_read_input_tokens"] += int(delta.get("cache_read_input_tokens", 0) or 0)
-        self._phase_usage_current["cached_input_tokens"] += int(delta.get("cached_input_tokens", 0) or 0)
-        self._phase_usage_current["output_tokens"] += int(delta.get("output_tokens", 0) or 0)
-        self._phase_usage_current["reasoning_tokens"] += int(delta.get("reasoning_tokens", 0) or 0)
-        self._phase_usage_current["total_tokens"] += int(delta.get("total_tokens", 0) or 0)
-        self._phase_usage_current["total_tokens"] = _usage_total(self._phase_usage_current)
+        add_token_usage(self._phase_usage_current, delta)
         self._phase_usage_current["cost_usd"] += float(delta.get("cost_usd", 0.0) or 0.0)
 
     def _end_phase(self, phase: str) -> None:
@@ -508,25 +462,9 @@ class JsonlMessageWriter:
             },
         )
         totals["duration_s"] = float(totals.get("duration_s", 0.0)) + duration_s
-        totals["input_tokens"] = int(totals.get("input_tokens", 0) or 0) + int(usage.get("input_tokens", 0) or 0)
-        totals["cache_creation_input_tokens"] = int(totals.get("cache_creation_input_tokens", 0) or 0) + int(usage.get("cache_creation_input_tokens", 0) or 0)
-        totals["cache_read_input_tokens"] = int(totals.get("cache_read_input_tokens", 0) or 0) + int(usage.get("cache_read_input_tokens", 0) or 0)
-        totals["cached_input_tokens"] = int(totals.get("cached_input_tokens", 0) or 0) + int(usage.get("cached_input_tokens", 0) or 0)
-        totals["output_tokens"] = int(totals.get("output_tokens", 0) or 0) + int(usage.get("output_tokens", 0) or 0)
-        totals["reasoning_tokens"] = int(totals.get("reasoning_tokens", 0) or 0) + int(usage.get("reasoning_tokens", 0) or 0)
-        totals["total_tokens"] = int(totals.get("total_tokens", 0) or 0) + int(usage.get("total_tokens", 0) or 0)
-        totals["total_tokens"] = _usage_total(totals)
+        add_token_usage(totals, usage)
         totals["cost_usd"] = float(totals.get("cost_usd", 0.0) or 0.0) + float(usage.get("cost_usd", 0.0) or 0.0)
-        self._phase_usage_current = {
-            "input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "cached_input_tokens": 0,
-            "output_tokens": 0,
-            "reasoning_tokens": 0,
-            "total_tokens": 0,
-            "cost_usd": 0.0,
-        }
+        self._phase_usage_current = _empty_usage()
 
     def _start_phase(self, phase: str) -> None:
         self._phase = phase
@@ -1268,61 +1206,20 @@ def _format_compact_tokens(value: int | float) -> str:
 
 
 def _total_token_usage(breakdown: dict[str, dict[str, Any]] | None) -> dict[str, int]:
-    totals = {
-        "input_tokens": 0,
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": 0,
-        "cached_input_tokens": 0,
-        "output_tokens": 0,
-        "reasoning_tokens": 0,
-        "total_tokens": 0,
-    }
+    totals = empty_token_usage()
     for phase_data in (breakdown or {}).values():
         if not isinstance(phase_data, dict):
             continue
-        for key in (
-            "input_tokens",
-            "cache_creation_input_tokens",
-            "cache_read_input_tokens",
-            "cached_input_tokens",
-            "output_tokens",
-            "reasoning_tokens",
-        ):
-            if isinstance(phase_data.get(key), int | float):
-                totals[key] += int(phase_data[key])
-    totals["cached_input_tokens"] = max(
-        int(totals.get("cached_input_tokens", 0) or 0),
-        int(totals.get("cache_creation_input_tokens", 0) or 0)
-        + int(totals.get("cache_read_input_tokens", 0) or 0),
-    )
-    totals["total_tokens"] = _usage_total(totals)
-    return {key: int(value) for key, value in totals.items()}
+        add_token_usage(totals, phase_data)
+    return {key: int(totals.get(key, 0) or 0) for key in TOKEN_USAGE_KEYS}
 
 
 def _empty_usage() -> dict[str, float | int]:
-    return {
-        "input_tokens": 0,
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": 0,
-        "cached_input_tokens": 0,
-        "output_tokens": 0,
-        "reasoning_tokens": 0,
-        "total_tokens": 0,
-        "cost_usd": 0.0,
-    }
+    return {**empty_token_usage(), "cost_usd": 0.0}
 
 
 def _usage_total(usage: dict[str, Any]) -> int:
-    cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
-    cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
-    derived = (
-        int(usage.get("input_tokens", 0) or 0)
-        + cache_creation
-        + cache_read
-        + int(usage.get("output_tokens", 0) or 0)
-        + int(usage.get("reasoning_tokens", 0) or 0)
-    )
-    return max(int(usage.get("total_tokens", 0) or 0), derived)
+    return token_total(usage)
 
 
 def _looks_like_closing_summary(text: str) -> bool:

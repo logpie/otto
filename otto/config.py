@@ -822,7 +822,13 @@ def _queue_value_is_valid(key: str, value: Any) -> bool:
     if key == "concurrent":
         return isinstance(value, int) and not isinstance(value, bool) and value >= 1
     if key == "worktree_dir":
-        return isinstance(value, str)
+        if not isinstance(value, str):
+            return False
+        value = value.strip()
+        if not value:
+            return False
+        candidate = Path(value)
+        return not candidate.is_absolute() and ".." not in candidate.parts
     if key == "on_watcher_restart":
         return isinstance(value, str) and value in {"resume", "fail"}
     if key == "merge_certifier_mode":

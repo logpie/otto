@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from otto.logstream import summarize_browser_efficiency
 from otto.redaction import redact_text
+from otto.token_usage import phase_token_usage_from_messages, total_token_usage_from_phases
 
 try:
     import tomllib
@@ -1257,33 +1258,7 @@ def _show_round_timeline(round_history: list[dict[str, Any]]) -> bool:
 
 def _token_usage_summary(messages_jsonl: Path) -> dict[str, int]:
     """Return total token usage from phase events, falling back to result usage."""
-    phase_totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
-    fallback: dict[str, int] = {}
-    try:
-        with messages_jsonl.open(encoding="utf-8") as fh:
-            for raw_line in fh:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                rec = json.loads(line)
-                usage = rec.get("usage")
-                if not isinstance(usage, dict):
-                    continue
-                item = {
-                    "input_tokens": int(usage.get("input_tokens", 0) or 0),
-                    "cached_input_tokens": int(usage.get("cached_input_tokens", 0) or 0),
-                    "output_tokens": int(usage.get("output_tokens", 0) or 0),
-                }
-                if rec.get("type") == "phase_end":
-                    for key, value in item.items():
-                        phase_totals[key] += value
-                elif rec.get("type") == "result":
-                    fallback = item
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return {}
-
-    total = phase_totals if any(phase_totals.values()) else fallback
-    return {key: value for key, value in total.items() if value > 0}
+    return total_token_usage_from_phases(phase_token_usage_from_messages(messages_jsonl.parent))
 
 
 def _token_usage_lines(token_usage: dict[str, int]) -> list[str]:
@@ -2572,7 +2547,15 @@ async def run_agentic_certifier(
             }
             if float(cost or 0.0) > 0:
                 breakdown_summary["certify"]["cost_usd"] = float(cost or 0.0)
-            for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+            for key in (
+                "input_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+            ):
                 if isinstance(usage.get(key), (int, float)):
                     breakdown_summary["certify"][key] = int(usage[key])
             _write_session_summary(

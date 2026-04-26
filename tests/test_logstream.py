@@ -1153,6 +1153,34 @@ class TestMakeSessionLogger:
         phase_end = [rec for rec in records if rec.get("type") == "phase_end"][-1]
         assert phase_end["usage"]["total_tokens"] == 12345
 
+    def test_phase_usage_cumulative_tokens_ignore_cost_reset(self, tmp_path):
+        cbs = make_session_logger(tmp_path)
+        try:
+            cbs["on_message"](
+                AssistantMessage(
+                    content=[TextBlock(text="first")],
+                    usage={"input_tokens": 100, "output_tokens": 10, "total_cost_usd": 0.20},
+                )
+            )
+            cbs["on_message"](
+                AssistantMessage(
+                    content=[TextBlock(text="second")],
+                    usage={"input_tokens": 150, "output_tokens": 15},
+                )
+            )
+        finally:
+            cbs["_close"]()
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "messages.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        phase_end = [rec for rec in records if rec.get("type") == "phase_end"][-1]
+        assert phase_end["usage"]["input_tokens"] == 150
+        assert phase_end["usage"]["output_tokens"] == 15
+        assert phase_end["usage"]["cost_usd"] == 0.2
+
     def test_subagent_error_event_is_written(self, tmp_path):
         cbs = make_session_logger(tmp_path)
         try:

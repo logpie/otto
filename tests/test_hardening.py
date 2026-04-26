@@ -2144,6 +2144,7 @@ class TestProofOfWorkRendering:
             "input_tokens": 123456,
             "cached_input_tokens": 120000,
             "output_tokens": 789,
+            "total_tokens": 124245,
         }
         assert "- Cost: not reported by provider" in md
         assert "- Tokens: 123,456 input (120,000 cached), 789 output" in md

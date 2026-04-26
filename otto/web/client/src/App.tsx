@@ -1520,7 +1520,7 @@ export function App() {
       try {
         const result = await api<ActionResult | {message?: string}>(`/api/watcher/${action}`, {
           method: "POST",
-          body: action === "start" ? JSON.stringify({concurrent: 2}) : "{}",
+          body: "{}",
         });
         showToast(result.message || `watcher ${action} requested`);
         // W10-CRITICAL-1/2: peer tabs need to see watcher start/stop
@@ -6985,14 +6985,16 @@ function formatDuration(seconds: number): string {
 function tokenBreakdownLine(tokenUsage?: StateResponse["project_stats"]["token_usage"]): string {
   if (!tokenUsage) return "No token usage recorded";
   const input = Number(tokenUsage.input_tokens || 0);
-  const cacheRead = Number(tokenUsage.cache_read_input_tokens || tokenUsage.cached_input_tokens || 0);
+  const cacheRead = Number(tokenUsage.cache_read_input_tokens || 0);
   const cacheWrite = Number(tokenUsage.cache_creation_input_tokens || 0);
+  const cachedSubset = cacheRead || cacheWrite ? 0 : Number(tokenUsage.cached_input_tokens || 0);
   const output = Number(tokenUsage.output_tokens || 0);
   const reasoning = Number(tokenUsage.reasoning_tokens || 0);
   const parts = [
     input ? `${formatCompactNumber(input)} input` : "",
     cacheRead ? `${formatCompactNumber(cacheRead)} cache read` : "",
     cacheWrite ? `${formatCompactNumber(cacheWrite)} cache write` : "",
+    cachedSubset ? `${formatCompactNumber(cachedSubset)} cached` : "",
     output ? `${formatCompactNumber(output)} output` : "",
     reasoning ? `${formatCompactNumber(reasoning)} reasoning` : "",
   ].filter(Boolean);
@@ -7020,9 +7022,9 @@ function storyTotalsFromLanding(items: LandingItem[]): {passed: number; tested: 
 function tokenTotal(tokenUsage?: StateResponse["project_stats"]["token_usage"]): number {
   if (!tokenUsage) return 0;
   const explicit = Number(tokenUsage.total_tokens || 0);
+  if (explicit > 0) return explicit;
   const cacheCreation = Number(tokenUsage.cache_creation_input_tokens || 0);
-  let cacheRead = Number(tokenUsage.cache_read_input_tokens || 0);
-  if (!cacheCreation && !cacheRead) cacheRead = Number(tokenUsage.cached_input_tokens || 0);
+  const cacheRead = Number(tokenUsage.cache_read_input_tokens || 0);
   const derived = Number(tokenUsage.input_tokens || 0)
     + cacheCreation
     + cacheRead

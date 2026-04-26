@@ -317,7 +317,7 @@ def _display_status(status: str | None, overlay: StaleOverlay | None) -> str:
 
 
 def _is_effectively_active(status: str | None, overlay: StaleOverlay | None) -> bool:
-    if str(status or "") in {"done", "failed", "cancelled", "removed", "interrupted"}:
+    if str(status or "") in {"done", "failed", "cancelled", "removed", "interrupted", "paused"}:
         return False
     if overlay is not None and overlay.level == "stale":
         return False

@@ -329,8 +329,8 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     assert row["reasoning_effort"] == "medium"
     assert row["cost_display"] == "1.2K in / 56 out"
     assert row["token_usage"]["cached_input_tokens"] == 1000
-    assert state["project_stats"]["total_tokens"] == 2290
-    assert state["project_stats"]["token_display"] == "2.3K tokens"
+    assert state["project_stats"]["total_tokens"] == 1290
+    assert state["project_stats"]["token_display"] == "1.3K tokens"
     assert row["progress"] == "STORY_RESULT: web PASS"
 
     detail = client.get("/api/runs/build-web").json()
@@ -794,6 +794,11 @@ def test_web_paused_spec_review_exposes_approve_and_regenerate_actions(tmp_path:
     )
 
     client = TestClient(create_app(repo))
+    state = client.get("/api/state").json()
+    paused_item = next(item for item in state["live"]["items"] if item["run_id"] == run_id)
+    assert state["live"]["active_count"] == 0
+    assert paused_item["active"] is False
+
     detail = client.get(f"/api/runs/{run_id}").json()
     actions = {action["key"]: action for action in detail["legal_actions"]}
 
@@ -2451,14 +2456,19 @@ def test_web_can_stop_stale_but_live_watcher_process(tmp_path: Path, monkeypatch
         },
     )
     signals: list[tuple[int, int]] = []
+    killed = False
 
     def fake_kill(target_pid: int, sig: int) -> None:
+        nonlocal killed
         if sig == 0:
             return
+        killed = True
         signals.append((target_pid, sig))
 
     monkeypatch.setattr("otto.mission_control.runtime.os.kill", fake_kill)
     monkeypatch.setattr("otto.mission_control.service.os.kill", fake_kill)
+    monkeypatch.setattr("otto.mission_control.service._safe_getpgid", lambda _pid: None)
+    monkeypatch.setattr("otto.mission_control.service._pid_alive", lambda _pid: not killed)
 
     try:
         client = TestClient(create_app(repo))
@@ -2490,15 +2500,20 @@ def test_web_refuses_to_stop_unverified_live_watcher_pid(tmp_path: Path, monkeyp
         },
     )
     signals: list[tuple[int, int]] = []
+    killed = False
 
     def fake_kill(target_pid: int, sig: int) -> None:
+        nonlocal killed
         if sig == 0:
             return
+        killed = True
         signals.append((target_pid, sig))
 
     monkeypatch.setattr("otto.queue.runtime.os.kill", fake_kill)
     monkeypatch.setattr("otto.mission_control.runtime.os.kill", fake_kill)
     monkeypatch.setattr("otto.mission_control.service.os.kill", fake_kill)
+    monkeypatch.setattr("otto.mission_control.service._safe_getpgid", lambda _pid: None)
+    monkeypatch.setattr("otto.mission_control.service._pid_alive", lambda _pid: not killed)
 
     response = TestClient(create_app(repo)).post("/api/watcher/stop", json={})
 
@@ -2529,15 +2544,20 @@ def test_web_allows_stop_for_supervised_live_watcher_pid(tmp_path: Path, monkeyp
         exit_when_empty=False,
     )
     signals: list[tuple[int, int]] = []
+    killed = False
 
     def fake_kill(target_pid: int, sig: int) -> None:
+        nonlocal killed
         if sig == 0:
             return
+        killed = True
         signals.append((target_pid, sig))
 
     monkeypatch.setattr("otto.queue.runtime.os.kill", fake_kill)
     monkeypatch.setattr("otto.mission_control.runtime.os.kill", fake_kill)
     monkeypatch.setattr("otto.mission_control.service.os.kill", fake_kill)
+    monkeypatch.setattr("otto.mission_control.service._safe_getpgid", lambda _pid: None)
+    monkeypatch.setattr("otto.mission_control.service._pid_alive", lambda _pid: not killed)
 
     response = TestClient(create_app(repo)).post("/api/watcher/stop", json={})
 
@@ -2646,6 +2666,7 @@ def test_web_start_watcher_blocks_when_runtime_is_stale(tmp_path: Path, monkeypa
 def test_web_start_watcher_launches_background_process(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
+    (repo / "otto.yaml").write_text("default_branch: main\n", encoding="utf-8")
     calls: list[dict[str, object]] = []
 
     class _FakePopen:
@@ -2677,9 +2698,37 @@ def test_web_start_watcher_launches_background_process(tmp_path: Path, monkeypat
     assert calls[0]["kwargs"]["cwd"] == str(repo.resolve())
 
 
+def test_web_start_watcher_uses_configured_default_concurrency(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "otto.yaml").write_text("default_branch: main\nqueue:\n  concurrent: 4\n", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    class _FakePopen:
+        pid = 12345
+        returncode = None
+
+        def __init__(self, argv, **kwargs) -> None:
+            calls.append({"argv": argv, "kwargs": kwargs})
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr("otto.mission_control.service.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("otto.mission_control.service.time.sleep", lambda _seconds: None)
+
+    client = TestClient(create_app(repo))
+    response = client.post("/api/watcher/start", json={})
+
+    assert response.status_code == 200
+    argv = calls[0]["argv"]
+    assert argv[argv.index("--concurrent") + 1] == "4"
+
+
 def test_web_start_watcher_reports_started_when_state_becomes_alive(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
+    (repo / "otto.yaml").write_text("default_branch: main\n", encoding="utf-8")
     pid = os.getpid()
 
     class _FakePopen:
@@ -2718,6 +2767,7 @@ def test_web_start_watcher_reports_started_when_state_becomes_alive(tmp_path: Pa
 def test_web_start_watcher_records_immediate_failure(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
+    (repo / "otto.yaml").write_text("default_branch: main\n", encoding="utf-8")
 
     class _FailedPopen:
         pid = 12345

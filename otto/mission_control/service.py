@@ -19,7 +19,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 import click
 
-from otto.config import load_config
+from otto.config import ConfigError, load_config
 from otto.config import repo_preflight_issues
 from otto.config import resolve_intent_for_enqueue
 from otto import paths
@@ -57,7 +57,7 @@ from otto.mission_control.supervisor import record_watcher_stop
 from otto.mission_control.supervisor import read_supervisor
 from otto.queue.enqueue import enqueue_task
 from otto.queue.runtime import IN_FLIGHT_STATUSES, task_display_status, watcher_alive
-from otto.queue.runner import child_is_alive
+from otto.queue.runner import child_is_alive, kill_child_safely, runner_config_from_otto_config
 from otto.queue.schema import load_queue, load_state as load_queue_state
 
 LOGGER = logging.getLogger(__name__)
@@ -865,7 +865,11 @@ class MissionControlService:
                 details={"state": health.get("state"), "blocking_pid": health.get("blocking_pid")},
             )
             raise MissionControlServiceError(message, status_code=409)
-        concurrent_value = max(1, int(concurrent or 3))
+        try:
+            default_concurrent = runner_config_from_otto_config(load_config(self.project_dir / "otto.yaml")).concurrent
+        except (ConfigError, ValueError) as exc:
+            raise MissionControlServiceError(str(exc), status_code=400) from exc
+        concurrent_value = max(1, int(concurrent if concurrent is not None else default_concurrent))
         argv = [
             *_otto_cli_argv("queue", "run", "--no-dashboard"),
             "--concurrent",
@@ -980,35 +984,31 @@ class MissionControlService:
                 details={"pid": pid, "state": health.get("state")},
             )
             raise MissionControlServiceError(identity_issue, status_code=409)
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            payload = {"ok": True, "message": "watcher already stopped", "refresh": True, "watcher": self.watcher_status()}
-            self._record_event(
-                kind="watcher.stop.skipped",
-                severity="info",
-                message=payload["message"],
-                details={"pid": pid, "state": health.get("state")},
-            )
-            return payload
-        except PermissionError as exc:
+        message = "stale watcher stop requested" if health.get("state") == "stale" else "watcher stop requested"
+        termination = terminate_watcher_blocking(
+            self.project_dir,
+            grace=3.0,
+            reason=message,
+            fallback_pid=pid,
+        )
+        if termination.get("error"):
             self._record_event(
                 kind="watcher.stop.failed",
                 severity="error",
-                message=f"watcher stop denied: {exc}",
-                details={"pid": pid, "state": health.get("state")},
+                message=str(termination["error"]),
+                details={"pid": pid, "state": health.get("state"), "termination": termination},
             )
-            raise MissionControlServiceError(f"watcher stop denied: {exc}", status_code=403) from exc
-        message = "stale watcher stop requested" if health.get("state") == "stale" else "watcher stop requested"
+            raise MissionControlServiceError(str(termination["error"]), status_code=500)
         supervisor = self._record_watcher_stop(target_pid=pid, reason=message)
         payload = {"ok": True, "message": message, "refresh": True, "watcher": self.watcher_status()}
         if supervisor is not None:
             payload["supervisor"] = supervisor
+        payload["termination"] = termination
         self._record_event(
             kind="watcher.stop.requested",
             severity="warning" if health.get("state") == "stale" else "info",
             message=message,
-            details={"pid": pid, "state": health.get("state")},
+            details={"pid": pid, "state": health.get("state"), "termination": termination},
         )
         return payload
 
@@ -3182,6 +3182,7 @@ def terminate_watcher_blocking(
     *,
     grace: float = 3.0,
     reason: str = "backend shutdown",
+    fallback_pid: int | None = None,
 ) -> dict[str, Any]:
     """Force-terminate any watcher subprocess this project owns.
 
@@ -3214,20 +3215,36 @@ def terminate_watcher_blocking(
         "pgid": None,
         "escalated": False,
         "error": None,
+        "children": [],
     }
     try:
         metadata, _err = read_supervisor(project_dir)
     except Exception as exc:  # pragma: no cover — defensive
         result["error"] = f"supervisor read failed: {exc}"
         return result
-    if not metadata:
-        return result
-    pid = metadata.get("watcher_pid")
+    children = _queue_children_for_termination(project_dir)
+    pid = metadata.get("watcher_pid") if metadata else fallback_pid
     if not isinstance(pid, int) or pid <= 0:
+        if children:
+            _terminate_queue_children(children, result, signal.SIGTERM)
+            _wait_for_queue_children(children, grace)
+            live_children = [child for child in children if _child_pid_alive(child)]
+            if live_children:
+                _terminate_queue_children(live_children, result, signal.SIGKILL)
+                result["escalated"] = True
+                _wait_for_queue_children(live_children, 1.0)
         return result
     result["pid"] = pid
     if not _pid_alive(pid):
         # Already dead — record the stop so health probes stop reporting it.
+        if children:
+            _terminate_queue_children(children, result, signal.SIGTERM)
+            _wait_for_queue_children(children, grace)
+            live_children = [child for child in children if _child_pid_alive(child)]
+            if live_children:
+                _terminate_queue_children(live_children, result, signal.SIGKILL)
+                result["escalated"] = True
+                _wait_for_queue_children(live_children, 1.0)
         try:
             record_watcher_stop(project_dir, target_pid=pid, reason=f"{reason} (already dead)")
         except Exception:
@@ -3241,7 +3258,9 @@ def terminate_watcher_blocking(
     try:
         signaller(target_for_signal, signal.SIGTERM)
         result["terminated"] = True
+        _terminate_queue_children(children, result, signal.SIGTERM)
     except ProcessLookupError:
+        _terminate_queue_children(children, result, signal.SIGTERM)
         try:
             record_watcher_stop(project_dir, target_pid=pid, reason=f"{reason} (lookup miss)")
         except Exception:
@@ -3253,23 +3272,28 @@ def terminate_watcher_blocking(
 
     deadline = time.monotonic() + max(0.0, grace)
     while time.monotonic() < deadline:
-        if not _pid_alive(pid):
+        if not _pid_alive(pid) and not any(_child_pid_alive(child) for child in children):
             break
         time.sleep(0.05)
 
-    if _pid_alive(pid):
+    live_children = [child for child in children if _child_pid_alive(child)]
+    if _pid_alive(pid) or live_children:
         # Escalate to SIGKILL on the same target.
-        try:
-            signaller(target_for_signal, signal.SIGKILL)
+        if _pid_alive(pid):
+            try:
+                signaller(target_for_signal, signal.SIGKILL)
+                result["escalated"] = True
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                result["error"] = f"SIGKILL failed: {exc}"
+        if live_children:
+            _terminate_queue_children(live_children, result, signal.SIGKILL)
             result["escalated"] = True
-        except ProcessLookupError:
-            pass
-        except OSError as exc:
-            result["error"] = f"SIGKILL failed: {exc}"
         # Final brief wait for the kernel to reap.
         kill_deadline = time.monotonic() + 1.0
         while time.monotonic() < kill_deadline:
-            if not _pid_alive(pid):
+            if not _pid_alive(pid) and not any(_child_pid_alive(child) for child in children):
                 break
             time.sleep(0.05)
 
@@ -3278,6 +3302,69 @@ def terminate_watcher_blocking(
     except Exception:
         pass
     return result
+
+
+def _queue_children_for_termination(project_dir: Path) -> list[dict[str, Any]]:
+    try:
+        state = load_queue_state(project_dir)
+    except (OSError, ValueError, TypeError):
+        return []
+    children: list[dict[str, Any]] = []
+    for task_id, task_state in (state.get("tasks") or {}).items():
+        if not isinstance(task_state, dict):
+            continue
+        if str(task_state.get("status") or "") not in IN_FLIGHT_STATUSES:
+            continue
+        child = task_state.get("child")
+        if not isinstance(child, dict):
+            continue
+        normalized = {**child, "task_id": str(task_id)}
+        if child_is_alive(normalized):
+            children.append(normalized)
+    return children
+
+
+def _terminate_queue_children(
+    children: list[dict[str, Any]],
+    result: dict[str, Any],
+    sig: signal.Signals | int,
+) -> None:
+    sent_signal = getattr(sig, "name", str(sig))
+    for child in children:
+        pid = child.get("pid")
+        pgid = child.get("pgid")
+        error = None
+        try:
+            sent = kill_child_safely(child, int(sig))
+        except OSError as exc:
+            sent = False
+            error = str(exc)
+            result["error"] = result.get("error") or f"child signal failed: {exc}"
+        if sent:
+            result["terminated"] = True
+        child_result = {
+            "task_id": child.get("task_id"),
+            "pid": pid,
+            "pgid": pgid,
+            "signal": sent_signal,
+            "sent": sent,
+        }
+        if error:
+            child_result["error"] = error
+        result["children"].append(child_result)
+
+
+def _child_pid_alive(child: dict[str, Any]) -> bool:
+    pid = child.get("pid")
+    return isinstance(pid, int) and _pid_alive(pid)
+
+
+def _wait_for_queue_children(children: list[dict[str, Any]], grace: float) -> None:
+    deadline = time.monotonic() + max(0.0, grace)
+    while time.monotonic() < deadline:
+        if not any(_child_pid_alive(child) for child in children):
+            return
+        time.sleep(0.05)
 
 
 def _pid_alive(pid: int) -> bool:

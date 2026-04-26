@@ -44,6 +44,7 @@ from otto.mission_control.supervisor import (
     read_supervisor,
     supervisor_path,
 )
+from otto.queue.schema import write_state
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +108,14 @@ def _record_watcher(project_dir: Path, pid: int) -> None:
         concurrent=2,
         exit_when_empty=False,
     )
+
+
+def _queue_child_record(proc: subprocess.Popen[bytes]) -> dict[str, int]:
+    return {
+        "pid": proc.pid,
+        "pgid": os.getpgid(proc.pid),
+        "start_time_ns": int(psutil.Process(proc.pid).create_time() * 1_000_000_000),
+    }
 
 
 def _is_dead_or_zombie(pid: int) -> bool:
@@ -203,6 +212,42 @@ def test_terminate_watcher_blocking_kills_grandchildren(tmp_path: Path) -> None:
                 pass
 
 
+def test_terminate_watcher_blocking_kills_queue_children_in_separate_process_groups(tmp_path: Path) -> None:
+    """Queue task children use their own process groups and need explicit cleanup."""
+
+    project_dir = tmp_path / "project"
+    _git_init(project_dir)
+    watcher = _spawn_sleep(duration=120)
+    child = _spawn_sleep(duration=120)
+    try:
+        _record_watcher(project_dir, watcher.pid)
+        write_state(
+            project_dir,
+            {
+                "schema_version": 1,
+                "watcher": None,
+                "tasks": {
+                    "task-1": {
+                        "status": "running",
+                        "child": _queue_child_record(child),
+                    }
+                },
+            },
+        )
+
+        result = terminate_watcher_blocking(project_dir, grace=3.0)
+
+        assert result["terminated"] is True
+        assert any(item["pid"] == child.pid and item["sent"] for item in result["children"])
+        assert _wait_dead(watcher.pid), f"watcher pid={watcher.pid} survived terminate"
+        assert _wait_dead(child.pid), f"queue child pid={child.pid} survived terminate"
+    finally:
+        for proc in (watcher, child):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=2)
+
+
 def test_terminate_watcher_blocking_escalates_to_sigkill(tmp_path: Path) -> None:
     """A watcher that ignores SIGTERM should be SIGKILLed after grace."""
 
@@ -262,6 +307,7 @@ def test_terminate_watcher_blocking_no_metadata_is_noop(tmp_path: Path) -> None:
         "pgid": None,
         "escalated": False,
         "error": None,
+        "children": [],
     }
 
 
