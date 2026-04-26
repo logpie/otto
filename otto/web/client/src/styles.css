@@ -1881,6 +1881,29 @@ tbody tr.selected {
   font-weight: 600;
 }
 
+/* mc-audit microinteractions I7: a disabled tab (e.g. Diff while the run
+   has no branch yet) must look obviously different from a merely-inactive
+   tab. The base button:disabled rule sets a flat grey background that is
+   nearly identical to .tab's --surface-alt, making the two states
+   indistinguishable. Override with a striped background, lower opacity,
+   strikethrough text, and not-allowed cursor so operators know the tab
+   cannot be activated. */
+.tab:disabled,
+.tab[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+  text-decoration: line-through;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      #eef1f5 0,
+      #eef1f5 6px,
+      #e3e7ee 6px,
+      #e3e7ee 12px
+    );
+  color: #9aa4b2;
+}
+
 .run-inspector {
   position: fixed;
   left: 254px;
@@ -2502,11 +2525,38 @@ tbody tr.selected {
   opacity: 0;
   transform: translateY(8px);
   transition: opacity 0.16s ease, transform 0.16s ease;
+  /* mc-audit microinteractions I8: layout the message + close-button so the
+     ✕ stays at the right edge regardless of message length. */
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
 }
 
 #toast.visible {
   opacity: 1;
   transform: translateY(0);
+}
+
+#toast .toast-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#toast .toast-close {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  margin: -2px -4px -2px 0;
+  cursor: pointer;
+}
+
+#toast .toast-close:hover:not(:disabled) {
+  color: white;
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .toast-error {
@@ -2563,6 +2613,22 @@ tbody tr.selected {
 .confirm-dialog p {
   margin: 0;
   color: var(--muted);
+}
+
+/* mc-audit microinteractions I6: in danger-tone confirms the Cancel button
+   gets explicit "safe-choice" emphasis (heavier outline + bolder text) so a
+   panicked user can spot the abort path next to the red destructive CTA.
+   Non-danger Cancel buttons keep the default appearance. */
+.confirm-dialog .confirm-dialog-cancel.cancel-emphasis {
+  border: 2px solid #1f2937;
+  background: var(--surface);
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.confirm-dialog .confirm-dialog-cancel.cancel-emphasis:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: #0f172a;
 }
 
 .field-grid {

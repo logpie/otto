@@ -436,6 +436,10 @@ export interface QueuePayload {
   as?: string;
   after?: string[];
   extra_args: string[];
+  // W3-CRITICAL-1: improve must iterate on the prior run's branch (not fork
+  // from main). The JobDialog populates this when command === "improve" and
+  // the operator picks a prior run from the dropdown.
+  prior_run_id?: string;
 }
 
 export interface QueueResult {

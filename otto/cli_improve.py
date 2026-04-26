@@ -15,6 +15,65 @@ from otto.config import ConfigError, require_git, resolve_project_dir
 from otto.theme import error_console
 
 
+# --------------------------------------------------------------------------- #
+# Report rendering helpers (pure — pulled out so they can be unit-tested
+# without spinning up the certify→fix loop)
+# --------------------------------------------------------------------------- #
+
+
+# Glyphs/labels per verdict tier. The icon is what the operator sees first;
+# the trailing label disambiguates for screen-readers and grep-able audits.
+# WARN is intentionally NOT a check — see W3-IMPORTANT-3 in
+# docs/mc-audit/live-findings.md (operator misread three WARN observations
+# as PASS because the prior renderer hard-coded ✓ for any `passed`-truthy
+# story, including warnings).
+_VERDICT_GLYPHS: dict[str, tuple[str, str, str]] = {
+    # verdict        icon  text-label   semantic class (for any future HTML
+    #                                   /ANSI styling — kept as plain text
+    #                                   in markdown so reports stay
+    #                                   render-anywhere).
+    "PASS":          ("✓", "PASS", "success"),
+    "WARN":          ("!",      "WARN", "warning"),
+    "FAIL":          ("✗", "FAIL", "danger"),
+    "SKIPPED":       ("–", "SKIP", "muted"),
+    "FLAG_FOR_HUMAN":("⚠", "FLAG", "warning"),
+}
+
+
+def _journey_verdict(journey: dict[str, object]) -> str:
+    """Return the canonical verdict tag for a journey row.
+
+    Falls back to PASS/FAIL by `passed` for any caller that hasn't been
+    upgraded to populate `verdict` (older serialized state, mock data).
+    """
+    raw = journey.get("verdict")
+    if isinstance(raw, str) and raw:
+        verdict = raw.upper()
+        if verdict in _VERDICT_GLYPHS:
+            return verdict
+    return "PASS" if journey.get("passed") else "FAIL"
+
+
+def _render_results_section(journeys: list[dict[str, object]]) -> list[str]:
+    """Render the `## Results` block as markdown lines.
+
+    Each row carries the verdict glyph AND a bracketed `[PASS]/[WARN]/[FAIL]`
+    label so the report is unambiguous even where the glyph fails to render
+    (terminals without unicode, plain-text exports). The label also makes
+    the rows trivially greppable for downstream audit tooling.
+    """
+    if not journeys:
+        return []
+    lines: list[str] = ["## Results"]
+    for j in journeys:
+        verdict = _journey_verdict(j)
+        icon, label, _cls = _VERDICT_GLYPHS.get(verdict, ("?", verdict, "muted"))
+        name = j.get("name") or j.get("story_id") or ""
+        lines.append(f"- {icon} [{label}] {name}")
+    lines.append("")
+    return lines
+
+
 def _positive_budget_option(
     _ctx: click.Context,
     _param: click.Parameter,
@@ -518,12 +577,7 @@ def _run_improve_locked(
         report_lines.append(f"**Target:** {target}")
         report_lines.append("")
 
-    if result.journeys:
-        report_lines.append("## Results")
-        for j in result.journeys:
-            icon = "\u2713" if j.get("passed") else "\u2717"
-            report_lines.append(f"- {icon} {j.get('name', '')}")
-        report_lines.append("")
+    report_lines.extend(_render_results_section(result.journeys))
 
     report_lines.append("## Summary")
     report_lines.append(f"- **Result:** {'PASSED' if result.passed else 'FAILED'}")
@@ -590,9 +644,20 @@ def _run_improve_locked(
     console.print()
     console.print(f"  [bold]{command_label} complete[/bold]")
     if result.journeys:
+        # Mirror the on-disk report tier: PASS = success, WARN = warning,
+        # everything else = danger. Plain-text label included so console
+        # screenshots are unambiguous even on terminals without color.
+        _CONSOLE_GLYPHS: dict[str, tuple[str, str]] = {
+            "PASS": ("[success]\u2713[/success]", "PASS"),
+            "WARN": ("[yellow]![/yellow]", "WARN"),
+            "FAIL": ("[red]\u2717[/red]", "FAIL"),
+            "SKIPPED": ("[muted]\u2013[/muted]", "SKIP"),
+            "FLAG_FOR_HUMAN": ("[yellow]\u26a0[/yellow]", "FLAG"),
+        }
         for j in result.journeys:
-            icon = "[success]\u2713[/success]" if j.get("passed") else "[red]\u2717[/red]"
-            console.print(f"    {icon} {rich_escape(j.get('name', ''))}")
+            verdict = _journey_verdict(j)
+            icon, label = _CONSOLE_GLYPHS.get(verdict, ("?", verdict))
+            console.print(f"    {icon} [{label}] {rich_escape(j.get('name', ''))}")
     console.print(f"  Rounds: {result.rounds}")
     console.print(f"  Cost: ${result.total_cost:.2f}")
     console.print(f"  Duration: {duration / 60:.1f} min")

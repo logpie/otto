@@ -60,6 +60,13 @@ class QueueTask:
     spec_file_path: str | None = None
     branch: str | None = None
     worktree: str | None = None       # relative path under project_dir
+    # Base ref the worktree branch should be created FROM. None → git default
+    # (HEAD on the project's main worktree, typically the default branch).
+    # Set when an improve task should iterate on a prior run's branch
+    # (W3-CRITICAL-1): the new branch is created at <base_ref> so the
+    # improve agent sees the prior build's files instead of starting from
+    # scratch and colliding at merge time.
+    base_ref: str | None = None
     # User-provided extras — opaque, preserved on round-trip
     notes: str | None = None
 
@@ -144,6 +151,7 @@ def _task_from_dict(d: dict[str, Any]) -> QueueTask:
         spec_file_path=d.get("spec_file_path"),
         branch=d.get("branch"),
         worktree=d.get("worktree"),
+        base_ref=d.get("base_ref"),
         notes=d.get("notes"),
     )
 

@@ -1083,7 +1083,15 @@ class Runner:
             raise RuntimeError(f"task {task.id!r} missing branch snapshot")
         branch = task.branch
         try:
-            add_worktree(project_dir=self.project_dir, worktree_path=wt_path, branch=branch)
+            # base_ref is set when this task should iterate on a prior run's
+            # branch (W3-CRITICAL-1). Default None preserves git's "branch
+            # from HEAD" behaviour.
+            add_worktree(
+                project_dir=self.project_dir,
+                worktree_path=wt_path,
+                branch=branch,
+                base_ref=task.base_ref,
+            )
         except WorktreeAlreadyCheckedOut:
             # Branch already in another worktree — likely from a prior crash
             # the user didn't clean up. Fail this task with a clear reason.
@@ -1773,6 +1781,7 @@ class Runner:
             spec_file_path=raw.get("spec_file_path"),
             branch=raw.get("branch"),
             worktree=raw.get("worktree"),
+            base_ref=raw.get("base_ref"),
             notes=raw.get("notes"),
         )
 

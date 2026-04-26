@@ -30,6 +30,7 @@ def enqueue_task(
     focus: str | None = None,
     target: str | None = None,
     explicit_intent: str | None = None,
+    base_ref: str | None = None,
 ) -> QueueEnqueueResult:
     """Append a queue task and return its immutable definition."""
     project_dir = Path(project_dir)
@@ -84,6 +85,7 @@ def enqueue_task(
         target=target,
         branch=compute_branch_name(command, task_id),
         worktree=str(Path(worktree_dir) / task_id),
+        base_ref=base_ref,
     )
     append_task(project_dir, task)
     return QueueEnqueueResult(task=task, warnings=warnings)

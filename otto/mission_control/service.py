@@ -816,6 +816,16 @@ class MissionControlService:
                 if subcommand not in {"bugs", "feature", "target"}:
                     raise MissionControlServiceError("unsupported improve subcommand", status_code=400)
                 focus_or_goal = _optional_str(payload.get("focus") or payload.get("goal"))
+                # W3-CRITICAL-1: improve must iterate on a prior run's branch,
+                # not fork from main and re-collide on the same files. The web
+                # JobDialog selects a prior run and posts its run id; we
+                # resolve that to a branch ref and pass it as the worktree's
+                # base_ref so the new improve branch is rooted on the prior
+                # build's tip. Falls back to git's default (HEAD/main) when
+                # the operator submits without selecting a prior run, which
+                # preserves backwards compat for projects with no history.
+                prior_run_id = _optional_str(payload.get("prior_run_id"))
+                base_ref = self._resolve_prior_run_branch(prior_run_id) if prior_run_id else None
                 raw_args = [subcommand]
                 if focus_or_goal:
                     raw_args.append(focus_or_goal)
@@ -833,6 +843,7 @@ class MissionControlService:
                     resumable=True,
                     focus=focus_or_goal if subcommand in {"bugs", "feature"} else None,
                     target=focus_or_goal if subcommand == "target" else None,
+                    base_ref=base_ref,
                 )
             elif command == "certify":
                 intent = _optional_str(payload.get("intent"))
@@ -876,6 +887,56 @@ class MissionControlService:
             },
         )
         return response
+
+    def _resolve_prior_run_branch(self, prior_run_id: str) -> str:
+        """Look up the branch for a prior run id.
+
+        Searches live records first (handles "still-warm" runs that haven't
+        been GC'd yet), then falls back to history rows. Raises a 400 if the
+        run isn't found or doesn't have a recorded branch — the operator
+        explicitly selected this run, so a silent fallback to main would
+        re-open W3-CRITICAL-1.
+        """
+        run_id = prior_run_id.strip()
+        if not run_id:
+            raise MissionControlServiceError("prior_run_id is empty", status_code=400)
+        # Live records are the freshest source — if the prior build just
+        # finished its branch is already recorded there with the writer's tip.
+        try:
+            from otto.runs.registry import read_live_records
+            for record in read_live_records(self.project_dir):
+                if record.run_id == run_id:
+                    branch = str((record.git or {}).get("branch") or "").strip()
+                    if branch:
+                        return branch
+                    raise MissionControlServiceError(
+                        f"prior run {run_id!r} has no recorded branch", status_code=400
+                    )
+        except MissionControlServiceError:
+            raise
+        except Exception:  # pragma: no cover — defensive; fall through to history
+            pass
+        # History fallback — completed runs that have aged out of the live
+        # registry still appear in cross-sessions/history.jsonl.
+        try:
+            from otto.runs.history import load_project_history_rows
+            for row in load_project_history_rows(self.project_dir):
+                row_run_id = str(row.get("run_id") or "").strip()
+                if row_run_id != run_id:
+                    continue
+                branch = str((row.get("git") or {}).get("branch") or row.get("branch") or "").strip()
+                if branch:
+                    return branch
+                raise MissionControlServiceError(
+                    f"prior run {run_id!r} has no recorded branch", status_code=400
+                )
+        except MissionControlServiceError:
+            raise
+        except Exception:  # pragma: no cover — defensive
+            pass
+        raise MissionControlServiceError(
+            f"prior run {run_id!r} not found in live or history records", status_code=404
+        )
 
     def _state(self, filters: MissionControlFilters | None) -> MissionControlState:
         return self.model.initial_state(filters=filters or MissionControlFilters())

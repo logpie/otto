@@ -404,6 +404,13 @@ export function App() {
   const watcherInFlight = useInFlight();
   const refreshInFlight = useInFlight();
   const mergeAllInFlight = useInFlight();
+  // mc-audit microinteractions I4: optimistic UI for high-latency actions.
+  // When the operator confirms a cancel, we immediately overlay
+  // display_status="cancelling" on the affected row so the card flips state
+  // within ~16ms instead of waiting for the next /api/state poll (up to
+  // refresh_interval_s seconds). On POST failure, we drop the overlay so
+  // the row reverts to its server-provided state.
+  const [optimisticRunStates, setOptimisticRunStates] = useState<Record<string, "cancelling">>({});
   // Server byte-offset for the next log fetch. Tracked in a ref because the
   // poll loop reads-modifies it from inside a setInterval callback that must
   // not retrigger React effects.
@@ -481,6 +488,46 @@ export function App() {
     historyPageSizeRef.current = historyPageSize;
   }, [historyPageSize]);
 
+  // ---- W3-CRITICAL-2: deterministic shell-ready marker for external automation.
+  //
+  // Without this, the only public boot signal was "#root has children" — but
+  // the boot-loading skeleton renders into #root itself, so external probes
+  // (Playwright, MCP tools, smoke harnesses) can race the SPA and click
+  // controls that do not exist yet (the live W3 dogfood lost a $0 build that
+  // way). We expose two equivalent probes:
+  //   * `[data-mc-shell="ready"]` on the top-level shell wrapper — covers
+  //     DOM-attribute selectors (Playwright `wait_for_selector`, the codex
+  //     audit harness, third-party tooling).
+  //   * `window.__OTTO_MC_READY = true` — covers headless/eval contexts that
+  //     don't have data-attribute access (page.evaluate, jsdom snapshots).
+  //
+  // The marker flips ONLY after BOTH /api/projects and /api/state have
+  // resolved AND the boot-loading gate (cluster F) has cleared. While the
+  // launcher placeholder is showing the marker stays unset — the launcher
+  // is its own destination, not the actionable Mission Control shell.
+  const mcShellReady =
+    projectsLoaded && !!data && !!data.project && !projectsState?.launcher_enabled;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    // Use a typed cast for the ambient property — TypeScript strict mode
+    // disallows expandos on Window without a declaration. The shape is
+    // small enough (single boolean) that a cast is clearer than a global
+    // augmentation file for one flag.
+    const w = window as unknown as {__OTTO_MC_READY?: boolean};
+    if (mcShellReady) {
+      w.__OTTO_MC_READY = true;
+    } else {
+      // Reset when the shell un-readies (e.g. project switch routes us back
+      // through the boot gate). External probes that polled and missed must
+      // NOT see a stale `true`.
+      w.__OTTO_MC_READY = false;
+    }
+    return () => {
+      w.__OTTO_MC_READY = false;
+    };
+  }, [mcShellReady]);
+
   useEffect(() => {
     writeRouteState(currentRouteState(), "replace");
     const onPopState = () => {
@@ -525,10 +572,46 @@ export function App() {
     writeRouteState(currentRouteState(), "push");
   }, [currentRouteState]);
 
+  // mc-audit microinteractions I8: pause-on-hover + manual dismiss for toasts.
+  // Track the auto-dismiss timer in a ref so mouseenter/mouseleave can
+  // cancel/restart it without losing track of the current toast. dismissToast
+  // gives the close-button a no-arg handler.
+  const toastTimerRef = useRef<number | null>(null);
+  const TOAST_DURATION_MS = 3200;
+  const dismissToast = useCallback(() => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    setToast(null);
+  }, []);
+  const scheduleToastDismiss = useCallback((duration: number) => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast(null);
+    }, duration);
+  }, []);
+  const pauseToastDismiss = useCallback(() => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+  }, []);
+  const resumeToastDismiss = useCallback(() => {
+    // Restart with a full duration so the user gets a fresh window after
+    // their hover is over.
+    scheduleToastDismiss(TOAST_DURATION_MS);
+  }, [scheduleToastDismiss]);
   const showToast = useCallback((message: string, severity: ToastState["severity"] = "information") => {
     if (severity === "error") setLastError(message);
     setToast({message, severity});
-    window.setTimeout(() => setToast(null), 3200);
+    scheduleToastDismiss(TOAST_DURATION_MS);
+  }, [scheduleToastDismiss]);
+  // Cleanup any pending timer on unmount so we don't fire setToast after
+  // the component is gone.
+  useEffect(() => () => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
   }, []);
 
   const requestConfirm = useCallback((next: ConfirmState) => {
@@ -587,6 +670,43 @@ export function App() {
     setDetail(null);
     setSelectedQueuedTask(task);
   }, []);
+
+  // mc-audit microinteractions I4: drop optimistic "cancelling" overlays
+  // once the server reflects a terminal/cancelled state for that run, so
+  // the data stops being shadowed after the refresh confirms the action.
+  useEffect(() => {
+    if (!data) return;
+    setOptimisticRunStates((prev) => {
+      const keys = Object.keys(prev);
+      if (!keys.length) return prev;
+      const liveById = new Map((data.live.items || []).map((item) => [item.run_id, item]));
+      let changed = false;
+      const next = {...prev};
+      for (const runId of keys) {
+        const live = liveById.get(runId);
+        // No live row for this id (server already removed it) → drop.
+        if (!live) {
+          delete next[runId];
+          changed = true;
+          continue;
+        }
+        // Server has caught up to a terminal/cancelled status → drop overlay.
+        const status = (live.display_status || "").toLowerCase();
+        if (
+          status === "cancelled" ||
+          status === "cancelling" ||
+          status === "terminating" ||
+          status === "failed" ||
+          status === "done" ||
+          status === "success"
+        ) {
+          delete next[runId];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [data]);
 
   // Auto-promote selectedQueuedTask -> selectedRunId once the watcher picks
   // up the task and a real run materializes. Without this, the user stays
@@ -1014,12 +1134,37 @@ export function App() {
       // codex-destructive-action-safety #6). Do NOT catch + showToast here —
       // that would silently close the dialog on 4xx/5xx.
       onConfirm: async () => {
-        const result = await api<ActionResult>(`/api/runs/${encodeURIComponent(runId)}/actions/${action}`, {
-          method: "POST",
-          body: JSON.stringify(requestPayload),
-        });
-        handleActionResult(result, `${action} requested`, showToast, setResultBanner);
-        if (result.refresh !== false) await refresh(true);
+        // mc-audit microinteractions I4: optimistic transition for cancel.
+        // Set BEFORE the POST so the row visibly flips to "cancelling" the
+        // moment the confirm dialog closes. Cleared in the catch on failure
+        // (toast surfaces the revert) and naturally superseded by the next
+        // refresh on success.
+        if (isCancel) {
+          setOptimisticRunStates((prev) => ({...prev, [runId]: "cancelling"}));
+        }
+        try {
+          const result = await api<ActionResult>(`/api/runs/${encodeURIComponent(runId)}/actions/${action}`, {
+            method: "POST",
+            body: JSON.stringify(requestPayload),
+          });
+          handleActionResult(result, `${action} requested`, showToast, setResultBanner);
+          if (result.refresh !== false) await refresh(true);
+        } catch (err) {
+          if (isCancel) {
+            // Roll back the optimistic flip so the row returns to the
+            // server-provided status. Toast already surfaced via
+            // executeConfirmedAction's confirmError path; add a warning
+            // so the user knows the row reverted.
+            setOptimisticRunStates((prev) => {
+              if (!(runId in prev)) return prev;
+              const next = {...prev};
+              delete next[runId];
+              return next;
+            });
+            showToast("Cancel did not take effect — reverted.", "warning");
+          }
+          throw err;
+        }
       },
     });
   }, [data?.landing, detail, diffContent, refresh, requestConfirm, showToast]);
@@ -1467,7 +1612,12 @@ export function App() {
             onRefresh={onManualRefresh}
           />
         </main>
-        {toast && <div id="toast" className={`visible toast-${toast.severity}`} role="status" aria-live="polite">{toast.message}</div>}
+        <ToastDisplay
+          toast={toast}
+          onMouseEnter={pauseToastDismiss}
+          onMouseLeave={resumeToastDismiss}
+          onDismiss={dismissToast}
+        />
       </div>
     );
   }
@@ -1491,7 +1641,7 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-mc-shell="ready">
       {/* Skip link must be the first focusable element so a single Tab from
           page load lands on it. Visually hidden until focused. mc-audit a11y
           A11Y-08, K-09. */}
@@ -1585,7 +1735,7 @@ export function App() {
             <div className="diagnostics-workspace">
               <div className="diagnostics-grid">
                 <DiagnosticsSummary data={data} onSelect={selectRun} />
-                <LiveRuns items={data?.live.items || []} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
+                <LiveRuns items={applyOptimisticRunStates(data?.live.items || [], optimisticRunStates)} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
                 <EventTimeline events={data?.events} />
                 <History
                   items={data?.history.items || []}
@@ -1652,6 +1802,7 @@ export function App() {
         <JobDialog
           project={project}
           dirtyFiles={landing?.dirty_files || []}
+          priorRunOptions={collectPriorRunOptions(landing?.items || [], data?.history.items || [])}
           onClose={() => setJobOpen(false)}
           onQueued={async (message) => {
             setJobOpen(false);
@@ -1689,7 +1840,47 @@ export function App() {
           onConfirm={() => void executeConfirmedAction()}
         />
       )}
-      {toast && <div id="toast" className={`visible toast-${toast.severity}`} role="status" aria-live="polite">{toast.message}</div>}
+      <ToastDisplay
+        toast={toast}
+        onMouseEnter={pauseToastDismiss}
+        onMouseLeave={resumeToastDismiss}
+        onDismiss={dismissToast}
+      />
+    </div>
+  );
+}
+
+/**
+ * mc-audit microinteractions I8: shared toast renderer with hover-to-pause
+ * and a manual ✕ dismiss button. Lives outside the App component so both
+ * the launcher view (line ~1470) and the workspace view (line ~1690) can
+ * use the same markup without duplication.
+ */
+function ToastDisplay({toast, onMouseEnter, onMouseLeave, onDismiss}: {
+  toast: ToastState | null;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
+  onDismiss: () => void;
+}) {
+  if (!toast) return null;
+  return (
+    <div
+      id="toast"
+      className={`visible toast-${toast.severity}`}
+      role="status"
+      aria-live="polite"
+      data-testid="toast"
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+    >
+      <span className="toast-message">{toast.message}</span>
+      <button
+        type="button"
+        className="toast-close"
+        data-testid="toast-close"
+        aria-label="Dismiss notification"
+        onClick={onDismiss}
+      >×</button>
     </div>
   );
 }
@@ -3906,9 +4097,115 @@ function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoad
   );
 }
 
-function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
+// W3-CRITICAL-1: a single prior-run candidate the JobDialog's "Refine which
+// run?" dropdown can show. The label is what the operator sees; run_id is
+// what the server uses to look up the prior branch.
+interface PriorRunOption {
+  run_id: string;
+  branch: string;
+  label: string;
+}
+
+/**
+ * Build the list of prior runs the operator can pick to iterate on.
+ *
+ * Inputs:
+ * - ``landingItems`` — terminal-ready queue runs that are still on their
+ *   build branch (they haven't been merged yet). These are the natural
+ *   "refine the most recent thing" candidates.
+ * - ``historyItems`` — every terminal run we know about. We keep only
+ *   ``build`` and ``improve`` runs that succeeded and have a recorded
+ *   branch. ``certify`` runs land no branch; ``merge`` runs are not a
+ *   useful base.
+ *
+ * Output: deduped by run_id, sorted "freshest first" by relying on the
+ * caller's order (history is newest-first and landing.items are queued
+ * order). Keep at most 25 — improve is point-in-time, the operator
+ * doesn't need a 200-row select.
+ *
+ * Why not just expose all history? Because picking a 6-month-old build to
+ * "improve" is almost always operator error — a long-tail dropdown invites
+ * mistakes. 25 is enough to reach back through a normal day's work.
+ */
+function collectPriorRunOptions(
+  landingItems: LandingItem[],
+  historyItems: HistoryItem[],
+): PriorRunOption[] {
+  const seen = new Set<string>();
+  const options: PriorRunOption[] = [];
+
+  // Landing items first — they're the freshest and explicitly "ready to
+  // land", which means the branch is on disk and uncollided.
+  for (const item of landingItems) {
+    if (item.landing_state !== "ready") continue;
+    const runId = (item.run_id || "").trim();
+    const branch = (item.branch || "").trim();
+    if (!runId || !branch || seen.has(runId)) continue;
+    seen.add(runId);
+    options.push({
+      run_id: runId,
+      branch,
+      label: priorRunLabel({
+        summary: item.summary,
+        branch,
+        task_id: item.task_id,
+        run_id: runId,
+        when: null,
+      }),
+    });
+  }
+
+  // History items: terminal-success build/improve only.
+  for (const row of historyItems) {
+    if (row.terminal_outcome !== "success") continue;
+    const familyOk = row.command === "build"
+      || row.command === "improve"
+      || row.command?.startsWith("improve.");
+    if (!familyOk) continue;
+    const runId = (row.run_id || "").trim();
+    const branch = (row.branch || "").trim();
+    if (!runId || !branch || seen.has(runId)) continue;
+    seen.add(runId);
+    options.push({
+      run_id: runId,
+      branch,
+      label: priorRunLabel({
+        summary: row.summary || row.intent || "",
+        branch,
+        task_id: row.queue_task_id,
+        run_id: runId,
+        when: row.completed_at_display,
+      }),
+    });
+    if (options.length >= 25) break;
+  }
+
+  return options;
+}
+
+function priorRunLabel(args: {
+  summary: string | null;
+  branch: string;
+  task_id: string | null;
+  run_id: string;
+  when: string | null;
+}): string {
+  const summary = (args.summary || "").trim();
+  const trimmed = summary.length > 60 ? summary.slice(0, 57) + "…" : summary;
+  const headline = trimmed || args.task_id || args.branch || args.run_id;
+  const suffix = args.when ? ` · ${args.when}` : "";
+  return `${headline} (${args.branch})${suffix}`;
+}
+
+function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onError}: {
   project: StateResponse["project"] | undefined;
   dirtyFiles: string[];
+  // W3-CRITICAL-1: list of prior runs the operator can iterate on. Sourced
+  // from the parent (landing.items + history.items, filtered to terminal
+  // success runs with a recorded branch). When empty, the dialog tells the
+  // operator there's nothing to improve and disables Submit for command=
+  // "improve" so the silent-fork-from-main bug cannot recur.
+  priorRunOptions: PriorRunOption[];
   onClose: () => void;
   onQueued: (message?: string) => Promise<void>;
   onError: (message: string) => void;
@@ -3925,6 +4222,17 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
   const [targetConfirmed, setTargetConfirmed] = useState(false);
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // W3-CRITICAL-1: which prior run the improve job should iterate on.
+  // Auto-selects the freshest option when the dropdown becomes available
+  // so the most-likely choice is one click away. Empty string means "no
+  // selection" — Submit stays disabled so the server never silently falls
+  // back to main.
+  const [priorRunId, setPriorRunId] = useState<string>("");
+  const priorRunOptionsAvailable = priorRunOptions.length > 0;
+  // For non-improve commands the dropdown isn't rendered — treat it as
+  // satisfied so it doesn't block the submit button.
+  const priorRunMissing =
+    command === "improve" && (!priorRunOptionsAvailable || !priorRunId.trim());
   // Whether the Advanced section should be programmatically opened. The
   // pre-submit summary "Edit" link sets this so users get one-click access
   // to the provider/model/effort fields without scrolling through Otto
@@ -3946,7 +4254,11 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
   // unspecified", which is never what a user means. mc-audit
   // codex-first-time-user.md #8.
   const intentRequired = !intent.trim();
-  const submitDisabled = submitting || intentRequired || (targetNeedsConfirmation && !targetConfirmed);
+  const submitDisabled =
+    submitting
+    || intentRequired
+    || (targetNeedsConfirmation && !targetConfirmed)
+    || priorRunMissing;
 
   // Pre-submit summary fields. We resolve the visible "will run with" line
   // by combining the user's selection with the project's defaults. mc-audit
@@ -3978,6 +4290,24 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
     }
   }, [certification, command, subcommand]);
 
+  // W3-CRITICAL-1: when the operator switches to "improve" and there is
+  // exactly one obvious prior run (or the previously-picked id is no
+  // longer in the list), auto-select the freshest. The list is sorted
+  // most-recent-first by collectPriorRunOptions, so options[0] is the
+  // last terminal-success build/improve.
+  useEffect(() => {
+    if (command !== "improve") return;
+    const first = priorRunOptions[0];
+    if (!first) {
+      if (priorRunId) setPriorRunId("");
+      return;
+    }
+    const stillValid = priorRunOptions.some((option) => option.run_id === priorRunId);
+    if (!stillValid) {
+      setPriorRunId(first.run_id);
+    }
+  }, [command, priorRunOptions, priorRunId]);
+
   // Sync the <details> open state when the user clicks the "Edit" link in
   // the summary. The native attribute change has to land on the DOM node so
   // the disclosure widget actually toggles open without a re-render race.
@@ -4005,7 +4335,8 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
   async function performQueue(): Promise<void> {
     setStatus("queueing");
     try {
-      const payload = buildQueuePayload({
+      const priorRunForPayload = command === "improve" ? priorRunId.trim() : "";
+      const payloadArgs: Parameters<typeof buildQueuePayload>[0] = {
         command,
         subcommand,
         intent: intent.trim(),
@@ -4015,7 +4346,9 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
         model,
         effort,
         certification,
-      });
+      };
+      if (priorRunForPayload) payloadArgs.priorRunId = priorRunForPayload;
+      const payload = buildQueuePayload(payloadArgs);
       const result = await api<QueueResult>(`/api/queue/${command}`, {method: "POST", body: JSON.stringify(payload)});
       await onQueued(result.message);
     } catch (error) {
@@ -4050,6 +4383,14 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
     }
     if (targetNeedsConfirmation && !targetConfirmed) {
       setStatus("Confirm the dirty target project before queueing.");
+      return;
+    }
+    if (priorRunMissing) {
+      setStatus(
+        priorRunOptionsAvailable
+          ? "Select a prior run for the improve job to iterate on."
+          : "No prior runs to improve. Run a build first."
+      );
       return;
     }
     // mc-audit codex-destructive-action-safety #7: 3-second grace window.
@@ -4175,6 +4516,37 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
             </select>
           </label>
         )}
+        {command === "improve" && (
+          <label>Prior run
+            {priorRunOptionsAvailable ? (
+              <>
+                <select
+                  data-testid="job-prior-run-select"
+                  value={priorRunId}
+                  onChange={(event) => setPriorRunId(event.target.value)}
+                >
+                  {priorRunOptions.map((option) => (
+                    <option key={option.run_id} value={option.run_id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="field-hint">
+                  Improve iterates on this run&apos;s branch — its files are pre-loaded
+                  into the worktree, so the agent extends the prior work instead
+                  of starting from scratch.
+                </span>
+              </>
+            ) : (
+              <span
+                className="field-hint"
+                data-testid="job-prior-run-empty"
+              >
+                No prior runs to improve. Run a build first, then come back.
+              </span>
+            )}
+          </label>
+        )}
         <label>{intentLabelMap[command]}
           <textarea
             value={intent}
@@ -4192,6 +4564,10 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
               ? `Describe the requested outcome (${intentLabelMap[command].toLowerCase()}) to enable queueing.`
               : targetNeedsConfirmation && !targetConfirmed
               ? "Confirm the dirty target project above to enable queueing."
+              : priorRunMissing
+              ? (priorRunOptionsAvailable
+                  ? "Select the prior run for the improve job to iterate on."
+                  : "No prior runs to improve. Run a build first, then come back.")
               : "Submit is disabled."}
           </p>
         )}
@@ -4282,6 +4658,10 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
             title={!submitting && submitDisabled ? (
               intentRequired
                 ? `Describe the requested outcome (${intentLabelMap[command].toLowerCase()}) to enable queueing.`
+                : priorRunMissing
+                ? (priorRunOptionsAvailable
+                    ? "Select the prior run for the improve job to iterate on."
+                    : "No prior runs to improve. Run a build first, then come back.")
                 : "Confirm the dirty target project above."
             ) : undefined}
           >
@@ -4421,7 +4801,8 @@ function ConfirmDialog({confirm, pending, error, checkboxAck, onChangeCheckboxAc
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const confirmClass = confirm.tone === "danger" ? "danger-button" : "primary";
+  const isDanger = confirm.tone === "danger";
+  const confirmClass = isDanger ? "danger-button" : "primary";
   const dialogRef = useDialogFocus<HTMLDivElement>(onCancel, pending);
   const blockedByCheckbox = Boolean(confirm.requireCheckbox) && !checkboxAck;
   const submitDisabled = pending || blockedByCheckbox;
@@ -4439,16 +4820,29 @@ function ConfirmDialog({confirm, pending, error, checkboxAck, onChangeCheckboxAc
     <div className="modal-backdrop" role="presentation" onClick={onBackdropClick}>
       <div
         ref={dialogRef}
-        className="confirm-dialog"
+        className={`confirm-dialog${isDanger ? " confirm-dialog-danger" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirmHeading"
         aria-describedby="confirmBody"
+        data-tone={isDanger ? "danger" : "primary"}
         tabIndex={-1}
       >
         <header>
           <h2 id="confirmHeading">{confirm.title}</h2>
-          <button type="button" disabled={pending} onClick={onCancel}>Close</button>
+          {/* mc-audit microinteractions I6: For danger-tone confirms, drop
+              the header Close affordance — two close paths (header × +
+              footer Cancel) dilute focus and neither emphasises the safe
+              choice. Non-danger confirms keep the header Close so they
+              match JobDialog's affordance set. */}
+          {!isDanger && (
+            <button
+              type="button"
+              data-testid="confirm-dialog-header-close"
+              disabled={pending}
+              onClick={onCancel}
+            >Close</button>
+          )}
         </header>
         <div id="confirmBody" className="confirm-body">
           {confirm.body && <p className="confirm-body-text">{confirm.body}</p>}
@@ -4478,7 +4872,17 @@ function ConfirmDialog({confirm, pending, error, checkboxAck, onChangeCheckboxAc
           </div>
         )}
         <footer>
-          <button type="button" disabled={pending} onClick={onCancel}>Cancel</button>
+          {/* mc-audit microinteractions I6: in danger flows the Cancel
+              button receives a "safe choice" emphasis (outline + bold) so
+              a panicked user can spot the abort path at-a-glance. The
+              confirm button still carries the red CTA. */}
+          <button
+            type="button"
+            className={isDanger ? "confirm-dialog-cancel cancel-emphasis" : "confirm-dialog-cancel"}
+            data-testid="confirm-dialog-cancel-button"
+            disabled={pending}
+            onClick={onCancel}
+          >Cancel</button>
           <button
             className={confirmClass}
             type="button"
@@ -5480,6 +5884,30 @@ function preferredProofArtifact(artifacts: ArtifactRef[]): ArtifactRef | null {
     if (match) return match;
   }
   return existing[0] || null;
+}
+
+/**
+ * Overlay optimistic run states onto the live-run items returned by
+ * /api/state. Used by mc-audit microinteractions I4 to flip a row's
+ * displayed status to "cancelling" the moment the operator confirms a
+ * cancel, instead of waiting for the next /api/state poll. The original
+ * server item is otherwise untouched.
+ */
+function applyOptimisticRunStates(
+  items: LiveRunItem[],
+  overlays: Record<string, "cancelling">,
+): LiveRunItem[] {
+  if (!items.length || !Object.keys(overlays).length) return items;
+  return items.map((item) => {
+    const overlay = overlays[item.run_id];
+    if (!overlay) return item;
+    return {
+      ...item,
+      display_status: overlay,
+      active: true,
+      last_event: "cancelling",
+    };
+  });
 }
 
 function canShowDiff(detail: RunDetail | null): boolean {

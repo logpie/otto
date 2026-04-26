@@ -143,6 +143,7 @@ export function buildQueuePayload(args: {
   model: string;
   effort: string;
   certification: CertificationPolicy;
+  priorRunId?: string;
 }): QueuePayload {
   const payload: QueuePayload = {extra_args: []};
   const after = splitCsv(args.after);
@@ -159,6 +160,10 @@ export function buildQueuePayload(args: {
   } else if (args.command === "improve") {
     payload.subcommand = args.subcommand;
     if (args.intent) payload.focus = args.intent;
+    // W3-CRITICAL-1: server uses prior_run_id to base the improve worktree
+    // on the prior run's branch instead of forking from main and colliding
+    // on the same files. Optional — server falls back to main when omitted.
+    if (args.priorRunId) payload.prior_run_id = args.priorRunId;
   } else if (args.intent) {
     payload.intent = args.intent;
   }

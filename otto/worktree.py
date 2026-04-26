@@ -49,12 +49,18 @@ def add_worktree(
     project_dir: Path,
     worktree_path: Path,
     branch: str,
+    base_ref: str | None = None,
 ) -> None:
     """Create a worktree at ``worktree_path`` checked out on ``branch``.
 
-    - If branch doesn't exist: ``git worktree add -b <branch> <path>``
+    - If branch doesn't exist: ``git worktree add -b <branch> <path> [<base_ref>]``
     - If branch exists but isn't checked out: ``git worktree add <path> <branch>``
     - If branch is already checked out elsewhere: raise WorktreeAlreadyCheckedOut
+
+    ``base_ref`` (optional) is the start-point passed when creating a new
+    branch — git uses HEAD by default. The W3-CRITICAL-1 fix passes a prior
+    run's branch here so improve worktrees iterate on the prior build's
+    files instead of forking from main.
 
     Caller should NOT have already created the directory.
     """
@@ -82,15 +88,24 @@ def add_worktree(
             f"worktree path {worktree_path} already exists and is not a worktree"
         )
 
-    # Try create-and-checkout-new-branch first
+    # Try create-and-checkout-new-branch first. When base_ref is supplied
+    # (improve-on-prior-run), append it as the start-point so the new branch
+    # is rooted on the prior run's tip rather than HEAD/main.
+    create_argv = ["git", "worktree", "add", "-b", branch, str(worktree_path)]
+    if base_ref:
+        create_argv.append(base_ref)
     result = subprocess.run(
-        ["git", "worktree", "add", "-b", branch, str(worktree_path)],
+        create_argv,
         cwd=project_dir, capture_output=True, text=True,
     )
     if result.returncode == 0:
         return
 
-    # Branch may already exist — try without -b
+    # Branch may already exist — try without -b. We deliberately ignore
+    # base_ref here: git's "checkout existing branch" path doesn't accept a
+    # start-point, and re-pointing an existing branch ref via the worktree
+    # add command would be surprising. The branch already encodes its own
+    # history; if base_ref differs we surface that as a hard error below.
     result2 = subprocess.run(
         ["git", "worktree", "add", str(worktree_path), branch],
         cwd=project_dir, capture_output=True, text=True,

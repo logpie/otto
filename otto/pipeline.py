@@ -41,13 +41,31 @@ class BuildResult:
 
 
 def _stories_to_journeys(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert story results to journey dicts for BuildResult."""
-    return [
-        {"name": s.get("summary", s.get("story_id", "")),
-         "passed": s.get("passed", False),
-         "story_id": s.get("story_id", "")}
-        for s in stories
-    ]
+    """Convert story results to journey dicts for BuildResult.
+
+    Carries `verdict` (PASS/WARN/FAIL/...) so downstream renderers can
+    distinguish WARN observations from PASS. Without this, the improve
+    report rendered all `passed`-truthy stories with a green check —
+    silently misrepresenting WARN-level certifier observations as
+    fully-met requirements (W3-IMPORTANT-3).
+    """
+    journeys: list[dict[str, Any]] = []
+    for s in stories:
+        verdict = s.get("verdict")
+        if not verdict:
+            verdict = "PASS" if s.get("passed") else "FAIL"
+            if s.get("warn"):
+                verdict = "WARN"
+        verdict_str = str(verdict).upper()
+        journeys.append(
+            {
+                "name": s.get("summary", s.get("story_id", "")),
+                "passed": s.get("passed", False),
+                "verdict": verdict_str,
+                "story_id": s.get("story_id", ""),
+            }
+        )
+    return journeys
 
 
 def _write_session_summary(
