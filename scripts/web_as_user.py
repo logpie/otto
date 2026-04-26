@@ -315,6 +315,15 @@ W6_BUILD_TIMEOUT_S = 10 * 60
 W7_INTENT = W1_INTENT
 W7_BUILD_TIMEOUT_S = 12 * 60
 
+# W8 — power-user keyboard-only. 3 quick builds (same shape as W2) but driven
+# entirely via Tab / Enter / Space / arrow keys. We re-use the W2 intents so
+# the cost/duration profile matches and we can compare keyboard- vs mouse-
+# driven UX directly.
+W8_INTENT_A = W2_INTENT_A
+W8_INTENT_B = W2_INTENT_B
+W8_INTENT_C = W2_INTENT_C
+W8_BUILD_TIMEOUT_S = 20 * 60   # same bound as W2; 3 sequential builds
+
 
 # ---------------------------------------------------------------------------
 # Web-as-user helpers (Playwright + in-process server)
@@ -3657,6 +3666,514 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
 
 
 # ---------------------------------------------------------------------------
+# W8 — Power-user keyboard-only
+# ---------------------------------------------------------------------------
+
+
+def _kbd_focus_testid(page: Any, testid: str, *, max_tabs: int = 60) -> bool:
+    """Press Tab repeatedly until the focused element matches ``[data-testid=testid]``.
+
+    Returns True if focus landed on the target. Records observed focus chain
+    (only useful for debugging) on the page object via attribute side-channel.
+    """
+    chain: list[str] = []
+    for i in range(max_tabs):
+        try:
+            descriptor = page.evaluate(
+                "() => { const el = document.activeElement; if (!el) return null;"
+                " return { tag: el.tagName, testid: el.getAttribute('data-testid'),"
+                " text: (el.textContent||'').trim().slice(0,40),"
+                " role: el.getAttribute('role'), aria: el.getAttribute('aria-label') }; }"
+            )
+        except Exception:  # noqa: BLE001
+            descriptor = None
+        if descriptor:
+            chain.append(
+                f"{descriptor.get('tag')}#{descriptor.get('testid') or '-'}|"
+                f"{descriptor.get('aria') or descriptor.get('text') or ''}"
+            )
+            if descriptor.get("testid") == testid:
+                # Stash for caller diagnostics.
+                setattr(page, "_w8_focus_chain", chain)
+                return True
+        page.keyboard.press("Tab")
+        time.sleep(0.05)
+    setattr(page, "_w8_focus_chain", chain)
+    return False
+
+
+def _kbd_focused_testid(page: Any) -> Optional[str]:
+    try:
+        return page.evaluate(
+            "() => document.activeElement?.getAttribute('data-testid')"
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _run_w8(ctx: ScenarioContext) -> ScenarioRunResult:
+    """W8 — multi-job operator driven entirely from the keyboard.
+
+    Mirrors W2 (3 builds, watcher, cancel one) but never uses the mouse.
+    Findings catalogue any flow that REQUIRES mouse to complete.
+    """
+    from playwright.sync_api import sync_playwright
+
+    started = time.monotonic()
+    failures = ctx.failures
+    artifact_dir = ctx.artifact_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    debug, _log = _open_logger(ctx.debug_log, "W8")
+
+    if not failures.soft_assert(ctx.web_url is not None, "no web_url"):
+        debug.close()
+        return ScenarioRunResult(
+            outcome="FAIL", note="no web_url",
+            duration_s=time.monotonic() - started,
+            failures=list(failures.failures),
+        )
+
+    _log(f"web_url={ctx.web_url}")
+    _log(f"project_dir={ctx.project_dir}")
+
+    # Per-step focus chains — written out as artifacts.
+    focus_chains: dict[str, list[str]] = {}
+
+    def _enqueue_via_keyboard(label: str, intent: str, idx: int) -> bool:
+        """Open dialog (Tab→Enter or Cmd-K), fill intent, submit — all via keyboard."""
+        # Step a: focus body so Tab order is deterministic
+        try:
+            page.evaluate("() => document.body.focus()")
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Try Cmd-K palette first (canonical power-user entry).
+        opened_via_palette = False
+        try:
+            page.keyboard.press("Meta+k")
+            time.sleep(0.4)
+            palette = page.locator(
+                '[data-testid="command-palette"], [role="dialog"][aria-label*="Command"]'
+            )
+            if palette.count() > 0:
+                # Type "new job" or pick first item with Enter
+                _log(f"  palette opened via Cmd-K ({label})")
+                page.keyboard.type("new job", delay=20)
+                time.sleep(0.3)
+                page.keyboard.press("Enter")
+                time.sleep(0.5)
+                opened_via_palette = page.locator('[data-testid="job-dialog-intent"]').count() > 0
+                if opened_via_palette:
+                    _log("  Cmd-K palette → JobDialog OK")
+                else:
+                    failures.note(
+                        f"Cmd-K palette opened but Enter on first match did not open JobDialog ({label})"
+                    )
+                    # Dismiss palette if still open
+                    page.keyboard.press("Escape")
+                    time.sleep(0.2)
+            else:
+                _log(f"  Cmd-K did not open a command palette ({label}) — fall back to Tab")
+                # press Escape just in case something opened invisibly
+                page.keyboard.press("Escape")
+                time.sleep(0.1)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"Cmd-K attempt raised: {exc}")
+
+        if not opened_via_palette:
+            # Fallback: Tab through to mission-new-job-button
+            page.evaluate("() => document.body.focus()")
+            time.sleep(0.1)
+            landed = _kbd_focus_testid(
+                page,
+                "mission-new-job-button",
+                max_tabs=60,
+            )
+            chain = getattr(page, "_w8_focus_chain", [])
+            focus_chains[f"{label}-tab-to-newjob"] = list(chain)
+            if not landed:
+                # try the alternate id
+                page.evaluate("() => document.body.focus()")
+                landed = _kbd_focus_testid(page, "new-job-button", max_tabs=60)
+                chain = getattr(page, "_w8_focus_chain", [])
+                focus_chains[f"{label}-tab-to-newjob-alt"] = list(chain)
+            if not landed:
+                failures.fail(
+                    f"could not Tab to new-job button via keyboard ({label}); "
+                    f"chain length={len(chain)}"
+                )
+                return False
+            page.keyboard.press("Enter")
+            try:
+                page.wait_for_selector('[data-testid="job-dialog-intent"]', timeout=10_000)
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"job dialog did not open after Enter on new-job ({label}): {exc}")
+                return False
+
+        _safe_screenshot(page, artifact_dir, f"{idx:02d}-dialog-{label}")
+
+        # Dialog open. The intent textarea SHOULD be auto-focused; if not, that's a finding.
+        cur = _kbd_focused_testid(page)
+        _log(f"  on dialog open, activeElement testid={cur!r}")
+        if cur != "job-dialog-intent":
+            failures.note(
+                f"JobDialog intent textarea is NOT auto-focused on open ({label}); "
+                f"focused testid={cur!r}"
+            )
+            # Force focus into intent via Tab loop
+            landed = _kbd_focus_testid(page, "job-dialog-intent", max_tabs=20)
+            if not landed:
+                failures.fail(f"could not Tab to job-dialog-intent ({label})")
+                return False
+
+        # Type intent (no mouse).
+        page.keyboard.type(intent, delay=2)
+        time.sleep(0.2)
+
+        # Submit via keyboard. Two paths to test:
+        #   1. Cmd+Enter shortcut from inside textarea
+        #   2. Tab to submit, press Enter
+        # We test path 1 for the first, path 2 for subsequent — gives signal on both.
+        if idx % 2 == 0:
+            _log("  submitting via Cmd+Enter from textarea")
+            page.keyboard.press("Meta+Enter")
+        else:
+            _log("  submitting via Tab → Enter on submit button")
+            landed = _kbd_focus_testid(page, "job-dialog-submit-button", max_tabs=20)
+            chain = getattr(page, "_w8_focus_chain", [])
+            focus_chains[f"{label}-tab-to-submit"] = list(chain)
+            if not landed:
+                failures.fail(f"could not Tab to submit button ({label})")
+                return False
+            page.keyboard.press("Enter")
+
+        # Wait for dialog to close
+        try:
+            page.wait_for_selector(
+                '[data-testid="job-dialog-intent"]',
+                state="detached",
+                timeout=10_000,
+            )
+        except Exception:  # noqa: BLE001
+            # If submit didn't close it, that's a real bug — but record and try Escape.
+            still_open = page.locator('[data-testid="job-dialog-intent"]').count() > 0
+            if still_open:
+                failures.fail(
+                    f"JobDialog still open after keyboard submit ({label}) — Cmd+Enter / Enter ignored"
+                )
+                # Try clicking submit via .focus().press(Enter) once more
+                try:
+                    page.locator('[data-testid="job-dialog-submit-button"]').focus()
+                    page.keyboard.press("Enter")
+                    page.wait_for_selector(
+                        '[data-testid="job-dialog-intent"]',
+                        state="detached",
+                        timeout=5_000,
+                    )
+                except Exception:  # noqa: BLE001
+                    failures.fail(f"JobDialog refused all keyboard submit attempts ({label})")
+                    # Last-resort: press Escape so we don't blockade the next iteration
+                    page.keyboard.press("Escape")
+                    time.sleep(0.3)
+                    return False
+        return True
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            record_video_dir=str(artifact_dir),
+        )
+        try:
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"tracing.start failed: {exc}")
+        page = context.new_page()
+        captured = _capture_console_and_network(page, artifact_dir)
+
+        try:
+            # ---------- Step 1: open MC, verify shell ready ----------
+            _log("Step 1: open MC, verify shell ready marker")
+            try:
+                page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_function(
+                    "document.querySelector('#root')?.children.length > 0",
+                    timeout=15_000,
+                )
+                # cluster G ready marker
+                try:
+                    page.wait_for_selector('[data-mc-shell="ready"]', timeout=5_000)
+                    _log("  [data-mc-shell=ready] present")
+                except Exception as exc:  # noqa: BLE001
+                    failures.note(f"shell ready marker missing: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"shell load failed: {exc}")
+            _safe_screenshot(page, artifact_dir, "01-shell")
+
+            # ---------- Step 2: enqueue 3 builds via keyboard ----------
+            _log("Step 2: enqueue 3 jobs via keyboard")
+            enqueued = 0
+            for idx, (lab, intent) in enumerate(
+                [("a", W8_INTENT_A), ("b", W8_INTENT_B), ("c", W8_INTENT_C)],
+                start=1,
+            ):
+                if _enqueue_via_keyboard(lab, intent, idx + 1):
+                    enqueued += 1
+                time.sleep(1.5)
+            _log(f"  enqueued={enqueued}/3")
+            failures.soft_assert(
+                enqueued == 3,
+                f"expected to enqueue 3 jobs via keyboard, got {enqueued}",
+            )
+
+            # ---------- Step 3: verify queue reflects backlog ----------
+            _log("Step 3: poll /api/state for ≥3 queue rows")
+            queue_count = 0
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                state = _state(ctx.web_url)
+                items = _live_items(state)
+                queue_count = sum(1 for it in items if it.get("domain") == "queue")
+                if queue_count >= 3:
+                    break
+                time.sleep(2)
+            failures.soft_assert(
+                queue_count >= 3,
+                f"expected ≥3 queue rows, got {queue_count}",
+            )
+            _safe_screenshot(page, artifact_dir, "05-queue-3rows")
+
+            # ---------- Step 4: start watcher via keyboard ----------
+            _log("Step 4: Tab to start watcher and Enter")
+            page.evaluate("() => document.body.focus()")
+            time.sleep(0.1)
+            landed = _kbd_focus_testid(
+                page, "mission-start-watcher-button", max_tabs=80,
+            )
+            chain = getattr(page, "_w8_focus_chain", [])
+            focus_chains["tab-to-start-watcher"] = list(chain)
+            if not landed:
+                # alternate id
+                page.evaluate("() => document.body.focus()")
+                landed = _kbd_focus_testid(page, "start-watcher-button", max_tabs=80)
+                chain = getattr(page, "_w8_focus_chain", [])
+                focus_chains["tab-to-start-watcher-alt"] = list(chain)
+            if not landed:
+                failures.fail("could not Tab to start-watcher-button")
+            else:
+                page.keyboard.press("Enter")
+                _log("  Enter pressed on start-watcher button")
+            _safe_screenshot(page, artifact_dir, "06-watcher")
+            time.sleep(2)
+
+            # ---------- Step 5: cancel one queued task via keyboard ----------
+            # Tab order in queue is unpredictable; try keyboard tabs first, but
+            # fall back to API POST so the rest of the scenario still runs.
+            _log("Step 5: try cancel via keyboard (Tab to a cancel/'C' button on a queue row)")
+
+            # Wait a bit so something is running and one is queued
+            running_run_id: Optional[str] = None
+            cancelled_run_id: Optional[str] = None
+            cancel_via: str = "none"
+            kb_cancel_ok: bool = False
+            kdeadline = time.monotonic() + 5 * 60
+            while time.monotonic() < kdeadline:
+                state = _state(ctx.web_url)
+                items = _live_items(state)
+                queue_items = [it for it in items if it.get("domain") == "queue"]
+                running = [it for it in queue_items if it.get("status") == "running"]
+                queued = [
+                    it for it in queue_items
+                    if it.get("status") in ("queued", "pending", "ready")
+                ]
+                if running and queued:
+                    running_run_id = running[0].get("run_id")
+                    cancelled_run_id = queued[-1].get("run_id")
+                    break
+                time.sleep(5)
+            _log(f"  candidates: running={running_run_id} cancel={cancelled_run_id}")
+
+            kb_cancel_ok = False
+            if cancelled_run_id is not None:
+                # Try keyboard. Look for a cancel/dismiss row affordance with
+                # data-testid containing 'cancel' or aria-label 'Cancel'.
+                page.evaluate("() => document.body.focus()")
+                # Walk Tab order, log every focused element with aria-label/text
+                # containing 'cancel'.
+                cancel_candidates: list[str] = []
+                for _ in range(120):
+                    try:
+                        d = page.evaluate(
+                            "() => { const e = document.activeElement; if (!e) return null;"
+                            " return {testid: e.getAttribute('data-testid'),"
+                            " aria: e.getAttribute('aria-label'),"
+                            " text: (e.textContent||'').trim().slice(0,30)}; }"
+                        )
+                    except Exception:  # noqa: BLE001
+                        d = None
+                    if d:
+                        cancel_candidates.append(
+                            f"{d.get('testid') or '-'}|{d.get('aria') or ''}|{d.get('text') or ''}"
+                        )
+                        text = (d.get("aria") or "").lower() + " " + (d.get("text") or "").lower()
+                        testid = (d.get("testid") or "").lower()
+                        if (
+                            "cancel" in text
+                            or "cancel" in testid
+                            or testid.endswith("-cancel")
+                        ):
+                            page.keyboard.press("Enter")
+                            time.sleep(0.6)
+                            kb_cancel_ok = True
+                            cancel_via = "keyboard"
+                            _log(f"  pressed Enter on focused cancel candidate testid={testid!r}")
+                            break
+                    page.keyboard.press("Tab")
+                    time.sleep(0.03)
+                focus_chains["tab-cancel-candidates"] = cancel_candidates
+
+                if not kb_cancel_ok:
+                    failures.fail(
+                        "no cancel affordance reachable via keyboard Tab — "
+                        "queue rows lack a per-row cancel button in tab order"
+                    )
+                    # Fall back to API POST so the rest of the scenario can verify behaviors
+                    status, body = _post_action(ctx.web_url, cancelled_run_id, "cancel")
+                    cancel_via = f"api(status={status})"
+                    _log(f"  fallback POST cancel status={status}")
+            else:
+                failures.fail("no cancellation candidate appeared within 5 min — cannot test cancel via keyboard")
+
+            _safe_screenshot(page, artifact_dir, "07-after-cancel")
+
+            # ---------- Step 6: wait for queue to drain ----------
+            _log(f"Step 6: wait ≤{W8_BUILD_TIMEOUT_S}s for drain")
+            ddeadline = time.monotonic() + W8_BUILD_TIMEOUT_S
+            drained = False
+            while time.monotonic() < ddeadline:
+                state = _state(ctx.web_url)
+                items = _live_items(state)
+                non_terminal = [
+                    it for it in items
+                    if it.get("domain") == "queue"
+                    and it.get("status")
+                    not in ("done", "failed", "cancelled", "interrupted", "removed")
+                ]
+                if not non_terminal:
+                    drained = True
+                    break
+                _log(
+                    f"  non_terminal={len(non_terminal)} statuses="
+                    f"{[it.get('status') for it in non_terminal]}"
+                )
+                time.sleep(15)
+            failures.soft_assert(
+                drained, f"queue did not drain in {W8_BUILD_TIMEOUT_S}s",
+            )
+            _safe_screenshot(page, artifact_dir, "08-drained")
+
+            # ---------- Step 7: focus management probe — Cmd-K palette + tablist arrows ----------
+            _log("Step 7: Cmd-K palette + tablist arrow nav probe")
+            try:
+                page.keyboard.press("Meta+k")
+                time.sleep(0.5)
+                pal_present = page.locator(
+                    '[data-testid="command-palette"], [role="dialog"][aria-label*="Command"]'
+                ).count() > 0
+                _log(f"  Cmd-K palette present (post-drain) = {pal_present}")
+                if pal_present:
+                    page.keyboard.press("Escape")
+                    time.sleep(0.2)
+                else:
+                    failures.note(
+                        "Cmd-K does NOT open a command palette — power-user keyboard entry missing"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"Cmd-K probe raised: {exc}")
+
+            # Tab to tablist (if present) and press ArrowRight
+            try:
+                tablist_count = page.evaluate(
+                    "() => document.querySelectorAll('[role=\"tablist\"]').length"
+                )
+                _log(f"  tablists in DOM = {tablist_count}")
+                if tablist_count and tablist_count > 0:
+                    # Find first tablist and click first tab via JS focus, then ArrowRight
+                    page.evaluate(
+                        "() => {const tl=document.querySelector('[role=\"tablist\"]');"
+                        " if(!tl) return null; const t=tl.querySelector('[role=\"tab\"]');"
+                        " if(t) t.focus(); return t?.getAttribute('aria-label')||t?.textContent;}"
+                    )
+                    before_aria = _kbd_focused_testid(page) or "(unknown)"
+                    page.keyboard.press("ArrowRight")
+                    time.sleep(0.2)
+                    after_aria = _kbd_focused_testid(page) or "(unknown)"
+                    _log(f"  arrow-right on tablist: {before_aria} -> {after_aria}")
+                    if before_aria == after_aria:
+                        failures.note(
+                            "Tablist ArrowRight did not move focus — WAI-ARIA tablist key support missing"
+                        )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"tablist arrow probe raised: {exc}")
+
+            # ---------- Step 8: snapshot artifacts ----------
+            state = _state(ctx.web_url)
+            if isinstance(state, dict):
+                (artifact_dir / "final-state.json").write_text(
+                    json.dumps(state, indent=2, default=str), encoding="utf-8"
+                )
+            (artifact_dir / "focus-chains.json").write_text(
+                json.dumps(focus_chains, indent=2), encoding="utf-8",
+            )
+            (artifact_dir / "cancel-summary.json").write_text(
+                json.dumps(
+                    {
+                        "running_run_id": running_run_id,
+                        "cancelled_run_id": cancelled_run_id,
+                        "kb_cancel_ok": kb_cancel_ok,
+                        "cancel_via": cancel_via,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            _safe_screenshot(page, artifact_dir, "09-final")
+
+        finally:
+            try:
+                context.tracing.stop(path=str(artifact_dir / "trace.zip"))
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"tracing.stop failed: {exc}")
+            _flush_captured(captured, artifact_dir)
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if any(c.get("type") == "error" for c in captured["console"]):
+        failures.fail("console errors during W8; see console.json")
+    if captured["page_errors"]:
+        failures.fail(f"page errors during W8: {len(captured['page_errors'])}")
+    if captured["network_errors"]:
+        unexpected = [n for n in captured["network_errors"] if n.get("status") not in (404,)]
+        if unexpected:
+            failures.fail(f"unexpected 4xx/5xx during W8: {len(unexpected)}")
+
+    debug.close()
+    return ScenarioRunResult(
+        outcome="PASS" if not failures.failures else "FAIL",
+        note=failures.summary(),
+        duration_s=time.monotonic() - started,
+        failures=list(failures.failures),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Scenario registry — every W1..W13 (W12 split into W12a, W12b) has an entry
 # ---------------------------------------------------------------------------
 
@@ -3740,7 +4257,7 @@ SCENARIOS: dict[str, Scenario] = {
         estimated_seconds=15 * 60,
         needs_product_verification=True,
         target_recordings=["R9", "R5"],
-        run_fn=_stub_scenario,
+        run_fn=_run_w8,
     ),
     "W9": Scenario(
         id="W9",

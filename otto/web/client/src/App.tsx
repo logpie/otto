@@ -2584,7 +2584,13 @@ function TaskCard({task, selected, onSelect, onSelectQueued}: {
           <span
             className={`task-status status-tone-${statusTone(task.status, task.stage)}`}
             data-status-tone={statusTone(task.status, task.stage)}
-          >{task.status}</span>
+          >
+            {/* mc-audit visual-coherence F10 — colour-blind safety: glyph
+                prefix so the tone isn't conveyed by colour alone. */}
+            <span className="status-icon" aria-hidden="true">{toneIcon(statusTone(task.status, task.stage))}</span>
+            {" "}
+            {task.status}
+          </span>
           <span className="task-card-cta">{task.stage === "ready" ? "Review" : "Details"}</span>
         </span>
         <strong className="task-title" title={task.title}>{task.title}</strong>
@@ -3557,7 +3563,11 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
           <div className="proof-checks">
             {proofChecks.map((check) => (
               <div className={`review-check check-${check.status}`} key={check.key}>
-                <span>{checkStatusLabel(check.status)}</span>
+                <span>
+                  <span className="status-icon" aria-hidden="true">{checkStatusIcon(check.status)}</span>
+                  {" "}
+                  {checkStatusLabel(check.status)}
+                </span>
                 <div>
                   <strong>{check.label}</strong>
                   <p>{formatReviewText(check.detail)}</p>
@@ -3575,7 +3585,11 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
           <div className="proof-stories" data-testid="proof-story-list">
             {stories.map((story) => (
               <article className={`proof-story story-${storyStatusClass(story.status)}`} key={story.id || story.title}>
-                <span>{storyStatusLabel(story.status)}</span>
+                <span>
+                  <span className="status-icon" aria-hidden="true">{storyStatusIcon(story.status)}</span>
+                  {" "}
+                  {storyStatusLabel(story.status)}
+                </span>
                 <div>
                   <strong>{story.title || story.id}</strong>
                   {story.detail ? <p>{formatReviewText(story.detail)}</p> : null}
@@ -3864,7 +3878,11 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
           <div className="review-checklist" aria-label="Readiness checklist">
             {drawerChecks.map((check) => (
               <div className={`review-check check-${check.status}`} key={check.key}>
-                <span>{checkStatusLabel(check.status)}</span>
+                <span>
+                  <span className="status-icon" aria-hidden="true">{checkStatusIcon(check.status)}</span>
+                  {" "}
+                  {checkStatusLabel(check.status)}
+                </span>
                 <div>
                   <strong>{check.label}</strong>
                   <p>{formatReviewText(check.detail)}</p>
@@ -5207,6 +5225,26 @@ function taskChangeLine(task: BoardTask): string {
 //   warning — blocked/queued/waiting/paused/interrupted/stale
 //   danger  — failed/cancelled/removed/error
 //   neutral — anything else
+// mc-audit visual-coherence F10 — tone-to-glyph map for status badges so
+// signal isn't carried by colour alone. ✓ pass-like, ⚠ warning,
+// ✗ danger, ● running (filled circle reads as "in flight"),
+// · neutral. Marked aria-hidden where applied; the surrounding label
+// already communicates the status to screen readers.
+export function toneIcon(tone: "success" | "running" | "warning" | "danger" | "neutral" | string): string {
+  switch (tone) {
+    case "success":
+      return "✓";
+    case "warning":
+      return "⚠";
+    case "danger":
+      return "✗";
+    case "running":
+      return "●";
+    default:
+      return "·";
+  }
+}
+
 export function statusTone(
   status: string,
   stage: BoardStage,
@@ -6193,6 +6231,31 @@ function formatTechnicalIssue(message: string): string {
     return "Repository has local changes. Commit, stash, or revert them before landing.";
   }
   return value;
+}
+
+// mc-audit visual-coherence F10 — status badges must NOT rely on colour
+// alone. Prefix every check/story badge with a glyph so deuteranopia /
+// protanopia users (~5% of men) can still tell pass/warn/fail apart.
+// The icon char is exposed via a `.status-icon` span so test harnesses
+// and styling can target it independently of the text label.
+function checkStatusIcon(status: string): string {
+  return {
+    pass: "✓",
+    warn: "⚠",
+    fail: "✗",
+    pending: "…",
+    info: "i",
+  }[status] || "i";
+}
+
+function storyStatusIcon(status: string): string {
+  return {
+    pass: "✓",
+    warn: "⚠",
+    fail: "✗",
+    skipped: "–",
+    unknown: "i",
+  }[status] || "i";
 }
 
 function checkStatusLabel(status: string): string {

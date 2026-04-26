@@ -27,6 +27,72 @@
      and white). Outline-offset keeps the ring visible against tinted
      backgrounds. mc-audit a11y K-15. */
   --focus-ring: #1d4ed8;
+
+  /* ---------------------------------------------------------------- *
+   * Visual-coherence design tokens (mc-audit visual-coherence cluster
+   * F4–F12 IMPORTANT). One source of truth for status colours, type
+   * scale, spacing, and radii. New work MUST use the tokens below
+   * rather than raw hex / px literals so the system stays coherent.
+   * ---------------------------------------------------------------- */
+
+  /* Type scale (6 steps). Replaces the previous ad-hoc 10-step scale
+     that mixed 10/11/12/13/14/15/16/18/20/22 px. Inherited body sizes
+     stay 14px. */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-md: 18px;
+  --text-lg: 22px;
+  --text-xl: 28px;
+
+  /* Spacing scale (8px grid). Allow 4px as the half-grid for tight
+     pill paddings; everything else snaps to 8/12/16/24/32. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radii — three steps. 4 for inputs/refresh chips, 8 for cards/
+     dialogs, 12 for the run-inspector overlay. 999 stays for pills
+     (defined inline at use sites). */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Semantic status colour tokens. One token per tone × surface so
+     the same "pass" tint never drifts between contexts. The -fg
+     variants keep the AA-darkened palette tones already in --green
+     etc.; the -bg variants are the soft tints used for badges; the
+     -border variants are the slightly darker line for tinted card
+     borders. mc-audit visual-coherence F9. */
+  --color-success-fg: var(--green);
+  --color-success-bg: #dcfce7;
+  --color-success-border: #bbf7d0;
+
+  --color-warning-fg: var(--amber);
+  --color-warning-bg: #fef3c7;
+  --color-warning-border: #fde68a;
+
+  --color-danger-fg: var(--red);
+  --color-danger-bg: #fee2e2;
+  --color-danger-border: #fecaca;
+
+  --color-info-fg: var(--blue);
+  --color-info-bg: #dbeafe;
+  --color-info-border: #bfdbfe;
+
+  /* Hover tint reused by clickable rows and selected list items. */
+  --hover-bg: #e8f3f1;
+
+  /* Disabled idiom — applied globally below via [disabled] /
+     [aria-disabled="true"]. mc-audit visual-coherence F4. */
+  --disabled-opacity: 0.55;
+
+  /* Toolbar form-control height — input + button match exactly so the
+     baseline never jaggies. mc-audit visual-coherence F11. */
+  --control-height: 32px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -170,10 +236,20 @@ button:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
+/* Canonical disabled idiom (mc-audit visual-coherence F4). One pattern
+   for every interactive primitive — buttons, links, list rows, custom
+   roles. Older variants that overrode background/colour are gone so
+   "disabled" reads identically across the surface. The .tab override
+   below keeps the striped affordance for inactive-vs-disabled tabs. */
+[disabled],
+[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: var(--disabled-opacity);
+}
+
 button:disabled {
   cursor: not-allowed;
-  color: #9aa4b2;
-  background: #eef1f5;
+  opacity: var(--disabled-opacity);
 }
 
 /*
@@ -304,7 +380,7 @@ textarea:focus-visible,
 
 .project-meta dt {
   color: #cbd5e1;
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
 }
 
@@ -503,9 +579,36 @@ textarea:focus-visible,
 .filters,
 .toolbar-actions {
   display: flex;
-  align-items: end;
+  /* mc-audit visual-coherence F11: end-aligned a 34px input vs button
+     produced a baseline jaggy because the input has internal V-padding
+     and the button centers via flex. Center-align so inner text sits on
+     the same baseline regardless of internal padding. */
+  align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+/* mc-audit visual-coherence F10 — status icon prefix used by every
+   status badge (.task-status, .review-check span, .proof-story span,
+   etc.) so the tone is not communicated by colour alone. The glyph
+   inherits colour from its parent badge so we don't drift between
+   the icon hue and the label hue. */
+.status-icon {
+  display: inline-block;
+  font-weight: 700;
+  margin-right: 2px;
+}
+
+/* Toolbar inputs/buttons share an explicit height so the baseline lines
+   up at the pixel level. mc-audit visual-coherence F11. */
+.toolbar .filters > label > input,
+.toolbar .filters > label > select,
+.toolbar .filters > button,
+.toolbar-actions > button {
+  height: var(--control-height);
+  min-height: var(--control-height);
+  line-height: 1;
+  vertical-align: middle;
 }
 
 label {
@@ -519,7 +622,10 @@ select,
 input,
 textarea {
   min-height: 34px;
-  padding: 7px 9px;
+  /* mc-audit visual-coherence F7 — snap to 8/8 grid; the previous 7×9
+     was 1px off the grid both axes and produced jaggy baselines
+     against neighbouring buttons. */
+  padding: 6px 8px;
 }
 
 textarea {
@@ -586,7 +692,7 @@ textarea {
 }
 
 .focus-copy h2 {
-  font-size: 20px;
+  font-size: 22px;
 }
 
 .focus-copy p {
@@ -659,13 +765,13 @@ textarea {
   border-radius: 8px;
   background: var(--surface-alt);
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .task-board-empty.task-board-empty-filtered-empty {
-  border-color: var(--amber);
-  background: #fef3c7;
-  color: var(--amber);
+  border-color: var(--color-warning-fg);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .task-board-empty-action {
@@ -695,7 +801,7 @@ textarea {
 .queued-task-subtitle {
   margin: 0 0 12px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .queued-task-meta {
@@ -703,7 +809,7 @@ textarea {
   grid-template-columns: max-content 1fr;
   gap: 4px 12px;
   margin: 0 0 12px;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .queued-task-meta dt {
@@ -718,7 +824,7 @@ textarea {
 
 .queued-task-next-action {
   margin: 0 0 12px;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .task-board {
@@ -868,7 +974,7 @@ textarea {
   border-radius: 999px;
   background: var(--surface-alt);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
   /* Border default for non-toned status (so toned ones look intentional). */
@@ -880,27 +986,27 @@ textarea {
    reuse existing palette tokens (--green/--amber/--red/--blue) on tinted
    backgrounds to keep AA contrast on light surfaces. */
 .task-status.status-tone-success {
-  background: #dcfce7;
-  color: var(--green);
-  border-color: #bbf7d0;
+  background: var(--color-success-bg);
+  color: var(--color-success-fg);
+  border-color: var(--color-success-border);
 }
 
 .task-status.status-tone-running {
-  background: #dbeafe;
-  color: var(--blue);
-  border-color: #bfdbfe;
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
+  border-color: var(--color-info-border);
 }
 
 .task-status.status-tone-warning {
-  background: #fef3c7;
-  color: var(--amber);
-  border-color: #fde68a;
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+  border-color: var(--color-warning-border);
 }
 
 .task-status.status-tone-danger {
-  background: #fee2e2;
-  color: var(--red);
-  border-color: #fecaca;
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+  border-color: var(--color-danger-border);
 }
 
 .task-status.status-tone-neutral {
@@ -934,8 +1040,8 @@ textarea {
 
 .task-card-drawer {
   display: grid;
-  gap: 7px;
-  padding-top: 7px;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
   border-top: 1px solid var(--line);
 }
 
@@ -1012,7 +1118,9 @@ textarea {
 
 .history-activity.selected,
 .history-activity:hover {
-  background: #e8f3f1;
+  /* mc-audit visual-coherence F5: hover tint shared with tbody tr via
+     the --hover-bg token. */
+  background: var(--hover-bg);
 }
 
 .diagnostics-layout {
@@ -1078,9 +1186,10 @@ button.diagnostic-card {
   display: grid;
   justify-items: start;
   gap: 3px;
-  padding: 9px 10px;
+  /* mc-audit visual-coherence F7: snap to 8px/12px grid. */
+  padding: 8px 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   text-align: left;
 }
@@ -1104,7 +1213,7 @@ button.diagnostic-card {
 
 .diagnostic-card span {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -1222,21 +1331,21 @@ button.diagnostic-card {
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  padding: 9px 10px;
-  border-radius: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
   font-size: 12px;
 }
 
 .status-banner.error {
-  border: 1px solid #fecaca;
-  background: #fef2f2;
-  color: #7f1d1d;
+  border: 1px solid var(--color-danger-border);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
 }
 
 .status-banner.warning {
-  border: 1px solid #f4d58d;
-  background: #fff8e1;
-  color: #713f12;
+  border: 1px solid var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .runtime-banner span {
@@ -1360,7 +1469,8 @@ tbody tr {
 
 tbody tr:hover,
 tbody tr.selected {
-  background: #e8f3f1;
+  /* mc-audit visual-coherence F5: shared --hover-bg token. */
+  background: var(--hover-bg);
 }
 
 .timeline-panel {
@@ -1396,7 +1506,7 @@ tbody tr.selected {
 }
 
 .timeline-item strong {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .timeline-item span,
@@ -1434,9 +1544,9 @@ tbody tr.selected {
 }
 
 .timeline-warning {
-  border-bottom: 1px solid #f4d58d;
-  background: #fff8e1;
-  color: #713f12;
+  border-bottom: 1px solid var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .status-running,
@@ -1481,7 +1591,7 @@ tbody tr.selected {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  padding: 9px 12px;
+  padding: 8px 12px;
   color: var(--muted);
   cursor: pointer;
   list-style: none;
@@ -1507,7 +1617,7 @@ tbody tr.selected {
 
 .detail-body h3 {
   margin: 0 0 8px;
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .detail-body dl {
@@ -1542,7 +1652,7 @@ tbody tr.selected {
 }
 
 .advanced-actions summary {
-  padding: 9px 12px;
+  padding: 8px 12px;
   color: var(--muted);
   cursor: pointer;
   font-size: 12px;
@@ -1631,9 +1741,9 @@ tbody tr.selected {
   grid-template-columns: 44px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
-  padding: 7px 8px;
+  padding: var(--space-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
 }
 
@@ -1643,11 +1753,11 @@ tbody tr.selected {
 
 .review-blockers {
   margin: 0;
-  padding: 7px 8px 7px 26px;
-  border: 1px solid #f4d58d;
-  border-radius: 6px;
-  background: #fff8e1;
-  color: #713f12;
+  padding: 8px 8px 8px 26px;
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .review-grid {
@@ -1692,7 +1802,7 @@ tbody tr.selected {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 7px 8px;
+  padding: var(--space-2);
   color: var(--muted);
   cursor: pointer;
   list-style: none;
@@ -1719,9 +1829,9 @@ tbody tr.selected {
   grid-template-columns: 48px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
-  padding: 7px 8px;
+  padding: var(--space-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
 }
 
@@ -1730,7 +1840,7 @@ tbody tr.selected {
   place-items: center;
   min-height: 22px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -1744,49 +1854,49 @@ tbody tr.selected {
 }
 
 .check-pass > span {
-  background: #dcfce7;
-  color: var(--green);
+  background: var(--color-success-bg);
+  color: var(--color-success-fg);
 }
 
 .check-warn > span,
 .check-pending > span {
-  background: #fff8e1;
-  color: var(--amber);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .check-fail > span {
-  background: #fef2f2;
-  color: var(--red);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
 }
 
 .check-info > span {
-  background: #dbeafe;
-  color: var(--blue);
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
 }
 
 .review-note {
-  padding: 7px 8px;
-  border-radius: 6px;
-  background: #fef2f2;
-  color: #7f1d1d;
+  padding: 8px 8px;
+  border-radius: var(--radius-md);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
 }
 
 .failure-summary {
   display: grid;
   gap: 6px;
-  border: 1px solid #fecaca;
+  border: 1px solid var(--color-danger-border);
 }
 
 .failure-summary strong {
-  color: #991b1b;
+  color: var(--color-danger-fg);
 }
 
 .failure-summary pre {
   max-height: 180px;
   margin: 2px 0 0;
-  padding: 9px 10px;
+  padding: 8px 12px;
   overflow: auto;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 
 .proof-failure .failure-summary {
@@ -1803,9 +1913,9 @@ tbody tr.selected {
 .recovery-note {
   display: grid;
   gap: 3px;
-  border: 1px solid #bfdbfe;
-  background: #eff6ff;
-  color: #1e3a8a;
+  border: 1px solid var(--color-info-border);
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
 }
 
 .review-files {
@@ -1836,9 +1946,9 @@ tbody tr.selected {
 }
 
 .review-evidence .missing {
-  border-color: #f4d58d;
-  color: #713f12;
-  background: #fff8e1;
+  border-color: var(--color-warning-border);
+  color: var(--color-warning-fg);
+  background: var(--color-warning-bg);
 }
 
 .review-inline-action {
@@ -1917,7 +2027,7 @@ tbody tr.selected {
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
 }
@@ -2033,9 +2143,9 @@ tbody tr.selected {
   display: grid;
   gap: 2px;
   min-width: 0;
-  padding: 8px;
+  padding: var(--space-2);
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--surface-alt);
 }
 
@@ -2067,7 +2177,7 @@ tbody tr.selected {
   align-items: center;
   min-height: 32px;
   padding: 6px 10px;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--line);
   background: var(--surface-alt);
   color: var(--text);
@@ -2083,10 +2193,10 @@ tbody tr.selected {
 .proof-story {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 10px;
-  padding: 10px;
+  gap: var(--space-3);
+  padding: var(--space-3);
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--surface-alt);
 }
 
@@ -2097,26 +2207,26 @@ tbody tr.selected {
   border-radius: 999px;
   background: #e5e7eb;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
   text-align: center;
   text-transform: uppercase;
 }
 
 .proof-story.story-pass > span {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--color-success-bg);
+  color: var(--color-success-fg);
 }
 
 .proof-story.story-warn > span,
 .proof-story.story-skipped > span {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .proof-story.story-fail > span {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
 }
 
 .proof-story strong,
@@ -2145,13 +2255,13 @@ tbody tr.selected {
   justify-items: start;
   height: auto;
   min-height: 50px;
-  padding: 9px 10px;
+  padding: 8px 12px;
   text-align: left;
 }
 
 .proof-artifacts button.selected {
   border-color: var(--accent);
-  background: #ecfdf5;
+  background: var(--color-success-bg);
 }
 
 .proof-artifacts span {
@@ -2176,10 +2286,10 @@ tbody tr.selected {
 }
 
 .proof-content-heading span {
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 999px;
-  background: #fff8e1;
-  color: var(--amber);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
   font-size: 12px;
   font-weight: 700;
 }
@@ -2188,8 +2298,8 @@ tbody tr.selected {
   min-height: 0;
   margin: 0;
   overflow: auto;
-  padding: 12px;
-  border-radius: 7px;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
   background: #0b1020;
   color: #e5e7eb;
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -2310,7 +2420,7 @@ tbody tr.selected {
   height: auto;
   min-height: 34px;
   margin-bottom: 6px;
-  padding: 7px 9px;
+  padding: 6px 8px;
   border-color: rgba(148, 163, 184, 0.28);
   background: rgba(148, 163, 184, 0.08);
   color: #cbd5e1;
@@ -2560,11 +2670,11 @@ tbody tr.selected {
 }
 
 .toast-error {
-  background: #7f1d1d !important;
+  background: var(--color-danger-fg) !important;
 }
 
 .toast-warning {
-  background: #713f12 !important;
+  background: var(--color-warning-fg) !important;
 }
 
 .modal-backdrop {
@@ -2649,9 +2759,9 @@ tbody tr.selected {
 .static-field {
   display: grid;
   gap: 4px;
-  padding: 9px 10px;
+  padding: 8px 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: #fff;
 }
 
@@ -2662,7 +2772,7 @@ tbody tr.selected {
 }
 
 .static-field strong {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .job-advanced {
@@ -2692,16 +2802,16 @@ tbody tr.selected {
   display: grid;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  background: #eff6ff;
-  color: #1e3a8a;
+  border: 1px solid var(--color-info-border);
+  border-radius: var(--radius-md);
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
 }
 
 .target-dirty {
-  border-color: #f4d58d;
-  background: #fff8e1;
-  color: #713f12;
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
 }
 
 .target-guard strong,
@@ -2729,7 +2839,7 @@ tbody tr.selected {
 
 .target-confirm {
   color: inherit;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 @media (max-width: 1500px) and (min-width: 981px) {
@@ -2849,7 +2959,7 @@ tbody tr.selected {
   }
 
   .project-meta dt {
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .toolbar,
@@ -3009,9 +3119,9 @@ tbody tr.selected {
 .job-dialog-validation {
   margin: 0;
   padding: 6px 10px;
-  border-radius: 6px;
-  background: #fef3c7;
-  color: #78350f;
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
   font-size: 12px;
 }
 
@@ -3028,10 +3138,10 @@ tbody tr.selected {
   gap: 12px;
   margin: 8px 0 0;
   padding: 8px 12px;
-  border-radius: 6px;
-  background: #fef3c7;
-  color: #78350f;
-  font-size: 13px;
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+  font-size: 14px;
 }
 
 .job-grace-banner strong {
@@ -3040,16 +3150,16 @@ tbody tr.selected {
 
 .job-grace-cancel {
   padding: 4px 10px;
-  border-radius: 4px;
-  border: 1px solid #b45309;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-warning-fg);
   background: #ffffff;
-  color: #78350f;
+  color: var(--color-warning-fg);
   font-size: 12px;
   cursor: pointer;
 }
 
 .job-grace-cancel:hover {
-  background: #fef3c7;
+  background: var(--color-warning-bg);
 }
 
 /* History pagination — sits below the run-history table. Power users with
@@ -3138,17 +3248,17 @@ tbody tr.selected {
 .boot-loading-panel p {
   margin: 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .boot-loading-error {
   display: grid;
   gap: 8px;
   padding: 10px 12px;
-  border-radius: 8px;
-  background: #fef2f2;
-  color: #7f1d1d;
-  font-size: 13px;
+  border-radius: var(--radius-md);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+  font-size: 14px;
 }
 
 /*
@@ -3198,13 +3308,13 @@ tbody tr.selected {
   flex-wrap: wrap;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
-  background: #fff7ed;
+  background: var(--color-warning-bg);
 }
 
 .recovery-action-bar button {
   min-height: 30px;
   padding: 4px 12px;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 /*
@@ -3216,10 +3326,10 @@ tbody tr.selected {
   display: grid;
   gap: 6px;
   margin-top: 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: #fff7ed;
-  color: #92400e;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
   font-size: 12px;
 }
 
@@ -3238,7 +3348,7 @@ tbody tr.selected {
  * codex-first-time-user.md #5/#15.
  */
 .launcher-status-error {
-  color: #7f1d1d;
+  color: var(--color-danger-fg);
   font-weight: 500;
 }
 
@@ -3255,7 +3365,7 @@ tbody tr.selected {
 [data-testid="launcher-empty-state"] p {
   margin: 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 /*
@@ -3623,13 +3733,13 @@ details > summary:focus-visible {
   min-width: 60px;
   text-align: right;
   color: #94a3b8;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .log-search button {
   flex: 0 0 auto;
   padding: 3px 8px;
-  font-size: 11px;
+  font-size: 12px;
   background: rgba(15, 23, 42, 0.8);
   color: #e5e7eb;
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -3724,13 +3834,13 @@ mark.log-search-match.active {
 }
 
 .command-palette-row-button strong {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
 }
 
 .command-palette-row-button code {
   display: block;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   grid-column: 1 / 2;
   grid-row: 2 / 3;
@@ -3746,7 +3856,7 @@ mark.log-search-match.active {
   border-radius: 999px;
   background: rgba(37, 99, 235, 0.15);
   color: #2563eb;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -3763,7 +3873,7 @@ mark.log-search-match.active {
   border-top: 1px solid var(--line);
   background: rgba(15, 23, 42, 0.04);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   display: flex;
   justify-content: flex-end;
 }
