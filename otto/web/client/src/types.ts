@@ -402,6 +402,21 @@ export interface DiffResponse {
   text: string;
   error: string | null;
   truncated: boolean;
+  // Freshness metadata: SHAs captured at fetch time so the operator can
+  // tell whether the code about to be merged matches what they reviewed.
+  // ``target_sha`` / ``branch_sha`` may be null when the underlying
+  // ``git rev-parse`` failed (deleted branch, missing remote, etc.); the
+  // failing lookups are recorded in ``errors`` so the UI can render a
+  // targeted warning instead of a generic "diff unavailable".
+  fetched_at: string;
+  target_sha: string | null;
+  branch_sha: string | null;
+  merge_base: string | null;
+  limit_chars: number;
+  full_size_chars: number;
+  shown_hunks: number;
+  total_hunks: number;
+  errors: string[];
 }
 
 export interface ActionResult {

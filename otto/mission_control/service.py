@@ -9,6 +9,7 @@ import signal
 import subprocess
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -183,6 +184,7 @@ class MissionControlService:
             else _branch_diff(self.project_dir, branch, target)
         )
         text = ""
+        full_text = ""
         truncated = False
         command = (
             _optional_str(diff.get("command"))
@@ -197,10 +199,26 @@ class MissionControlService:
             if text_result["error"] is not None:
                 diff = {**diff, "error": text_result["error"]}
             else:
-                text = str(text_result["text"])
-                if len(text) > limit_chars:
-                    text = text[:limit_chars]
+                full_text = str(text_result["text"])
+                if len(full_text) > limit_chars:
+                    text = full_text[:limit_chars]
                     truncated = True
+                else:
+                    text = full_text
+        # Freshness metadata: SHAs are captured at fetch time so the merge
+        # action can later validate that nothing has moved underneath the
+        # operator. ``errors`` records *which* lookup failed so the UI can
+        # surface a targeted warning instead of a vague "diff unavailable".
+        target_sha, branch_sha, merge_base, sha_errors = _diff_freshness_shas(
+            self.project_dir,
+            branch=branch,
+            target=target,
+            merge_info=merge_info,
+        )
+        fetched_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        full_size_chars = len(full_text)
+        shown_hunks = text.count("\n@@ ") + (1 if text.startswith("@@ ") else 0)
+        total_hunks = full_text.count("\n@@ ") + (1 if full_text.startswith("@@ ") else 0)
         return {
             "run_id": detail.run_id,
             "branch": branch,
@@ -211,6 +229,15 @@ class MissionControlService:
             "text": text,
             "error": diff["error"],
             "truncated": truncated,
+            "fetched_at": fetched_at,
+            "target_sha": target_sha,
+            "branch_sha": branch_sha,
+            "merge_base": merge_base,
+            "limit_chars": limit_chars,
+            "full_size_chars": full_size_chars,
+            "shown_hunks": shown_hunks,
+            "total_hunks": total_hunks,
+            "errors": sha_errors,
         }
 
     def execute(
@@ -220,6 +247,8 @@ class MissionControlService:
         *,
         selected_queue_task_ids: list[str] | None = None,
         artifact_index: int | None = None,
+        expected_target_sha: str | None = None,
+        expected_branch_sha: str | None = None,
         filters: MissionControlFilters | None = None,
     ) -> dict[str, Any]:
         key = _action_key(action)
@@ -235,6 +264,11 @@ class MissionControlService:
             if merge_info is not None:
                 target = str(merge_info.get("target") or _merge_target(self.project_dir))
                 raise MissionControlServiceError(f"Already merged into {target}.", status_code=409)
+            self._validate_expected_diff_shas(
+                detail,
+                expected_target_sha=expected_target_sha,
+                expected_branch_sha=expected_branch_sha,
+            )
             _ensure_merge_unblocked(self.project_dir)
 
         selected_artifact_path = None
@@ -273,6 +307,64 @@ class MissionControlService:
             },
         )
         return payload
+
+    def _validate_expected_diff_shas(
+        self,
+        detail: DetailView,
+        *,
+        expected_target_sha: str | None,
+        expected_branch_sha: str | None,
+    ) -> None:
+        """Reject the merge if the live SHAs disagree with what the operator reviewed.
+
+        Called only on the merge action and only when the client sends
+        ``expected_target_sha`` / ``expected_branch_sha`` from its most-recent
+        diff fetch. The intent is the safety hatch for the diff-freshness
+        contract: if the target branch has moved or the audit branch has
+        been amended since the diff snapshot, the operator is shown a 409
+        explaining what changed and asked to refetch the diff. Power users
+        who want to skip the gate simply omit the SHAs from their POST.
+        """
+        expected_target = (expected_target_sha or "").strip().lower() or None
+        expected_branch = (expected_branch_sha or "").strip().lower() or None
+        if not expected_target and not expected_branch:
+            return
+        target = _review_target(self.project_dir, detail.record)
+        branch = _optional_str(detail.record.git.get("branch"))
+        # Resolve the *current* refs to compare against the snapshot.
+        current_target_sha, target_err = _resolve_sha(self.project_dir, target) if target else (None, "target ref is empty")
+        current_branch_sha: str | None = None
+        branch_err: str | None = None
+        if branch and branch != target:
+            current_branch_sha, branch_err = _resolve_sha(self.project_dir, branch)
+        if expected_target and target_err and current_target_sha is None:
+            raise MissionControlServiceError(
+                f"Could not resolve current target {target}: {target_err}. Re-fetch the diff and try again.",
+                status_code=409,
+            )
+        if expected_branch and branch_err and current_branch_sha is None:
+            raise MissionControlServiceError(
+                f"Could not resolve current branch {branch}: {branch_err}. Re-fetch the diff and try again.",
+                status_code=409,
+            )
+        if expected_target and current_target_sha and expected_target != current_target_sha.lower():
+            raise MissionControlServiceError(
+                (
+                    f"Target branch {target} has moved since you reviewed the diff "
+                    f"(diff was at {expected_target[:7]}, now {current_target_sha[:7]}). "
+                    "Re-fetch the diff to confirm what will be merged."
+                ),
+                status_code=409,
+            )
+        if expected_branch and current_branch_sha and expected_branch != current_branch_sha.lower():
+            raise MissionControlServiceError(
+                (
+                    f"Branch {branch} has moved since you reviewed the diff "
+                    f"(diff was at {expected_branch[:7]}, now {current_branch_sha[:7]}). "
+                    "Re-fetch the diff to confirm what will be merged."
+                ),
+                status_code=409,
+            )
 
     def merge_all(self) -> dict[str, Any]:
         _ensure_merge_unblocked(self.project_dir)
@@ -1919,6 +2011,117 @@ def _branch_diff_text(project_dir: Path, branch: str | None, target: str) -> dic
         detail = (result.stderr or result.stdout or f"git diff exited {result.returncode}").strip()
         return {"text": "", "error": detail}
     return {"text": result.stdout, "error": None}
+
+
+def _resolve_sha(project_dir: Path, ref: str) -> tuple[str | None, str | None]:
+    """Resolve ``ref`` to a 40-char SHA via ``git rev-parse``.
+
+    Returns ``(sha, error)``. ``error`` is ``None`` on success and a
+    short human-readable string when the lookup failed (so the UI can
+    distinguish "branch missing" from "git unavailable").
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return None, "ref is empty"
+    resolved_ref = _git_diff_ref(project_dir, ref)
+    result = git_ops.run_git(project_dir, "rev-parse", "--verify", "--quiet", f"{resolved_ref}^{{commit}}")
+    if not result.ok:
+        detail = (result.stderr or result.stdout or f"rev-parse exited {result.returncode}").strip()
+        return None, detail or f"could not resolve {ref}"
+    sha = result.stdout.strip()
+    if not sha:
+        return None, f"could not resolve {ref}"
+    return sha, None
+
+
+def _resolve_merge_base(project_dir: Path, target: str, branch: str) -> tuple[str | None, str | None]:
+    target_ref = _git_diff_ref(project_dir, target)
+    branch_ref = _git_diff_ref(project_dir, branch)
+    result = git_ops.run_git(project_dir, "merge-base", target_ref, branch_ref)
+    if not result.ok:
+        detail = (result.stderr or result.stdout or f"merge-base exited {result.returncode}").strip()
+        return None, detail or f"could not compute merge-base({target}, {branch})"
+    sha = result.stdout.strip()
+    if not sha:
+        return None, f"could not compute merge-base({target}, {branch})"
+    return sha, None
+
+
+def _diff_freshness_shas(
+    project_dir: Path,
+    *,
+    branch: str | None,
+    target: str,
+    merge_info: dict[str, Any] | None,
+) -> tuple[str | None, str | None, str | None, list[str]]:
+    """Capture target HEAD, branch HEAD, and merge-base SHAs at fetch time.
+
+    For already-merged tasks we prefer the recorded SHAs from the merge
+    state (``target_head_before`` / ``merge_commit``) over re-resolving
+    the live refs — those refs may have moved on past the merge.
+    Returns ``(target_sha, branch_sha, merge_base, errors)``.
+    """
+    errors: list[str] = []
+    target_sha: str | None = None
+    branch_sha: str | None = None
+    merge_base: str | None = None
+    if merge_info is not None:
+        # Merged task: snapshot what was actually merged. The "target_sha"
+        # is the target HEAD at merge time; the "branch_sha" is the merge
+        # commit's second parent (the tip of the branch as merged); the
+        # merge-base is recorded as ``diff_base`` when available.
+        target_sha = _optional_str(merge_info.get("target_head_before"))
+        merge_commit = _optional_str(merge_info.get("merge_commit"))
+        if merge_commit:
+            branch_tip = _merge_commit_branch_parent(project_dir, merge_commit)
+            branch_sha = branch_tip or merge_commit
+        else:
+            branch_sha = None
+        merge_base = _optional_str(merge_info.get("diff_base")) or target_sha
+        if target_sha is None:
+            errors.append("target_head_before missing from merge state")
+        if branch_sha is None:
+            errors.append("merge_commit missing from merge state")
+        return target_sha, branch_sha, merge_base, errors
+
+    # Live diff path: rev-parse each ref. Lookups fail independently so the
+    # UI can warn the operator about exactly which side is unverifiable.
+    if not target:
+        errors.append("target ref is empty")
+    else:
+        target_sha, err = _resolve_sha(project_dir, target)
+        if err:
+            errors.append(f"target {target}: {err}")
+    branch_str = (branch or "").strip()
+    if not branch_str or branch_str == target:
+        # Same-branch diff is empty; nothing meaningful to report.
+        pass
+    else:
+        branch_sha, err = _resolve_sha(project_dir, branch_str)
+        if err:
+            errors.append(f"branch {branch_str}: {err}")
+    if target and branch_str and branch_str != target and target_sha and branch_sha:
+        merge_base, err = _resolve_merge_base(project_dir, target, branch_str)
+        if err:
+            errors.append(f"merge-base: {err}")
+    return target_sha, branch_sha, merge_base, errors
+
+
+def _merge_commit_branch_parent(project_dir: Path, merge_commit: str) -> str | None:
+    """Return the second parent of ``merge_commit`` (tip of merged branch).
+
+    ``merge --no-ff`` produces a commit whose first parent is the target's
+    prior HEAD and whose second parent is the merged-in branch tip. For
+    fast-forward merges there is only one parent and the branch tip equals
+    the merge commit itself.
+    """
+    result = git_ops.run_git(project_dir, "rev-list", "--parents", "-n", "1", merge_commit)
+    if not result.ok:
+        return None
+    parts = result.stdout.strip().split()
+    if len(parts) >= 3:
+        return parts[2]
+    return None
 
 
 def _git_diff_ref(project_dir: Path, ref: str) -> str:

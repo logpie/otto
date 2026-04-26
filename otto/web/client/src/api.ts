@@ -18,13 +18,58 @@ export interface StateQuery {
 export class ApiError extends Error {
   status: number;
   severity: string;
+  // Original server-provided message preserved for tests/logging. The
+  // `.message` is replaced with a friendlier mapping by `friendlyApiMessage`
+  // when one of the recognized status codes hits.
+  rawMessage: string;
 
   constructor(message: string, status: number, severity = "error") {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.severity = severity;
+    this.rawMessage = message;
   }
+}
+
+/**
+ * Map common project-launcher / generic API failures to actionable copy.
+ *
+ * Pulled from mc-audit codex-first-time-user.md #24/#15/#16: launcher errors
+ * surface raw `HTTP <status>` strings (or unhelpful server text) without
+ * recovery hints. Mapping at the API boundary means every caller (project
+ * create, project select, queue, watcher, ...) gets the same friendly copy
+ * for free instead of duplicating switch-on-status in each component.
+ */
+export function friendlyApiMessage(status: number, raw: string, context?: {projectName?: string; projectPath?: string}): string {
+  const trimmed = (raw || "").trim();
+  const lowered = trimmed.toLowerCase();
+  if (status === 409) {
+    if (context?.projectName) {
+      return `A project named "${context.projectName}" already exists. Choose a different name or open the existing one.`;
+    }
+    return trimmed || "That name or path is already in use.";
+  }
+  if (status === 400) {
+    if (context?.projectPath || lowered.includes("not a git repository")) {
+      const where = context?.projectPath || trimmed.replace(/^[^:]*:\s*/, "");
+      return `${where || "That path"} isn't a valid git repo. Make sure it exists and contains a .git directory.`;
+    }
+    return trimmed || "Request was invalid.";
+  }
+  if (status === 403) {
+    if (context?.projectPath) {
+      return `Permission denied at ${context.projectPath}. Check directory permissions, or pick a different path.`;
+    }
+    return trimmed || "Permission denied.";
+  }
+  if (status === 404) {
+    return trimmed || "The requested resource was not found.";
+  }
+  if (status >= 500) {
+    return `Server error: ${trimmed || `HTTP ${status}`}. Try again or check the server log.`;
+  }
+  return trimmed || `HTTP ${status}`;
 }
 
 export function stateQueryParams(query: StateQuery): URLSearchParams {
@@ -58,7 +103,9 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   }
   if (!response.ok) {
     const body = (data || {}) as ApiErrorBody;
-    throw new ApiError(body.message || `HTTP ${response.status}`, response.status, body.severity || "error");
+    const raw = body.message || `HTTP ${response.status}`;
+    const friendly = friendlyApiMessage(response.status, raw);
+    throw new ApiError(friendly, response.status, body.severity || "error");
   }
   return data as T;
 }

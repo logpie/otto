@@ -1,6 +1,6 @@
 import {FormEvent, useCallback, useEffect, useMemo, useRef, useState} from "react";
 import type {ReactNode} from "react";
-import {ApiError, api, buildQueuePayload, stateQueryParams} from "./api";
+import {ApiError, api, buildQueuePayload, friendlyApiMessage, stateQueryParams} from "./api";
 import {Spinner} from "./components/Spinner";
 import {useInFlight} from "./hooks/useInFlight";
 import {useDebouncedValue} from "./hooks/useDebouncedValue";
@@ -240,6 +240,14 @@ export function App() {
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [data, setData] = useState<StateResponse | null>(null);
   const [projectsState, setProjectsState] = useState<ProjectsResponse | null>(null);
+  // `projectsLoaded` flips true the first time `/api/projects` resolves
+  // (success or recoverable failure). Until then we render a boot-loading
+  // placeholder instead of either the launcher OR the main shell — see
+  // mc-audit codex-first-time-user.md #1: before /api/projects returns,
+  // projectsState is null so the launcher gate fails and the main shell
+  // can render with an enabled "New job" button + project undefined.
+  const [projectsLoaded, setProjectsLoaded] = useState<boolean>(false);
+  const [bootError, setBootError] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRoute.selectedRunId);
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [logState, setLogState] = useState<LogState>(initialLogState);
@@ -479,9 +487,17 @@ export function App() {
   }, [filters, historyPage, historyPageSize]);
 
   const loadProjects = useCallback(async () => {
-    const next = await api<ProjectsResponse>("/api/projects");
-    setProjectsState(next);
-    return next;
+    try {
+      const next = await api<ProjectsResponse>("/api/projects");
+      setProjectsState(next);
+      setBootError(null);
+      setProjectsLoaded(true);
+      return next;
+    } catch (error) {
+      setBootError(errorMessage(error));
+      setProjectsLoaded(true);
+      throw error;
+    }
   }, []);
 
   const refresh = useCallback(async (showStatus = false) => {
@@ -669,16 +685,29 @@ export function App() {
       return;
     }
     const actionLabel = capitalize(label || action);
+    // For merge actions we forward the SHAs from the most-recent diff
+    // fetch so the server can refuse to merge code that differs from
+    // what the operator reviewed (CRITICAL diff-freshness contract). The
+    // confirm body is rebuilt to spell out exactly which branch+SHA is
+    // about to land into which target+SHA.
+    const isMerge = action === "merge";
+    const liveDiff = isMerge ? diffContent : null;
+    const mergeBody = isMerge && liveDiff
+      ? mergeConfirmationBody(liveDiff)
+      : message;
+    const requestPayload: Record<string, string> = {};
+    if (isMerge && liveDiff?.target_sha) requestPayload.expected_target_sha = liveDiff.target_sha;
+    if (isMerge && liveDiff?.branch_sha) requestPayload.expected_branch_sha = liveDiff.branch_sha;
     requestConfirm({
-      title: action === "merge" ? "Land task" : `${actionLabel} run`,
-      body: message,
-      confirmLabel: action === "merge" ? "Land task" : actionLabel,
+      title: isMerge ? "Land task" : `${actionLabel} run`,
+      body: mergeBody,
+      confirmLabel: isMerge ? "Land task" : actionLabel,
       tone: ["cancel", "cleanup"].includes(action) ? "danger" : "primary",
       onConfirm: async () => {
         try {
           const result = await api<ActionResult>(`/api/runs/${encodeURIComponent(runId)}/actions/${action}`, {
             method: "POST",
-            body: JSON.stringify({}),
+            body: JSON.stringify(requestPayload),
           });
           handleActionResult(result, `${action} requested`, showToast, setResultBanner);
           if (result.refresh !== false) await refresh(true);
@@ -687,7 +716,7 @@ export function App() {
         }
       },
     });
-  }, [data?.landing, refresh, requestConfirm, showToast]);
+  }, [data?.landing, diffContent, refresh, requestConfirm, showToast]);
 
   const mergeReadyTasks = useCallback(async () => {
     const landing = data?.landing;
@@ -964,6 +993,38 @@ export function App() {
     }, "replace");
   }, [currentRouteState]);
 
+  // Boot-loading gate: until /api/projects has resolved at least once, render
+  // a minimal centered placeholder. Without this, `projectsState` is null and
+  // `projectsState?.launcher_enabled` is false, so the launcher branch falls
+  // through to the main shell — which renders with `project` undefined and an
+  // ENABLED "New job" button. A click would then submit a queue request that
+  // 409s on the server. See codex-first-time-user.md #1.
+  if (!projectsLoaded) {
+    return (
+      <div className="app-shell boot-loading" data-testid="boot-loading">
+        <main className="boot-loading-panel" role="status" aria-live="polite">
+          <div className="boot-loading-mark">
+            <Spinner />
+            <strong>Loading Mission Control…</strong>
+          </div>
+          <p>Reading project state. Actions will appear once the workspace is ready.</p>
+          {bootError ? (
+            <div className="boot-loading-error" data-testid="boot-loading-error">
+              <span>Could not reach the server: {bootError}</span>
+              <button
+                className="primary"
+                type="button"
+                disabled={refreshInFlight.pending}
+                aria-busy={refreshInFlight.pending}
+                onClick={onManualRefresh}
+              >{refreshInFlight.pending ? <><Spinner /> Retrying…</> : "Retry"}</button>
+            </div>
+          ) : null}
+        </main>
+      </div>
+    );
+  }
+
   if (projectsState?.launcher_enabled && !data) {
     return (
       <div className="app-shell launcher-shell">
@@ -975,7 +1036,7 @@ export function App() {
               <p>Project Launcher</p>
             </div>
           </div>
-          <p className="sidebar-hint">Choose a managed project before queueing work.</p>
+          <p className="sidebar-hint">Choose a project folder before queueing work.</p>
         </aside>
         <main className="workspace launcher-workspace">
           <ProjectLauncher
@@ -988,6 +1049,24 @@ export function App() {
           />
         </main>
         {toast && <div id="toast" className={`visible toast-${toast.severity}`} role="status" aria-live="polite">{toast.message}</div>}
+      </div>
+    );
+  }
+
+  // Defensive secondary gate: even once projectsLoaded is true, the main
+  // shell must not render until we have a `project` from /api/state. This
+  // prevents the dialog from opening with `project` undefined if the
+  // launcher mode is off but /api/state has not yet returned.
+  if (!data || !data.project) {
+    return (
+      <div className="app-shell boot-loading" data-testid="boot-loading">
+        <main className="boot-loading-panel" role="status" aria-live="polite">
+          <div className="boot-loading-mark">
+            <Spinner />
+            <strong>Loading Mission Control…</strong>
+          </div>
+          <p>Reading queue, runs, and repository status…</p>
+        </main>
       </div>
     );
   }
@@ -1072,6 +1151,7 @@ export function App() {
                 onShowArtifacts={showArtifacts}
                 onLoadProofArtifact={(index) => void loadProofArtifact(index)}
                 onLoadArtifact={(index) => void loadArtifact(index)}
+                onRefreshDiff={() => void loadDiff()}
                 onBackToArtifacts={() => {
                   setSelectedArtifactIndex(null);
                   setArtifactContent(null);
@@ -1134,6 +1214,7 @@ export function App() {
                   onShowArtifacts={showArtifacts}
                   onLoadProofArtifact={(index) => void loadProofArtifact(index)}
                   onLoadArtifact={(index) => void loadArtifact(index)}
+                  onRefreshDiff={() => void loadDiff()}
                   onBackToArtifacts={() => {
                     setSelectedArtifactIndex(null);
                     setArtifactContent(null);
@@ -1149,6 +1230,7 @@ export function App() {
       {jobOpen && (
         <JobDialog
           project={project}
+          dirtyFiles={landing?.dirty_files || []}
           onClose={() => setJobOpen(false)}
           onQueued={async (message) => {
             setJobOpen(false);
@@ -1208,24 +1290,37 @@ function ProjectLauncher({projectsState, refreshStatus, refreshPending, onCreate
 }) {
   const [name, setName] = useState("");
   const [status, setStatus] = useState("");
+  const [statusKind, setStatusKind] = useState<"info" | "error">("info");
   const [pending, setPending] = useState(false);
   const projects = projectsState.projects || [];
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+  // When the project list is empty, focus the create-form's name input so the
+  // first-run user lands directly on the only sensible next step. mc-audit
+  // codex-first-time-user.md #5.
+  useEffect(() => {
+    if (projects.length === 0) {
+      nameInputRef.current?.focus();
+    }
+  }, [projects.length]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = name.trim();
     if (!trimmed) {
       setStatus("Project name is required.");
+      setStatusKind("error");
       return;
     }
     setPending(true);
     setStatus("Creating project");
+    setStatusKind("info");
     try {
       await onCreate(trimmed);
       setName("");
       setStatus("");
     } catch (error) {
-      setStatus(errorMessage(error));
+      setStatus(launcherErrorMessage(error, {projectName: trimmed}));
+      setStatusKind("error");
     } finally {
       setPending(false);
     }
@@ -1235,11 +1330,13 @@ function ProjectLauncher({projectsState, refreshStatus, refreshPending, onCreate
     if (!project.path || pending) return;
     setPending(true);
     setStatus(`Opening ${project.name}`);
+    setStatusKind("info");
     try {
       await onSelect(project.path);
       setStatus("");
     } catch (error) {
-      setStatus(errorMessage(error));
+      setStatus(launcherErrorMessage(error, {projectPath: project.path}));
+      setStatusKind("error");
     } finally {
       setPending(false);
     }
@@ -1249,9 +1346,11 @@ function ProjectLauncher({projectsState, refreshStatus, refreshPending, onCreate
     <section className="project-launcher" aria-labelledby="projectLauncherHeading">
       <div className="launcher-head">
         <div>
-          <span>Managed workspace</span>
+          <span>Project folder</span>
           <h2 id="projectLauncherHeading">Project Launcher</h2>
-          <p>Create or open a managed git project before queueing work.</p>
+          <p data-testid="launcher-subhead">
+            Otto runs AI coding jobs in isolated git worktrees, then lets you review logs, diffs, and merge results.
+          </p>
         </div>
         <div className="launcher-actions">
           {refreshLabel(refreshStatus) && <span className="muted">{refreshLabel(refreshStatus)}</span>}
@@ -1263,25 +1362,33 @@ function ProjectLauncher({projectsState, refreshStatus, refreshPending, onCreate
         <form className="launcher-panel launcher-form" onSubmit={(event) => void submit(event)}>
           <div>
             <h3>Create project</h3>
-            <p>Otto will create a normal folder and initialize a git repo in the managed projects root.</p>
+            <p>Otto creates a folder and initializes a git repo under the projects root.</p>
           </div>
           <label>Project name
             <input
+              ref={nameInputRef}
               value={name}
+              data-testid="launcher-create-name-input"
               autoFocus
               type="text"
               placeholder="Expense approval portal"
               onChange={(event) => setName(event.target.value)}
             />
           </label>
-          <button className="primary" type="submit" disabled={pending}>{pending ? "Working" : "Create project"}</button>
-          <p className="launcher-status" aria-live="polite">{status}</p>
+          <button className="primary" type="submit" data-testid="launcher-create-submit" disabled={pending}>{pending ? "Working" : "Create project"}</button>
+          <p
+            className={`launcher-status ${statusKind === "error" ? "launcher-status-error" : ""}`}
+            data-testid="launcher-form-status"
+            aria-live="polite"
+          >{status}</p>
         </form>
 
         <div className="launcher-panel managed-root">
-          <h3>Managed root</h3>
+          <h3>Project folder root</h3>
           <code title={projectsState.projects_root}>{projectsState.projects_root}</code>
-          <p>Managed projects isolate Otto work from the repo that launched the web server. They are not a filesystem security sandbox.</p>
+          <p data-testid="launcher-managed-root-help">
+            All projects live under this directory. Otto creates a git worktree per project so other repos on this machine aren&apos;t affected. The repo that launched Mission Control is intentionally excluded — pick or create a project here to begin.
+          </p>
         </div>
       </div>
 
@@ -1289,7 +1396,7 @@ function ProjectLauncher({projectsState, refreshStatus, refreshPending, onCreate
         <div className="panel-heading">
           <div>
             <h3>Open project</h3>
-            <p className="panel-subtitle">Existing managed git repos under the projects root.</p>
+            <p className="panel-subtitle">Existing git repos under the projects root.</p>
           </div>
           <span className="pill">{projects.length}</span>
         </div>
@@ -1307,12 +1414,27 @@ function ProjectLauncher({projectsState, refreshStatus, refreshPending, onCreate
               </span>
             </button>
           )) : (
-            <div className="launcher-empty">No managed projects yet.</div>
+            <div className="launcher-empty" data-testid="launcher-empty-state">
+              <strong>Create your first Otto project below.</strong>
+              <p>Pick a name in the form above. Otto initializes a git repo and you can queue your first build right after.</p>
+            </div>
           )}
         </div>
       </div>
     </section>
   );
+}
+
+/**
+ * Translate launcher mutation errors into recovery copy. Wraps
+ * `friendlyApiMessage` for ApiError instances and falls back to the raw
+ * message otherwise. mc-audit codex-first-time-user.md #15/#24.
+ */
+function launcherErrorMessage(error: unknown, context: {projectName?: string; projectPath?: string}): string {
+  if (error instanceof ApiError) {
+    return friendlyApiMessage(error.status, error.rawMessage, context);
+  }
+  return errorMessage(error);
 }
 
 function Toolbar({filters, refreshStatus, refreshPending, viewMode, onChange, onRefresh, onViewChange}: {
@@ -1578,13 +1700,25 @@ function MissionFocus({data, lastError, resultBanner, watcherPending, landPendin
           <button className="primary" type="button" data-testid="mission-land-ready-button" disabled={!canMerge(data?.landing) || landPending} aria-busy={landPending} onClick={onLandReady}>{landPending ? <><Spinner /> Landing…</> : "Land all ready"}</button>
         )}
         {focus.primary === "start" && (
-          <button className="primary" type="button" data-testid="mission-start-watcher-button" disabled={!canStartWatcher(data) || watcherPending} aria-busy={watcherPending} onClick={onStartWatcher}>{watcherPending ? <><Spinner /> Starting…</> : "Start watcher"}</button>
+          <button
+            className="primary"
+            type="button"
+            data-testid="mission-start-watcher-button"
+            disabled={!canStartWatcher(data) || watcherPending}
+            aria-busy={watcherPending}
+            title="Start the watcher process to run queued jobs."
+            onClick={onStartWatcher}
+          >
+            {watcherPending
+              ? <><Spinner /> Starting…</>
+              : (Number(data?.watcher.counts.queued || 0) > 0 ? "Start queued job" : "Start watcher")}
+          </button>
         )}
         {focus.primary === "diagnostics" && (
           <button className="primary" type="button" onClick={onOpenDiagnostics}>Review cleanup</button>
         )}
         {focus.primary === "new" && (
-          <button className="primary" type="button" onClick={onNewJob}>New job</button>
+          <button className="primary" type="button" data-testid="mission-new-job-button" onClick={onNewJob}>{focus.firstRun ? "Start first build" : "New job"}</button>
         )}
         {focus.primary !== "new" && <button type="button" onClick={onNewJob}>New job</button>}
       </div>
@@ -2029,6 +2163,7 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
       {detail ? (
         <>
           <div className="detail-scroll">
+            <RecoveryActionBar actions={detail.legal_actions || []} status={detail.display_status} onRunAction={onRunAction} />
             <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} onLoadArtifact={onLoadArtifact} onShowArtifacts={onShowArtifacts} />
             <details className="detail-body detail-metadata">
               <summary>
@@ -2052,20 +2187,22 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
             <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
           </div>
           <div className="detail-inspector-actions" aria-label="Evidence shortcuts">
-            <button className="primary" type="button" data-testid="open-proof-button" onClick={onShowProof}>Open proof</button>
-            <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Diff</button>
+            <button className="primary" type="button" data-testid="open-proof-button" onClick={onShowProof}>Review result</button>
+            <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Code changes</button>
             <button type="button" data-testid="open-logs-button" onClick={onShowLogs}>Logs</button>
             <button type="button" data-testid="open-artifacts-button" onClick={onShowArtifacts}>Artifacts</button>
           </div>
         </>
       ) : (
-        <div className="detail-body empty">Select a run.</div>
+        <div className="detail-body empty" data-testid="run-detail-empty">
+          Select a task card to review logs, code changes, verification, and next action.
+        </div>
       )}
     </aside>
   );
 }
 
-function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, diffContent, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onBackToArtifacts, onClose}: {
+function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, diffContent, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onRefreshDiff, onBackToArtifacts, onClose}: {
   detail: RunDetail;
   mode: InspectorMode;
   logState: LogState;
@@ -2080,6 +2217,7 @@ function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactCo
   onShowArtifacts: () => void;
   onLoadProofArtifact: (index: number) => void;
   onLoadArtifact: (index: number) => void;
+  onRefreshDiff: () => void;
   onBackToArtifacts: () => void;
   onClose: () => void;
 }) {
@@ -2097,11 +2235,11 @@ function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactCo
       <div className="run-inspector-heading">
         <div>
           <h2 id="runInspectorHeading">{detail.title || detail.run_id}</h2>
-          <p>{detailStatusLabel(detail)} evidence packet</p>
+          <p>{detailStatusLabel(detail)} review</p>
         </div>
         <div className="detail-tabs" role="tablist" aria-label="Evidence view">
-          <button className={`tab ${mode === "proof" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "proof"} onClick={onShowProof}>Proof</button>
-          <button className={`tab ${mode === "diff" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "diff"} disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Diff</button>
+          <button className={`tab ${mode === "proof" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "proof"} onClick={onShowProof}>Result</button>
+          <button className={`tab ${mode === "diff" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "diff"} disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Code changes</button>
           <button className={`tab ${mode === "logs" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "logs"} onClick={onShowLogs}>Logs</button>
           <button className={`tab ${mode === "artifacts" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "artifacts"} onClick={onShowArtifacts}>Artifacts</button>
         </div>
@@ -2111,7 +2249,7 @@ function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactCo
         {mode === "proof" ? (
           <ProofPane detail={detail} proofArtifactIndex={proofArtifactIndex} proofContent={proofContent} onShowDiff={onShowDiff} onLoadProofArtifact={onLoadProofArtifact} />
         ) : mode === "diff" ? (
-          <DiffPane diff={diffContent} />
+          <DiffPane diff={diffContent} onRefresh={onRefreshDiff} />
         ) : mode === "logs" ? (
           <LogPane logState={logState} runActive={detail.active} onRetry={onShowLogs} />
         ) : (
@@ -2263,7 +2401,7 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
         </section>
       )}
       <section className="proof-section" aria-labelledby="proofChecksHeading">
-        <h3 id="proofChecksHeading">Certification checks</h3>
+        <h3 id="proofChecksHeading">Verification</h3>
         {proofChecks.length ? (
           <div className="proof-checks">
             {proofChecks.map((check) => (
@@ -2354,22 +2492,89 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
   );
 }
 
-function DiffPane({diff}: {diff: DiffResponse | null}) {
+function DiffPane({diff, onRefresh}: {diff: DiffResponse | null; onRefresh: () => void}) {
+  // All hooks must run on every render — bail-out branches must come AFTER
+  // the hook calls or React throws "Rendered more hooks than previous"
+  // (#310). Order matters here.
   const sections = useMemo(() => splitDiffIntoFiles(diff?.text || "", diff?.files || []), [diff?.text, diff?.files]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // Re-render the "captured X ago" relative time once a second so the
+  // header doesn't lie when the operator stares at the panel.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick((tick) => tick + 1), 1000);
+    return () => window.clearInterval(id);
+  }, []);
   useEffect(() => {
     setSelectedPath(sections[0]?.path || null);
   }, [diff?.run_id, diff?.text, sections]);
+  const command = diff?.command || null;
+  const copyCommand = useCallback(() => {
+    if (!command) return;
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      void navigator.clipboard.writeText(command);
+    }
+  }, [command]);
   const selected = sections.find((section) => section.path === selectedPath) || sections[0] || null;
   if (!diff) {
-    return <div className="diff-viewer"><div className="diff-toolbar"><strong>Code diff</strong><span>loading</span></div><pre className="diff-pane">Loading diff...</pre></div>;
+    return (
+      <div className="diff-viewer" data-testid="diff-pane">
+        <div className="diff-toolbar"><strong>Code diff</strong><span>loading</span></div>
+        <pre className="diff-pane">Loading diff...</pre>
+      </div>
+    );
   }
+  const targetShaShort = diff.target_sha ? diff.target_sha.slice(0, 7) : null;
+  const branchShaShort = diff.branch_sha ? diff.branch_sha.slice(0, 7) : null;
+  const mergeBaseShort = diff.merge_base ? diff.merge_base.slice(0, 7) : null;
+  const ageLabel = diff.fetched_at ? formatRelativeFreshness(diff.fetched_at) : null;
+  const truncationBanner = diff.truncated
+    ? formatDiffTruncationBanner(diff)
+    : null;
   return (
     <div className="diff-viewer" data-testid="diff-pane">
+      <div className="diff-freshness" data-testid="diff-freshness">
+        <div className="diff-freshness-meta">
+          {ageLabel && <span data-testid="diff-fetched-at">Captured {ageLabel}</span>}
+          {targetShaShort ? (
+            <span data-testid="diff-target-sha" title={diff.target_sha || ""}>target {diff.target} @ {targetShaShort}</span>
+          ) : (
+            <span className="diff-warning" data-testid="diff-target-sha-missing">⚠ Could not resolve target SHA; diff may be stale.</span>
+          )}
+          {diff.branch && diff.branch !== diff.target ? (
+            branchShaShort ? (
+              <span data-testid="diff-branch-sha" title={diff.branch_sha || ""}>branch {diff.branch} @ {branchShaShort}</span>
+            ) : (
+              <span className="diff-warning" data-testid="diff-branch-sha-missing">⚠ Could not resolve branch SHA; diff may be stale.</span>
+            )
+          ) : null}
+          {mergeBaseShort ? (
+            <span data-testid="diff-merge-base" title={diff.merge_base || ""}>base {mergeBaseShort}</span>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="diff-refresh-button"
+          data-testid="diff-refresh-button"
+          onClick={onRefresh}
+        >
+          Refresh
+        </button>
+      </div>
       <div className="diff-toolbar">
         <strong>Code diff</strong>
-        <span>{diff.branch || "-"} → {diff.target}{diff.truncated ? " · truncated" : ""}</span>
+        <span>{diff.branch || "-"} → {diff.target}</span>
       </div>
+      {truncationBanner ? (
+        <div className="diff-truncation" data-testid="diff-truncation">
+          <span>{truncationBanner}</span>
+          {diff.command ? (
+            <button type="button" data-testid="diff-copy-command-button" onClick={copyCommand}>
+              Copy diff command
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {diff.error ? <div className="diff-error">{formatTechnicalIssue(diff.error)}</div> : null}
       <div className="diff-layout">
         {sections.length ? (
@@ -2396,6 +2601,48 @@ function DiffPane({diff}: {diff: DiffResponse | null}) {
       </div>
     </div>
   );
+}
+
+// Render "Showing N hunks of M · X KB of Y MB" so the operator can tell
+// how much of the diff is hidden by the 240k char slice. Falls back to a
+// concise byte-only line when the server didn't report a hunk count.
+function formatDiffTruncationBanner(diff: DiffResponse): string {
+  const shownBytes = humanBytes(new TextEncoder().encode(diff.text || "").length);
+  const totalBytes = humanBytes(new TextEncoder().encode("a".repeat(Math.max(0, diff.full_size_chars))).length);
+  // Cheap upper-bound: char counts are ~bytes for ASCII source diff. Use
+  // the raw chars to avoid encoding the entire diff just for a banner.
+  const shownChars = diff.text ? diff.text.length : 0;
+  const fullChars = diff.full_size_chars || 0;
+  const shownLabel = humanBytes(shownChars);
+  const totalLabel = humanBytes(fullChars);
+  const hunksPart = diff.total_hunks > 0
+    ? `Showing ${diff.shown_hunks.toLocaleString()} hunk${diff.shown_hunks === 1 ? "" : "s"} of ${diff.total_hunks.toLocaleString()}`
+    : "Diff was truncated";
+  const sizePart = `shown ${shownLabel} of ${totalLabel}`;
+  // shownBytes/totalBytes only used to keep the helper imports honest in
+  // case we later switch to a real byte count. Suppress unused warnings.
+  void shownBytes;
+  void totalBytes;
+  return `${hunksPart} · ${sizePart}`;
+}
+
+// Render an ISO timestamp as "Xs ago", "Xm Ys ago", etc. Returns "just now"
+// for sub-second deltas and "in the future" if the server clock is ahead.
+function formatRelativeFreshness(iso: string): string {
+  const fetched = Date.parse(iso);
+  if (!Number.isFinite(fetched)) return "unknown";
+  const deltaSec = Math.round((Date.now() - fetched) / 1000);
+  if (deltaSec < 0) return "just now";
+  if (deltaSec < 5) return "just now";
+  if (deltaSec < 60) return `${deltaSec}s ago`;
+  const minutes = Math.floor(deltaSec / 60);
+  const seconds = deltaSec % 60;
+  if (minutes < 60) {
+    return seconds > 0 ? `${minutes}m ${seconds}s ago` : `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remMin = minutes % 60;
+  return remMin > 0 ? `${hours}h ${remMin}m ago` : `${hours}h ago`;
 }
 
 function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
@@ -2568,6 +2815,72 @@ function DetailLine({line}: {line: string}) {
   );
 }
 
+/**
+ * Surface the most-relevant recovery action (Retry / Resume / Cleanup /
+ * Requeue) next to the run header for failed/paused/interrupted runs. The
+ * full set still lives under "Advanced run actions" below — this bar is a
+ * shortcut for the obvious-next-step. mc-audit codex-first-time-user.md #14.
+ */
+function RecoveryActionBar({actions, status, onRunAction}: {
+  actions: ActionState[];
+  status: string;
+  onRunAction: (action: string, label?: string) => void;
+}) {
+  const recovery = pickRecoveryActions(actions, status);
+  if (!recovery.length) return null;
+  return (
+    <div
+      className="recovery-action-bar"
+      data-testid="recovery-action-bar"
+      role="toolbar"
+      aria-label="Recovery actions"
+    >
+      {recovery.map((action, idx) => {
+        const name = actionName(action.key);
+        return (
+          <button
+            key={action.key}
+            type="button"
+            className={idx === 0 ? "primary" : ""}
+            data-testid={`recovery-action-${name}`}
+            disabled={!action.enabled}
+            title={action.reason || action.preview || ""}
+            onClick={() => onRunAction(name, action.label)}
+          >
+            {reviewActionLabel(action.label)}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const RECOVERABLE_STATUSES = new Set([
+  "failed",
+  "cancelled",
+  "interrupted",
+  "stale",
+  "paused",
+  "needs_attention",
+]);
+
+const RECOVERY_ACTION_KEYS = ["R", "r", "x"];
+
+function pickRecoveryActions(actions: ActionState[], status: string | null | undefined): ActionState[] {
+  const normalized = String(status || "").toLowerCase();
+  if (!RECOVERABLE_STATUSES.has(normalized)) return [];
+  // Honor the order in RECOVERY_ACTION_KEYS (Retry > Resume > Cleanup) so
+  // the primary slot is the most-likely next step.
+  const byKey = new Map<string, ActionState>();
+  for (const action of actions) byKey.set(action.key, action);
+  const result: ActionState[] = [];
+  for (const key of RECOVERY_ACTION_KEYS) {
+    const match = byKey.get(key);
+    if (match) result.push(match);
+  }
+  return result;
+}
+
 function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]; mergeBlocked: boolean; onRunAction: (action: string, label?: string) => void}) {
   const visible = actions.filter((action) => !["o", "e", "m", "M"].includes(action.key));
   if (!visible.length) return <div className="advanced-actions empty" aria-hidden="true" />;
@@ -2626,8 +2939,9 @@ function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoad
   );
 }
 
-function JobDialog({project, onClose, onQueued, onError}: {
+function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
   project: StateResponse["project"] | undefined;
+  dirtyFiles: string[];
   onClose: () => void;
   onQueued: (message?: string) => Promise<void>;
   onError: (message: string) => void;
@@ -2644,9 +2958,40 @@ function JobDialog({project, onClose, onQueued, onError}: {
   const [targetConfirmed, setTargetConfirmed] = useState(false);
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // Whether the Advanced section should be programmatically opened. The
+  // pre-submit summary "Edit" link sets this so users get one-click access
+  // to the provider/model/effort fields without scrolling through Otto
+  // jargon. mc-audit codex-first-time-user.md #2.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const advancedRef = useRef<HTMLDetailsElement | null>(null);
   const dialogRef = useDialogFocus<HTMLFormElement>(onClose, submitting);
   const targetNeedsConfirmation = Boolean(project?.dirty);
-  const submitDisabled = submitting || (command === "build" && !intent.trim()) || (targetNeedsConfirmation && !targetConfirmed);
+  // ALL commands now require a non-empty intent (or focus). Codex flagged
+  // that improve/certify could queue blank — equivalent to "do something
+  // unspecified", which is never what a user means. mc-audit
+  // codex-first-time-user.md #8.
+  const intentRequired = !intent.trim();
+  const submitDisabled = submitting || intentRequired || (targetNeedsConfirmation && !targetConfirmed);
+
+  // Pre-submit summary fields. We resolve the visible "will run with" line
+  // by combining the user's selection with the project's defaults. mc-audit
+  // codex-first-time-user.md #2.
+  const summary = jobRunSummary({command, subcommand, project, provider, model, effort, certification});
+  const intentLabelMap: Record<JobCommand, string> = {
+    build: "Intent",
+    improve: "Focus",
+    certify: "Focus",
+  };
+  const intentPlaceholderMap: Record<JobCommand, string> = {
+    build: "Describe what you want Otto to build.",
+    improve: "Describe what to refine, fix, or extend in the existing run.",
+    certify: "Describe what to verify in the existing run.",
+  };
+  const commandHelpMap: Record<JobCommand, string> = {
+    build: "Build new work from your description.",
+    improve: "Iterate on an existing run (refine, fix bugs, extend feature).",
+    certify: "Verify an existing run against acceptance criteria.",
+  };
 
   useEffect(() => {
     setTargetConfirmed(false);
@@ -2658,10 +3003,19 @@ function JobDialog({project, onClose, onQueued, onError}: {
     }
   }, [certification, command, subcommand]);
 
+  // Sync the <details> open state when the user clicks the "Edit" link in
+  // the summary. The native attribute change has to land on the DOM node so
+  // the disclosure widget actually toggles open without a re-render race.
+  useEffect(() => {
+    const el = advancedRef.current;
+    if (!el) return;
+    if (advancedOpen && !el.open) el.open = true;
+  }, [advancedOpen]);
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (command === "build" && !intent.trim()) {
-      setStatus("Build intent is required.");
+    if (intentRequired) {
+      setStatus(`${intentLabelMap[command]} is required.`);
       return;
     }
     if (targetNeedsConfirmation && !targetConfirmed) {
@@ -2693,6 +3047,9 @@ function JobDialog({project, onClose, onQueued, onError}: {
     }
   }
 
+  const dirtyPreview = dirtyFiles.slice(0, 5);
+  const dirtyOverflow = Math.max(0, dirtyFiles.length - dirtyPreview.length);
+
   return (
     <div className="modal-backdrop" role="presentation">
       <form
@@ -2709,12 +3066,26 @@ function JobDialog({project, onClose, onQueued, onError}: {
           <h2 id="jobDialogHeading">New queue job</h2>
           <button type="button" onClick={onClose}>Close</button>
         </header>
+        <div className="job-summary" data-testid="job-dialog-summary" aria-label="Run summary">
+          <strong>Will run with:</strong>
+          <span data-testid="job-dialog-summary-text">{summary}</span>
+          <button
+            type="button"
+            className="job-summary-edit"
+            data-testid="job-dialog-summary-edit"
+            onClick={() => {
+              setAdvancedOpen(true);
+              advancedRef.current?.scrollIntoView({block: "nearest"});
+            }}
+          >Edit</button>
+        </div>
         <label>Command
           <select data-testid="job-command-select" value={command} onChange={(event) => setCommand(event.target.value as JobCommand)}>
             <option value="build">Build</option>
             <option value="improve">Improve</option>
             <option value="certify">Certify</option>
           </select>
+          <span className="field-hint" data-testid="job-command-help">{commandHelpMap[command]}</span>
         </label>
         <div className={`target-guard ${project?.dirty ? "target-dirty" : ""}`} aria-label="Target project">
           <strong>Target project</strong>
@@ -2723,17 +3094,29 @@ function JobDialog({project, onClose, onQueued, onError}: {
             <dt>Branch</dt><dd>{project?.branch || "-"}</dd>
             <dt>State</dt><dd>{project ? project.dirty ? "dirty" : "clean" : "unknown"}</dd>
           </dl>
-          <p>This job can create branches/worktrees and modify files under this folder.</p>
+          <p>This job can create temporary git worktrees and modify files under this folder.</p>
           {targetNeedsConfirmation && (
-            <label className="check-label target-confirm">
-              <input
-                checked={targetConfirmed}
-                data-testid="target-project-confirm"
-                type="checkbox"
-                onChange={(event) => setTargetConfirmed(event.target.checked)}
-              />
-              I understand this dirty project may affect the queued work
-            </label>
+            <>
+              {dirtyPreview.length ? (
+                <div className="target-dirty-files" data-testid="job-dialog-dirty-files" aria-label="Uncommitted files">
+                  <strong>Uncommitted changes ({dirtyFiles.length})</strong>
+                  <ul>
+                    {dirtyPreview.map((path) => <li key={path}>{path}</li>)}
+                    {dirtyOverflow > 0 && <li>+{dirtyOverflow} more</li>}
+                  </ul>
+                  <span>Commit, stash, or revert these before queueing if they shouldn&apos;t affect this job.</span>
+                </div>
+              ) : null}
+              <label className="check-label target-confirm">
+                <input
+                  checked={targetConfirmed}
+                  data-testid="target-project-confirm"
+                  type="checkbox"
+                  onChange={(event) => setTargetConfirmed(event.target.checked)}
+                />
+                I understand this dirty project may affect the queued work
+              </label>
+            </>
           )}
         </div>
         {command === "improve" && (
@@ -2745,26 +3128,32 @@ function JobDialog({project, onClose, onQueued, onError}: {
             </select>
           </label>
         )}
-        <label>Intent / focus
+        <label>{intentLabelMap[command]}
           <textarea
             value={intent}
+            data-testid="job-dialog-intent"
             rows={5}
-            placeholder="Describe the requested outcome"
+            placeholder={intentPlaceholderMap[command]}
             aria-describedby={submitDisabled ? "jobDialogValidationHint" : undefined}
-            aria-invalid={command === "build" && !intent.trim() ? true : undefined}
+            aria-invalid={intentRequired ? true : undefined}
             onChange={(event) => setIntent(event.target.value)}
           />
         </label>
         {submitDisabled && !submitting && (
           <p id="jobDialogValidationHint" className="job-dialog-validation" data-testid="job-dialog-validation-hint" aria-live="polite">
-            {command === "build" && !intent.trim()
-              ? "Describe the requested outcome to enable queueing."
+            {intentRequired
+              ? `Describe the requested outcome (${intentLabelMap[command].toLowerCase()}) to enable queueing.`
               : targetNeedsConfirmation && !targetConfirmed
               ? "Confirm the dirty target project above to enable queueing."
               : "Submit is disabled."}
           </p>
         )}
-        <details className="job-advanced">
+        <details
+          className="job-advanced"
+          ref={advancedRef}
+          open={advancedOpen}
+          onToggle={(event) => setAdvancedOpen((event.target as HTMLDetailsElement).open)}
+        >
           <summary>Advanced options</summary>
           <div className="field-grid">
             <label>Task id
@@ -2824,8 +3213,8 @@ function JobDialog({project, onClose, onQueued, onError}: {
             disabled={submitDisabled}
             aria-busy={submitting}
             title={!submitting && submitDisabled ? (
-              command === "build" && !intent.trim()
-                ? "Describe the requested outcome to enable queueing."
+              intentRequired
+                ? `Describe the requested outcome (${intentLabelMap[command].toLowerCase()}) to enable queueing.`
                 : "Confirm the dirty target project above."
             ) : undefined}
           >
@@ -2835,6 +3224,45 @@ function JobDialog({project, onClose, onQueued, onError}: {
       </form>
     </div>
   );
+}
+
+/**
+ * Build the human-readable "Will run with: …" line shown above Advanced
+ * options. Mirrors the precedence the queue payload builder uses: the user
+ * override wins, otherwise we fall back to the project's effective defaults
+ * coming from otto.yaml. mc-audit codex-first-time-user.md #2.
+ */
+function jobRunSummary({command, subcommand, project, provider, model, effort, certification}: {
+  command: JobCommand;
+  subcommand: ImproveSubcommand;
+  project: StateResponse["project"] | undefined;
+  provider: string;
+  model: string;
+  effort: string;
+  certification: CertificationPolicy;
+}): string {
+  const defaults = project?.defaults;
+  const providerLabel = provider || defaults?.provider || "default provider";
+  const modelLabel = model.trim() || defaults?.model || "default model";
+  const effortLabel = effort || defaults?.reasoning_effort || "default effort";
+  const verificationLabel = describeVerificationPolicy(command, subcommand, certification, project);
+  return `${providerLabel} · ${modelLabel} · effort=${effortLabel} · verification=${verificationLabel}`;
+}
+
+function describeVerificationPolicy(
+  command: JobCommand,
+  subcommand: ImproveSubcommand,
+  certification: CertificationPolicy,
+  project: StateResponse["project"] | undefined,
+): string {
+  if (certification === "skip") return "skipped";
+  if (certification) return certification;
+  if (command === "improve" && subcommand === "feature") return "hillclimb";
+  if (command === "improve" && subcommand === "target") return "target";
+  if (command === "improve" && subcommand === "bugs") return "thorough (improve default)";
+  const defaults = project?.defaults;
+  if (defaults?.skip_product_qa) return "skipped (project default)";
+  return defaults?.certifier_mode || "fast";
 }
 
 function certificationOptions(
@@ -2962,6 +3390,11 @@ function missionFocus(data: StateResponse | null): {
   working: number;
   needsAction: number;
   ready: number;
+  // True when the project has no completed runs and nothing in flight — this
+  // is the very first time the user opens this project. The MissionFocus
+  // component reads this to flip the primary CTA from "New job" to
+  // "Start first build". mc-audit codex-first-time-user.md #6.
+  firstRun: boolean;
 } {
   if (!data) {
     return {
@@ -2973,6 +3406,7 @@ function missionFocus(data: StateResponse | null): {
       working: 0,
       needsAction: 0,
       ready: 0,
+      firstRun: false,
     };
   }
   const columns = taskBoardColumns(data);
@@ -2993,6 +3427,7 @@ function missionFocus(data: StateResponse | null): {
       working,
       needsAction,
       ready,
+      firstRun: false,
     };
   }
   if (data.landing.merge_blocked && rawReady) {
@@ -3006,6 +3441,7 @@ function missionFocus(data: StateResponse | null): {
       working,
       needsAction,
       ready,
+      firstRun: false,
     };
   }
   if (needsAction) {
@@ -3018,6 +3454,7 @@ function missionFocus(data: StateResponse | null): {
       working,
       needsAction,
       ready,
+      firstRun: false,
     };
   }
   if (ready) {
@@ -3030,18 +3467,20 @@ function missionFocus(data: StateResponse | null): {
       working,
       needsAction,
       ready,
+      firstRun: false,
     };
   }
   if (queued && data.watcher.health.state !== "running") {
     return {
       kicker: "Queue",
       title: `${queued} queued task${queued === 1 ? "" : "s"} waiting`,
-      body: "Start the watcher to run queued work.",
+      body: "Start the watcher to run the queued job.",
       tone: "info",
       primary: "start",
       working,
       needsAction,
       ready,
+      firstRun: false,
     };
   }
   if (working) {
@@ -3054,6 +3493,7 @@ function missionFocus(data: StateResponse | null): {
       working,
       needsAction,
       ready,
+      firstRun: false,
     };
   }
   if (data.landing.counts.total || data.history.total_rows) {
@@ -3066,17 +3506,19 @@ function missionFocus(data: StateResponse | null): {
       working,
       needsAction,
       ready,
+      firstRun: false,
     };
   }
   return {
     kicker: "Start",
-    title: "Queue the first job",
-    body: "Create a build, improve, or certify task for this project.",
+    title: "Start your first build",
+    body: "Describe what you want Otto to build. Otto will plan, code, and verify it inside an isolated git worktree, then surface logs, diffs, and a result for review.",
     tone: "neutral",
     primary: "new",
     working,
     needsAction,
     ready,
+    firstRun: true,
   };
 }
 
@@ -3508,6 +3950,21 @@ function actionConfirmationBody(action: string, label?: string): string {
   if (normalized === "requeue") return "Requeue this task?";
   if (normalized === "resume") return "Resume this run?";
   return `${capitalize(normalized)} this run?`;
+}
+
+// Build the merge confirm dialog body from the most recent diff fetch.
+// We spell out branch + target with their captured SHAs so the operator
+// can compare against the diff metadata header before clicking through —
+// this is the human half of the diff-freshness contract.
+function mergeConfirmationBody(diff: DiffResponse): string {
+  const target = diff.target || "target";
+  const branch = diff.branch || "branch";
+  const targetSha = diff.target_sha ? diff.target_sha.slice(0, 7) : null;
+  const branchSha = diff.branch_sha ? diff.branch_sha.slice(0, 7) : null;
+  const branchPart = branchSha ? `${branch} @ ${branchSha}` : branch;
+  const targetPart = targetSha ? `${target} @ ${targetSha}` : target;
+  const lead = `Land branch ${branchPart} into target ${targetPart}?`;
+  return `${lead} This is the diff you reviewed.`;
 }
 
 function proofLine(item: LandingItem): string {

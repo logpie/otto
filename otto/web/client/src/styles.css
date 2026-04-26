@@ -2101,6 +2101,69 @@ tbody tr.selected {
   background: rgba(185, 28, 28, 0.18);
 }
 
+.diff-freshness {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(15, 23, 42, 0.8);
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.diff-freshness-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+
+.diff-freshness-meta .diff-warning {
+  color: #fde68a;
+}
+
+.diff-refresh-button {
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(15, 23, 42, 0.6);
+  color: #e2e8f0;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.diff-refresh-button:hover {
+  background: rgba(30, 41, 59, 0.8);
+}
+
+.diff-truncation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(120, 53, 15, 0.18);
+  color: #fed7aa;
+  font-size: 12px;
+}
+
+.diff-truncation button {
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 200, 100, 0.3);
+  background: rgba(120, 53, 15, 0.4);
+  color: #fde68a;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.diff-truncation button:hover {
+  background: rgba(146, 64, 14, 0.6);
+}
+
 .diff-add,
 .ansi-green {
   color: #86efac;
@@ -2698,4 +2761,160 @@ tbody tr.selected {
   width: 56px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Boot-loading gate — rendered until `/api/projects` resolves the first
+ * time. Prevents the main shell from rendering with project=undefined,
+ * which previously let users open the New job dialog and queue requests
+ * that 409'd on the server. mc-audit codex-first-time-user.md #1.
+ */
+.app-shell.boot-loading {
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+}
+
+.boot-loading-panel {
+  display: grid;
+  gap: 12px;
+  max-width: 520px;
+  padding: 28px 32px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.boot-loading-mark {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.boot-loading-panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.boot-loading-error {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #7f1d1d;
+  font-size: 13px;
+}
+
+/*
+ * Job dialog pre-submit summary — surfaces provider/model/effort/verification
+ * outside the Advanced disclosure so cost-affecting defaults are not
+ * hidden. mc-audit codex-first-time-user.md #2.
+ */
+.job-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  font-size: 12px;
+}
+
+.job-summary strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.job-summary > span {
+  color: var(--muted);
+  flex: 1 1 240px;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-summary-edit {
+  margin-left: auto;
+  min-height: 24px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+/*
+ * Recovery action bar — primary contextual recovery action surfaced above
+ * the review packet for failed/paused/interrupted runs. The full action
+ * list still lives under "Advanced run actions" below. mc-audit
+ * codex-first-time-user.md #14.
+ */
+.recovery-action-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #fff7ed;
+}
+
+.recovery-action-bar button {
+  min-height: 30px;
+  padding: 4px 12px;
+  font-size: 13px;
+}
+
+/*
+ * Dirty-file list inside JobDialog target-guard — list up to five files
+ * with overflow indicator, then an actionable hint. mc-audit
+ * codex-first-time-user.md #10.
+ */
+.target-dirty-files {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #92400e;
+  font-size: 12px;
+}
+
+.target-dirty-files ul {
+  margin: 0;
+  padding-left: 18px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.target-dirty-files li {
+  line-height: 1.6;
+}
+
+/*
+ * Launcher form/status tweaks — error variant + empty-state CTA. mc-audit
+ * codex-first-time-user.md #5/#15.
+ */
+.launcher-status-error {
+  color: #7f1d1d;
+  font-weight: 500;
+}
+
+[data-testid="launcher-empty-state"] {
+  display: grid;
+  gap: 6px;
+}
+
+[data-testid="launcher-empty-state"] strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+[data-testid="launcher-empty-state"] p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
 }

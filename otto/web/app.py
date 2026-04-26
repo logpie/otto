@@ -201,11 +201,15 @@ def create_app(
 
     @app.post("/api/runs/{run_id}/actions/{action}")
     def run_action(run_id: str, action: str, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+        expected_target = payload.get("expected_target_sha")
+        expected_branch = payload.get("expected_branch_sha")
         return _service().execute(
             run_id,
             action,
             selected_queue_task_ids=payload.get("selected_queue_task_ids"),
             artifact_index=payload.get("artifact_index"),
+            expected_target_sha=str(expected_target) if isinstance(expected_target, str) and expected_target.strip() else None,
+            expected_branch_sha=str(expected_branch) if isinstance(expected_branch, str) and expected_branch.strip() else None,
         )
 
     @app.post("/api/actions/merge-all")
