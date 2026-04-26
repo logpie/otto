@@ -12,6 +12,8 @@ import {TopBar} from "./components/topbar/TopBar";
 import {Toolbar} from "./components/toolbar/Toolbar";
 import {ProjectLauncher} from "./components/launcher/ProjectLauncher";
 import {InertEffect, LiveRegion} from "./components/a11y";
+import {ConfirmDialog, type ConfirmState} from "./components/ConfirmDialog";
+import {EventTimeline} from "./components/EventTimeline";
 import {
   CommandList,
   FocusMetric,
@@ -98,22 +100,6 @@ interface ResultBannerState {
   title: string;
   body: string;
   severity: ToastState["severity"];
-}
-
-interface ConfirmState {
-  title: string;
-  // Plain-text body. Always populated so existing callers keep working;
-  // structured callers can also provide `bodyContent` for a richer render.
-  body: string;
-  // Optional rich body (scrollable list, dl, etc). Renders BELOW `body`.
-  bodyContent?: ReactNode;
-  confirmLabel: string;
-  tone?: "primary" | "danger";
-  // When set, the confirm button stays disabled until the user ticks the
-  // checkbox. Used for high-blast-radius bulk operations like "Land 7 tasks"
-  // (mc-audit codex-destructive-action-safety #1).
-  requireCheckbox?: {label: string} | undefined;
-  onConfirm: () => Promise<void>;
 }
 
 export interface Filters {
@@ -3514,41 +3500,7 @@ export function safeCompareNumber(a: number | null | undefined, b: number | null
   return 0;
 }
 
-export function EventTimeline({events, compact = false}: {events: StateResponse["events"] | undefined; compact?: boolean}) {
-  const items = events?.items || [];
-  const malformed = events?.malformed_count || 0;
-  const visibleItems = compact ? items.slice(0, 6) : items;
-  return (
-    <section className="panel timeline-panel" aria-labelledby="timelineHeading">
-      <div className="panel-heading">
-        <div>
-          <h2 id="timelineHeading">Operator Timeline</h2>
-          <p className="panel-subtitle">{timelineSubtitle(events)}</p>
-        </div>
-        <span className="pill">{events?.total_count || 0}</span>
-      </div>
-      <div className="timeline-list" role="list">
-        {malformed > 0 && (
-          // mc-audit codex-first-time-user #26: replace "malformed event rows"
-          // with user-facing "unreadable log entries".
-          <div className="timeline-warning" data-testid="timeline-malformed-warning">Skipped {malformed} unreadable log entr{malformed === 1 ? "y" : "ies"}.</div>
-        )}
-        {visibleItems.length ? visibleItems.map((event) => (
-          <div className={`timeline-item event-${event.severity}`} key={event.event_id || `${event.created_at}-${event.message}`} role="listitem">
-            <span className="timeline-severity">{event.severity}</span>
-            <div>
-              <strong title={event.message}>{event.message}</strong>
-              <span>{eventTargetLine(event)}</span>
-            </div>
-            <time dateTime={event.created_at}>{formatEventTime(event.created_at)}</time>
-          </div>
-        )) : (
-          <div className="timeline-empty">No operator events yet.</div>
-        )}
-      </div>
-    </section>
-  );
-}
+// EventTimeline moved to components/EventTimeline.tsx
 
 
 export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watcherRunning, onRunAction, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact, onStartWatcher, onClose}: {
@@ -5927,113 +5879,7 @@ export function staticCertificationLabel(command: JobCommand, subcommand: Improv
 
 // configSourceLabel / titleCase moved to utils/format.ts (Wave 8).
 
-export function ConfirmDialog({confirm, pending, error, checkboxAck, onChangeCheckboxAck, onCancel, onConfirm}: {
-  confirm: ConfirmState;
-  pending: boolean;
-  error: string | null;
-  checkboxAck: boolean;
-  onChangeCheckboxAck: (next: boolean) => void;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const isDanger = confirm.tone === "danger";
-  const confirmClass = isDanger ? "danger-button" : "primary";
-  const dialogRef = useDialogFocus<HTMLDivElement>(onCancel, pending);
-  const blockedByCheckbox = Boolean(confirm.requireCheckbox) && !checkboxAck;
-  const submitDisabled = pending || blockedByCheckbox;
-
-  // mc-audit live W11-CRITICAL-2: clicking the backdrop dismisses the
-  // confirm dialog (matches Escape behaviour). Skip while a confirm POST is
-  // pending so a stray click can never abandon an in-flight action.
-  const onBackdropClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (event.target !== event.currentTarget) return;
-    if (pending) return;
-    onCancel();
-  };
-
-  return (
-    <div className="modal-backdrop" role="presentation" onClick={onBackdropClick}>
-      <div
-        ref={dialogRef}
-        className={`confirm-dialog${isDanger ? " confirm-dialog-danger" : ""}`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="confirmHeading"
-        aria-describedby="confirmBody"
-        data-tone={isDanger ? "danger" : "primary"}
-        tabIndex={-1}
-      >
-        <header>
-          <h2 id="confirmHeading">{confirm.title}</h2>
-          {/* mc-audit microinteractions I6: For danger-tone confirms, drop
-              the header Close affordance — two close paths (header × +
-              footer Cancel) dilute focus and neither emphasises the safe
-              choice. Non-danger confirms keep the header Close so they
-              match JobDialog's affordance set. */}
-          {!isDanger && (
-            <button
-              type="button"
-              data-testid="confirm-dialog-header-close"
-              disabled={pending}
-              onClick={onCancel}
-            >Close</button>
-          )}
-        </header>
-        <div id="confirmBody" className="confirm-body">
-          {confirm.body && <p className="confirm-body-text">{confirm.body}</p>}
-          {confirm.bodyContent}
-        </div>
-        {confirm.requireCheckbox && (
-          <label className="confirm-ack" data-testid="confirm-dialog-ack">
-            <input
-              type="checkbox"
-              data-testid="confirm-dialog-ack-checkbox"
-              checked={checkboxAck}
-              disabled={pending}
-              onChange={(event) => onChangeCheckboxAck(event.target.checked)}
-            />
-            <span>{confirm.requireCheckbox.label}</span>
-          </label>
-        )}
-        {error && (
-          <div
-            className="confirm-error"
-            data-testid="confirm-dialog-error"
-            role="alert"
-            aria-live="assertive"
-          >
-            <strong>Action did not complete</strong>
-            <span>{error}</span>
-          </div>
-        )}
-        <footer>
-          {/* mc-audit microinteractions I6: in danger flows the Cancel
-              button receives a "safe choice" emphasis (outline + bold) so
-              a panicked user can spot the abort path at-a-glance. The
-              confirm button still carries the red CTA. */}
-          <button
-            type="button"
-            className={isDanger ? "confirm-dialog-cancel cancel-emphasis" : "confirm-dialog-cancel"}
-            data-testid="confirm-dialog-cancel-button"
-            disabled={pending}
-            onClick={onCancel}
-          >Cancel</button>
-          <button
-            className={confirmClass}
-            type="button"
-            data-testid="confirm-dialog-confirm-button"
-            disabled={submitDisabled}
-            aria-busy={pending}
-            title={blockedByCheckbox ? "Tick the acknowledgement above to enable this action." : undefined}
-            onClick={onConfirm}
-          >
-            {pending ? <><Spinner /> Working…</> : confirm.confirmLabel}
-          </button>
-        </footer>
-      </div>
-    </div>
-  );
-}
+// ConfirmDialog moved to components/ConfirmDialog.tsx
 
 export function missionFocus(data: StateResponse | null): {
   kicker: string;
@@ -7700,21 +7546,6 @@ export function changeLine(item: LandingItem): string {
   const count = Number(item.changed_file_count || 0);
   if (!count) return "-";
   return `${count} file${count === 1 ? "" : "s"}`;
-}
-
-export function timelineSubtitle(events?: StateResponse["events"]): string {
-  if (!events || !events.total_count) return "Queue, watcher, merge, and recovery actions appear here.";
-  // mc-audit codex-first-time-user #26: "malformed" → "unreadable" in user-facing copy.
-  const malformed = events.malformed_count ? ` / ${events.malformed_count} unreadable` : "";
-  const scope = events.truncated ? "scanned recent log" : String(events.total_count);
-  return `Recent ${Math.min(events.items.length, events.limit)} of ${scope}${malformed}.`;
-}
-
-export function eventTargetLine(event: MissionEvent): string {
-  const target = [event.task_id ? `task ${event.task_id}` : "", event.run_id ? `run ${event.run_id}` : ""]
-    .filter(Boolean)
-    .join(" / ");
-  return [event.kind, target].filter(Boolean).join(" - ") || "-";
 }
 
 // formatEventTime / storiesLine moved to utils/format.ts (Wave 8).
