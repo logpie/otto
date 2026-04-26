@@ -2799,7 +2799,15 @@ tbody tr.selected {
 .job-dialog,
 .confirm-dialog {
   width: min(560px, calc(100vw - 28px));
+  /* W7-IMPORTANT-1: use the dynamic viewport unit (`dvh`) so the dialog
+     accounts for mobile browser UI chrome (Safari/Chrome bottom bars).
+     `100vh` measures the *largest* viewport size on iOS Safari which can
+     leave the submit button below the fold once the URL bar expands. The
+     `vh` fallback is provided for browsers without `dvh` support. The
+     extra 80px subtraction guarantees the sticky footer keeps clearance
+     even when keyboards/toolbars eat the bottom edge. */
   max-height: calc(100vh - 28px);
+  max-height: calc(100dvh - 28px);
   overflow: auto;
   display: grid;
   gap: 12px;
@@ -2808,6 +2816,21 @@ tbody tr.selected {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+/* W7-IMPORTANT-1: pin the JobDialog footer to the bottom of the scrolling
+   modal so the primary "Queue job" button remains reachable on small
+   viewports without scrolling. The footer participates in the dialog's
+   grid layout but uses `position: sticky` to stay anchored at the bottom
+   of the visible area while the form fields above scroll. */
+.job-dialog footer {
+  position: sticky;
+  bottom: 0;
+  background: var(--surface);
+  margin: 0 -16px -16px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  z-index: 1;
 }
 
 .confirm-dialog {
@@ -4009,3 +4032,52 @@ mark.log-search-match.active {
   display: flex;
   justify-content: flex-end;
 }
+
+/* Codex error-empty-states #1: sticky banner shown when /api/state polls
+ * have failed CONNECTION_LOST_THRESHOLD times in a row. The banner sits
+ * at the very top of the app shell so it is visible regardless of which
+ * view the user has open, and stays put while they scroll. The banner
+ * is deliberately loud (red bg) since it indicates the rest of the page
+ * is showing stale data. */
+.connection-lost-banner {
+  position: sticky;
+  top: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #b91c1c;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.15);
+}
+
+.connection-lost-banner .connection-lost-message {
+  flex: 0 1 auto;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.connection-lost-banner .connection-lost-retry {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.connection-lost-banner .connection-lost-retry:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.connection-lost-banner .connection-lost-retry:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+

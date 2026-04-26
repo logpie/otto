@@ -138,6 +138,14 @@ const STATE_POLL_HIDDEN_MS = 30_000;
 // gates the burst.
 const STATE_POLL_MIN_GAP_MS = 1000;
 
+// Codex error-empty-states #1: number of consecutive `/api/state` poll
+// failures required before the connection-lost banner appears. Three
+// failures means the user has waited ~3 poll intervals (≈4–15s depending
+// on cadence) before we surface a sticky "Lost connection" banner —
+// long enough to ride out a single hiccup, short enough to be actionable
+// before the operator notices the page is stale.
+const CONNECTION_LOST_THRESHOLD = 3;
+
 type LogStatus = "idle" | "loading" | "ok" | "missing" | "error";
 
 interface LogState {
@@ -398,6 +406,12 @@ export function App() {
   const [proofContent, setProofContent] = useState<ArtifactContentResponse | null>(null);
   const [diffContent, setDiffContent] = useState<DiffResponse | null>(null);
   const [refreshStatus, setRefreshStatus] = useState("idle");
+  // Codex error-empty-states #1: count of consecutive `/api/state` poll
+  // failures. When this hits ``CONNECTION_LOST_THRESHOLD`` we render a
+  // sticky banner ("Lost connection to Mission Control. Retrying every
+  // 5s…") with a manual retry button. A successful refresh resets it to
+  // 0 and the banner disappears (restore-on-reconnect).
+  const [stateFailureStreak, setStateFailureStreak] = useState(0);
   const [jobOpen, setJobOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
@@ -919,13 +933,20 @@ export function App() {
         setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
         return;
       }
-      const next = await api<StateResponse>(
+      const rawNext = await api<StateResponse>(
         `/api/state?${stateQueryParams({...filters, historyPage, historyPageSize}).toString()}`,
         signal ? {signal} : {},
       );
       if (signal?.aborted) return;
+      // W9-IMPORTANT-2: drop live rows whose run_id is already a terminal
+      // history row before any consumer (LiveRuns, TaskBoard, history table)
+      // sees the response. The backend's live→history transition is not
+      // atomic so the same run can appear in both lists for one poll cycle.
+      const next = dedupeLiveAgainstHistory(rawNext);
       setData(next);
       setLastError(null);
+      // Codex error-empty-states #1: a successful poll restores the connection.
+      setStateFailureStreak(0);
       const visible = visibleRunIds(next);
       if (selectedRunId && visible.has(selectedRunId)) {
         void refreshDetail(selectedRunId).catch((error) => {
@@ -949,6 +970,11 @@ export function App() {
         return;
       }
       setRefreshStatus("error");
+      // Codex error-empty-states #1: track consecutive failures so the
+      // sticky banner appears at the threshold. The banner is the durable
+      // connection-lost surface; transient toasts also stay so existing
+      // user-initiated refresh flows behave the same way.
+      setStateFailureStreak((prev) => prev + 1);
       showToast(errorMessage(error), "error");
     }
   }, [filters, historyPage, historyPageSize, loadProjects, refreshDetail, selectedRunId, showToast, currentRouteState]);
@@ -1836,6 +1862,36 @@ export function App() {
     );
   }
 
+  // Codex error-empty-states #1: connection-lost banner. Renders when
+  // the polling streak has crossed the threshold. Both the boot screen
+  // and the main shell mount the same node so the operator sees a
+  // sticky reminder regardless of how stale the cached data is. The
+  // manual retry button calls `onManualRefresh` which itself toggles
+  // `refreshInFlight` so the button shows a spinner during the retry.
+  const connectionLost = stateFailureStreak >= CONNECTION_LOST_THRESHOLD;
+  const connectionBanner = connectionLost ? (
+    <div
+      className="connection-lost-banner"
+      data-testid="connection-lost-banner"
+      role="alert"
+      aria-live="assertive"
+    >
+      <span className="connection-lost-message">
+        Lost connection to Mission Control. Retrying every 5s…
+      </span>
+      <button
+        type="button"
+        className="connection-lost-retry"
+        data-testid="connection-lost-retry-button"
+        onClick={onManualRefresh}
+        disabled={refreshInFlight.pending}
+        aria-busy={refreshInFlight.pending}
+      >
+        {refreshInFlight.pending ? <><Spinner /> Retrying…</> : "Retry now"}
+      </button>
+    </div>
+  ) : null;
+
   // Defensive secondary gate: even once projectsLoaded is true, the main
   // shell must not render until we have a `project` from /api/state. This
   // prevents the dialog from opening with `project` undefined if the
@@ -1843,6 +1899,7 @@ export function App() {
   if (!data || !data.project) {
     return (
       <div className="app-shell boot-loading" data-testid="boot-loading">
+        {connectionBanner}
         <main className="boot-loading-panel" role="status" aria-live="polite">
           <div className="boot-loading-mark">
             <Spinner />
@@ -1862,6 +1919,7 @@ export function App() {
       <a href="#main-content" className="skip-link" data-testid="skip-link">
         Skip to main content
       </a>
+      {connectionBanner}
       <InertEffect active={sidebarInert} selector=".sidebar" />
       <InertEffect active={mainContentInert} selector=".main-shell-content" />
       <InertEffect active={inspectorInert} selector="[data-mc-inspector]" />
@@ -2258,7 +2316,7 @@ function ProjectLauncher({projectsState, refreshStatus, refreshPending, onCreate
           <h3>Project folder root</h3>
           <code title={projectsState.projects_root}>{projectsState.projects_root}</code>
           <p data-testid="launcher-managed-root-help">
-            All projects live under this directory. Otto creates a git worktree per project so other repos on this machine aren&apos;t affected. The repo that launched Mission Control is intentionally excluded — pick or create a project here to begin.
+            All projects live under this directory. Otto manages projects in isolated git worktrees so it never touches your other repos on this machine. The repo that launched Mission Control is intentionally excluded — pick or create a project below to start.
           </p>
         </div>
       </div>
@@ -5125,6 +5183,21 @@ function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onE
             aria-describedby={submitDisabled && !submitting && pendingSeconds === null ? "jobDialogValidationHint" : undefined}
             aria-invalid={intentRequired ? true : undefined}
             onChange={(event) => setIntent(event.target.value)}
+            onKeyDown={(event) => {
+              // W8-IMPORTANT-1: documented power-user shortcut. Cmd+Enter
+              // (mac) / Ctrl+Enter (linux/windows) submits the dialog from
+              // the textarea — universal in code-gen tools and in MC's own
+              // accelerator catalogue. The default `<textarea>` swallows
+              // Enter as a newline, so we intercept here. The submit goes
+              // through the form's onSubmit so the validation gating (grace
+              // window, dirty-target confirm, prior-run requirement) stays
+              // in one place.
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                if (submitDisabled) return;
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
           />
         </label>
         {submitDisabled && !submitting && pendingSeconds === null && (
@@ -5931,6 +6004,45 @@ function visibleRunIds(data: StateResponse): Set<string> {
     ...data.landing.items.map((item) => item.run_id).filter((value): value is string => Boolean(value)),
     ...data.history.items.map((item) => item.run_id),
   ]);
+}
+
+/**
+ * W9-IMPORTANT-2: client-side dedupe of stale live entries.
+ *
+ * The backend's live → history transition is not atomic — a run that has
+ * reached terminal can briefly appear in BOTH ``live[]`` and ``history[]``.
+ * Without this guard, the UI shows the same run twice (once "running" in
+ * the live pane, once "success" in the history pane) until the next poll.
+ *
+ * The fix is purely cosmetic: prefer the history record (which carries
+ * ``terminal_outcome``) and drop the matching live row. We never mutate
+ * the server response — the result is a shallow-cloned ``StateResponse``
+ * with ``live.items`` filtered. ``visibleRunIds`` and other consumers
+ * see the dedup'd shape automatically because ``data`` is the only
+ * source of truth flowing into the renderers.
+ */
+export function dedupeLiveAgainstHistory(data: StateResponse): StateResponse {
+  const terminalHistoryIds = new Set<string>();
+  for (const item of data.history.items) {
+    if (item.terminal_outcome && item.run_id) {
+      terminalHistoryIds.add(item.run_id);
+    }
+  }
+  if (terminalHistoryIds.size === 0) return data;
+  const filtered = data.live.items.filter((item) => !terminalHistoryIds.has(item.run_id));
+  if (filtered.length === data.live.items.length) return data;
+  return {
+    ...data,
+    live: {
+      ...data.live,
+      items: filtered,
+      // Re-derive counts so headline numbers don't disagree with the
+      // rendered list. ``active_count`` reflects truly-active rows, so
+      // recomputing from the filtered list is the correct floor.
+      total_count: filtered.length,
+      active_count: filtered.filter((item) => item.active).length,
+    },
+  };
 }
 
 function refreshIntervalMs(data: StateResponse | null): number {
