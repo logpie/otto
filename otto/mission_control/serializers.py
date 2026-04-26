@@ -33,6 +33,7 @@ from otto.mission_control.model import (
     StaleOverlay,
 )
 from otto.runs.schema import RunRecord
+from otto.token_usage import token_usage_from_mapping as _shared_token_usage_from_mapping
 
 
 # Otto's own runtime files (re-exported from ``setup_gitignore`` for the
@@ -698,20 +699,7 @@ def _phase_label(phase: str, *, command_family: str | None = None) -> str:
 
 
 def _token_usage_from_mapping(mapping: dict[str, Any]) -> dict[str, int]:
-    result: dict[str, int] = {}
-    for key in (
-        "input_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-        "cached_input_tokens",
-        "output_tokens",
-        "reasoning_tokens",
-        "total_tokens",
-    ):
-        value = _first_int(mapping.get(key))
-        if value:
-            result[key] = value
-    return result
+    return _shared_token_usage_from_mapping(mapping)
 
 
 def _project_defaults(project_dir: Path) -> dict[str, Any]:

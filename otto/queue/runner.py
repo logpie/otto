@@ -42,6 +42,13 @@ from otto.config import DEFAULTS
 from otto.manifest import queue_index_path_for
 from otto import paths
 from otto.queue.artifacts import preserve_queue_session_artifacts
+from otto.token_usage import (
+    TOKEN_USAGE_KEYS,
+    add_token_usage,
+    empty_token_usage,
+    prune_zero_token_usage,
+    token_usage_from_mapping,
+)
 from otto.queue.runtime import (
     IN_FLIGHT_STATUSES,
     INITIALIZING_STATUS,
@@ -214,82 +221,18 @@ def _summary_path_from_manifest(manifest: dict[str, Any]) -> Path | None:
 
 
 def _token_usage_from_summary(summary: dict[str, Any]) -> dict[str, int]:
-    totals = _empty_token_usage()
-    direct = _token_usage_from_mapping(summary)
-    if any(direct.values()):
-        return {key: value for key, value in direct.items() if value}
+    direct = token_usage_from_mapping(summary)
+    if direct:
+        return direct
     breakdown = summary.get("breakdown")
     if not isinstance(breakdown, dict):
         return {}
+    totals = empty_token_usage()
     for phase in breakdown.values():
         if not isinstance(phase, dict):
             continue
-        _add_token_usage(totals, _token_usage_from_mapping(phase))
-    return {key: value for key, value in totals.items() if value}
-
-
-_TOKEN_USAGE_KEYS = (
-    "input_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-    "cached_input_tokens",
-    "output_tokens",
-    "reasoning_tokens",
-    "total_tokens",
-)
-
-
-def _empty_token_usage() -> dict[str, int]:
-    return dict.fromkeys(_TOKEN_USAGE_KEYS, 0)
-
-
-def _token_usage_from_mapping(mapping: Any) -> dict[str, int]:
-    if not isinstance(mapping, dict):
-        return _empty_token_usage()
-    raw_usage = mapping.get("token_usage")
-    if isinstance(raw_usage, dict):
-        mapping = {**mapping, **raw_usage}
-    cache_creation = _int_or_none(mapping.get("cache_creation_input_tokens")) or 0
-    cache_read = _int_or_none(mapping.get("cache_read_input_tokens")) or 0
-    legacy_cached = _int_or_none(mapping.get("cached_input_tokens")) or 0
-    if not cache_read and legacy_cached and not cache_creation:
-        cache_read = legacy_cached
-    cached_total = max(legacy_cached, cache_creation + cache_read)
-    totals = {
-        "input_tokens": (_int_or_none(mapping.get("input_tokens")) or _int_or_none(mapping.get("tokens_in")) or 0),
-        "cache_creation_input_tokens": cache_creation,
-        "cache_read_input_tokens": cache_read,
-        "cached_input_tokens": cached_total,
-        "output_tokens": (_int_or_none(mapping.get("output_tokens")) or _int_or_none(mapping.get("tokens_out")) or 0),
-        "reasoning_tokens": _int_or_none(mapping.get("reasoning_tokens")) or 0,
-        "total_tokens": 0,
-    }
-    explicit_total = _int_or_none(mapping.get("total_tokens")) or 0
-    totals["total_tokens"] = max(explicit_total, _token_total(totals))
-    return totals
-
-
-def _add_token_usage(target: dict[str, int], usage: dict[str, int]) -> None:
-    for key in _TOKEN_USAGE_KEYS:
-        if key == "total_tokens":
-            continue
-        target[key] = int(target.get(key, 0) or 0) + int(usage.get(key, 0) or 0)
-    target["total_tokens"] = _token_total(target)
-
-
-def _token_total(token_usage: dict[str, int]) -> int:
-    cache_creation = int(token_usage.get("cache_creation_input_tokens", 0) or 0)
-    cache_read = int(token_usage.get("cache_read_input_tokens", 0) or 0)
-    if not cache_creation and not cache_read:
-        cache_read = int(token_usage.get("cached_input_tokens", 0) or 0)
-    derived = (
-        int(token_usage.get("input_tokens", 0) or 0)
-        + cache_creation
-        + cache_read
-        + int(token_usage.get("output_tokens", 0) or 0)
-        + int(token_usage.get("reasoning_tokens", 0) or 0)
-    )
-    return max(int(token_usage.get("total_tokens", 0) or 0), derived)
+        add_token_usage(totals, token_usage_from_mapping(phase))
+    return prune_zero_token_usage(totals)
 
 
 # ---------- PID-reuse-safe child validation ----------
@@ -1482,7 +1425,7 @@ class Runner:
 
     def _queue_usage_fields(self, ts: dict[str, Any]) -> dict[str, int]:
         fields: dict[str, int] = {}
-        for key in _TOKEN_USAGE_KEYS:
+        for key in TOKEN_USAGE_KEYS:
             value = _int_or_none(ts.get(key))
             if value is not None:
                 fields[key] = value

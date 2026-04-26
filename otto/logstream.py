@@ -443,7 +443,7 @@ class JsonlMessageWriter:
         if not isinstance(usage, dict):
             return _empty_usage()
         cache_creation = max(int(usage.get("cache_creation_input_tokens", 0) or 0), 0)
-        cache_read = max(int(usage.get("cache_read_input_tokens", usage.get("cached_input_tokens", 0)) or 0), 0)
+        cache_read = max(int(usage.get("cache_read_input_tokens", 0) or 0), 0)
         legacy_cached = max(int(usage.get("cached_input_tokens", 0) or 0), 0)
         cached_total = max(legacy_cached, cache_creation + cache_read)
         current = {
@@ -1315,8 +1315,6 @@ def _empty_usage() -> dict[str, float | int]:
 def _usage_total(usage: dict[str, Any]) -> int:
     cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
     cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
-    if not cache_creation and not cache_read:
-        cache_read = int(usage.get("cached_input_tokens", 0) or 0)
     derived = (
         int(usage.get("input_tokens", 0) or 0)
         + cache_creation

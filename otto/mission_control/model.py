@@ -17,7 +17,16 @@ from otto.runs.history import load_project_history_rows
 from otto.runs.registry import HEARTBEAT_INTERVAL_S, load_live_record, read_live_records, writer_identity_matches_live_process
 from otto.runs.schema import RunRecord, is_terminal_status
 from otto.mission_control.actions import ActionResult, ActionState
-from otto.token_usage import phase_token_usage_from_messages, total_token_usage_from_phases
+from otto.token_usage import (
+    add_token_usage as _shared_add_token_usage,
+    empty_token_usage as _shared_empty_token_usage,
+    normalize_token_usage as _shared_normalize_token_usage,
+    phase_token_usage_from_messages,
+    prune_zero_token_usage as _shared_prune_zero_token_usage,
+    token_total as _shared_token_total,
+    token_usage_from_mapping as _shared_token_usage_from_mapping,
+    total_token_usage_from_phases,
+)
 
 PaneName = Literal["live", "history", "detail"]
 TypeFilter = Literal["all", "build", "improve", "certify", "merge", "queue"]
@@ -47,17 +56,6 @@ _STATUS_PRIORITY = {
     "cancelled": 4,
     "removed": 4,
 }
-_TOKEN_USAGE_KEYS = (
-    "input_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-    "cached_input_tokens",
-    "output_tokens",
-    "reasoning_tokens",
-    "total_tokens",
-)
-
-
 @dataclass(slots=True)
 class ArtifactRef:
     label: str
@@ -1379,15 +1377,13 @@ def _history_token_usage(row: HistoryRow) -> dict[str, int]:
 def _token_usage_from_mapping(mapping: Any) -> dict[str, int]:
     if not isinstance(mapping, dict):
         return {}
-    raw_usage = mapping.get("token_usage")
-    if isinstance(raw_usage, dict):
-        mapping = {**mapping, **raw_usage}
-    totals = _normalize_token_usage(mapping)
-    if any(totals.values()):
-        return _prune_zero_token_usage(totals)
+    usage = _shared_token_usage_from_mapping(mapping)
+    if usage:
+        return usage
     breakdown = mapping.get("breakdown")
     if not isinstance(breakdown, dict):
         return {}
+    totals = _empty_token_usage()
     for phase in breakdown.values():
         if not isinstance(phase, dict):
             continue
@@ -1396,67 +1392,23 @@ def _token_usage_from_mapping(mapping: Any) -> dict[str, int]:
 
 
 def _empty_token_usage() -> dict[str, int]:
-    return dict.fromkeys(_TOKEN_USAGE_KEYS, 0)
+    return _shared_empty_token_usage()
 
 
 def _normalize_token_usage(mapping: Any) -> dict[str, int]:
-    if not isinstance(mapping, dict):
-        return _empty_token_usage()
-    raw_usage = mapping.get("token_usage")
-    if isinstance(raw_usage, dict):
-        mapping = {**mapping, **raw_usage}
-    cache_creation = _coerce_int(mapping.get("cache_creation_input_tokens"))
-    cache_read = _coerce_int(mapping.get("cache_read_input_tokens"))
-    legacy_cached = _coerce_int(mapping.get("cached_input_tokens"))
-    if not cache_read and legacy_cached and not cache_creation:
-        cache_read = legacy_cached
-    cached_total = cache_creation + cache_read
-    if legacy_cached and legacy_cached > cached_total:
-        cached_total = legacy_cached
-    totals = {
-        "input_tokens": _coerce_int(mapping.get("input_tokens") or mapping.get("tokens_in")),
-        "cache_creation_input_tokens": cache_creation,
-        "cache_read_input_tokens": cache_read,
-        "cached_input_tokens": cached_total,
-        "output_tokens": _coerce_int(mapping.get("output_tokens") or mapping.get("tokens_out")),
-        "reasoning_tokens": _coerce_int(mapping.get("reasoning_tokens")),
-        "total_tokens": 0,
-    }
-    explicit_total = _coerce_int(mapping.get("total_tokens"))
-    derived_total = _token_total(totals)
-    totals["total_tokens"] = explicit_total if explicit_total > derived_total else derived_total
-    return totals
+    return _shared_normalize_token_usage(mapping)
 
 
 def _add_token_usage(target: dict[str, int], usage: dict[str, int] | None) -> None:
-    normalized = _normalize_token_usage(usage or {})
-    for key in _TOKEN_USAGE_KEYS:
-        if key == "total_tokens":
-            continue
-        target[key] = int(target.get(key, 0) or 0) + int(normalized.get(key, 0) or 0)
-    target["total_tokens"] = _token_total(target)
+    _shared_add_token_usage(target, usage)
 
 
 def _token_total(token_usage: dict[str, int] | None) -> int:
-    if not token_usage:
-        return 0
-    explicit = int(token_usage.get("total_tokens", 0) or 0)
-    cache_creation = int(token_usage.get("cache_creation_input_tokens", 0) or 0)
-    cache_read = int(token_usage.get("cache_read_input_tokens", 0) or 0)
-    if not cache_creation and not cache_read:
-        cache_read = int(token_usage.get("cached_input_tokens", 0) or 0)
-    derived = (
-        int(token_usage.get("input_tokens", 0) or 0)
-        + cache_creation
-        + cache_read
-        + int(token_usage.get("output_tokens", 0) or 0)
-        + int(token_usage.get("reasoning_tokens", 0) or 0)
-    )
-    return max(explicit, derived)
+    return _shared_token_total(token_usage)
 
 
 def _prune_zero_token_usage(token_usage: dict[str, int]) -> dict[str, int]:
-    return {key: int(token_usage.get(key, 0) or 0) for key in _TOKEN_USAGE_KEYS if int(token_usage.get(key, 0) or 0)}
+    return _shared_prune_zero_token_usage(token_usage)
 
 
 def _stories_from_mapping(mapping: Any) -> tuple[int, int]:
@@ -1479,10 +1431,10 @@ def _token_usage_from_summary_paths(paths: list[Path], *, base_dir: Path | None)
             summary = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             continue
-        usage = _token_usage_from_mapping(summary)
+        usage = total_token_usage_from_phases(phase_token_usage_from_messages(candidate.parent))
         if usage:
             return usage
-        usage = total_token_usage_from_phases(phase_token_usage_from_messages(candidate.parent))
+        usage = _token_usage_from_mapping(summary)
         if usage:
             return usage
     return {}
