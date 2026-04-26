@@ -10,7 +10,7 @@
  * runtime behavior is identical.
  */
 
-import type {DiffResponse, HistoryItem, LandingItem, RunDetail, StateResponse} from "../types";
+import type {DiffResponse, LandingItem, RunDetail, StateResponse, TokenUsage} from "../types";
 
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -39,7 +39,7 @@ export function humanBytes(value: number): string {
   return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-export function tokenTotal(tokenUsage?: StateResponse["project_stats"]["token_usage"]): number {
+export function tokenTotal(tokenUsage?: TokenUsage): number {
   if (!tokenUsage) return 0;
   const explicit = Number(tokenUsage.total_tokens || 0);
   if (explicit > 0) return explicit;
@@ -53,7 +53,7 @@ export function tokenTotal(tokenUsage?: StateResponse["project_stats"]["token_us
   return Math.max(explicit, derived);
 }
 
-export function tokenBreakdownLine(tokenUsage?: StateResponse["project_stats"]["token_usage"]): string {
+export function tokenBreakdownLine(tokenUsage?: TokenUsage): string {
   if (!tokenUsage) return "No token usage recorded";
   const input = Number(tokenUsage.input_tokens || 0);
   const cacheRead = Number(tokenUsage.cache_read_input_tokens || 0);
@@ -72,7 +72,7 @@ export function tokenBreakdownLine(tokenUsage?: StateResponse["project_stats"]["
   return parts.length ? parts.join(" · ") : "No token usage recorded";
 }
 
-export function usageLine(item: HistoryItem): string {
+export function usageLine(item: {token_usage?: TokenUsage; cost_usd?: number | null; cost_display?: string | null}): string {
   const tokens = tokenTotal(item.token_usage);
   const cost = item.cost_usd && item.cost_usd > 0 ? `$${item.cost_usd.toFixed(2)}` : "";
   const tokenText = tokens ? `${formatCompactNumber(tokens)} tokens` : item.cost_display || "";

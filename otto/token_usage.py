@@ -21,6 +21,35 @@ def empty_token_usage() -> dict[str, int]:
     return dict.fromkeys(TOKEN_USAGE_KEYS, 0)
 
 
+def format_compact_token_count(value: int | float) -> str:
+    amount = max(float(value or 0), 0)
+    if amount >= 1_000_000:
+        return f"{amount / 1_000_000:.1f}".removesuffix(".0") + "M"
+    if amount >= 1_000:
+        return f"{amount / 1_000:.1f}".removesuffix(".0") + "K"
+    return str(int(amount))
+
+
+def format_token_spend(
+    token_usage: dict[str, int] | None,
+    *,
+    reported_cost_usd: float | None = None,
+    pending: bool = False,
+) -> str:
+    """Return the canonical user-facing spend string.
+
+    Tokens are the primary cross-provider spend unit. Provider-reported USD
+    remains useful metadata, but it is not comparable across Claude/Codex
+    runs and is only shown as a fallback when no token usage was recorded.
+    """
+    tokens = token_total(normalize_token_usage(token_usage or {}))
+    if tokens:
+        return f"{format_compact_token_count(tokens)} tokens"
+    if isinstance(reported_cost_usd, (int, float)) and float(reported_cost_usd) > 0:
+        return f"reported ${float(reported_cost_usd):.2f}"
+    return "..." if pending else "-"
+
+
 def normalize_token_usage(mapping: Any) -> dict[str, int]:
     if not isinstance(mapping, dict):
         return empty_token_usage()

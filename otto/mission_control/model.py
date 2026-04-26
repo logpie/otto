@@ -20,6 +20,8 @@ from otto.mission_control.actions import ActionResult, ActionState
 from otto.token_usage import (
     add_token_usage as _shared_add_token_usage,
     empty_token_usage as _shared_empty_token_usage,
+    format_compact_token_count as _shared_format_compact_token_count,
+    format_token_spend as _shared_format_token_spend,
     normalize_token_usage as _shared_normalize_token_usage,
     phase_token_usage_from_messages,
     prune_zero_token_usage as _shared_prune_zero_token_usage,
@@ -716,7 +718,7 @@ class MissionControlModel:
             total_duration_s=duration_s,
             duration_display=_format_elapsed(duration_s) if duration_s else "-",
             reported_cost_usd=reported_cost if cost_seen else None,
-            cost_display=f"${reported_cost:.2f}" if cost_seen else "-",
+            cost_display=_format_usage(reported_cost if cost_seen else None, token_usage),
             token_usage=_prune_zero_token_usage(token_usage),
             total_tokens=total_tokens,
             token_display=f"{_format_compact_number(total_tokens)} tokens" if total_tokens else "-",
@@ -1328,26 +1330,11 @@ def _format_elapsed(seconds: float | None) -> str:
 
 
 def _format_usage(cost: float | None, token_usage: dict[str, int] | None = None, *, pending: bool = False) -> str:
-    if isinstance(cost, (int, float)) and float(cost) > 0:
-        return f"${float(cost):.2f}"
-    if token_usage:
-        normalized = _normalize_token_usage(token_usage)
-        input_tokens = int(normalized.get("input_tokens", 0) or 0)
-        output_tokens = int(normalized.get("output_tokens", 0) or 0)
-        if input_tokens or output_tokens:
-            return f"{_format_compact_number(input_tokens)} in / {_format_compact_number(output_tokens)} out"
-    if isinstance(cost, (int, float)):
-        return "$0.00"
-    return "…" if pending else "-"
+    return _shared_format_token_spend(token_usage, reported_cost_usd=cost, pending=pending)
 
 
 def _format_compact_number(value: int | float) -> str:
-    amount = float(value)
-    if amount >= 1_000_000:
-        return f"{amount / 1_000_000:.1f}M"
-    if amount >= 1_000:
-        return f"{amount / 1_000:.1f}K"
-    return str(int(amount))
+    return _shared_format_compact_token_count(value)
 
 
 def _record_token_usage(record: RunRecord) -> dict[str, int]:

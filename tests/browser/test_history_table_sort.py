@@ -2,7 +2,7 @@
 
 Heavy-user paper cut #2 (mc-audit `_hunter-findings/heavy-user.md`):
 
-    Power user sweeping history wants to sort by cost desc, duration desc,
+    Power user sweeping history wants to sort by token usage desc, duration desc,
     age. Today the columns Outcome / Run / Summary / Duration / Usage are
     non-clickable headers — no sort affordance at all.
 
@@ -12,8 +12,8 @@ This test asserts:
     `hs=duration&hd=asc`.
   - Second click flips to descending, URL gains `hd=desc`.
   - Third click clears the sort, URL drops both keys.
-  - Sorting `usage` desc by `cost_usd` puts the priciest row first
-    regardless of the order the server returned (sort is page-local).
+  - Sorting `usage` desc by token usage puts the heaviest row first
+    regardless of provider-reported cost order (sort is page-local).
 
 Run::
 
@@ -36,7 +36,7 @@ pytestmark = pytest.mark.browser
 # --------------------------------------------------------------------------- #
 
 
-def _history_item(idx: int, cost: float, duration: float, summary: str, outcome: str) -> dict[str, Any]:
+def _history_item(idx: int, cost: float, tokens: int, duration: float, summary: str, outcome: str) -> dict[str, Any]:
     return {
         "run_id": f"run-{idx:03d}",
         "domain": "build",
@@ -56,6 +56,7 @@ def _history_item(idx: int, cost: float, duration: float, summary: str, outcome:
         "duration_display": f"{int(duration)}s",
         "cost_usd": cost,
         "cost_display": f"${cost:.2f}",
+        "token_usage": {"total_tokens": tokens},
         "resumable": False,
         "adapter_key": "build",
     }
@@ -63,9 +64,9 @@ def _history_item(idx: int, cost: float, duration: float, summary: str, outcome:
 
 def _state_payload() -> dict[str, Any]:
     items = [
-        _history_item(1, 0.05, 30.0, "Alpha summary", "success"),
-        _history_item(2, 1.20, 600.0, "Bravo summary", "failed"),
-        _history_item(3, 0.40, 120.0, "Charlie summary", "interrupted"),
+        _history_item(1, 0.05, 5_000, 30.0, "Alpha summary", "success"),
+        _history_item(2, 1.20, 1_000, 600.0, "Bravo summary", "failed"),
+        _history_item(3, 0.40, 3_000, 120.0, "Charlie summary", "interrupted"),
     ]
     return {
         "project": {
@@ -192,8 +193,8 @@ def test_sort_button_first_click_asc_url_and_indicator(
     )
     assert "hd=asc" in page.url, f"expected hd=asc in URL, got {page.url}"
 
-    # Asc by cost: $0.05 (task-001), $0.40 (task-003), $1.20 (task-002).
-    assert _row_order(page) == ["task-001", "task-003", "task-002"]
+    # Asc by token usage: 1K (task-002), 3K (task-003), 5K (task-001).
+    assert _row_order(page) == ["task-002", "task-003", "task-001"]
 
     # Header text gains an arrow indicator.
     btn = page.get_by_test_id("history-sort-usage")
@@ -219,8 +220,8 @@ def test_sort_second_click_flips_desc(
         "() => new URL(location.href).searchParams.get('hd') === 'desc'",
         timeout=3_000,
     )
-    # Desc by cost: $1.20 (task-002), $0.40 (task-003), $0.05 (task-001).
-    assert _row_order(page) == ["task-002", "task-003", "task-001"]
+    # Desc by token usage: 5K (task-001), 3K (task-003), 1K (task-002).
+    assert _row_order(page) == ["task-001", "task-003", "task-002"]
 
 
 def test_sort_third_click_resets(

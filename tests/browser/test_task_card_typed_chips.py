@@ -3,9 +3,9 @@ typed chips instead of unlabeled pills.
 
 Each card chip carries:
 
-* a ``data-chip-kind`` attribute (``files`` / ``stories`` / ``cost`` /
+* a ``data-chip-kind`` attribute (``files`` / ``stories`` / ``usage`` /
   ``time`` / ``status``) so CSS can hue-code without relying on order;
-* an icon prefix glyph (file emoji, ✓, $, ⏱) so the kind reads at a
+* an icon prefix glyph (file emoji, ✓, T, ⏱) so the kind reads at a
   glance without colour;
 * a typed label (e.g. "3 files", "2/2 stories", "0.05", "1m").
 
@@ -79,6 +79,7 @@ def _full_landing_item() -> dict[str, Any]:
         "exit_code": None,
         "elapsed_s": 60,
         "cost_usd": 0.42,
+        "token_usage": {"total_tokens": 12_300},
         "duration_s": 720,  # 12m
         "stories_passed": 2,
         "stories_tested": 2,
@@ -239,7 +240,7 @@ def _hydrate(mc_backend: Any, page: Any, disable_animations: Any) -> None:
 def test_full_task_card_renders_typed_chips(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """A fully populated task surfaces files/stories/cost/time chips."""
+    """A fully populated task surfaces files/stories/usage/time chips."""
 
     _install_routes(page)
     _hydrate(mc_backend, page, disable_animations)
@@ -257,16 +258,15 @@ def test_full_task_card_renders_typed_chips(
     )
     kinds = [c["kind"] for c in info]
     # Must include the four typed chips.
-    for required in ["files", "stories", "cost", "time"]:
+    for required in ["files", "stories", "usage", "time"]:
         assert required in kinds, f"expected '{required}' chip; got chips={info!r}"
 
     # Look up each chip by kind.
     by_kind = {c["kind"]: c["text"] for c in info}
     assert "3 file" in by_kind["files"], f"files chip text wrong: {by_kind['files']!r}"
     assert "2/2 stories" in by_kind["stories"], f"stories chip text wrong: {by_kind['stories']!r}"
-    # Cost chip carries the dollar amount (with our $ icon prefix; the label
-    # strips the leading $).
-    assert "0.42" in by_kind["cost"], f"cost chip text wrong: {by_kind['cost']!r}"
+    # Usage chip carries token spend as the primary cross-provider measure.
+    assert "12.3K tokens" in by_kind["usage"], f"usage chip text wrong: {by_kind['usage']!r}"
     # Time chip carries a duration label like "12m".
     assert "12m" in by_kind["time"] or "m" in by_kind["time"], (
         f"time chip text wrong: {by_kind['time']!r}"
@@ -306,7 +306,7 @@ def test_bare_task_falls_back_to_status_chip(
     )
     bare = next((c for c in info if "task-bare" in c["title"]), None)
     assert bare is not None, f"expected to find task-bare in {info!r}"
-    # Should fall back to a single status chip, not "files: -" / "cost: -" pills.
+    # Should fall back to a single status chip, not "files: -" / "usage: -" pills.
     assert len(bare["chips"]) == 1, f"bare task should have 1 fallback chip; got {bare['chips']!r}"
     fallback = bare["chips"][0]
     assert fallback["kind"] == "status", f"expected status fallback; got {fallback!r}"

@@ -209,7 +209,7 @@ export interface BoardTask {
   // chip is suppressed (rather than rendering "-" placeholder).
   storiesPassed?: number | null;
   storiesTested?: number | null;
-  costDisplay?: string | null;
+  usageDisplay?: string | null;
   durationDisplay?: string | null;
 }
 
@@ -476,10 +476,9 @@ export function App() {
   const historyPageSizeRef = useRef<number>(initialRoute.historyPageSize ?? DEFAULT_HISTORY_PAGE_SIZE);
 
   // Heavy-user paper-cut #2 (history sort). Sort is applied client-side over
-  // the current page — it is documented in the followups that a server-side
-  // sort would be more honest for "cost desc across all 200+ rows", but
-  // page-local sort already covers the common "I'm scanning this page for
-  // the priciest run" case. Refs let writeRouteState read the current value
+  // the current page; server-side sort would be more honest across all
+  // pages, but page-local sort covers the common "scan this page for the
+  // heaviest run" case. Refs let writeRouteState read the current value
   // without forming a dep cycle, mirroring viewModeRef / historyPageRef.
   const [historySort, setHistorySort] = useState<HistorySortColumn | null>(initialRoute.historySort);
   const [historySortDir, setHistorySortDir] = useState<HistorySortDir | null>(initialRoute.historySortDir);
@@ -2530,7 +2529,7 @@ export function ProjectOverview({data}: {data: StateResponse | null}) {
       <div className="panel-heading">
         <div>
           <h2 id="projectOverviewHeading">Project Overview</h2>
-          <p className="panel-subtitle">Work, review readiness, and provider usage for this project.</p>
+          <p className="panel-subtitle">Work, review readiness, and token spend for this project.</p>
         </div>
       </div>
       <div className="project-stat-grid">
@@ -3049,7 +3048,7 @@ export function TaskCard({task, selected, onSelect, onSelectQueued, onCancelRun}
     }
   };
   // mc-audit info-density #2: render typed chips with explicit kind labels
-  // (files / stories / cost / time) instead of a row of unlabeled pills.
+  // (files / stories / usage / time) instead of a row of unlabeled pills.
   // Each chip is suppressed when the underlying value is null/missing — no
   // "-" placeholder leakage.
   // Drop the time chip when the live block above already shows "Elapsed 12m"
@@ -3215,7 +3214,7 @@ export function RecentRunsPanel({items, totalRows, selectedRunId, onSelect}: {
       <div className="panel-heading">
         <div>
           <h2 id="recentRunsHeading">Recent Runs</h2>
-          <p className="panel-subtitle">Outcome, duration, and provider usage.</p>
+          <p className="panel-subtitle">Outcome, duration, and token spend.</p>
         </div>
         <span className="pill">{totalRows}</span>
       </div>
@@ -3364,7 +3363,7 @@ export function LiveRuns({items, landing, selectedRunId, onSelect}: {
                   <span className="cell-overflow" aria-label={item.branch_task || ""}>{item.branch_task || "-"}</span>
                 </td>
                 <td>{item.elapsed_display || "-"}</td>
-                <td>{item.cost_display || "-"}</td>
+                <td>{usageLine(item)}</td>
                 <td>
                   <span className="cell-overflow" aria-label={runEventText(item, landingByTask)}>{runEventText(item, landingByTask)}</span>
                 </td>
@@ -3521,7 +3520,7 @@ export function History({
                   <span className="cell-overflow" aria-label={item.summary || ""}>{item.summary || "-"}</span>
                 </td>
                 <td>{item.duration_display || "-"}</td>
-                <td>{item.cost_display || "-"}</td>
+                <td>{usageLine(item)}</td>
               </tr>
             )) : (
               <tr><td colSpan={5} className="empty-cell">{loaded ? "No matching history." : "Loading…"}</td></tr>
@@ -3598,9 +3597,10 @@ export function History({
 /**
  * Heavy-user paper-cut #2: page-local sort. We sort the rows we already
  * have (the current paginated slice) — server-side sort across all rows is
- * a followup. Comparators are domain-aware: cost/duration use numeric
- * values from the API (cost_usd / duration_s), not the display strings,
- * so "$2" doesn't sort ahead of "$10".
+ * a followup. Comparators are domain-aware: token usage/duration use numeric
+ * values from the API (token_usage / duration_s), not the display strings,
+ * so "2K" doesn't sort ahead of "10K". USD is only a fallback for legacy
+ * rows with no token usage.
  */
 export function sortHistoryItems(
   items: HistoryItem[],
@@ -3614,12 +3614,18 @@ export function sortHistoryItems(
     run: (a, b) => safeCompareString(a.queue_task_id || a.run_id, b.queue_task_id || b.run_id),
     summary: (a, b) => safeCompareString(a.summary, b.summary),
     duration: (a, b) => safeCompareNumber(a.duration_s, b.duration_s),
-    usage: (a, b) => safeCompareNumber(a.cost_usd, b.cost_usd),
+    usage: (a, b) => safeCompareNumber(usageSortValue(a), usageSortValue(b)),
   };
   const cmp = comparators[column];
   // Slice so we never mutate the caller's array — React identity matters
   // for memoization and for the test harness that snapshots `items`.
   return [...items].sort((a, b) => cmp(a, b) * factor);
+}
+
+export function usageSortValue(item: {token_usage?: StateResponse["project_stats"]["token_usage"]; cost_usd?: number | null}): number | null {
+  const tokens = tokenTotal(item.token_usage);
+  if (tokens > 0) return tokens;
+  return item.cost_usd ?? null;
 }
 
 export function safeCompareString(a: string | null | undefined, b: string | null | undefined): number {
@@ -3835,7 +3841,7 @@ export function phaseUsageLine(phase: RunDetail["phase_timeline"][number]): stri
     typeof phase.duration_s === "number" ? formatDuration(phase.duration_s) : "",
     phase.rounds ? `${phase.rounds} round${phase.rounds === 1 ? "" : "s"}` : "",
     tokenTotal(phase.token_usage) ? `${formatCompactNumber(tokenTotal(phase.token_usage))} tokens` : "",
-    phase.cost_usd && phase.cost_usd > 0 ? `$${phase.cost_usd.toFixed(2)}` : "",
+    phase.cost_usd && phase.cost_usd > 0 ? `reported $${phase.cost_usd.toFixed(2)}` : "",
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "No usage recorded";
 }
@@ -4641,7 +4647,7 @@ export function CertificationRoundTabs({rounds}: {rounds: CertificationRound[]})
             <dt>Verdict</dt><dd data-testid="proof-round-verdict">{active.verdict}</dd>
             {active.stories_tested != null && (<><dt>Stories</dt><dd data-testid="proof-round-stories">{active.passed_count ?? 0} passed / {active.failed_count ?? 0} failed / {active.warn_count ?? 0} warn / {active.stories_tested} tested</dd></>)}
             {active.duration_human && (<><dt>Duration</dt><dd data-testid="proof-round-duration">{active.duration_human}</dd></>)}
-            {active.cost_usd != null && (<><dt>Cost</dt><dd data-testid="proof-round-cost">${active.cost_usd.toFixed(2)}{active.cost_estimated ? " (est)" : ""}</dd></>)}
+            {active.cost_usd != null && (<><dt>Reported cost</dt><dd data-testid="proof-round-cost">${active.cost_usd.toFixed(2)}{active.cost_estimated ? " (est)" : ""}</dd></>)}
           </dl>
           {active.diagnosis && <p className="proof-round-diagnosis" data-testid="proof-round-diagnosis">{active.diagnosis}</p>}
           {active.failing_story_ids.length > 0 && (
@@ -5292,6 +5298,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
   const [fixModel, setFixModel] = useState("");
   const [fixEffort, setFixEffort] = useState("");
   const [certification, setCertification] = useState<CertificationPolicy>("");
+  const [rounds, setRounds] = useState("");
   const [targetConfirmed, setTargetConfirmed] = useState(false);
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -5312,7 +5319,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
   // jargon. mc-audit codex-first-time-user.md #2.
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const advancedRef = useRef<HTMLDetailsElement | null>(null);
-  // mc-audit codex-destructive-action-safety #7: cost-incurring jobs queue
+  // mc-audit codex-destructive-action-safety #7: provider-spend jobs queue
   // immediately on Submit and the watcher dispatches with no cancel window.
   // Add a 3-second grace banner with a [Cancel] button between submit and
   // the actual POST. The form/dialog stay editable during the grace period.
@@ -5338,7 +5345,13 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
   // Pre-submit summary fields. We resolve the visible "will run with" line
   // by combining the user's selection with the project's defaults. mc-audit
   // codex-first-time-user.md #2.
-  const summary = jobRunSummary({command, subcommand, project, provider, model, effort, certification});
+  const summary = jobRunSummary({command, subcommand, project, provider, model, effort, certification, rounds});
+  const effectiveRounds = effectiveRoundLimit(project, rounds);
+  const improveOneRoundWarning =
+    command === "improve"
+    && executionMode === "split"
+    && effectiveRounds !== null
+    && effectiveRounds <= 1;
   const intentLabelMap: Record<JobCommand, string> = {
     build: "Intent",
     improve: "Focus",
@@ -5435,6 +5448,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
         fixModel,
         fixEffort,
         certification,
+        rounds,
         planning,
         specFilePath: specFilePath.trim(),
       };
@@ -5717,6 +5731,22 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
               <input value={after} type="text" placeholder="optional dependencies" onChange={(event) => setAfter(event.target.value)} />
             </label>
           </div>
+          <label>Max rounds
+            <input
+              data-testid="job-rounds-input"
+              value={rounds}
+              type="number"
+              min={1}
+              max={50}
+              placeholder={project?.defaults?.max_certify_rounds ? `inherit: ${project.defaults.max_certify_rounds}` : "inherit"}
+              onChange={(event) => setRounds(event.target.value)}
+            />
+            <span className={`field-hint ${improveOneRoundWarning ? "field-warning" : ""}`} data-testid="job-rounds-help">
+              {improveOneRoundWarning
+                ? "One split improve round only evaluates existing work. Use 2+ rounds to let Otto fix/improve and re-check."
+                : "Maximum certify/evaluate rounds for this queued job."}
+            </span>
+          </label>
           <div className="field-grid">
             <label>Provider
               <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
@@ -5910,7 +5940,7 @@ export function planningHelp(planning: PlanningMode): string {
  * override wins, otherwise we fall back to the project's effective defaults
  * coming from otto.yaml. mc-audit codex-first-time-user.md #2.
  */
-export function jobRunSummary({command, subcommand, project, provider, model, effort, certification}: {
+export function jobRunSummary({command, subcommand, project, provider, model, effort, certification, rounds}: {
   command: JobCommand;
   subcommand: ImproveSubcommand;
   project: StateResponse["project"] | undefined;
@@ -5918,13 +5948,23 @@ export function jobRunSummary({command, subcommand, project, provider, model, ef
   model: string;
   effort: string;
   certification: CertificationPolicy;
+  rounds: string;
 }): string {
   const defaults = project?.defaults;
   const providerLabel = provider || defaults?.provider || "default";
   const modelLabel = model.trim() || defaults?.model || "default";
   const effortLabel = effort || defaults?.reasoning_effort || "default";
   const verificationLabel = describeVerificationPolicy(command, subcommand, certification, project);
-  return `${providerLabel} · model ${modelLabel} · effort ${effortLabel} · verify ${verificationLabel}`;
+  const roundLimit = effectiveRoundLimit(project, rounds);
+  const roundLabel = roundLimit ? ` · rounds ${roundLimit}` : "";
+  return `${providerLabel} · model ${modelLabel} · effort ${effortLabel} · verify ${verificationLabel}${roundLabel}`;
+}
+
+export function effectiveRoundLimit(project: StateResponse["project"] | undefined, rounds: string): number | null {
+  const requested = Number.parseInt(rounds, 10);
+  if (Number.isFinite(requested) && requested > 0) return requested;
+  const inherited = project?.defaults?.max_certify_rounds;
+  return typeof inherited === "number" && inherited > 0 ? inherited : null;
 }
 
 export function describeVerificationPolicy(
@@ -6258,7 +6298,7 @@ export function missionFocus(data: StateResponse | null): {
     // run instead of a bare count. Pick the most recently active live item
     // (sort by elapsed_s ascending — newest first; fall back to first
     // working board card). Headline format:
-    //   "<task-id> · <branch> · <elapsed> · <cost> · <last event>"
+    //   "<task-id> · <branch> · <elapsed> · <usage> · <last event>"
     // Each segment is omitted if missing, so the line never reads as "·· ·".
     const liveActive = data.live.items
       .filter((item) => item.active || ["starting", "running", "initializing", "terminating"].includes(item.display_status))
@@ -6270,7 +6310,7 @@ export function missionFocus(data: StateResponse | null): {
           hottest.queue_task_id || hottest.display_id || hottest.run_id,
           hottest.branch || null,
           hottest.elapsed_display || null,
-          hottest.cost_display && hottest.cost_display !== "…" ? hottest.cost_display : null,
+          usageLine(hottest) !== "-" ? usageLine(hottest) : null,
           hottest.overlay?.reason || hottest.last_event || null,
         ]
           .filter((segment): segment is string => Boolean(segment && segment.trim()))
@@ -6404,7 +6444,7 @@ export function boardTaskFromLanding(item: LandingItem, runId: string | null, me
     source: "landing",
     storiesPassed: item.stories_passed,
     storiesTested: item.stories_tested,
-    costDisplay: typeof item.cost_usd === "number" ? `$${item.cost_usd.toFixed(2)}` : null,
+    usageDisplay: usageLine(item) !== "-" ? usageLine(item) : null,
     durationDisplay: typeof item.duration_s === "number" ? formatDuration(item.duration_s) : null,
   };
 }
@@ -6425,7 +6465,7 @@ export function boardTaskFromLive(item: LiveRunItem): BoardTask {
     status: item.display_status,
     branch: item.branch,
     changedFileCount: null,
-    proof: item.cost_display || "-",
+    proof: usageLine(item),
     reason: item.overlay?.reason || item.last_event || item.elapsed_display || item.display_status,
     active: item.active,
     elapsedDisplay: item.elapsed_display || null,
@@ -6435,7 +6475,7 @@ export function boardTaskFromLive(item: LiveRunItem): BoardTask {
     source: "live",
     storiesPassed: null,
     storiesTested: null,
-    costDisplay: item.cost_display && item.cost_display !== "-" ? item.cost_display : null,
+    usageDisplay: usageLine(item) !== "-" ? usageLine(item) : null,
     durationDisplay: item.elapsed_display && item.elapsed_display !== "-" ? item.elapsed_display : null,
   };
 }
@@ -6545,7 +6585,7 @@ export function activeRunSummary(data: StateResponse | null): {label: string; de
 // tooltip with extra context. Chips are suppressed when the underlying value
 // is null — never render a "-" placeholder.
 export interface TaskChip {
-  kind: "files" | "stories" | "cost" | "time" | "status";
+  kind: "files" | "stories" | "usage" | "cost" | "time" | "status";
   icon: string;
   label: string;
   tooltip?: string;
@@ -6574,20 +6614,19 @@ export function computeTaskChips(task: BoardTask): TaskChip[] {
       tooltip: passed === tested ? "All certifier stories passed" : "Certifier story results",
     });
   }
-  // Cost chip — only when a non-null cost display is available, and it is
-  // not the placeholder "$0.00" that means "no cost data recorded" (the
-  // backend emits exactly $0.00 when cost was not captured).
+  // Usage chip — token spend is the cross-provider primary measure. Hide
+  // empty placeholders and legacy zero-cost displays.
   if (
-    task.costDisplay
-    && task.costDisplay !== "-"
-    && task.costDisplay.trim() !== ""
-    && task.costDisplay.replace(/^\$/, "").replace(/\.0+$/, "") !== "0"
+    task.usageDisplay
+    && task.usageDisplay !== "-"
+    && task.usageDisplay.trim() !== ""
+    && task.usageDisplay.replace(/^\$/, "").replace(/\.0+$/, "") !== "0"
   ) {
     chips.push({
-      kind: "cost",
-      icon: "$",
-      label: task.costDisplay.replace(/^\$/, ""),
-      tooltip: "Estimated provider cost for this task",
+      kind: "usage",
+      icon: "T",
+      label: task.usageDisplay.replace(/^\$/, ""),
+      tooltip: "Provider token usage for this task",
     });
   }
   // Time chip — only when we have a duration.

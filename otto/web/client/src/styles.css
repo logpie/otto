@@ -1704,7 +1704,7 @@ textarea {
 
 /* mc-audit info-density #2: typed chips so the meta row is not a wall of
    identical unlabeled pills. Each chip kind has a distinct hue so files
-   (blue), stories (green), cost (amber), and time (neutral) scan apart at
+   (blue), stories (green), usage (amber), and time (neutral) scan apart at
    a glance. The icon glyph keeps the chip identifiable when colour is not
    conveyed (colour-blind users / monochrome rendering). */
 .task-card-meta .task-chip {
@@ -1724,6 +1724,7 @@ textarea {
   color: #0f766e;
 }
 
+.task-card-meta .task-chip-usage,
 .task-card-meta .task-chip-cost {
   background: rgba(202, 138, 4, 0.10);
   color: #92400e;
@@ -4845,6 +4846,11 @@ tbody tr.selected {
   line-height: 1.35;
 }
 
+.field-hint.field-warning {
+  color: #9a3412;
+  font-weight: 650;
+}
+
 .static-field {
   display: grid;
   gap: 4px;
@@ -5601,7 +5607,7 @@ html, body {
 
 /*
  * Job dialog pre-submit summary — surfaces provider/model/effort/verification
- * outside the Advanced disclosure so cost-affecting defaults are not
+ * outside the Advanced disclosure so spend-affecting defaults are not
  * hidden. mc-audit codex-first-time-user.md #2.
  */
 .job-summary {
