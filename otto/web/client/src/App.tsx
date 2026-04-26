@@ -67,6 +67,84 @@ interface RouteState {
   selectedRunId: string | null;
 }
 
+// Cap the log buffer at ~1MB of text — the browser can render that without
+// jank, and we display "{N} earlier bytes elided" to make the truncation
+// honest. We chose bytes (not lines) because a runaway log can still emit
+// short lines indefinitely and overrun a line-based cap. See
+// docs/mc-audit/_hunter-findings/codex-long-string-overflow.md finding #1.
+const LOG_BUFFER_MAX_BYTES = 1_048_576;
+const LOG_POLL_BASE_MS = 1200;
+// Backoff schedule when the log fetch fails repeatedly. Index 0 is the
+// "first failure" delay; we cap at 30s so a sustained outage stops hammering
+// the API. On the first successful read we drop back to LOG_POLL_BASE_MS.
+const LOG_POLL_BACKOFF_MS = [2000, 5000, 15000, 30000];
+
+type LogStatus = "idle" | "loading" | "ok" | "missing" | "error";
+
+interface LogState {
+  text: string;
+  totalLines: number;
+  totalBytes: number;
+  droppedBytes: number;
+  path: string | null;
+  status: LogStatus;
+  error: string | null;
+  lastUpdatedAt: number | null;
+  pollIntervalMs: number;
+  consecutiveErrors: number;
+}
+
+const initialLogState: LogState = {
+  text: "",
+  totalLines: 0,
+  totalBytes: 0,
+  droppedBytes: 0,
+  path: null,
+  status: "idle",
+  error: null,
+  lastUpdatedAt: null,
+  pollIntervalMs: LOG_POLL_BASE_MS,
+  consecutiveErrors: 0,
+};
+
+function bytesToString(value: string): number {
+  if (typeof TextEncoder === "undefined") return value.length;
+  return new TextEncoder().encode(value).length;
+}
+
+// Count newline characters (\n). When appending an incremental chunk this
+// gives the number of *additional* lines closed by the chunk, which lets us
+// maintain a running totalLines counter without ever re-splitting the full
+// log. The display rounds up to "1 line" for any non-empty buffer so an
+// always-tailing log doesn't read as "0 lines" until the first newline.
+function countLines(text: string): number {
+  if (!text) return 0;
+  let count = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text.charCodeAt(i) === 10) count += 1;
+  }
+  return count;
+}
+
+function appendToLogBuffer(prev: string, chunk: string, maxBytes: number): {text: string; droppedBytes: number} {
+  if (!chunk) return {text: prev, droppedBytes: 0};
+  const combined = prev + chunk;
+  const combinedBytes = bytesToString(combined);
+  if (combinedBytes <= maxBytes) return {text: combined, droppedBytes: 0};
+  // Drop characters from the front until we are under the cap, then snap to
+  // the next newline so partial lines don't sit at the head of the buffer.
+  // We approximate "bytes" with "characters" for the slice search — exact
+  // byte alignment is not meaningful when the original split between chunks
+  // can already land mid-grapheme.
+  const overshootChars = Math.max(0, combined.length - maxBytes);
+  let cut = overshootChars;
+  const newlineAfterCut = combined.indexOf("\n", cut);
+  if (newlineAfterCut >= 0 && newlineAfterCut - cut < 4096) cut = newlineAfterCut + 1;
+  const truncated = combined.slice(cut);
+  const droppedBytes = bytesToString(combined.slice(0, cut));
+  return {text: truncated, droppedBytes};
+}
+
 interface BoardTask {
   id: string;
   runId: string | null;
@@ -120,7 +198,7 @@ export function App() {
   const [projectsState, setProjectsState] = useState<ProjectsResponse | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRoute.selectedRunId);
   const [detail, setDetail] = useState<RunDetail | null>(null);
-  const [logText, setLogText] = useState("");
+  const [logState, setLogState] = useState<LogState>(initialLogState);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorMode, setInspectorMode] = useState<InspectorMode>("proof");
   const [selectedArtifactIndex, setSelectedArtifactIndex] = useState<number | null>(null);
@@ -145,7 +223,19 @@ export function App() {
   const watcherInFlight = useInFlight();
   const refreshInFlight = useInFlight();
   const mergeAllInFlight = useInFlight();
+  // Server byte-offset for the next log fetch. Tracked in a ref because the
+  // poll loop reads-modifies it from inside a setInterval callback that must
+  // not retrigger React effects.
   const logOffsetRef = useRef(0);
+  // Mirror of logState.text — the poll loop computes the next buffer
+  // synchronously without going through React state, so the next chunk's
+  // append doesn't race against an unflushed state update.
+  const logTextRef = useRef("");
+  // setTimeout id for the recurring poll, plus a flag for whether the tab is
+  // currently visible. The poll is rescheduled at variable cadence to
+  // implement exponential backoff on errors, so we keep the id outside React.
+  const logPollTimeoutRef = useRef<number | null>(null);
+  const logPollVisibleRef = useRef(true);
   const selectedRunIdRef = useRef<string | null>(initialRoute.selectedRunId);
   const viewModeRef = useRef<ViewMode>(initialRoute.viewMode);
 
@@ -200,7 +290,9 @@ export function App() {
     setInspectorOpen(false);
     if (runId !== selectedRunIdRef.current) {
       setDetail(null);
-      setLogText("");
+      logOffsetRef.current = 0;
+      logTextRef.current = "";
+      setLogState(initialLogState);
       setArtifactContent(null);
       setProofContent(null);
       setDiffContent(null);
@@ -233,20 +325,71 @@ export function App() {
 
   const loadLogs = useCallback(async (runId: string, reset = false) => {
     if ((inspectorMode !== "logs" || !inspectorOpen) && !reset) return;
+    if (reset) {
+      logOffsetRef.current = 0;
+      logTextRef.current = "";
+      setLogState({...initialLogState, status: "loading"});
+    } else {
+      setLogState((prev) => (prev.status === "idle" ? {...prev, status: "loading"} : prev));
+    }
     const offset = reset ? 0 : logOffsetRef.current;
     try {
       const logs = await api<LogsResponse>(`/api/runs/${encodeURIComponent(runId)}/logs?offset=${offset}`);
       if (selectedRunIdRef.current !== runId) return;
-      if (reset) setLogText("");
-      if (logs.text) {
-        setLogText((current) => `${reset ? "" : current}${logs.text}`);
-      }
-      logOffsetRef.current = logs.next_offset || offset;
+      logOffsetRef.current = typeof logs.next_offset === "number" ? logs.next_offset : offset;
+      // Build the next buffer synchronously off `logTextRef` so concurrent
+      // reset+poll cycles do not race over the React state update.
+      const baseText = reset ? "" : logTextRef.current;
+      const incoming = logs.text || "";
+      const {text: nextText, droppedBytes: newlyDropped} = appendToLogBuffer(baseText, incoming, LOG_BUFFER_MAX_BYTES);
+      logTextRef.current = nextText;
+      const incomingLines = countLines(incoming);
+      const incomingBytes = bytesToString(incoming);
+      setLogState((prev) => {
+        const droppedBytes = (reset ? 0 : prev.droppedBytes) + newlyDropped;
+        // Total lines/bytes accumulate unbounded — they describe the original
+        // file, not the rendered tail. Use server-provided total_bytes when
+        // available; fall back to the running counter so older payloads still
+        // render a sensible "Final · {N} bytes" label.
+        const baseLines = reset ? 0 : prev.totalLines;
+        const baseBytes = reset ? 0 : prev.totalBytes;
+        const totalBytes = typeof logs.total_bytes === "number" && logs.total_bytes > 0
+          ? logs.total_bytes
+          : baseBytes + incomingBytes;
+        return {
+          text: nextText,
+          totalLines: baseLines + incomingLines,
+          totalBytes,
+          droppedBytes,
+          path: logs.path ?? null,
+          status: logs.exists ? "ok" : "missing",
+          error: null,
+          lastUpdatedAt: Date.now(),
+          pollIntervalMs: LOG_POLL_BASE_MS,
+          consecutiveErrors: 0,
+        };
+      });
     } catch (error) {
-      if (detailWasRemoved(error)) return;
-      showToast(errorMessage(error), "error");
+      if (selectedRunIdRef.current !== runId) return;
+      if (detailWasRemoved(error)) {
+        setLogState((prev) => ({...prev, status: "missing", error: null}));
+        return;
+      }
+      const message = errorMessage(error);
+      setLogState((prev) => {
+        const consecutiveErrors = prev.consecutiveErrors + 1;
+        const idx = Math.min(consecutiveErrors - 1, LOG_POLL_BACKOFF_MS.length - 1);
+        const backoff = LOG_POLL_BACKOFF_MS[idx] ?? LOG_POLL_BACKOFF_MS[LOG_POLL_BACKOFF_MS.length - 1] ?? LOG_POLL_BASE_MS;
+        return {
+          ...prev,
+          status: "error",
+          error: message,
+          consecutiveErrors,
+          pollIntervalMs: backoff,
+        };
+      });
     }
-  }, [inspectorMode, inspectorOpen, showToast]);
+  }, [inspectorMode, inspectorOpen]);
 
   const refreshDetail = useCallback(async (runId: string) => {
     const params = stateQueryParams(filters).toString();
@@ -269,7 +412,9 @@ export function App() {
         setData(null);
         setSelectedRunId(null);
         setDetail(null);
-        setLogText("");
+        logOffsetRef.current = 0;
+        logTextRef.current = "";
+        setLogState(initialLogState);
         setArtifactContent(null);
         setProofContent(null);
         setDiffContent(null);
@@ -319,7 +464,9 @@ export function App() {
   useEffect(() => {
     if (!selectedRunId) {
       setDetail(null);
-      setLogText("");
+      logOffsetRef.current = 0;
+      logTextRef.current = "";
+      setLogState(initialLogState);
       setArtifactContent(null);
       setProofContent(null);
       setDiffContent(null);
@@ -330,7 +477,8 @@ export function App() {
     setInspectorMode("proof");
     setDetail(null);
     logOffsetRef.current = 0;
-    setLogText("");
+    logTextRef.current = "";
+    setLogState(initialLogState);
     setArtifactContent(null);
     setProofContent(null);
     setDiffContent(null);
@@ -341,7 +489,9 @@ export function App() {
         selectedRunIdRef.current = null;
         setSelectedRunId(null);
         setDetail(null);
-        setLogText("");
+        logOffsetRef.current = 0;
+        logTextRef.current = "";
+        setLogState(initialLogState);
         setArtifactContent(null);
         setProofContent(null);
         setDiffContent(null);
@@ -354,11 +504,84 @@ export function App() {
     });
   }, [refreshDetail, selectedRunId, showToast]);
 
+  // Log polling with three controls the simple `setInterval` version lacked:
+  //   1. Exponential backoff on consecutive errors (1.2s -> 2s -> 5s -> ...).
+  //      `pollIntervalMs` lives in `logState`; on error the previous loadLogs
+  //      raised it, on success it dropped it back to LOG_POLL_BASE_MS.
+  //   2. Pause when the tab is hidden — keeps the SPA from flooding the
+  //      server when the user has the inspector parked in a background tab.
+  //   3. Stop entirely when the run is terminal AND we've drained the file.
+  //      `detail.active` flips to false on completion, so once we have one
+  //      successful read after that we stop scheduling.
   useEffect(() => {
     if (!selectedRunId || inspectorMode !== "logs" || !inspectorOpen) return;
-    const interval = window.setInterval(() => void loadLogs(selectedRunId), 1200);
-    return () => window.clearInterval(interval);
-  }, [inspectorMode, inspectorOpen, loadLogs, selectedRunId]);
+    const runIsActive = detail?.active === true;
+    // Stop polling when the run has terminated and we have at least one
+    // successful read of the final state. The first successful read after
+    // termination is what makes the header flip to "Final · ..." too.
+    const shouldKeepPolling = runIsActive || logState.status === "loading" || logState.status === "idle" || logState.status === "error";
+    if (!shouldKeepPolling) return;
+
+    let cancelled = false;
+
+    const scheduleNext = (delayMs: number) => {
+      if (cancelled) return;
+      logPollTimeoutRef.current = window.setTimeout(async () => {
+        if (cancelled) return;
+        if (!logPollVisibleRef.current) {
+          // Tab is hidden — re-check on visibility change, do not poll now.
+          // The visibilitychange handler below will resume by re-running this
+          // effect (it sets state which forces a render).
+          return;
+        }
+        await loadLogs(selectedRunId);
+        if (cancelled) return;
+        scheduleNext(logState.pollIntervalMs);
+      }, delayMs);
+    };
+
+    scheduleNext(logState.pollIntervalMs);
+
+    return () => {
+      cancelled = true;
+      if (logPollTimeoutRef.current !== null) {
+        window.clearTimeout(logPollTimeoutRef.current);
+        logPollTimeoutRef.current = null;
+      }
+    };
+  }, [inspectorMode, inspectorOpen, loadLogs, selectedRunId, detail?.active, logState.status, logState.pollIntervalMs]);
+
+  // Pause/resume polling on tab visibility. We track visibility in a ref so
+  // the polling timer can cheaply consult it without re-rendering, and bump
+  // a state setter on transitions so the polling effect's deps fire and a
+  // hidden->visible flip resumes the loop immediately.
+  const [logVisibilityTick, setLogVisibilityTick] = useState(0);
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const update = () => {
+      const visible = document.visibilityState !== "hidden";
+      const wasVisible = logPollVisibleRef.current;
+      logPollVisibleRef.current = visible;
+      if (visible && !wasVisible) {
+        // Re-arm polling immediately on resume rather than waiting up to
+        // `pollIntervalMs` for the previously-scheduled tick to run.
+        setLogVisibilityTick((tick) => tick + 1);
+      }
+    };
+    update();
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+
+  // When the visibility tick advances *and* the inspector is showing logs,
+  // kick a single immediate fetch so the user sees fresh content the moment
+  // they return to the tab. The recurring polling effect above continues
+  // from there at the normal cadence.
+  useEffect(() => {
+    if (logVisibilityTick === 0) return;
+    if (!selectedRunId || inspectorMode !== "logs" || !inspectorOpen) return;
+    void loadLogs(selectedRunId);
+  }, [logVisibilityTick, selectedRunId, inspectorMode, inspectorOpen, loadLogs]);
 
   const runActionForRun = useCallback(async (runId: string, action: string, message: string, label?: string) => {
     if (action === "merge" && data?.landing.merge_blocked) {
@@ -585,7 +808,9 @@ export function App() {
     setData(null);
     setSelectedRunId(null);
     setDetail(null);
-    setLogText("");
+    logOffsetRef.current = 0;
+    logTextRef.current = "";
+    setLogState(initialLogState);
     setArtifactContent(null);
     setProofContent(null);
     setDiffContent(null);
@@ -696,7 +921,7 @@ export function App() {
               <RunInspector
                 detail={detail}
                 mode={inspectorMode}
-                logText={logText}
+                logState={logState}
                 selectedArtifactIndex={selectedArtifactIndex}
                 artifactContent={artifactContent}
                 proofArtifactIndex={proofArtifactIndex}
@@ -746,7 +971,7 @@ export function App() {
                 <RunInspector
                   detail={detail}
                   mode={inspectorMode}
-                  logText={logText}
+                  logState={logState}
                   selectedArtifactIndex={selectedArtifactIndex}
                   artifactContent={artifactContent}
                   proofArtifactIndex={proofArtifactIndex}
@@ -1567,10 +1792,10 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
   );
 }
 
-function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, diffContent, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onBackToArtifacts, onClose}: {
+function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, diffContent, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onBackToArtifacts, onClose}: {
   detail: RunDetail;
   mode: InspectorMode;
-  logText: string;
+  logState: LogState;
   selectedArtifactIndex: number | null;
   artifactContent: ArtifactContentResponse | null;
   proofArtifactIndex: number | null;
@@ -1615,7 +1840,7 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
         ) : mode === "diff" ? (
           <DiffPane diff={diffContent} />
         ) : mode === "logs" ? (
-          <LogPane text={logText} />
+          <LogPane logState={logState} runActive={detail.active} onRetry={onShowLogs} />
         ) : (
           <ArtifactPane
             artifacts={detail.artifacts || []}
@@ -1630,18 +1855,91 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
   );
 }
 
-function LogPane({text}: {text: string}) {
-  const compact = compactLongText(text || "No logs yet.", 14000);
-  const lineCount = text ? text.split(/\n/).length : 0;
+function LogPane({logState, runActive, onRetry}: {logState: LogState; runActive: boolean; onRetry: () => void}) {
+  const {text, status, error, path, totalBytes, totalLines, droppedBytes, lastUpdatedAt, pollIntervalMs} = logState;
+  // Display lines are derived from the unbounded `totalLines` counter so the
+  // header reflects the *full* log size, not just what fits in the tail
+  // buffer. We never re-split the buffer per render — that's the whole bug.
+  const displayLines = totalLines > 0 ? totalLines : (text ? 1 : 0);
+  const headerStatus = describeLogHeader({runActive, status, lastUpdatedAt, pollIntervalMs, displayLines, totalBytes});
+  const droppedNote = droppedBytes > 0 ? `${humanBytes(droppedBytes)} earlier bytes elided` : null;
+
+  // Empty/missing/error rendering — these states replace the bare "waiting
+  // for output" placeholder with state-specific copy + a recovery action.
+  let body: ReactNode;
+  if (status === "missing") {
+    body = (
+      <div className="log-empty" data-testid="log-empty-missing">
+        {path ? `No log file at ${path}.` : "Log will appear when the agent starts writing."}
+      </div>
+    );
+  } else if (status === "error") {
+    body = (
+      <div className="log-empty log-error" data-testid="log-empty-error">
+        <p>Could not read log{error ? `: ${error}` : "."}</p>
+        <button type="button" data-testid="log-retry-button" onClick={onRetry}>Retry</button>
+      </div>
+    );
+  } else if (!text) {
+    body = (
+      <div className="log-empty" data-testid="log-empty-waiting">
+        {status === "loading" ? "Loading log…" : "Log will appear when the agent starts writing."}
+      </div>
+    );
+  } else {
+    body = (
+      <pre
+        className="log-pane log-content"
+        tabIndex={0}
+        aria-label="Run log output"
+        data-testid="run-log-pane"
+      >{renderLogText(text)}</pre>
+    );
+  }
+
   return (
     <div className="log-viewer">
       <div className="log-toolbar">
         <strong>Run logs</strong>
-        <span>{lineCount ? `${lineCount} line${lineCount === 1 ? "" : "s"}` : "waiting for output"}{compact.truncated ? " · showing latest output" : ""}</span>
+        <span data-testid="log-pane-status">{headerStatus}</span>
+        {droppedNote && (
+          <span className="log-elided" data-testid="log-pane-elided">{droppedNote}</span>
+        )}
       </div>
-      <pre className="log-pane log-content" tabIndex={0} aria-label="Run log output" data-testid="run-log-pane">{renderLogText(compact.text)}</pre>
+      {body}
     </div>
   );
+}
+
+function describeLogHeader({runActive, status, lastUpdatedAt, pollIntervalMs, displayLines, totalBytes}: {
+  runActive: boolean;
+  status: LogStatus;
+  lastUpdatedAt: number | null;
+  pollIntervalMs: number;
+  displayLines: number;
+  totalBytes: number;
+}): string {
+  if (runActive) {
+    const cadence = (pollIntervalMs / 1000).toFixed(pollIntervalMs >= 10_000 ? 0 : 1);
+    if (lastUpdatedAt === null) return `Live · polling every ${cadence}s`;
+    const ageSec = Math.max(0, Math.round((Date.now() - lastUpdatedAt) / 1000));
+    return `Live · polling every ${cadence}s · last update ${ageSec}s ago`;
+  }
+  if (status === "missing") return "No log file";
+  if (displayLines === 0 && totalBytes === 0) return "waiting for output";
+  return `Final · ${displayLines.toLocaleString()} line${displayLines === 1 ? "" : "s"} · ${humanBytes(totalBytes)}`;
+}
+
+function humanBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let v = value;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
 function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoadProofArtifact}: {

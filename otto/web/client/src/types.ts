@@ -382,6 +382,8 @@ export interface LogsResponse {
   next_offset: number;
   text: string;
   exists: boolean;
+  total_bytes: number;
+  eof: boolean;
 }
 
 export interface ArtifactContentResponse {

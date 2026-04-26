@@ -65,6 +65,16 @@ class LogReadResult:
     next_offset: int
     text: str
     exists: bool
+    # Total size of the log file at read time. The client uses this to render
+    # "Final · {total_bytes}" headers and to detect "we are caught up" without
+    # having to do a second HEAD request.  ``0`` when the file is missing or
+    # the slice came from an in-memory fallback.
+    total_bytes: int = 0
+    # ``True`` when ``next_offset == total_bytes`` after this slice — i.e. the
+    # caller has read every byte we currently know about. Lets the client stop
+    # polling once a terminal run has been fully drained without inferring it
+    # from sentinel offsets.
+    eof: bool = False
 
 
 class MissionControlService:
@@ -106,7 +116,7 @@ class MissionControlService:
         if fallback is not None:
             return asdict(fallback)
         if not detail.log_paths:
-            return asdict(LogReadResult(None, offset, offset, "", False))
+            return asdict(LogReadResult(None, offset, offset, "", False, total_bytes=0, eof=True))
         index = min(max(log_index, 0), len(detail.log_paths) - 1)
         path = self._validated_artifact_path(detail.log_paths[index])
         return asdict(self._read_file_slice(path, offset=max(0, offset), limit_bytes=limit_bytes))
@@ -686,7 +696,8 @@ class MissionControlService:
 
     def _read_file_slice(self, path: Path, *, offset: int, limit_bytes: int) -> LogReadResult:
         if not path.exists() or not path.is_file():
-            return LogReadResult(str(path), offset, offset, "", False)
+            return LogReadResult(str(path), offset, offset, "", False, total_bytes=0, eof=True)
+        total_bytes = path.stat().st_size
         with path.open("rb") as handle:
             handle.seek(offset)
             chunk = handle.read(max(1, limit_bytes))
@@ -697,6 +708,8 @@ class MissionControlService:
             next_offset=next_offset,
             text=chunk.decode("utf-8", errors="replace"),
             exists=True,
+            total_bytes=total_bytes,
+            eof=next_offset >= total_bytes,
         )
 
     def _record_event(
@@ -1573,12 +1586,15 @@ def _queue_failure_log_fallback(
     raw = text.encode("utf-8", errors="replace")
     start = max(0, min(offset, len(raw)))
     chunk = raw[start : start + max(1, limit_bytes)]
+    next_offset = start + len(chunk)
     return LogReadResult(
         path=str(path),
         offset=start,
-        next_offset=start + len(chunk),
+        next_offset=next_offset,
         text=chunk.decode("utf-8", errors="replace"),
         exists=True,
+        total_bytes=len(raw),
+        eof=next_offset >= len(raw),
     )
 
 
