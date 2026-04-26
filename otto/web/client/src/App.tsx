@@ -2,6 +2,23 @@ import {FormEvent, useCallback, useEffect, useMemo, useRef, useState} from "reac
 import type {KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode} from "react";
 import {ApiError, api, buildQueuePayload, friendlyApiMessage, runDetailUrl, stateQueryParams} from "./api";
 import {Spinner} from "./components/Spinner";
+import type {PillTone} from "./components/Pill";
+import {BrandMark} from "./components/BrandMark";
+import {HelpOverlay} from "./components/HelpOverlay";
+import {LauncherExplainer} from "./components/launcher/LauncherExplainer";
+import {TaskQueueList} from "./components/tasks/TaskQueueList";
+import {TopBar} from "./components/topbar/TopBar";
+import {ProjectLauncher} from "./components/launcher/ProjectLauncher";
+import {
+  CommandList,
+  FocusMetric,
+  HealthCard,
+  MetaItem,
+  OverviewMetric,
+  ProjectStatCard,
+  ReviewDrawer,
+  ReviewMetric,
+} from "./components/MicroComponents";
 import {useInFlight} from "./hooks/useInFlight";
 import {useDebouncedValue} from "./hooks/useDebouncedValue";
 import {useCrossTabChannel} from "./hooks/useCrossTabChannel";
@@ -16,6 +33,25 @@ import {
   type LogState,
   type LogStatus,
 } from "./logBuffer";
+import {
+  capitalize,
+  configSourceLabel,
+  formatCompactNumber,
+  formatDiffTruncationBanner,
+  formatDuration,
+  formatEventTime,
+  formatRelativeFreshness,
+  formatTechnicalIssue,
+  humanBytes,
+  refreshLabel,
+  shortText,
+  storiesLine,
+  storyTotalsFromLanding,
+  titleCase,
+  tokenBreakdownLine,
+  tokenTotal,
+  usageLine,
+} from "./utils/format";
 import type {
   ActionResult,
   ActionState,
@@ -77,17 +113,17 @@ interface ConfirmState {
   onConfirm: () => Promise<void>;
 }
 
-interface Filters {
+export interface Filters {
   type: RunTypeFilter;
   outcome: OutcomeFilter;
   query: string;
   activeOnly: boolean;
 }
 
-type ViewMode = "tasks" | "diagnostics";
+export type ViewMode = "tasks" | "diagnostics";
 
-type BoardStage = "attention" | "working" | "ready" | "landed";
-type InspectorMode = "try" | "proof" | "logs" | "artifacts" | "diff";
+export type BoardStage = "attention" | "working" | "ready" | "landed";
+export type InspectorMode = "try" | "proof" | "logs" | "artifacts" | "diff";
 
 // Sortable columns for the History table. `null` means "no sort applied"
 // (the user has cycled past desc back to default). We keep this small —
@@ -151,7 +187,7 @@ const STATE_POLL_MIN_GAP_MS = 1000;
 // before the operator notices the page is stale.
 const CONNECTION_LOST_THRESHOLD = 3;
 
-interface BoardTask {
+export interface BoardTask {
   id: string;
   runId: string | null;
   title: string;
@@ -191,7 +227,7 @@ const RUN_TYPE_VALUES: readonly RunTypeFilter[] = ["all", "build", "improve", "c
 const OUTCOME_VALUES: readonly OutcomeFilter[] = ["all", "success", "failed", "interrupted", "cancelled", "removed", "other"];
 const HISTORY_SORT_COLUMNS: readonly HistorySortColumn[] = ["outcome", "run", "summary", "duration", "usage"];
 
-function defaultRouteState(): RouteState {
+export function defaultRouteState(): RouteState {
   return {
     viewMode: "tasks",
     selectedRunId: null,
@@ -206,7 +242,7 @@ function defaultRouteState(): RouteState {
   };
 }
 
-function readRouteState(): RouteState {
+export function readRouteState(): RouteState {
   if (typeof window === "undefined") return defaultRouteState();
   const params = new URLSearchParams(window.location.search);
   const ft = params.get("ft");
@@ -240,21 +276,21 @@ function readRouteState(): RouteState {
   };
 }
 
-function parseHistoryPageParam(raw: string | null): number {
+export function parseHistoryPageParam(raw: string | null): number {
   if (!raw) return 1;
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < 1) return 1;
   return parsed;
 }
 
-function parseHistoryPageSizeParam(raw: string | null): number | null {
+export function parseHistoryPageSizeParam(raw: string | null): number | null {
   if (!raw) return null;
   const parsed = Number.parseInt(raw, 10);
   if (!HISTORY_PAGE_SIZE_OPTIONS.includes(parsed)) return null;
   return parsed;
 }
 
-function writeRouteState(route: RouteState, mode: "push" | "replace"): void {
+export function writeRouteState(route: RouteState, mode: "push" | "replace"): void {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   url.searchParams.set("view", route.viewMode);
@@ -391,6 +427,7 @@ export function App() {
   // Cmd/Ctrl+K from anywhere on the page (skipped while a modal is open so
   // we don't stack a palette on top of a confirm dialog).
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const watcherInFlight = useInFlight();
   const refreshInFlight = useInFlight();
   const mergeAllInFlight = useInFlight();
@@ -899,6 +936,12 @@ export function App() {
       }
       setSelectedRunId((current) => {
         if (current && visible.has(current)) return current;
+        // mc-audit redesign Phase C: drawer-mode means an empty selection is
+        // the *closed* state. Don't auto-select on first poll if `current`
+        // is null — the user has explicitly chosen "no drawer." Only
+        // auto-select when an existing selection has gone away (e.g. the
+        // run was deleted) so we degrade gracefully without a stale id.
+        if (!current) return null;
         const nextRunId = next.live.items[0]?.run_id || next.landing.items.find((item) => item.run_id)?.run_id || next.history.items[0]?.run_id || null;
         selectedRunIdRef.current = nextRunId;
         writeRouteState(currentRouteState(), "replace");
@@ -1101,10 +1144,80 @@ export function App() {
         // palette's focus subtree still closes it.
         setPaletteOpen(false);
       }
+      // mc-audit redesign §9 W9.4: global "new job" shortcut. Honours the
+      // typing-target check so it doesn't steal "n" inside the intent
+      // textarea or filter inputs, and honours the modal-stack check so
+      // it never opens a second dialog over an already-open one.
+      const noMods = !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey;
+      const inputBlocked = isTypingTarget(event.target);
+      const anyModalOpen = jobOpen || confirm || paletteOpen;
+      if (event.key === "n" && noMods && !anyModalOpen && !inputBlocked) {
+        event.preventDefault();
+        setJobOpen(true);
+        return;
+      }
+      // mc-audit redesign Phase D: navigation shortcuts.
+      // j/k: move selection down/up through visible task rows.
+      // o: open inspector for selected row (default = Result tab).
+      // Esc: close drawer / inspector if open.
+      // ?: show shortcut overlay (handled separately below).
+      if ((event.key === "j" || event.key === "k") && noMods && !anyModalOpen && !inputBlocked) {
+        event.preventDefault();
+        const rows = Array.from(document.querySelectorAll<HTMLElement>('[data-stage] [data-testid^="task-card-"]'));
+        if (!rows.length) return;
+        const currentIndex = rows.findIndex((row) => {
+          const id = row.getAttribute("data-run-id") || row.closest("[data-run-id]")?.getAttribute("data-run-id");
+          return id && id === selectedRunIdRef.current;
+        });
+        const nextIndex = event.key === "j"
+          ? Math.min(rows.length - 1, currentIndex < 0 ? 0 : currentIndex + 1)
+          : Math.max(0, currentIndex < 0 ? 0 : currentIndex - 1);
+        rows[nextIndex]?.click();
+        rows[nextIndex]?.scrollIntoView({block: "nearest"});
+        return;
+      }
+      if (event.key === "Escape" && !anyModalOpen) {
+        // Close help overlay first, then drawer/inspector.
+        if (helpOpen) {
+          setHelpOpen(false);
+          return;
+        }
+        if (inspectorOpen) {
+          setInspectorOpen(false);
+          return;
+        }
+        if (selectedRunIdRef.current || selectedQueuedTask) {
+          setSelectedRunId(null);
+          setSelectedQueuedTask(null);
+          selectedRunIdRef.current = null;
+          const route = readRouteState();
+          route.selectedRunId = null;
+          writeRouteState(route, "replace");
+          return;
+        }
+      }
+      // ? opens shortcut help overlay (Shift+/ on US layout).
+      if (event.key === "?" && !inputBlocked && !anyModalOpen) {
+        event.preventDefault();
+        setHelpOpen((prev) => !prev);
+        return;
+      }
+      // 1..5 switch inspector tabs while inspector is open.
+      // Loading for logs/diff is handled by separate effects keyed on
+      // inspectorMode/inspectorOpen — we just flip the mode here.
+      if (inspectorOpen && noMods && !inputBlocked && /^[1-5]$/.test(event.key)) {
+        const tabModes: InspectorMode[] = ["try", "proof", "diff", "logs", "artifacts"];
+        const mode = tabModes[Number(event.key) - 1];
+        if (mode) {
+          event.preventDefault();
+          setInspectorMode(mode);
+        }
+        return;
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [jobOpen, confirm, paletteOpen]);
+  }, [jobOpen, confirm, paletteOpen, inspectorOpen, selectedQueuedTask, helpOpen]);
 
   // Manual-refresh handler: wraps `refresh(true)` in a synchronous in-flight
   // latch so the toolbar/launcher Refresh buttons disable while a fetch is in
@@ -1338,7 +1451,7 @@ export function App() {
               delete next[runId];
               return next;
             });
-            showToast("Cancel did not take effect — reverted.", "warning");
+            showToast("Cancel reverted.", "warning");
           }
           throw err;
         }
@@ -1386,7 +1499,7 @@ export function App() {
   const recoverLanding = useCallback(async () => {
     requestConfirm({
       title: "Recover landing",
-      body: "Abort the interrupted git merge, then run Otto's conflict-resolving merge for the remaining ready work. This may invoke the configured merge provider.",
+      body: "Abort the merge and re-run conflict resolution. May invoke the merge provider.",
       confirmLabel: "Recover landing",
       onConfirm: async () => {
         try {
@@ -1403,7 +1516,7 @@ export function App() {
   const abortMerge = useCallback(async () => {
     requestConfirm({
       title: "Abort merge",
-      body: "Clean up the in-progress git merge without landing the remaining ready tasks. Use this when you want the repository back in a safe state before deciding what to do next.",
+      body: "Abort the merge and don't land. Returns the repo to a clean state.",
       confirmLabel: "Abort merge",
       tone: "danger",
       onConfirm: async () => {
@@ -1481,7 +1594,7 @@ export function App() {
         // For a non-empty workload, require explicit ack to avoid an Enter
         // keystroke from the previous dialog interrupting running tasks.
         requireCheckbox: stopInfo.requireAck
-          ? {label: "Yes, stop the watcher now."}
+          ? {label: "Stop watcher"}
           : undefined,
         onConfirm: () => execute(),
       });
@@ -1562,6 +1675,31 @@ export function App() {
     setInspectorOpen(true);
     setInspectorMode("proof");
   }, []);
+
+  // State-derived "open inspector" — picks the most useful tab for the
+  // selected run's state instead of always opening on Result. mc-audit
+  // redesign §5 W5.2 / §1.3.
+  //   • In-flight                    → Logs
+  //   • Ready / needs-review         → Code changes
+  //   • Merged / has proof           → Result
+  //   • Otherwise                    → Result
+  const showInspectorContextual = useCallback(() => {
+    setInspectorOpen(true);
+    const next: InspectorMode = (() => {
+      if (!detail) return "proof";
+      if (detail.active) return "logs";
+      const state = detail.review_packet?.readiness?.state;
+      if (state === "ready") return "diff";
+      return "proof";
+    })();
+    setInspectorMode(next);
+    if (next === "logs") {
+      const runId = selectedRunIdRef.current;
+      if (runId) void loadLogs(runId, true);
+    } else if (next === "diff") {
+      void loadDiff();
+    }
+  }, [detail, loadLogs, loadDiff]);
 
   const showTryProduct = useCallback(() => {
     setInspectorOpen(true);
@@ -1678,10 +1816,20 @@ export function App() {
       current: result.project || null,
       projects: result.projects,
     }));
+    // mc-audit redesign §5 W5.4: preserve a deep-linked run param across
+    // the project-open transition. Before this change, opening a project
+    // from a `?view=tasks&run=<id>` URL silently dropped the run id and
+    // navigated to the latest run instead, defeating share-link UX.
+    const carryRunId = (() => {
+      try {
+        const route = readRouteState();
+        return route.selectedRunId;
+      } catch { return null; }
+    })();
     viewModeRef.current = "tasks";
-    selectedRunIdRef.current = null;
+    selectedRunIdRef.current = carryRunId;
     setViewMode("tasks");
-    setSelectedRunId(null);
+    setSelectedRunId(carryRunId);
     historyPageRef.current = 1;
     historyPageSizeRef.current = DEFAULT_HISTORY_PAGE_SIZE;
     historySortRef.current = null;
@@ -1692,7 +1840,9 @@ export function App() {
     setHistorySort(null);
     setHistorySortDir(null);
     setFilters(defaultFilters);
-    writeRouteState(defaultRouteState(), "replace");
+    const nextRoute = defaultRouteState();
+    if (carryRunId) nextRoute.selectedRunId = carryRunId;
+    writeRouteState(nextRoute, "replace");
     showToast(`Opened ${result.project?.name || "project"}`);
     await refresh(true);
   }, [refresh, showToast]);
@@ -1848,17 +1998,7 @@ export function App() {
   if (projectsState?.launcher_enabled && !data) {
     return (
       <div className="app-shell launcher-shell">
-        <aside className="sidebar">
-          <div className="brand">
-            <div className="brand-mark">O</div>
-            <div>
-              <h1>Otto</h1>
-              <p>Project Launcher</p>
-            </div>
-          </div>
-          <p className="sidebar-hint">Choose a project folder before queueing work.</p>
-        </aside>
-        <main className="workspace launcher-workspace">
+        <main className="launcher-shell-main">
           <ProjectLauncher
             projectsState={projectsState}
             refreshStatus={refreshStatus}
@@ -1928,7 +2068,12 @@ export function App() {
   }
 
   return (
-    <div className="app-shell" data-mc-shell="ready">
+    <div
+      className="app-shell"
+      data-mc-shell="ready"
+      data-drawer-open={(detail || selectedQueuedTask) ? "true" : "false"}
+      data-inspector-open={inspectorOpen ? "true" : "false"}
+    >
       {/* Skip link must be the first focusable element so a single Tab from
           page load lands on it. Visually hidden until focused. mc-audit a11y
           A11Y-08, K-09. */}
@@ -1936,28 +2081,21 @@ export function App() {
         Skip to main content
       </a>
       {connectionBanner}
-      <InertEffect active={sidebarInert} selector=".sidebar" />
+      <InertEffect active={sidebarInert} selector=".topbar" />
       <InertEffect active={mainContentInert} selector=".main-shell-content" />
       <InertEffect active={inspectorInert} selector="[data-mc-inspector]" />
       <LiveRegion message={liveAnnouncement} />
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">O</div>
-          <div>
-            <h1>Otto</h1>
-            <p>Mission Control</p>
-          </div>
-        </div>
-        <ProjectMeta project={project} watcher={watcher} landing={landing} active={active} firstRun={isProjectFirstRun(data)} />
-        {projectsState?.launcher_enabled && (
-          <button type="button" data-testid="switch-project-button" onClick={() => void switchProject()}>Switch project</button>
-        )}
-        <button className="primary" type="button" data-testid="new-job-button" onClick={openJobDialog}>New job</button>
-        <button type="button" data-testid="start-watcher-button" disabled={!canStartWatcher(data) || watcherInFlight.pending} aria-describedby="watcher-action-hint" aria-busy={watcherInFlight.pending} title={startWatcherTooltip(data)} onClick={() => void runWatcherAction("start")}>{watcherInFlight.pending ? <><Spinner /> Starting…</> : "Start watcher"}</button>
-        <button type="button" data-testid="stop-watcher-button" disabled={!canStopWatcher(data) || watcherInFlight.pending} aria-describedby="watcher-action-hint" aria-busy={watcherInFlight.pending} title={watcher?.health.next_action || ""} onClick={() => void runWatcherAction("stop")}>{watcherInFlight.pending ? <><Spinner /> Stopping…</> : "Stop watcher"}</button>
-        <p id="watcher-action-hint" className="sidebar-hint">{watcherHint}</p>
-      </aside>
-
+      <TopBar
+        data={data}
+        project={project}
+        watcher={watcher}
+        watcherPending={watcherInFlight.pending}
+        projectsState={projectsState}
+        onNewJob={openJobDialog}
+        onSwitchProject={() => void switchProject()}
+        onStartWatcher={() => void runWatcherAction("start")}
+        onStopWatcher={() => void runWatcherAction("stop")}
+      />
       <main className="workspace main-shell-content" id="main-content" tabIndex={-1}>
           <Toolbar
             filters={filters}
@@ -1971,60 +2109,75 @@ export function App() {
         {viewMode === "tasks" ? (
           <section className="mission-layout" aria-label="Mission Control task workflow">
             <div className="main-stack">
-              <MissionFocus
+              {/* Top-of-page banners only show when there's something to say.
+                  No persistent IDLE hero. mc-audit redesign Phase C. */}
+              {(lastError || resultBanner) && (
+                <div className="page-banners">
+                  {lastError && (
+                    <div className="status-banner error">
+                      <strong>Last error</strong>
+                      <span>{lastError}</span>
+                      <button type="button" onClick={() => setLastError(null)}>Dismiss</button>
+                    </div>
+                  )}
+                  {resultBanner && (
+                    <div className={`status-banner ${resultBanner.severity === "error" ? "error" : "warning"}`}>
+                      <strong>{resultBanner.title}</strong>
+                      <span>{resultBanner.body}</span>
+                      <button type="button" onClick={() => setResultBanner(null)}>Dismiss</button>
+                    </div>
+                  )}
+                </div>
+              )}
+              <TaskQueueList
                 data={data}
-                lastError={lastError}
-                resultBanner={resultBanner}
-                watcherPending={watcherInFlight.pending}
-                landPending={mergeAllInFlight.pending}
-                onNewJob={openJobDialog}
-                onStartWatcher={() => void runWatcherAction("start")}
+                filters={filters}
+                selectedRunId={selectedRunId}
+                selectedQueuedTaskId={selectedQueuedTask?.id || null}
+                onSelect={selectRun}
+                onSelectQueued={selectQueuedTask}
                 onLandReady={() => void mergeReadyTasks()}
-                onRecoverLanding={() => void recoverLanding()}
-                onAbortMerge={() => void abortMerge()}
-                onResolveRelease={() => void resolveReleaseIssues()}
-                onOpenDiagnostics={() => navigateView("diagnostics")}
-                onDismissError={() => setLastError(null)}
-                onDismissResult={() => setResultBanner(null)}
+                onCancelRun={(runId, taskTitle) => void runActionForRun(
+                  runId,
+                  "cancel",
+                  actionConfirmationBody("cancel", `Cancel ${taskTitle}`),
+                  "Cancel",
+                )}
+                onClearFilters={() => updateFilters(defaultFilters)}
+                onNewJob={openJobDialog}
               />
-              <div className="task-workbench">
-                <div className="workbench-primary">
-                  <TaskBoard
-                    data={data}
-                    filters={filters}
-                    selectedRunId={selectedRunId}
-                    selectedQueuedTaskId={selectedQueuedTask?.id || null}
-                    onSelect={selectRun}
-                    onSelectQueued={selectQueuedTask}
-                    onLandReady={() => void mergeReadyTasks()}
-                    onCancelRun={(runId, taskTitle) => void runActionForRun(
-                      runId,
-                      "cancel",
-                      actionConfirmationBody("cancel", `Cancel ${taskTitle}`),
-                      "Cancel",
-                    )}
-                    onClearFilters={() => updateFilters(defaultFilters)}
-                    onNewJob={openJobDialog}
-                  />
+              <details className="tasks-supplementary" data-testid="tasks-supplementary">
+                <summary><span>Project info & activity</span></summary>
+                <div className="tasks-supplementary-body">
                   <ProjectOverview data={data} />
                   <RecentActivity events={data?.events} history={data?.history.items || []} selectedRunId={selectedRunId} onSelect={selectRun} />
                 </div>
-                <RunDetailPanel
-                  detail={detail}
-                  landing={landing}
-                  inspectorOpen={inspectorOpen}
-                  queuedTask={selectedQueuedTask}
-                  watcherRunning={data?.watcher.health.state === "running"}
-                  onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
-                  onShowTryProduct={showTryProduct}
-                  onShowProof={showProof}
-                  onShowLogs={showLogs}
-                  onShowDiff={showDiff}
-                  onShowArtifacts={showArtifacts}
-                  onLoadArtifact={(index) => void loadArtifact(index)}
-                  onStartWatcher={() => void runWatcherAction("start")}
-                />
-              </div>
+              </details>
+              <RunDetailPanel
+                detail={detail}
+                landing={landing}
+                inspectorOpen={inspectorOpen}
+                queuedTask={selectedQueuedTask}
+                watcherRunning={data?.watcher.health.state === "running"}
+                onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
+                onShowTryProduct={showTryProduct}
+                onShowProof={showProof}
+                onShowLogs={showLogs}
+                onShowDiff={showDiff}
+                onShowArtifacts={showArtifacts}
+                onLoadArtifact={(index) => void loadArtifact(index)}
+                onStartWatcher={() => void runWatcherAction("start")}
+                onClose={() => {
+                  setSelectedRunId(null);
+                  setSelectedQueuedTask(null);
+                  selectedRunIdRef.current = null;
+                  // Drop ?run= from the URL so a reload doesn't re-open
+                  // the drawer. mc-audit redesign Phase C.
+                  const route = readRouteState();
+                  route.selectedRunId = null;
+                  writeRouteState(route, "replace");
+                }}
+              />
             </div>
           </section>
         ) : (
@@ -2073,6 +2226,16 @@ export function App() {
                 onShowArtifacts={showArtifacts}
                 onLoadArtifact={(index) => void loadArtifact(index)}
                 onStartWatcher={() => void runWatcherAction("start")}
+                onClose={() => {
+                  setSelectedRunId(null);
+                  setSelectedQueuedTask(null);
+                  selectedRunIdRef.current = null;
+                  // Drop ?run= from the URL so a reload doesn't re-open
+                  // the drawer. mc-audit redesign Phase C.
+                  const route = readRouteState();
+                  route.selectedRunId = null;
+                  writeRouteState(route, "replace");
+                }}
               />
             </div>
           </section>
@@ -2154,6 +2317,7 @@ export function App() {
           onConfirm={() => void executeConfirmedAction()}
         />
       )}
+      {helpOpen && <HelpOverlay onClose={() => setHelpOpen(false)} />}
       <ToastDisplay
         toast={toast}
         onMouseEnter={pauseToastDismiss}
@@ -2170,7 +2334,7 @@ export function App() {
  * the launcher view (line ~1470) and the workspace view (line ~1690) can
  * use the same markup without duplication.
  */
-function ToastDisplay({toast, onMouseEnter, onMouseLeave, onDismiss}: {
+export function ToastDisplay({toast, onMouseEnter, onMouseLeave, onDismiss}: {
   toast: ToastState | null;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
@@ -2199,206 +2363,21 @@ function ToastDisplay({toast, onMouseEnter, onMouseLeave, onDismiss}: {
   );
 }
 
-function ProjectMeta({project, watcher, landing, active, firstRun}: {
-  project: StateResponse["project"] | undefined;
-  watcher: WatcherInfo | undefined;
-  landing: LandingState | undefined;
-  active: number;
-  // mc-audit codex-first-time-user #15: when the project has zero history AND
-  // no live runs, hide the detailed Watcher/Heartbeat/In-flight/queued/ready/
-  // landed counters and show a single-line "Project ready · No jobs yet"
-  // summary so the first-run sidebar isn't a wall of internal vocabulary.
-  firstRun: boolean;
-}) {
-  const counts = watcher?.counts || {};
-  const health = watcher?.health;
-  if (firstRun) {
-    return (
-      <dl className="project-meta project-meta-first-run" aria-label="Project metadata" data-testid="project-meta-first-run">
-        <MetaItem label="Project" value={project?.name || "-"} />
-        <MetaItem label="Branch" value={project?.branch || "-"} />
-        <MetaItem
-          label="Status"
-          value={!project ? "Loading…" : "Project ready · No jobs yet"}
-        />
-      </dl>
-    );
-  }
-  return (
-    <dl className="project-meta" aria-label="Project metadata" data-testid="project-meta-full">
-      <MetaItem label="Project" value={project?.name || "-"} />
-      <MetaItem label="Branch" value={project?.branch || "-"} />
-      <MetaItem label="State" value={!project ? "unknown" : project.dirty ? "dirty" : "clean"} />
-      <MetaItem label="Watcher" value={watcherSummary(watcher)} />
-      <MetaItem label="Heartbeat" value={health?.heartbeat_age_s === null || health?.heartbeat_age_s === undefined ? "-" : `${Math.round(health.heartbeat_age_s)}s ago`} />
-      <MetaItem label="In flight" value={String(active)} />
-      <MetaItem label="Tasks" value={`queued ${counts.queued || 0} / ready ${landing?.counts.ready || 0} / landed ${landing?.counts.merged || 0}`} />
-    </dl>
-  );
-}
+// ProjectMeta moved to components/launcher/ProjectLauncher.tsx
 
-function MetaItem({label, value}: {label: string; value: string}) {
-  return <div><dt>{label}</dt><dd>{value}</dd></div>;
-}
+// MetaItem moved to components/MicroComponents.tsx
 
-function ProjectLauncher({projectsState, refreshStatus, refreshPending, onCreate, onSelect, onRefresh}: {
-  projectsState: ProjectsResponse;
-  refreshStatus: string;
-  refreshPending: boolean;
-  onCreate: (name: string) => Promise<void>;
-  onSelect: (path: string) => Promise<void>;
-  onRefresh: () => void;
-}) {
-  const [name, setName] = useState("");
-  const [status, setStatus] = useState("");
-  const [statusKind, setStatusKind] = useState<"info" | "error">("info");
-  const [pending, setPending] = useState(false);
-  const projects = projectsState.projects || [];
-  const nameInputRef = useRef<HTMLInputElement | null>(null);
-  // When the project list is empty, focus the create-form's name input so the
-  // first-run user lands directly on the only sensible next step. mc-audit
-  // codex-first-time-user.md #5.
-  useEffect(() => {
-    if (projects.length === 0) {
-      nameInputRef.current?.focus();
-    }
-  }, [projects.length]);
+// ============================================================================
+// TopBar — replaces the sidebar with a slim horizontal bar. mc-audit redesign
+// Phase C. Brand on the left, project context in the middle, status pill +
+// New Job CTA on the right. Designed to read like Linear / Vercel /
+// Posthog header rather than a 2010s admin dashboard.
+// ============================================================================
+// TopBar moved to components/topbar/TopBar.tsx
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed) {
-      setStatus("Project name is required.");
-      setStatusKind("error");
-      return;
-    }
-    setPending(true);
-    setStatus("Creating project");
-    setStatusKind("info");
-    try {
-      await onCreate(trimmed);
-      setName("");
-      setStatus("");
-    } catch (error) {
-      setStatus(launcherErrorMessage(error, {projectName: trimmed}));
-      setStatusKind("error");
-    } finally {
-      setPending(false);
-    }
-  }
+// ProjectLauncher + launcherErrorMessage moved to components/launcher/ProjectLauncher.tsx
 
-  async function openProject(project: ManagedProjectInfo) {
-    if (!project.path || pending) return;
-    setPending(true);
-    setStatus(`Opening ${project.name}`);
-    setStatusKind("info");
-    try {
-      await onSelect(project.path);
-      setStatus("");
-    } catch (error) {
-      setStatus(launcherErrorMessage(error, {projectPath: project.path}));
-      setStatusKind("error");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  return (
-    <section className="project-launcher" aria-labelledby="projectLauncherHeading">
-      <div className="launcher-head">
-        <div>
-          <span>Project folder</span>
-          <h2 id="projectLauncherHeading">Project Launcher</h2>
-          <p data-testid="launcher-subhead">
-            Otto runs AI coding jobs in isolated git worktrees, then lets you review logs, diffs, and merge results.
-          </p>
-        </div>
-        <div className="launcher-actions">
-          {refreshLabel(refreshStatus) && <span className="muted">{refreshLabel(refreshStatus)}</span>}
-          <button type="button" data-testid="launcher-refresh-button" disabled={refreshPending} aria-busy={refreshPending} onClick={onRefresh}>{refreshPending ? <><Spinner /> Refreshing…</> : "Refresh"}</button>
-        </div>
-      </div>
-
-      <div className="launcher-grid">
-        <form className="launcher-panel launcher-form" onSubmit={(event) => void submit(event)}>
-          <div>
-            <h3>Create project</h3>
-            <p>Otto creates a folder and initializes a git repo under the projects root.</p>
-          </div>
-          <label>Project name
-            <input
-              ref={nameInputRef}
-              value={name}
-              data-testid="launcher-create-name-input"
-              autoFocus
-              type="text"
-              placeholder="Expense approval portal"
-              onChange={(event) => setName(event.target.value)}
-            />
-          </label>
-          <button className="primary" type="submit" data-testid="launcher-create-submit" disabled={pending}>{pending ? "Working" : "Create project"}</button>
-          <p
-            className={`launcher-status ${statusKind === "error" ? "launcher-status-error" : ""}`}
-            data-testid="launcher-form-status"
-            aria-live="polite"
-          >{status}</p>
-        </form>
-
-        <div className="launcher-panel managed-root">
-          <h3>Project folder root</h3>
-          <code title={projectsState.projects_root}>{projectsState.projects_root}</code>
-          <p data-testid="launcher-managed-root-help">
-            All projects live under this directory. Otto manages projects in isolated git worktrees so it never touches your other repos on this machine. The repo that launched Mission Control is intentionally excluded — pick or create a project below to start.
-          </p>
-        </div>
-      </div>
-
-      <div className="launcher-panel project-list-panel">
-        <div className="panel-heading">
-          <div>
-            <h3>Open project</h3>
-            <p className="panel-subtitle">Existing git repos under the projects root.</p>
-          </div>
-          <span className="pill">{projects.length}</span>
-        </div>
-        <div className="project-list">
-          {projects.length ? projects.map((project) => (
-            <button className="project-row" type="button" key={project.path} disabled={pending} onClick={() => void openProject(project)}>
-              <span>
-                <strong>{project.name}</strong>
-                <code title={project.path}>{project.path}</code>
-              </span>
-              <span className="project-row-meta">
-                <span>{project.branch || "-"}</span>
-                <span>{project.dirty ? "dirty" : "clean"}</span>
-                <span>{project.head_sha ? project.head_sha.slice(0, 7) : "-"}</span>
-              </span>
-            </button>
-          )) : (
-            <div className="launcher-empty" data-testid="launcher-empty-state">
-              <strong>Create your first Otto project below.</strong>
-              <p>Pick a name in the form above. Otto initializes a git repo and you can queue your first build right after.</p>
-            </div>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-/**
- * Translate launcher mutation errors into recovery copy. Wraps
- * `friendlyApiMessage` for ApiError instances and falls back to the raw
- * message otherwise. mc-audit codex-first-time-user.md #15/#24.
- */
-function launcherErrorMessage(error: unknown, context: {projectName?: string; projectPath?: string}): string {
-  if (error instanceof ApiError) {
-    return friendlyApiMessage(error.status, error.rawMessage, context);
-  }
-  return errorMessage(error);
-}
-
-function Toolbar({filters, refreshStatus, refreshPending, viewMode, onChange, onRefresh, onViewChange}: {
+export function Toolbar({filters, refreshStatus, refreshPending, viewMode, onChange, onRefresh, onViewChange}: {
   filters: Filters;
   refreshStatus: string;
   refreshPending: boolean;
@@ -2499,7 +2478,7 @@ function Toolbar({filters, refreshStatus, refreshPending, viewMode, onChange, on
   );
 }
 
-function OperationalOverview({data, lastError, resultBanner, onDismissError, onDismissResult}: {
+export function OperationalOverview({data, lastError, resultBanner, onDismissError, onDismissResult}: {
   data: StateResponse | null;
   lastError: string | null;
   resultBanner: ResultBannerState | null;
@@ -2537,21 +2516,11 @@ function OperationalOverview({data, lastError, resultBanner, onDismissError, onD
   );
 }
 
-function OverviewMetric({label, value, tone}: {label: string; value: string; tone: "neutral" | "info" | "success" | "warning" | "danger"}) {
-  return (
-    <div className={`overview-metric tone-${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
+// OverviewMetric moved to components/MicroComponents.tsx
 
-function ProjectOverview({data}: {data: StateResponse | null}) {
+export function ProjectOverview({data}: {data: StateResponse | null}) {
   const stats = data?.project_stats;
-  const health = workflowHealth(data);
-  const landed = data?.landing.counts.merged || 0;
   const totalTasks = data?.landing.counts.total || 0;
-  const openTasks = Math.max(totalTasks - landed, 0);
   const landingStories = storyTotalsFromLanding(data?.landing.items || []);
   const storiesPassed = stats?.stories_tested ? stats.stories_passed : landingStories.passed;
   const storiesTested = stats?.stories_tested ? stats.stories_tested : landingStories.tested;
@@ -2565,12 +2534,8 @@ function ProjectOverview({data}: {data: StateResponse | null}) {
         </div>
       </div>
       <div className="project-stat-grid">
-        <ProjectStatCard
-          label="Current work"
-          value={`${openTasks} open`}
-          detail={`${health.ready} ready · ${health.needsAttention} attention · ${landed} landed`}
-          tone={health.needsAttention ? "warning" : health.ready ? "success" : health.active ? "info" : "neutral"}
-        />
+        {/* "Current work" tile dropped — same counts are owned by the Task
+            Board (kanban column counters). mc-audit redesign §3b W4.3. */}
         <ProjectStatCard
           label="Run history"
           value={`${stats?.history_count || 0} runs`}
@@ -2578,7 +2543,7 @@ function ProjectOverview({data}: {data: StateResponse | null}) {
           tone={stats?.failed_count ? "warning" : "neutral"}
         />
         <ProjectStatCard
-          label="Total tokens"
+          label="Tokens"
           value={stats?.token_display || "-"}
           detail={tokenBreakdownLine(stats?.token_usage)}
           tone={stats?.total_tokens ? "info" : "neutral"}
@@ -2586,13 +2551,13 @@ function ProjectOverview({data}: {data: StateResponse | null}) {
         <ProjectStatCard
           label="Runtime"
           value={stats?.duration_display || "-"}
-          detail="Completed plus active run time"
+          detail="Completed + active run time"
           tone={stats?.total_duration_s ? "info" : "neutral"}
         />
         <ProjectStatCard
           label="Stories"
           value={storyValue}
-          detail={storiesTested ? "Certified product stories" : "No story evidence yet"}
+          detail={storiesTested ? "Certified" : "No evidence yet"}
           tone={storiesTested ? (storiesPassed === storiesTested ? "success" : "warning") : "neutral"}
         />
       </div>
@@ -2600,22 +2565,9 @@ function ProjectOverview({data}: {data: StateResponse | null}) {
   );
 }
 
-function ProjectStatCard({label, value, detail, tone}: {
-  label: string;
-  value: string;
-  detail: string;
-  tone: "neutral" | "info" | "success" | "warning" | "danger";
-}) {
-  return (
-    <div className={`project-stat-card tone-${tone}`}>
-      <span>{label}</span>
-      <strong title={value}>{value}</strong>
-      <p title={detail}>{detail}</p>
-    </div>
-  );
-}
+// ProjectStatCard moved to components/MicroComponents.tsx
 
-function RuntimeWarnings({data}: {data: StateResponse}) {
+export function RuntimeWarnings({data}: {data: StateResponse}) {
   const top = data.runtime.issues.slice(0, 3);
   const bannerTone = top.some((issue) => issue.severity === "error") ? "error" : "warning";
   const backlog = data.runtime.command_backlog;
@@ -2637,7 +2589,7 @@ function RuntimeWarnings({data}: {data: StateResponse}) {
   );
 }
 
-function SystemHealth({data}: {data: StateResponse | null}) {
+export function SystemHealth({data}: {data: StateResponse | null}) {
   const runtime = data?.runtime;
   const watcher = data?.watcher.health;
   const backlog = runtime?.command_backlog;
@@ -2649,7 +2601,7 @@ function SystemHealth({data}: {data: StateResponse | null}) {
       <div className="panel-heading">
         <div>
           <h2 id="systemHealthHeading">System Health</h2>
-          <p className="panel-subtitle">Use this when the queue, watcher, or repository needs recovery.</p>
+          <p className="panel-subtitle">Recovery view for queue, watcher, and repo.</p>
         </div>
         <span className={`pill health-${runtime?.status || "loading"}`}>{runtime?.status || "loading"}</span>
       </div>
@@ -2665,21 +2617,21 @@ function SystemHealth({data}: {data: StateResponse | null}) {
           title="Queue files"
           status={`${backlog?.pending || 0} pending`}
           detail={`${backlog?.processing || 0} processing · ${backlog?.malformed || 0} malformed`}
-          next={queueFile?.error || stateFile?.error || "Queue and state files are readable"}
+          next={queueFile?.error || stateFile?.error || "Files OK."}
           tone={backlog?.malformed ? "danger" : backlog?.pending || backlog?.processing ? "info" : "neutral"}
         />
         <HealthCard
           title="Repository"
           status={data?.landing.merge_blocked ? "blocked" : data?.project.dirty ? "dirty" : "clean"}
           detail={dirty.length ? dirty.slice(0, 3).join(", ") : `branch ${data?.project.branch || "-"}`}
-          next={data?.landing.merge_blocked ? "Clean or commit local changes before landing" : "No landing blocker detected"}
+          next={data?.landing.merge_blocked ? "Commit or stash local changes." : "OK."}
           tone={data?.landing.merge_blocked ? "danger" : data?.project.dirty ? "warning" : "success"}
         />
         <HealthCard
           title="Runtime owner"
           status={runtime?.supervisor.mode || "unknown"}
-          detail={runtime?.supervisor.stop_target_pid ? `stop target pid ${runtime.supervisor.stop_target_pid}` : runtime?.supervisor.start_blocked_reason || "No active stop target"}
-          next={runtime?.supervisor.can_start ? "Start watcher is safe" : runtime?.supervisor.can_stop ? "Stop watcher is available" : runtime?.supervisor.start_blocked_reason || "No runtime action available"}
+          detail={runtime?.supervisor.stop_target_pid ? `stop target pid ${runtime.supervisor.stop_target_pid}` : runtime?.supervisor.start_blocked_reason || "No stop target."}
+          next={runtime?.supervisor.can_start ? "Ready to start." : runtime?.supervisor.can_stop ? "Stop available." : runtime?.supervisor.start_blocked_reason || "No action available."}
           tone={runtime?.issues.some((issue) => issue.severity === "error") ? "danger" : runtime?.issues.length ? "warning" : "neutral"}
         />
       </div>
@@ -2697,33 +2649,17 @@ function SystemHealth({data}: {data: StateResponse | null}) {
   );
 }
 
-function HealthCard({title, status, detail, next, tone}: {
-  title: string;
-  status: string;
-  detail: string;
-  next: string;
-  tone: "neutral" | "info" | "success" | "warning" | "danger";
-}) {
-  return (
-    <article className={`health-card tone-${tone}`}>
-      <span>{title}</span>
-      <strong>{status}</strong>
-      <p>{detail}</p>
-      <em>{next}</em>
-    </article>
-  );
-}
+// HealthCard moved to components/MicroComponents.tsx
 
-function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSelect: (runId: string) => void}) {
+export function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSelect: (runId: string) => void}) {
   const issues = data?.runtime.issues || [];
-  const landingItems = data?.landing.items || [];
   const commands = data?.runtime.command_backlog.items || [];
-  const visibleLanding = [
-    ...landingItems.filter((item) => item.landing_state === "ready"),
-    ...landingItems.filter((item) => item.landing_state === "blocked"),
-    ...landingItems.filter((item) => item.landing_state === "merged"),
-  ].slice(0, 8);
-  const diagnosticCount = issues.length + commands.length + visibleLanding.length;
+  // Landing items dropped from Health — same list lives in the Tasks view
+  // Task Board, and showing it here forces the user to triangulate.
+  // mc-audit redesign §3b W4.7. `onSelect` is no longer needed but kept in
+  // signature for callers.
+  void onSelect;
+  const diagnosticCount = issues.length + commands.length;
   return (
     <section className="panel diagnostics-summary" aria-labelledby="diagnosticsSummaryHeading">
       <div className="panel-heading">
@@ -2765,29 +2701,14 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
             </details>
           )) : <div className="diagnostic-empty">No system issues.</div>}
         </div>
-        <div className="wide-diagnostics-section">
-          <h3>Review And Landing</h3>
-          {visibleLanding.length ? visibleLanding.map((item) => (
-            <button
-              className={`diagnostic-card landing-state-${item.landing_state}`}
-              type="button"
-              key={item.task_id}
-              disabled={!item.run_id}
-              onClick={() => item.run_id && onSelect(item.run_id)}
-            >
-              <span>{landingStateText(item)}</span>
-              <strong>{item.task_id}</strong>
-              <p>{item.summary || item.branch || "-"}</p>
-              <em>{diagnosticLandingAction(item)}</em>
-            </button>
-          )) : <div className="diagnostic-empty">No queued work.</div>}
-        </div>
+        {/* "Review and landing" list dropped — duplicates Tasks view's
+            Task Board. mc-audit redesign §3b W4.7. */}
       </div>
     </section>
   );
 }
 
-function MissionFocus({data, lastError, resultBanner, watcherPending, landPending, onNewJob, onStartWatcher, onLandReady, onRecoverLanding, onAbortMerge, onResolveRelease, onOpenDiagnostics, onDismissError, onDismissResult}: {
+export function MissionFocus({data, lastError, resultBanner, watcherPending, landPending, onNewJob, onStartWatcher, onLandReady, onRecoverLanding, onAbortMerge, onResolveRelease, onOpenDiagnostics, onDismissError, onDismissResult}: {
   data: StateResponse | null;
   lastError: string | null;
   resultBanner: ResultBannerState | null;
@@ -2872,11 +2793,18 @@ function MissionFocus({data, lastError, resultBanner, watcherPending, landPendin
         )}
         {focus.primary !== "new" && <button type="button" onClick={onNewJob}>New job</button>}
       </div>
-      <div className="focus-metrics">
-        <FocusMetric label="Queued/running" value={String(focus.working)} />
-        <FocusMetric label="Needs action" value={String(focus.needsAction)} />
-        <FocusMetric label="Ready" value={String(focus.ready)} />
-      </div>
+      {/* Banner metrics dropped — same numbers are visible in the Task
+          Board column counters directly below this banner. mc-audit
+          redesign §3b W4.2. The numbers stay accessible via the
+          aria-label below for SR users.
+          The banner now collapses to copy + actions only when idle. */}
+      {(focus.working > 0 || focus.needsAction > 0 || focus.ready > 0) && (
+        <div className="focus-metrics" aria-label="Queue summary">
+          <FocusMetric label="Queued/running" value={String(focus.working)} />
+          <FocusMetric label="Needs action" value={String(focus.needsAction)} />
+          <FocusMetric label="Ready" value={String(focus.ready)} />
+        </div>
+      )}
       {lastError && (
         <div className="status-banner error">
           <strong>Last error</strong>
@@ -2896,16 +2824,9 @@ function MissionFocus({data, lastError, resultBanner, watcherPending, landPendin
   );
 }
 
-function FocusMetric({label, value}: {label: string; value: string}) {
-  return (
-    <div>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
+// FocusMetric moved to components/MicroComponents.tsx
 
-function TaskBoard({data, filters, selectedRunId, selectedQueuedTaskId, onSelect, onSelectQueued, onLandReady, onCancelRun, onClearFilters, onNewJob}: {
+export function TaskBoard({data, filters, selectedRunId, selectedQueuedTaskId, onSelect, onSelectQueued, onLandReady, onCancelRun, onClearFilters, onNewJob}: {
   data: StateResponse | null;
   filters: Filters;
   selectedRunId: string | null;
@@ -2990,7 +2911,9 @@ function TaskBoard({data, filters, selectedRunId, selectedQueuedTaskId, onSelect
         {columns.map((column) => (
           <div className="task-column" key={column.stage}>
             <header>
-              <span>{column.title}</span>
+              <span title={taskColumnTooltip(column.stage)}>
+                {column.title}
+              </span>
               <strong>{column.items.length}</strong>
             </header>
             <div className="task-list">
@@ -3018,6 +2941,25 @@ function TaskBoard({data, filters, selectedRunId, selectedQueuedTaskId, onSelect
       </div>
     </section>
   );
+}
+
+// ============================================================================
+// TaskQueueList — replaces the kanban TaskBoard with a single ordered list,
+// Linear-style. Tasks render as table rows ranked by the natural workflow:
+// active runs first, then needs-action, then ready-to-land, then queued, then
+// recently landed. Click a row → opens RunDrawer. mc-audit redesign Phase C.
+// ============================================================================
+// TaskQueueList + TaskRow moved to components/tasks/TaskQueueList.tsx
+
+// Glossary tooltips for the kanban column labels. mc-audit redesign §7 W7.3.
+export function taskColumnTooltip(stage: string): string {
+  switch (stage) {
+    case "attention": return "Tasks blocked or needing user input.";
+    case "working":   return "Tasks queued or currently running.";
+    case "ready":     return "Tasks done and ready to merge into the target branch.";
+    case "landed":    return "Tasks already merged.";
+    default:          return "";
+  }
 }
 
 // mc-audit error-empty-states #11: classify *why* the task board is empty.
@@ -3059,7 +3001,7 @@ export function computeBoardEmptyReason(
   return "true-empty";
 }
 
-function columnEmptyCopy(
+export function columnEmptyCopy(
   column: {empty: string},
   reason: BoardEmptyReason | null,
 ): string {
@@ -3071,14 +3013,14 @@ function columnEmptyCopy(
 // be cancelled via the watcher. Mirrors the backend's cancel-eligible set
 // so the per-row Cancel button doesn't render for already-finished work.
 // `terminating` is intentionally excluded — it's already cancelling.
-const CANCELLABLE_TASK_STATUSES = new Set([
+export const CANCELLABLE_TASK_STATUSES = new Set([
   "queued",
   "starting",
   "initializing",
   "running",
 ]);
 
-function TaskCard({task, selected, onSelect, onSelectQueued, onCancelRun}: {
+export function TaskCard({task, selected, onSelect, onSelectQueued, onCancelRun}: {
   task: BoardTask;
   selected: boolean;
   onSelect: (runId: string) => void;
@@ -3110,7 +3052,10 @@ function TaskCard({task, selected, onSelect, onSelectQueued, onCancelRun}: {
   // (files / stories / cost / time) instead of a row of unlabeled pills.
   // Each chip is suppressed when the underlying value is null/missing — no
   // "-" placeholder leakage.
-  const chips = computeTaskChips(task);
+  // Drop the time chip when the live block above already shows "Elapsed 12m"
+  // — same fact in two places is just visual noise.
+  const showsLiveTime = Boolean(task.elapsedDisplay);
+  const chips = computeTaskChips(task).filter((chip) => !(chip.kind === "time" && showsLiveTime));
   const isQueuedNoRun = !task.runId;
   // mc-audit W8-CRITICAL-1: render the per-row Cancel button only when
   // the task has a runId AND its status is cancel-eligible. The handler
@@ -3259,7 +3204,7 @@ function TaskCard({task, selected, onSelect, onSelectQueued, onCancelRun}: {
   );
 }
 
-function RecentRunsPanel({items, totalRows, selectedRunId, onSelect}: {
+export function RecentRunsPanel({items, totalRows, selectedRunId, onSelect}: {
   items: HistoryItem[];
   totalRows: number;
   selectedRunId: string | null;
@@ -3301,28 +3246,56 @@ function RecentRunsPanel({items, totalRows, selectedRunId, onSelect}: {
   );
 }
 
-function RecentActivity({events, history, selectedRunId, onSelect}: {
+export function RecentActivity({events, history, selectedRunId, onSelect}: {
   events: StateResponse["events"] | undefined;
   history: HistoryItem[];
   selectedRunId: string | null;
   onSelect: (runId: string) => void;
 }) {
-  const recentEvents = events?.items.slice(0, 4) || [];
+  // Collapse adjacent same-message lifecycle events (e.g. four
+  // "watcher started"/"watcher stop requested" rows in 6 minutes) into a
+  // single grouped row "watcher restarted 4×". mc-audit redesign §3b W4.4.
+  const rawEvents = events?.items.slice(0, 24) || [];
+  const collapsed: Array<{key: string; severity: string; message: string; created_at: string; count: number}> = [];
+  for (const event of rawEvents) {
+    const last = collapsed[collapsed.length - 1];
+    const baseMsg = (event.message || "").replace(/\s+(started|stop requested|stopped)\s*$/i, "").trim();
+    const isWatcher = /^watcher\b/i.test(event.message || "");
+    if (isWatcher && last && last.message.startsWith("watcher") && last.severity === event.severity) {
+      // Same-actor adjacency — collapse and keep the most recent timestamp.
+      last.count += 1;
+      last.created_at = event.created_at;
+      if (last.count === 2) last.message = `${baseMsg} cycled`;
+      continue;
+    }
+    collapsed.push({
+      key: event.event_id || `${event.created_at}-${event.message}`,
+      severity: event.severity,
+      message: event.message,
+      created_at: event.created_at,
+      count: 1,
+    });
+    if (collapsed.length >= 4) break;
+  }
+  const recentEvents = collapsed.slice(0, 4);
   const recentHistory = history.slice(0, 4);
   return (
     <section className="panel activity-panel" aria-labelledby="activityHeading">
       <div className="panel-heading">
         <div>
           <h2 id="activityHeading">Recent Activity</h2>
-          <p className="panel-subtitle" data-testid="activity-subtitle">Recent job activity, approvals, merges, and errors appear here.</p>
+          <p className="panel-subtitle" data-testid="activity-subtitle">Jobs, merges, and errors.</p>
         </div>
         <span className="pill">{(events?.total_count || 0) + history.length}</span>
       </div>
       <div className="activity-list">
         {recentEvents.map((event) => (
-          <div className={`activity-item event-${event.severity}`} key={event.event_id || `${event.created_at}-${event.message}`}>
+          <div className={`activity-item event-${event.severity}`} key={event.key}>
             <span>{event.severity}</span>
-            <strong title={event.message}>{event.message}</strong>
+            <strong title={event.message}>
+              {event.message}
+              {event.count > 1 ? <em className="activity-count" aria-label={`${event.count} occurrences`}> ×{event.count}</em> : null}
+            </strong>
             <time dateTime={event.created_at}>{formatEventTime(event.created_at)}</time>
           </div>
         ))}
@@ -3335,7 +3308,7 @@ function RecentActivity({events, history, selectedRunId, onSelect}: {
           >
             <span>{item.outcome_display || item.status}</span>
             <strong title={item.summary || ""}>{item.queue_task_id || item.run_id}</strong>
-            <time>{item.duration_display || "-"}</time>
+            <time title="Run duration">{item.duration_display ? `${item.duration_display}` : "-"}</time>
           </button>
         ))}
         {!recentEvents.length && !recentHistory.length && <div className="timeline-empty">No activity yet.</div>}
@@ -3344,7 +3317,7 @@ function RecentActivity({events, history, selectedRunId, onSelect}: {
   );
 }
 
-function LiveRuns({items, landing, selectedRunId, onSelect}: {
+export function LiveRuns({items, landing, selectedRunId, onSelect}: {
   items: LiveRunItem[];
   landing: LandingState | undefined;
   selectedRunId: string | null;
@@ -3406,7 +3379,7 @@ function LiveRuns({items, landing, selectedRunId, onSelect}: {
   );
 }
 
-function History({
+export function History({
   items,
   totalRows,
   page,
@@ -3629,7 +3602,7 @@ function History({
  * values from the API (cost_usd / duration_s), not the display strings,
  * so "$2" doesn't sort ahead of "$10".
  */
-function sortHistoryItems(
+export function sortHistoryItems(
   items: HistoryItem[],
   column: HistorySortColumn | null,
   dir: HistorySortDir | null,
@@ -3649,7 +3622,7 @@ function sortHistoryItems(
   return [...items].sort((a, b) => cmp(a, b) * factor);
 }
 
-function safeCompareString(a: string | null | undefined, b: string | null | undefined): number {
+export function safeCompareString(a: string | null | undefined, b: string | null | undefined): number {
   const av = (a || "").toLowerCase();
   const bv = (b || "").toLowerCase();
   if (av < bv) return -1;
@@ -3657,7 +3630,7 @@ function safeCompareString(a: string | null | undefined, b: string | null | unde
   return 0;
 }
 
-function safeCompareNumber(a: number | null | undefined, b: number | null | undefined): number {
+export function safeCompareNumber(a: number | null | undefined, b: number | null | undefined): number {
   const av = typeof a === "number" && Number.isFinite(a) ? a : Number.NEGATIVE_INFINITY;
   const bv = typeof b === "number" && Number.isFinite(b) ? b : Number.NEGATIVE_INFINITY;
   if (av < bv) return -1;
@@ -3665,7 +3638,7 @@ function safeCompareNumber(a: number | null | undefined, b: number | null | unde
   return 0;
 }
 
-function EventTimeline({events, compact = false}: {events: StateResponse["events"] | undefined; compact?: boolean}) {
+export function EventTimeline({events, compact = false}: {events: StateResponse["events"] | undefined; compact?: boolean}) {
   const items = events?.items || [];
   const malformed = events?.malformed_count || 0;
   const visibleItems = compact ? items.slice(0, 6) : items;
@@ -3701,13 +3674,11 @@ function EventTimeline({events, compact = false}: {events: StateResponse["events
   );
 }
 
-function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watcherRunning, onRunAction, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact, onStartWatcher}: {
+
+export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watcherRunning, onRunAction, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact, onStartWatcher, onClose}: {
   detail: RunDetail | null;
   landing: LandingState | undefined;
   inspectorOpen: boolean;
-  // mc-audit codex-first-time-user #19: when a queued card without a runId
-  // is selected, render a placeholder explaining that the task is waiting
-  // for the watcher and what the user can do (start the watcher, etc.).
   queuedTask?: BoardTask | null;
   watcherRunning?: boolean;
   onRunAction: (action: string, label?: string) => void;
@@ -3718,13 +3689,25 @@ function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watcherRunn
   onShowArtifacts: () => void;
   onLoadArtifact: (index: number) => void;
   onStartWatcher?: () => void;
+  onClose?: () => void;
 }) {
+  // Drawer-mode: only render when a task is selected. Replaces the inline
+  // right-rail Review Packet that used to show "Already merged into main"
+  // permanently. mc-audit redesign Phase C.
+  if (!detail && !queuedTask) return null;
   return (
-    <aside className="detail" aria-labelledby="detailHeading" data-testid="run-detail-panel">
-      <div className="panel-heading">
-        <h2 id="detailHeading">{detail ? "Review Packet" : "Run Detail"}</h2>
-        <span className="pill">{detail ? detailStatusLabel(detail) : "-"}</span>
-      </div>
+    <>
+      <div className="run-drawer-backdrop" onClick={onClose} aria-hidden="true" />
+      <aside className="detail run-drawer" aria-labelledby="detailHeading" data-testid="run-detail-panel">
+        <div className="panel-heading run-drawer-heading">
+          <div>
+            <h2 id="detailHeading">{detail ? "Run detail" : "Queued task"}</h2>
+            <span className="pill">{detail ? detailStatusLabel(detail) : "-"}</span>
+          </div>
+          {onClose ? (
+            <button type="button" className="run-drawer-close" aria-label="Close" onClick={onClose}>×</button>
+          ) : null}
+        </div>
       {detail ? (
         <>
           <div className="detail-scroll">
@@ -3794,7 +3777,7 @@ function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watcherRunn
             <strong>Next:</strong>{" "}
             {watcherRunning
               ? "Watcher is running — task should pick up shortly."
-              : "Start the watcher to dispatch this queued task."}
+              : "Start the watcher to run this task."}
           </p>
           {!watcherRunning && onStartWatcher && (
             <button
@@ -3805,25 +3788,28 @@ function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watcherRunn
             >Start watcher</button>
           )}
         </div>
-      ) : (
-        <div className="detail-body empty" data-testid="run-detail-empty">
-          Select a task card to review logs, code changes, verification, and next action.
-        </div>
-      )}
-    </aside>
+      ) : null}
+      </aside>
+    </>
   );
 }
 
-function PhaseTimeline({phases}: {phases: RunDetail["phase_timeline"]}) {
+export function PhaseTimeline({phases}: {phases: RunDetail["phase_timeline"]}) {
   if (!phases.length) return null;
+  // Filter out phases that are pure placeholders for run types where they
+  // never run (e.g. merge runs always show 3 SKIPPED phases for build/
+  // certify/fix — that is just visual noise). Show only phases that have
+  // either run, are running, or are queued — i.e. status is meaningful.
+  const visible = phases.filter((phase) => phase.status !== "skipped");
+  if (!visible.length) return null;
   return (
     <section className="detail-body phase-timeline" aria-label="Execution phases">
       <div className="phase-timeline-heading">
         <h3>Execution</h3>
-        <span>{phases.length} phase{phases.length === 1 ? "" : "s"}</span>
+        <span>{visible.length} phase{visible.length === 1 ? "" : "s"}</span>
       </div>
       <div className="phase-timeline-list">
-        {phases.map((phase) => (
+        {visible.map((phase) => (
           <article key={phase.phase} className={`phase-item phase-${phase.status}`}>
             <span className="phase-status">{phase.status}</span>
             <strong>{phase.label}</strong>
@@ -3836,7 +3822,7 @@ function PhaseTimeline({phases}: {phases: RunDetail["phase_timeline"]}) {
   );
 }
 
-function phaseProviderLine(phase: RunDetail["phase_timeline"][number]): string {
+export function phaseProviderLine(phase: RunDetail["phase_timeline"][number]): string {
   return [
     phase.provider || "provider default",
     phase.model || "model default",
@@ -3844,7 +3830,7 @@ function phaseProviderLine(phase: RunDetail["phase_timeline"][number]): string {
   ].join(" / ");
 }
 
-function phaseUsageLine(phase: RunDetail["phase_timeline"][number]): string {
+export function phaseUsageLine(phase: RunDetail["phase_timeline"][number]): string {
   const parts = [
     typeof phase.duration_s === "number" ? formatDuration(phase.duration_s) : "",
     phase.rounds ? `${phase.rounds} round${phase.rounds === 1 ? "" : "s"}` : "",
@@ -3854,7 +3840,7 @@ function phaseUsageLine(phase: RunDetail["phase_timeline"][number]): string {
   return parts.length ? parts.join(" · ") : "No usage recorded";
 }
 
-function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, diffContent, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onRefreshDiff, onBackToArtifacts, onClose}: {
+export function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, diffContent, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onRefreshDiff, onBackToArtifacts, onClose}: {
   detail: RunDetail;
   mode: InspectorMode;
   logState: LogState;
@@ -3989,7 +3975,7 @@ function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactCo
   );
 }
 
-function ProductHandoffPane({detail}: {detail: RunDetail}) {
+export function ProductHandoffPane({detail}: {detail: RunDetail}) {
   const handoff = productHandoffFor(detail);
   const hasLaunch = handoff.launch.length > 0;
   const hasReset = handoff.reset.length > 0;
@@ -4118,7 +4104,7 @@ function ProductHandoffPane({detail}: {detail: RunDetail}) {
   );
 }
 
-function productHandoffFor(detail: RunDetail): ProductHandoff {
+export function productHandoffFor(detail: RunDetail): ProductHandoff {
   const handoff = detail.review_packet.product_handoff;
   if (handoff) return handoff;
   return {
@@ -4138,25 +4124,35 @@ function productHandoffFor(detail: RunDetail): ProductHandoff {
     reset: [],
     try_flows: [],
     sample_data: [],
-    notes: ["Open the README, proof, logs, and changed files to infer how to run this artifact."],
+    notes: ["See README and logs to run."],
   };
 }
 
-function CommandList({commands}: {commands: Array<{label: string; command: string}>}) {
-  return (
-    <div className="handoff-command-list">
-      {commands.map((command, index) => (
-        <div className="handoff-command" key={`${command.command}-${index}`}>
-          <span>{command.label}</span>
-          <code>{command.command}</code>
-        </div>
-      ))}
-    </div>
-  );
-}
+// CommandList moved to components/MicroComponents.tsx
 
-function LogPane({logState, runActive, onRetry}: {logState: LogState; runActive: boolean; onRetry: () => void}) {
-  const {text, status, error, path, totalBytes, totalLines, droppedBytes, lastUpdatedAt, pollIntervalMs} = logState;
+export function LogPane({logState, runActive, onRetry}: {logState: LogState; runActive: boolean; onRetry: () => void}) {
+  const {text: rawText, status, error, path, totalBytes, totalLines, droppedBytes, lastUpdatedAt, pollIntervalMs} = logState;
+  // mc-audit redesign §5 W5.7: heartbeat filter + jump-to-verdict.
+  // Heartbeats are progress-tick lines ("⋯ building… (40s) · …", repeated
+  // every 20s). They drown out semantic events. Default-on for terminal
+  // runs (the user is reviewing a finished log); off for active runs (the
+  // user wants live ticks).
+  const [hideHeartbeats, setHideHeartbeats] = useState<boolean>(!runActive);
+  useEffect(() => {
+    // When run flips active->inactive, default the filter ON to declutter
+    // the post-run review. Don't flip the user's explicit choice while
+    // active.
+    if (!runActive) setHideHeartbeats(true);
+  }, [runActive]);
+  const text = useMemo(() => {
+    if (!hideHeartbeats || !rawText) return rawText;
+    // A heartbeat line is one starting with `[+H:MM] ⋯` (or just ⋯).
+    // Strip them but keep newlines so layout doesn't collapse.
+    return rawText
+      .split("\n")
+      .filter((line) => !/^\[\+\d+:\d+\]\s*⋯/.test(line))
+      .join("\n");
+  }, [rawText, hideHeartbeats]);
   // Display lines are derived from the unbounded `totalLines` counter so the
   // header reflects the *full* log size, not just what fits in the tail
   // buffer. We never re-split the buffer per render — that's the whole bug.
@@ -4264,6 +4260,10 @@ function LogPane({logState, runActive, onRetry}: {logState: LogState; runActive:
     );
 }
 
+  const jumpToEnd = useCallback(() => {
+    const pre = containerRef.current?.querySelector<HTMLElement>('[data-testid="run-log-pane"]');
+    if (pre) pre.scrollTop = pre.scrollHeight;
+  }, []);
   return (
     <div className="log-viewer" ref={containerRef}>
       <div className="log-toolbar">
@@ -4272,6 +4272,25 @@ function LogPane({logState, runActive, onRetry}: {logState: LogState; runActive:
         {droppedNote && (
           <span className="log-elided" data-testid="log-pane-elided">{droppedNote}</span>
         )}
+        {rawText ? (
+          <>
+            <label className="log-toolbar-toggle" data-testid="log-toggle-heartbeats" title="Hide repeated progress ticks like '⋯ building… (40s)'">
+              <input
+                type="checkbox"
+                checked={hideHeartbeats}
+                onChange={(event) => setHideHeartbeats(event.target.checked)}
+              />
+              {" "}Hide heartbeats
+            </label>
+            <button
+              type="button"
+              className="log-toolbar-jump"
+              data-testid="log-jump-to-end"
+              onClick={jumpToEnd}
+              title="Scroll to the verdict/end of the log"
+            >Jump to end</button>
+          </>
+        ) : null}
       </div>
       {/* Heavy-user paper-cut #6: in-pane search. Always visible whenever
           there's a populated log buffer so the user doesn't have to discover
@@ -4336,7 +4355,7 @@ function LogPane({logState, runActive, onRetry}: {logState: LogState; runActive:
  * segments to keep the implementation simple; the test suite asserts
  * `<mark>` presence not ANSI nesting.
  */
-function renderLogTextWithHighlight(text: string, needle: string, activeMatchIdx: number) {
+export function renderLogTextWithHighlight(text: string, needle: string, activeMatchIdx: number) {
   if (!needle) return renderLogText(text);
   const lower = text.toLowerCase();
   const lowerNeedle = needle.toLowerCase();
@@ -4378,7 +4397,7 @@ function renderLogTextWithHighlight(text: string, needle: string, activeMatchIdx
  * textarea, contentEditable. Used by global hotkeys (`/`, Cmd-K) to stay
  * out of the user's way while they're typing.
  */
-function isTypingTarget(target: EventTarget | null): boolean {
+export function isTypingTarget(target: EventTarget | null): boolean {
   if (!target || !(target instanceof HTMLElement)) return false;
   const tag = target.tagName;
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
@@ -4386,7 +4405,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return false;
 }
 
-function describeLogHeader({runActive, status, lastUpdatedAt, pollIntervalMs, displayLines, totalBytes}: {
+export function describeLogHeader({runActive, status, lastUpdatedAt, pollIntervalMs, displayLines, totalBytes}: {
   runActive: boolean;
   status: LogStatus;
   lastUpdatedAt: number | null;
@@ -4405,19 +4424,7 @@ function describeLogHeader({runActive, status, lastUpdatedAt, pollIntervalMs, di
   return `Final · ${displayLines.toLocaleString()} line${displayLines === 1 ? "" : "s"} · ${humanBytes(totalBytes)}`;
 }
 
-function humanBytes(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  let v = value;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i += 1;
-  }
-  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoadProofArtifact}: {
+export function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoadProofArtifact}: {
   detail: RunDetail;
   proofArtifactIndex: number | null;
   proofContent: ArtifactContentResponse | null;
@@ -4567,7 +4574,7 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
  * stale or mis-routed file) we render a prominent warning rather than
  * silently rendering somebody else's evidence.
  */
-function ProofProvenance({proofReport, runId}: {proofReport: ProofReportInfo; runId: string}) {
+export function ProofProvenance({proofReport, runId}: {proofReport: ProofReportInfo; runId: string}) {
   if (!proofReport || !proofReport.available) return null;
   const sha = proofReport.sha256 ? proofReport.sha256.slice(0, 12) : null;
   const mismatch = proofReport.run_id_matches === false;
@@ -4601,7 +4608,7 @@ function ProofProvenance({proofReport, runId}: {proofReport: ProofReportInfo; ru
  * and round 2 passed after a fix) shows verdict, counts, durations,
  * and per-round diagnosis instead of collapsing to the final state.
  */
-function CertificationRoundTabs({rounds}: {rounds: CertificationRound[]}) {
+export function CertificationRoundTabs({rounds}: {rounds: CertificationRound[]}) {
   const [activeRound, setActiveRound] = useState<number>(rounds[rounds.length - 1]?.round ?? 1);
   const active = rounds.find((entry) => entry.round === activeRound) || rounds[rounds.length - 1];
   return (
@@ -4666,7 +4673,7 @@ function CertificationRoundTabs({rounds}: {rounds: CertificationRound[]}) {
  * download artifact" message with the size + MIME so the operator can
  * decide what to do.
  */
-function ProofEvidenceContent({runId, artifactIndex, content}: {
+export function ProofEvidenceContent({runId, artifactIndex, content}: {
   runId: string;
   artifactIndex: number | null;
   content: ArtifactContentResponse | null;
@@ -4714,7 +4721,7 @@ function ProofEvidenceContent({runId, artifactIndex, content}: {
   );
 }
 
-function DiffPane({diff, onRefresh}: {diff: DiffResponse | null; onRefresh: () => void}) {
+export function DiffPane({diff, onRefresh}: {diff: DiffResponse | null; onRefresh: () => void}) {
   // All hooks must run on every render — bail-out branches must come AFTER
   // the hook calls or React throws "Rendered more hooks than previous"
   // (#310). Order matters here.
@@ -4785,7 +4792,9 @@ function DiffPane({diff, onRefresh}: {diff: DiffResponse | null; onRefresh: () =
       </div>
       <div className="diff-toolbar">
         <strong>Code diff</strong>
-        <span title={`${diff.branch || "-"} → ${diff.target}`}>{diff.branch || "-"} → {diff.target}</span>
+        {/* "branch → target" repetition dropped — the diff-freshness meta
+            row above already shows both branch and target with SHAs.
+            mc-audit redesign §3b W4.10. */}
       </div>
       {truncationBanner ? (
         <div className="diff-truncation" data-testid="diff-truncation">
@@ -4828,46 +4837,10 @@ function DiffPane({diff, onRefresh}: {diff: DiffResponse | null; onRefresh: () =
 // Render "Showing N hunks of M · X KB of Y MB" so the operator can tell
 // how much of the diff is hidden by the 240k char slice. Falls back to a
 // concise byte-only line when the server didn't report a hunk count.
-function formatDiffTruncationBanner(diff: DiffResponse): string {
-  const shownBytes = humanBytes(new TextEncoder().encode(diff.text || "").length);
-  const totalBytes = humanBytes(new TextEncoder().encode("a".repeat(Math.max(0, diff.full_size_chars))).length);
-  // Cheap upper-bound: char counts are ~bytes for ASCII source diff. Use
-  // the raw chars to avoid encoding the entire diff just for a banner.
-  const shownChars = diff.text ? diff.text.length : 0;
-  const fullChars = diff.full_size_chars || 0;
-  const shownLabel = humanBytes(shownChars);
-  const totalLabel = humanBytes(fullChars);
-  const hunksPart = diff.total_hunks > 0
-    ? `Showing ${diff.shown_hunks.toLocaleString()} hunk${diff.shown_hunks === 1 ? "" : "s"} of ${diff.total_hunks.toLocaleString()}`
-    : "Diff was truncated";
-  const sizePart = `shown ${shownLabel} of ${totalLabel}`;
-  // shownBytes/totalBytes only used to keep the helper imports honest in
-  // case we later switch to a real byte count. Suppress unused warnings.
-  void shownBytes;
-  void totalBytes;
-  return `${hunksPart} · ${sizePart}`;
-}
+// formatDiffTruncationBanner / formatRelativeFreshness extracted to
+// utils/format.ts during mc-audit redesign Wave 8.
 
-// Render an ISO timestamp as "Xs ago", "Xm Ys ago", etc. Returns "just now"
-// for sub-second deltas and "in the future" if the server clock is ahead.
-function formatRelativeFreshness(iso: string): string {
-  const fetched = Date.parse(iso);
-  if (!Number.isFinite(fetched)) return "unknown";
-  const deltaSec = Math.round((Date.now() - fetched) / 1000);
-  if (deltaSec < 0) return "just now";
-  if (deltaSec < 5) return "just now";
-  if (deltaSec < 60) return `${deltaSec}s ago`;
-  const minutes = Math.floor(deltaSec / 60);
-  const seconds = deltaSec % 60;
-  if (minutes < 60) {
-    return seconds > 0 ? `${minutes}m ${seconds}s ago` : `${minutes}m ago`;
-  }
-  const hours = Math.floor(minutes / 60);
-  const remMin = minutes % 60;
-  return remMin > 0 ? `${hours}h ${remMin}m ago` : `${hours}h ago`;
-}
-
-function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
+export function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
   packet: RunDetail["review_packet"];
   onRunAction: (action: string, label?: string) => void;
   onLoadArtifact: (index: number) => void;
@@ -4878,8 +4851,6 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
   const inProgress = packet.readiness.state === "in_progress";
   const reviewEvidence = packet.evidence.filter(isReviewEvidenceArtifact);
   const artifactCount = reviewEvidence.length;
-  const readableEvidence = reviewEvidence.filter(isReadableArtifact);
-  const evidence = readableEvidence.slice(0, 4);
   const showActionButton = Boolean(action.action_key);
   const hasFailure = Boolean(packet.failure);
   const attentionChecks = packet.checks.filter((check) => !["pass", "info"].includes(check.status));
@@ -4891,9 +4862,6 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
   const filesSummary = packet.changes.file_count
     ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}`
     : `${packet.changes.files.length} file${packet.changes.files.length === 1 ? "" : "s"}`;
-  const evidenceSummary = readableEvidence.length
-    ? `${readableEvidence.length}/${reviewEvidence.length}`
-    : `${reviewEvidence.length}`;
   return (
     <div className={`review-packet review-${packet.readiness.tone || "info"}`}>
       <div className="review-head">
@@ -4966,18 +4934,12 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
           {packet.changes.diff_command && packet.readiness.state === "ready" && <code title={packet.changes.diff_command}>{packet.changes.diff_command}</code>}
         </ReviewDrawer>
       )}
-      {evidence.length > 0 && (
-        <ReviewDrawer title="Evidence" meta={evidenceSummary}>
-          <div className="review-evidence" aria-label="Evidence artifacts">
-            {evidence.map((artifact) => (
-              <button className={isReadableArtifact(artifact) ? "" : "missing"} key={`${artifact.index}-${artifact.path}`} type="button" disabled={!isReadableArtifact(artifact)} onClick={() => onLoadArtifact(artifact.index)}>
-                {artifact.label}{artifact.exists ? "" : " missing"}
-              </button>
-            ))}
-          </div>
-        </ReviewDrawer>
-      )}
-      {packet.evidence.length > evidence.length && !inProgress && (
+      {/* Evidence drawer dropped — same data is covered by the Evidence stat
+          tile above + the "View all evidence" button below.
+          mc-audit redesign §3b W4.6. evidenceSummary stays in scope so the
+          stat-tile-vs-drawer comparison can be re-derived if we ever need
+          a "Recent evidence" preview. */}
+      {(packet.evidence.length > 0 && !inProgress) && (
         <button className="review-inline-action" type="button" data-testid="review-more-artifacts-button" onClick={onShowArtifacts}>
           View all evidence
         </button>
@@ -4986,28 +4948,9 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
   );
 }
 
-function ReviewMetric({label, value}: {label: string; value: string}) {
-  return <div><span>{label}</span><strong>{value}</strong></div>;
-}
+// ReviewMetric / ReviewDrawer moved to components/MicroComponents.tsx
 
-function ReviewDrawer({title, meta, defaultOpen = false, children}: {
-  title: string;
-  meta: string;
-  defaultOpen?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <details className="review-drawer" open={defaultOpen}>
-      <summary>
-        <span>{title}</span>
-        <strong>{meta}</strong>
-      </summary>
-      <div className="review-drawer-body">{children}</div>
-    </details>
-  );
-}
-
-function FailureSummary({failure, showExcerpt = false}: {
+export function FailureSummary({failure, showExcerpt = false}: {
   failure: NonNullable<RunDetail["review_packet"]["failure"]>;
   showExcerpt?: boolean;
 }) {
@@ -5022,7 +4965,7 @@ function FailureSummary({failure, showExcerpt = false}: {
   );
 }
 
-function DetailLine({line}: {line: string}) {
+export function DetailLine({line}: {line: string}) {
   const visibleLine = userVisibleDetailLine(line);
   if (!visibleLine) return null;
   const visibleSplit = visibleLine.indexOf(":");
@@ -5048,7 +4991,7 @@ function DetailLine({line}: {line: string}) {
  * full set still lives under "Advanced run actions" below — this bar is a
  * shortcut for the obvious-next-step. mc-audit codex-first-time-user.md #14.
  */
-function RecoveryActionBar({actions, status, onRunAction}: {
+export function RecoveryActionBar({actions, status, onRunAction}: {
   actions: ActionState[];
   status: string;
   onRunAction: (action: string, label?: string) => void;
@@ -5093,7 +5036,7 @@ const RECOVERABLE_STATUSES = new Set([
 
 const RECOVERY_ACTION_KEYS = ["R", "r", "x"];
 
-function pickRecoveryActions(actions: ActionState[], status: string | null | undefined): ActionState[] {
+export function pickRecoveryActions(actions: ActionState[], status: string | null | undefined): ActionState[] {
   const normalized = String(status || "").toLowerCase();
   if (!RECOVERABLE_STATUSES.has(normalized)) return [];
   // Honor the order in RECOVERY_ACTION_KEYS (Retry > Resume > Cleanup) so
@@ -5108,7 +5051,7 @@ function pickRecoveryActions(actions: ActionState[], status: string | null | und
   return result;
 }
 
-function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]; mergeBlocked: boolean; onRunAction: (action: string, label?: string) => void}) {
+export function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]; mergeBlocked: boolean; onRunAction: (action: string, label?: string) => void}) {
   const visible = actions.filter((action) => !["o", "e", "m", "M"].includes(action.key));
   if (!visible.length) return <div className="advanced-actions empty" aria-hidden="true" />;
   return (
@@ -5136,8 +5079,7 @@ function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]
     </details>
   );
 }
-
-function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoadArtifact, onBack, runId}: {
+export function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoadArtifact, onBack, runId}: {
   artifacts: ArtifactRef[];
   selectedArtifactIndex: number | null;
   artifactContent: ArtifactContentResponse | null;
@@ -5208,7 +5150,7 @@ function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoad
   );
 }
 
-function artifactProvenanceTooltip(artifact: ArtifactRef): string {
+export function artifactProvenanceTooltip(artifact: ArtifactRef): string {
   const parts: string[] = [artifact.path];
   if (artifact.size_bytes != null) parts.push(`${artifact.size_bytes.toLocaleString()} bytes`);
   if (artifact.mtime) parts.push(`mtime ${artifact.mtime}`);
@@ -5246,7 +5188,7 @@ interface PriorRunOption {
  * "improve" is almost always operator error — a long-tail dropdown invites
  * mistakes. 25 is enough to reach back through a normal day's work.
  */
-function collectPriorRunOptions(
+export function collectPriorRunOptions(
   landingItems: LandingItem[],
   historyItems: HistoryItem[],
 ): PriorRunOption[] {
@@ -5302,7 +5244,7 @@ function collectPriorRunOptions(
   return options;
 }
 
-function priorRunLabel(args: {
+export function priorRunLabel(args: {
   summary: string | null;
   branch: string;
   task_id: string | null;
@@ -5316,7 +5258,7 @@ function priorRunLabel(args: {
   return `${headline} (${args.branch})${suffix}`;
 }
 
-function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onError}: {
+export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onError}: {
   project: StateResponse["project"] | undefined;
   dirtyFiles: string[];
   // W3-CRITICAL-1: list of prior runs the operator can iterate on. Sourced
@@ -5521,7 +5463,7 @@ function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onE
     }
     setPendingSeconds(null);
     setSubmitting(false);
-    setStatus("Queueing cancelled. Edit and resubmit if you still want to queue.");
+    setStatus("Queueing cancelled.");
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -5531,14 +5473,14 @@ function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onE
       return;
     }
     if (targetNeedsConfirmation && !targetConfirmed) {
-      setStatus("Confirm the dirty target project before queueing.");
+      setStatus("Confirm the dirty target project above.");
       return;
     }
     if (priorRunMissing) {
       setStatus(
         priorRunOptionsAvailable
-          ? "Select a prior run for the improve job to iterate on."
-          : "No prior runs to improve. Run a build first."
+          ? "Select a prior run to improve."
+          : "No prior runs. Run a build first."
       );
       return;
     }
@@ -5549,13 +5491,13 @@ function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onE
     setSubmitting(true);
     pendingCancelledRef.current = false;
     setPendingSeconds(3);
-    setStatus("Queueing in 3s — click Cancel to keep editing.");
+    setStatus("Queueing in 3s. Cancel to edit.");
     pendingTickRef.current = window.setInterval(() => {
       setPendingSeconds((prev) => {
         if (prev === null) return null;
         const next = Math.max(0, prev - 1);
         if (next > 0) {
-          setStatus(`Queueing in ${next}s — click Cancel to keep editing.`);
+          setStatus(`Queueing in ${next}s. Cancel to edit.`);
         }
         return next;
       });
@@ -5591,7 +5533,7 @@ function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onE
     <div className="modal-backdrop" role="presentation" onClick={onBackdropClick}>
       <form
         ref={dialogRef}
-        className="job-dialog"
+        className="job-dialog job-palette"
         role="dialog"
         aria-modal="true"
         aria-labelledby="jobDialogHeading"
@@ -5599,108 +5541,17 @@ function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onE
         tabIndex={-1}
         onSubmit={(event) => void submit(event)}
       >
-        <header>
-          <h2 id="jobDialogHeading">New queue job</h2>
-          <button type="button" onClick={onClose}>Close</button>
-        </header>
-        <div className="job-summary" data-testid="job-dialog-summary" aria-label="Run summary">
-          <strong>Will run with:</strong>
-          <span data-testid="job-dialog-summary-text">{summary}</span>
-          <button
-            type="button"
-            className="job-summary-edit"
-            data-testid="job-dialog-summary-edit"
-            onClick={() => {
-              setAdvancedOpen(true);
-              advancedRef.current?.scrollIntoView({block: "nearest"});
-            }}
-          >Edit</button>
+        <div className="job-palette-head">
+          <h2 id="jobDialogHeading">{command === "improve" ? "Improve" : command === "certify" ? "Certify" : "New job"}</h2>
+          <button type="button" className="job-palette-close" aria-label="Close" onClick={onClose}>×</button>
         </div>
-        <label>Command
-          <select data-testid="job-command-select" value={command} onChange={(event) => setCommand(event.target.value as JobCommand)}>
-            <option value="build">Build</option>
-            <option value="improve">Improve</option>
-            <option value="certify">Certify</option>
-          </select>
-          <span className="field-hint" data-testid="job-command-help">{commandHelpMap[command]}</span>
-        </label>
-        <div className={`target-guard ${project?.dirty ? "target-dirty" : ""}`} role="group" aria-label="Target project">
-          <strong>Target project</strong>
-          <dl>
-            <dt>Path</dt><dd title={project?.path || ""}>{project?.path || "loading"}</dd>
-            <dt>Branch</dt><dd>{project?.branch || "-"}</dd>
-            <dt>State</dt><dd>{project ? project.dirty ? "dirty" : "clean" : "unknown"}</dd>
-          </dl>
-          <p>This job can create temporary git worktrees and modify files under this folder.</p>
-          {targetNeedsConfirmation && (
-            <>
-              {dirtyPreview.length ? (
-                <div className="target-dirty-files" data-testid="job-dialog-dirty-files" aria-label="Uncommitted files">
-                  <strong>Uncommitted changes ({dirtyFiles.length})</strong>
-                  <ul>
-                    {dirtyPreview.map((path) => <li key={path}>{path}</li>)}
-                    {dirtyOverflow > 0 && <li>+{dirtyOverflow} more</li>}
-                  </ul>
-                  <span>Commit, stash, or revert these before queueing if they shouldn&apos;t affect this job.</span>
-                </div>
-              ) : null}
-              <label className="check-label target-confirm">
-                <input
-                  checked={targetConfirmed}
-                  data-testid="target-project-confirm"
-                  type="checkbox"
-                  onChange={(event) => setTargetConfirmed(event.target.checked)}
-                />
-                I understand this dirty project may affect the queued work
-              </label>
-            </>
-          )}
-        </div>
-        {command === "improve" && (
-          <label>Improve mode
-            <select data-testid="job-improve-mode-select" value={subcommand} onChange={(event) => setSubcommand(event.target.value as ImproveSubcommand)}>
-              <option value="bugs">Bugs</option>
-              <option value="feature">Feature</option>
-              <option value="target">Target</option>
-            </select>
-          </label>
-        )}
-        {command === "improve" && (
-          <label>Prior run
-            {priorRunOptionsAvailable ? (
-              <>
-                <select
-                  data-testid="job-prior-run-select"
-                  value={priorRunId}
-                  onChange={(event) => setPriorRunId(event.target.value)}
-                >
-                  {priorRunOptions.map((option) => (
-                    <option key={option.run_id} value={option.run_id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <span className="field-hint">
-                  Improve iterates on this run&apos;s branch — its files are pre-loaded
-                  into the worktree, so the agent extends the prior work instead
-                  of starting from scratch.
-                </span>
-              </>
-            ) : (
-              <span
-                className="field-hint"
-                data-testid="job-prior-run-empty"
-              >
-                No prior runs to improve. Run a build first, then come back.
-              </span>
-            )}
-          </label>
-        )}
-        <label>{intentLabelMap[command]}
+        {/* Intent textarea is THE primary field — front and center, autofocused. */}
+        <label className="job-palette-intent" aria-label={intentLabelMap[command]}>
           <textarea
             value={intent}
             data-testid="job-dialog-intent"
-            rows={5}
+            rows={4}
+            autoFocus
             placeholder={intentPlaceholderMap[command]}
             aria-describedby={submitDisabled && !submitting && pendingSeconds === null ? "jobDialogValidationHint" : undefined}
             aria-invalid={intentRequired ? true : undefined}
@@ -5722,19 +5573,102 @@ function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onE
             }}
           />
         </label>
+        {/* Command pills — Build / Improve / Certify, sentence-style not select. */}
+        <div className="job-palette-commands" role="radiogroup" aria-label="Command">
+          {(["build", "improve", "certify"] as const).map((cmd) => (
+            <button
+              key={cmd}
+              type="button"
+              role="radio"
+              aria-checked={command === cmd}
+              data-testid={cmd === "build" ? "job-command-select" : `job-command-${cmd}`}
+              className={`job-palette-pill ${command === cmd ? "active" : ""}`}
+              onClick={() => setCommand(cmd)}
+            >
+              {cmd === "build" ? "Build" : cmd === "improve" ? "Improve" : "Certify"}
+            </button>
+          ))}
+          {/* Improve sub-mode pills, only shown when Improve is selected. */}
+          {command === "improve" && (
+            <span className="job-palette-submodes">
+              {(["bugs", "feature", "target"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  role="radio"
+                  aria-checked={subcommand === mode}
+                  className={`job-palette-pill job-palette-pill-sub ${subcommand === mode ? "active" : ""}`}
+                  onClick={() => setSubcommand(mode)}
+                  data-testid={`job-improve-mode-${mode}`}
+                >
+                  {mode === "bugs" ? "Bugs" : mode === "feature" ? "Feature" : "Target"}
+                </button>
+              ))}
+            </span>
+          )}
+        </div>
+        {/* Compact target line — shown subtly. Dirty confirm flow stays. */}
+        <div className={`job-palette-target ${project?.dirty ? "is-dirty" : ""}`} data-testid="job-target-summary">
+          <span>Target</span>
+          <code title={project?.path || ""}>{project?.name || project?.path || "loading"}</code>
+          <span>on</span>
+          <code>{project?.branch || "-"}</code>
+          {project?.dirty ? <em>· dirty</em> : null}
+          <span className="job-palette-target-summary" data-testid="job-dialog-summary-text">{summary}</span>
+        </div>
+        {targetNeedsConfirmation && (
+          <div className="job-palette-dirty">
+            {dirtyPreview.length ? (
+              <div className="target-dirty-files" data-testid="job-dialog-dirty-files" aria-label="Uncommitted files">
+                <strong>Uncommitted changes ({dirtyFiles.length})</strong>
+                <ul>
+                  {dirtyPreview.map((path) => <li key={path}>{path}</li>)}
+                  {dirtyOverflow > 0 && <li>+{dirtyOverflow} more</li>}
+                </ul>
+              </div>
+            ) : null}
+            <label className="check-label target-confirm">
+              <input
+                checked={targetConfirmed}
+                data-testid="target-project-confirm"
+                type="checkbox"
+                onChange={(event) => setTargetConfirmed(event.target.checked)}
+              />
+              I understand this dirty project may affect the queued work
+            </label>
+          </div>
+        )}
+        {/* Prior run selector — shown only for Improve. */}
+        {command === "improve" && priorRunOptionsAvailable && (
+          <label className="job-palette-prior">
+            <span>Prior run</span>
+            <select
+              data-testid="job-prior-run-select"
+              value={priorRunId}
+              onChange={(event) => setPriorRunId(event.target.value)}
+            >
+              {priorRunOptions.map((option) => (
+                <option key={option.run_id} value={option.run_id}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {command === "improve" && !priorRunOptionsAvailable && (
+          <span className="field-hint" data-testid="job-prior-run-empty">No prior runs. Run a build first.</span>
+        )}
         {submitDisabled && !submitting && pendingSeconds === null && (
           <p id="jobDialogValidationHint" className="job-dialog-validation" data-testid="job-dialog-validation-hint" aria-live="polite">
             {intentRequired
-              ? `Describe the requested outcome (${intentLabelMap[command].toLowerCase()}) to enable queueing.`
+              ? `Describe the ${intentLabelMap[command].toLowerCase()} to queue.`
               : specFileRequired
-              ? "Enter the approved spec file path."
+              ? "Enter the spec file path."
               : targetNeedsConfirmation && !targetConfirmed
-              ? "Confirm the dirty target project above to enable queueing."
+              ? "Confirm the dirty target project above."
               : priorRunMissing
               ? (priorRunOptionsAvailable
-                  ? "Select the prior run for the improve job to iterate on."
-                  : "No prior runs to improve. Run a build first, then come back.")
-              : "Submit is disabled."}
+                  ? "Select a prior run to improve."
+                  : "No prior runs. Run a build first.")
+              : null}
           </p>
         )}
         <details
@@ -5900,13 +5834,13 @@ function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onE
             aria-busy={submitting}
             title={!submitting && submitDisabled ? (
               intentRequired
-                ? `Describe the requested outcome (${intentLabelMap[command].toLowerCase()}) to enable queueing.`
+                ? `Describe the ${intentLabelMap[command].toLowerCase()} to queue.`
                 : specFileRequired
-                ? "Enter the approved spec file path."
+                ? "Enter the spec file path."
                 : priorRunMissing
                 ? (priorRunOptionsAvailable
-                    ? "Select the prior run for the improve job to iterate on."
-                    : "No prior runs to improve. Run a build first, then come back.")
+                    ? "Select a prior run to improve."
+                    : "No prior runs. Run a build first.")
                 : "Confirm the dirty target project above."
             ) : undefined}
           >
@@ -5918,7 +5852,7 @@ function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueued, onE
   );
 }
 
-function PhaseRoutingFields({label, testKey, provider, model, effort, onProvider, onModel, onEffort}: {
+export function PhaseRoutingFields({label, testKey, provider, model, effort, onProvider, onModel, onEffort}: {
   label: string;
   testKey: string;
   provider: string;
@@ -5956,20 +5890,18 @@ function PhaseRoutingFields({label, testKey, provider, model, effort, onProvider
   );
 }
 
-function executionModeHelp(mode: ExecutionMode, command: JobCommand): string {
+export function executionModeHelp(mode: ExecutionMode, _command: JobCommand): string {
   if (mode !== "split") {
-    return "A single agent session owns the whole loop; useful for exploration or fallback.";
+    return "Single session. Faster, less reliable.";
   }
-  return command === "improve"
-    ? "Otto owns evaluation, improvement/fix, and recovery as separate phases."
-    : "Otto owns build, certify, fix, and recovery as separate phases.";
+  return "Phases run separately. Default.";
 }
 
-function planningHelp(planning: PlanningMode): string {
-  if (planning === "spec-review") return "Otto generates a spec, pauses, and waits for approval in Mission Control.";
-  if (planning === "spec-auto") return "Otto generates a spec and uses it immediately without a human gate.";
-  if (planning === "spec-file") return "Use an existing approved spec file; the CLI validates it before building.";
-  return "Start implementation directly from the intent.";
+export function planningHelp(planning: PlanningMode): string {
+  if (planning === "spec-review") return "Generate a spec, then wait for approval.";
+  if (planning === "spec-auto") return "Generate a spec and use it without review.";
+  if (planning === "spec-file") return "Use an existing spec file.";
+  return "Build directly from the intent.";
 }
 
 /**
@@ -5978,7 +5910,7 @@ function planningHelp(planning: PlanningMode): string {
  * override wins, otherwise we fall back to the project's effective defaults
  * coming from otto.yaml. mc-audit codex-first-time-user.md #2.
  */
-function jobRunSummary({command, subcommand, project, provider, model, effort, certification}: {
+export function jobRunSummary({command, subcommand, project, provider, model, effort, certification}: {
   command: JobCommand;
   subcommand: ImproveSubcommand;
   project: StateResponse["project"] | undefined;
@@ -5988,14 +5920,14 @@ function jobRunSummary({command, subcommand, project, provider, model, effort, c
   certification: CertificationPolicy;
 }): string {
   const defaults = project?.defaults;
-  const providerLabel = provider || defaults?.provider || "default provider";
-  const modelLabel = model.trim() || defaults?.model || "default model";
-  const effortLabel = effort || defaults?.reasoning_effort || "default effort";
+  const providerLabel = provider || defaults?.provider || "default";
+  const modelLabel = model.trim() || defaults?.model || "default";
+  const effortLabel = effort || defaults?.reasoning_effort || "default";
   const verificationLabel = describeVerificationPolicy(command, subcommand, certification, project);
-  return `${providerLabel} · ${modelLabel} · effort=${effortLabel} · verification=${verificationLabel}`;
+  return `${providerLabel} · model ${modelLabel} · effort ${effortLabel} · verify ${verificationLabel}`;
 }
 
-function describeVerificationPolicy(
+export function describeVerificationPolicy(
   command: JobCommand,
   subcommand: ImproveSubcommand,
   certification: CertificationPolicy,
@@ -6011,87 +5943,81 @@ function describeVerificationPolicy(
   return defaults?.certifier_mode || "fast";
 }
 
-function certificationOptions(
+export function certificationOptions(
   command: JobCommand,
   subcommand: ImproveSubcommand,
   project: StateResponse["project"] | undefined,
 ): Array<{value: CertificationPolicy; label: string}> {
   if (command === "improve" && subcommand !== "bugs") return [];
   const inherited = command === "improve" && subcommand === "bugs"
-    ? "Inherit: thorough bug certification (improve default)"
+    ? "Inherit: thorough"
     : certificationDefaultLabel(project);
   const options: Array<{value: CertificationPolicy; label: string}> = [
     {value: "", label: inherited},
-    {value: "fast", label: "Fast certification (--fast)"},
-    {value: "standard", label: "Standard certification (--standard)"},
-    {value: "thorough", label: "Thorough certification (--thorough)"},
+    {value: "fast", label: "Fast"},
+    {value: "standard", label: "Standard"},
+    {value: "thorough", label: "Thorough"},
   ];
   if (command === "build") {
-    options.push({value: "skip", label: "Skip certification (--no-qa)"});
+    options.push({value: "skip", label: "Skip"});
   }
   return options;
 }
 
-function certificationPolicyAllowed(command: JobCommand, subcommand: ImproveSubcommand, policy: CertificationPolicy): boolean {
+export function certificationPolicyAllowed(command: JobCommand, subcommand: ImproveSubcommand, policy: CertificationPolicy): boolean {
   if (!policy) return true;
   if (policy === "skip") return command === "build";
   return command === "build" || command === "certify" || (command === "improve" && subcommand === "bugs");
 }
 
-function providerDefaultLabel(project: StateResponse["project"] | undefined): string {
+export function providerDefaultLabel(project: StateResponse["project"] | undefined): string {
   const defaults = project?.defaults;
-  if (!defaults) return "Inherit from otto.yaml";
-  return `Inherit: ${titleCase(defaults.provider || "claude")} (${configSourceLabel(defaults.config_file_exists)})`;
+  if (!defaults) return "Inherit default";
+  return `Inherit: ${titleCase(defaults.provider || "claude")}`;
 }
 
-function effortDefaultLabel(project: StateResponse["project"] | undefined): string {
+export function effortDefaultLabel(project: StateResponse["project"] | undefined): string {
   const defaults = project?.defaults;
-  if (!defaults) return "Inherit from otto.yaml";
+  if (!defaults) return "Inherit default";
   const effort = defaults.reasoning_effort ? titleCase(defaults.reasoning_effort) : "Provider default";
-  return `Inherit: ${effort} (${configSourceLabel(defaults.config_file_exists)})`;
+  return `Inherit: ${effort}`;
 }
 
-function modelDefaultPlaceholder(project: StateResponse["project"] | undefined): string {
+export function modelDefaultPlaceholder(project: StateResponse["project"] | undefined): string {
   const model = project?.defaults?.model;
-  return model ? `project default: ${model}` : "provider default";
+  return model ? `default: ${model}` : "provider default";
 }
 
-function certificationDefaultLabel(project: StateResponse["project"] | undefined): string {
+export function certificationDefaultLabel(project: StateResponse["project"] | undefined): string {
   const defaults = project?.defaults;
-  if (!defaults) return "Inherit certification policy";
-  const policy = defaults.skip_product_qa ? "skip certification" : `${defaults.certifier_mode || "fast"} certification`;
-  return `Inherit: ${policy} (${configSourceLabel(defaults.config_file_exists)})`;
+  if (!defaults) return "Inherit default";
+  const policy = defaults.skip_product_qa ? "skip" : (defaults.certifier_mode || "fast");
+  return `Inherit: ${policy}`;
 }
 
-function certificationHelp(
+export function certificationHelp(
   command: JobCommand,
   subcommand: ImproveSubcommand,
   certification: CertificationPolicy,
   project: StateResponse["project"] | undefined,
 ): string {
-  if (certification === "skip") return "Build runs without post-build product certification.";
-  if (certification) return "Applies only to the certification phase for this queued job.";
+  if (certification === "skip") return "Skips verification.";
+  if (certification) return "Applies to the verify phase only.";
   const defaults = project?.defaults;
-  if (defaults?.config_error) return `Using built-in defaults because otto.yaml could not be read: ${defaults.config_error}`;
-  if (command === "improve" && subcommand === "bugs") return "Improve bugs defaults to thorough certification unless you choose fast or standard here.";
-  return "Inherits certifier_mode and skip_product_qa from otto.yaml, then built-in defaults.";
+  if (defaults?.config_error) return `Using built-in defaults — otto.yaml could not be read: ${defaults.config_error}`;
+  if (command === "improve" && subcommand === "bugs") return "Defaults to thorough for bug improvements.";
+  return "Uses otto.yaml defaults.";
 }
 
-function staticCertificationLabel(command: JobCommand, subcommand: ImproveSubcommand): string {
+export function staticCertificationLabel(command: JobCommand, subcommand: ImproveSubcommand): string {
   if (command === "improve" && subcommand === "feature") return "Feature improvement uses hillclimb evaluation";
   if (command === "improve" && subcommand === "target") return "Target improvement uses target evaluation";
   return "Managed by this command";
 }
 
-function configSourceLabel(configFileExists: boolean): string {
-  return configFileExists ? "otto.yaml" : "built-in default";
-}
+// configSourceLabel / titleCase moved to utils/format.ts (Wave 8).
 
-function titleCase(value: string): string {
-  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
-}
-
-function ConfirmDialog({confirm, pending, error, checkboxAck, onChangeCheckboxAck, onCancel, onConfirm}: {
+export function ConfirmDialog({confirm, pending, error, checkboxAck, onChangeCheckboxAck, onCancel, onConfirm}: {
   confirm: ConfirmState;
   pending: boolean;
   error: string | null;
@@ -6199,7 +6125,7 @@ function ConfirmDialog({confirm, pending, error, checkboxAck, onChangeCheckboxAc
   );
 }
 
-function missionFocus(data: StateResponse | null): {
+export function missionFocus(data: StateResponse | null): {
   kicker: string;
   title: string;
   body: string;
@@ -6218,7 +6144,7 @@ function missionFocus(data: StateResponse | null): {
     return {
       kicker: "Loading",
       title: "Reading project state",
-      body: "Mission Control is loading the queue, runs, and repository status.",
+      body: "Loading project state.",
       tone: "info",
       primary: "new",
       working: 0,
@@ -6239,7 +6165,7 @@ function missionFocus(data: StateResponse | null): {
     return {
       kicker: "Landing",
       title: "Landing needs recovery",
-      body: "A previous landing left git mid-merge. Recover will clean up that state and relaunch conflict-resolving landing for the remaining ready work.",
+      body: "A previous landing left a partial merge. Recover will clean it up and retry.",
       tone: "danger",
       primary: "recover",
       working,
@@ -6252,7 +6178,7 @@ function missionFocus(data: StateResponse | null): {
     return {
       kicker: "Commands",
       title: `${commandBacklog} command${commandBacklog === 1 ? "" : "s"} waiting`,
-      body: "Start the watcher to apply pending commands.",
+      body: "Start the watcher to run pending commands.",
       tone: "warning",
       primary: "start",
       working,
@@ -6292,7 +6218,7 @@ function missionFocus(data: StateResponse | null): {
     return {
       kicker: "Attention",
       title: `${needsAction} task${needsAction === 1 ? "" : "s"} need action`,
-      body: "Open blocked work or the health view to inspect the failure, stale run, missing branch, or recovery action.",
+      body: "Open the failure or Health to investigate.",
       tone: "warning",
       primary: "diagnostics",
       working,
@@ -6318,7 +6244,7 @@ function missionFocus(data: StateResponse | null): {
     return {
       kicker: "Queue",
       title: `${queued} queued task${queued === 1 ? "" : "s"} waiting`,
-      body: "Start the watcher to run the queued job.",
+      body: "Start the watcher to run this task.",
       tone: "info",
       primary: "start",
       working,
@@ -6368,8 +6294,8 @@ function missionFocus(data: StateResponse | null): {
   if (data.landing.counts.total || data.history.total_rows) {
     return {
       kicker: "Idle",
-      title: "No task needs action",
-      body: "Queue the next product task when the current work is complete.",
+      title: "Idle",
+      body: "Queue your next task.",
       tone: "neutral",
       primary: "new",
       working,
@@ -6381,7 +6307,7 @@ function missionFocus(data: StateResponse | null): {
   return {
     kicker: "Start",
     title: "Start your first build",
-    body: "Describe what you want Otto to build. Otto will plan, code, and verify it inside an isolated git worktree, then surface logs, diffs, and a result for review.",
+    body: "Describe what you want. Otto plans, codes, verifies, and shows the result for review.",
     tone: "neutral",
     primary: "new",
     working,
@@ -6391,16 +6317,16 @@ function missionFocus(data: StateResponse | null): {
   };
 }
 
-function taskBoardColumns(data: StateResponse | null, filters: Filters = defaultFilters): Array<{
+export function taskBoardColumns(data: StateResponse | null, filters: Filters = defaultFilters): Array<{
   stage: BoardStage;
   title: string;
   empty: string;
   items: BoardTask[];
 }> {
   const columns: Array<{stage: BoardStage; title: string; empty: string; items: BoardTask[]}> = [
-    {stage: "attention", title: "Needs Action", empty: "No blocked work.", items: []},
-    {stage: "working", title: "Queued / Running", empty: "No queued or running tasks.", items: []},
-    {stage: "ready", title: "Ready To Land", empty: "Nothing ready yet.", items: []},
+    {stage: "attention", title: "Needs action", empty: "No tasks.", items: []},
+    {stage: "working", title: "In progress", empty: "No tasks.", items: []},
+    {stage: "ready", title: "Ready to land", empty: "No tasks.", items: []},
     {stage: "landed", title: "Landed", empty: "Nothing landed yet.", items: []},
   ];
   if (!data) return columns;
@@ -6432,7 +6358,7 @@ function taskBoardColumns(data: StateResponse | null, filters: Filters = default
   return columns;
 }
 
-function boardTaskMatchesFilters(task: BoardTask, filters: Filters): boolean {
+export function boardTaskMatchesFilters(task: BoardTask, filters: Filters): boolean {
   const query = filters.query.trim().toLowerCase();
   if (query) {
     const haystack = [task.id, task.title, task.summary, task.status, task.branch || "", task.reason, task.proof]
@@ -6445,7 +6371,7 @@ function boardTaskMatchesFilters(task: BoardTask, filters: Filters): boolean {
   return true;
 }
 
-function boardTaskMatchesOutcome(task: BoardTask, outcome: OutcomeFilter): boolean {
+export function boardTaskMatchesOutcome(task: BoardTask, outcome: OutcomeFilter): boolean {
   const status = task.status.toLowerCase();
   if (outcome === "success") return ["ready", "landed", "done", "success"].some((value) => status.includes(value));
   if (outcome === "failed") return status.includes("failed") || task.stage === "attention";
@@ -6456,7 +6382,7 @@ function boardTaskMatchesOutcome(task: BoardTask, outcome: OutcomeFilter): boole
   return true;
 }
 
-function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllowed: boolean, live?: LiveRunItem): BoardTask {
+export function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllowed: boolean, live?: LiveRunItem): BoardTask {
   const stage = boardStageForLanding(item, mergeAllowed);
   const active = Boolean(live?.active) || isActiveQueueStatus(item.queue_status);
   return {
@@ -6483,12 +6409,12 @@ function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllo
   };
 }
 
-function landingDurationDisplay(item: LandingItem): string | null {
+export function landingDurationDisplay(item: LandingItem): string | null {
   if (!["done", "failed", "cancelled", "interrupted", "removed"].includes(item.queue_status)) return null;
   return typeof item.duration_s === "number" ? formatDuration(item.duration_s) : null;
 }
 
-function boardTaskFromLive(item: LiveRunItem): BoardTask {
+export function boardTaskFromLive(item: LiveRunItem): BoardTask {
   const stage: BoardStage = item.active ? "working" : isAttentionStatus(item.display_status) ? "attention" : "working";
   return {
     id: item.queue_task_id || item.run_id,
@@ -6514,20 +6440,20 @@ function boardTaskFromLive(item: LiveRunItem): BoardTask {
   };
 }
 
-function boardStageForLanding(item: LandingItem, mergeAllowed: boolean): BoardStage {
+export function boardStageForLanding(item: LandingItem, mergeAllowed: boolean): BoardStage {
   if (item.landing_state === "merged") return "landed";
   if (item.landing_state === "ready") return mergeAllowed ? "ready" : "attention";
   if (isWaitingLandingItem(item)) return "working";
   return "attention";
 }
 
-function boardStatusLabel(item: LandingItem, mergeAllowed: boolean): string {
+export function boardStatusLabel(item: LandingItem, mergeAllowed: boolean): string {
   if (item.landing_state === "ready") return mergeAllowed ? "ready" : "blocked";
   if (item.landing_state === "merged") return "landed";
   return item.queue_status || item.landing_state || "blocked";
 }
 
-function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean, live?: LiveRunItem): string {
+export function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean, live?: LiveRunItem): string {
   if (item.landing_state === "ready" && !mergeAllowed) return "Repository cleanup required before landing.";
   if (item.landing_state === "ready") return `${changeLine(item)} changed; ${proofLine(item)} recorded.`;
   if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";
@@ -6543,7 +6469,7 @@ function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean, live?: 
   return "Not ready to land yet.";
 }
 
-function taskChangeLine(task: BoardTask): string {
+export function taskChangeLine(task: BoardTask): string {
   if (task.changedFileCount === null) return "diff pending";
   if (task.stage === "working" && task.status.toLowerCase() === "queued") return "not built yet";
   if (task.stage === "working") return "diff pending";
@@ -6551,13 +6477,13 @@ function taskChangeLine(task: BoardTask): string {
   return `${task.changedFileCount} file${task.changedFileCount === 1 ? "" : "s"}`;
 }
 
-function taskProofMeta(task: BoardTask): string {
+export function taskProofMeta(task: BoardTask): string {
   const proof = task.proof.trim();
   if (task.active && ["running", "starting", "initializing"].includes(proof.toLowerCase())) return "";
   return proof;
 }
 
-function taskConfigChip(task: BoardTask): string {
+export function taskConfigChip(task: BoardTask): string {
   const config = task.buildConfig;
   if (!config) return "";
   const primaryAgent = primaryAgentConfig(config);
@@ -6569,7 +6495,7 @@ function taskConfigChip(task: BoardTask): string {
   return [mode, provider, planning, cert, timeout].filter(Boolean).join(" · ");
 }
 
-function taskConfigSummary(config: RunBuildConfig | null): string {
+export function taskConfigSummary(config: RunBuildConfig | null): string {
   if (!config) return "No build config recorded.";
   return [
     config.split_mode ? "split mode" : "agentic mode",
@@ -6580,11 +6506,11 @@ function taskConfigSummary(config: RunBuildConfig | null): string {
   ].filter(Boolean).join(" · ");
 }
 
-function isActiveQueueStatus(status: string): boolean {
+export function isActiveQueueStatus(status: string): boolean {
   return ["initializing", "starting", "running", "terminating"].includes(status);
 }
 
-function liveEventLabel(task: BoardTask): string | null {
+export function liveEventLabel(task: BoardTask): string | null {
   const event = String(task.lastEvent || "").trim();
   if (!event || event === "-") return null;
   const normalized = event.toLowerCase();
@@ -6593,13 +6519,13 @@ function liveEventLabel(task: BoardTask): string | null {
   return shortText(event, 56);
 }
 
-function progressLabel(task: BoardTask): string | null {
+export function progressLabel(task: BoardTask): string | null {
   const progress = String(task.progress || "").trim();
   if (!task.active || !progress) return null;
   return shortText(progress, 110);
 }
 
-function activeRunSummary(data: StateResponse | null): {label: string; detail: string} | null {
+export function activeRunSummary(data: StateResponse | null): {label: string; detail: string} | null {
   if (!data) return null;
   const active = data.live.items.filter((item) => item.active);
   if (!active.length) return null;
@@ -6610,7 +6536,7 @@ function activeRunSummary(data: StateResponse | null): {label: string; detail: s
     const status = titleCase(item.display_status || item.status || "running");
     return {label, detail: [status, item.elapsed_display].filter(Boolean).join(" · ")};
   }
-  return {label: `${active.length} active runs`, detail: "Detailed progress is shown on each task card."};
+  return {label: `${active.length} active runs`, detail: ""};
 }
 
 // mc-audit info-density #2: typed chip data for the task card meta row.
@@ -6648,8 +6574,15 @@ export function computeTaskChips(task: BoardTask): TaskChip[] {
       tooltip: passed === tested ? "All certifier stories passed" : "Certifier story results",
     });
   }
-  // Cost chip — only when a non-null cost display is available.
-  if (task.costDisplay && task.costDisplay !== "-" && task.costDisplay.trim() !== "") {
+  // Cost chip — only when a non-null cost display is available, and it is
+  // not the placeholder "$0.00" that means "no cost data recorded" (the
+  // backend emits exactly $0.00 when cost was not captured).
+  if (
+    task.costDisplay
+    && task.costDisplay !== "-"
+    && task.costDisplay.trim() !== ""
+    && task.costDisplay.replace(/^\$/, "").replace(/\.0+$/, "") !== "0"
+  ) {
     chips.push({
       kind: "cost",
       icon: "$",
@@ -6734,14 +6667,14 @@ export function statusTone(
   return "neutral";
 }
 
-function compareBoardTasks(left: BoardTask, right: BoardTask): number {
+export function compareBoardTasks(left: BoardTask, right: BoardTask): number {
   const stageOrder: Record<BoardStage, number> = {attention: 0, ready: 1, working: 2, landed: 3};
   const byStage = stageOrder[left.stage] - stageOrder[right.stage];
   if (byStage) return byStage;
   return left.title.localeCompare(right.title);
 }
 
-function taskBoardSubtitle(data: StateResponse | null, filters: Filters = defaultFilters): string {
+export function taskBoardSubtitle(data: StateResponse | null, filters: Filters = defaultFilters): string {
   if (!data) return "Loading tasks.";
   const total = taskBoardColumns(data, filters).reduce((sum, column) => sum + column.items.length, 0);
   if (!total) {
@@ -6755,14 +6688,14 @@ function taskBoardSubtitle(data: StateResponse | null, filters: Filters = defaul
     return "No work queued.";
   }
   const target = data.landing.target || "main";
-  return `${total} visible task${total === 1 ? "" : "s"} for ${target}.`;
+  return `${total} task${total === 1 ? "" : "s"} on ${target}.`;
 }
 
-function testIdForTask(taskId: string): string {
+export function testIdForTask(taskId: string): string {
   return `task-card-${taskId.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
 }
 
-function visibleRunIds(data: StateResponse): Set<string> {
+export function visibleRunIds(data: StateResponse): Set<string> {
   return new Set([
     ...data.live.items.map((item) => item.run_id),
     ...data.landing.items.map((item) => item.run_id).filter((value): value is string => Boolean(value)),
@@ -6809,7 +6742,7 @@ export function dedupeLiveAgainstHistory(data: StateResponse): StateResponse {
   };
 }
 
-function refreshIntervalMs(data: StateResponse | null): number {
+export function refreshIntervalMs(data: StateResponse | null): number {
   return Math.max(700, Math.min(5000, Number(data?.live.refresh_interval_s || 1.5) * 1000));
 }
 
@@ -6824,7 +6757,7 @@ export function domainLabel(domain: string | null | undefined): string {
   return domain;
 }
 
-function activeCount(watcher?: WatcherInfo): number {
+export function activeCount(watcher?: WatcherInfo): number {
   const counts = watcher?.counts || {};
   return Number(counts.running || 0)
     + Number(counts.initializing || 0)
@@ -6853,7 +6786,7 @@ export function isProjectFirstRun(data: StateResponse | null | undefined): boole
     && running === 0;
 }
 
-function canStartWatcher(data?: StateResponse | null): boolean {
+export function canStartWatcher(data?: StateResponse | null): boolean {
   const queued = Number(data?.watcher.counts.queued || 0);
   const backlog = Number(data?.runtime.command_backlog.pending || 0) + Number(data?.runtime.command_backlog.processing || 0);
   return Boolean(data?.runtime.supervisor.can_start && (queued > 0 || backlog > 0));
@@ -6865,7 +6798,7 @@ function canStartWatcher(data?: StateResponse | null): boolean {
 // control. That read as "do this to start" — the opposite of what the
 // disabled state meant. Compose a Start-specific tooltip so the title and
 // the visible label agree.
-function startWatcherTooltip(data?: StateResponse | null): string {
+export function startWatcherTooltip(data?: StateResponse | null): string {
   const blocked = data?.runtime.supervisor.start_blocked_reason || "";
   if (blocked) return blocked;
   if (data?.watcher.health.state === "running") return "Watcher already running.";
@@ -6875,11 +6808,11 @@ function startWatcherTooltip(data?: StateResponse | null): string {
   return data?.watcher.health.next_action || "";
 }
 
-function canStopWatcher(data?: StateResponse | null): boolean {
+export function canStopWatcher(data?: StateResponse | null): boolean {
   return Boolean(data?.runtime.supervisor.can_stop);
 }
 
-function watcherControlHint(data?: StateResponse | null): string {
+export function watcherControlHint(data?: StateResponse | null): string {
   if (!data) return "Loading watcher controls.";
   const queued = Number(data.watcher.counts.queued || 0);
   const backlog = Number(data.runtime.command_backlog.pending || 0) + Number(data.runtime.command_backlog.processing || 0);
@@ -6887,94 +6820,41 @@ function watcherControlHint(data?: StateResponse | null): string {
     const work = [queued ? `${queued} queued` : "", backlog ? `${backlog} command${backlog === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ");
     return `Start watcher to process ${work}.`;
   }
-  if (canStopWatcher(data)) return "Watcher is running; stop it only when you need to pause queue processing.";
+  if (canStopWatcher(data)) return "Running. Stop to pause the queue.";
   if (data.runtime.supervisor.start_blocked_reason) return `Start unavailable: ${data.runtime.supervisor.start_blocked_reason}`;
-  if (!queued && !backlog) return "Queue a job before starting the watcher.";
+  if (!queued && !backlog) return "Queue a job to start.";
   return data.watcher.health.next_action || "Watcher controls are unavailable.";
 }
 
-function watcherSummary(watcher?: WatcherInfo): string {
+export function watcherSummary(watcher?: WatcherInfo): string {
   const health = watcher?.health;
   if (!health) return "stopped";
+  // mc-audit redesign §5 W5.3: when the backend still reports "running" but
+  // the heartbeat hasn't ticked in >15s, the supervisor process may have
+  // crashed silently. Auto-flip the user-facing label to "stale" so the
+  // sidebar can't lie. Backend "stale" already works; this guard catches
+  // the gap between liveness and the next snapshot. */
+  const stale = health.heartbeat_age_s !== null && health.heartbeat_age_s !== undefined && health.heartbeat_age_s > 15;
+  if (health.state === "running" && stale) {
+    return `stale pid ${health.blocking_pid || "-"} (${Math.round(health.heartbeat_age_s || 0)}s)`;
+  }
   if (health.state === "running") return `running pid ${health.blocking_pid || "-"}`;
   if (health.state === "stale") return `stale pid ${health.blocking_pid || "-"}`;
   return "stopped";
 }
 
-function commandBacklogLine(command: CommandBacklogItem): string {
+export function commandBacklogLine(command: CommandBacklogItem): string {
   const id = command.command_id || "command id unknown";
   const target = command.run_id || command.task_id || command.command_id || "target unknown";
   const age = command.age_s === null || command.age_s === undefined ? "" : ` · ${formatDuration(command.age_s)} old`;
   return `${id} · ${target}${age}`;
 }
 
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.round((seconds % 3600) / 60);
-  return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
-}
+// formatDuration / tokenBreakdownLine / usageLine / storyTotalsFromLanding /
+// tokenTotal / formatCompactNumber moved to utils/format.ts
+// during mc-audit redesign Wave 8.
 
-function tokenBreakdownLine(tokenUsage?: StateResponse["project_stats"]["token_usage"]): string {
-  if (!tokenUsage) return "No token usage recorded";
-  const input = Number(tokenUsage.input_tokens || 0);
-  const cacheRead = Number(tokenUsage.cache_read_input_tokens || 0);
-  const cacheWrite = Number(tokenUsage.cache_creation_input_tokens || 0);
-  const cachedSubset = cacheRead || cacheWrite ? 0 : Number(tokenUsage.cached_input_tokens || 0);
-  const output = Number(tokenUsage.output_tokens || 0);
-  const reasoning = Number(tokenUsage.reasoning_tokens || 0);
-  const parts = [
-    input ? `${formatCompactNumber(input)} input` : "",
-    cacheRead ? `${formatCompactNumber(cacheRead)} cache read` : "",
-    cacheWrite ? `${formatCompactNumber(cacheWrite)} cache write` : "",
-    cachedSubset ? `${formatCompactNumber(cachedSubset)} cached` : "",
-    output ? `${formatCompactNumber(output)} output` : "",
-    reasoning ? `${formatCompactNumber(reasoning)} reasoning` : "",
-  ].filter(Boolean);
-  return parts.length ? parts.join(" · ") : "No token usage recorded";
-}
-
-function usageLine(item: HistoryItem): string {
-  const tokens = tokenTotal(item.token_usage);
-  const cost = item.cost_usd && item.cost_usd > 0 ? `$${item.cost_usd.toFixed(2)}` : "";
-  const tokenText = tokens ? `${formatCompactNumber(tokens)} tokens` : item.cost_display || "";
-  return [tokenText, cost && cost !== tokenText ? cost : ""].filter(Boolean).join(" · ") || "-";
-}
-
-function storyTotalsFromLanding(items: LandingItem[]): {passed: number; tested: number} {
-  return items.reduce(
-    (totals, item) => {
-      totals.passed += Number(item.stories_passed || 0);
-      totals.tested += Number(item.stories_tested || 0);
-      return totals;
-    },
-    {passed: 0, tested: 0},
-  );
-}
-
-function tokenTotal(tokenUsage?: StateResponse["project_stats"]["token_usage"]): number {
-  if (!tokenUsage) return 0;
-  const explicit = Number(tokenUsage.total_tokens || 0);
-  if (explicit > 0) return explicit;
-  const cacheCreation = Number(tokenUsage.cache_creation_input_tokens || 0);
-  const cacheRead = Number(tokenUsage.cache_read_input_tokens || 0);
-  const derived = Number(tokenUsage.input_tokens || 0)
-    + cacheCreation
-    + cacheRead
-    + Number(tokenUsage.output_tokens || 0)
-    + Number(tokenUsage.reasoning_tokens || 0);
-  return Math.max(explicit, derived);
-}
-
-function formatCompactNumber(value: number): string {
-  const amount = Math.max(Number(value || 0), 0);
-  if (amount >= 1_000_000) return `${(amount / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (amount >= 1_000) return `${(amount / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
-  return String(Math.round(amount));
-}
-
-function workflowHealth(data: StateResponse | null): {
+export function workflowHealth(data: StateResponse | null): {
   active: number;
   needsAttention: number;
   ready: number;
@@ -7026,7 +6906,7 @@ function workflowHealth(data: StateResponse | null): {
   return {active, needsAttention, ready, repositoryLabel, repositoryTone, watcherLabel, watcherTone, runtimeLabel, runtimeTone};
 }
 
-function selectOnKeyboard(event: {key: string; preventDefault: () => void}, onSelect: () => void) {
+export function selectOnKeyboard(event: {key: string; preventDefault: () => void}, onSelect: () => void) {
   if (event.key !== "Enter" && event.key !== " ") return;
   event.preventDefault();
   onSelect();
@@ -7041,7 +6921,7 @@ function selectOnKeyboard(event: {key: string; preventDefault: () => void}, onSe
  * A11Y-02). `inert` removes the entire subtree from focus, click, and AT
  * tree — exactly the semantics we want.
  */
-function InertEffect({active, selector}: {active: boolean; selector: string}) {
+export function InertEffect({active, selector}: {active: boolean; selector: string}) {
   useEffect(() => {
     if (typeof document === "undefined") return;
     const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector));
@@ -7065,7 +6945,7 @@ function InertEffect({active, selector}: {active: boolean; selector: string}) {
 /**
  * Polite singleton aria-live region. mc-audit a11y A11Y-10.
  */
-function LiveRegion({message}: {message: string}) {
+export function LiveRegion({message}: {message: string}) {
   return (
     <div
       id="mc-live-region"
@@ -7083,7 +6963,7 @@ function LiveRegion({message}: {message: string}) {
 /**
  * Per-view document.title. mc-audit a11y A11Y-09.
  */
-function useDocumentTitle({viewMode, selectedRunId, selectedDetail, inspectorOpen, inspectorMode}: {
+export function useDocumentTitle({viewMode, selectedRunId, selectedDetail, inspectorOpen, inspectorMode}: {
   viewMode: ViewMode;
   selectedRunId: string | null;
   selectedDetail: RunDetail | null;
@@ -7110,7 +6990,7 @@ function useDocumentTitle({viewMode, selectedRunId, selectedDetail, inspectorOpe
 /**
  * Live-region message generator. mc-audit a11y A11Y-10.
  */
-function useLiveAnnouncement({viewMode, selectedRunId, inspectorOpen, inspectorMode}: {
+export function useLiveAnnouncement({viewMode, selectedRunId, inspectorOpen, inspectorMode}: {
   viewMode: ViewMode;
   selectedRunId: string | null;
   inspectorOpen: boolean;
@@ -7130,7 +7010,7 @@ function useLiveAnnouncement({viewMode, selectedRunId, inspectorOpen, inspectorM
   }, [viewMode, selectedRunId, inspectorOpen, inspectorMode]);
 }
 
-function useDialogFocus<T extends HTMLElement>(onCancel: () => void, disabled: boolean) {
+export function useDialogFocus<T extends HTMLElement>(onCancel: () => void, disabled: boolean) {
   const dialogRef = useRef<T | null>(null);
   const onCancelRef = useRef(onCancel);
   const disabledRef = useRef(disabled);
@@ -7148,8 +7028,13 @@ function useDialogFocus<T extends HTMLElement>(onCancel: () => void, disabled: b
     if (!dialog) return;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     window.setTimeout(() => {
-      const first = focusableDialogElements(dialog)[0] || dialog;
-      first.focus();
+      // Prefer the currently-selected tab if there is one (so a tabbed
+      // dialog opens with focus on the active tab rather than the first
+      // visible button — mc-audit redesign §6 D12). Falls back to the
+      // first focusable element.
+      const selectedTab = dialog.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]:not([disabled])');
+      const target = selectedTab || focusableDialogElements(dialog)[0] || dialog;
+      target.focus();
     }, 0);
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -7187,7 +7072,7 @@ function useDialogFocus<T extends HTMLElement>(onCancel: () => void, disabled: b
   return dialogRef;
 }
 
-function focusableDialogElements(root: HTMLElement): HTMLElement[] {
+export function focusableDialogElements(root: HTMLElement): HTMLElement[] {
   const selector = [
     "button:not([disabled])",
     "input:not([disabled])",
@@ -7202,7 +7087,7 @@ function focusableDialogElements(root: HTMLElement): HTMLElement[] {
   });
 }
 
-function handleActionResult(
+export function handleActionResult(
   result: ActionResult,
   fallback: string,
   showToast: (message: string, severity?: ToastState["severity"]) => void,
@@ -7226,22 +7111,22 @@ function handleActionResult(
   showToast(message, severity);
 }
 
-function actionToastSeverity(result: ActionResult): ToastState["severity"] {
+export function actionToastSeverity(result: ActionResult): ToastState["severity"] {
   const severity = String(result.severity || "").toLowerCase();
   if (severity === "error") return "error";
   if (severity === "warning") return "warning";
   return result.ok ? "information" : "warning";
 }
 
-function isAttentionStatus(status: string | null | undefined): boolean {
+export function isAttentionStatus(status: string | null | undefined): boolean {
   return ["failed", "cancelled", "interrupted", "stale"].includes(String(status || "").toLowerCase());
 }
 
-function canMerge(landing?: LandingState): boolean {
+export function canMerge(landing?: LandingState): boolean {
   return Boolean(landing && landing.counts.ready > 0 && !landing.merge_blocked);
 }
 
-function canResolveRelease(data?: StateResponse | null): boolean {
+export function canResolveRelease(data?: StateResponse | null): boolean {
   const landing = data?.landing;
   if (!landing) return false;
   if (mergeRecoveryNeeded(landing)) return true;
@@ -7249,24 +7134,24 @@ function canResolveRelease(data?: StateResponse | null): boolean {
   return supersededFailedTaskIds(landing).length > 0;
 }
 
-function mergeRecoveryNeeded(landing?: LandingState): boolean {
+export function mergeRecoveryNeeded(landing?: LandingState): boolean {
   if (!landing?.merge_blocked) return false;
   const blockers = landing.merge_blockers.join(" ").toLowerCase();
   return blockers.includes("merge in progress") || blockers.includes("unmerged path");
 }
 
-function mergeButtonTitle(landing?: LandingState): string {
+export function mergeButtonTitle(landing?: LandingState): string {
   if (mergeRecoveryNeeded(landing)) return "Recover or abort the interrupted landing before merging.";
   return landing?.merge_blocked ? "Commit, stash, or revert local project changes before merging." : "";
 }
 
-function mergeBlockedText(landing: LandingState): string {
+export function mergeBlockedText(landing: LandingState): string {
   if (mergeRecoveryNeeded(landing)) return "Landing is blocked by an interrupted git merge. Use Recover landing.";
   const suffix = landing.dirty_files.length ? `: ${landing.dirty_files.slice(0, 3).join(", ")}` : "";
   return `Merge blocked by local changes${suffix}`;
 }
 
-function landingBulkConfirmation(landing?: LandingState): string {
+export function landingBulkConfirmation(landing?: LandingState): string {
   const ready = (landing?.items || []).filter((item) => item.landing_state === "ready");
   const target = landing?.target || "main";
   const taskList = ready.slice(0, 5).map((item) => item.task_id).join(", ");
@@ -7279,7 +7164,7 @@ function landingBulkConfirmation(landing?: LandingState): string {
   return `Land ${ready.length} ready task${ready.length === 1 ? "" : "s"} into ${target}: ${taskList}${suffix}. This uses transactional fast merge, so ${target} updates only if every branch merges cleanly. It will stage ${changed} changed file${changed === 1 ? "" : "s"} across the ready work.${collisionNote}`;
 }
 
-function releaseResolutionConfirmation(data: StateResponse | null): string {
+export function releaseResolutionConfirmation(data: StateResponse | null): string {
   const landing = data?.landing;
   if (!landing) return "Otto will inspect release state and run the first safe recovery action it can prove.";
   if (mergeRecoveryNeeded(landing)) {
@@ -7297,7 +7182,7 @@ function releaseResolutionConfirmation(data: StateResponse | null): string {
   return "Otto will inspect release state and report if no safe automated action is available.";
 }
 
-function supersededFailedTaskIds(landing?: LandingState): string[] {
+export function supersededFailedTaskIds(landing?: LandingState): string[] {
   if (!landing) return [];
   const landed = new Set(
     landing.items
@@ -7313,19 +7198,19 @@ function supersededFailedTaskIds(landing?: LandingState): string[] {
     .map((item) => item.task_id);
 }
 
-function summarySignature(value: string | null | undefined): string {
+export function summarySignature(value: string | null | undefined): string {
   return String(value || "").trim().toLowerCase().replace(/\s+/g, " ").slice(0, 500);
 }
 
-function isWaitingLandingItem(item: LandingItem): boolean {
+export function isWaitingLandingItem(item: LandingItem): boolean {
   return item.landing_state === "blocked" && ["queued", "starting", "initializing", "running", "terminating"].includes(item.queue_status);
 }
 
-function providerLine(detail: RunDetail): string {
+export function providerLine(detail: RunDetail): string {
   return providerConfigLine(detail.build_config) || [detail.provider, detail.model, detail.reasoning_effort].filter(Boolean).join(" / ") || "-";
 }
 
-function providerConfigLine(config: RunBuildConfig | null | undefined): string {
+export function providerConfigLine(config: RunBuildConfig | null | undefined): string {
   if (!config) return "";
   const buildAgent = primaryAgentConfig(config);
   return [
@@ -7337,13 +7222,13 @@ function providerConfigLine(config: RunBuildConfig | null | undefined): string {
     .join(" / ");
 }
 
-function certificationLine(config: RunBuildConfig | null | undefined): string {
+export function certificationLine(config: RunBuildConfig | null | undefined): string {
   if (!config) return "-";
   if (config.skip_product_qa) return "Skipped product certification";
   return capitalize(config.certification || `${config.certifier_mode || "fast"} certification`);
 }
 
-function planningLine(config: RunBuildConfig | null | undefined): string {
+export function planningLine(config: RunBuildConfig | null | undefined): string {
   if (!config) return "";
   if (config.planning === "spec_review") return "Spec review gate";
   if (config.planning === "spec_auto") return "Spec auto-approved";
@@ -7351,7 +7236,7 @@ function planningLine(config: RunBuildConfig | null | undefined): string {
   return "";
 }
 
-function timeoutLine(config: RunBuildConfig | null | undefined): string {
+export function timeoutLine(config: RunBuildConfig | null | undefined): string {
   if (!config) return "-";
   return [
     config.queue?.task_timeout_s !== null && config.queue?.task_timeout_s !== undefined
@@ -7361,7 +7246,7 @@ function timeoutLine(config: RunBuildConfig | null | undefined): string {
   ].filter(Boolean).join(" · ");
 }
 
-function limitLine(config: RunBuildConfig | null | undefined): string {
+export function limitLine(config: RunBuildConfig | null | undefined): string {
   if (!config) return "-";
   return [
     config.max_certify_rounds ? `${config.max_certify_rounds} cert rounds` : "",
@@ -7369,7 +7254,7 @@ function limitLine(config: RunBuildConfig | null | undefined): string {
   ].filter(Boolean).join(" · ") || "-";
 }
 
-function flagsLine(config: RunBuildConfig | null | undefined): string {
+export function flagsLine(config: RunBuildConfig | null | undefined): string {
   if (!config) return "-";
   const flags = [
     config.split_mode ? "split mode" : "agentic mode",
@@ -7379,7 +7264,7 @@ function flagsLine(config: RunBuildConfig | null | undefined): string {
   return flags.length ? flags.join(" · ") : "default safeguards";
 }
 
-function agentsLine(config: RunBuildConfig | null | undefined): string {
+export function agentsLine(config: RunBuildConfig | null | undefined): string {
   const agents = config?.agents;
   if (!agents) return "-";
   const rows = agentRowsForConfig(config).map(([name, label]) => {
@@ -7390,13 +7275,13 @@ function agentsLine(config: RunBuildConfig | null | undefined): string {
   return rows.join(" · ");
 }
 
-function primaryAgentConfig(config: RunBuildConfig): AgentBuildConfig | undefined {
+export function primaryAgentConfig(config: RunBuildConfig): AgentBuildConfig | undefined {
   if (config.command_family === "certify") return config.agents?.certifier;
   if (config.command_family === "improve" && config.split_mode) return config.agents?.fix;
   return config.agents?.build;
 }
 
-function agentRowsForConfig(config: RunBuildConfig): Array<["build" | "certifier" | "spec" | "fix", string]> {
+export function agentRowsForConfig(config: RunBuildConfig): Array<["build" | "certifier" | "spec" | "fix", string]> {
   if (config.command_family === "certify") return [["certifier", "certifier"]];
   if (config.command_family === "improve") {
     return config.split_mode
@@ -7408,7 +7293,7 @@ function agentRowsForConfig(config: RunBuildConfig): Array<["build" | "certifier
     : [["build", "builder"]];
 }
 
-function projectConfigLine(config: RunBuildConfig | null | undefined): string {
+export function projectConfigLine(config: RunBuildConfig | null | undefined): string {
   if (!config) return "-";
   return [
     config.default_branch ? `target ${config.default_branch}` : "",
@@ -7419,7 +7304,7 @@ function projectConfigLine(config: RunBuildConfig | null | undefined): string {
   ].filter(Boolean).join(" · ") || "-";
 }
 
-function productKindHint(kind: string): string {
+export function productKindHint(kind: string): string {
   switch (kind) {
     case "web":
       return "Start the web server, open the local URL, and exercise the primary browser workflow.";
@@ -7440,24 +7325,24 @@ function productKindHint(kind: string): string {
   }
 }
 
-function shortPath(path: string | null | undefined): string {
+export function shortPath(path: string | null | undefined): string {
   if (!path) return "-";
   const parts = path.split("/");
   if (parts.length <= 4) return path;
   return `.../${parts.slice(-3).join("/")}`;
 }
 
-function detailStatusLabel(detail: RunDetail): string {
+export function detailStatusLabel(detail: RunDetail): string {
   const readiness = detail.review_packet.readiness.state;
   if (readiness === "blocked" || readiness === "merged") return readiness;
   return detail.display_status || "-";
 }
 
-function actionName(key: string): string {
+export function actionName(key: string): string {
   return {c: "cancel", r: "resume", R: "retry", x: "cleanup", m: "merge", M: "merge-all", a: "approve-spec", g: "regenerate-spec"}[key] || key;
 }
 
-function actionConfirmationBody(action: string, label?: string): string {
+export function actionConfirmationBody(action: string, label?: string): string {
   const normalized = (label || action).toLowerCase();
   if (action === "cancel") return "Cancel this run?";
   if (action === "merge") return "Land this task into the target branch?";
@@ -7474,7 +7359,7 @@ function actionConfirmationBody(action: string, label?: string): string {
 // We spell out branch + target with their captured SHAs so the operator
 // can compare against the diff metadata header before clicking through —
 // this is the human half of the diff-freshness contract.
-function mergeConfirmationBody(diff: DiffResponse): string {
+export function mergeConfirmationBody(diff: DiffResponse): string {
   const target = diff.target || "target";
   const branch = diff.branch || "branch";
   const targetSha = diff.target_sha ? diff.target_sha.slice(0, 7) : null;
@@ -7495,7 +7380,7 @@ function mergeConfirmationBody(diff: DiffResponse): string {
 //   #5 Watcher stop: pid + running/queued/backlog counts
 // --------------------------------------------------------------------------
 
-function BulkLandingConfirmList({items, target}: {
+export function BulkLandingConfirmList({items, target}: {
   items: LandingItem[];
   target: string;
 }) {
@@ -7542,7 +7427,7 @@ function BulkLandingConfirmList({items, target}: {
   );
 }
 
-function SingleMergeConfirmDetails({detail, diff}: {
+export function SingleMergeConfirmDetails({detail, diff}: {
   detail: RunDetail | null;
   diff: DiffResponse | null;
 }) {
@@ -7583,7 +7468,7 @@ function SingleMergeConfirmDetails({detail, diff}: {
   );
 }
 
-function describeCleanupConfirm(detail: RunDetail | null): {
+export function describeCleanupConfirm(detail: RunDetail | null): {
   title: string;
   body: string;
   confirmLabel: string;
@@ -7614,7 +7499,7 @@ function describeCleanupConfirm(detail: RunDetail | null): {
   };
 }
 
-function describeCancelConfirm(detail: RunDetail | null, runId: string): {
+export function describeCancelConfirm(detail: RunDetail | null, runId: string): {
   title: string;
   body: string;
   confirmLabel: string;
@@ -7628,7 +7513,7 @@ function describeCancelConfirm(detail: RunDetail | null, runId: string): {
   };
 }
 
-function describeWatcherStopConfirm(data: StateResponse | null): {
+export function describeWatcherStopConfirm(data: StateResponse | null): {
   body: string;
   detail: ReactNode;
   requireAck: boolean;
@@ -7678,7 +7563,7 @@ function describeWatcherStopConfirm(data: StateResponse | null): {
   return {body, detail, requireAck};
 }
 
-function proofLine(item: LandingItem): string {
+export function proofLine(item: LandingItem): string {
   const passed = Number(item.stories_passed || 0);
   const tested = Number(item.stories_tested || 0);
   if (tested) return `${passed}/${tested} stories`;
@@ -7686,7 +7571,7 @@ function proofLine(item: LandingItem): string {
   return "-";
 }
 
-function evidenceLine(packet: RunDetail["review_packet"]): string {
+export function evidenceLine(packet: RunDetail["review_packet"]): string {
   if (packet.readiness.state === "in_progress") return "-";
   if (isRepositoryBlockedPacket(packet)) return "-";
   const reviewEvidence = packet.evidence.filter(isReviewEvidenceArtifact);
@@ -7696,7 +7581,7 @@ function evidenceLine(packet: RunDetail["review_packet"]): string {
   return `${existing}/${reviewEvidence.length}`;
 }
 
-function preferredProofArtifact(artifacts: ArtifactRef[]): ArtifactRef | null {
+export function preferredProofArtifact(artifacts: ArtifactRef[]): ArtifactRef | null {
   const existing = artifacts.filter(isReadableArtifact);
   if (!existing.length) return null;
   const preferredLabels = ["proof markdown", "proof json", "summary", "queue manifest", "manifest", "primary log", "intent"];
@@ -7714,7 +7599,7 @@ function preferredProofArtifact(artifacts: ArtifactRef[]): ArtifactRef | null {
  * cancel, instead of waiting for the next /api/state poll. The original
  * server item is otherwise untouched.
  */
-function applyOptimisticRunStates(
+export function applyOptimisticRunStates(
   items: LiveRunItem[],
   overlays: Record<string, "cancelling">,
 ): LiveRunItem[] {
@@ -7731,7 +7616,7 @@ function applyOptimisticRunStates(
   });
 }
 
-function canShowDiff(detail: RunDetail | null): boolean {
+export function canShowDiff(detail: RunDetail | null): boolean {
   if (!detail) return false;
   const packet = detail.review_packet;
   if (!packet.changes.branch || packet.changes.diff_error) return false;
@@ -7743,7 +7628,7 @@ function canShowDiff(detail: RunDetail | null): boolean {
  * on every Diff button so operators are not left guessing why the control is
  * grey (mc-audit microinteractions C4).
  */
-function diffDisabledReason(detail: RunDetail | null): string {
+export function diffDisabledReason(detail: RunDetail | null): string {
   if (!detail) return "Select a run to view its diff.";
   const packet = detail.review_packet;
   if (packet.changes.diff_error) return `Diff failed: ${packet.changes.diff_error}`;
@@ -7752,15 +7637,15 @@ function diffDisabledReason(detail: RunDetail | null): string {
   return "Diff is not available for this run.";
 }
 
-function isReadableArtifact(artifact: ArtifactRef): boolean {
+export function isReadableArtifact(artifact: ArtifactRef): boolean {
   return artifact.exists && artifact.kind !== "directory";
 }
 
-function isReviewEvidenceArtifact(artifact: ArtifactRef): boolean {
+export function isReviewEvidenceArtifact(artifact: ArtifactRef): boolean {
   return artifact.kind !== "directory";
 }
 
-function isLogArtifact(artifact: ArtifactRef | null): boolean {
+export function isLogArtifact(artifact: ArtifactRef | null): boolean {
   if (!artifact) return false;
   const kind = artifact.kind.toLowerCase();
   const label = artifact.label.toLowerCase();
@@ -7768,7 +7653,7 @@ function isLogArtifact(artifact: ArtifactRef | null): boolean {
   return kind === "log" || label.includes("log") || path.endsWith(".log");
 }
 
-function artifactKindLabel(artifact: ArtifactRef): string {
+export function artifactKindLabel(artifact: ArtifactRef): string {
   if (!artifact.exists) return `${artifact.kind} (missing)`;
   if (artifact.kind === "directory") return "directory - use Diff for code review";
   if (artifact.kind === "html") return "HTML report";
@@ -7779,7 +7664,7 @@ function artifactKindLabel(artifact: ArtifactRef): string {
   return artifact.kind;
 }
 
-function formatArtifactContent(content: string): string {
+export function formatArtifactContent(content: string): string {
   const trimmed = content.trim();
   if (!trimmed) return "";
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return content;
@@ -7790,7 +7675,7 @@ function formatArtifactContent(content: string): string {
   }
 }
 
-function renderDiffText(text: string) {
+export function renderDiffText(text: string) {
   return text.split(/(\n)/).map((part, index) => {
     if (part === "\n") return part;
     const className = diffLineClass(part);
@@ -7803,7 +7688,7 @@ interface DiffFileSection {
   text: string;
 }
 
-function splitDiffIntoFiles(text: string, files: string[]): DiffFileSection[] {
+export function splitDiffIntoFiles(text: string, files: string[]): DiffFileSection[] {
   const sections: DiffFileSection[] = [];
   let current: DiffFileSection | null = null;
   const lines = text ? text.split("\n") : [];
@@ -7823,7 +7708,7 @@ function splitDiffIntoFiles(text: string, files: string[]): DiffFileSection[] {
   return files.map((path) => ({path, text: ""}));
 }
 
-function diffLineClass(line: string): string {
+export function diffLineClass(line: string): string {
   if (line.startsWith("@@")) return "diff-hunk";
   if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ")) return "diff-meta";
   if (line.startsWith("+")) return "diff-add";
@@ -7831,7 +7716,7 @@ function diffLineClass(line: string): string {
   return "diff-context";
 }
 
-function renderLogText(text: string) {
+export function renderLogText(text: string) {
   const lines = text.split("\n");
   return lines.map((line, index) => (
     <span className={`log-line ${logLineClass(line)}`} key={`log-${index}`}>
@@ -7841,7 +7726,7 @@ function renderLogText(text: string) {
   ));
 }
 
-function logLineClass(line: string): string {
+export function logLineClass(line: string): string {
   const clean = stripAnsi(line).toLowerCase();
   if (/(— .*starting —|— .*complete —|certify round|fix round|run summary|━━━)/.test(clean)) return "log-line-phase";
   if (/(\bfatal\b|\berror\b|traceback|exception|\bfailed\b|\bfail\b|exit code [1-9])/.test(clean)) return "log-line-error";
@@ -7851,11 +7736,11 @@ function logLineClass(line: string): string {
   return "log-line-muted";
 }
 
-function stripAnsi(text: string): string {
+export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-function renderAnsiText(text: string) {
+export function renderAnsiText(text: string) {
   const segments: ReactNode[] = [];
   const pattern = /\x1b\[([0-9;]*)m/g;
   let lastIndex = 0;
@@ -7874,7 +7759,7 @@ function renderAnsiText(text: string) {
   return segments.length ? segments : text;
 }
 
-function appendAnsiSegment(segments: ReactNode[], text: string, style: {fg: string; bold: boolean}, key: number) {
+export function appendAnsiSegment(segments: ReactNode[], text: string, style: {fg: string; bold: boolean}, key: number) {
   if (!text) return;
   const className = [style.fg ? `ansi-${style.fg}` : "", style.bold ? "ansi-bold" : ""].filter(Boolean).join(" ");
   if (!className) {
@@ -7884,7 +7769,7 @@ function appendAnsiSegment(segments: ReactNode[], text: string, style: {fg: stri
   segments.push(<span className={className} key={`ansi-${key}`}>{text}</span>);
 }
 
-function applyAnsiCodes(current: {fg: string; bold: boolean}, rawCodes: string): {fg: string; bold: boolean} {
+export function applyAnsiCodes(current: {fg: string; bold: boolean}, rawCodes: string): {fg: string; bold: boolean} {
   const codes = rawCodes.split(";").filter(Boolean).map((code) => Number(code));
   if (!codes.length) return {fg: "", bold: false};
   let next = {...current};
@@ -7917,11 +7802,11 @@ const ANSI_COLOR_CLASS: Record<number, string> = {
   97: "white",
 };
 
-function isRepositoryBlockedPacket(packet: RunDetail["review_packet"]): boolean {
+export function isRepositoryBlockedPacket(packet: RunDetail["review_packet"]): boolean {
   return packet.readiness.blockers.some((blocker) => blocker.startsWith("Repository has local changes"));
 }
 
-function runEventText(item: LiveRunItem, landingByTask: Map<string, LandingItem>): string {
+export function runEventText(item: LiveRunItem, landingByTask: Map<string, LandingItem>): string {
   const landingItem = item.queue_task_id ? landingByTask.get(item.queue_task_id) : undefined;
   if (landingItem?.landing_state === "ready") return "Ready for review";
   if (landingItem?.landing_state === "merged") return "Landed";
@@ -7930,14 +7815,14 @@ function runEventText(item: LiveRunItem, landingByTask: Map<string, LandingItem>
   return item.last_event || "-";
 }
 
-function landingStateText(item: LandingItem): string {
+export function landingStateText(item: LandingItem): string {
   if (item.landing_state === "ready") return "Ready to land";
   if (item.landing_state === "merged") return "Landed";
   if (isWaitingLandingItem(item)) return item.queue_status === "queued" ? "Queued" : "In progress";
   return item.label || "Needs action";
 }
 
-function diagnosticLandingAction(item: LandingItem): string {
+export function diagnosticLandingAction(item: LandingItem): string {
   if (item.landing_state === "ready") return `${changeLine(item)} changed; review evidence before landing.`;
   if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";
   if (item.queue_status === "queued") return "Start the watcher to run this task.";
@@ -7947,14 +7832,14 @@ function diagnosticLandingAction(item: LandingItem): string {
   return "Open review packet for next action.";
 }
 
-function changeLine(item: LandingItem): string {
+export function changeLine(item: LandingItem): string {
   if (item.diff_error) return "diff error";
   const count = Number(item.changed_file_count || 0);
   if (!count) return "-";
   return `${count} file${count === 1 ? "" : "s"}`;
 }
 
-function timelineSubtitle(events?: StateResponse["events"]): string {
+export function timelineSubtitle(events?: StateResponse["events"]): string {
   if (!events || !events.total_count) return "Queue, watcher, merge, and recovery actions appear here.";
   // mc-audit codex-first-time-user #26: "malformed" → "unreadable" in user-facing copy.
   const malformed = events.malformed_count ? ` / ${events.malformed_count} unreadable` : "";
@@ -7962,27 +7847,16 @@ function timelineSubtitle(events?: StateResponse["events"]): string {
   return `Recent ${Math.min(events.items.length, events.limit)} of ${scope}${malformed}.`;
 }
 
-function eventTargetLine(event: MissionEvent): string {
+export function eventTargetLine(event: MissionEvent): string {
   const target = [event.task_id ? `task ${event.task_id}` : "", event.run_id ? `run ${event.run_id}` : ""]
     .filter(Boolean)
     .join(" / ");
   return [event.kind, target].filter(Boolean).join(" - ") || "-";
 }
 
-function formatEventTime(value: string): string {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-}
+// formatEventTime / storiesLine moved to utils/format.ts (Wave 8).
 
-function storiesLine(packet: RunDetail["review_packet"]): string {
-  const tested = Number(packet.certification.stories_tested || 0);
-  const passed = Number(packet.certification.stories_passed || 0);
-  return tested ? `${passed}/${tested}` : "-";
-}
-
-function reviewActionLabel(label: string): string {
+export function reviewActionLabel(label: string): string {
   const normalized = label.toLowerCase();
   if (normalized === "merge selected") return "Land selected";
   if (normalized === "cleanup") return "Clean run record";
@@ -7990,33 +7864,24 @@ function reviewActionLabel(label: string): string {
   return normalized.includes("merge") ? "Land task" : capitalize(label);
 }
 
-function formatReviewText(message: string): string {
+export function formatReviewText(message: string): string {
   return formatTechnicalIssue(message);
 }
 
-function userVisibleDetailLine(line: string): string | null {
+export function userVisibleDetailLine(line: string): string | null {
   const normalized = line.toLowerCase();
   if (normalized.startsWith("compat:")) return null;
   return line.replace("legacy queue mode", "queue compatibility mode");
 }
 
-function formatTechnicalIssue(message: string): string {
-  const value = message.trim();
-  if (/unknown revision|ambiguous argument|bad revision|invalid object name/i.test(value)) {
-    return "Changed files could not be inspected because the source branch is missing or not reachable. Refresh after the task creates its branch, or remove and requeue the task.";
-  }
-  if (/working tree has|unstaged changes|uncommitted changes/i.test(value)) {
-    return "Repository has local changes. Commit, stash, or revert them before landing.";
-  }
-  return value;
-}
+// formatTechnicalIssue moved to utils/format.ts (Wave 8).
 
 // mc-audit visual-coherence F10 — status badges must NOT rely on colour
 // alone. Prefix every check/story badge with a glyph so deuteranopia /
 // protanopia users (~5% of men) can still tell pass/warn/fail apart.
 // The icon char is exposed via a `.status-icon` span so test harnesses
 // and styling can target it independently of the text label.
-function checkStatusIcon(status: string): string {
+export function checkStatusIcon(status: string): string {
   return {
     pass: "✓",
     warn: "⚠",
@@ -8026,7 +7891,7 @@ function checkStatusIcon(status: string): string {
   }[status] || "i";
 }
 
-function storyStatusIcon(status: string): string {
+export function storyStatusIcon(status: string): string {
   return {
     pass: "✓",
     warn: "⚠",
@@ -8036,7 +7901,7 @@ function storyStatusIcon(status: string): string {
   }[status] || "i";
 }
 
-function checkStatusLabel(status: string): string {
+export function checkStatusLabel(status: string): string {
   return {
     pass: "Pass",
     warn: "Warn",
@@ -8046,7 +7911,7 @@ function checkStatusLabel(status: string): string {
   }[status] || capitalize(status || "info");
 }
 
-function storyStatusLabel(status: string): string {
+export function storyStatusLabel(status: string): string {
   return {
     pass: "Pass",
     warn: "Warn",
@@ -8056,19 +7921,15 @@ function storyStatusLabel(status: string): string {
   }[status] || capitalize(status || "info");
 }
 
-function storyStatusClass(status: string): string {
+export function storyStatusClass(status: string): string {
   const normalized = String(status || "unknown").toLowerCase();
   if (["pass", "warn", "fail", "skipped"].includes(normalized)) return normalized;
   return "unknown";
 }
 
-function shortText(value: string, maxLength: number): string {
-  const text = value.replace(/\s+/g, " ").trim();
-  if (text.length <= maxLength) return text;
-  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
-}
+// shortText moved to utils/format.ts (Wave 8).
 
-function compactLongText(value: string, maxLength: number): {text: string; truncated: boolean} {
+export function compactLongText(value: string, maxLength: number): {text: string; truncated: boolean} {
   if (value.length <= maxLength) return {text: value, truncated: false};
   const tail = value.slice(-maxLength);
   const firstLineBreak = tail.indexOf("\n");
@@ -8080,22 +7941,14 @@ function compactLongText(value: string, maxLength: number): {text: string; trunc
   };
 }
 
-function capitalize(value: string): string {
-  return value ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : value;
-}
+// capitalize / refreshLabel moved to utils/format.ts (Wave 8).
 
-function refreshLabel(status: string): string {
-  if (status === "refreshing") return "refreshing";
-  if (status === "error") return "refresh failed";
-  return "";
-}
-
-function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error || "Unknown error");
 }
 
-function detailWasRemoved(error: unknown): boolean {
+export function detailWasRemoved(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404;
 }
 
@@ -8115,7 +7968,7 @@ let _notificationPermissionRequested = false;
  * Notification API is unavailable (older browsers, secure-context-required
  * pages) — caller flow is unaffected.
  */
-function requestNotificationPermissionOnce(): void {
+export function requestNotificationPermissionOnce(): void {
   if (_notificationPermissionRequested) return;
   if (typeof window === "undefined") return;
   const notif = (window as unknown as {Notification?: typeof Notification}).Notification;
@@ -8144,7 +7997,7 @@ function requestNotificationPermissionOnce(): void {
  * baseline when the project changes (different `data.project.path`) so a
  * project switch isn't mis-read as "all runs just finished."
  */
-function useNotificationsOnRunFinish(data: StateResponse | null): void {
+export function useNotificationsOnRunFinish(data: StateResponse | null): void {
   const previousLiveIdsRef = useRef<Set<string>>(new Set());
   const previousProjectRef = useRef<string | null>(null);
   useEffect(() => {
@@ -8209,7 +8062,7 @@ interface CommandPaletteProps {
  * pattern at the App shell respects this: when paletteOpen is true the
  * sidebar/main go inert, so click-through and tab traversal stay inside.
  */
-function CommandPalette({projects, currentPath, onSelect, onClose}: CommandPaletteProps) {
+export function CommandPalette({projects, currentPath, onSelect, onClose}: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
   const dialogRef = useDialogFocus<HTMLDivElement>(onClose, false);
@@ -8317,7 +8170,7 @@ function CommandPalette({projects, currentPath, onSelect, onClose}: CommandPalet
  * keeps things predictable for muscle-memory users who recognise the order
  * of their last 5 projects.
  */
-function filterPalette(projects: ManagedProjectInfo[], query: string): ManagedProjectInfo[] {
+export function filterPalette(projects: ManagedProjectInfo[], query: string): ManagedProjectInfo[] {
   const trimmed = query.trim().toLowerCase();
   if (!trimmed) return projects;
   return projects.filter((project) => {
