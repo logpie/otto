@@ -199,6 +199,13 @@ interface BoardTask {
   proof: string;
   reason: string;
   source: "landing" | "live" | "history";
+  // mc-audit info-density #2: typed chip data so the card renders distinct
+  // labelled chips instead of a row of unlabeled pills. `null` means the
+  // chip is suppressed (rather than rendering "-" placeholder).
+  storiesPassed?: number | null;
+  storiesTested?: number | null;
+  costDisplay?: string | null;
+  durationDisplay?: string | null;
 }
 
 const defaultFilters: Filters = {
@@ -1677,7 +1684,7 @@ export function App() {
             <p>Mission Control</p>
           </div>
         </div>
-        <ProjectMeta project={project} watcher={watcher} landing={landing} active={active} />
+        <ProjectMeta project={project} watcher={watcher} landing={landing} active={active} firstRun={isProjectFirstRun(data)} />
         {projectsState?.launcher_enabled && (
           <button type="button" data-testid="switch-project-button" onClick={() => void switchProject()}>Switch project</button>
         )}
@@ -1902,16 +1909,33 @@ function ToastDisplay({toast, onMouseEnter, onMouseLeave, onDismiss}: {
   );
 }
 
-function ProjectMeta({project, watcher, landing, active}: {
+function ProjectMeta({project, watcher, landing, active, firstRun}: {
   project: StateResponse["project"] | undefined;
   watcher: WatcherInfo | undefined;
   landing: LandingState | undefined;
   active: number;
+  // mc-audit codex-first-time-user #15: when the project has zero history AND
+  // no live runs, hide the detailed Watcher/Heartbeat/In-flight/queued/ready/
+  // landed counters and show a single-line "Project ready · No jobs yet"
+  // summary so the first-run sidebar isn't a wall of internal vocabulary.
+  firstRun: boolean;
 }) {
   const counts = watcher?.counts || {};
   const health = watcher?.health;
+  if (firstRun) {
+    return (
+      <dl className="project-meta project-meta-first-run" aria-label="Project metadata" data-testid="project-meta-first-run">
+        <MetaItem label="Project" value={project?.name || "-"} />
+        <MetaItem label="Branch" value={project?.branch || "-"} />
+        <MetaItem
+          label="Status"
+          value={!project ? "Loading…" : "Project ready · No jobs yet"}
+        />
+      </dl>
+    );
+  }
   return (
-    <dl className="project-meta" aria-label="Project metadata">
+    <dl className="project-meta" aria-label="Project metadata" data-testid="project-meta-full">
       <MetaItem label="Project" value={project?.name || "-"} />
       <MetaItem label="Branch" value={project?.branch || "-"} />
       <MetaItem label="State" value={!project ? "unknown" : project.dirty ? "dirty" : "clean"} />
@@ -2236,10 +2260,12 @@ function RuntimeWarnings({data}: {data: StateResponse}) {
   const top = data.runtime.issues.slice(0, 3);
   const bannerTone = top.some((issue) => issue.severity === "error") ? "error" : "warning";
   const backlog = data.runtime.command_backlog;
+  // mc-audit codex-first-time-user #26: surface user-facing labels in the
+  // runtime banner instead of internal terms ("malformed" → "unreadable").
   const suffix = [
     backlog.pending ? `${backlog.pending} pending` : "",
     backlog.processing ? `${backlog.processing} processing` : "",
-    backlog.malformed ? `${backlog.malformed} malformed` : "",
+    backlog.malformed ? `${backlog.malformed} unreadable` : "",
   ].filter(Boolean).join(" / ");
   return (
     <div className={`status-banner ${bannerTone} runtime-banner`}>
@@ -2267,13 +2293,16 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
       <div className="panel-heading">
         <div>
           <h2 id="diagnosticsSummaryHeading">Diagnostics Summary</h2>
-          <p className="panel-subtitle">Runtime issues and landing state, translated into operator actions.</p>
+          {/* mc-audit codex-first-time-user #26: avoid internal vocabulary
+              ("operator actions / command backlog / runtime issues") in the
+              diagnostics surfaces — translate to user-facing copy. */}
+          <p className="panel-subtitle" data-testid="diagnostics-subtitle">System issues and pending commands surface here so you can act on them.</p>
         </div>
-        <span className="pill" title="Runtime issues, command backlog items, and review items." aria-label={`${diagnosticCount} diagnostic items`}>{diagnosticCount}</span>
+        <span className="pill" title="Pending commands, system issues, and review items." aria-label={`${diagnosticCount} diagnostic items`}>{diagnosticCount}</span>
       </div>
       <div className="diagnostics-summary-body">
         <div>
-          <h3>Command Backlog</h3>
+          <h3 data-testid="diagnostics-pending-commands-heading">Pending Commands</h3>
           {commands.length ? commands.map((command, index) => (
             <details className={`diagnostic-card command-${command.state}`} key={`${command.command_id || command.run_id || "command"}-${index}`}>
               <summary>
@@ -2287,7 +2316,7 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
           )) : <div className="diagnostic-empty">No pending commands.</div>}
         </div>
         <div>
-          <h3>Runtime Issues</h3>
+          <h3 data-testid="diagnostics-system-issues-heading">System Issues</h3>
           {issues.length ? issues.slice(0, 4).map((issue, index) => (
             <details className={`diagnostic-card severity-${issue.severity}`} key={`${issue.label}-${index}`} open={issue.severity === "error"}>
               <summary>
@@ -2298,7 +2327,7 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
               <p>{issue.detail}</p>
               <em>{issue.next_action}</em>
             </details>
-          )) : <div className="diagnostic-empty">No runtime issues.</div>}
+          )) : <div className="diagnostic-empty">No system issues.</div>}
         </div>
         <div className="wide-diagnostics-section">
           <h3>Review And Landing</h3>
@@ -2575,7 +2604,11 @@ function TaskCard({task, selected, onSelect, onSelectQueued}: {
       onSelectQueued(task);
     }
   };
-  const meta = [taskChangeLine(task), task.proof].filter(Boolean);
+  // mc-audit info-density #2: render typed chips with explicit kind labels
+  // (files / stories / cost / time) instead of a row of unlabeled pills.
+  // Each chip is suppressed when the underlying value is null/missing — no
+  // "-" placeholder leakage.
+  const chips = computeTaskChips(task);
   const isQueuedNoRun = !task.runId;
   return (
     <article className={`task-card task-${task.stage} ${selected ? "selected" : ""}`}>
@@ -2611,8 +2644,19 @@ function TaskCard({task, selected, onSelect, onSelectQueued}: {
           <span className="task-card-cta">{task.stage === "ready" ? "Review" : "Details"}</span>
         </span>
         <strong className="task-title" title={task.title}>{task.title}</strong>
-        <span className="task-card-meta">
-          {meta.map((item) => <span key={item}>{item}</span>)}
+        <span className="task-card-meta" data-testid={`${testIdForTask(task.id)}-chips`}>
+          {chips.map((chip) => (
+            <span
+              key={chip.kind}
+              className={`task-chip task-chip-${chip.kind}`}
+              data-chip-kind={chip.kind}
+              title={chip.tooltip || chip.label}
+            >
+              <span className="task-chip-icon" aria-hidden="true">{chip.icon}</span>
+              {" "}
+              {chip.label}
+            </span>
+          ))}
         </span>
       </button>
       <button
@@ -2620,19 +2664,38 @@ function TaskCard({task, selected, onSelect, onSelectQueued}: {
         type="button"
         aria-expanded={expanded}
         aria-controls={`${testIdForTask(task.id)}-drawer`}
+        data-testid={`${testIdForTask(task.id)}-toggle`}
         onClick={() => setExpanded((value) => !value)}
       >
+        {/* mc-audit microinteractions I5: chevron rotates 90deg on toggle so
+            the user gets a visual affordance even before the height
+            transition runs. The arrow points right when collapsed and down
+            when expanded. */}
+        <span className="task-card-toggle-chevron" aria-hidden="true" data-testid={`${testIdForTask(task.id)}-toggle-chevron`}>›</span>
         {expanded ? "Less" : "More"}
       </button>
-      {expanded ? (
-        <div className="task-card-drawer" id={`${testIdForTask(task.id)}-drawer`}>
+      {/* mc-audit microinteractions I5: keep the drawer mounted and animate
+          its grid-template-rows from 0fr → 1fr so the layout shift is
+          visible (≤200ms). The inner div needs `min-height: 0; overflow:
+          hidden` so the row animation actually clips. The transition is
+          neutralised under prefers-reduced-motion (see styles.css). */}
+      <div
+        className="task-card-drawer-wrap"
+        data-expanded={expanded ? "true" : "false"}
+        data-testid={`${testIdForTask(task.id)}-drawer-wrap`}
+      >
+        <div
+          className="task-card-drawer"
+          id={`${testIdForTask(task.id)}-drawer`}
+          aria-hidden={!expanded}
+        >
           <p title={task.summary}>{shortText(task.summary, 220)}</p>
           <dl>
             <dt>Branch</dt><dd title={task.branch || ""}>{task.branch || "no branch"}</dd>
             <dt>Reason</dt><dd>{task.reason}</dd>
           </dl>
         </div>
-      ) : null}
+      </div>
     </article>
   );
 }
@@ -2650,7 +2713,10 @@ function RecentActivity({events, history, selectedRunId, onSelect}: {
       <div className="panel-heading">
         <div>
           <h2 id="activityHeading">Recent Activity</h2>
-          <p className="panel-subtitle">Latest queue, watcher, land, and run outcomes.</p>
+          {/* mc-audit codex-first-time-user #27: rewrite jargon-heavy subtitle
+              ("queue, watcher, land, and run outcomes") into user-facing copy
+              that describes what the panel actually shows. */}
+          <p className="panel-subtitle" data-testid="activity-subtitle">Recent job activity, approvals, merges, and errors appear here.</p>
         </div>
         <span className="pill">{(events?.total_count || 0) + history.length}</span>
       </div>
@@ -3015,7 +3081,9 @@ function EventTimeline({events}: {events: StateResponse["events"] | undefined}) 
       </div>
       <div className="timeline-list" role="list">
         {malformed > 0 && (
-          <div className="timeline-warning">Ignored {malformed} malformed event row{malformed === 1 ? "" : "s"}.</div>
+          // mc-audit codex-first-time-user #26: replace "malformed event rows"
+          // with user-facing "unreadable log entries".
+          <div className="timeline-warning" data-testid="timeline-malformed-warning">Skipped {malformed} unreadable log entr{malformed === 1 ? "y" : "ies"}.</div>
         )}
         {items.length ? items.map((event) => (
           <div className={`timeline-item event-${event.severity}`} key={event.event_id || `${event.created_at}-${event.message}`} role="listitem">
@@ -5169,7 +5237,7 @@ function missionFocus(data: StateResponse | null): {
     return {
       kicker: "Commands",
       title: `${commandBacklog} command${commandBacklog === 1 ? "" : "s"} waiting`,
-      body: "Start the watcher to apply pending operator actions.",
+      body: "Start the watcher to apply pending commands.",
       tone: "warning",
       primary: "start",
       working,
@@ -5374,6 +5442,10 @@ function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllo
     proof: proofLine(item),
     reason: boardReasonForLanding(item, mergeAllowed),
     source: "landing",
+    storiesPassed: item.stories_passed,
+    storiesTested: item.stories_tested,
+    costDisplay: typeof item.cost_usd === "number" ? `$${item.cost_usd.toFixed(2)}` : null,
+    durationDisplay: typeof item.duration_s === "number" ? formatDuration(item.duration_s) : null,
   };
 }
 
@@ -5391,6 +5463,10 @@ function boardTaskFromLive(item: LiveRunItem): BoardTask {
     proof: item.cost_display || "-",
     reason: item.overlay?.reason || item.last_event || item.elapsed_display || item.display_status,
     source: "live",
+    storiesPassed: null,
+    storiesTested: null,
+    costDisplay: item.cost_display && item.cost_display !== "-" ? item.cost_display : null,
+    durationDisplay: item.elapsed_display && item.elapsed_display !== "-" ? item.elapsed_display : null,
   };
 }
 
@@ -5426,6 +5502,74 @@ function taskChangeLine(task: BoardTask): string {
   if (task.stage === "working") return "diff pending";
   if (task.stage === "landed") return "no unlanded diff";
   return `${task.changedFileCount} file${task.changedFileCount === 1 ? "" : "s"}`;
+}
+
+// mc-audit info-density #2: typed chip data for the task card meta row.
+// Each chip carries a `kind` (used for both data-chip-kind attribute + CSS
+// selector), a glyph icon for at-a-glance scanning, a label, and an optional
+// tooltip with extra context. Chips are suppressed when the underlying value
+// is null — never render a "-" placeholder.
+export interface TaskChip {
+  kind: "files" | "stories" | "cost" | "time" | "status";
+  icon: string;
+  label: string;
+  tooltip?: string;
+}
+
+export function computeTaskChips(task: BoardTask): TaskChip[] {
+  const chips: TaskChip[] = [];
+  // Files chip — only when we have a real number to show. Pending/landed
+  // states without a count are NOT shown as "-"; they're suppressed entirely.
+  if (typeof task.changedFileCount === "number") {
+    chips.push({
+      kind: "files",
+      icon: "📄",
+      label: `${task.changedFileCount} file${task.changedFileCount === 1 ? "" : "s"}`,
+      tooltip: "Files changed in this task's branch",
+    });
+  }
+  // Stories chip — only when at least one story has been tested.
+  const tested = Number(task.storiesTested || 0);
+  const passed = Number(task.storiesPassed || 0);
+  if (tested > 0) {
+    chips.push({
+      kind: "stories",
+      icon: passed === tested ? "✓" : "•",
+      label: `${passed}/${tested} stories`,
+      tooltip: passed === tested ? "All certifier stories passed" : "Certifier story results",
+    });
+  }
+  // Cost chip — only when a non-null cost display is available.
+  if (task.costDisplay && task.costDisplay !== "-" && task.costDisplay.trim() !== "") {
+    chips.push({
+      kind: "cost",
+      icon: "$",
+      label: task.costDisplay.replace(/^\$/, ""),
+      tooltip: "Estimated provider cost for this task",
+    });
+  }
+  // Time chip — only when we have a duration.
+  if (task.durationDisplay && task.durationDisplay !== "-" && task.durationDisplay.trim() !== "") {
+    chips.push({
+      kind: "time",
+      icon: "⏱",
+      label: task.durationDisplay,
+      tooltip: "Wall-clock duration",
+    });
+  }
+  // Fallback: if no concrete chips, surface the human-readable change line
+  // ("diff pending" / "not built yet") as a single status chip so the row is
+  // not visually empty. This preserves the prior behavior for queued tasks
+  // without losing the typed-chip look elsewhere.
+  if (chips.length === 0) {
+    chips.push({
+      kind: "status",
+      icon: "·",
+      label: taskChangeLine(task),
+      tooltip: "Task status",
+    });
+  }
+  return chips;
 }
 
 // mc-audit info-density #3: map a task's status string + stage to a tone
@@ -5538,6 +5682,27 @@ function activeCount(watcher?: WatcherInfo): number {
     + Number(counts.initializing || 0)
     + Number(counts.starting || 0)
     + Number(counts.terminating || 0);
+}
+
+// mc-audit codex-first-time-user #15: a project is on its first-run path when
+// it has zero history, zero live runs, no landing items, and no queued tasks.
+// In that state the sidebar collapses Watcher / Heartbeat / In-flight /
+// queued/ready/landed counters into a single "Project ready · No jobs yet"
+// summary. As soon as ANY of those counters fills, the full dashboard returns.
+export function isProjectFirstRun(data: StateResponse | null | undefined): boolean {
+  if (!data) return false;
+  const historyItems = Number(data.history?.items?.length || 0);
+  const totalRows = Number(data.history?.total_rows || 0);
+  const liveCount = Number(data.live?.total_count || data.live?.items?.length || 0);
+  const landingItems = Number(data.landing?.items?.length || 0);
+  const queued = Number(data.watcher?.counts?.queued || 0);
+  const running = activeCount(data.watcher);
+  return historyItems === 0
+    && totalRows === 0
+    && liveCount === 0
+    && landingItems === 0
+    && queued === 0
+    && running === 0;
 }
 
 function canStartWatcher(data?: StateResponse | null): boolean {
@@ -6390,7 +6555,8 @@ function changeLine(item: LandingItem): string {
 
 function timelineSubtitle(events?: StateResponse["events"]): string {
   if (!events || !events.total_count) return "Queue, watcher, merge, and recovery actions appear here.";
-  const malformed = events.malformed_count ? ` / ${events.malformed_count} malformed` : "";
+  // mc-audit codex-first-time-user #26: "malformed" → "unreadable" in user-facing copy.
+  const malformed = events.malformed_count ? ` / ${events.malformed_count} unreadable` : "";
   const scope = events.truncated ? "scanned recent log" : String(events.total_count);
   return `Recent ${Math.min(events.items.length, events.limit)} of ${scope}${malformed}.`;
 }

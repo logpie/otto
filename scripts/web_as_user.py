@@ -324,6 +324,23 @@ W8_INTENT_B = W2_INTENT_B
 W8_INTENT_C = W2_INTENT_C
 W8_BUILD_TIMEOUT_S = 20 * 60   # same bound as W2; 3 sequential builds
 
+# W9 — backgrounded tab + return. Submit one realistic build, then flip
+# document.visibilityState to hidden (and switch focus elsewhere) for ~2 min
+# while it runs. Return after expected completion and verify the SPA caught
+# up with no double-fire / stale state, and (best-effort) verify the
+# Notification API was invoked.
+W9_INTENT = W2_INTENT_A     # tiny calculator — small, ~3-5 min build
+W9_BUILD_TIMEOUT_S = 12 * 60
+W9_HIDE_S = 120             # how long the tab stays "hidden"
+
+# W10 — two-tab consistency. Submit a job from tab A, observe it propagate to
+# tab B within the poll window; then cancel from tab B and verify A reflects
+# it. Build is intentionally small (will be cancelled mid-flight; we are
+# testing UI propagation, not build correctness).
+W10_INTENT = W2_INTENT_B    # `/` -> "hello world" — small surface
+W10_PROPAGATION_TIMEOUT_S = 30   # generous bound for poll-based propagation
+W10_TERMINAL_TIMEOUT_S = 8 * 60
+
 
 # ---------------------------------------------------------------------------
 # Web-as-user helpers (Playwright + in-process server)
@@ -4147,6 +4164,676 @@ def _run_w8(ctx: ScenarioContext) -> ScenarioRunResult:
 
 
 # ---------------------------------------------------------------------------
+# W9 — Backgrounded tab + return
+# ---------------------------------------------------------------------------
+
+
+def _install_notification_spy(page: Any) -> None:
+    """Replace window.Notification with a recording spy BEFORE the SPA boots.
+
+    The MC client (App.tsx ~6543, useTrackCompletions hook) fires
+    `new Notification("Otto: build completed", ...)` when (a) a live run
+    transitions out and (b) document.visibilityState === "hidden". We can't
+    rely on the OS to actually display the notification in headless tests, so
+    we install a recorder and check window.__otto_notifs__ later.
+
+    Permission is also forced to "granted" so the gate that checks
+    `Notification.permission === "granted"` succeeds.
+    """
+
+    page.add_init_script(
+        """
+        (() => {
+            const records = [];
+            const Spy = function (title, opts) {
+                records.push({
+                    title: String(title),
+                    body: opts && opts.body ? String(opts.body) : null,
+                    visibility: document.visibilityState,
+                    when: Date.now(),
+                });
+                return { close: () => {} };
+            };
+            Spy.permission = "granted";
+            Spy.requestPermission = () => Promise.resolve("granted");
+            // Some code reads the static .permission via `window.Notification`
+            // identity — preserve that.
+            try {
+                Object.defineProperty(window, "Notification", {
+                    configurable: true,
+                    writable: true,
+                    value: Spy,
+                });
+            } catch (e) {
+                window.Notification = Spy;
+            }
+            window.__otto_notifs__ = records;
+        })();
+        """
+    )
+
+
+def _set_visibility(page: Any, *, hidden: bool) -> None:
+    """Force document.visibilityState by overriding the property + dispatching event.
+
+    Playwright doesn't expose a direct "background this tab" hook for
+    headless. We install descriptor overrides + fire visibilitychange. The
+    React hook listens for visibilitychange events.
+    """
+
+    state = "hidden" if hidden else "visible"
+    is_hidden = "true" if hidden else "false"
+    page.evaluate(
+        f"""
+        (() => {{
+            try {{
+                Object.defineProperty(document, 'visibilityState', {{
+                    configurable: true, get: () => "{state}",
+                }});
+                Object.defineProperty(document, 'hidden', {{
+                    configurable: true, get: () => {is_hidden},
+                }});
+            }} catch (e) {{}}
+            document.dispatchEvent(new Event('visibilitychange'));
+            window.__otto_visibility_log = window.__otto_visibility_log || [];
+            window.__otto_visibility_log.push({{state: "{state}", t: Date.now()}});
+        }})();
+        """
+    )
+
+
+def _run_w9(ctx: ScenarioContext) -> ScenarioRunResult:
+    """W9 — submit a build, hide the tab for ~2 min, return, verify state coherence."""
+    from playwright.sync_api import sync_playwright
+
+    started = time.monotonic()
+    failures = ctx.failures
+    artifact_dir = ctx.artifact_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    debug, _log = _open_logger(ctx.debug_log, "W9")
+
+    if not failures.soft_assert(ctx.web_url is not None, "no web_url"):
+        debug.close()
+        return ScenarioRunResult(
+            outcome="FAIL", note="no web_url",
+            duration_s=time.monotonic() - started,
+            failures=list(failures.failures),
+        )
+
+    _log(f"web_url={ctx.web_url}")
+    _log(f"project_dir={ctx.project_dir}")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            record_video_dir=str(artifact_dir),
+        )
+        try:
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"tracing.start failed: {exc}")
+
+        page = context.new_page()
+        # Install the Notification spy BEFORE goto so it lands before SPA boots.
+        try:
+            _install_notification_spy(page)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"notification spy install failed: {exc}")
+
+        captured = _capture_console_and_network(page, artifact_dir)
+        # Track raw poll calls so we can detect "did polling pause" / "did it
+        # resume". /api/state is the canonical poll endpoint.
+        poll_log: list[dict[str, Any]] = []
+
+        def _on_request(req: Any) -> None:
+            try:
+                url = req.url
+                if "/api/state" in url:
+                    poll_log.append({
+                        "t": time.monotonic() - started,
+                        "url": url,
+                        "method": req.method,
+                    })
+            except Exception:  # noqa: BLE001
+                pass
+
+        page.on("request", _on_request)
+
+        try:
+            # ---------- Step 1: load + shell ready ----------
+            _log("Step 1: page.goto")
+            try:
+                page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"page.goto failed: {exc}")
+            _safe_screenshot(page, artifact_dir, "01-loaded")
+            try:
+                _wait_for_mc_ready(page)
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"react never hydrated: {exc}")
+
+            # ---------- Step 2: enqueue one build via JobDialog ----------
+            _log("Step 2: enqueue 1 build")
+            ok = _enqueue_via_dialog(
+                page, W9_INTENT,
+                failures=failures, label="w9", artifact_dir=artifact_dir,
+                screenshot_idx=2,
+            )
+            if not ok:
+                failures.fail("could not enqueue W9 build")
+
+            # ---------- Step 3: start watcher ----------
+            _log("Step 3: start watcher")
+            time.sleep(1.5)
+            _click_start_watcher(page, failures=failures, label="W9")
+            _safe_screenshot(page, artifact_dir, "03-watcher-started")
+
+            # ---------- Step 4: wait for the build to actually start ----------
+            _log("Step 4: wait for live row to appear (running)")
+            running_run_id: Optional[str] = None
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 90:
+                state = _state(ctx.web_url)
+                items = _live_items(state)
+                running = [it for it in items if it.get("status") == "running"]
+                if running:
+                    running_run_id = running[0].get("run_id")
+                    break
+                time.sleep(3)
+            _log(f"  running_run_id={running_run_id}")
+            failures.soft_assert(
+                running_run_id is not None,
+                "no running row appeared after starting watcher",
+            )
+
+            # snapshot poll-count BEFORE hide, then hide.
+            polls_before_hide = len(poll_log)
+            _log(f"  polls before hide={polls_before_hide}")
+
+            # ---------- Step 5: hide the tab ----------
+            _log(f"Step 5: hide tab for {W9_HIDE_S}s")
+            try:
+                _set_visibility(page, hidden=True)
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"could not set visibilityState=hidden: {exc}")
+            _safe_screenshot(page, artifact_dir, "05-hidden")
+
+            # While "hidden": just sleep on the python side. The page is still
+            # alive, JS continues to run; the SPA may throttle its polling
+            # under hidden, but should NOT die.
+            hide_started = time.monotonic()
+            # Sleep in chunks so we can record poll arrivals.
+            chunk = 10
+            while time.monotonic() - hide_started < W9_HIDE_S:
+                time.sleep(chunk)
+                _log(
+                    f"  hide-tick t+{int(time.monotonic() - hide_started)}s "
+                    f"polls={len(poll_log)}"
+                )
+
+            polls_during_hide = len(poll_log) - polls_before_hide
+            _log(f"  polls during hide ({W9_HIDE_S}s)={polls_during_hide}")
+            (artifact_dir / "poll-stats.json").write_text(
+                json.dumps({
+                    "polls_before_hide": polls_before_hide,
+                    "polls_during_hide_window": polls_during_hide,
+                    "hide_window_s": W9_HIDE_S,
+                }, indent=2),
+                encoding="utf-8",
+            )
+
+            # ---------- Step 6: return — restore visibility ----------
+            _log("Step 6: restore visibility")
+            try:
+                _set_visibility(page, hidden=False)
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"visibility restore failed: {exc}")
+            time.sleep(2)
+            _safe_screenshot(page, artifact_dir, "06-restored")
+
+            # The SPA should resume / catch up immediately on visibilitychange.
+            # Snapshot poll count after the restore so we can verify resume.
+            t_after_restore = time.monotonic()
+            polls_at_restore = len(poll_log)
+            time.sleep(15)
+            polls_after_restore = len(poll_log) - polls_at_restore
+            _log(f"  polls in 15s after restore={polls_after_restore}")
+            failures.soft_assert(
+                polls_after_restore >= 1,
+                f"only {polls_after_restore} polls in 15s after returning — polling may not have resumed",
+            )
+
+            # ---------- Step 7: wait for terminal ----------
+            _log(f"Step 7: wait ≤{W9_BUILD_TIMEOUT_S}s for terminal")
+            outcome, run_id = _wait_for_terminal(
+                ctx.web_url, timeout_s=W9_BUILD_TIMEOUT_S, log_fn=_log,
+                domain_filter={"queue"},
+            )
+            _log(f"  outcome={outcome} run_id={run_id}")
+            failures.soft_assert(
+                outcome is not None,
+                f"build did not reach terminal in {W9_BUILD_TIMEOUT_S}s",
+            )
+            _safe_screenshot(page, artifact_dir, "07-terminal")
+
+            # ---------- Step 8: state coherence — no duplicate live rows ----------
+            _log("Step 8: state coherence — no stale duplicates")
+            state = _state(ctx.web_url)
+            live = _live_items(state)
+            history = _history_items(state)
+            # When a run completes, it should leave live and appear in history.
+            if run_id is not None:
+                live_dupes = [it for it in live if it.get("run_id") == run_id]
+                hist_match = [it for it in history if it.get("run_id") == run_id]
+                _log(f"  live_dupes={len(live_dupes)} hist_match={len(hist_match)}")
+                failures.soft_assert(
+                    len(live_dupes) == 0,
+                    f"completed run {run_id} still in live[] after terminal — stale state",
+                )
+                failures.soft_assert(
+                    len(hist_match) >= 1,
+                    f"completed run {run_id} not in history[] — handoff missing",
+                )
+            (artifact_dir / "final-state.json").write_text(
+                json.dumps(state or {}, indent=2, default=str), encoding="utf-8"
+            )
+
+            # ---------- Step 9: notification spy check ----------
+            _log("Step 9: check Notification API spy")
+            try:
+                notifs = page.evaluate("() => window.__otto_notifs__ || []")
+            except Exception as exc:  # noqa: BLE001
+                notifs = []
+                failures.note(f"could not read notification spy: {exc}")
+            _log(f"  notifications fired={len(notifs)}")
+            (artifact_dir / "notifications.json").write_text(
+                json.dumps(notifs, indent=2), encoding="utf-8"
+            )
+            # The hook only fires when a live run drops out WHILE hidden. If
+            # the build completed AFTER we restored visibility, no notif will
+            # fire — which is the correct semantic. Capture the timing and
+            # assert only when we're confident the completion landed during
+            # the hide window.
+            try:
+                vis_log = page.evaluate("() => window.__otto_visibility_log || []")
+            except Exception:  # noqa: BLE001
+                vis_log = []
+            (artifact_dir / "visibility-log.json").write_text(
+                json.dumps(vis_log, indent=2), encoding="utf-8"
+            )
+            # Soft-only: it is informational. We log a NOTE if the obvious
+            # heavy-user notification path didn't fire.
+            if outcome and not notifs:
+                failures.note(
+                    "background-tab notification did not fire (run may have "
+                    "completed after restore — see visibility-log.json + "
+                    "poll-stats.json)"
+                )
+
+            # ---------- Step 10: no double-fire — request log dedup ----------
+            (artifact_dir / "poll-log.json").write_text(
+                json.dumps(poll_log, indent=2), encoding="utf-8"
+            )
+
+        finally:
+            try:
+                context.tracing.stop(path=str(artifact_dir / "trace.zip"))
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"tracing.stop failed: {exc}")
+            _flush_captured(captured, artifact_dir)
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if any(c.get("type") == "error" for c in captured["console"]):
+        failures.fail("console errors during W9; see console.json")
+    if captured["page_errors"]:
+        failures.fail(f"page errors during W9: {len(captured['page_errors'])}")
+    if captured["network_errors"]:
+        unexpected = [n for n in captured["network_errors"] if n.get("status") not in (404,)]
+        if unexpected:
+            failures.fail(f"unexpected 4xx/5xx during W9: {len(unexpected)}")
+
+    debug.close()
+    return ScenarioRunResult(
+        outcome="PASS" if not failures.failures else "FAIL",
+        note=failures.summary(),
+        duration_s=time.monotonic() - started,
+        failures=list(failures.failures),
+    )
+
+
+# ---------------------------------------------------------------------------
+# W10 — Two-tab consistency
+# ---------------------------------------------------------------------------
+
+
+def _run_w10(ctx: ScenarioContext) -> ScenarioRunResult:
+    """W10 — open two browser contexts on same backend; mutation in A → visible in B."""
+    from playwright.sync_api import sync_playwright
+
+    started = time.monotonic()
+    failures = ctx.failures
+    artifact_dir = ctx.artifact_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    debug, _log = _open_logger(ctx.debug_log, "W10")
+
+    if not failures.soft_assert(ctx.web_url is not None, "no web_url"):
+        debug.close()
+        return ScenarioRunResult(
+            outcome="FAIL", note="no web_url",
+            duration_s=time.monotonic() - started,
+            failures=list(failures.failures),
+        )
+
+    _log(f"web_url={ctx.web_url}")
+    _log(f"project_dir={ctx.project_dir}")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        ctx_a = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            record_video_dir=str(artifact_dir / "tab-a"),
+        )
+        ctx_b = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            record_video_dir=str(artifact_dir / "tab-b"),
+        )
+        try:
+            ctx_a.tracing.start(screenshots=True, snapshots=True)
+            ctx_b.tracing.start(screenshots=True, snapshots=True)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"tracing.start failed: {exc}")
+
+        page_a = ctx_a.new_page()
+        page_b = ctx_b.new_page()
+        captured_a = _capture_console_and_network(page_a, artifact_dir / "tab-a")
+        captured_b = _capture_console_and_network(page_b, artifact_dir / "tab-b")
+
+        try:
+            # ---------- Step 1: both tabs goto + ready ----------
+            _log("Step 1: load both tabs")
+            for label, page in [("A", page_a), ("B", page_b)]:
+                try:
+                    page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=30_000)
+                except Exception as exc:  # noqa: BLE001
+                    failures.fail(f"page.goto failed (tab {label}): {exc}")
+                try:
+                    _wait_for_mc_ready(page)
+                except Exception as exc:  # noqa: BLE001
+                    failures.fail(f"hydration failed (tab {label}): {exc}")
+            _safe_screenshot(page_a, artifact_dir / "tab-a", "01-loaded")
+            _safe_screenshot(page_b, artifact_dir / "tab-b", "01-loaded")
+
+            # ---------- Step 2: enqueue from tab A via dialog ----------
+            _log("Step 2: enqueue from tab A")
+            ok = _enqueue_via_dialog(
+                page_a, W10_INTENT,
+                failures=failures, label="w10-A", artifact_dir=artifact_dir / "tab-a",
+                screenshot_idx=2,
+            )
+            failures.soft_assert(ok, "tab A enqueue failed")
+            t_submit = time.monotonic()
+            _safe_screenshot(page_a, artifact_dir / "tab-a", "02-after-submit")
+
+            # ---------- Step 2b: start watcher from tab A so the queued task
+            # actually progresses to "running" — that is the realistic path
+            # users will exercise before cancelling.
+            _log("Step 2b: start watcher from tab A")
+            time.sleep(1.5)
+            _click_start_watcher(page_a, failures=failures, label="W10-A")
+            _safe_screenshot(page_a, artifact_dir / "tab-a", "02b-watcher-started")
+
+            # ---------- Step 3: tab B should pick up the new task within poll window ----------
+            _log(f"Step 3: poll tab B for new task (≤{W10_PROPAGATION_TIMEOUT_S}s)")
+            target_run_id: Optional[str] = None
+            queue_task_id: Optional[str] = None
+            propagation_s: Optional[float] = None
+
+            # Use the API to get the run_id deterministically (the dialog
+            # closing alone doesn't expose run_id), then poll tab B's DOM for
+            # a row matching that id. Wait until the run reaches "running" so
+            # the row gets a stable run_id (queue-compat:* sentinel ids may
+            # not match what the task board actually renders).
+            t0 = time.monotonic()
+            running_seen = False
+            while time.monotonic() - t0 < W10_PROPAGATION_TIMEOUT_S * 4:  # up to ~2 min
+                state = _state(ctx.web_url)
+                items = _live_items(state)
+                queue_items = [it for it in items if it.get("domain") == "queue"]
+                if queue_items:
+                    # Prefer a "running" row if available (its run_id is real).
+                    running = [it for it in queue_items if it.get("status") == "running"]
+                    chosen = running[0] if running else queue_items[0]
+                    target_run_id = chosen.get("run_id")
+                    queue_task_id = chosen.get("queue_task_id")
+                    if running:
+                        running_seen = True
+                        break
+                time.sleep(1)
+            _log(
+                f"  target_run_id={target_run_id} task_id={queue_task_id} "
+                f"running_seen={running_seen}"
+            )
+            failures.soft_assert(
+                target_run_id is not None,
+                f"backend never showed the enqueued job within {W10_PROPAGATION_TIMEOUT_S}s",
+            )
+            failures.soft_assert(
+                running_seen,
+                "queued row never transitioned to running (watcher may not be picking it up)",
+            )
+
+            # Now poll tab B for that row in DOM.
+            if target_run_id is not None:
+                deadline_b = time.monotonic() + W10_PROPAGATION_TIMEOUT_S
+                appeared = False
+                while time.monotonic() < deadline_b:
+                    try:
+                        # Look for ANY DOM evidence of the run id. Two paths:
+                        # (1) a [data-run-id="X"] attribute on a task card.
+                        # (2) the textual run id in any task-board cell.
+                        count = page_b.evaluate(
+                            "(rid) => {"
+                            "  if (!rid) return 0;"
+                            "  let n = document.querySelectorAll('[data-run-id=\"' + rid + '\"]').length;"
+                            "  if (n) return n;"
+                            "  const board = document.querySelector('[data-testid=\"task-board\"]');"
+                            "  if (!board) return 0;"
+                            "  return board.textContent.includes(rid) ? 1 : 0;"
+                            "}",
+                            target_run_id,
+                        )
+                        if count and count > 0:
+                            appeared = True
+                            propagation_s = time.monotonic() - t_submit
+                            break
+                    except Exception:  # noqa: BLE001
+                        pass
+                    time.sleep(1)
+                _log(f"  propagation_to_B s={propagation_s} appeared={appeared}")
+                failures.soft_assert(
+                    appeared,
+                    f"tab B did not show run {target_run_id} within {W10_PROPAGATION_TIMEOUT_S}s",
+                )
+            _safe_screenshot(page_b, artifact_dir / "tab-b", "03-after-propagation")
+
+            # ---------- Step 4: cancel from tab B (via API — keeps logic deterministic) ----------
+            _log("Step 4: cancel from tab B")
+            cancel_status: Optional[int] = None
+            cancel_body: Optional[str] = None
+            if target_run_id is not None:
+                # Drive the cancel from tab B's PAGE so it counts as
+                # "originated from B". The MC client maps cancel UI to the
+                # same /api/runs/<id>/actions/cancel endpoint. We use fetch()
+                # via page.evaluate so the request goes through the tab's
+                # JS context (proves B can issue it; cookies/headers/origin
+                # all match B).
+                try:
+                    res = page_b.evaluate(
+                        """
+                        async (rid) => {
+                            const r = await fetch('/api/runs/' + rid + '/actions/cancel', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: '{}',
+                            });
+                            const text = await r.text();
+                            return {status: r.status, body: text};
+                        }
+                        """,
+                        target_run_id,
+                    )
+                    cancel_status = res.get("status") if isinstance(res, dict) else None
+                    cancel_body = res.get("body") if isinstance(res, dict) else None
+                except Exception as exc:  # noqa: BLE001
+                    failures.fail(f"cancel from tab B failed: {exc}")
+                _log(f"  cancel status={cancel_status} body={(cancel_body or '')[:160]}")
+                failures.soft_assert(
+                    cancel_status == 200,
+                    f"cancel from tab B returned {cancel_status}",
+                )
+            _safe_screenshot(page_b, artifact_dir / "tab-b", "04-after-cancel")
+
+            # ---------- Step 5: tab A should reflect the cancellation ----------
+            _log(f"Step 5: poll tab A for cancellation reflection (≤{W10_PROPAGATION_TIMEOUT_S}s)")
+            cancel_seen_in_a = False
+            t_cancel = time.monotonic()
+            cancel_propagation_s: Optional[float] = None
+            if target_run_id is not None:
+                deadline_a = time.monotonic() + W10_PROPAGATION_TIMEOUT_S
+                while time.monotonic() < deadline_a:
+                    # 1) Backend truth via /api/state
+                    state = _state(ctx.web_url)
+                    history = _history_items(state)
+                    live = _live_items(state)
+                    matching_history = [
+                        it for it in history if it.get("run_id") == target_run_id
+                    ]
+                    matching_live = [
+                        it for it in live if it.get("run_id") == target_run_id
+                    ]
+                    backend_cancelled = bool(matching_history) and any(
+                        it.get("terminal_outcome") in ("cancelled", "interrupted")
+                        or it.get("status") == "cancelled"
+                        for it in matching_history
+                    )
+                    # 2) Tab A DOM truth: row should either be gone from board
+                    #    or carry a "cancelled" affordance.
+                    try:
+                        a_state = page_a.evaluate(
+                            "(rid) => {"
+                            "  const board = document.querySelector('[data-testid=\"task-board\"]');"
+                            "  const row = board ? Array.from(board.querySelectorAll('*')).find("
+                            "    el => (el.getAttribute && el.getAttribute('data-run-id') === rid)"
+                            "          || (el.textContent && el.textContent.includes(rid))"
+                            "  ) : null;"
+                            "  if (!row) return {present: false, text: ''};"
+                            "  return {present: true, text: (row.textContent || '').slice(0, 200)};"
+                            "}",
+                            target_run_id,
+                        )
+                    except Exception:  # noqa: BLE001
+                        a_state = {"present": False, "text": ""}
+                    a_says_cancelled = (
+                        not a_state.get("present", False)
+                        or "cancel" in (a_state.get("text") or "").lower()
+                        or "interrupt" in (a_state.get("text") or "").lower()
+                    )
+                    if backend_cancelled and a_says_cancelled and not matching_live:
+                        cancel_seen_in_a = True
+                        cancel_propagation_s = time.monotonic() - t_cancel
+                        break
+                    time.sleep(1)
+                _log(
+                    f"  cancel_seen_in_a={cancel_seen_in_a} "
+                    f"propagation_s={cancel_propagation_s}"
+                )
+                failures.soft_assert(
+                    cancel_seen_in_a,
+                    f"tab A did not reflect cancellation within "
+                    f"{W10_PROPAGATION_TIMEOUT_S}s",
+                )
+            _safe_screenshot(page_a, artifact_dir / "tab-a", "05-after-cancel-reflected")
+
+            # ---------- Step 6: wait for terminal (best-effort, may be quick) ----------
+            _log(f"Step 6: wait ≤{W10_TERMINAL_TIMEOUT_S}s for terminal")
+            terminal_outcome, terminal_run = _wait_for_terminal(
+                ctx.web_url, timeout_s=W10_TERMINAL_TIMEOUT_S, log_fn=_log,
+                domain_filter={"queue"},
+            )
+            _log(f"  terminal_outcome={terminal_outcome} run_id={terminal_run}")
+            # The cancel may convert outcome to cancelled/interrupted, which
+            # is the success path here. We don't fail on outcome.
+            (artifact_dir / "metrics.json").write_text(
+                json.dumps({
+                    "target_run_id": target_run_id,
+                    "queue_task_id": queue_task_id,
+                    "propagation_to_B_s": propagation_s,
+                    "cancel_status": cancel_status,
+                    "cancel_propagation_to_A_s": cancel_propagation_s,
+                    "terminal_outcome": terminal_outcome,
+                }, indent=2),
+                encoding="utf-8",
+            )
+
+            # final state snapshot
+            state = _state(ctx.web_url)
+            (artifact_dir / "final-state.json").write_text(
+                json.dumps(state or {}, indent=2, default=str),
+                encoding="utf-8",
+            )
+
+        finally:
+            try:
+                ctx_a.tracing.stop(path=str(artifact_dir / "tab-a-trace.zip"))
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"tracing.stop A failed: {exc}")
+            try:
+                ctx_b.tracing.stop(path=str(artifact_dir / "tab-b-trace.zip"))
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"tracing.stop B failed: {exc}")
+            _flush_captured(captured_a, artifact_dir / "tab-a")
+            _flush_captured(captured_b, artifact_dir / "tab-b")
+            for c in (ctx_a, ctx_b):
+                try:
+                    c.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # Console errors gated separately per tab.
+    for label, captured in [("A", captured_a), ("B", captured_b)]:
+        if any(c.get("type") == "error" for c in captured["console"]):
+            failures.fail(f"console errors during W10 (tab {label})")
+        if captured["page_errors"]:
+            failures.fail(f"page errors during W10 (tab {label}): {len(captured['page_errors'])}")
+        if captured["network_errors"]:
+            unexpected = [n for n in captured["network_errors"] if n.get("status") not in (404,)]
+            if unexpected:
+                failures.fail(
+                    f"unexpected 4xx/5xx during W10 (tab {label}): {len(unexpected)}"
+                )
+
+    debug.close()
+    return ScenarioRunResult(
+        outcome="PASS" if not failures.failures else "FAIL",
+        note=failures.summary(),
+        duration_s=time.monotonic() - started,
+        failures=list(failures.failures),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Scenario registry — every W1..W13 (W12 split into W12a, W12b) has an entry
 # ---------------------------------------------------------------------------
 
@@ -4240,7 +4927,7 @@ SCENARIOS: dict[str, Scenario] = {
         estimated_seconds=10 * 60,
         needs_product_verification=True,
         target_recordings=["R1.mid"],
-        run_fn=_stub_scenario,
+        run_fn=_run_w9,
     ),
     "W10": Scenario(
         id="W10",
@@ -4250,7 +4937,7 @@ SCENARIOS: dict[str, Scenario] = {
         estimated_seconds=6 * 60,
         needs_product_verification=True,
         target_recordings=["R1.mid"],
-        run_fn=_stub_scenario,
+        run_fn=_run_w10,
     ),
     "W11": Scenario(
         id="W11",

@@ -1030,17 +1030,97 @@ textarea {
   background: var(--surface-alt);
 }
 
+/* mc-audit info-density #2: typed chips so the meta row is not a wall of
+   identical unlabeled pills. Each chip kind has a distinct hue so files
+   (blue), stories (green), cost (amber), and time (neutral) scan apart at
+   a glance. The icon glyph keeps the chip identifiable when colour is not
+   conveyed (colour-blind users / monochrome rendering). */
+.task-card-meta .task-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-weight: 500;
+}
+
+.task-card-meta .task-chip-files {
+  background: rgba(37, 99, 235, 0.10);
+  color: #1d4ed8;
+}
+
+.task-card-meta .task-chip-stories {
+  background: rgba(15, 118, 110, 0.10);
+  color: #0f766e;
+}
+
+.task-card-meta .task-chip-cost {
+  background: rgba(202, 138, 4, 0.10);
+  color: #92400e;
+}
+
+.task-card-meta .task-chip-time {
+  background: var(--surface-alt);
+  color: var(--muted);
+}
+
+.task-card-meta .task-chip-status {
+  background: var(--surface-alt);
+  color: var(--muted);
+}
+
+.task-chip-icon {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1;
+}
+
 .task-card-toggle {
   min-height: 26px;
   justify-self: start;
   padding: 0 8px;
   color: var(--muted);
   font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* mc-audit microinteractions I5: chevron uses a 0deg → 90deg rotation
+   when the drawer expands so the toggle communicates state visually
+   without relying on a text label swap alone. */
+.task-card-toggle-chevron {
+  display: inline-block;
+  font-size: 14px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 180ms ease-out;
+}
+
+.task-card-toggle[aria-expanded="true"] .task-card-toggle-chevron {
+  transform: rotate(90deg);
+}
+
+/* mc-audit microinteractions I5: animatable grid-template-rows transition
+   (0fr → 1fr) so the drawer height interpolates smoothly without
+   measuring at runtime. ≤200ms for snappy feel. The inner .task-card-drawer
+   needs `min-height: 0` + `overflow: hidden` for the clip to work. */
+.task-card-drawer-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 180ms ease-out;
+}
+
+.task-card-drawer-wrap[data-expanded="true"] {
+  grid-template-rows: 1fr;
 }
 
 .task-card-drawer {
+  min-height: 0;
+  overflow: hidden;
   display: grid;
   gap: var(--space-2);
+}
+
+.task-card-drawer-wrap[data-expanded="true"] .task-card-drawer {
   padding-top: var(--space-2);
   border-top: 1px solid var(--line);
 }
@@ -2870,6 +2950,29 @@ tbody tr.selected {
 
   .diagnostics-workspace > .detail {
     order: -1;
+  }
+}
+
+/* mc-audit microinteractions / heavy-user theme — ensure no horizontal
+   scroll at the mini/MBA/iPhone breakpoints. Below 1024px the sidebar
+   stacks above the main content rather than competing for horizontal
+   real estate. The 980px block below carries the rest of the cascade
+   (toolbar, task-board, diagnostics-summary). The catch-all at the top
+   prevents accidental overflow on intermediate widths. */
+html, body {
+  overflow-x: hidden;
+}
+
+@media (max-width: 1024px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    min-height: 100vh;
+    height: auto;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
   }
 }
 

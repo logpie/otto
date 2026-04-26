@@ -215,6 +215,36 @@ def test_sidebar_in_flight_zero_with_no_runs(
     payload["live"]["items"] = []
     payload["live"]["active_count"] = 0
     payload["live"]["total_count"] = 0
+    # mc-audit codex-first-time-user #15: the sidebar collapses to a single
+    # "Project ready · No jobs yet" row when the project has zero history,
+    # zero live runs, no queued/landing items. Seed a history row so this
+    # negative test still exercises the full ProjectMeta dashboard with the
+    # In-flight counter visible.
+    payload["history"]["items"] = [
+        {
+            "run_id": "2026-04-26-000000-bbbbbb",
+            "domain": "build",
+            "run_type": "build",
+            "command": "build",
+            "status": "completed",
+            "terminal_outcome": "success",
+            "queue_task_id": "prior-task",
+            "merge_id": None,
+            "branch": "feature/prior",
+            "worktree": None,
+            "summary": "Prior build",
+            "intent": "Prior build",
+            "completed_at_display": "2026-04-25 10:00",
+            "outcome_display": "success",
+            "duration_s": 60,
+            "duration_display": "1m",
+            "cost_usd": 0.01,
+            "cost_display": "$0.01",
+            "resumable": False,
+            "adapter_key": "build",
+        }
+    ]
+    payload["history"]["total_rows"] = 1
 
     _install_projects_route(page)
     _install_state_route(page, payload)
