@@ -40,8 +40,10 @@ from otto.queue.artifacts import preserve_queue_session_artifacts
 from otto.theme import error_console
 from otto.queue.runtime import (
     INTERRUPTED_STATUS,
+    RESUMABLE_QUEUE_STATUSES,
     checkpoint_path_for_task,
-    task_resume_available,
+    task_resume_allowed,
+    task_resume_block_reason,
     task_display_status,
     watcher_alive,
 )
@@ -258,6 +260,9 @@ def _resume_status(project_dir: Path, task) -> tuple[str, str | None]:
         return "n/a", None
     if checkpoint_path is None:
         return "no checkpoint", None
+    reason = task_resume_block_reason(project_dir, task, {"status": INTERRUPTED_STATUS})
+    if reason is not None:
+        return reason, str(checkpoint_path)
     return "ready", str(checkpoint_path)
 
 
@@ -649,19 +654,21 @@ def register_queue_commands(main: click.Group) -> None:
     @click.argument("task_id")
     def rm(task_id: str) -> None:
         """Remove a task from the queue."""
-        from otto.queue.schema import append_command, remove_task
+        from otto.queue.schema import append_command, load_state, remove_task
 
         project_dir = _project_dir()
         tasks = _load_queue_or_exit(project_dir)
-        if not any(t.id == task_id for t in tasks):
+        task = next((t for t in tasks if t.id == task_id), None)
+        if task is None:
             error_console.print(f"[error]No such task: {task_id!r}[/error]")
             sys.exit(2)
-        status = _task_status(project_dir, task_id)
+        task_state = load_state(project_dir).get("tasks", {}).get(task_id, {})
+        status = task_display_status(task_state)
         if status in QUEUE_CLEANUP_STATUSES:
             action = (
                 f"use `otto queue resume {task_id}` to continue it, or "
                 f"`otto queue cleanup {task_id}` to discard its worktree"
-                if status == INTERRUPTED_STATUS
+                if status in RESUMABLE_QUEUE_STATUSES and task_resume_allowed(project_dir, task, task_state)
                 else f"use `otto queue cleanup {task_id}` to clear finished tasks"
             )
             error_console.print(
@@ -762,12 +769,12 @@ def register_queue_commands(main: click.Group) -> None:
     @queue.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("task_ids", nargs=-1)
     @click.option("--select", is_flag=True,
-                  help="Pick interrupted tasks from an interactive checkbox list")
+                  help="Pick checkpoint-resumable tasks from an interactive checkbox list")
     def resume(task_ids: tuple[str, ...], select: bool) -> None:
-        """Resume interrupted queue tasks.
+        """Resume interrupted or checkpointed failed queue tasks.
 
         \b
-            otto queue resume                  # resume all interrupted tasks
+            otto queue resume                  # resume all tasks with a checkpoint
             otto queue resume labels           # resume one task
             otto queue resume labels,due       # resume multiple tasks
             otto queue resume --select         # pick from a checkbox list
@@ -781,23 +788,23 @@ def register_queue_commands(main: click.Group) -> None:
         tasks = _load_queue_or_exit(project_dir)
         tasks_by_id = {task.id: task for task in tasks}
         state = load_state(project_dir)
-        interrupted_ids = [
+        resumable_status_ids = [
             task.id
             for task in tasks
-            if task_display_status(state.get("tasks", {}).get(task.id, {})) == INTERRUPTED_STATUS
+            if task_display_status(state.get("tasks", {}).get(task.id, {})) in RESUMABLE_QUEUE_STATUSES
         ]
-        if not interrupted_ids:
-            console.print("  No interrupted tasks are waiting to resume.")
+        if not resumable_status_ids:
+            console.print("  No checkpoint-resumable tasks are waiting to resume.")
             return
         resumable_ids = [
-            task_id for task_id in interrupted_ids
-            if task_resume_available(project_dir, tasks_by_id[task_id])
+            task_id for task_id in resumable_status_ids
+            if task_resume_allowed(project_dir, tasks_by_id[task_id], state.get("tasks", {}).get(task_id, {}))
         ]
 
         selected_ids = _parse_resume_task_args(task_ids)
         if select:
             if not resumable_ids:
-                console.print("  Interrupted tasks exist, but none have a resumable checkpoint.")
+                console.print("  Resume-eligible tasks exist, but none have a resumable checkpoint.")
                 return
             selected_ids = select_resume_tasks(
                 project_dir,
@@ -813,7 +820,7 @@ def register_queue_commands(main: click.Group) -> None:
         elif not selected_ids:
             selected_ids = list(resumable_ids)
             if not selected_ids:
-                console.print("  Interrupted tasks exist, but none have a resumable checkpoint.")
+                console.print("  Resume-eligible tasks exist, but none have a resumable checkpoint.")
                 return
 
         missing = [task_id for task_id in selected_ids if task_id not in tasks_by_id]
@@ -825,23 +832,31 @@ def register_queue_commands(main: click.Group) -> None:
 
         invalid_status = [
             task_id for task_id in selected_ids
-            if task_display_status(state.get("tasks", {}).get(task_id, {})) != INTERRUPTED_STATUS
+            if task_display_status(state.get("tasks", {}).get(task_id, {})) not in RESUMABLE_QUEUE_STATUSES
         ]
         if invalid_status:
             error_console.print(
-                "[error]Only interrupted tasks can be resumed.[/error]\n"
-                f"  Not interrupted: {rich_escape(', '.join(invalid_status))}"
+                "[error]Only interrupted, failed, cancelled, or paused tasks can be resumed.[/error]\n"
+                f"  Not resume-eligible: {rich_escape(', '.join(invalid_status))}"
             )
             sys.exit(2)
 
-        unavailable = [
-            task_id for task_id in selected_ids
-            if not task_resume_available(project_dir, tasks_by_id[task_id])
-        ]
+        unavailable = {
+            task_id: task_resume_block_reason(
+                project_dir,
+                tasks_by_id[task_id],
+                state.get("tasks", {}).get(task_id, {}),
+            )
+            for task_id in selected_ids
+        }
+        unavailable = {task_id: reason for task_id, reason in unavailable.items() if reason}
         if unavailable:
+            details = "; ".join(
+                f"{task_id}: {reason}" for task_id, reason in unavailable.items()
+            )
             error_console.print(
-                "[error]Selected task(s) do not have a resumable checkpoint.[/error]\n"
-                f"  No checkpoint: {rich_escape(', '.join(unavailable))}"
+                "[error]Selected task(s) cannot be resumed from checkpoint.[/error]\n"
+                f"  {rich_escape(details)}"
             )
             sys.exit(2)
 

@@ -13,6 +13,7 @@ Flow:
 from __future__ import annotations
 
 import asyncio
+import json
 import hashlib
 import logging
 import re
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("otto.spec")
 MAX_SPEC_REGENERATIONS = 5
+SPEC_REVIEW_DECISION_FILE = "review-decision.json"
 
 # Required section headings (exact match after stripping whitespace). The
 # spec prompt is constrained to produce these — validation catches drift.
@@ -50,6 +52,45 @@ class SpecResult:
     cost: float
     duration_s: float
     version: int = 0
+
+
+def spec_review_decision_path(spec_path: Path) -> Path:
+    """Return the sidecar file used by non-TTY web spec review."""
+    return Path(spec_path).with_name(SPEC_REVIEW_DECISION_FILE)
+
+
+def write_spec_review_decision(spec_path: Path, *, action: str, note: str = "") -> Path:
+    """Persist a web review decision for the next queued resume attempt."""
+    normalized = str(action or "").strip().lower()
+    if normalized not in {"approve", "regenerate"}:
+        raise ValueError("spec review action must be approve or regenerate")
+    payload = {
+        "schema_version": 1,
+        "action": normalized,
+        "note": str(note or "").strip(),
+        "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    path = spec_review_decision_path(spec_path)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def read_spec_review_decision(spec_path: Path) -> dict[str, str] | None:
+    """Read and validate a web review decision, if one exists."""
+    path = spec_review_decision_path(spec_path)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"spec review decision is unreadable: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("spec review decision must be a JSON object")
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"approve", "regenerate"}:
+        raise ValueError("spec review decision action must be approve or regenerate")
+    note = str(payload.get("note") or "").strip()
+    return {"action": action, "note": note}
 
 
 # ---------------------------------------------------------------------------

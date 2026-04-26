@@ -23,6 +23,13 @@ def test_atomic_adapter_orders_artifacts_and_formats_summary(tmp_path: Path) -> 
     (session_dir / "spec.md").write_text("# spec")
     (paths.build_dir(tmp_path, run_id) / "narrative.log").write_text("hello")
     (session_dir / "agent.log").write_text("secondary")
+    certify_dir = paths.certify_dir(tmp_path, run_id)
+    certify_dir.mkdir(parents=True, exist_ok=True)
+    (certify_dir / "proof-of-work.html").write_text("<html>proof</html>")
+    (certify_dir / "proof-of-work.md").write_text("# proof")
+    (certify_dir / "proof-of-work.json").write_text("{}")
+    (certify_dir / "narrative.log").write_text("certifier log")
+    (certify_dir / "messages.jsonl").write_text("{}\n")
 
     record = make_run_record(
         project_dir=tmp_path,
@@ -49,7 +56,20 @@ def test_atomic_adapter_orders_artifacts_and_formats_summary(tmp_path: Path) -> 
     labels = [artifact.label for artifact in adapter.artifacts(record)]
     actions = {action.key: action for action in adapter.legal_actions(record, None)}
 
-    assert labels == ["intent", "spec", "manifest", "summary", "checkpoint", "primary log", "extra 1"]
+    assert labels == [
+        "intent",
+        "spec",
+        "manifest",
+        "summary",
+        "checkpoint",
+        "primary log",
+        "proof report",
+        "proof markdown",
+        "proof json",
+        "certifier log",
+        "certifier messages",
+        "agent.log",
+    ]
     assert adapter.row_label(record) == "export csv"
     assert actions["r"].enabled is False
     assert actions["r"].reason == "run is not interrupted"
@@ -61,6 +81,13 @@ def test_queue_adapter_includes_queue_manifest_and_merge_action_preview(tmp_path
     queue_manifest = tmp_path / "otto_logs" / "queue" / task_id / "manifest.json"
     queue_manifest.parent.mkdir(parents=True, exist_ok=True)
     queue_manifest.write_text(json.dumps({"run_id": "queue-run"}))
+    session_dir = paths.session_dir(tmp_path, "queue-run")
+    certify_dir = paths.certify_dir(tmp_path, "queue-run")
+    certify_dir.mkdir(parents=True, exist_ok=True)
+    (certify_dir / "proof-of-work.html").write_text("<html>proof</html>")
+    (certify_dir / "proof-of-work.md").write_text("# proof")
+    (certify_dir / "proof-of-work.json").write_text("{}")
+    (certify_dir / "narrative.log").write_text("certifier log")
 
     record = make_run_record(
         project_dir=tmp_path,
@@ -74,7 +101,7 @@ def test_queue_adapter_includes_queue_manifest_and_merge_action_preview(tmp_path
         identity={"queue_task_id": task_id, "merge_id": None, "parent_run_id": None},
         intent={"summary": "build queued thing", "intent_path": None, "spec_path": None},
         git={"branch": "build/queued", "worktree": ".worktrees/queue-task"},
-        artifacts={"manifest_path": str(queue_manifest), "primary_log_path": None},
+        artifacts={"session_dir": str(session_dir), "manifest_path": str(queue_manifest), "primary_log_path": None},
         adapter_key="queue.attempt",
     )
 
@@ -82,7 +109,9 @@ def test_queue_adapter_includes_queue_manifest_and_merge_action_preview(tmp_path
     artifacts = adapter.artifacts(record)
     actions = {action.key: action for action in adapter.legal_actions(record, None)}
 
-    assert artifacts[0].label == "queue manifest"
+    labels = [artifact.label for artifact in artifacts]
+    assert labels[:4] == ["queue manifest", "manifest", "proof report", "proof markdown"]
+    assert "certifier log" in labels
     assert actions["m"].enabled is True
     assert "otto merge --fast --no-certify queue-task" in actions["m"].preview
 

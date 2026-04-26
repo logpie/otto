@@ -43,7 +43,7 @@ Two subsystems built on top of the core build/certify/improve flows:
            │                     │
      ┌─────▼──────┐    ┌────────▼─────────┐
      │ Agent Mode │    │   Split Mode     │
-     │ (default)  │    │   (--split)      │
+     │ (--agentic)│    │   (default)      │
      └─────┬──────┘    └────────┬─────────┘
            │                     │
      ┌─────▼──────────┐  ┌──────▼───────────────┐
@@ -136,10 +136,10 @@ otto improve bugs "error handling" --split -n 5
      └───────────────────────────────────────────────────────┘
 ```
 
-## Improve Flow (Agent Mode — Default)
+## Improve Flow (Agent Mode — `--agentic`)
 
 ```
-otto improve bugs "error handling" -n 5
+otto improve bugs "error handling" --agentic -n 5
 │
 ├─ Create improvement branch
 │
@@ -220,7 +220,7 @@ otto improve bugs "error handling" -n 5
   (`intent.md`, `otto.yaml`) are snapshotted for task context and kept out of
   task commits by default — they're shared project state, not per-task work.
 - Watcher supports an optional per-task wall-clock timeout
-  (`queue.task_timeout_s`; default template value 1800s, set to `0` or `null`
+  (`queue.task_timeout_s`; default template value 4200s, set to `0` or `null`
   to disable) that SIGTERMs hung children so they free their concurrency slot.
 - On watcher restart, in-flight tasks are either resumed (default,
   `on_watcher_restart: resume`) by reconciling state.json against live PIDs

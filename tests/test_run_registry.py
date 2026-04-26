@@ -19,6 +19,7 @@ from otto.runs.registry import (
     make_run_record,
     read_live_records,
     RunPublisher,
+    update_record,
     write_record,
 )
 
@@ -238,3 +239,29 @@ def test_run_publisher_ignores_updates_after_finalize(tmp_path: Path) -> None:
     record = json.loads(paths.live_run_path(tmp_path, run_id).read_text())
     assert record["status"] == "done"
     assert record["terminal_outcome"] == "success"
+
+
+def test_terminal_update_freezes_finished_at_and_duration(tmp_path: Path) -> None:
+    run_id = allocate_run_id(tmp_path)
+    write_record(
+        tmp_path,
+        make_run_record(
+            project_dir=tmp_path,
+            run_id=run_id,
+            domain="queue",
+            run_type="queue",
+            command="build",
+            display_name="queue: build",
+            status="running",
+            cwd=tmp_path,
+        ),
+    )
+
+    update_record(tmp_path, run_id, {"status": "failed"}, heartbeat=False)
+    first = json.loads(paths.live_run_path(tmp_path, run_id).read_text())
+    update_record(tmp_path, run_id, {"last_event": "still failed"}, heartbeat=False)
+    second = json.loads(paths.live_run_path(tmp_path, run_id).read_text())
+
+    assert first["timing"]["finished_at"]
+    assert second["timing"]["finished_at"] == first["timing"]["finished_at"]
+    assert second["timing"]["duration_s"] == first["timing"]["duration_s"]

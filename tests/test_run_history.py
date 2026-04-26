@@ -269,6 +269,49 @@ def test_terminal_history_writers_emit_v2_snapshots_for_all_domains(tmp_path: Pa
     assert by_run_id["certify-run"]["artifacts"]["checkpoint_path"] is None
     assert by_run_id["queue-run"]["domain"] == "queue"
     assert by_run_id["queue-run"]["queue_task_id"] == "task-1"
+    assert by_run_id["queue-run"]["argv"] == ["build", "queued work"]
+    assert by_run_id["queue-run"]["source"]["argv"] == ["build", "queued work"]
+    assert by_run_id["queue-run"]["child_run_id"] == "queue-run"
+    assert by_run_id["queue-run"]["expected_child_run_id"] == "queue-run"
     assert by_run_id["queue-run"]["artifacts"]["primary_log_path"].endswith("/queue-run/build/narrative.log")
     assert by_run_id["merge-run"]["domain"] == "merge"
     assert by_run_id["merge-run"]["artifacts"]["extra_log_paths"][0].endswith("/merge-run/state.json")
+
+
+def test_queue_history_snapshot_preserves_timeout_context(tmp_path: Path) -> None:
+    queue_worktree = tmp_path / ".worktrees" / "timeout-task"
+    queue_session = paths.ensure_session_scaffold(queue_worktree, "queue-timeout", phase="build")
+    (queue_session / "build" / "narrative.log").write_text("Agent run cancelled\n", encoding="utf-8")
+
+    runner = Runner(tmp_path, RunnerConfig(), otto_bin="otto")
+    task = QueueTask(
+        id="timeout-task",
+        command_argv=["build", "long task", "--provider", "codex", "--thorough"],
+        resolved_intent="long task",
+        branch="build/timeout-task",
+        worktree=".worktrees/timeout-task",
+        resumable=True,
+    )
+    runner._append_queue_history_snapshot(
+        task,
+        {
+            "attempt_run_id": "queue-timeout",
+            "child_run_id": "queue-timeout",
+            "started_at": "2026-04-23T12:30:00Z",
+            "finished_at": "2026-04-23T13:00:02Z",
+            "failure_reason": "timed out after 1802s (limit 1800s)",
+        },
+        run_id="queue-timeout",
+        status="failed",
+        terminal_outcome="failure",
+    )
+
+    row = read_history_rows(paths.history_jsonl(tmp_path))[0]
+
+    assert row["duration_s"] == 1802.0
+    assert row["failure_reason"] == "timed out after 1802s (limit 1800s)"
+    assert row["argv"] == ["build", "long task", "--provider", "codex", "--thorough"]
+    assert row["source"]["invoked_via"] == "queue"
+    assert row["source"]["argv"] == ["build", "long task", "--provider", "codex", "--thorough"]
+    assert row["child_run_id"] == "queue-timeout"
+    assert row["expected_child_run_id"] == "queue-timeout"

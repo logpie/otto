@@ -53,6 +53,40 @@ def _max_turns_option(
     return value
 
 
+def _apply_improver_agent_aliases(overrides: dict, *, resolved_split: bool) -> None:
+    """Map improve-native agent flags onto the implementation phase.
+
+    Split improve has no initial build phase, so the code-changing agent is
+    stored as ``fix``. Agentic improve is a single main session, currently
+    stored as ``build`` for provider dispatch. Keep that implementation detail
+    out of the public CLI by accepting ``--improver-*`` in both modes.
+    """
+    target_prefix = "fix" if resolved_split else "build"
+    hidden_alias = "fix" if target_prefix == "build" else "build"
+    for field in ("provider", "model", "effort"):
+        improver_key = f"improver_{field}"
+        target_key = f"{target_prefix}_{field}"
+        alias_key = f"{hidden_alias}_{field}"
+        improver_value = overrides.get(improver_key)
+        target_value = overrides.get(target_key)
+        if improver_value and target_value and improver_value != target_value:
+            error_console.print(
+                "[error]"
+                f"--improver-{field} conflicts with --{target_prefix}-{field} "
+                "for the selected improve execution mode."
+                "[/error]"
+            )
+            sys.exit(2)
+        if improver_value:
+            overrides[target_key] = improver_value
+        if overrides.get(alias_key):
+            # Improve split starts at evaluation, and agentic improve is a
+            # single main session. Preserve backward compatibility by
+            # accepting old queued args, but do not surface no-op phase
+            # overrides in config output.
+            overrides[alias_key] = None
+
+
 def _exit_for_lock_busy(exc) -> None:
     holder = exc.holder or {}
     error_console.print(
@@ -138,6 +172,7 @@ def _run_improve(
     subcommand: str,
     target: str | None = None,
     split: bool = False,
+    agentic: bool = False,
     resume: bool = False,
     resume_state=None,
     force_cross_command_resume: bool = False,
@@ -246,6 +281,7 @@ def _run_improve(
                     subcommand=subcommand,
                     target=target,
                     split=split,
+                    agentic=agentic,
                     resume=resume,
                     resume_state=resume_state,
                     run_id=run_id,
@@ -272,6 +308,7 @@ def _run_improve_locked(
     subcommand: str,
     target: str | None,
     split: bool,
+    agentic: bool,
     resume: bool,
     resume_state,
     run_id: str,
@@ -280,7 +317,12 @@ def _run_improve_locked(
     cli_overrides: dict | None = None,
 ) -> None:
     from otto import paths as _paths
-    from otto.cli import _load_config_or_exit, _print_config_banner, _record_cli_override
+    from otto.cli import (
+        _load_config_or_exit,
+        _print_config_banner,
+        _record_cli_override,
+        _record_phase_agent_cli_overrides,
+    )
     from otto.config import ensure_safe_repo_state, get_max_rounds, get_max_turns_per_call
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop
 
@@ -293,8 +335,22 @@ def _run_improve_locked(
         resolved_rounds = resume_rounds
     else:
         resolved_rounds = get_max_rounds(config)
-    resolved_split = bool(split or config.get("split_mode"))
+    if split and agentic:
+        error_console.print("[error]--split and --agentic are mutually exclusive.[/error]")
+        sys.exit(2)
+    if split:
+        resolved_split = True
+    elif agentic:
+        resolved_split = False
+    else:
+        resolved_split = bool(config.get("split_mode"))
     if resume_state.resumed and resume_state.split_mode is not None:
+        if split and resume_state.split_mode is False:
+            error_console.print("[error]Cannot change an agentic checkpoint to split mode on resume.[/error]")
+            sys.exit(2)
+        if agentic and resume_state.split_mode is True:
+            error_console.print("[error]Cannot change a split checkpoint to agentic mode on resume.[/error]")
+            sys.exit(2)
         resolved_split = resume_state.split_mode
     if resume_state.resumed and not focus and getattr(resume_state, "focus", ""):
         focus = resume_state.focus
@@ -334,7 +390,16 @@ def _run_improve_locked(
     config["certifier_mode"] = certifier_mode
 
     # Apply CLI overrides to the loaded config.
-    overrides = cli_overrides or {}
+    overrides = dict(cli_overrides or {})
+    _apply_improver_agent_aliases(overrides, resolved_split=resolved_split)
+    config["_agent_label_overrides"] = (
+        {"certifier": "evaluator", "fix": "improver"}
+        if resolved_split
+        else {"build": "improver"}
+    )
+    config["_agent_types_for_banner"] = (
+        ("certifier", "fix") if resolved_split else ("build",)
+    )
     sources: dict[str, str] = {}
     if rounds is not None:
         sources["max_certify_rounds"] = "--rounds"
@@ -365,6 +430,33 @@ def _run_improve_locked(
         config["effort"] = overrides["effort"]
         sources["effort"] = "--effort"
         _record_cli_override(config, "effort", overrides["effort"])
+    if split:
+        sources["split_mode"] = "--split"
+    elif agentic:
+        sources["split_mode"] = "--agentic"
+    elif resume_state.resumed and resume_state.split_mode is not None:
+        sources["split_mode"] = "checkpoint"
+    _record_phase_agent_cli_overrides(
+        config=config,
+        sources=sources,
+        values={
+            "build": {
+                "provider": overrides.get("build_provider"),
+                "model": overrides.get("build_model"),
+                "effort": overrides.get("build_effort"),
+            },
+            "certifier": {
+                "provider": overrides.get("certifier_provider"),
+                "model": overrides.get("certifier_model"),
+                "effort": overrides.get("certifier_effort"),
+            },
+            "fix": {
+                "provider": overrides.get("fix_provider"),
+                "model": overrides.get("fix_model"),
+                "effort": overrides.get("fix_effort"),
+            },
+        },
+    )
     if overrides.get("strict"):
         config["strict_mode"] = True
         sources["strict_mode"] = "--strict"
@@ -648,6 +740,7 @@ def register_improve_commands(main: click.Group) -> None:
     @click.argument("focus", required=False)
     @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
+    @click.option("--agentic", is_flag=True, help="One provider session owns certify and fix")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
     @click.option(
         "--force-cross-command-resume",
@@ -661,6 +754,18 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
+    @click.option("--improver-provider", default=None, help="Override provider for the improver/fixer agent")
+    @click.option("--improver-model", default=None, help="Override model for the improver/fixer agent")
+    @click.option("--improver-effort", default=None, help="Override effort for the improver/fixer agent")
+    @click.option("--build-provider", default=None, hidden=True)
+    @click.option("--build-model", default=None, hidden=True)
+    @click.option("--build-effort", default=None, hidden=True)
+    @click.option("--certifier-provider", default=None, help="Override provider for the evaluator/certifier phase")
+    @click.option("--certifier-model", default=None, help="Override model for the evaluator/certifier phase")
+    @click.option("--certifier-effort", default=None, help="Override effort for the evaluator/certifier phase")
+    @click.option("--fix-provider", default=None, hidden=True)
+    @click.option("--fix-model", default=None, hidden=True)
+    @click.option("--fix-effort", default=None, hidden=True)
     @click.option("--fast", is_flag=True, help="Downgrade bug certification to fast mode")
     @click.option("--standard", is_flag=True, help="Downgrade bug certification to standard mode")
     @click.option("--thorough", is_flag=True, help="Bug certification depth (default)")
@@ -670,7 +775,7 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
     @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
-    def bugs(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, fast, standard, thorough, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
+    def bugs(focus, rounds, split, agentic, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, improver_provider, improver_model, improver_effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, fast, standard, thorough, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
         """Find and fix bugs, edge cases, and error handling gaps.
 
         One agent certifies, reads findings, fixes, and re-certifies
@@ -700,6 +805,7 @@ def register_improve_commands(main: click.Group) -> None:
             command_label="Bug fixing",
             subcommand="bugs",
             split=split,
+            agentic=agentic,
             resume=resume,
             force_cross_command_resume=force_cross_command_resume,
             in_worktree=in_worktree,
@@ -712,6 +818,18 @@ def register_improve_commands(main: click.Group) -> None:
                 "model": model,
                 "provider": provider,
                 "effort": effort,
+                "improver_provider": improver_provider,
+                "improver_model": improver_model,
+                "improver_effort": improver_effort,
+                "build_provider": build_provider,
+                "build_model": build_model,
+                "build_effort": build_effort,
+                "certifier_provider": certifier_provider,
+                "certifier_model": certifier_model,
+                "certifier_effort": certifier_effort,
+                "fix_provider": fix_provider,
+                "fix_model": fix_model,
+                "fix_effort": fix_effort,
                 "strict": strict,
                 "verbose": verbose,
                 "debug_unredacted": debug_unredacted,
@@ -723,6 +841,7 @@ def register_improve_commands(main: click.Group) -> None:
     @click.argument("focus", required=False)
     @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
+    @click.option("--agentic", is_flag=True, help="One provider session owns certify and fix")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
     @click.option(
         "--force-cross-command-resume",
@@ -736,13 +855,25 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
+    @click.option("--improver-provider", default=None, help="Override provider for the improver/fixer agent")
+    @click.option("--improver-model", default=None, help="Override model for the improver/fixer agent")
+    @click.option("--improver-effort", default=None, help="Override effort for the improver/fixer agent")
+    @click.option("--build-provider", default=None, hidden=True)
+    @click.option("--build-model", default=None, hidden=True)
+    @click.option("--build-effort", default=None, hidden=True)
+    @click.option("--certifier-provider", default=None, help="Override provider for the evaluator/certifier phase")
+    @click.option("--certifier-model", default=None, help="Override model for the evaluator/certifier phase")
+    @click.option("--certifier-effort", default=None, help="Override effort for the evaluator/certifier phase")
+    @click.option("--fix-provider", default=None, hidden=True)
+    @click.option("--fix-model", default=None, hidden=True)
+    @click.option("--fix-effort", default=None, hidden=True)
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
     @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
     @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
-    def feature(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
+    def feature(focus, rounds, split, agentic, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, improver_provider, improver_model, improver_effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
         """Suggest and implement product improvements.
 
         One agent evaluates the product, identifies improvements, implements
@@ -766,6 +897,7 @@ def register_improve_commands(main: click.Group) -> None:
             command_label="Feature improvement",
             subcommand="feature",
             split=split,
+            agentic=agentic,
             resume=resume,
             force_cross_command_resume=force_cross_command_resume,
             in_worktree=in_worktree,
@@ -778,6 +910,18 @@ def register_improve_commands(main: click.Group) -> None:
                 "model": model,
                 "provider": provider,
                 "effort": effort,
+                "improver_provider": improver_provider,
+                "improver_model": improver_model,
+                "improver_effort": improver_effort,
+                "build_provider": build_provider,
+                "build_model": build_model,
+                "build_effort": build_effort,
+                "certifier_provider": certifier_provider,
+                "certifier_model": certifier_model,
+                "certifier_effort": certifier_effort,
+                "fix_provider": fix_provider,
+                "fix_model": fix_model,
+                "fix_effort": fix_effort,
                 "strict": strict,
                 "verbose": verbose,
                 "debug_unredacted": debug_unredacted,
@@ -788,6 +932,7 @@ def register_improve_commands(main: click.Group) -> None:
     @click.argument("goal", required=False)
     @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
+    @click.option("--agentic", is_flag=True, help="One provider session owns certify and fix")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
     @click.option(
         "--force-cross-command-resume",
@@ -801,13 +946,25 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
+    @click.option("--improver-provider", default=None, help="Override provider for the improver/fixer agent")
+    @click.option("--improver-model", default=None, help="Override model for the improver/fixer agent")
+    @click.option("--improver-effort", default=None, help="Override effort for the improver/fixer agent")
+    @click.option("--build-provider", default=None, hidden=True)
+    @click.option("--build-model", default=None, hidden=True)
+    @click.option("--build-effort", default=None, hidden=True)
+    @click.option("--certifier-provider", default=None, help="Override provider for the evaluator/certifier phase")
+    @click.option("--certifier-model", default=None, help="Override model for the evaluator/certifier phase")
+    @click.option("--certifier-effort", default=None, help="Override effort for the evaluator/certifier phase")
+    @click.option("--fix-provider", default=None, hidden=True)
+    @click.option("--fix-model", default=None, hidden=True)
+    @click.option("--fix-effort", default=None, hidden=True)
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
     @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
     @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
-    def target(goal, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
+    def target(goal, rounds, split, agentic, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, improver_provider, improver_model, improver_effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
         """Optimize toward a measurable target.
 
         Measures a metric, compares to the target, and iterates until met.
@@ -887,6 +1044,7 @@ def register_improve_commands(main: click.Group) -> None:
             subcommand="target",
             target=goal,
             split=split,
+            agentic=agentic,
             resume=resume,
             resume_state=resume_state,
             force_cross_command_resume=force_cross_command_resume,
@@ -900,6 +1058,18 @@ def register_improve_commands(main: click.Group) -> None:
                 "model": model,
                 "provider": provider,
                 "effort": effort,
+                "improver_provider": improver_provider,
+                "improver_model": improver_model,
+                "improver_effort": improver_effort,
+                "build_provider": build_provider,
+                "build_model": build_model,
+                "build_effort": build_effort,
+                "certifier_provider": certifier_provider,
+                "certifier_model": certifier_model,
+                "certifier_effort": certifier_effort,
+                "fix_provider": fix_provider,
+                "fix_model": fix_model,
+                "fix_effort": fix_effort,
                 "strict": strict,
                 "verbose": verbose,
                 "debug_unredacted": debug_unredacted,

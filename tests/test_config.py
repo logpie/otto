@@ -99,7 +99,7 @@ class TestLoadConfig:
         assert q["concurrent"] == 3
         assert q["worktree_dir"] == ".worktrees"
         assert q["on_watcher_restart"] == "resume"
-        assert q["task_timeout_s"] == 1800.0
+        assert q["task_timeout_s"] == 4200.0
         assert q["merge_certifier_mode"] == "standard"
         assert "intent.md" in q["bookkeeping_files"]
         assert "otto.yaml" in q["bookkeeping_files"]
@@ -560,6 +560,41 @@ class TestFirstTouchBookkeeping:
             check=True,
         ).stdout
         assert status.startswith(" M .gitignore")
+
+    def test_retries_transient_index_lock_during_auto_commit(
+        self, tmp_bare_git_repo, monkeypatch
+    ):
+        import subprocess
+
+        real_run = subprocess.run
+        commit_attempts = 0
+
+        def flaky_commit_run(cmd, *args, **kwargs):
+            nonlocal commit_attempts
+            if list(cmd[:2]) == ["git", "commit"]:
+                commit_attempts += 1
+                if commit_attempts == 1:
+                    return subprocess.CompletedProcess(
+                        cmd,
+                        128,
+                        stdout="",
+                        stderr="fatal: Unable to create '.git/index.lock': File exists.\n",
+                    )
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", flaky_commit_run)
+
+        first_touch_bookkeeping(tmp_bare_git_repo, DEFAULT_CONFIG)
+
+        assert commit_attempts == 2
+        status = real_run(
+            ["git", "status", "--short", "--", ".gitignore", ".gitattributes"],
+            cwd=tmp_bare_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert status == ""
 
 
 class TestSetupCommandExistingConfig:

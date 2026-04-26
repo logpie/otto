@@ -46,6 +46,25 @@ from otto.queue.schema import (
 from tests._helpers import init_repo
 
 
+def _write_resume_checkpoint(
+    repo: Path,
+    task: QueueTask,
+    session_id: str = "2026-04-22-010203-abc123",
+    *,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    worktree = repo / (task.worktree or f".worktrees/{task.id}")
+    _paths.ensure_session_scaffold(worktree, session_id)
+    _paths.session_checkpoint(worktree, session_id).write_text(
+        json.dumps({
+            "status": "in_progress",
+            "updated_at": "2026-04-22T01:02:03Z",
+            **(extra or {}),
+        }),
+        encoding="utf-8",
+    )
+
+
 # ---------- acquire_lock ----------
 
 
@@ -384,6 +403,23 @@ def _write_queue_manifest(repo: Path, task_id: str, *, exit_status: str = "succe
     return manifest_path
 
 
+def test_finalize_paused_manifest_marks_task_paused(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume"), otto_bin="/bin/true")
+    _write_queue_manifest(repo, "t1", exit_status="paused")
+    ts = {
+        "status": "running",
+        "started_at": "2026-04-19T00:00:00Z",
+        "child": {"pid": 123456, "pgid": 123456},
+    }
+
+    runner._finalize_task_from_manifest(ts, "t1", exit_code=0)
+
+    assert ts["status"] == "paused"
+    assert ts["child"] is None
+    assert ts["failure_reason"] == "paused; resume available"
+
+
 def _spawn_orphan_child(*, cwd: Path, command: str) -> dict[str, Any]:
     script = """
 import json
@@ -566,6 +602,39 @@ def test_refresh_queue_run_records_surfaces_unexpected_update_errors(tmp_path: P
 
     with pytest.raises(RuntimeError, match="boom"):
         runner._refresh_queue_run_records([task], state)
+
+
+def test_refresh_queue_run_records_freezes_terminal_elapsed_time(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    )
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+    state = {
+        "tasks": {
+            "t1": {
+                "status": "failed",
+                "attempt_run_id": "run-123",
+                "child": None,
+                "failure_reason": "exit_code=2",
+                "started_at": "2026-04-23T00:00:00Z",
+                "finished_at": "2026-04-23T00:00:05Z",
+            }
+        }
+    }
+
+    runner._write_queue_run_record(task, state["tasks"]["t1"], status="running")
+    changed = runner._refresh_queue_run_records([task], state)
+
+    record = json.loads(_paths.live_run_path(repo, "run-123").read_text())
+    assert changed is True
+    assert state["tasks"]["t1"]["duration_s"] == 5.0
+    assert record["status"] == "failed"
+    assert record["timing"]["finished_at"] == "2026-04-23T00:00:05Z"
+    assert record["timing"]["duration_s"] == 5.0
 
 
 def test_refresh_queue_run_records_does_not_recreate_gc_deleted_terminal_attempt(tmp_path: Path) -> None:
@@ -951,11 +1020,11 @@ def test_runner_task_timeout_disabled_when_none(tmp_path: Path):
 
 
 def test_runner_config_loads_task_timeout_from_yaml():
-    """`queue.task_timeout_s` in otto.yaml is honored; absent → 1800 default."""
+    """`queue.task_timeout_s` in otto.yaml is honored; absent → default guard."""
     cfg = runner_config_from_otto_config({"queue": {"task_timeout_s": 600}})
     assert cfg.task_timeout_s == 600.0
     cfg2 = runner_config_from_otto_config({"queue": {}})
-    assert cfg2.task_timeout_s == 1800.0
+    assert cfg2.task_timeout_s == 4200.0
     cfg3 = runner_config_from_otto_config({"queue": {"task_timeout_s": None}})
     assert cfg3.task_timeout_s is None
     cfg4 = runner_config_from_otto_config({"queue": {"task_timeout_s": 0}})
@@ -1161,7 +1230,7 @@ def test_runner_config_from_otto_config():
     assert cfg.concurrent == 5
     assert cfg.worktree_dir == ".my-trees"
     assert cfg.on_watcher_restart == "fail"
-    assert cfg.task_timeout_s == 1800.0
+    assert cfg.task_timeout_s == 4200.0
 
 
 @pytest.mark.parametrize("bad_concurrent", [0, -2, True, "3"])
@@ -1544,13 +1613,15 @@ def test_cancel_queued_task_removes_queue_entry(tmp_path: Path):
 
 def test_resume_command_requeues_interrupted_task(tmp_path: Path):
     repo = init_repo(tmp_path)
-    append_task(repo, QueueTask(
+    task = QueueTask(
         id="resume1",
         command_argv=["build", "x"],
         resumable=True,
         branch="build/resume1",
         worktree=".worktrees/resume1",
-    ))
+    )
+    append_task(repo, task)
+    _write_resume_checkpoint(repo, task)
     runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
     state = load_state(repo)
     state["tasks"]["resume1"] = {
@@ -1568,17 +1639,74 @@ def test_resume_command_requeues_interrupted_task(tmp_path: Path):
     assert state["tasks"]["resume1"]["finished_at"] is None
 
 
-def test_resume_command_allows_superseding_terminal_history(tmp_path: Path):
-    from otto.runs.history import append_history_snapshot, read_history_rows
-
+def test_resume_command_requeues_failed_task_with_checkpoint(tmp_path: Path):
     repo = init_repo(tmp_path)
-    append_task(repo, QueueTask(
+    task = QueueTask(
         id="resume1",
         command_argv=["build", "x"],
         resumable=True,
         branch="build/resume1",
         worktree=".worktrees/resume1",
-    ))
+    )
+    append_task(repo, task)
+    _write_resume_checkpoint(repo, task)
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["resume1"] = {
+        "status": "failed",
+        "started_at": "2026-04-19T00:00:00Z",
+        "finished_at": "2026-04-19T00:30:00Z",
+        "failure_reason": "timed out after 1800s (limit 1800s)",
+    }
+
+    runner._apply_command({"cmd": "resume", "id": "resume1"}, state)
+
+    assert state["tasks"]["resume1"]["status"] == "queued"
+    assert state["tasks"]["resume1"]["resumed_from_checkpoint"] is True
+    assert state["tasks"]["resume1"]["failure_reason"] is None
+    assert state["tasks"]["resume1"]["finished_at"] is None
+
+
+def test_resume_command_rejects_stale_checkpoint(tmp_path: Path, caplog):
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="resume1",
+        command_argv=["build", "x"],
+        resumable=True,
+        branch="build/resume1",
+        worktree=".worktrees/resume1",
+    )
+    append_task(repo, task)
+    _write_resume_checkpoint(repo, task, extra={"git_sha": "stale-sha"})
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["resume1"] = {
+        "status": "failed",
+        "started_at": "2026-04-19T00:00:00Z",
+        "finished_at": "2026-04-19T00:30:00Z",
+        "failure_reason": "timed out after 1800s (limit 1800s)",
+    }
+
+    runner._apply_command({"cmd": "resume", "id": "resume1"}, state)
+
+    assert state["tasks"]["resume1"]["status"] == "failed"
+    assert "resumed_from_checkpoint" not in state["tasks"]["resume1"]
+    assert "checkpoint is stale: git HEAD changed" in caplog.text
+
+
+def test_resume_command_allows_superseding_terminal_history(tmp_path: Path):
+    from otto.runs.history import append_history_snapshot, read_history_rows
+
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="resume1",
+        command_argv=["build", "x"],
+        resumable=True,
+        branch="build/resume1",
+        worktree=".worktrees/resume1",
+    )
+    append_task(repo, task)
+    _write_resume_checkpoint(repo, task)
     run_id = "2026-04-23-010203-abc123"
     append_history_snapshot(
         repo,
@@ -1625,6 +1753,13 @@ def test_resume_command_allows_superseding_terminal_history(tmp_path: Path):
 
 def test_resume_command_ignores_non_interrupted_task(tmp_path: Path, caplog):
     repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="queued1",
+        command_argv=["build", "x"],
+        resumable=True,
+        branch="build/queued1",
+        worktree=".worktrees/queued1",
+    ))
     runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
     state = load_state(repo)
     state["tasks"]["queued1"] = {"status": "queued"}
@@ -2047,10 +2182,12 @@ def test_reconcile_applies_cancel_after_terminal_manifest_finalization(tmp_path:
 
 def test_reconcile_applies_resume_after_interrupted_terminating_finalizes(tmp_path: Path):
     repo = init_repo(tmp_path)
-    append_task(repo, QueueTask(
+    task = QueueTask(
         id="b1", command_argv=["build", "x"], resumable=True,
         branch="build/b1", worktree=".worktrees/b1",
-    ))
+    )
+    append_task(repo, task)
+    _write_resume_checkpoint(repo, task)
     state = load_state(repo)
     state["tasks"]["b1"] = {
         "status": "terminating",
@@ -2610,13 +2747,15 @@ def test_replayed_noop_command_is_acked_and_clears_processing(
     monkeypatch: pytest.MonkeyPatch,
 ):
     repo = init_repo(tmp_path)
-    append_task(repo, QueueTask(
+    task = QueueTask(
         id="resume1",
         command_argv=["build", "x"],
         resumable=True,
         branch="build/resume1",
         worktree=".worktrees/resume1",
-    ))
+    )
+    append_task(repo, task)
+    _write_resume_checkpoint(repo, task)
     state = load_state(repo)
     state["tasks"]["resume1"] = {
         "status": INTERRUPTED_STATUS,

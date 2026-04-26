@@ -11,13 +11,16 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from otto import paths
+from otto.checkpoint import write_checkpoint
 from otto.merge.state import BranchOutcome, MergeState, write_state as write_merge_state
+from otto.mission_control.actions import ActionResult
 from otto.mission_control.events import append_event, events_path
 from otto.mission_control.supervisor import record_watcher_launch
 from otto.queue.runner import acquire_lock
 from otto.queue.schema import QueueTask, append_task, load_queue, write_state as write_queue_state
 from otto.runs.history import append_history_snapshot, build_terminal_snapshot
 from otto.runs.registry import make_run_record, update_record, write_record
+from otto.spec import spec_hash
 from otto.web.app import create_app
 
 
@@ -87,6 +90,136 @@ def _write_run(repo: Path, *, run_id: str = "build-web", outside_artifact: str |
         last_event="running tests",
     )
     write_record(repo, record)
+
+
+def test_web_detail_exposes_split_phase_routing_and_timeline(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_id = "split-routing"
+    primary_log = paths.build_dir(repo, run_id) / "narrative.log"
+    primary_log.parent.mkdir(parents=True, exist_ok=True)
+    primary_log.write_text("done\n", encoding="utf-8")
+    summary_path = paths.session_summary(repo, run_id)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps({"verdict": "passed"}), encoding="utf-8")
+    record = make_run_record(
+        project_dir=repo,
+        run_id=run_id,
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="build split routing",
+        status="done",
+        cwd=repo,
+        source={
+            "argv": [
+                "build",
+                "split routing",
+                "--split",
+                "--provider",
+                "claude",
+                "--build-provider",
+                "codex",
+                "--certifier-provider",
+                "codex",
+                "--fix-provider",
+                "codex",
+                "--fix-effort",
+                "high",
+            ],
+        },
+        git={"branch": "main", "worktree": None},
+        intent={"summary": "split routing"},
+        artifacts={"summary_path": str(summary_path), "primary_log_path": str(primary_log)},
+        metrics={
+            "breakdown": {
+                "build": {"duration_s": 10, "total_tokens": 100},
+                "certify": {"duration_s": 5, "rounds": 1},
+                "fix": {"duration_s": 3, "cost_usd": 0.12},
+            },
+        },
+        adapter_key="atomic.build",
+        last_event="completed",
+    )
+    record.terminal_outcome = "success"
+    write_record(repo, record)
+
+    detail = TestClient(create_app(repo)).get(f"/api/runs/{run_id}").json()
+
+    assert detail["build_config"]["split_mode"] is True
+    assert detail["build_config"]["agents"]["build"]["provider"] == "codex"
+    assert detail["build_config"]["agents"]["certifier"]["provider"] == "codex"
+    assert detail["build_config"]["agents"]["fix"]["provider"] == "codex"
+    assert detail["build_config"]["agents"]["fix"]["reasoning_effort"] == "high"
+    phases = {item["phase"]: item for item in detail["phase_timeline"]}
+    assert phases["build"]["provider"] == "codex"
+    assert phases["build"]["token_usage"]["total_tokens"] == 100
+    assert phases["certify"]["provider"] == "codex"
+    assert phases["certify"]["rounds"] == 1
+    assert phases["fix"]["cost_usd"] == 0.12
+
+
+def test_web_detail_exposes_improve_split_as_evaluate_and_improve(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_id = "improve-routing"
+    primary_log = paths.improve_dir(repo, run_id) / "narrative.log"
+    primary_log.parent.mkdir(parents=True, exist_ok=True)
+    primary_log.write_text("done\n", encoding="utf-8")
+    summary_path = paths.session_summary(repo, run_id)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps({"verdict": "passed"}), encoding="utf-8")
+    record = make_run_record(
+        project_dir=repo,
+        run_id=run_id,
+        domain="atomic",
+        run_type="improve",
+        command="improve feature",
+        display_name="improve feature",
+        status="done",
+        cwd=repo,
+        source={
+            "argv": [
+                "improve",
+                "feature",
+                "search UX",
+                "--split",
+                "--provider",
+                "claude",
+                "--certifier-provider",
+                "claude",
+                "--improver-provider",
+                "codex",
+                "--improver-effort",
+                "high",
+            ],
+        },
+        git={"branch": "improve/test", "worktree": None},
+        intent={"summary": "improve search UX"},
+        artifacts={"summary_path": str(summary_path), "primary_log_path": str(primary_log)},
+        metrics={
+            "breakdown": {
+                "certify": {"duration_s": 5, "rounds": 1},
+                "fix": {"duration_s": 8, "total_tokens": 200},
+            },
+        },
+        adapter_key="atomic.improve",
+        last_event="completed",
+    )
+    record.terminal_outcome = "success"
+    write_record(repo, record)
+
+    detail = TestClient(create_app(repo)).get(f"/api/runs/{run_id}").json()
+
+    assert detail["build_config"]["command_family"] == "improve"
+    assert detail["build_config"]["provider"] == "codex"
+    assert detail["build_config"]["agents"]["fix"]["provider"] == "codex"
+    assert detail["build_config"]["agents"]["fix"]["reasoning_effort"] == "high"
+    phases = detail["phase_timeline"]
+    assert [item["phase"] for item in phases] == ["certify", "fix"]
+    assert [item["label"] for item in phases] == ["Evaluate", "Improve / fix"]
+    assert phases[1]["provider"] == "codex"
+    assert phases[1]["token_usage"]["total_tokens"] == 200
 
 
 def test_web_project_launcher_starts_without_selected_project(tmp_path: Path) -> None:
@@ -195,6 +328,9 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     assert row["model"] == "gpt-5.4"
     assert row["reasoning_effort"] == "medium"
     assert row["cost_display"] == "1.2K in / 56 out"
+    assert row["token_usage"]["cached_input_tokens"] == 1000
+    assert state["project_stats"]["total_tokens"] == 2290
+    assert state["project_stats"]["token_display"] == "2.3K tokens"
     assert row["progress"] == "STORY_RESULT: web PASS"
 
     detail = client.get("/api/runs/build-web").json()
@@ -258,6 +394,12 @@ def test_web_review_packet_includes_story_details_and_html_report(tmp_path: Path
     assert packet["certification"]["stories"][0]["id"] == "save-filter"
     assert packet["certification"]["stories"][1]["status"] == "fail"
     assert packet["certification"]["proof_report"]["html_url"] == "/api/runs/build-web/proof-report"
+    handoff = packet["product_handoff"]
+    assert handoff["task_summary"] == "build the web surface"
+    assert [flow["title"] for flow in handoff["task_flows"][:2]] == [
+        "Users can save a filtered dashboard view.",
+        "Users can restore a saved dashboard view.",
+    ]
     report = client.get("/api/runs/build-web/proof-report")
     assert report.status_code == 200
     assert "Proof report" in report.text
@@ -266,6 +408,76 @@ def test_web_review_packet_includes_story_details_and_html_report(tmp_path: Path
     assert client.get("/api/runs/build-web/proof-assets/evidence%2Fhomepage.png").content == b"fake-png"
     assert "STORY_RESULT: web PASS" in client.get("/api/runs/build-web/proof-assets/..%2Fbuild%2Fnarrative.log").text
     assert client.get("/api/runs/build-web/evidence/homepage.png").content == b"fake-png"
+
+
+def test_web_review_packet_includes_explicit_product_handoff(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    handoff_dir = repo / ".otto"
+    handoff_dir.mkdir()
+    (handoff_dir / "product-handoff.json").write_text(
+        json.dumps(
+            {
+                "kind": "cli",
+                "summary": "Try the expense importer CLI.",
+                "launch": [{"label": "Show help", "command": "expense-import --help"}],
+                "try_flows": [{"title": "Import CSV", "steps": ["Run sample import", "Check summary output"]}],
+                "sample_data": [{"label": "Fixture", "value": "examples/expenses.csv"}],
+                "reset": [{"label": "Clear output", "command": "rm -f out.json"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_run(repo)
+
+    packet = TestClient(create_app(repo)).get("/api/runs/build-web").json()["review_packet"]
+    handoff = packet["product_handoff"]
+
+    assert handoff["kind"] == "cli"
+    assert handoff["label"] == "CLI tool"
+    assert handoff["summary"] == "Try the expense importer CLI."
+    assert handoff["launch"] == [{"label": "Show help", "command": "expense-import --help"}]
+    assert handoff["task_summary"] == "build the web surface"
+    assert handoff["task_flows"][0]["title"].startswith("Try this task:")
+    assert handoff["try_flows"][0]["title"] == "Import CSV"
+    assert handoff["sample_data"][0]["value"] == "examples/expenses.csv"
+    assert handoff["reset"][0]["command"] == "rm -f out.json"
+
+
+def test_web_review_packet_detects_product_handoff_from_readme(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "README.md").write_text(
+        "\n".join(
+            [
+                "# Expense Portal",
+                "",
+                "A browser dashboard for reviewing employee expenses.",
+                "",
+                "## Quick Start",
+                "flask --app expense_portal run --port 5000",
+                "flask --app expense_portal init-db",
+                "",
+                "Seed users include Maya Chen manager and Alex Kim employee.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (repo / "expense_portal").mkdir()
+    _write_run(repo)
+
+    packet = TestClient(create_app(repo)).get("/api/runs/build-web").json()["review_packet"]
+    handoff = packet["product_handoff"]
+
+    assert handoff["kind"] == "web"
+    assert handoff["label"] == "Web app"
+    assert handoff["summary"] == "Expense Portal"
+    assert {"label": "Start server", "command": "flask --app expense_portal run --port 5000"} in handoff["launch"]
+    assert {"label": "Reset demo data", "command": "flask --app expense_portal init-db"} in handoff["reset"]
+    assert handoff["task_summary"] == "build the web surface"
+    assert handoff["task_flows"][0]["title"] == "Try this task: build the web surface"
+    assert any("Maya Chen" in item["value"] for item in handoff["sample_data"])
+    assert handoff["try_flows"][0]["title"] == "Open the app"
 
 
 def test_web_run_detail_is_not_hidden_by_list_filters(tmp_path: Path) -> None:
@@ -479,6 +691,125 @@ def test_web_keeps_failed_queue_tasks_inspectable_for_requeue(tmp_path: Path) ->
     assert logs["path"] == str(watcher_log)
     assert "Primary session log was not created" in logs["text"]
     assert "Bad file descriptor" in logs["text"]
+
+
+def test_web_failed_queue_run_with_checkpoint_prefers_resume(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    task = QueueTask(
+        id="failed-task",
+        command_argv=["build", "ship it"],
+        added_at="2026-04-24T00:00:00Z",
+        resolved_intent="ship it",
+        branch="build/failed-task",
+        worktree=".worktrees/failed-task",
+        resumable=True,
+    )
+    append_task(repo, task)
+    session_id = "failed-task-run"
+    worktree = repo / ".worktrees" / "failed-task"
+    paths.ensure_session_scaffold(worktree, session_id)
+    paths.session_checkpoint(worktree, session_id).write_text(
+        json.dumps({"status": "in_progress", "updated_at": "2026-04-24T00:01:00Z"}),
+        encoding="utf-8",
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "failed-task": {
+                    "status": "failed",
+                    "attempt_run_id": session_id,
+                    "started_at": "2026-04-24T00:00:00Z",
+                    "finished_at": "2026-04-24T00:30:00Z",
+                    "failure_reason": "timed out after 1800s (limit 1800s)",
+                }
+            },
+        },
+    )
+
+    detail = TestClient(create_app(repo)).get("/api/runs/failed-task-run?type=merge").json()
+    actions = {action["key"]: action for action in detail["legal_actions"]}
+
+    assert detail["display_status"] == "failed"
+    assert actions["r"]["label"] == "resume from checkpoint"
+    assert actions["r"]["enabled"] is True
+    assert detail["review_packet"]["next_action"]["label"] == "resume from checkpoint"
+    assert detail["review_packet"]["next_action"]["action_key"] == "r"
+
+
+def test_web_paused_spec_review_exposes_approve_and_regenerate_actions(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_id = "spec-review-run"
+    spec_path = paths.spec_dir(repo, run_id) / "spec.md"
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_content = (
+        "**Intent:** add reports\n\n"
+        "## Must Have\n- Report list\n\n"
+        "## Must NOT Have Yet\n- Billing\n\n"
+        "## Success Criteria\n- Tests pass\n"
+    )
+    spec_path.write_text(spec_content, encoding="utf-8")
+    write_checkpoint(
+        repo,
+        run_id=run_id,
+        command="build",
+        phase="spec_review",
+        status="paused",
+        split_mode=True,
+        intent="add reports",
+        spec_path=str(spec_path),
+        spec_hash=spec_hash(spec_content),
+    )
+    append_task(
+        repo,
+        QueueTask(
+            id="reports",
+            command_argv=["build", "add reports", "--spec", "--spec-review-mode", "web"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="add reports",
+            branch="build/reports",
+            worktree=".",
+            resumable=True,
+        ),
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "reports": {
+                    "status": "paused",
+                    "attempt_run_id": run_id,
+                    "started_at": "2026-04-24T00:00:00Z",
+                    "finished_at": "2026-04-24T00:01:00Z",
+                    "failure_reason": "approve or request changes in Mission Control",
+                }
+            },
+        },
+    )
+
+    client = TestClient(create_app(repo))
+    detail = client.get(f"/api/runs/{run_id}").json()
+    actions = {action["key"]: action for action in detail["legal_actions"]}
+
+    assert detail["display_status"] == "paused"
+    assert detail["review_packet"]["headline"] == "Spec review required"
+    assert detail["review_packet"]["next_action"]["action_key"] == "a"
+    assert actions["a"]["enabled"] is True
+    assert actions["g"]["enabled"] is True
+    assert actions["r"]["enabled"] is False
+    assert any(artifact["label"] == "spec" for artifact in detail["artifacts"])
+
+    response = client.post(f"/api/runs/{run_id}/actions/regenerate-spec", json={"note": "Add admin report criteria"})
+    assert response.status_code == 200
+    decision = json.loads((spec_path.parent / "review-decision.json").read_text(encoding="utf-8"))
+    assert decision["action"] == "regenerate"
+    assert decision["note"] == "Add admin report criteria"
 
 
 def test_web_failed_queue_run_prefers_existing_primary_log(tmp_path: Path) -> None:
@@ -1202,6 +1533,120 @@ def test_web_merge_all_rejects_dirty_project_before_launch(tmp_path: Path) -> No
     assert "README.md" in response.json()["message"]
 
 
+def test_web_runtime_issue_prefers_recovery_for_interrupted_merge(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    monkeypatch.setattr(
+        "otto.mission_control.service._merge_preflight",
+        lambda project_dir: {
+            "merge_blocked": True,
+            "merge_blockers": ["repository has unmerged paths: app.py", "repository has merge in progress"],
+            "dirty_files": ["app.py"],
+        },
+    )
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+
+    assert state["runtime"]["issues"][0]["label"] == "Landing recovery available"
+    issue = next(item for item in state["runtime"]["issues"] if item["label"] == "Landing recovery available")
+    assert "Recover landing" in issue["next_action"]
+
+
+def test_web_merge_recovery_routes_record_actions(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    calls: list[str] = []
+
+    def _fake_abort(project_dir):
+        calls.append(f"abort:{project_dir}")
+        return ActionResult(ok=True, message="aborted", refresh=True)
+
+    def _fake_recover(project_dir, *, post_result=None):
+        del post_result
+        calls.append(f"recover:{project_dir}")
+        return ActionResult(ok=True, message="recovery launched", refresh=True)
+
+    monkeypatch.setattr("otto.mission_control.service.execute_merge_abort", _fake_abort)
+    monkeypatch.setattr("otto.mission_control.service.execute_merge_recover", _fake_recover)
+    client = TestClient(create_app(repo))
+
+    abort = client.post("/api/actions/merge-abort", json={})
+    recover = client.post("/api/actions/merge-recover", json={})
+
+    assert abort.status_code == 200
+    assert abort.json()["message"] == "aborted"
+    assert recover.status_code == 200
+    assert recover.json()["message"] == "recovery launched"
+    assert calls == [f"abort:{repo.resolve()}", f"recover:{repo.resolve()}"]
+
+
+def test_web_resolve_release_recovers_interrupted_merge(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "otto.mission_control.service.MissionControlService.landing_status",
+        lambda self: {
+            "counts": {"ready": 1, "merged": 0, "blocked": 0, "total": 1},
+            "items": [],
+            "merge_blocked": True,
+            "merge_blockers": ["repository has merge in progress"],
+            "dirty_files": ["app.py"],
+        },
+    )
+    monkeypatch.setattr(
+        "otto.mission_control.service.execute_merge_recover",
+        lambda project_dir, *, post_result=None: calls.append(str(project_dir)) or ActionResult(ok=True, message="recovery launched", refresh=True),
+    )
+
+    response = TestClient(create_app(repo)).post("/api/actions/resolve-release", json={})
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "recovery launched"
+    assert calls == [str(repo.resolve())]
+
+
+def test_web_resolve_release_cleans_superseded_failed_tasks(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "otto.mission_control.service.MissionControlService.landing_status",
+        lambda self: {
+            "counts": {"ready": 0, "merged": 1, "blocked": 1, "total": 2},
+            "items": [
+                {
+                    "task_id": "old-task",
+                    "queue_status": "failed",
+                    "landing_state": "blocked",
+                    "summary": "Add CSV export",
+                },
+                {
+                    "task_id": "redo-task",
+                    "queue_status": "done",
+                    "landing_state": "merged",
+                    "summary": "Add CSV export",
+                },
+            ],
+            "merge_blocked": False,
+            "merge_blockers": [],
+            "dirty_files": [],
+        },
+    )
+    monkeypatch.setattr(
+        "otto.mission_control.service.execute_queue_cleanup",
+        lambda project_dir, task_ids, *, post_result=None: calls.append(list(task_ids)) or ActionResult(ok=True, message="cleanup launched", refresh=True),
+    )
+
+    response = TestClient(create_app(repo)).post("/api/actions/resolve-release", json={})
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "cleanup launched"
+    assert calls == [["old-task"]]
+
+
 def test_web_artifact_content_rejects_paths_outside_project(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1249,12 +1694,114 @@ def test_web_queue_build_enqueues_without_click_context(tmp_path: Path) -> None:
     assert row["provider"] == "codex"
     assert row["model"] == "gpt-5.4"
     assert row["reasoning_effort"] == "medium"
+    assert row["build_config"]["provider"] == "codex"
+    assert row["build_config"]["certifier_mode"] == "fast"
+    assert row["build_config"]["queue"]["task_timeout_s"] == 4200.0
 
     hidden = client.get("/api/state?type=queue&query=unmatched").json()
     assert hidden["live"]["items"] == []
 
     matching = client.get("/api/state?type=queue&query=saved").json()
     assert matching["live"]["items"][0]["queue_task_id"] == "saved-searches"
+
+
+def test_web_queue_build_spec_defaults_to_web_review_mode(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    response = TestClient(create_app(repo)).post(
+        "/api/queue/build",
+        json={
+            "intent": "add reports",
+            "as": "reports",
+            "extra_args": ["--spec", "--split"],
+        },
+    )
+
+    assert response.status_code == 200
+    task = load_queue(repo)[0]
+    assert task.command_argv == [
+        "build",
+        "add reports",
+        "--spec",
+        "--split",
+        "--spec-review-mode",
+        "web",
+    ]
+    config = TestClient(create_app(repo)).get("/api/state").json()["live"]["items"][0]["build_config"]
+    assert config["planning"] == "spec_review"
+
+
+def test_web_queue_accepts_split_mode_and_phase_provider_args(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    response = TestClient(create_app(repo)).post(
+        "/api/queue/build",
+        json={
+            "intent": "add saved searches",
+            "as": "saved-searches",
+            "extra_args": [
+                "--split",
+                "--provider",
+                "claude",
+                "--build-provider",
+                "codex",
+                "--certifier-provider",
+                "claude",
+                "--fix-provider",
+                "codex",
+                "--fix-effort",
+                "high",
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    task = load_queue(repo)[0]
+    assert "--split" in task.command_argv
+    state = TestClient(create_app(repo)).get("/api/state").json()
+    config = state["live"]["items"][0]["build_config"]
+    assert config["split_mode"] is True
+    assert config["agents"]["build"]["provider"] == "codex"
+    assert config["agents"]["certifier"]["provider"] == "claude"
+    assert config["agents"]["fix"]["provider"] == "codex"
+    assert config["agents"]["fix"]["reasoning_effort"] == "high"
+
+
+def test_web_queue_accepts_improve_improver_provider_args(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    response = TestClient(create_app(repo)).post(
+        "/api/queue/improve",
+        json={
+            "subcommand": "feature",
+            "focus": "improve search UX",
+            "as": "improve-search",
+            "extra_args": [
+                "--split",
+                "--provider",
+                "claude",
+                "--certifier-provider",
+                "claude",
+                "--improver-provider",
+                "codex",
+                "--improver-effort",
+                "high",
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    task = load_queue(repo)[0]
+    assert "--improver-provider" in task.command_argv
+    state = TestClient(create_app(repo)).get("/api/state").json()
+    config = state["live"]["items"][0]["build_config"]
+    assert config["command_family"] == "improve"
+    assert config["provider"] == "codex"
+    assert config["agents"]["fix"]["provider"] == "codex"
+    assert config["agents"]["fix"]["reasoning_effort"] == "high"
 
 
 def test_web_queue_rejects_unknown_after_dependency(tmp_path: Path) -> None:
@@ -1305,6 +1852,21 @@ def test_web_state_exposes_effective_project_defaults(tmp_path: Path) -> None:
             "effort: high",
             "certifier_mode: standard",
             "skip_product_qa: true",
+            "run_budget_seconds: 2400",
+            "spec_timeout: 300",
+            "max_certify_rounds: 5",
+            "max_turns_per_call: 120",
+            "strict_mode: true",
+            "split_mode: true",
+            "allow_dirty_repo: true",
+            "default_branch: main",
+            "test_command: uv run pytest",
+            "queue:",
+            "  concurrent: 4",
+            "  worktree_dir: .otto-trees",
+            "  on_watcher_restart: fail",
+            "  task_timeout_s: 1200",
+            "  merge_certifier_mode: thorough",
             "",
         ]),
         encoding="utf-8",
@@ -1318,8 +1880,99 @@ def test_web_state_exposes_effective_project_defaults(tmp_path: Path) -> None:
     assert defaults["reasoning_effort"] == "high"
     assert defaults["certifier_mode"] == "standard"
     assert defaults["skip_product_qa"] is True
+    assert defaults["run_budget_seconds"] == 2400
+    assert defaults["spec_timeout"] == 300
+    assert defaults["max_certify_rounds"] == 5
+    assert defaults["max_turns_per_call"] == 120
+    assert defaults["strict_mode"] is True
+    assert defaults["split_mode"] is True
+    assert defaults["allow_dirty_repo"] is True
+    assert defaults["default_branch"] == "main"
+    assert defaults["test_command"] == "uv run pytest"
+    assert defaults["queue_concurrent"] == 4
+    assert defaults["queue_task_timeout_s"] == 1200.0
+    assert defaults["queue_worktree_dir"] == ".otto-trees"
+    assert defaults["queue_on_watcher_restart"] == "fail"
+    assert defaults["queue_merge_certifier_mode"] == "thorough"
     assert defaults["config_file_exists"] is True
     assert defaults["config_error"] is None
+
+
+def test_web_state_exposes_queue_task_build_config(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "otto.yaml").write_text(
+        "\n".join([
+            "provider: claude",
+            "model: sonnet",
+            "effort: medium",
+            "certifier_mode: standard",
+            "run_budget_seconds: 3600",
+            "max_certify_rounds: 4",
+            "queue:",
+            "  concurrent: 2",
+            "  task_timeout_s: 1500",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    append_task(
+        repo,
+        QueueTask(
+            id="configured-task",
+            command_argv=[
+                "build",
+                "configured task",
+                "--provider",
+                "codex",
+                "--model",
+                "gpt-5.4",
+                "--effort",
+                "high",
+                "--thorough",
+                "--rounds",
+                "6",
+                "--budget",
+                "900",
+                "--max-turns",
+                "80",
+                "--strict",
+                "--split",
+                "--allow-dirty",
+            ],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="configured task",
+            branch="build/configured-task",
+            worktree=".worktrees/configured-task",
+        ),
+    )
+    write_queue_state(repo, {"schema_version": 1, "watcher": None, "tasks": {}})
+
+    client = TestClient(create_app(repo))
+    state = client.get("/api/state").json()
+    live_config = state["live"]["items"][0]["build_config"]
+    landing_config = state["landing"]["items"][0]["build_config"]
+
+    for config in (live_config, landing_config):
+        assert config["provider"] == "codex"
+        assert config["model"] == "gpt-5.4"
+        assert config["reasoning_effort"] == "high"
+        assert config["certifier_mode"] == "thorough"
+        assert config["skip_product_qa"] is False
+        assert config["run_budget_seconds"] == 900
+        assert config["max_certify_rounds"] == 6
+        assert config["max_turns_per_call"] == 80
+        assert config["strict_mode"] is True
+        assert config["split_mode"] is True
+        assert config["allow_dirty_repo"] is True
+        assert config["queue"]["concurrent"] == 2
+        assert config["queue"]["task_timeout_s"] == 1500.0
+        assert config["agents"]["build"]["provider"] == "codex"
+        assert config["agents"]["certifier"]["provider"] == "codex"
+
+    detail = client.get(f"/api/runs/{state['live']['items'][0]['run_id']}").json()
+    assert detail["build_config"]["certifier_mode"] == "thorough"
+    assert detail["build_config"]["queue"]["task_timeout_s"] == 1500.0
 
 
 def test_web_landing_does_not_show_diff_errors_for_queued_future_branches(tmp_path: Path) -> None:
@@ -1516,6 +2169,51 @@ def test_web_history_usage_reads_merge_summary_extra_artifact(tmp_path: Path) ->
     state = TestClient(create_app(repo)).get("/api/state?type=merge").json()
 
     assert state["history"]["items"][0]["cost_display"] == "2.0K in / 300 out"
+
+
+def test_web_project_stats_include_claude_cache_token_fields(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    summary_path = repo / "otto_logs" / "sessions" / "claude-build" / "summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        json.dumps(
+            {
+                "breakdown": {
+                    "build": {
+                        "input_tokens": 51,
+                        "cache_creation_input_tokens": 84864,
+                        "cache_read_input_tokens": 2434281,
+                        "output_tokens": 25347,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    append_history_snapshot(
+        repo,
+        build_terminal_snapshot(
+            run_id="claude-build",
+            domain="queue",
+            run_type="queue",
+            command="build",
+            intent_meta={"summary": "build with claude"},
+            status="done",
+            terminal_outcome="success",
+            timing={"finished_at": "2026-04-24T00:00:00Z"},
+            artifacts={"summary_path": str(summary_path)},
+            identity={"queue_task_id": "claude-build"},
+        ),
+    )
+
+    state = TestClient(create_app(repo)).get("/api/state").json()
+
+    usage = state["history"]["items"][0]["token_usage"]
+    assert usage["cache_creation_input_tokens"] == 84864
+    assert usage["cache_read_input_tokens"] == 2434281
+    assert state["project_stats"]["total_tokens"] == 2544543
+    assert state["project_stats"]["token_display"] == "2.5M tokens"
 
 
 def test_web_merge_run_review_packet_is_landing_audit_not_landable(tmp_path: Path) -> None:

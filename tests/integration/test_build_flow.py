@@ -82,7 +82,7 @@ def test_build_cli_writes_canonical_and_queue_manifest_mirror(
     }
     result = cli_in_repo(
         tmp_otto_repo,
-        ["build", "ship queue manifest mirror", "--fast"],
+        ["build", "ship queue manifest mirror", "--agentic", "--fast"],
         env=env,
     )
 

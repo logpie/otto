@@ -297,10 +297,43 @@ def _load_config_or_exit(config_path: Path) -> dict[str, Any]:
         sys.exit(2)
 
 
-def _record_cli_override(config: dict[str, Any], key: str, value: Any) -> None:
+def _record_cli_override(
+    config: dict[str, Any],
+    key: str,
+    value: Any,
+    *,
+    agent_type: str | None = None,
+) -> None:
     overrides = config.setdefault("_cli_overrides", {})
+    if not isinstance(overrides, dict):
+        return
+    if agent_type:
+        agents = overrides.setdefault("agents", {})
+        if isinstance(agents, dict):
+            agent_overrides = agents.setdefault(agent_type, {})
+            if isinstance(agent_overrides, dict):
+                agent_overrides[key] = value
+        return
     if isinstance(overrides, dict):
         overrides[key] = value
+
+
+def _record_phase_agent_cli_overrides(
+    *,
+    config: dict[str, Any],
+    sources: dict[str, str],
+    values: dict[str, dict[str, str | None]],
+) -> None:
+    for agent_type, overrides in values.items():
+        agent_config = config.setdefault("agents", {}).setdefault(agent_type, {})
+        if not isinstance(agent_config, dict):
+            continue
+        for key, value in overrides.items():
+            if not value:
+                continue
+            agent_config[key] = value
+            sources[f"agents.{agent_type}.{key}"] = f"--{agent_type}-{key}"
+            _record_cli_override(config, key, value, agent_type=agent_type)
 
 
 def _apply_build_cli_overrides(
@@ -312,12 +345,22 @@ def _apply_build_cli_overrides(
     standard_: bool,
     thorough: bool,
     split: bool,
+    agentic: bool,
     rounds: int | None,
     budget: int | None,
     max_turns: int | None,
     model: str | None,
     provider: str | None,
     effort: str | None,
+    build_provider: str | None,
+    build_model: str | None,
+    build_effort: str | None,
+    certifier_provider: str | None,
+    certifier_model: str | None,
+    certifier_effort: str | None,
+    fix_provider: str | None,
+    fix_model: str | None,
+    fix_effort: str | None,
     strict: bool,
     verbose: bool,
     debug_unredacted: bool,
@@ -341,18 +384,34 @@ def _apply_build_cli_overrides(
         cli_label="--no-qa",
     )
     config["skip_product_qa"] = resolved_skip_qa
-    resolved_split, _split_source = _resolve_bool_setting(
-        config=config,
-        config_path=config_path,
-        key="split_mode",
-        cli_enabled=split,
-        cli_label="--split",
-    )
-    resolved_split_bool = bool(resolved_split)
-    if resume_state.resumed and resume_state.split_mode is not None:
-        resolved_split_bool = resume_state.split_mode
-
+    if split and agentic:
+        raise ConfigError("--split and --agentic are mutually exclusive.")
+    resolved_split_bool = False
     sources: dict[str, str] = {}
+    if split:
+        resolved_split_bool = True
+        sources["split_mode"] = "--split"
+    elif agentic:
+        resolved_split_bool = False
+        sources["split_mode"] = "--agentic"
+    else:
+        resolved_split, _split_source = _resolve_bool_setting(
+            config=config,
+            config_path=config_path,
+            key="split_mode",
+            cli_enabled=False,
+            cli_label="--split",
+        )
+        resolved_split_bool = bool(resolved_split)
+    if resume_state.resumed and resume_state.split_mode is not None:
+        if split and resume_state.split_mode is False:
+            raise ConfigError("Cannot change an agentic checkpoint to split mode on resume.")
+        if agentic and resume_state.split_mode is True:
+            raise ConfigError("Cannot change a split checkpoint to agentic mode on resume.")
+        resolved_split_bool = resume_state.split_mode
+        sources["split_mode"] = "checkpoint"
+    config["split_mode"] = resolved_split_bool
+
     mode_flag = "fast" if fast else ("standard" if standard_ else ("thorough" if thorough else None))
     if mode_flag:
         config["certifier_mode"] = mode_flag
@@ -381,6 +440,19 @@ def _apply_build_cli_overrides(
         config["effort"] = effort
         sources["effort"] = "--effort"
         _record_cli_override(config, "effort", effort)
+    _record_phase_agent_cli_overrides(
+        config=config,
+        sources=sources,
+        values={
+            "build": {"provider": build_provider, "model": build_model, "effort": build_effort},
+            "certifier": {
+                "provider": certifier_provider,
+                "model": certifier_model,
+                "effort": certifier_effort,
+            },
+            "fix": {"provider": fix_provider, "model": fix_model, "effort": fix_effort},
+        },
+    )
     if strict:
         config["strict_mode"] = True
         sources["strict_mode"] = "--strict"
@@ -480,6 +552,9 @@ def _agent_setting_source(
     agent_type: str,
     key: str,
 ) -> str:
+    scoped_key = f"agents.{agent_type}.{key}"
+    if scoped_key in cli_sources:
+        return cli_sources[scoped_key]
     if key in cli_sources:
         return cli_sources[key]
     raw_agents = yaml_raw.get("agents", {})
@@ -579,6 +654,7 @@ def _print_config_banner(
     model_value = config.get("model") or _runtime_model_name(str(config.get("provider") or ""))
 
     rows: list[tuple[str, Any, str]] = [
+        ("Execution", "split" if config.get("split_mode") else "agentic", "split_mode"),
         ("Mode", config.get("certifier_mode"), "certifier_mode"),
         ("Time budget", _format_budget_value(config.get("run_budget_seconds")), "run_budget_seconds"),
         ("Provider", config.get("provider"), "provider"),
@@ -635,7 +711,15 @@ def _print_config_banner(
         if key == "model" and not global_value:
             global_value = _runtime_model_name(agent_provider(config))
         entries: list[str] = []
-        for agent_type in ("build", "certifier", "spec", "fix"):
+        raw_agent_types = config.get("_agent_types_for_banner")
+        agent_types = (
+            tuple(str(item) for item in raw_agent_types)
+            if isinstance(raw_agent_types, (list, tuple))
+            else ("build", "certifier", "spec", "fix")
+        )
+        raw_agent_labels = config.get("_agent_label_overrides")
+        agent_labels = raw_agent_labels if isinstance(raw_agent_labels, dict) else {}
+        for agent_type in agent_types:
             value = resolver(config, agent_type)
             if key == "model" and not value:
                 value = _runtime_model_name(agent_provider(config, agent_type))
@@ -648,7 +732,8 @@ def _print_config_banner(
                 key=key,
             )
             entries.append(
-                f"{agent_type}={_render_config_value(value, source, show_default_suffix=not all_default)}"
+                f"{agent_labels.get(agent_type, agent_type)}="
+                f"{_render_config_value(value, source, show_default_suffix=not all_default)}"
             )
         if entries:
             console_.print(f"  {label}: " + ", ".join(entries))
@@ -705,6 +790,7 @@ async def _run_spec_phase(
     spec: bool,
     spec_file: Path | None,
     auto_approve: bool,
+    spec_review_mode: str = "interactive",
     resume_state,
     config: dict,
     split_mode: bool,
@@ -724,11 +810,14 @@ async def _run_spec_phase(
         write_checkpoint,
     )
     from otto.spec import (
+        MAX_SPEC_REGENERATIONS,
         SpecResult,
         count_open_questions,
         read_spec_file,
+        read_spec_review_decision,
         review_spec,
         run_spec_agent,
+        spec_review_decision_path,
         spec_hash,
         validate_spec,
     )
@@ -738,6 +827,7 @@ async def _run_spec_phase(
 
     from otto import paths as _paths
     # Determine run_id (unified session_id): resume preserves, otherwise fresh.
+    spec_started_at = time.time()
     run_id = run_id or resume_state.run_id or _new_run_id(project_dir)
     _paths.ensure_session_scaffold(project_dir, run_id, phase="spec")
     run_dir = _paths.spec_dir(project_dir, run_id)
@@ -754,6 +844,136 @@ async def _run_spec_phase(
         },
         spec={"source": "none", "path": "", "sha256": ""},
     )
+
+    def _mark_queue_ready(phase: str) -> None:
+        from otto.queue.runtime import mark_queue_child_ready
+
+        mark_queue_child_ready(
+            project_dir,
+            run_id=run_id,
+            session_dir=_paths.session_dir(project_dir, run_id),
+            phase=phase,
+            checkpoint_path=_paths.session_checkpoint(project_dir, run_id),
+        )
+
+    def _write_web_spec_pause_manifest(spec_path: Path, spec_cost_value: float, spec_duration_value: float) -> None:
+        from otto.branching import current_branch
+        from otto.manifest import (
+            QUEUE_TASK_ENV,
+            current_head_sha,
+            make_manifest,
+            write_manifest,
+        )
+
+        session_dir = _paths.session_dir(project_dir, run_id)
+        manifest = make_manifest(
+            command="build",
+            argv=list(sys.argv[1:]),
+            queue_task_id=os.environ.get(QUEUE_TASK_ENV),
+            run_id=run_id,
+            branch=(current_branch(project_dir) or None),
+            checkpoint_path=_paths.session_checkpoint(project_dir, run_id),
+            proof_of_work_path=None,
+            cost_usd=spec_cost_value,
+            duration_s=max(spec_duration_value, time.time() - spec_started_at),
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(spec_started_at)),
+            head_sha=current_head_sha(project_dir),
+            resolved_intent=intent,
+            exit_status="paused",
+        )
+        manifest.extra.update({
+            "phase": "spec_review",
+            "spec_path": str(spec_path),
+            "next_action": "approve or request changes in Mission Control",
+        })
+        write_manifest(manifest, project_dir=project_dir, fallback_dir=session_dir)
+
+    async def _review_spec_for_web(spec_result: SpecResult, regen_count: int) -> SpecResult:
+        decision = read_spec_review_decision(spec_result.path)
+        if decision is None:
+            write_checkpoint(
+                project_dir,
+                run_id=run_id,
+                command="build",
+                phase="spec_review",
+                status="paused",
+                split_mode=split_mode,
+                intent=intent,
+                spec_path=str(spec_result.path),
+                spec_hash=spec_hash(spec_result.content),
+                spec_version=spec_result.version,
+                spec_cost=spec_result.cost,
+            )
+            _mark_queue_ready("spec_review")
+            _write_web_spec_pause_manifest(spec_result.path, spec_result.cost, spec_result.duration_s)
+            console.print(
+                f"  [yellow]Spec is waiting for web review: {spec_result.path}[/yellow]\n"
+                "  Approve or request changes from Mission Control."
+            )
+            sys.exit(0)
+
+        decision_path = spec_review_decision_path(spec_result.path)
+        try:
+            decision_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        if decision["action"] == "approve":
+            return spec_result
+
+        if regen_count >= MAX_SPEC_REGENERATIONS:
+            raise ValueError(
+                f"spec regeneration limit reached ({MAX_SPEC_REGENERATIONS}); approve the current spec or start a new run"
+            )
+        note = decision.get("note") or "Revise the spec based on the web review request."
+        next_version = regen_count + 1
+        archive_path = run_dir / f"spec-v{next_version}.md"
+        try:
+            archive_path.write_text(spec_result.content)
+        except OSError as exc:
+            console.print(f"  [yellow]Could not archive prior spec: {exc}[/yellow]")
+        console.print("  [bold]Spec phase[/bold] — regenerating from web review note...\n")
+        new = await run_spec_agent(
+            intent,
+            project_dir,
+            run_dir,
+            config,
+            prior_spec=spec_result.content,
+            user_notes=note,
+            version=next_version,
+            budget=budget,
+        )
+        current = SpecResult(
+            path=new.path,
+            content=new.content,
+            open_questions=new.open_questions,
+            cost=spec_result.cost + new.cost,
+            duration_s=spec_result.duration_s + new.duration_s,
+            version=next_version,
+        )
+        write_checkpoint(
+            project_dir,
+            run_id=run_id,
+            command="build",
+            phase="spec_review",
+            status="paused",
+            split_mode=split_mode,
+            intent=intent,
+            spec_path=str(current.path),
+            spec_hash=spec_hash(current.content),
+            spec_version=current.version,
+            spec_cost=current.cost,
+        )
+        update_input_provenance(
+            _paths.session_dir(project_dir, run_id),
+            spec={"source": "spec-agent", "path": str(current.path), "sha256": spec_hash(current.content)},
+        )
+        _mark_queue_ready("spec_review")
+        _write_web_spec_pause_manifest(current.path, current.cost, current.duration_s)
+        console.print(
+            f"  [yellow]Regenerated spec is waiting for web review: {current.path}[/yellow]"
+        )
+        sys.exit(0)
 
     # Resume fast-path: already approved.
     if resume_state.resumed and spec_phase_completed(resume_state.phase):
@@ -835,6 +1055,7 @@ async def _run_spec_phase(
                 spec_version=current_spec_version,
                 spec_cost=spec_cost,
             )
+            _mark_queue_ready("spec_review")
             update_input_provenance(
                 _paths.session_dir(project_dir, run_id),
                 spec={"source": "--spec-file", "path": str(spec_path_out), "sha256": current_spec_hash},
@@ -854,6 +1075,7 @@ async def _run_spec_phase(
                     split_mode=split_mode,
                     intent=intent, spec_cost=spec_cost, spec_version=resume_state.spec_version,
                 )
+                _mark_queue_ready("spec")
                 spec_result = await run_spec_agent(
                     intent, project_dir, run_dir, config,
                     version=resume_state.spec_version, budget=budget,
@@ -872,6 +1094,7 @@ async def _run_spec_phase(
                     intent=intent, spec_path=str(spec_result.path),
                     spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
                 )
+                _mark_queue_ready("spec_review")
                 update_input_provenance(
                     _paths.session_dir(project_dir, run_id),
                     spec={"source": "spec-agent", "path": str(spec_result.path), "sha256": current_spec_hash},
@@ -898,6 +1121,7 @@ async def _run_spec_phase(
                 split_mode=split_mode,
                 intent=intent, spec_cost=spec_cost, spec_version=resume_state.spec_version,
             )
+            _mark_queue_ready("spec")
             console.print("  [bold]Spec phase[/bold] — generating product spec...\n")
             spec_result = await run_spec_agent(
                 intent, project_dir, run_dir, config, budget=budget,
@@ -916,18 +1140,22 @@ async def _run_spec_phase(
                 intent=intent, spec_path=str(spec_result.path),
                 spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
             )
+            _mark_queue_ready("spec_review")
             update_input_provenance(
                 _paths.session_dir(project_dir, run_id),
                 spec={"source": "spec-agent", "path": str(spec_result.path), "sha256": current_spec_hash},
             )
 
         # Review gate
-        approved = await review_spec(
-            spec_result, project_dir, run_dir, run_id, intent, config,
-            auto_approve=auto_approve,
-            initial_regen_count=resume_state.spec_version,
-            budget=budget,
-        )
+        if spec_review_mode == "web" and not auto_approve:
+            approved = await _review_spec_for_web(spec_result, resume_state.spec_version)
+        else:
+            approved = await review_spec(
+                spec_result, project_dir, run_dir, run_id, intent, config,
+                auto_approve=auto_approve,
+                initial_regen_count=resume_state.spec_version,
+                budget=budget,
+            )
         spec_cost = approved.cost
         spec_duration = approved.duration_s
         current_phase = "spec_approved"
@@ -1149,12 +1377,22 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--standard", "standard_", is_flag=True, help="Standard certification — Must-Have + generic CRUD/edge/access checklist")
 @click.option("--thorough", is_flag=True, help="Thorough certification — adversarial edge cases + code review")
 @click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
+@click.option("--agentic", is_flag=True, help="Agentic mode: one provider session owns build, certify, and fix")
 @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Max certification rounds, 1-50 (default from otto.yaml or 8)")
 @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
 @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
 @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
 @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
 @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
+@click.option("--build-provider", default=None, help="Override provider for the build phase")
+@click.option("--build-model", default=None, help="Override model for the build phase")
+@click.option("--build-effort", default=None, help="Override effort for the build phase")
+@click.option("--certifier-provider", default=None, help="Override provider for the certifier phase")
+@click.option("--certifier-model", default=None, help="Override model for the certifier phase")
+@click.option("--certifier-effort", default=None, help="Override effort for the certifier phase")
+@click.option("--fix-provider", default=None, help="Override provider for the fix phase")
+@click.option("--fix-model", default=None, help="Override model for the fix phase")
+@click.option("--fix-effort", default=None, help="Override effort for the fix phase")
 @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
 @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
 @click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
@@ -1168,13 +1406,19 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--spec-file", type=click.Path(exists=False, dir_okay=False, path_type=Path),
               default=None, help="Use a pre-written spec file (implies --yes)")
 @click.option("--yes", is_flag=True, help="Auto-approve the generated spec (for CI/scripts)")
+@click.option(
+    "--spec-review-mode",
+    type=click.Choice(["interactive", "web"]),
+    default="interactive",
+    hidden=True,
+)
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
 @click.option("--in-worktree", "in_worktree", is_flag=True,
               help="Run in an isolated git worktree (./.worktrees/build-<slug>-<date>/) "
                    "instead of modifying the current working tree")
 @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has local modifications or untracked files")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, max_turns, model, provider, effort, strict, verbose, debug_unredacted, resume, force_cross_command_resume, spec, spec_file, yes, force, in_worktree, allow_dirty, break_lock):
+def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budget, max_turns, model, provider, effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, resume, force_cross_command_resume, spec, spec_file, yes, spec_review_mode, force, in_worktree, allow_dirty, break_lock):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -1204,9 +1448,13 @@ def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, max_t
         with _signal_interrupt_guard():
             with _paths.project_lock(project_dir, "build", break_lock=break_lock):
                 _build_locked(
-                    intent, no_qa, fast, standard_, thorough, split, rounds,
-                    budget, max_turns, model, provider, effort, strict, verbose, debug_unredacted,
-                    resume, force_cross_command_resume, spec, spec_file, yes, force, in_worktree, allow_dirty, project_dir,
+                    intent, no_qa, fast, standard_, thorough, split, agentic, rounds,
+                    budget, max_turns, model, provider, effort,
+                    build_provider, build_model, build_effort,
+                    certifier_provider, certifier_model, certifier_effort,
+                    fix_provider, fix_model, fix_effort,
+                    strict, verbose, debug_unredacted,
+                    resume, force_cross_command_resume, spec, spec_file, yes, spec_review_mode, force, in_worktree, allow_dirty, project_dir,
                 )
     except _paths.LockBreakError as exc:
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
@@ -1222,12 +1470,22 @@ def _build_locked(
     standard_,
     thorough,
     split,
+    agentic,
     rounds,
     budget,
     max_turns,
     model,
     provider,
     effort,
+    build_provider,
+    build_model,
+    build_effort,
+    certifier_provider,
+    certifier_model,
+    certifier_effort,
+    fix_provider,
+    fix_model,
+    fix_effort,
     strict,
     verbose,
     debug_unredacted,
@@ -1236,6 +1494,7 @@ def _build_locked(
     spec,
     spec_file,
     yes,
+    spec_review_mode,
     force,
     in_worktree,
     allow_dirty,
@@ -1258,6 +1517,7 @@ def _build_locked(
 
     bootstrap_intent = "Bootstrap and maintain the product described in intent.md"
     split_cli = bool(split)
+    agentic_cli = bool(agentic)
 
     if spec and spec_file:
         error_console.print("[error]--spec and --spec-file are mutually exclusive.[/error]")
@@ -1504,12 +1764,22 @@ def _build_locked(
             standard_=standard_,
             thorough=thorough,
             split=split_cli,
+            agentic=agentic_cli,
             rounds=rounds,
             budget=budget,
             max_turns=max_turns,
             model=model,
             provider=provider,
             effort=effort,
+            build_provider=build_provider,
+            build_model=build_model,
+            build_effort=build_effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
+            fix_provider=fix_provider,
+            fix_model=fix_model,
+            fix_effort=fix_effort,
             strict=strict,
             verbose=verbose,
             debug_unredacted=debug_unredacted,
@@ -1578,12 +1848,22 @@ def _build_locked(
                 standard_=standard_,
                 thorough=thorough,
                 split=split_cli,
+                agentic=agentic_cli,
                 rounds=rounds,
                 budget=budget,
                 max_turns=max_turns,
                 model=model,
                 provider=provider,
                 effort=effort,
+                build_provider=build_provider,
+                build_model=build_model,
+                build_effort=build_effort,
+                certifier_provider=certifier_provider,
+                certifier_model=certifier_model,
+                certifier_effort=certifier_effort,
+                fix_provider=fix_provider,
+                fix_model=fix_model,
+                fix_effort=fix_effort,
                 strict=strict,
                 verbose=verbose,
                 debug_unredacted=debug_unredacted,
@@ -1651,6 +1931,7 @@ def _build_locked(
                 spec=spec,
                 spec_file=spec_file,
                 auto_approve=yes,
+                spec_review_mode=spec_review_mode,
                 resume_state=resume_state,
                 config=config,
                 split_mode=split,
@@ -1848,8 +2129,11 @@ def _build_locked(
 @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
 @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
 @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
+@click.option("--certifier-provider", default=None, help="Override provider for this certification run")
+@click.option("--certifier-model", default=None, help="Override model for this certification run")
+@click.option("--certifier-effort", default=None, help="Override effort for this certification run")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model, provider, effort, break_lock):
+def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model, provider, effort, certifier_provider, certifier_model, certifier_effort, break_lock):
     """Certify a product — independent, builder-blind verification.
 
     Tests the product in the current directory as a real user. Works on
@@ -1882,6 +2166,7 @@ def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model,
                 _certify_locked(
                     intent, thorough, fast, standard_,
                     budget, max_turns, strict, model, provider, effort,
+                    certifier_provider, certifier_model, certifier_effort,
                     project_dir, session_id,
                 )
     except _paths.LockBreakError as exc:
@@ -1894,6 +2179,7 @@ def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model,
 def _certify_locked(
     intent, thorough, fast, standard_,
     budget, max_turns, strict, model, provider, effort,
+    certifier_provider, certifier_model, certifier_effort,
     project_dir: Path, session_id: str,
 ):
 
@@ -1923,6 +2209,17 @@ def _certify_locked(
         config["effort"] = effort
         sources["effort"] = "cli"
         _record_cli_override(config, "effort", effort)
+    _record_phase_agent_cli_overrides(
+        config=config,
+        sources=sources,
+        values={
+            "certifier": {
+                "provider": certifier_provider,
+                "model": certifier_model,
+                "effort": certifier_effort,
+            },
+        },
+    )
     mode_flag = "fast" if fast else ("standard" if standard_ else ("thorough" if thorough else None))
     if mode_flag:
         config["certifier_mode"] = mode_flag

@@ -1049,6 +1049,106 @@ async def test_run_agentic_certifier_stops_publisher_when_prompt_setup_raises(tm
 
 
 @pytest.mark.asyncio
+async def test_split_loop_writes_aggregate_pow_round_history(tmp_git_repo, monkeypatch):
+    from otto.certifier.report import CertificationOutcome, CertificationReport
+    from otto.pipeline import BuildResult
+
+    certifier_rounds: list[int | None] = []
+    reports = [
+        CertificationReport(
+            outcome=CertificationOutcome.FAILED,
+            cost_usd=0.2,
+            duration_s=3.0,
+            story_results=[
+                {"story_id": "crud", "summary": "CRUD works", "passed": True, "verdict": "PASS"},
+                {"story_id": "auth", "summary": "Auth is missing", "passed": False, "verdict": "FAIL"},
+            ],
+            diagnosis="auth is missing",
+            run_id="split-run",
+        ),
+        CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            cost_usd=0.3,
+            duration_s=4.0,
+            story_results=[
+                {"story_id": "crud", "summary": "CRUD works", "passed": True, "verdict": "PASS"},
+                {"story_id": "auth", "summary": "Auth now works", "passed": True, "verdict": "PASS"},
+            ],
+            diagnosis="fixed",
+            run_id="split-run",
+        ),
+    ]
+
+    async def fake_certifier(**kwargs):
+        certifier_rounds.append(kwargs.get("round_num"))
+        return reports.pop(0)
+
+    async def fake_fix_agent(*_args, **kwargs):
+        return BuildResult(passed=True, build_id=kwargs["run_id"], total_cost=0.1)
+
+    monkeypatch.setattr("otto.certifier.run_agentic_certifier", fake_certifier)
+    monkeypatch.setattr("otto.pipeline.build_agentic_v3", fake_fix_agent)
+
+    result = await run_certify_fix_loop(
+        "add auth",
+        tmp_git_repo,
+        {"max_rounds": 2},
+        skip_initial_build=True,
+        session_id="split-run",
+        command="build",
+    )
+
+    pow_path = _paths.certify_dir(tmp_git_repo, "split-run") / "proof-of-work.json"
+    pow_data = json.loads(pow_path.read_text(encoding="utf-8"))
+    assert result.passed is True
+    assert certifier_rounds == [1, 2]
+    assert pow_data["pipeline_mode"] == "split"
+    assert pow_data["outcome"] == "passed"
+    assert [item["verdict"] for item in pow_data["round_history"]] == ["failed", "passed"]
+    assert pow_data["round_history"][0]["failing_story_ids"] == ["auth"]
+    assert pow_data["round_history"][0]["cost_estimated"] is False
+    assert pow_data["round_history"][1]["passed_count"] == 2
+
+
+def test_pow_round_history_preserves_legacy_count_only_rounds():
+    from otto.certifier import _round_history
+
+    history = _round_history(
+        certify_rounds=[
+            {
+                "round": 1,
+                "result": "FAIL 6/8",
+                "stories_tested": 8,
+                "stories_passed": 6,
+                "failing_story_ids": ["migration", "actor"],
+                "diagnosis": "two failures",
+                "cost": 0.2,
+            },
+            {
+                "round": 2,
+                "result": "PASS 8/8",
+                "stories_tested": 8,
+                "stories_passed": 8,
+                "diagnosis": "fixed",
+                "cost": 0.3,
+            },
+        ],
+        stories=[],
+        outcome="passed",
+        diagnosis="fixed",
+        total_duration_s=10.0,
+        certifier_cost_usd=0.5,
+    )
+
+    assert [item["verdict"] for item in history] == ["failed", "passed"]
+    assert history[0]["stories_tested"] == 8
+    assert history[0]["passed_count"] == 6
+    assert history[0]["failed_count"] == 2
+    assert history[0]["failing_story_ids"] == ["migration", "actor"]
+    assert history[0]["cost_estimated"] is False
+
+
+@pytest.mark.asyncio
 async def test_build_startup_repairs_missing_terminal_history_from_summary(tmp_git_repo, monkeypatch):
     from otto.runs.history import read_history_rows
 

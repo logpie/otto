@@ -919,24 +919,61 @@ def _round_history(
             for story in round_data.get("stories", []) or []
         ]
         counts = _counts_from_stories(round_stories)
-        failing_story_ids = [
-            story.get("story_id", "")
-            for story in round_stories
-            if story.get("status") == "fail"
-        ]
-        warn_story_ids = [
-            story.get("story_id", "")
-            for story in round_stories
-            if story.get("status") == "warn"
-        ]
+        failing_story_ids = (
+            [
+                story.get("story_id", "")
+                for story in round_stories
+                if story.get("status") == "fail"
+            ]
+            if round_stories
+            else [str(item) for item in round_data.get("failing_story_ids", []) or [] if str(item)]
+        )
+        warn_story_ids = (
+            [
+                story.get("story_id", "")
+                for story in round_stories
+                if story.get("status") == "warn"
+            ]
+            if round_stories
+            else [str(item) for item in round_data.get("warn_story_ids", []) or [] if str(item)]
+        )
         round_verdict = round_data.get("verdict")
         if isinstance(round_verdict, bool):
             verdict_text = "passed" if round_verdict else "failed"
         else:
-            verdict_text = "failed" if failing_story_ids else "passed"
+            result_text = str(round_data.get("result") or "").strip().lower()
+            verdict_text = (
+                "failed"
+                if failing_story_ids or result_text.startswith("fail") or result_text.startswith("not met")
+                else "passed"
+            )
         round_diagnosis = _diagnosis_text(round_data.get("diagnosis", ""), verdict_text)
-        duration_s = durations[index] if index < len(durations) else 0.0
-        cost_usd = raw_costs[index] if index < len(raw_costs) else 0.0
+        if round_stories:
+            tested_count = round_data.get("tested", len(round_stories))
+            passed_count = counts["passed_count"]
+            failed_count = counts["failed_count"]
+            warn_count = counts["warn_count"]
+        else:
+            tested_count = int(round_data.get("stories_tested", round_data.get("tested", 0)) or 0)
+            passed_count = int(round_data.get("stories_passed", 0) or 0)
+            warn_count = int(round_data.get("warn_count", 0) or 0)
+            failed_count = int(round_data.get("failed_count", 0) or 0)
+            if failed_count == 0 and tested_count:
+                failed_count = max(tested_count - passed_count - warn_count, len(failing_story_ids))
+        duration_value = round_data.get("duration_s")
+        explicit_duration = isinstance(duration_value, int | float)
+        duration_s = (
+            max(float(duration_value), 0.0)
+            if explicit_duration
+            else durations[index] if index < len(durations) else 0.0
+        )
+        cost_value = round_data.get("cost_usd", round_data.get("cost"))
+        explicit_cost = isinstance(cost_value, int | float)
+        cost_usd = (
+            max(float(cost_value), 0.0)
+            if explicit_cost
+            else raw_costs[index] if index < len(raw_costs) else 0.0
+        )
         fix_commits = list(round_data.get("fix_commits", []) or [])
         fix_diff_stat = str(round_data.get("fix_diff_stat", "") or "")
         still_failing_after_fix = list(round_data.get("still_failing_after_fix", []) or [])
@@ -945,17 +982,17 @@ def _round_history(
             {
                 "round": round_data.get("round", index + 1),
                 "verdict": verdict_text,
-                "stories_tested": round_data.get("tested", len(round_stories)),
-                "passed_count": counts["passed_count"],
-                "failed_count": counts["failed_count"],
-                "warn_count": counts["warn_count"],
+                "stories_tested": tested_count,
+                "passed_count": passed_count,
+                "failed_count": failed_count,
+                "warn_count": warn_count,
                 "failing_story_ids": failing_story_ids,
                 "warn_story_ids": warn_story_ids,
                 "diagnosis": round_diagnosis,
                 "duration_s": duration_s,
                 "duration_human": _human_duration(duration_s),
                 "cost_usd": round(cost_usd, 4),
-                "cost_estimated": not bool(round_timings),
+                "cost_estimated": not bool(round_timings) and not explicit_cost,
                 "fix_commits": fix_commits,
                 "fix_diff_stat": fix_diff_stat,
                 "still_failing_after_fix": still_failing_after_fix,
@@ -2195,6 +2232,7 @@ async def run_agentic_certifier(
     write_session_summary: bool = True,
     write_history: bool = True,
     verbose: bool = False,
+    round_num: int | None = None,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 
@@ -2330,6 +2368,7 @@ async def run_agentic_certifier(
             options,
             log_dir=report_dir,
             phase_name="CERTIFY",
+            phase_label=f"CERTIFY ROUND {round_num}" if round_num else None,
             timeout=timeout,
             project_dir=project_dir,
             on_terminal_event=terminal_callback,

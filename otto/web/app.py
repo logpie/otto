@@ -175,11 +175,24 @@ def create_app(
             action,
             selected_queue_task_ids=payload.get("selected_queue_task_ids"),
             artifact_index=payload.get("artifact_index"),
+            action_payload=payload,
         )
 
     @app.post("/api/actions/merge-all")
     def merge_all() -> dict[str, Any]:
         return _service().merge_all()
+
+    @app.post("/api/actions/merge-abort")
+    def merge_abort() -> dict[str, Any]:
+        return _service().merge_abort()
+
+    @app.post("/api/actions/merge-recover")
+    def merge_recover() -> dict[str, Any]:
+        return _service().merge_recover()
+
+    @app.post("/api/actions/resolve-release")
+    def resolve_release() -> dict[str, Any]:
+        return _service().resolve_release_issues()
 
     @app.get("/api/watcher")
     def watcher_status() -> dict[str, Any]:

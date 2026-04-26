@@ -12,7 +12,14 @@ from otto import paths
 from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
 from otto.runs.registry import make_run_record, read_jsonl_rows, write_record
 from otto.mission_control.adapters import adapter_for_key
-from otto.mission_control.actions import ActionResult, execute_action, execute_merge_all
+from otto.mission_control.actions import (
+    ActionResult,
+    execute_action,
+    execute_merge_abort,
+    execute_merge_all,
+    execute_merge_recover,
+    execute_queue_cleanup,
+)
 
 
 class _FakePopen:
@@ -506,9 +513,64 @@ def test_merge_selected_and_all_shell_out(tmp_path: Path, monkeypatch) -> None:
     execute_merge_all(tmp_path)
 
     assert _FakePopen.calls[0]["argv"][-5:] == ["merge", "--fast", "--no-certify", "task-1", "task-2"]
-    assert _FakePopen.calls[1]["argv"][-4:] == ["merge", "--fast", "--no-certify", "--all"]
+    assert _FakePopen.calls[1]["argv"][-5:] == ["merge", "--fast", "--transactional", "--no-certify", "--all"]
     assert _FakePopen.calls[0]["start_new_session"] is True
     assert _FakePopen.calls[1]["start_new_session"] is True
+
+
+def test_merge_abort_requires_in_progress_merge(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(mission_control_actions.git_ops, "merge_in_progress", lambda project_dir: False)
+
+    result = execute_merge_abort(tmp_path)
+
+    assert result.ok is False
+    assert result.severity == "warning"
+    assert "No in-progress" in (result.message or "")
+
+
+def test_merge_abort_aborts_git_merge(tmp_path: Path, monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(mission_control_actions.git_ops, "merge_in_progress", lambda project_dir: True)
+    monkeypatch.setattr(
+        mission_control_actions.git_ops,
+        "merge_abort",
+        lambda project_dir: calls.append(str(project_dir)) or mission_control_actions.git_ops.GitResult(0, "", ""),
+    )
+
+    result = execute_merge_abort(tmp_path)
+
+    assert result.ok is True
+    assert result.refresh is True
+    assert calls == [str(tmp_path)]
+
+
+def test_merge_recover_aborts_then_launches_agentic_merge(tmp_path: Path, monkeypatch) -> None:
+    abort_calls: list[str] = []
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr(mission_control_actions.git_ops, "merge_in_progress", lambda project_dir: True)
+    monkeypatch.setattr(
+        mission_control_actions.git_ops,
+        "merge_abort",
+        lambda project_dir: abort_calls.append(str(project_dir)) or mission_control_actions.git_ops.GitResult(0, "", ""),
+    )
+    _FakePopen.calls.clear()
+
+    result = execute_merge_recover(tmp_path)
+
+    assert result.ok is True
+    assert abort_calls == [str(tmp_path)]
+    assert _FakePopen.calls[-1]["argv"][-3:] == ["merge", "--no-certify", "--all"]
+    assert _FakePopen.calls[-1]["cwd"] == str(tmp_path)
+
+
+def test_queue_cleanup_shells_out_for_superseded_tasks(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
+    _FakePopen.calls.clear()
+
+    result = execute_queue_cleanup(tmp_path, ["old-task", ""])
+
+    assert result.ok is True
+    assert _FakePopen.calls[-1]["argv"][-3:] == ["queue", "cleanup", "old-task"]
 
 
 def test_otto_cli_argv_prefers_entrypoint_next_to_python(monkeypatch, tmp_path: Path) -> None:

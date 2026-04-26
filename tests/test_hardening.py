@@ -2992,11 +2992,18 @@ class TestCheckpointRegression:
             assert load_checkpoint(tmp_path) is None
 
     @pytest.mark.asyncio
-    async def test_agent_resume_preserves_session_id_in_precheckpoint(self, tmp_git_repo):
-        """Interrupted resumed agent runs must keep the resumable session_id."""
-        from otto.checkpoint import load_checkpoint
+    async def test_agent_interrupt_refreshes_paused_checkpoint_fingerprint(self, tmp_git_repo):
+        """SIGTERM/KeyboardInterrupt after agent work must leave a safe resume checkpoint."""
+        from otto.checkpoint import load_checkpoint, resolve_resume
 
         async def interrupt_agent(*args, **kwargs):
+            (tmp_git_repo / "agent-work.txt").write_text("partial work\n", encoding="utf-8")
+            subprocess.run(["git", "add", "agent-work.txt"], cwd=tmp_git_repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "partial agent work"],
+                cwd=tmp_git_repo,
+                check=True,
+            )
             raise KeyboardInterrupt()
 
         with patch("otto.agent.run_agent_with_timeout", side_effect=interrupt_agent):
@@ -3009,8 +3016,19 @@ class TestCheckpointRegression:
                 )
 
         checkpoint = load_checkpoint(tmp_git_repo)
-        assert checkpoint["status"] == "in_progress"
+        current_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        assert checkpoint["status"] == "paused"
         assert checkpoint["agent_session_id"] == "sess-resume-123"
+        assert checkpoint["git_sha"] == current_head
+        state = resolve_resume(tmp_git_repo, resume=True, expected_command="build", reject_incompatible=True)
+        assert state.resumed
+        assert not state.fingerprint_mismatch
 
     @pytest.mark.asyncio
     async def test_split_resume_tracks_phase_and_last_completed_round(self, tmp_git_repo):
@@ -3319,6 +3337,7 @@ class TestBuildResume:
                     subcommand="bugs",
                     target=None,
                     split=False,
+                    agentic=False,
                     resume=False,
                     resume_state=resume_state,
                     run_id="improve-run-1",
@@ -3375,6 +3394,7 @@ class TestBuildResume:
                         subcommand="bugs",
                         target=None,
                         split=False,
+                        agentic=True,
                         resume=False,
                         resume_state=resume_state,
                         run_id="improve-run-1",
@@ -3413,7 +3433,7 @@ class TestBuildResume:
         with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = CliRunner().invoke(
                 main,
-                ["build", "a kanban board:\n  localStorage"],
+                ["build", "a kanban board:\n  localStorage", "--agentic"],
                 catch_exceptions=False,
             )
 
@@ -3483,6 +3503,7 @@ class TestCliProjectRootResolution:
                     [
                         "build",
                         "test intent",
+                        "--agentic",
                         "--in-worktree",
                         "--budget",
                         "123",
@@ -3600,7 +3621,7 @@ class TestCliProjectRootResolution:
              patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = CliRunner().invoke(
                 main,
-                ["improve", "bugs", "--allow-dirty"],
+                ["improve", "bugs", "--agentic", "--allow-dirty"],
                 catch_exceptions=False,
             )
 
@@ -3817,6 +3838,7 @@ class TestCliProjectRootResolution:
             command="build",
             session_id="sess-resume-123",
             status="in_progress",
+            split_mode=False,
         )
 
         captured_prompts = []
@@ -3980,6 +4002,52 @@ class TestCliProjectRootResolution:
         assert result.exit_code == 0
         assert captured["command"] == "build"
 
+    def test_build_defaults_to_split_and_agentic_flag_overrides(
+        self, tmp_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        async def fake_loop(intent, project_dir, config, **kwargs):
+            return BuildResult(
+                passed=True,
+                build_id="split-default",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            return BuildResult(
+                passed=True,
+                build_id="agentic-explicit",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.run_certify_fix_loop", side_effect=fake_loop) as split_loop, \
+             patch("otto.pipeline.build_agentic_v3", new=AsyncMock(side_effect=AssertionError("agentic path should not run"))):
+            result = CliRunner().invoke(
+                main,
+                ["build", "default split", "--allow-dirty"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        split_loop.assert_called_once()
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.run_certify_fix_loop", new=AsyncMock(side_effect=AssertionError("split path should not run"))), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=fake_build) as agentic_build:
+            result = CliRunner().invoke(
+                main,
+                ["build", "explicit agentic", "--agentic", "--allow-dirty"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        agentic_build.assert_called_once()
+
     def test_build_cli_certification_failure_prints_report_and_narrative(
         self, tmp_git_repo, monkeypatch
     ):
@@ -4013,7 +4081,7 @@ class TestCliProjectRootResolution:
         with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = CliRunner().invoke(
                 main,
-                ["build", "failing app"],
+                ["build", "failing app", "--agentic"],
                 catch_exceptions=False,
             )
 
@@ -4059,7 +4127,7 @@ class TestCliProjectRootResolution:
         with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = CliRunner().invoke(
                 main,
-                ["build", "kanban board", "--allow-dirty"],
+                ["build", "kanban board", "--agentic", "--allow-dirty"],
                 catch_exceptions=False,
             )
 
@@ -4067,7 +4135,8 @@ class TestCliProjectRootResolution:
         assert "Time budget" in result.output
         assert "60m" in result.output
         assert "Max build rounds" in result.output
-        assert "(all defaults — override with --model, --budget, --rounds, etc.)" in result.output
+        assert "Execution" in result.output
+        assert "agentic (--agentic)" in result.output
         assert "Working on:" in result.output
         assert "Project:" in result.output
         assert "Session:" in result.output
@@ -4107,7 +4176,7 @@ class TestCliProjectRootResolution:
         with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = CliRunner().invoke(
                 main,
-                ["build", "flagged app", "--strict", "--verbose"],
+                ["build", "flagged app", "--agentic", "--strict", "--verbose"],
                 catch_exceptions=False,
             )
 
@@ -4235,7 +4304,7 @@ class TestCliProjectRootResolution:
              patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = CliRunner().invoke(
                 main,
-                ["improve", "bugs", "--resume"],
+                ["improve", "bugs", "--agentic", "--resume"],
                 catch_exceptions=False,
             )
         assert result.exit_code == 0
@@ -4266,7 +4335,7 @@ class TestCliProjectRootResolution:
              patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = CliRunner().invoke(
                 main,
-                ["improve", "bugs", "--allow-dirty"],
+                ["improve", "bugs", "--agentic", "--allow-dirty"],
                 catch_exceptions=False,
             )
 
@@ -4295,7 +4364,7 @@ class TestCliProjectRootResolution:
              patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = CliRunner().invoke(
                 main,
-                ["improve", "bugs", "--standard", "--allow-dirty"],
+                ["improve", "bugs", "--agentic", "--standard", "--allow-dirty"],
                 catch_exceptions=False,
             )
 

@@ -23,7 +23,14 @@ from otto import paths
 from otto.merge import git_ops
 from otto.merge.state import load_state as load_merge_state
 from otto.mission_control.actions import _otto_cli_argv
-from otto.mission_control.actions import execute_action, execute_merge_all
+from otto.mission_control.actions import (
+    ActionResult,
+    execute_action,
+    execute_merge_abort,
+    execute_merge_all,
+    execute_merge_recover,
+    execute_queue_cleanup,
+)
 from otto.mission_control.events import append_event
 from otto.mission_control.events import events_status
 from otto.mission_control.model import (
@@ -34,6 +41,7 @@ from otto.mission_control.model import (
     SelectionState,
 )
 from otto.mission_control.serializers import (
+    run_config_from_argv,
     serialize_action_result,
     serialize_artifact,
     serialize_detail,
@@ -52,6 +60,12 @@ from otto.queue.schema import load_queue, load_state as load_queue_state
 LOGGER = logging.getLogger(__name__)
 REVIEW_IN_PROGRESS_STATUSES = {"queued", "starting", "initializing", "running", "terminating"}
 PROOF_LINK_ATTR_RE = re.compile(r"(?P<prefix>\b(?:src|href)=)(?P<quote>[\"'])(?P<url>.*?)(?P=quote)", re.IGNORECASE)
+URL_RE = re.compile(r"https?://[^\s)>\"]+")
+COMMAND_LINE_RE = re.compile(
+    r"^\s*(?P<command>(?:uv|python|python3|flask|fastapi|uvicorn|npm|pnpm|yarn|bun|cargo|go|make|pytest|curl|docker)\b.+)$",
+    re.MULTILINE,
+)
+PRODUCT_HANDOFF_KINDS = {"web", "api", "cli", "desktop", "library", "service", "worker", "pipeline", "unknown"}
 
 
 class MissionControlServiceError(ValueError):
@@ -248,6 +262,7 @@ class MissionControlService:
         *,
         selected_queue_task_ids: list[str] | None = None,
         artifact_index: int | None = None,
+        action_payload: dict[str, Any] | None = None,
         filters: MissionControlFilters | None = None,
     ) -> dict[str, Any]:
         key = _action_key(action)
@@ -279,6 +294,7 @@ class MissionControlService:
             self.project_dir,
             selected_artifact_path=selected_artifact_path,
             selected_queue_task_ids=selected_queue_task_ids,
+            action_payload=action_payload or {},
             post_result=lambda item: self._record_async_action_result(
                 kind=f"run.{event_action}.completed",
                 result=item,
@@ -319,6 +335,117 @@ class MissionControlService:
             severity=_event_severity(payload),
             message=payload.get("message") or "merge ready tasks requested",
             details={"ok": payload.get("ok")},
+        )
+        return payload
+
+    def merge_abort(self) -> dict[str, Any]:
+        payload = serialize_action_result(execute_merge_abort(self.project_dir))
+        self._record_event(
+            kind="merge.abort",
+            severity=_event_severity(payload),
+            message=payload.get("message") or "abort merge requested",
+            details={"ok": payload.get("ok")},
+        )
+        return payload
+
+    def merge_recover(self) -> dict[str, Any]:
+        payload = serialize_action_result(
+            execute_merge_recover(
+                self.project_dir,
+                post_result=lambda item: self._record_async_action_result(
+                    kind="merge.recover.completed",
+                    result=item,
+                    details={"action": "merge-recover"},
+                ),
+            )
+        )
+        self._record_event(
+            kind="merge.recover",
+            severity=_event_severity(payload),
+            message=payload.get("message") or "landing recovery requested",
+            details={"ok": payload.get("ok")},
+        )
+        return payload
+
+    def resolve_release_issues(self) -> dict[str, Any]:
+        landing = self.landing_status()
+        recovery_needed = _landing_recovery_needed(landing)
+        ready_count = int((landing.get("counts") or {}).get("ready") or 0)
+        cleanup_task_ids = _superseded_failed_task_ids(landing)
+
+        if recovery_needed:
+            payload = serialize_action_result(
+                execute_merge_recover(
+                    self.project_dir,
+                    post_result=lambda item: self._record_async_action_result(
+                        kind="release.resolve.completed",
+                        result=item,
+                        details={"action": "merge-recover", "cleanup_candidates": cleanup_task_ids},
+                    ),
+                )
+            )
+            action = "merge-recover"
+        elif bool(landing.get("merge_blocked")) and ready_count:
+            blockers = "; ".join(str(item) for item in landing.get("merge_blockers") or []) or "repository is blocked"
+            raise MissionControlServiceError(
+                f"Release recovery is blocked by local repository state: {blockers}. "
+                "Commit, stash, revert, or use Abort merge when an interrupted merge is present.",
+                status_code=409,
+            )
+        elif ready_count:
+            payload = serialize_action_result(
+                execute_merge_all(
+                    self.project_dir,
+                    post_result=lambda item: self._record_async_action_result(
+                        kind="release.resolve.completed",
+                        result=item,
+                        details={"action": "merge-all"},
+                    ),
+                )
+            )
+            action = "merge-all"
+        elif cleanup_task_ids:
+            payload = serialize_action_result(
+                execute_queue_cleanup(
+                    self.project_dir,
+                    cleanup_task_ids,
+                    post_result=lambda item: self._record_async_action_result(
+                        kind="release.resolve.completed",
+                        result=item,
+                        details={"action": "cleanup-superseded", "task_ids": cleanup_task_ids},
+                    ),
+                )
+            )
+            action = "cleanup-superseded"
+        else:
+            unresolved_attention = _blocked_attention_task_ids(landing)
+            payload = serialize_action_result(
+                ActionResult(
+                    ok=not unresolved_attention,
+                    message=(
+                        "no safe automated release fix found; open the blocked task review packet"
+                        if unresolved_attention
+                        else "no release issues found"
+                    ),
+                    severity="warning" if unresolved_attention else "information",
+                    refresh=True,
+                    clear_banner=True,
+                )
+            )
+            action = "blocked-review-needed" if unresolved_attention else "noop"
+
+        self._record_event(
+            kind="release.resolve",
+            severity=_event_severity(payload),
+            message=payload.get("message") or "release issue resolution requested",
+            details={
+                "ok": payload.get("ok"),
+                "action": action,
+                "ready_count": ready_count,
+                "cleanup_candidates": cleanup_task_ids,
+                "blocked_attention": _blocked_attention_task_ids(landing),
+                "merge_blocked": bool(landing.get("merge_blocked")),
+            },
         )
         return payload
 
@@ -407,6 +534,7 @@ class MissionControlService:
                 "branch": branch or None,
                 "worktree": task.worktree,
                 "summary": task.resolved_intent or _task_intent(task.command_argv),
+                "build_config": run_config_from_argv(self.project_dir, task.command_argv),
                 "queue_status": queue_status,
                 "landing_state": landing_state,
                 "label": label,
@@ -623,6 +751,7 @@ class MissionControlService:
         try:
             if command == "build":
                 intent = _required_str(payload.get("intent"), "intent")
+                extra_args = _normalize_web_build_spec_args(extra_args)
                 raw_args = [intent, *extra_args]
                 _validate_inner_command_args("build", raw_args)
                 result = enqueue_task(
@@ -862,6 +991,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
     evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
     merge_preflight = _merge_preflight(project_dir)
     failure = _failure_summary(project_dir, record, detail.overlay)
+    spec_review_pending = _spec_review_pending(record)
     readiness = _review_readiness(
         display_status=display_status,
         merged=merged,
@@ -871,6 +1001,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
         overlay=detail.overlay,
         merge_preflight=merge_preflight,
         failure=failure,
+        spec_review_pending=spec_review_pending,
     )
     next_action = (
         {"label": "No action", "action_key": None, "enabled": False, "reason": f"Already merged into {target}."}
@@ -904,6 +1035,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
             evidence=evidence,
             readiness=readiness,
             failure=failure,
+            spec_review_pending=spec_review_pending,
         ),
         "next_action": next_action,
         "certification": certification,
@@ -924,6 +1056,13 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
         },
         "evidence": evidence,
         "failure": failure,
+        "product_handoff": _product_handoff(
+            project_dir,
+            record,
+            merged=merged,
+            certification=certification,
+            changed_files=changed_files,
+        ),
     }
 
 
@@ -999,6 +1138,13 @@ def _merge_review_packet(project_dir: Path, detail: DetailView, *, display_statu
         },
         "evidence": evidence,
         "failure": failure,
+        "product_handoff": _product_handoff(
+            project_dir,
+            record,
+            merged=terminal_success,
+            certification=certification,
+            changed_files=[],
+        ),
     }
 
 
@@ -1047,7 +1193,7 @@ def _merge_review_checks(
     else:
         checks.append(_review_check("certification", "Post-landing certification", "info", "No post-landing story count was recorded."))
 
-    existing_evidence = [item for item in evidence if item.get("exists")]
+    existing_evidence = [item for item in evidence if _is_review_evidence_artifact(item) and item.get("exists")]
     if existing_evidence:
         checks.append(_review_check("evidence", "Evidence", "pass", f"{len(existing_evidence)} artifact{'' if len(existing_evidence) == 1 else 's'} available."))
     else:
@@ -1071,6 +1217,7 @@ def _review_readiness(
     overlay: Any,
     merge_preflight: dict[str, Any],
     failure: dict[str, Any] | None = None,
+    spec_review_pending: bool = False,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     if merged:
@@ -1100,6 +1247,14 @@ def _review_readiness(
             "tone": "info",
             "blockers": ["Wait for the task to finish before review."],
             "next_step": next_step,
+        }
+    if spec_review_pending:
+        return {
+            "state": "needs_attention",
+            "label": "Spec review required",
+            "tone": "warning",
+            "blockers": ["Review the generated spec before build work starts."],
+            "next_step": "Open the spec artifact, then approve it or request changes.",
         }
     if display_status == "done":
         if not branch:
@@ -1154,16 +1309,20 @@ def _review_checks(
     evidence: list[dict[str, Any]],
     readiness: dict[str, Any],
     failure: dict[str, Any] | None = None,
+    spec_review_pending: bool = False,
 ) -> list[dict[str, Any]]:
     changed_files = list(diff.get("files") or [])
     diff_error = _optional_str(diff.get("error"))
-    existing_evidence = [item for item in evidence if item.get("exists")]
-    missing_evidence = [item for item in evidence if not item.get("exists")]
+    review_evidence = [item for item in evidence if _is_review_evidence_artifact(item)]
+    existing_evidence = [item for item in review_evidence if item.get("exists")]
+    missing_evidence = [item for item in review_evidence if not item.get("exists")]
     stories_tested = _int_or_none(certification.get("stories_tested"))
     stories_passed = _int_or_none(certification.get("stories_passed"))
 
     checks: list[dict[str, Any]] = []
-    if merged:
+    if spec_review_pending:
+        checks.append(_review_check("run", "Spec review", "pending", "Build is paused until the generated spec is approved or regenerated."))
+    elif merged:
         checks.append(_review_check("run", "Run finished", "pass", f"Already landed in {target}."))
     elif display_status == "done":
         checks.append(_review_check("run", "Run finished", "pass", "Task completed and is ready for human review."))
@@ -1179,7 +1338,9 @@ def _review_checks(
         reason = (_optional_str(failure.get("reason")) if failure is not None else None) or f"Run status is {display_status or 'unknown'}."
         checks.append(_review_check("run", "Run finished", "fail", reason))
 
-    if display_status in REVIEW_IN_PROGRESS_STATUSES:
+    if spec_review_pending:
+        checks.append(_review_check("certification", "Certification", "pending", "Certification starts after spec approval and build execution."))
+    elif display_status in REVIEW_IN_PROGRESS_STATUSES:
         checks.append(_review_check("certification", "Certification", "pending", "Certification is pending until the task finishes."))
     elif stories_tested and stories_passed is not None and stories_passed >= stories_tested:
         checks.append(_review_check("certification", "Certification", "pass", f"{stories_passed}/{stories_tested} stories passed."))
@@ -1188,7 +1349,9 @@ def _review_checks(
     else:
         checks.append(_review_check("certification", "Certification", "warn", "No story pass count was recorded. Inspect artifacts before landing."))
 
-    if display_status in REVIEW_IN_PROGRESS_STATUSES:
+    if spec_review_pending:
+        checks.append(_review_check("changes", "Changed files", "pending", "No product changes should be present before spec approval."))
+    elif display_status in REVIEW_IN_PROGRESS_STATUSES:
         checks.append(_review_check("changes", "Changed files", "pending", "Changed files are available after the task creates its branch."))
     elif diff_error:
         checks.append(_review_check("changes", "Changed files", "fail", diff_error))
@@ -1204,7 +1367,11 @@ def _review_checks(
     else:
         checks.append(_review_check("changes", "Changed files", "warn", "No changed files were detected. Confirm the task produced the expected artifact."))
 
-    if display_status in REVIEW_IN_PROGRESS_STATUSES and not existing_evidence:
+    if spec_review_pending and existing_evidence:
+        checks.append(_review_check("evidence", "Spec artifact", "pass", f"{len(existing_evidence)} artifact{'' if len(existing_evidence) == 1 else 's'} available."))
+    elif spec_review_pending:
+        checks.append(_review_check("evidence", "Spec artifact", "warn", "Spec review is pending but no readable spec artifact is attached."))
+    elif display_status in REVIEW_IN_PROGRESS_STATUSES and not existing_evidence:
         checks.append(_review_check("evidence", "Evidence", "pending", "Evidence is available after the task writes artifacts."))
     elif existing_evidence and not missing_evidence:
         checks.append(_review_check("evidence", "Evidence", "pass", f"{len(existing_evidence)} artifact{'' if len(existing_evidence) == 1 else 's'} available."))
@@ -1244,6 +1411,29 @@ def _review_check(key: str, label: str, status: str, detail: str) -> dict[str, s
     return {"key": key, "label": label, "status": status, "detail": detail}
 
 
+def _is_review_evidence_artifact(item: dict[str, Any]) -> bool:
+    return str(item.get("kind") or "").lower() != "directory"
+
+
+def _spec_review_pending(record: Any) -> bool:
+    if getattr(record, "status", "") != "paused":
+        return False
+    artifacts = getattr(record, "artifacts", {}) or {}
+    checkpoint_path = _optional_str(artifacts.get("checkpoint_path"))
+    if not checkpoint_path:
+        return False
+    try:
+        checkpoint = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(checkpoint, dict):
+        return False
+    if str(checkpoint.get("phase") or "") != "spec_review":
+        return False
+    spec_path = _optional_str(checkpoint.get("spec_path"))
+    return bool(spec_path and Path(spec_path).exists())
+
+
 def _review_packet_headline(
     record: Any,
     display_status: str,
@@ -1273,6 +1463,8 @@ def _review_headline(record: Any, display_status: str) -> str:
         return "Waiting for watcher"
     if display_status in REVIEW_IN_PROGRESS_STATUSES:
         return "In progress"
+    if display_status == "paused" and _spec_review_pending(record):
+        return "Spec review required"
     if display_status == "interrupted":
         return "Interrupted; resume or requeue"
     summary = _optional_str(record.intent.get("summary")) if hasattr(record, "intent") else None
@@ -1293,8 +1485,10 @@ def _suggested_next_action(
         }
     by_key = {action.key: action for action in actions}
     preferred = {
-        "failed": ["R", "x"],
+        "failed": ["r", "R", "x"],
+        "cancelled": ["r", "R", "x"],
         "interrupted": ["r", "R", "x"],
+        "paused": ["a", "g", "r", "x"],
         "stale": ["x", "c"],
         "done": ["m", "x"],
         "running": ["c"],
@@ -1375,6 +1569,564 @@ def _merged_task_diff_range(merge_info: dict[str, Any] | None) -> tuple[str | No
     base = _optional_str(merge_info.get("diff_base")) or _optional_str(merge_info.get("target_head_before"))
     head = _optional_str(merge_info.get("merge_commit"))
     return base, head
+
+
+def _product_handoff(
+    project_dir: Path,
+    record: Any,
+    *,
+    merged: bool,
+    certification: dict[str, Any] | None,
+    changed_files: list[str],
+) -> dict[str, Any]:
+    root = _product_root(project_dir, record, merged=merged)
+    explicit = _explicit_product_handoff(
+        project_dir,
+        record,
+        root,
+        certification=certification,
+        changed_files=changed_files,
+    )
+    if explicit is not None:
+        return explicit
+    return _detected_product_handoff(root, record, certification=certification, changed_files=changed_files)
+
+
+def _product_root(project_dir: Path, record: Any, *, merged: bool) -> Path:
+    if merged:
+        return project_dir
+    git = getattr(record, "git", {}) if isinstance(getattr(record, "git", {}), dict) else {}
+    for value in (git.get("worktree"), getattr(record, "cwd", None)):
+        text = _optional_str(value)
+        if not text:
+            continue
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = project_dir / path
+        if path.exists() and path.is_dir():
+            return path.resolve(strict=False)
+    return project_dir
+
+
+def _explicit_product_handoff(
+    project_dir: Path,
+    record: Any,
+    root: Path,
+    *,
+    certification: dict[str, Any] | None,
+    changed_files: list[str],
+) -> dict[str, Any] | None:
+    artifacts = getattr(record, "artifacts", {}) if isinstance(getattr(record, "artifacts", {}), dict) else {}
+    session_dir = _optional_str(artifacts.get("session_dir"))
+    candidates: list[Path] = []
+    for key in ("product_handoff_path", "product_playbook_path"):
+        value = _optional_str(artifacts.get(key))
+        if value:
+            candidates.append(Path(value).expanduser())
+    if session_dir:
+        session_path = Path(session_dir).expanduser()
+        candidates.extend([
+            session_path / "product-handoff.json",
+            session_path / "product-playbook.json",
+        ])
+    candidates.extend([
+        root / "product-handoff.json",
+        root / "product-playbook.json",
+        root / ".otto" / "product-handoff.json",
+    ])
+    for candidate in candidates:
+        path = candidate if candidate.is_absolute() else project_dir / candidate
+        if not path.exists() or not path.is_file():
+            continue
+        data = _read_json_object(path)
+        if data is None:
+            continue
+        return _normalize_product_handoff(
+            data,
+            root=root,
+            record=record,
+            certification=certification,
+            changed_files=changed_files,
+            source="artifact",
+            source_path=path,
+        )
+    return None
+
+
+def _normalize_product_handoff(
+    data: dict[str, Any],
+    *,
+    root: Path,
+    record: Any,
+    certification: dict[str, Any] | None,
+    changed_files: list[str],
+    source: str,
+    source_path: Path | None,
+) -> dict[str, Any]:
+    kind = _normalize_product_kind(data.get("kind") or data.get("product_type") or data.get("type"))
+    if kind == "unknown":
+        kind = _detect_product_kind(root, _read_text(root / "README.md"))
+    launch = _normalize_commands(data.get("launch") or data.get("run") or data.get("commands"))
+    reset = _normalize_commands(data.get("reset") or data.get("reset_commands"))
+    try_flows = _normalize_flows(data.get("try_flows") or data.get("flows") or data.get("journeys"))
+    sample_data = _normalize_sample_data(data.get("sample_data") or data.get("sample_users") or data.get("fixtures"))
+    urls = _string_list(data.get("urls") or data.get("links"))
+    if not urls:
+        urls = _urls_from_text(json.dumps(data, default=str))
+    task_context = _task_handoff_context(record, certification=certification, changed_files=changed_files, kind=kind)
+    return {
+        "kind": kind,
+        "label": _product_kind_label(kind),
+        "source": source,
+        "source_path": str(source_path) if source_path is not None else None,
+        "root": str(root),
+        "summary": _optional_str(data.get("summary") or data.get("description")) or _fallback_product_summary(root),
+        **task_context,
+        "urls": urls[:8],
+        "launch": launch[:8],
+        "reset": reset[:6],
+        "try_flows": try_flows[:12] or _fallback_try_flows(kind),
+        "sample_data": sample_data[:12],
+        "notes": _string_list(data.get("notes") or data.get("known_limitations"))[:10],
+    }
+
+
+def _detected_product_handoff(
+    root: Path,
+    record: Any,
+    *,
+    certification: dict[str, Any] | None,
+    changed_files: list[str],
+) -> dict[str, Any]:
+    readme = _read_text(root / "README.md")
+    kind = _detect_product_kind(root, readme)
+    task_context = _task_handoff_context(record, certification=certification, changed_files=changed_files, kind=kind)
+    return {
+        "kind": kind,
+        "label": _product_kind_label(kind),
+        "source": "detected" if kind != "unknown" else "fallback",
+        "source_path": str(root / "README.md") if (root / "README.md").exists() else None,
+        "root": str(root),
+        "summary": _fallback_product_summary(root, readme=readme),
+        **task_context,
+        "urls": _urls_from_text(readme)[:8],
+        "launch": _detect_launch_commands(root, kind, readme)[:8],
+        "reset": _detect_reset_commands(root, readme)[:6],
+        "try_flows": _fallback_try_flows(kind, readme=readme)[:12],
+        "sample_data": _sample_data_from_readme(readme)[:12],
+        "notes": _fallback_handoff_notes(kind),
+    }
+
+
+def _task_handoff_context(
+    record: Any,
+    *,
+    certification: dict[str, Any] | None,
+    changed_files: list[str],
+    kind: str,
+) -> dict[str, Any]:
+    summary = _task_summary(record)
+    git = getattr(record, "git", {}) if isinstance(getattr(record, "git", {}), dict) else {}
+    status = _optional_str(getattr(record, "status", None))
+    return {
+        "task_summary": summary,
+        "task_status": status,
+        "task_branch": _optional_str(git.get("branch")),
+        "task_changed_files": [str(path) for path in changed_files[:12]],
+        "task_flows": _task_try_flows(summary, certification=certification, kind=kind)[:8],
+    }
+
+
+def _task_summary(record: Any) -> str:
+    intent = getattr(record, "intent", {}) if isinstance(getattr(record, "intent", {}), dict) else {}
+    return (
+        _optional_str(intent.get("summary"))
+        or _optional_str(getattr(record, "display_name", None))
+        or _optional_str(getattr(record, "run_id", None))
+        or ""
+    )
+
+
+def _task_try_flows(
+    summary: str,
+    *,
+    certification: dict[str, Any] | None,
+    kind: str,
+) -> list[dict[str, Any]]:
+    stories = certification.get("stories") if isinstance(certification, dict) else None
+    flows: list[dict[str, Any]] = []
+    if isinstance(stories, list):
+        for raw in stories[:6]:
+            if not isinstance(raw, dict):
+                continue
+            title = _first_nonempty(raw.get("title"), raw.get("id"), "Certified story")
+            status = _first_nonempty(raw.get("status"))
+            detail = _first_nonempty(raw.get("detail"))
+            steps = [
+                _launch_instruction_for_kind(kind),
+                f"Exercise this task story: {title}.",
+            ]
+            if detail:
+                steps.append(f"Compare against certification evidence: {detail}")
+            else:
+                steps.append("Confirm the behavior matches the task request.")
+            if status:
+                steps.append(f"Certification recorded this story as {status}.")
+            flows.append({"title": title, "steps": steps})
+    if flows:
+        return flows
+    if summary:
+        return [
+            {
+                "title": f"Try this task: {summary[:90]}",
+                "steps": [
+                    _launch_instruction_for_kind(kind),
+                    f"Find the feature or behavior requested by this task: {summary}.",
+                    "Exercise the path manually, then compare what you see with the proof and diff tabs.",
+                ],
+            }
+        ]
+    return []
+
+
+def _launch_instruction_for_kind(kind: str) -> str:
+    if kind == "web":
+        return "Start the app and open it in a browser."
+    if kind == "api":
+        return "Start the API and use curl or the docs page."
+    if kind == "cli":
+        return "Run the CLI command from the launch section."
+    if kind == "desktop":
+        return "Launch the desktop app."
+    if kind == "library":
+        return "Import the package from a fresh script or REPL."
+    if kind in {"service", "worker", "pipeline"}:
+        return "Run the product process with a small fixture."
+    return "Launch the product using the commands above."
+
+
+def _normalize_product_kind(value: Any) -> str:
+    text = str(value or "").strip().lower().replace(" ", "-").replace("_", "-")
+    aliases = {
+        "rest": "api",
+        "rest-api": "api",
+        "http-api": "api",
+        "webapp": "web",
+        "web-app": "web",
+        "website": "web",
+        "electron": "desktop",
+        "tauri": "desktop",
+        "native": "desktop",
+        "command": "cli",
+        "command-line": "cli",
+        "package": "library",
+        "lib": "library",
+        "daemon": "service",
+        "queue": "worker",
+        "batch": "pipeline",
+    }
+    text = aliases.get(text, text)
+    return text if text in PRODUCT_HANDOFF_KINDS else "unknown"
+
+
+def _detect_product_kind(root: Path, readme: str = "") -> str:
+    lower = readme.lower()
+    package = _read_json_object(root / "package.json")
+    if isinstance(package, dict):
+        deps = {**(package.get("dependencies") or {}), **(package.get("devDependencies") or {})}
+        dep_names = {str(key).lower() for key in deps}
+        if "electron" in dep_names or (root / "src-tauri").exists() or (root / "tauri.conf.json").exists():
+            return "desktop"
+        if any(key in dep_names for key in {"vite", "react", "next", "svelte", "vue", "@angular/core"}):
+            return "web"
+        if package.get("bin"):
+            return "cli"
+    if (root / "openapi.json").exists() or "openapi" in lower or "swagger" in lower:
+        return "api"
+    if "uvicorn" in lower or "fastapi" in lower or "flask --app" in lower or "django" in lower:
+        return "web" if any(token in lower for token in ("dashboard", "browser", "page", "web app", "html")) else "api"
+    if (root / "index.html").exists() or (root / "templates").exists() or (root / "static").exists():
+        return "web"
+    pyproject = _read_text(root / "pyproject.toml")
+    if "[project.scripts]" in pyproject or "[tool.poetry.scripts]" in pyproject:
+        return "cli"
+    if "__init__.py" in "\n".join(path.name for path in root.glob("*/__init__.py")) or "import " in lower:
+        return "library"
+    if "worker" in lower or "queue" in lower:
+        return "worker"
+    if "pipeline" in lower or "batch" in lower:
+        return "pipeline"
+    return "unknown"
+
+
+def _detect_launch_commands(root: Path, kind: str, readme: str) -> list[dict[str, str]]:
+    commands: list[dict[str, str]] = []
+    for command in _commands_from_readme(readme):
+        if _command_matches_kind(command, kind):
+            commands.append({"label": _command_label(command, kind), "command": command})
+    package = _read_json_object(root / "package.json")
+    scripts = package.get("scripts") if isinstance(package, dict) else None
+    if isinstance(scripts, dict):
+        for script in ("dev", "start", "serve"):
+            if isinstance(scripts.get(script), str):
+                commands.append({"label": f"npm {script}", "command": f"npm run {script}"})
+                break
+    if kind in {"web", "api"}:
+        if (root / "expense_portal").exists():
+            commands.append({"label": "Start Flask app", "command": ".venv/bin/flask --app expense_portal run --host 0.0.0.0 --port ${PORT}"})
+        elif (root / "app" / "main.py").exists():
+            commands.append({"label": "Start ASGI app", "command": "uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"})
+        elif (root / "manage.py").exists():
+            commands.append({"label": "Start Django app", "command": ".venv/bin/python manage.py runserver 0.0.0.0:${PORT}"})
+    if kind == "cli":
+        script = _first_project_script(root)
+        if script:
+            commands.append({"label": "Show help", "command": f"{script} --help"})
+        else:
+            commands.append({"label": "Show help", "command": "python -m <module> --help"})
+    if not commands and kind == "library":
+        commands.append({"label": "Import package", "command": "python - <<'PY'\nimport <package>\nprint(<package>.__name__)\nPY"})
+    return _dedupe_command_entries(commands)
+
+
+def _detect_reset_commands(root: Path, readme: str) -> list[dict[str, str]]:
+    commands = [
+        {"label": _command_label(command, "reset"), "command": command}
+        for command in _commands_from_readme(readme)
+        if any(token in command.lower() for token in ("reset", "init-db", "seed", "migrate"))
+    ]
+    if (root / "expense_portal").exists():
+        commands.append({"label": "Reset demo database", "command": ".venv/bin/flask --app expense_portal init-db"})
+    return _dedupe_command_entries(commands)
+
+
+def _fallback_try_flows(kind: str, readme: str = "") -> list[dict[str, Any]]:
+    if kind == "web":
+        return [
+            {"title": "Open the app", "steps": ["Start the web server.", "Open the local URL in a browser.", "Confirm the first screen loads without console-visible errors."]},
+            {"title": "Exercise the main workflow", "steps": ["Follow the primary action from the README or page.", "Create or update one record.", "Refresh and confirm the state persists."]},
+            {"title": "Review edge states", "steps": ["Try an empty or invalid form.", "Confirm the UI explains what to fix."]},
+        ]
+    if kind == "api":
+        return [
+            {"title": "Start and probe the API", "steps": ["Start the service.", "Open `/docs`, `/openapi.json`, or the documented health endpoint.", "Confirm a 2xx response."]},
+            {"title": "Run a CRUD path", "steps": ["Create a resource with curl.", "Read or list it back.", "Try one invalid request and inspect the error body."]},
+        ]
+    if kind == "cli":
+        return [
+            {"title": "Inspect commands", "steps": ["Run the CLI with `--help`.", "Run the main happy-path command.", "Confirm stdout, stderr, exit code, and generated files."]},
+            {"title": "Try a bad input", "steps": ["Run one malformed argument.", "Confirm the CLI exits non-zero with a useful message."]},
+        ]
+    if kind == "desktop":
+        return [
+            {"title": "Launch the app", "steps": ["Run the desktop launch command.", "Confirm the primary window appears.", "Exercise the main menu or primary action."]},
+            {"title": "Check persistence", "steps": ["Change one setting or record.", "Restart the app.", "Confirm the state is still present."]},
+        ]
+    if kind == "library":
+        return [
+            {"title": "Import the public API", "steps": ["Create a fresh script or REPL.", "Import the documented package.", "Call the main function and verify its return value."]},
+            {"title": "Check error handling", "steps": ["Call the API with one invalid input.", "Confirm it raises or returns the documented error."]},
+        ]
+    if kind in {"worker", "service", "pipeline"}:
+        return [
+            {"title": "Run with a fixture", "steps": ["Start the worker, service, or pipeline.", "Feed a small documented input.", "Verify output files, side effects, logs, or state changes."]},
+            {"title": "Try a bad fixture", "steps": ["Feed one malformed input.", "Confirm failure is visible and recoverable."]},
+        ]
+    if "quick start" in readme.lower():
+        return [{"title": "Follow README Quick Start", "steps": ["Run the setup commands from README.", "Run the main example.", "Confirm the expected output."]}]
+    return [{"title": "Smoke test the product", "steps": ["Open README or product docs.", "Run the documented setup command.", "Exercise the main user-facing path."]}]
+
+
+def _fallback_product_summary(root: Path, *, readme: str | None = None) -> str:
+    readme = _read_text(root / "README.md") if readme is None else readme
+    for line in readme.splitlines():
+        text = line.strip(" #\t")
+        if text:
+            return text[:220]
+    return root.name
+
+
+def _fallback_handoff_notes(kind: str) -> list[str]:
+    if kind in {"web", "api", "desktop", "service", "worker"}:
+        return ["Use ${PORT} as a placeholder when choosing a free local port."]
+    return []
+
+
+def _normalize_commands(value: Any) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    raw_items = value if isinstance(value, list) else [value] if value else []
+    for index, item in enumerate(raw_items, start=1):
+        if isinstance(item, str):
+            command = item.strip()
+            if command:
+                entries.append({"label": f"Command {index}", "command": command})
+        elif isinstance(item, dict):
+            command = _optional_str(item.get("command") or item.get("cmd"))
+            if not command:
+                continue
+            entries.append({
+                "label": _optional_str(item.get("label") or item.get("name")) or f"Command {index}",
+                "command": command,
+            })
+    return _dedupe_command_entries(entries)
+
+
+def _normalize_flows(value: Any) -> list[dict[str, Any]]:
+    flows: list[dict[str, Any]] = []
+    raw_items = value if isinstance(value, list) else [value] if value else []
+    for index, item in enumerate(raw_items, start=1):
+        if isinstance(item, str):
+            title = item.strip()
+            if title:
+                flows.append({"title": title, "steps": []})
+        elif isinstance(item, dict):
+            title = _optional_str(item.get("title") or item.get("name") or item.get("summary")) or f"Flow {index}"
+            steps = _string_list(item.get("steps") or item.get("actions"))
+            flows.append({"title": title, "steps": steps[:12]})
+    return flows
+
+
+def _normalize_sample_data(value: Any) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    raw_items = value if isinstance(value, list) else [value] if value else []
+    for index, item in enumerate(raw_items, start=1):
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                items.append({"label": f"Sample {index}", "value": text, "detail": ""})
+        elif isinstance(item, dict):
+            label = _optional_str(item.get("label") or item.get("name") or item.get("role")) or f"Sample {index}"
+            value = _optional_str(item.get("value") or item.get("email") or item.get("username") or item.get("id")) or ""
+            detail = _optional_str(item.get("detail") or item.get("description") or item.get("password")) or ""
+            items.append({"label": label, "value": value, "detail": detail})
+    return items
+
+
+def _commands_from_readme(readme: str) -> list[str]:
+    commands: list[str] = []
+    for match in COMMAND_LINE_RE.finditer(readme):
+        command = match.group("command").strip()
+        if command and not command.startswith(("```", "#")):
+            commands.append(command)
+    return commands[:24]
+
+
+def _command_matches_kind(command: str, kind: str) -> bool:
+    lower = command.lower()
+    if any(token in lower for token in (" init-db", " reset", " seed", " migrate", "pytest", " test")):
+        return False
+    if kind in {"web", "api"}:
+        return any(token in lower for token in ("flask", "uvicorn", "fastapi", "runserver", "npm run dev", "npm start", "pnpm dev", "yarn dev", "bun dev"))
+    if kind == "desktop":
+        return any(token in lower for token in ("electron", "tauri", "npm start", "cargo tauri"))
+    if kind == "cli":
+        return "--help" in lower or lower.startswith(("python -m", "uv run", "cargo run", "go run"))
+    return True
+
+
+def _command_label(command: str, kind: str) -> str:
+    lower = command.lower()
+    if "init-db" in lower or "seed" in lower:
+        return "Reset demo data"
+    if "flask" in lower or "uvicorn" in lower or "runserver" in lower:
+        return "Start server"
+    if "npm run dev" in lower or "pnpm dev" in lower or "yarn dev" in lower:
+        return "Start dev server"
+    if "curl" in lower:
+        return "Try request"
+    if "--help" in lower:
+        return "Show help"
+    if kind == "api":
+        return "Start API"
+    if kind == "desktop":
+        return "Launch desktop app"
+    if kind == "library":
+        return "Try import"
+    return "Run product"
+
+
+def _dedupe_command_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    result: list[dict[str, str]] = []
+    for entry in entries:
+        command = entry.get("command", "").strip()
+        if not command or command in seen:
+            continue
+        seen.add(command)
+        result.append({"label": entry.get("label", "Command").strip() or "Command", "command": command})
+    return result
+
+
+def _urls_from_text(text: str) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,")
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def _sample_data_from_readme(readme: str) -> list[dict[str, str]]:
+    samples: list[dict[str, str]] = []
+    for line in readme.splitlines():
+        text = line.strip(" -*\t")
+        if not text:
+            continue
+        lower = text.lower()
+        if any(token in lower for token in ("manager", "employee", "user", "login", "password", "token")) and len(text) <= 160:
+            samples.append({"label": "README", "value": text, "detail": ""})
+    return samples[:8]
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = _optional_str(item)
+        if text:
+            result.append(text)
+    return result
+
+
+def _read_text(path: Path, *, limit: int = 24_000) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[:limit]
+    except OSError:
+        return ""
+
+
+def _first_project_script(root: Path) -> str | None:
+    pyproject = _read_text(root / "pyproject.toml")
+    for line in pyproject.splitlines():
+        if "=" not in line or line.strip().startswith("["):
+            continue
+        name = line.split("=", 1)[0].strip()
+        if name and re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+            return name
+    package = _read_json_object(root / "package.json")
+    if isinstance(package, dict) and isinstance(package.get("bin"), dict):
+        for name in package["bin"]:
+            return str(name)
+    return None
+
+
+def _product_kind_label(kind: str) -> str:
+    return {
+        "web": "Web app",
+        "api": "API service",
+        "cli": "CLI tool",
+        "desktop": "Desktop app",
+        "library": "Library",
+        "service": "Service",
+        "worker": "Worker",
+        "pipeline": "Pipeline",
+    }.get(kind, "Product")
 
 
 def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
@@ -1772,8 +2524,21 @@ def _action_key(action: str) -> str:
         "remove": "x",
         "merge": "m",
         "open": "e",
+        "approve-spec": "a",
+        "approve_spec": "a",
+        "regenerate-spec": "g",
+        "request-spec-changes": "g",
     }
     return mapping.get(action, action)
+
+
+def _normalize_web_build_spec_args(extra_args: list[str]) -> list[str]:
+    args = list(extra_args)
+    if "--spec" not in args:
+        return args
+    if "--yes" in args or "--spec-review-mode" in args:
+        return args
+    return [*args, "--spec-review-mode", "web"]
 
 
 def _event_action_name(key: str, *, label: str | None = None, domain: str | None = None) -> str:
@@ -1785,6 +2550,8 @@ def _event_action_name(key: str, *, label: str | None = None, domain: str | None
     return {
         "c": "cancel",
         "r": "resume",
+        "a": "approve-spec",
+        "g": "regenerate-spec",
         "x": "cleanup",
         "m": "merge",
         "e": "open",
@@ -2083,6 +2850,58 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         raise MissionControlServiceError("expected a list of strings", status_code=400)
     return [str(item) for item in value if str(item).strip()]
+
+
+def _landing_recovery_needed(landing: dict[str, Any]) -> bool:
+    if not bool(landing.get("merge_blocked")):
+        return False
+    blockers = landing.get("merge_blockers") if isinstance(landing.get("merge_blockers"), list) else []
+    text = " ".join(str(item).lower() for item in blockers)
+    return "merge in progress" in text or "unmerged path" in text
+
+
+def _superseded_failed_task_ids(landing: dict[str, Any]) -> list[str]:
+    items = landing.get("items") if isinstance(landing.get("items"), list) else []
+    landed_signatures = {
+        _summary_signature(item.get("summary"))
+        for item in items
+        if isinstance(item, dict) and str(item.get("landing_state") or "") == "merged"
+    }
+    landed_signatures.discard("")
+    if not landed_signatures:
+        return []
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("queue_status") or "")
+        if status not in {"failed", "interrupted", "cancelled", "stale"}:
+            continue
+        if str(item.get("landing_state") or "") != "blocked":
+            continue
+        signature = _summary_signature(item.get("summary"))
+        task_id = _optional_str(item.get("task_id"))
+        if signature and task_id and signature in landed_signatures:
+            out.append(task_id)
+    return out
+
+
+def _blocked_attention_task_ids(landing: dict[str, Any]) -> list[str]:
+    items = landing.get("items") if isinstance(landing.get("items"), list) else []
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("queue_status") or "")
+        task_id = _optional_str(item.get("task_id"))
+        if status in {"failed", "interrupted", "cancelled", "stale"} and task_id:
+            out.append(task_id)
+    return out
+
+
+def _summary_signature(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    return text[:500]
 
 
 def _validate_inner_command_args(command: str, raw_args: list[str]) -> None:

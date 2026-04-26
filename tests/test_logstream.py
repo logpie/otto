@@ -180,6 +180,23 @@ class TestNarrativeFormatter:
 
         assert _strip_ts(path.read_text().strip()) == "\u2014 SPEC starting \u2014"
 
+    def test_display_phase_label_keeps_logical_summary_phase(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path, phase_name="CERTIFY", phase_label="CERTIFY ROUND 2")
+        f._start = time.monotonic() - 15.0
+        f.start()
+        f.write_message(ResultMessage(
+            subtype="success", is_error=False, session_id="x",
+            usage={"input_tokens": 12, "output_tokens": 3},
+        ))
+        f.close()
+
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
+        assert lines[0] == "\u2014 CERTIFY ROUND 2 starting \u2014"
+        assert lines[1] == "\u2014 CERTIFY ROUND 2 complete \u2014"
+        assert "RUN SUMMARY: certify=0:15" in lines[2]
+        assert "CERTIFY ROUND 2" not in lines[2]
+
     def test_terminal_callback_fires_for_phase_banners(self, tmp_path):
         path = tmp_path / "narrative.log"
         seen: list[str] = []
@@ -1115,6 +1132,26 @@ class TestMakeSessionLogger:
         assert phase_end["usage"]["input_tokens"] == 100
         assert phase_end["usage"]["cached_input_tokens"] == 80
         assert phase_end["usage"]["output_tokens"] == 10
+
+    def test_phase_usage_preserves_total_only_token_usage(self, tmp_path):
+        cbs = make_session_logger(tmp_path)
+        try:
+            cbs["on_message"](
+                AssistantMessage(
+                    content=[TextBlock(text="hello")],
+                    usage={"total_tokens": 12345},
+                )
+            )
+        finally:
+            cbs["_close"]()
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "messages.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        phase_end = [rec for rec in records if rec.get("type") == "phase_end"][-1]
+        assert phase_end["usage"]["total_tokens"] == 12345
 
     def test_subagent_error_event_is_written(self, tmp_path):
         cbs = make_session_logger(tmp_path)

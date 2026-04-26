@@ -337,6 +337,32 @@ def test_make_agent_options_cli_overrides_beat_per_agent_yaml(tmp_path):
     assert options.effort == "low"
 
 
+def test_make_agent_options_phase_cli_overrides_beat_global_cli(tmp_path):
+    config = {
+        "provider": "claude",
+        "model": "sonnet",
+        "effort": "medium",
+        "_cli_overrides": {
+            "provider": "claude",
+            "model": "haiku",
+            "effort": "low",
+            "agents": {
+                "certifier": {"provider": "codex", "model": "gpt-5.4", "effort": "high"},
+            },
+        },
+    }
+
+    build_options = make_agent_options(tmp_path, config, agent_type="build")
+    certifier_options = make_agent_options(tmp_path, config, agent_type="certifier")
+
+    assert build_options.provider == "claude"
+    assert build_options.model == "haiku"
+    assert build_options.effort == "low"
+    assert certifier_options.provider == "codex"
+    assert certifier_options.model == "gpt-5.4"
+    assert certifier_options.effort == "high"
+
+
 def test_make_agent_options_sets_default_max_turns(tmp_path):
     options = make_agent_options(tmp_path, {})
 

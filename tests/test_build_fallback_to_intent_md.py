@@ -31,7 +31,7 @@ def test_build_without_arg_uses_nontrivial_intent_md(tmp_git_repo, monkeypatch) 
     monkeypatch.chdir(tmp_git_repo)
     monkeypatch.setattr("otto.pipeline.build_agentic_v3", fake_build)
 
-    result = CliRunner().invoke(main, ["build"], catch_exceptions=False)
+    result = CliRunner().invoke(main, ["build", "--agentic"], catch_exceptions=False)
 
     assert result.exit_code == 0
     assert captured["intent"] == BOOTSTRAP_INTENT
@@ -61,7 +61,7 @@ def test_build_explicit_intent_still_wins_over_intent_md(tmp_git_repo, monkeypat
 
     result = CliRunner().invoke(
         main,
-        ["build", "ship the MVP shell first"],
+        ["build", "ship the MVP shell first", "--agentic"],
         catch_exceptions=False,
     )
 

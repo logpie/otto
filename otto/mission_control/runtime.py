@@ -140,17 +140,27 @@ def runtime_status(
     if bool(landing.get("merge_blocked")):
         blockers = landing.get("merge_blockers") if isinstance(landing.get("merge_blockers"), list) else []
         detail = "; ".join(str(item) for item in blockers[:3]) or "Local repository state blocks merge."
+        recovery_needed = _landing_recovery_needed(blockers)
         issues.append(
             _runtime_issue(
                 "warning",
-                "Merge is blocked",
+                "Landing recovery available" if recovery_needed else "Merge is blocked",
                 detail,
-                "Commit, stash, or revert local project changes before merging ready work.",
+                "Use Recover landing to abort the interrupted merge and relaunch conflict-resolving landing."
+                if recovery_needed
+                else "Commit, stash, or revert local project changes before merging ready work.",
             )
         )
 
     severity_rank = {"error": 3, "warning": 2, "info": 1}
-    issues.sort(key=lambda item: severity_rank.get(str(item.get("severity")), 0), reverse=True)
+    issue_rank = {"Landing recovery available": 3, "Merge is blocked": 2}
+    issues.sort(
+        key=lambda item: (
+            severity_rank.get(str(item.get("severity")), 0),
+            issue_rank.get(str(item.get("label")), 0),
+        ),
+        reverse=True,
+    )
     return {
         "status": "attention" if issues else "healthy",
         "generated_at": _utc_iso(generated_at),
@@ -214,6 +224,11 @@ def _runtime_issue(severity: str, label: str, detail: str, next_action: str) -> 
         "detail": detail,
         "next_action": next_action,
     }
+
+
+def _landing_recovery_needed(blockers: list[Any]) -> bool:
+    text = " ".join(str(item).lower() for item in blockers)
+    return "merge in progress" in text or "unmerged path" in text
 
 
 def _supervisor_status(project_dir: Path, health: dict[str, Any], watcher_state: str) -> dict[str, Any]:

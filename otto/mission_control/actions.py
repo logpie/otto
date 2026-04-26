@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import shlex
 import signal
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from otto import paths
+from otto.merge import git_ops
 from otto.queue.runtime import IN_FLIGHT_STATUSES, task_display_status
 from otto.queue.schema import QueueTask, load_queue, load_state
 from otto.runs.registry import (
@@ -61,6 +63,7 @@ class ActionExecutingAdapter:
         *,
         selected_artifact_path: str | None = None,
         selected_queue_task_ids: list[str] | None = None,
+        action_payload: dict[str, Any] | None = None,
         post_result: Callable[[ActionResult], None] | None = None,
     ) -> ActionResult:
         return execute_action(
@@ -69,6 +72,7 @@ class ActionExecutingAdapter:
             project_dir,
             selected_artifact_path=selected_artifact_path,
             selected_queue_task_ids=selected_queue_task_ids,
+            action_payload=action_payload,
             post_result=post_result,
         )
 
@@ -91,6 +95,7 @@ def execute_action(
     *,
     selected_artifact_path: str | None = None,
     selected_queue_task_ids: list[str] | None = None,
+    action_payload: dict[str, Any] | None = None,
     post_result: Callable[[ActionResult], None] | None = None,
 ) -> ActionResult:
     project_dir = Path(project_dir)
@@ -116,6 +121,14 @@ def execute_action(
             selected_artifact_path=selected_artifact_path,
             post_result=post_result,
         )
+    if action_kind in {"a", "g"}:
+        return _execute_spec_review_decision(
+            record,
+            project_dir,
+            action_kind=action_kind,
+            action_payload=action_payload or {},
+            post_result=post_result,
+        )
     return ActionResult(
         ok=False,
         message="action unavailable",
@@ -129,9 +142,64 @@ def execute_merge_all(
     post_result: Callable[[ActionResult], None] | None = None,
 ) -> ActionResult:
     return _launch_process(
-        _otto_cli_argv("merge", "--fast", "--no-certify", "--all"),
+        _otto_cli_argv("merge", "--fast", "--transactional", "--no-certify", "--all"),
         cwd=Path(project_dir),
         description="merge all",
+        post_result=post_result,
+        settle_timeout_s=2.0,
+    )
+
+
+def execute_merge_abort(project_dir: Path) -> ActionResult:
+    project_dir = Path(project_dir)
+    if not git_ops.merge_in_progress(project_dir):
+        return _warning_result("Abort unavailable", "No in-progress git merge was found.")
+    result = git_ops.merge_abort(project_dir)
+    if result.ok:
+        return ActionResult(
+            ok=True,
+            message="in-progress merge aborted",
+            severity="information",
+            refresh=True,
+            clear_banner=True,
+        )
+    detail = (result.stderr or result.stdout or "git merge --abort failed").strip()
+    return _error_result("Abort merge failed", detail)
+
+
+def execute_merge_recover(
+    project_dir: Path,
+    *,
+    post_result: Callable[[ActionResult], None] | None = None,
+) -> ActionResult:
+    project_dir = Path(project_dir)
+    if git_ops.merge_in_progress(project_dir):
+        abort = git_ops.merge_abort(project_dir)
+        if not abort.ok:
+            detail = (abort.stderr or abort.stdout or "git merge --abort failed").strip()
+            return _error_result("Recover landing failed", detail)
+    return _launch_process(
+        _otto_cli_argv("merge", "--no-certify", "--all"),
+        cwd=project_dir,
+        description="recover landing",
+        post_result=post_result,
+        settle_timeout_s=2.0,
+    )
+
+
+def execute_queue_cleanup(
+    project_dir: Path,
+    task_ids: list[str],
+    *,
+    post_result: Callable[[ActionResult], None] | None = None,
+) -> ActionResult:
+    cleaned_ids = [task_id for task_id in task_ids if task_id]
+    if not cleaned_ids:
+        return _warning_result("Cleanup unavailable", "No cleanup-safe queue tasks were found.")
+    return _launch_process(
+        _otto_cli_argv("queue", "cleanup", *cleaned_ids),
+        cwd=Path(project_dir),
+        description=f"cleanup {len(cleaned_ids)} superseded task{'s' if len(cleaned_ids) != 1 else ''}",
         post_result=post_result,
         settle_timeout_s=2.0,
     )
@@ -233,6 +301,49 @@ def _execute_resume(
         _otto_cli_argv(record.run_type, "--resume"),
         cwd=cwd,
         description=f"resume {record.run_type}",
+        post_result=post_result,
+    )
+
+
+def _execute_spec_review_decision(
+    record: RunRecord,
+    project_dir: Path,
+    *,
+    action_kind: str,
+    action_payload: dict[str, Any],
+    post_result: Callable[[ActionResult], None] | None,
+) -> ActionResult:
+    if record.domain != "queue":
+        return _error_result("Spec review unavailable", "spec review actions are only supported for queued builds")
+    task_id = _queue_task_id(record)
+    if not task_id:
+        return _error_result("Spec review failed", "queue task id missing")
+    checkpoint_path = str(record.artifacts.get("checkpoint_path") or "").strip()
+    if not checkpoint_path:
+        return _error_result("Spec review failed", "checkpoint missing")
+    try:
+        checkpoint = _read_json_file(Path(checkpoint_path))
+    except ValueError as exc:
+        return _error_result("Spec review failed", str(exc))
+    if str(checkpoint.get("phase") or "") != "spec_review":
+        return _error_result("Spec review unavailable", "run is not waiting at the spec review gate")
+    spec_path = str(checkpoint.get("spec_path") or "").strip()
+    if not spec_path or not Path(spec_path).exists():
+        return _error_result("Spec review failed", "spec file missing")
+    action = "approve" if action_kind == "a" else "regenerate"
+    note = str(action_payload.get("note") or "").strip()
+    if action == "regenerate" and not note:
+        return _warning_result("Spec review needs a note", "Add a short note describing what should change.")
+    try:
+        from otto.spec import write_spec_review_decision
+
+        write_spec_review_decision(Path(spec_path), action=action, note=note)
+    except Exception as exc:
+        return _error_result("Spec review failed", str(exc))
+    return _launch_process(
+        _otto_cli_argv("queue", "resume", task_id),
+        cwd=project_dir,
+        description=("approve spec" if action == "approve" else "request spec changes") + f" for {task_id}",
         post_result=post_result,
     )
 
@@ -572,6 +683,16 @@ def _record_cwd(record: RunRecord) -> Path | None:
     if not raw:
         return None
     return Path(raw)
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"{path} is unreadable: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return payload
 
 
 def _queue_task_id(record: RunRecord) -> str:

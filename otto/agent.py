@@ -389,6 +389,7 @@ async def run_agent_with_timeout(
     *,
     log_dir: Path,
     phase_name: str = "BUILD",
+    phase_label: str | None = None,
     timeout: int | None,
     project_dir: Path,
     capture_tool_output: bool = False,
@@ -416,6 +417,7 @@ async def run_agent_with_timeout(
     callbacks = make_session_logger(
         log_dir,
         phase_name=phase_name,
+        phase_label=phase_label,
         stdout_callback=on_terminal_event,
         verbose=verbose,
         strict_mode=strict_mode,

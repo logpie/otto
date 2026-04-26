@@ -3,6 +3,8 @@ export type OutcomeFilter = "all" | "success" | "failed" | "interrupted" | "canc
 export type JobCommand = "build" | "improve" | "certify";
 export type ImproveSubcommand = "bugs" | "feature" | "target";
 export type CertificationPolicy = "" | "fast" | "standard" | "thorough" | "skip";
+export type ExecutionMode = "split" | "agentic";
+export type PlanningMode = "direct" | "spec-review" | "spec-auto" | "spec-file";
 
 export interface ProjectDefaults {
   provider: string;
@@ -10,6 +12,57 @@ export interface ProjectDefaults {
   reasoning_effort: string | null;
   certifier_mode: string;
   skip_product_qa: boolean;
+  run_budget_seconds: number | null;
+  spec_timeout: number | null;
+  max_certify_rounds: number | null;
+  max_turns_per_call: number | null;
+  strict_mode: boolean;
+  split_mode: boolean;
+  allow_dirty_repo: boolean;
+  default_branch: string | null;
+  test_command: string | null;
+  queue_concurrent: number | null;
+  queue_task_timeout_s: number | null;
+  queue_worktree_dir: string | null;
+  queue_on_watcher_restart: string | null;
+  queue_merge_certifier_mode: string | null;
+  config_file_exists: boolean;
+  config_error: string | null;
+}
+
+export interface AgentBuildConfig {
+  provider: string | null;
+  model: string | null;
+  reasoning_effort: string | null;
+}
+
+export interface RunBuildConfig {
+  command_family: "build" | "improve" | "certify" | null;
+  provider: string | null;
+  model: string | null;
+  reasoning_effort: string | null;
+  certifier_mode: string | null;
+  skip_product_qa: boolean;
+  certification: string;
+  planning: "direct" | "spec_review" | "spec_auto" | "spec_file" | string;
+  spec_file_path: string | null;
+  run_budget_seconds: number | null;
+  spec_timeout: number | null;
+  max_certify_rounds: number | null;
+  max_turns_per_call: number | null;
+  strict_mode: boolean;
+  split_mode: boolean;
+  allow_dirty_repo: boolean;
+  default_branch: string | null;
+  test_command: string | null;
+  queue: {
+    concurrent: number | null;
+    task_timeout_s: number | null;
+    worktree_dir: string | null;
+    on_watcher_restart: string | null;
+    merge_certifier_mode: string | null;
+  };
+  agents: Record<"build" | "certifier" | "spec" | "fix", AgentBuildConfig>;
   config_file_exists: boolean;
   config_error: string | null;
 }
@@ -21,6 +74,32 @@ export interface ProjectInfo {
   dirty: boolean;
   head_sha: string | null;
   defaults?: ProjectDefaults;
+}
+
+export interface TokenUsage {
+  input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  cached_input_tokens?: number;
+  output_tokens?: number;
+  reasoning_tokens?: number;
+  total_tokens?: number;
+}
+
+export interface ProjectStats {
+  active_count: number;
+  history_count: number;
+  success_count: number;
+  failed_count: number;
+  total_duration_s: number;
+  duration_display: string;
+  reported_cost_usd: number | null;
+  cost_display: string;
+  token_usage: TokenUsage;
+  total_tokens: number;
+  token_display: string;
+  stories_passed: number;
+  stories_tested: number;
 }
 
 export interface ManagedProjectInfo extends ProjectInfo {
@@ -168,6 +247,7 @@ export interface LandingItem {
   branch: string | null;
   worktree: string | null;
   summary: string | null;
+  build_config: RunBuildConfig;
   queue_status: string;
   landing_state: "ready" | "merged" | "blocked" | string;
   label: string;
@@ -217,6 +297,10 @@ export interface RunSummary {
   provider: string | null;
   model: string | null;
   reasoning_effort: string | null;
+  certifier_mode: string | null;
+  skip_product_qa: boolean;
+  build_config: RunBuildConfig;
+  run_config?: RunBuildConfig;
   adapter_key: string;
   version: number;
 }
@@ -230,6 +314,7 @@ export interface LiveRunItem extends RunSummary {
   elapsed_display: string;
   cost_usd: number | null;
   cost_display: string;
+  token_usage: TokenUsage;
   last_event: string;
   progress: string;
   row_label: string;
@@ -255,6 +340,7 @@ export interface HistoryItem {
   duration_display: string;
   cost_usd: number | null;
   cost_display: string;
+  token_usage: TokenUsage;
   resumable: boolean;
   adapter_key: string;
 }
@@ -275,6 +361,19 @@ export interface ArtifactRef {
   exists: boolean;
 }
 
+export interface PhaseTimelineItem {
+  phase: string;
+  label: string;
+  status: string;
+  duration_s: number | null;
+  cost_usd: number | null;
+  rounds: number | null;
+  token_usage: TokenUsage;
+  provider: string | null;
+  model: string | null;
+  reasoning_effort: string | null;
+}
+
 export interface RunDetail extends RunSummary {
   display_status: string;
   active: boolean;
@@ -288,6 +387,7 @@ export interface RunDetail extends RunSummary {
   selected_log_path: string | null;
   legal_actions: ActionState[];
   review_packet: ReviewPacket;
+  phase_timeline: PhaseTimelineItem[];
   landing_state: string | null;
   merge_info?: Record<string, unknown> | null;
   record: Record<string, unknown>;
@@ -297,6 +397,7 @@ export interface ReviewPacket {
   headline: string;
   status: string;
   summary: string;
+  product_handoff: ProductHandoff;
   readiness: {
     state: "ready" | "merged" | "blocked" | "in_progress" | "needs_attention" | string;
     label: string;
@@ -356,8 +457,45 @@ export interface ReviewPacket {
   } | null;
 }
 
+export interface ProductCommand {
+  label: string;
+  command: string;
+}
+
+export interface ProductFlow {
+  title: string;
+  steps: string[];
+}
+
+export interface ProductSampleData {
+  label: string;
+  value: string;
+  detail: string;
+}
+
+export interface ProductHandoff {
+  kind: string;
+  label: string;
+  source: string;
+  source_path: string | null;
+  root: string;
+  summary: string;
+  task_summary: string;
+  task_status: string | null;
+  task_branch: string | null;
+  task_changed_files: string[];
+  task_flows: ProductFlow[];
+  urls: string[];
+  launch: ProductCommand[];
+  reset: ProductCommand[];
+  try_flows: ProductFlow[];
+  sample_data: ProductSampleData[];
+  notes: string[];
+}
+
 export interface StateResponse {
   project: ProjectInfo;
+  project_stats: ProjectStats;
   watcher: WatcherInfo;
   runtime: RuntimeStatus;
   events: EventsState;

@@ -21,6 +21,7 @@ _KNOWN_PLACEHOLDERS = frozenset({
     "evidence_dir",
     "target",
     "strict_mode",
+    "session_dir",
     "project_context",
     "project_intent_section",
     "merge_section",

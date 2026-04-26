@@ -14,13 +14,11 @@ import yaml
 # Single source of truth for all configuration defaults.
 #
 # Precedence, highest first:
-#   1. CLI flag (e.g. `otto build --thorough`)
+#   1. CLI flag (e.g. `otto build --thorough` or `--certifier-provider codex`)
 #   2. otto.yaml (created by `otto setup`, never auto-created)
 #   3. DEFAULTS (this dict)
 #
-# Per-agent overrides (agents.<name>.model etc.) only via otto.yaml —
-# CLI has global --model/--provider/--effort flags that apply to all
-# agents in the run. If finer control is needed, edit otto.yaml.
+# Per-agent overrides can come from otto.yaml or explicit phase CLI flags.
 # ---------------------------------------------------------------------------
 
 AGENT_TYPES = ("build", "certifier", "spec", "fix")
@@ -56,7 +54,7 @@ DEFAULTS: dict[str, Any] = {
     # Per-invocation defaults (CLI typically overrides)
     "certifier_mode":         "fast",    # fast | standard | thorough
     "skip_product_qa":        False,
-    "split_mode":             False,
+    "split_mode":             True,
     "strict_mode":            False,
     "allow_dirty_repo":       False,
 
@@ -69,7 +67,7 @@ DEFAULTS: dict[str, Any] = {
         "concurrent":           3,             # default --concurrent for `otto queue run`
         "worktree_dir":         ".worktrees",  # where per-task worktrees live (relative to project)
         "on_watcher_restart":   "resume",      # resume | fail
-        "task_timeout_s":        1800.0,        # per-task timeout; 0/null disables
+        "task_timeout_s":        4200.0,        # per-task timeout; 0/null disables
         "merge_certifier_mode":  "standard",    # fast | standard | thorough
         "bookkeeping_files": [                 # files queue tasks should NOT commit to their branches
             "intent.md",
@@ -207,19 +205,33 @@ def normalize_provider(
     return provider
 
 
+def _cli_agent_override(config: dict[str, Any], key: str, agent_type: str | None = None) -> Any:
+    overrides = (config.get("_cli_overrides") or {}) if isinstance(config, dict) else {}
+    if not isinstance(overrides, dict):
+        return None
+    if agent_type:
+        agents = overrides.get("agents")
+        if isinstance(agents, dict):
+            agent_overrides = agents.get(agent_type)
+            if isinstance(agent_overrides, dict) and agent_overrides.get(key):
+                return agent_overrides[key]
+    return overrides.get(key)
+
+
 def agent_provider(config: dict[str, Any], agent_type: str | None = None) -> str:
     """Return the effective provider for a given agent.
 
-    Resolution order: CLI override > per-agent override > global config > built-in default.
+    Resolution order: phase CLI override > global CLI override > per-agent config
+    > global config > built-in default.
     ``agent_type`` is one of AGENT_TYPES (build, certifier, spec, fix).
     If None, returns the global provider only.
     """
-    cli_override = ((config.get("_cli_overrides") or {}) if isinstance(config, dict) else {}).get("provider")
+    cli_override = _cli_agent_override(config, "provider", agent_type)
     if cli_override:
         return normalize_provider(
             cli_override,
             default=DEFAULTS["provider"],
-            key="provider",
+            key=f"agents.{agent_type}.provider" if agent_type else "provider",
         ) or DEFAULTS["provider"]
     if agent_type:
         per_agent = (config.get("agents", {}) or {}).get(agent_type, {}) or {}
@@ -238,9 +250,10 @@ def agent_provider(config: dict[str, Any], agent_type: str | None = None) -> str
 def agent_model(config: dict[str, Any], agent_type: str | None = None) -> str | None:
     """Return the effective model for a given agent, or None for provider default.
 
-    Resolution: CLI override > per-agent override > global config.model > None.
+    Resolution: phase CLI override > global CLI override > per-agent override
+    > global config.model > None.
     """
-    cli_override = ((config.get("_cli_overrides") or {}) if isinstance(config, dict) else {}).get("model")
+    cli_override = _cli_agent_override(config, "model", agent_type)
     if cli_override:
         return str(cli_override)
     if agent_type:
@@ -253,9 +266,10 @@ def agent_model(config: dict[str, Any], agent_type: str | None = None) -> str | 
 def agent_effort(config: dict[str, Any], agent_type: str | None = None) -> str | None:
     """Return the effective effort level for a given agent.
 
-    Resolution: CLI override > per-agent override > global config.effort > None.
+    Resolution: phase CLI override > global CLI override > per-agent override
+    > global config.effort > None.
     """
-    cli_override = ((config.get("_cli_overrides") or {}) if isinstance(config, dict) else {}).get("effort")
+    cli_override = _cli_agent_override(config, "effort", agent_type)
     if cli_override:
         return str(cli_override)
     if agent_type:
@@ -805,8 +819,34 @@ def first_touch_bookkeeping(project_dir: Path, config: dict[str, Any]) -> None:
     """
     import logging
     import subprocess as _sp
+    import time as _time
 
     log = logging.getLogger("otto.config")
+
+    def _run_git_with_index_retry(args: list[str]) -> _sp.CompletedProcess[str]:
+        last_result: _sp.CompletedProcess[str] | None = None
+        for attempt in range(4):
+            result = _sp.run(
+                ["git", *args],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                return result
+            last_result = result
+            stderr = result.stderr or ""
+            if "index.lock" not in stderr or attempt == 3:
+                break
+            _time.sleep(0.15 * (attempt + 1))
+        assert last_result is not None
+        raise _sp.CalledProcessError(
+            last_result.returncode,
+            ["git", *args],
+            output=last_result.stdout,
+            stderr=last_result.stderr,
+        )
 
     # Quick sanity: are we in a git working tree?
     try:
@@ -887,10 +927,13 @@ def first_touch_bookkeeping(project_dir: Path, config: dict[str, Any]) -> None:
                 changed_paths, staged_other,
             )
             return
-        _sp.run(
-            ["git", "add", "--", *changed_paths],
-            cwd=project_dir, capture_output=True, check=True,
+        _run_git_with_index_retry(["add", "--", *changed_paths])
+        pending = _sp.run(
+            ["git", "diff", "--cached", "--name-only", "--", *changed_paths],
+            cwd=project_dir, capture_output=True, text=True, check=False,
         )
+        if not (pending.stdout or "").strip():
+            return
         msg = "chore(otto): set up runtime bookkeeping (" + ", ".join(changed_paths) + ")"
         notice = (
             "Otto is committing runtime bookkeeping files so queue/merge can run "
@@ -898,10 +941,7 @@ def first_touch_bookkeeping(project_dir: Path, config: dict[str, Any]) -> None:
         )
         log.warning(notice)
         print(notice, file=sys.stderr)
-        _sp.run(
-            ["git", "commit", "-q", "-m", msg, "--", *changed_paths],
-            cwd=project_dir, capture_output=True, check=True,
-        )
+        _run_git_with_index_retry(["commit", "-q", "-m", msg, "--", *changed_paths])
         log.info("auto-committed %s: %s", changed_paths, msg)
     except _sp.CalledProcessError as exc:
         log.warning(
@@ -1109,7 +1149,7 @@ run_budget_seconds: {run_budget_seconds}      # total wall-clock (primary knob)
 # ─── Per-invocation defaults (CLI typically overrides) ───────────────
 # certifier_mode: {certifier_mode}            # fast | standard | thorough
 # skip_product_qa: false                      # --no-qa equivalent
-# split_mode: false                           # --split equivalent
+# split_mode: true                            # reliable split loop; use --agentic for one-session mode
 
 # ─── Features ────────────────────────────────────────────────────────
 # memory: false                       # cross-run certifier memory (opt-in)
@@ -1119,7 +1159,7 @@ run_budget_seconds: {run_budget_seconds}      # total wall-clock (primary knob)
 #   concurrent: 3                     # default --concurrent for `otto queue run`
 #   worktree_dir: .worktrees          # where per-task worktrees live
 #   on_watcher_restart: resume        # resume | fail
-#   task_timeout_s: 1800.0            # per-task timeout; 0/null disables
+#   task_timeout_s: 4200.0            # per-task timeout; 0/null disables
 #   merge_certifier_mode: standard    # fast | standard | thorough
 #   bookkeeping_files:                # NOT committed to task branches
 #     - intent.md

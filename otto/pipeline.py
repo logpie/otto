@@ -548,6 +548,7 @@ def _finalize_atomic_publisher(
     stories_passed: int,
     stories_tested: int,
     last_event: str,
+    breakdown: dict[str, dict[str, Any]] | None = None,
 ) -> Any:
     if publisher is None:
         return None
@@ -559,6 +560,7 @@ def _finalize_atomic_publisher(
                 "cost_usd": float(total_cost or 0.0),
                 "stories_passed": stories_passed,
                 "stories_tested": stories_tested,
+                "breakdown": breakdown or {},
             },
             "last_event": last_event,
         },
@@ -667,6 +669,7 @@ async def build_agentic_v3(
     is_improve_run: bool = False,
     strict_mode: bool = False,
     verbose: bool = False,
+    phase_label: str | None = None,
 ) -> BuildResult:
     """Fully agent-driven session: one agent, certifier as environment.
 
@@ -737,6 +740,8 @@ async def build_agentic_v3(
     story_results: list[dict[str, Any]] = []
     certify_rounds: list[dict[str, Any]] = []
     breakdown: dict[str, dict[str, Any]] = {}
+    breakdown_data: dict[str, Any] = {}
+    checkpoint_session_id = resume_session_id or ""
     try:
         # Resumed SDK sessions already carry prior context; avoid polluting
         # intent.md or stdin when the user resumes without a fresh intent.
@@ -789,6 +794,7 @@ async def build_agentic_v3(
                 prompt = render_prompt("improve.md",
                                        max_certify_rounds=str(max_certify_rounds),
                                        spec_section=spec_section,
+                                       session_dir=str(paths.session_dir(project_dir, session_id)),
                                        strict_mode=_strict_mode_guidance(strict_mode))
                 prompt += f"\n\nImprove this product:\n\n{intent}"
             else:
@@ -799,6 +805,7 @@ async def build_agentic_v3(
                 prompt = render_prompt("build.md",
                                        max_certify_rounds=str(max_certify_rounds),
                                        spec_section=spec_section,
+                                       session_dir=str(paths.session_dir(project_dir, session_id)),
                                        strict_mode=_strict_mode_guidance(strict_mode))
                 prompt += f"\n\nBuild this product:\n\n{intent}"
 
@@ -855,7 +862,6 @@ async def build_agentic_v3(
 
         from otto.checkpoint import load_checkpoint, write_checkpoint
 
-        checkpoint_session_id = resume_session_id or ""
         base_prior_cost = float(prior_total_cost if prior_total_cost else (spec_cost or 0.0))
         base_prior_duration = float(
             prior_total_duration if prior_total_duration else (spec_duration or 0.0)
@@ -953,6 +959,7 @@ async def build_agentic_v3(
                 prompt, options,
                 log_dir=build_dir,
                 phase_name="BUILD",
+                phase_label=phase_label,
                 timeout=timeout,
                 project_dir=project_dir,
                 capture_tool_output=True,
@@ -1273,6 +1280,7 @@ async def build_agentic_v3(
             stories_passed=stories_passed,
             stories_tested=stories_tested,
             last_event="completed" if passed else "failed",
+            breakdown=breakdown or None,
         )
         from otto.queue.runtime import is_queue_runner_child
 
@@ -1322,11 +1330,11 @@ async def build_agentic_v3(
             child_session_ids=list(breakdown_data.get("child_session_ids", []) or []),
         )
     except KeyboardInterrupt as exc:
+        total_duration = round(
+            float(prior_total_duration or spec_duration or 0.0) + (time.monotonic() - start_time),
+            1,
+        )
         if manage_checkpoint and str(exc) == "cancelled by command":
-            total_duration = round(
-                float(prior_total_duration or spec_duration or 0.0) + (time.monotonic() - start_time),
-                1,
-            )
             final_record = None
             if publisher is not None:
                 final_record = publisher.finalize(
@@ -1351,6 +1359,48 @@ async def build_agentic_v3(
                 runtime_path=runtime_path,
                 spec_path=str(config.get("_spec_path") or "").strip() or None,
                 final_record=final_record,
+            )
+        elif manage_checkpoint:
+            checkpoint_rounds = [
+                {
+                    "round": r.get("round", i + 1),
+                    "verdict": r.get("verdict"),
+                    "stories_tested": len(r.get("stories", [])),
+                    "stories_passed": r.get(
+                        "passed_count",
+                        sum(1 for s in r.get("stories", []) if s.get("passed")),
+                    ),
+                    "failing_story_ids": [
+                        s.get("story_id", "")
+                        for s in r.get("stories", []) or []
+                        if not s.get("passed")
+                    ],
+                    "diagnosis": r.get("diagnosis", ""),
+                    "fix_commits": list(r.get("fix_commits", []) or []),
+                    "fix_diff_stat": r.get("fix_diff_stat", ""),
+                    "still_failing_after_fix": list(r.get("still_failing_after_fix", []) or []),
+                    "subagent_errors": list(r.get("subagent_errors", []) or []),
+                }
+                for i, r in enumerate(certify_rounds)
+            ]
+            _cp(
+                "paused",
+                session_id=checkpoint_session_id,
+                phase="build",
+                current_round=len(certify_rounds),
+                rounds=checkpoint_rounds,
+                child_session_ids=list(breakdown_data.get("child_session_ids", []) or []),
+                total_duration=total_duration,
+                last_activity=str(breakdown_data.get("last_activity", "") or ""),
+                last_tool_name=str(breakdown_data.get("last_tool_name", "") or ""),
+                last_tool_args_summary=str(breakdown_data.get("last_tool_args_summary", "") or ""),
+                last_story_id=str(breakdown_data.get("last_story_id", "") or ""),
+                last_operation_started_at=str(breakdown_data.get("last_operation_started_at", "") or ""),
+                last_round_failures=[
+                    story.get("story_id", "")
+                    for story in story_results
+                    if not story.get("passed")
+                ],
             )
         raise
     finally:
@@ -1551,6 +1601,61 @@ def _append_intent(project_dir: Path, intent: str, build_id: str) -> None:
     paths.session_intent(project_dir, build_id).write_text(intent.rstrip() + "\n")
 
 
+def _write_split_proof_report(
+    *,
+    project_dir: Path,
+    run_id: str,
+    intent: str,
+    config: dict[str, Any],
+    certifier_mode: str,
+    passed: bool,
+    story_results: list[dict[str, Any]],
+    certify_rounds: list[dict[str, Any]],
+    diagnosis: str,
+    certify_duration_s: float,
+    certifier_cost_usd: float,
+    total_cost_usd: float,
+) -> None:
+    """Write the run-level split-mode proof report after all rounds finish."""
+    if not story_results and not certify_rounds:
+        return
+    try:
+        from otto import paths as _paths
+        from otto.agent import make_agent_options
+        from otto.certifier import _build_pow_report_data, _write_pow_report
+
+        report_dir = _paths.certify_dir(project_dir, run_id)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        evidence_dir = report_dir / "evidence"
+        options = make_agent_options(project_dir, config, agent_type="certifier")
+        tested = len(story_results)
+        passed_count = sum(1 for story in story_results if story.get("passed"))
+        pow_data = _build_pow_report_data(
+            project_dir=project_dir,
+            report_dir=report_dir,
+            log_dir=report_dir,
+            run_id=run_id,
+            session_id=run_id,
+            pipeline_mode="split",
+            certifier_mode=certifier_mode,
+            outcome="passed" if passed else "failed",
+            story_results=story_results,
+            diagnosis=diagnosis,
+            certify_rounds=certify_rounds,
+            duration_s=round(float(certify_duration_s or 0.0), 1),
+            certifier_cost_usd=float(certifier_cost_usd or 0.0),
+            total_cost_usd=float(total_cost_usd or 0.0),
+            intent=intent,
+            options=options,
+            evidence_dir=evidence_dir if evidence_dir.exists() else None,
+            stories_tested=tested,
+            stories_passed=passed_count,
+        )
+        _write_pow_report(report_dir, pow_data)
+    except Exception as exc:
+        logger.warning("Failed to write split proof report: %s", exc)
+
+
 async def run_certify_fix_loop(
     intent: str,
     project_dir: Path,
@@ -1647,6 +1752,8 @@ async def run_certify_fix_loop(
         certify_phase_duration = 0.0
         certify_phase_cost = 0.0
         certify_phase_rounds = 0
+        fix_phase_duration = 0.0
+        fix_phase_cost = 0.0
         spec_cost_remaining = float(spec_cost or 0.0)
         pending_resume_session_id = resume_session_id or None
         improve_dir = _paths.improve_dir(project_dir, build_id)
@@ -1867,6 +1974,7 @@ async def run_certify_fix_loop(
                             write_session_summary=False,
                             write_history=False,
                             verbose=verbose,
+                            round_num=round_num,
                         )
                         certify_phase_duration += time.monotonic() - certify_call_start
                         certify_phase_cost += float(report.cost_usd)
@@ -1932,9 +2040,13 @@ async def run_certify_fix_loop(
 
                 round_summary = {
                     "round": round_num,
+                    "verdict": not bool(failures),
+                    "tested": len(stories),
+                    "stories": list(stories),
                     "stories_tested": len(stories),
                     "stories_passed": len(stories) - len(failures),
                     "cost": float(report.cost_usd),
+                    "duration_s": float(report.duration_s),
                     "result": result_str,
                     "failing_story_ids": list(failing_story_ids),
                     "diagnosis": diagnosis_text,
@@ -2078,15 +2190,16 @@ async def run_certify_fix_loop(
                             spec=spec,
                             budget=budget,
                             verbose=verbose,
+                            phase_label=f"FIX ROUND {round_num}",
                         )
                         pending_resume_session_id = None
-                        build_phase_duration += time.monotonic() - fix_call_start
+                        fix_phase_duration += time.monotonic() - fix_call_start
                         break
                     except AgentCallError:
-                        build_phase_duration += time.monotonic() - fix_call_start
+                        fix_phase_duration += time.monotonic() - fix_call_start
                         raise
                     except Exception as err:
-                        build_phase_duration += time.monotonic() - fix_call_start
+                        fix_phase_duration += time.monotonic() - fix_call_start
                         if attempt < max_retries:
                             logger.warning("Fix round %d attempt %d failed: %s. Retrying...",
                                            round_num, attempt + 1, err)
@@ -2098,7 +2211,7 @@ async def run_certify_fix_loop(
 
                 if fix_result:
                     total_cost += fix_result.total_cost
-                    build_phase_cost += float(fix_result.total_cost)
+                    fix_phase_cost += float(fix_result.total_cost)
                     child_session_ids_seen.update(fix_result.child_session_ids)
                     record_build(project_dir, round_id, fix_result, session_id=build_id)
                     append_journal(project_dir, round_id, f"fix round {round_num}",
@@ -2139,6 +2252,8 @@ async def run_certify_fix_loop(
                 total_cost += partial_cost
                 if checkpoint_phase == "certify":
                     certify_phase_cost += partial_cost
+                elif checkpoint_phase == "fix":
+                    fix_phase_cost += partial_cost
                 else:
                     build_phase_cost += partial_cost
                 logger.warning("Round %d paused (%s)", round_num, err.reason)
@@ -2218,6 +2333,25 @@ async def run_certify_fix_loop(
             if certify_phase_cost > 0.0:
                 certify_entry["cost_usd"] = _round_cost(certify_phase_cost)
             split_breakdown["certify"] = certify_entry
+        if fix_phase_duration > 0.0:
+            fix_entry: dict[str, Any] = {"duration_s": round(fix_phase_duration, 1)}
+            if fix_phase_cost > 0.0:
+                fix_entry["cost_usd"] = _round_cost(fix_phase_cost)
+            split_breakdown["fix"] = fix_entry
+        _write_split_proof_report(
+            project_dir=project_dir,
+            run_id=build_id,
+            intent=intent,
+            config=config,
+            certifier_mode=certifier_mode,
+            passed=passed,
+            story_results=last_stories,
+            certify_rounds=list(checkpoint_rounds),
+            diagnosis=last_diagnosis_text,
+            certify_duration_s=certify_phase_duration,
+            certifier_cost_usd=certify_phase_cost,
+            total_cost_usd=total_cost,
+        )
         _write_session_summary(
             project_dir,
             build_id,
@@ -2241,6 +2375,7 @@ async def run_certify_fix_loop(
             stories_passed=sum(1 for j in journeys if j.get("passed")),
             stories_tested=len(journeys),
             last_event="completed" if passed else "failed",
+            breakdown=split_breakdown or None,
         )
         from otto.queue.runtime import is_queue_runner_child
 

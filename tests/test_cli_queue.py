@@ -608,6 +608,11 @@ def test_queue_rm_without_watcher_refuses_non_queued_task(tmp_path: Path):
 def test_queue_rm_refuses_interrupted_task_with_resume_or_cleanup_hint(tmp_path: Path):
     repo = init_repo(tmp_path)
     _run(["queue", "build", "csv"], cwd=repo)
+    session_id = "2026-04-22-010203-abc123"
+    paths.ensure_session_scaffold(repo / ".worktrees" / "csv", session_id)
+    paths.session_checkpoint(repo / ".worktrees" / "csv", session_id).write_text(
+        json.dumps({"status": "paused", "updated_at": "2026-04-22T01:02:03Z"})
+    )
     _write_watcher_state(
         repo,
         watcher=None,
@@ -1065,7 +1070,68 @@ def test_queue_resume_explicit_task_errors_without_checkpoint(tmp_path: Path):
     code, out, _ = _run(["queue", "resume", "labels"], cwd=repo)
 
     assert code == 2
-    assert "do not have a resumable checkpoint" in out
+    assert "cannot be resumed from checkpoint" in out
+    assert "checkpoint missing" in out
+
+
+def test_queue_resume_explicit_failed_task_with_checkpoint(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "labels"], cwd=repo)
+    session_id = "2026-04-22-010203-abc123"
+    paths.ensure_session_scaffold(repo / ".worktrees" / "labels", session_id)
+    paths.session_checkpoint(repo / ".worktrees" / "labels", session_id).write_text(
+        json.dumps({"status": "in_progress", "updated_at": "2026-04-22T01:02:03Z"})
+    )
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={
+            "labels": {
+                "status": "failed",
+                "failure_reason": "timed out after 1800s (limit 1800s)",
+            }
+        },
+    )
+
+    code, out, _ = _run(["queue", "resume", "labels"], cwd=repo)
+
+    assert code == 0
+    assert "Marked labels to resume" in out
+    cmds = _read_queue_commands(repo)
+    assert len(cmds) == 1
+    assert cmds[0]["cmd"] == "resume"
+    assert cmds[0]["id"] == "labels"
+
+
+def test_queue_resume_explicit_failed_task_rejects_stale_checkpoint(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "labels"], cwd=repo)
+    session_id = "2026-04-22-010203-abc123"
+    paths.ensure_session_scaffold(repo / ".worktrees" / "labels", session_id)
+    paths.session_checkpoint(repo / ".worktrees" / "labels", session_id).write_text(
+        json.dumps({
+            "status": "in_progress",
+            "updated_at": "2026-04-22T01:02:03Z",
+            "git_sha": "stale-sha",
+        })
+    )
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={
+            "labels": {
+                "status": "failed",
+                "failure_reason": "timed out after 1800s (limit 1800s)",
+            }
+        },
+    )
+
+    code, out, _ = _run(["queue", "resume", "labels"], cwd=repo)
+
+    assert code == 2
+    assert "cannot be resumed from checkpoint" in out
+    assert "checkpoint is stale: git HEAD changed" in out
+    assert not (repo / COMMANDS_FILE).exists()
 
 
 def test_queue_resume_select_uses_picker(monkeypatch, tmp_path: Path):

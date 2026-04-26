@@ -223,7 +223,7 @@ otto improve target "all endpoints respond in < 100ms"
 
 ### `otto build`
 
-Build a product from a natural language intent. One agent builds, certifies, and fixes autonomously.
+Build a product from a natural language intent. By default Otto uses split mode: a build agent implements, a certifier agent verifies, and a fix agent iterates on failures.
 
 ```bash
 otto build "bookmark manager with tags and search"
@@ -241,13 +241,18 @@ otto build "add dark mode toggle to the settings page"   # incremental
 | `--standard` | Standard certification — subagents + screenshots, no adversarial probing |
 | `--thorough` | Thorough certification — adversarial edge cases + code review |
 | `--no-qa` | Skip certification entirely (just build) |
-| `--split` | Python-driven certify→fix loop (vs. single agent session) |
+| `--split` | Force split mode: separate build, certifier, and fix agent calls (default) |
+| `--agentic` | Use one provider session to own build, certification, and fixes |
 | `--strict` | Require two consecutive PASSes (re-verify for consistency). Default stops at first PASS |
 | `--rounds N` / `-n N` | Max certification rounds (default 8) |
 | `--budget SECONDS` | Total wall-clock budget for the run (default 3600) |
 | `--model MODEL` | Override the coding model for this run (e.g. `sonnet`, `opus`) |
 | `--provider {claude\|codex}` | Override the agent provider for this run |
 | `--effort {low\|medium\|high\|max}` | Provider-specific reasoning effort hint |
+| `--build-provider/--build-model/--build-effort` | Override only the build phase |
+| `--certifier-provider/--certifier-model/--certifier-effort` | Override only the certifier phase |
+| `--fix-provider/--fix-model/--fix-effort` | Override only the fix phase |
+| `otto improve --improver-provider/--improver-model/--improver-effort` | Override the improve code-writing agent; maps to fix in split mode and the main session in agentic mode |
 | `--verbose` | Show tool-call counts in heartbeat + extra detail in terminal |
 | `--resume` | Resume only an in-progress checkpoint; intent is inherited from the checkpoint |
 | `--force-cross-command-resume` | Allow `--resume` to reuse a checkpoint written by a different otto command |
@@ -289,7 +294,9 @@ Find and fix bugs, edge cases, error handling gaps. Adversarial certifier tries 
 otto improve bugs                       # find and fix all bugs
 otto improve bugs "error handling"      # focus on error handling
 otto improve bugs -n 5                  # up to 5 rounds (default from otto.yaml or 8)
-otto improve bugs --split               # system-controlled loop (vs agent-driven)
+otto improve bugs --split               # force system-controlled loop (default)
+otto improve bugs --agentic             # one provider session owns certify/fix
+otto improve bugs --certifier-provider claude --improver-provider codex
 otto improve bugs --resume              # resume from last checkpoint
 ```
 
@@ -460,7 +467,7 @@ run_budget_seconds: 3600      # total wall-clock (primary knob)
 # ─── Per-invocation defaults (CLI typically overrides) ───────────────
 # certifier_mode: fast             # fast | standard | thorough
 # skip_product_qa: false           # --no-qa equivalent
-# split_mode: false                # --split equivalent
+# split_mode: true                 # reliable split loop; use --agentic for one-session mode
 
 # ─── Features ────────────────────────────────────────────────────────
 # memory: false                    # cross-run certifier memory (opt-in)
@@ -470,7 +477,7 @@ run_budget_seconds: 3600      # total wall-clock (primary knob)
 #   concurrent: 3                  # default --concurrent for `otto queue run`
 #   worktree_dir: .worktrees       # where per-task worktrees live
 #   on_watcher_restart: resume     # resume | fail
-#   task_timeout_s: 1800.0         # per-task timeout; 0/null disables
+#   task_timeout_s: 4200.0         # per-task timeout; 0/null disables
 #   merge_certifier_mode: standard # fast | standard | thorough
 #   bookkeeping_files:             # NOT committed to task branches
 #     - intent.md
@@ -485,7 +492,7 @@ Timeout knobs are orthogonal:
 |---|---|---|
 | `run_budget_seconds` | Total wall-clock across the whole `otto build` / `otto certify` / `otto improve` run. Build/improve exhaustion pauses with a resumable checkpoint; standalone or queued certify must be rerun on timeout. | `3600` (1h) |
 | `spec_timeout` | Per-phase cap on the spec-agent call specifically. Applied as `min(run_budget_remaining, spec_timeout)`. | `600` (10m) |
-| `queue.task_timeout_s` | Per-task wall-clock cap for `otto queue run` child processes. Set `0` or `null` to disable. | `1800` (30m) |
+| `queue.task_timeout_s` | Per-task wall-clock cap for `otto queue run` child processes. Set `0` or `null` to disable. Defaults above `run_budget_seconds` so the queue guard does not preempt normal budget handling. | `4200` (70m) |
 
 Previous `certifier_timeout` and `agent_timeout` keys have been removed — `run_budget_seconds` replaces them end-to-end.
 
@@ -510,7 +517,7 @@ Otto supports two agent providers:
 | `claude` (default) | Claude Code CLI via Agent SDK | `provider: claude` |
 | `codex` | OpenAI Codex CLI | `provider: codex` |
 
-Both providers use the same prompts, certification loop, and output parsing for build/certify-style agent calls. Non-fast merge conflict resolution currently requires `provider: claude` because the conflict resolver enforces a stricter tool-control contract; use `otto merge --fast` with `provider: codex`.
+Both providers use the same prompts, certification loop, and output parsing for build/certify-style agent calls. Split mode can mix providers per phase, for example `otto build "..." --build-provider codex --certifier-provider claude --fix-provider codex`. Non-fast merge conflict resolution currently requires `provider: claude` because the conflict resolver enforces a stricter tool-control contract; use `otto merge --fast` with `provider: codex`.
 
 ### Auto-detection
 
@@ -528,6 +535,7 @@ You can override any auto-detected value in `otto.yaml`.
 ```bash
 otto build "CLI that converts CSV to JSON"        # fast certifier by default
 otto build --resume                               # if interrupted
+otto queue resume <task-id>                       # continue queued work from checkpoint after interrupt/timeout
 ```
 
 ### Non-trivial product (spec-gated)

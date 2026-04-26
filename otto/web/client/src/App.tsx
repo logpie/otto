@@ -4,11 +4,13 @@ import {ApiError, api, buildQueuePayload, stateQueryParams} from "./api";
 import type {
   ActionResult,
   ActionState,
+  AgentBuildConfig,
   ArtifactContentResponse,
   ArtifactRef,
   CertificationPolicy,
   CommandBacklogItem,
   DiffResponse,
+  ExecutionMode,
   HistoryItem,
   ImproveSubcommand,
   JobCommand,
@@ -19,9 +21,11 @@ import type {
   ManagedProjectInfo,
   MissionEvent,
   OutcomeFilter,
+  PlanningMode,
   ProjectMutationResponse,
   ProjectsResponse,
   QueueResult,
+  RunBuildConfig,
   RunDetail,
   RunTypeFilter,
   StateResponse,
@@ -57,7 +61,7 @@ interface Filters {
 type ViewMode = "tasks" | "diagnostics";
 
 type BoardStage = "attention" | "working" | "ready" | "landed";
-type InspectorMode = "proof" | "logs" | "artifacts" | "diff";
+type InspectorMode = "try" | "proof" | "logs" | "artifacts" | "diff";
 
 interface RouteState {
   viewMode: ViewMode;
@@ -79,6 +83,7 @@ interface BoardTask {
   elapsedDisplay: string | null;
   lastEvent: string | null;
   progress: string | null;
+  buildConfig: RunBuildConfig | null;
   source: "landing" | "live" | "history";
 }
 
@@ -344,9 +349,20 @@ export function App() {
       showToast(mergeBlockedText(data.landing), "error");
       return;
     }
+    const actionPayload: Record<string, string> = {};
+    if (action === "regenerate-spec") {
+      const note = window.prompt("What should change in the spec?");
+      if (note === null) return;
+      if (!note.trim()) {
+        showToast("Add a short spec change note.", "warning");
+        return;
+      }
+      actionPayload.note = note.trim();
+    }
     const actionLabel = capitalize(label || action);
+    const specAction = action === "approve-spec" || action === "regenerate-spec";
     requestConfirm({
-      title: action === "merge" ? "Land task" : `${actionLabel} run`,
+      title: action === "merge" ? "Land task" : specAction ? actionLabel : `${actionLabel} run`,
       body: message,
       confirmLabel: action === "merge" ? "Land task" : actionLabel,
       tone: ["cancel", "cleanup"].includes(action) ? "danger" : "primary",
@@ -354,7 +370,7 @@ export function App() {
         try {
           const result = await api<ActionResult>(`/api/runs/${encodeURIComponent(runId)}/actions/${action}`, {
             method: "POST",
-            body: JSON.stringify({}),
+            body: JSON.stringify(actionPayload),
           });
           handleActionResult(result, `${action} requested`, showToast, setResultBanner);
           if (result.refresh !== false) await refresh(true);
@@ -391,6 +407,58 @@ export function App() {
       },
     });
   }, [data?.landing, refresh, requestConfirm, showToast]);
+
+  const recoverLanding = useCallback(async () => {
+    requestConfirm({
+      title: "Recover landing",
+      body: "Abort the interrupted git merge, then run Otto's conflict-resolving merge for the remaining ready work. This may invoke the configured merge provider.",
+      confirmLabel: "Recover landing",
+      onConfirm: async () => {
+        try {
+          const result = await api<ActionResult>("/api/actions/merge-recover", {method: "POST", body: "{}"});
+          handleActionResult(result, "landing recovery requested", showToast, setResultBanner);
+          if (result.refresh !== false) await refresh(true);
+        } catch (error) {
+          showToast(errorMessage(error), "error");
+        }
+      },
+    });
+  }, [refresh, requestConfirm, showToast]);
+
+  const abortMerge = useCallback(async () => {
+    requestConfirm({
+      title: "Abort merge",
+      body: "Clean up the in-progress git merge without landing the remaining ready tasks. Use this when you want the repository back in a safe state before deciding what to do next.",
+      confirmLabel: "Abort merge",
+      tone: "danger",
+      onConfirm: async () => {
+        try {
+          const result = await api<ActionResult>("/api/actions/merge-abort", {method: "POST", body: "{}"});
+          handleActionResult(result, "merge abort requested", showToast, setResultBanner);
+          if (result.refresh !== false) await refresh(true);
+        } catch (error) {
+          showToast(errorMessage(error), "error");
+        }
+      },
+    });
+  }, [refresh, requestConfirm, showToast]);
+
+  const resolveReleaseIssues = useCallback(async () => {
+    requestConfirm({
+      title: "Resolve release issues",
+      body: releaseResolutionConfirmation(data),
+      confirmLabel: "Resolve release",
+      onConfirm: async () => {
+        try {
+          const result = await api<ActionResult>("/api/actions/resolve-release", {method: "POST", body: "{}"});
+          handleActionResult(result, "release issue resolution requested", showToast, setResultBanner);
+          if (result.refresh !== false) await refresh(true);
+        } catch (error) {
+          showToast(errorMessage(error), "error");
+        }
+      },
+    });
+  }, [data, refresh, requestConfirm, showToast]);
 
   const runWatcherAction = useCallback(async (action: "start" | "stop") => {
     const execute = async () => {
@@ -489,6 +557,11 @@ export function App() {
   const showProof = useCallback(() => {
     setInspectorOpen(true);
     setInspectorMode("proof");
+  }, []);
+
+  const showTryProduct = useCallback(() => {
+    setInspectorOpen(true);
+    setInspectorMode("try");
   }, []);
 
   useEffect(() => {
@@ -641,28 +714,37 @@ export function App() {
                 onNewJob={openJobDialog}
                 onStartWatcher={() => void runWatcherAction("start")}
                 onLandReady={() => void mergeReadyTasks()}
+                onRecoverLanding={() => void recoverLanding()}
+                onAbortMerge={() => void abortMerge()}
+                onResolveRelease={() => void resolveReleaseIssues()}
                 onOpenDiagnostics={() => navigateView("diagnostics")}
                 onDismissError={() => setLastError(null)}
                 onDismissResult={() => setResultBanner(null)}
               />
-              <TaskBoard
-                data={data}
-                filters={filters}
-                selectedRunId={selectedRunId}
-                onSelect={selectRun}
-              />
-              <RecentActivity events={data?.events} history={data?.history.items || []} selectedRunId={selectedRunId} onSelect={selectRun} />
+              <div className="task-workbench">
+                <div className="workbench-primary">
+                  <ProjectOverview data={data} />
+                  <TaskBoard
+                    data={data}
+                    filters={filters}
+                    selectedRunId={selectedRunId}
+                    onSelect={selectRun}
+                    onLandReady={() => void mergeReadyTasks()}
+                  />
+                </div>
+                <RunDetailPanel
+                  detail={detail}
+                  landing={landing}
+                  onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
+                  onShowTryProduct={showTryProduct}
+                  onShowProof={showProof}
+                  onShowLogs={showLogs}
+                  onShowDiff={showDiff}
+                  onShowArtifacts={showArtifacts}
+                  onLoadArtifact={(index) => void loadArtifact(index)}
+                />
+              </div>
             </div>
-            <RunDetailPanel
-              detail={detail}
-              landing={landing}
-              onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
-              onShowProof={showProof}
-              onShowLogs={showLogs}
-              onShowDiff={showDiff}
-              onShowArtifacts={showArtifacts}
-              onLoadArtifact={(index) => void loadArtifact(index)}
-            />
             {inspectorOpen && detail && (
               <RunInspector
                 detail={detail}
@@ -674,6 +756,7 @@ export function App() {
                 proofContent={proofContent}
                 diffContent={diffContent}
                 onShowLogs={showLogs}
+                onShowTryProduct={showTryProduct}
                 onShowProof={showProof}
                 onShowDiff={showDiff}
                 onShowArtifacts={showArtifacts}
@@ -697,45 +780,19 @@ export function App() {
               onDismissResult={() => setResultBanner(null)}
             />
             <div className="diagnostics-workspace">
-              <div className="diagnostics-grid">
-                <DiagnosticsSummary data={data} onSelect={selectRun} />
-                <LiveRuns items={data?.live.items || []} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
-                <EventTimeline events={data?.events} />
-                <History items={data?.history.items || []} totalRows={data?.history.total_rows || 0} selectedRunId={selectedRunId} onSelect={selectRun} />
-              </div>
-              <RunDetailPanel
-                detail={detail}
-                landing={landing}
-                onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
-                onShowProof={showProof}
-                onShowLogs={showLogs}
-                onShowDiff={showDiff}
-                onShowArtifacts={showArtifacts}
-                onLoadArtifact={(index) => void loadArtifact(index)}
-              />
-              {inspectorOpen && detail && (
-                <RunInspector
-                  detail={detail}
-                  mode={inspectorMode}
-                  logText={logText}
-                  selectedArtifactIndex={selectedArtifactIndex}
-                  artifactContent={artifactContent}
-                  proofArtifactIndex={proofArtifactIndex}
-                  proofContent={proofContent}
-                  diffContent={diffContent}
-                  onShowLogs={showLogs}
-                  onShowProof={showProof}
-                  onShowDiff={showDiff}
-                  onShowArtifacts={showArtifacts}
-                  onLoadProofArtifact={(index) => void loadProofArtifact(index)}
-                  onLoadArtifact={(index) => void loadArtifact(index)}
-                  onBackToArtifacts={() => {
-                    setSelectedArtifactIndex(null);
-                    setArtifactContent(null);
+              <div className="diagnostics-grid health-grid">
+                <SystemHealth data={data} />
+                <RecentRunsPanel
+                  items={(data?.history.items || []).slice(0, 10)}
+                  totalRows={data?.history.total_rows || 0}
+                  selectedRunId={selectedRunId}
+                  onSelect={(runId) => {
+                    selectRun(runId);
+                    navigateView("tasks");
                   }}
-                  onClose={() => setInspectorOpen(false)}
                 />
-              )}
+                <EventTimeline events={data?.events} />
+              </div>
             </div>
           </section>
         )}
@@ -936,7 +993,7 @@ function Toolbar({filters, refreshStatus, viewMode, onChange, onRefresh, onViewC
           data-testid="diagnostics-tab"
           onClick={() => onViewChange("diagnostics")}
         >
-          Diagnostics
+          Health
         </button>
       </div>
       <div className="filters" aria-label="Run filters">
@@ -1033,6 +1090,75 @@ function OverviewMetric({label, value, tone}: {label: string; value: string; ton
   );
 }
 
+function ProjectOverview({data}: {data: StateResponse | null}) {
+  const stats = data?.project_stats;
+  const health = workflowHealth(data);
+  const landed = data?.landing.counts.merged || 0;
+  const totalTasks = data?.landing.counts.total || 0;
+  const openTasks = Math.max(totalTasks - landed, 0);
+  const landingStories = storyTotalsFromLanding(data?.landing.items || []);
+  const storiesPassed = stats?.stories_tested ? stats.stories_passed : landingStories.passed;
+  const storiesTested = stats?.stories_tested ? stats.stories_tested : landingStories.tested;
+  const storyValue = storiesTested ? `${storiesPassed}/${storiesTested}` : "-";
+  return (
+    <section className="panel project-overview" aria-labelledby="projectOverviewHeading">
+      <div className="panel-heading">
+        <div>
+          <h2 id="projectOverviewHeading">Project Overview</h2>
+          <p className="panel-subtitle">Work, review readiness, and provider usage for this project.</p>
+        </div>
+      </div>
+      <div className="project-stat-grid">
+        <ProjectStatCard
+          label="Current work"
+          value={`${openTasks} open`}
+          detail={`${health.ready} ready · ${health.needsAttention} attention · ${landed} landed`}
+          tone={health.needsAttention ? "warning" : health.ready ? "success" : health.active ? "info" : "neutral"}
+        />
+        <ProjectStatCard
+          label="Run history"
+          value={`${stats?.history_count || 0} runs`}
+          detail={`${totalTasks} tracked tasks · ${stats?.success_count || 0} success · ${stats?.failed_count || 0} failed`}
+          tone={stats?.failed_count ? "warning" : "neutral"}
+        />
+        <ProjectStatCard
+          label="Total tokens"
+          value={stats?.token_display || "-"}
+          detail={tokenBreakdownLine(stats?.token_usage)}
+          tone={stats?.total_tokens ? "info" : "neutral"}
+        />
+        <ProjectStatCard
+          label="Runtime"
+          value={stats?.duration_display || "-"}
+          detail="Completed plus active run time"
+          tone={stats?.total_duration_s ? "info" : "neutral"}
+        />
+        <ProjectStatCard
+          label="Stories"
+          value={storyValue}
+          detail={storiesTested ? "Certified product stories" : "No story evidence yet"}
+          tone={storiesTested ? (storiesPassed === storiesTested ? "success" : "warning") : "neutral"}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ProjectStatCard({label, value, detail, tone}: {
+  label: string;
+  value: string;
+  detail: string;
+  tone: "neutral" | "info" | "success" | "warning" | "danger";
+}) {
+  return (
+    <div className={`project-stat-card tone-${tone}`}>
+      <span>{label}</span>
+      <strong title={value}>{value}</strong>
+      <p title={detail}>{detail}</p>
+    </div>
+  );
+}
+
 function RuntimeWarnings({data}: {data: StateResponse}) {
   const top = data.runtime.issues.slice(0, 3);
   const bannerTone = top.some((issue) => issue.severity === "error") ? "error" : "warning";
@@ -1050,6 +1176,83 @@ function RuntimeWarnings({data}: {data: StateResponse}) {
       </span>
       <span className="runtime-backlog">{suffix || data.runtime.status}</span>
     </div>
+  );
+}
+
+function SystemHealth({data}: {data: StateResponse | null}) {
+  const runtime = data?.runtime;
+  const watcher = data?.watcher.health;
+  const backlog = runtime?.command_backlog;
+  const queueFile = runtime?.files.queue;
+  const stateFile = runtime?.files.state;
+  const dirty = data?.landing.dirty_files || [];
+  return (
+    <section className="panel system-health" aria-labelledby="systemHealthHeading">
+      <div className="panel-heading">
+        <div>
+          <h2 id="systemHealthHeading">System Health</h2>
+          <p className="panel-subtitle">Use this when the queue, watcher, or repository needs recovery.</p>
+        </div>
+        <span className={`pill health-${runtime?.status || "loading"}`}>{runtime?.status || "loading"}</span>
+      </div>
+      <div className="system-health-grid">
+        <HealthCard
+          title="Watcher"
+          status={watcher?.state || "unknown"}
+          detail={watcher ? `${watcher.blocking_pid ? `pid ${watcher.blocking_pid}` : "no pid"} · ${watcher.heartbeat_age_s === null || watcher.heartbeat_age_s === undefined ? "no heartbeat" : `${formatDuration(watcher.heartbeat_age_s)} heartbeat`}` : "No watcher data yet"}
+          next={watcher?.next_action || "Refresh state"}
+          tone={watcher?.state === "running" ? "success" : watcher?.state === "stale" ? "warning" : "neutral"}
+        />
+        <HealthCard
+          title="Queue files"
+          status={`${backlog?.pending || 0} pending`}
+          detail={`${backlog?.processing || 0} processing · ${backlog?.malformed || 0} malformed`}
+          next={queueFile?.error || stateFile?.error || "Queue and state files are readable"}
+          tone={backlog?.malformed ? "danger" : backlog?.pending || backlog?.processing ? "info" : "neutral"}
+        />
+        <HealthCard
+          title="Repository"
+          status={data?.landing.merge_blocked ? "blocked" : data?.project.dirty ? "dirty" : "clean"}
+          detail={dirty.length ? dirty.slice(0, 3).join(", ") : `branch ${data?.project.branch || "-"}`}
+          next={data?.landing.merge_blocked ? "Clean or commit local changes before landing" : "No landing blocker detected"}
+          tone={data?.landing.merge_blocked ? "danger" : data?.project.dirty ? "warning" : "success"}
+        />
+        <HealthCard
+          title="Runtime owner"
+          status={runtime?.supervisor.mode || "unknown"}
+          detail={runtime?.supervisor.stop_target_pid ? `stop target pid ${runtime.supervisor.stop_target_pid}` : runtime?.supervisor.start_blocked_reason || "No active stop target"}
+          next={runtime?.supervisor.can_start ? "Start watcher is safe" : runtime?.supervisor.can_stop ? "Stop watcher is available" : runtime?.supervisor.start_blocked_reason || "No runtime action available"}
+          tone={runtime?.issues.some((issue) => issue.severity === "error") ? "danger" : runtime?.issues.length ? "warning" : "neutral"}
+        />
+      </div>
+      <div className="system-issues" role="list" aria-label="Runtime issues">
+        {runtime?.issues.length ? runtime.issues.map((issue, index) => (
+          <div className={`system-issue severity-${issue.severity}`} role="listitem" key={`${issue.label}-${index}`}>
+            <span>{issue.severity}</span>
+            <strong>{issue.label}</strong>
+            <p>{issue.detail}</p>
+            <em>{issue.next_action}</em>
+          </div>
+        )) : <div className="diagnostic-empty">No runtime issues.</div>}
+      </div>
+    </section>
+  );
+}
+
+function HealthCard({title, status, detail, next, tone}: {
+  title: string;
+  status: string;
+  detail: string;
+  next: string;
+  tone: "neutral" | "info" | "success" | "warning" | "danger";
+}) {
+  return (
+    <article className={`health-card tone-${tone}`}>
+      <span>{title}</span>
+      <strong>{status}</strong>
+      <p>{detail}</p>
+      <em>{next}</em>
+    </article>
   );
 }
 
@@ -1123,35 +1326,58 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
   );
 }
 
-function MissionFocus({data, lastError, resultBanner, onNewJob, onStartWatcher, onLandReady, onOpenDiagnostics, onDismissError, onDismissResult}: {
+function MissionFocus({data, lastError, resultBanner, onNewJob, onStartWatcher, onLandReady, onRecoverLanding, onAbortMerge, onResolveRelease, onOpenDiagnostics, onDismissError, onDismissResult}: {
   data: StateResponse | null;
   lastError: string | null;
   resultBanner: ResultBannerState | null;
   onNewJob: () => void;
   onStartWatcher: () => void;
   onLandReady: () => void;
+  onRecoverLanding: () => void;
+  onAbortMerge: () => void;
+  onResolveRelease: () => void;
   onOpenDiagnostics: () => void;
   onDismissError: () => void;
   onDismissResult: () => void;
 }) {
   const focus = missionFocus(data);
-  const progressItems = activeProgressItems(data);
+  const activeSummary = activeRunSummary(data);
   return (
     <section className={`mission-focus focus-${focus.tone}`} data-testid="mission-focus" aria-label="Mission focus">
       <div className="focus-copy">
         <span>{focus.kicker}</span>
         <h2>{focus.title}</h2>
         <p>{focus.body}</p>
+        {activeSummary ? (
+          <div className="focus-live-summary" aria-label="Active worker summary">
+            <span className="task-live-dot" aria-hidden="true" />
+            <strong>{activeSummary.label}</strong>
+            <span>{activeSummary.detail}</span>
+          </div>
+        ) : null}
       </div>
       <div className="focus-actions">
         {focus.primary === "land" && (
-          <button className="primary" type="button" disabled={!canMerge(data?.landing)} onClick={onLandReady}>Land all ready</button>
+          <>
+            <button className="primary" type="button" disabled={!canResolveRelease(data)} onClick={onResolveRelease}>Resolve release issues</button>
+            <button type="button" disabled={!canMerge(data?.landing)} onClick={onLandReady}>Land all ready</button>
+          </>
         )}
         {focus.primary === "start" && (
           <button className="primary" type="button" disabled={!canStartWatcher(data)} onClick={onStartWatcher}>Start watcher</button>
         )}
         {focus.primary === "diagnostics" && (
-          <button className="primary" type="button" onClick={onOpenDiagnostics}>Review cleanup</button>
+          <button className="primary" type="button" onClick={onOpenDiagnostics}>Open health</button>
+        )}
+        {focus.primary === "recover" && (
+          <>
+            <button className="primary" type="button" onClick={onResolveRelease}>Resolve release issues</button>
+            <button type="button" onClick={onRecoverLanding}>Recover landing</button>
+            <button type="button" onClick={onAbortMerge}>Abort merge</button>
+          </>
+        )}
+        {focus.primary === "resolve" && (
+          <button className="primary" type="button" disabled={!canResolveRelease(data)} onClick={onResolveRelease}>Resolve release issues</button>
         )}
         {focus.primary === "new" && (
           <button className="primary" type="button" onClick={onNewJob}>New job</button>
@@ -1163,17 +1389,6 @@ function MissionFocus({data, lastError, resultBanner, onNewJob, onStartWatcher, 
         <FocusMetric label="Needs action" value={String(focus.needsAction)} />
         <FocusMetric label="Ready" value={String(focus.ready)} />
       </div>
-      {progressItems.length ? (
-        <div className="focus-progress" aria-label="Live worker progress">
-          {progressItems.map((item) => (
-            <div key={item.run_id}>
-              <span>{item.queue_task_id || item.display_id}</span>
-              <strong>{item.elapsed_display}</strong>
-              <p>{item.progress}</p>
-            </div>
-          ))}
-        </div>
-      ) : null}
       {lastError && (
         <div className="status-banner error">
           <strong>Last error</strong>
@@ -1202,19 +1417,32 @@ function FocusMetric({label, value}: {label: string; value: string}) {
   );
 }
 
-function TaskBoard({data, filters, selectedRunId, onSelect}: {
+function TaskBoard({data, filters, selectedRunId, onSelect, onLandReady}: {
   data: StateResponse | null;
   filters: Filters;
   selectedRunId: string | null;
   onSelect: (runId: string) => void;
+  onLandReady: () => void;
 }) {
   const columns = taskBoardColumns(data, filters);
+  const readyCount = data?.landing.counts.ready || 0;
   return (
     <section className="panel task-board-panel" data-testid="task-board" aria-labelledby="taskBoardHeading">
       <div className="panel-heading">
         <div>
           <h2 id="taskBoardHeading">Task Board</h2>
           <p className="panel-subtitle">{taskBoardSubtitle(data, filters)}</p>
+        </div>
+        <div className="panel-actions">
+          <button
+            className="primary"
+            type="button"
+            disabled={!canMerge(data?.landing)}
+            title={mergeButtonTitle(data?.landing)}
+            onClick={onLandReady}
+          >
+            {readyCount === 0 ? "No tasks ready" : readyCount === 1 ? "Land 1 ready task" : `Land ${readyCount} ready tasks`}
+          </button>
         </div>
       </div>
       <div className="task-board">
@@ -1250,7 +1478,7 @@ function TaskCard({task, selected, onSelect}: {
 }) {
   const [expanded, setExpanded] = useState(false);
   const selectTask = () => task.runId && onSelect(task.runId);
-  const meta = [taskChangeLine(task), taskProofMeta(task)].filter(Boolean);
+  const meta = [taskChangeLine(task), taskProofMeta(task), taskConfigChip(task)].filter(Boolean);
   const liveEvent = liveEventLabel(task);
   const progress = progressLabel(task);
   return (
@@ -1296,7 +1524,8 @@ function TaskCard({task, selected, onSelect}: {
           <p title={task.summary}>{shortText(task.summary, 220)}</p>
           <dl>
             <dt>Branch</dt><dd title={task.branch || ""}>{task.branch || "no branch"}</dd>
-            <dt>Reason</dt><dd>{task.reason}</dd>
+            <dt>Config</dt><dd>{taskConfigSummary(task.buildConfig)}</dd>
+            <dt>Status note</dt><dd>{task.reason}</dd>
           </dl>
         </div>
       ) : null}
@@ -1304,44 +1533,43 @@ function TaskCard({task, selected, onSelect}: {
   );
 }
 
-function RecentActivity({events, history, selectedRunId, onSelect}: {
-  events: StateResponse["events"] | undefined;
-  history: HistoryItem[];
+function RecentRunsPanel({items, totalRows, selectedRunId, onSelect}: {
+  items: HistoryItem[];
+  totalRows: number;
   selectedRunId: string | null;
   onSelect: (runId: string) => void;
 }) {
-  const recentEvents = events?.items.slice(0, 4) || [];
-  const recentHistory = history.slice(0, 4);
   return (
-    <section className="panel activity-panel" aria-labelledby="activityHeading">
+    <section className="panel recent-runs-panel" aria-labelledby="recentRunsHeading">
       <div className="panel-heading">
         <div>
-          <h2 id="activityHeading">Recent Activity</h2>
-          <p className="panel-subtitle">Latest queue, watcher, land, and run outcomes.</p>
+          <h2 id="recentRunsHeading">Recent Runs</h2>
+          <p className="panel-subtitle">Outcome, duration, and provider usage.</p>
         </div>
-        <span className="pill">{(events?.total_count || 0) + history.length}</span>
+        <span className="pill">{totalRows}</span>
       </div>
-      <div className="activity-list">
-        {recentEvents.map((event) => (
-          <div className={`activity-item event-${event.severity}`} key={event.event_id || `${event.created_at}-${event.message}`}>
-            <span>{event.severity}</span>
-            <strong title={event.message}>{event.message}</strong>
-            <time dateTime={event.created_at}>{formatEventTime(event.created_at)}</time>
-          </div>
-        ))}
-        {recentHistory.map((item) => (
+      <div className="recent-run-list" role="list">
+        {items.length ? items.map((item) => (
           <button
-            className={`activity-item history-activity ${item.run_id === selectedRunId ? "selected" : ""}`}
+            className={`recent-run-row ${item.run_id === selectedRunId ? "selected" : ""}`}
             type="button"
             key={item.run_id}
+            role="listitem"
             onClick={() => onSelect(item.run_id)}
           >
-            <span>{item.outcome_display || item.status}</span>
-            <strong title={item.summary}>{item.queue_task_id || item.run_id}</strong>
-            <time>{item.duration_display || "-"}</time>
+            <span className={`recent-run-outcome status-${(item.terminal_outcome || item.status || "").toLowerCase()}`}>
+              {item.outcome_display || item.status}
+            </span>
+            <span className="recent-run-main">
+              <strong title={item.queue_task_id || item.run_id}>{item.queue_task_id || item.run_id}</strong>
+              <em title={item.summary || ""}>{item.summary || "-"}</em>
+            </span>
+            <span className="recent-run-usage">
+              <strong>{item.duration_display || "-"}</strong>
+              <em>{usageLine(item)}</em>
+            </span>
           </button>
-        ))}
-        {!recentEvents.length && !recentHistory.length && <div className="timeline-empty">No activity yet.</div>}
+        )) : <div className="timeline-empty">No matching runs yet.</div>}
       </div>
     </section>
   );
@@ -1447,9 +1675,10 @@ function History({items, totalRows, selectedRunId, onSelect}: {items: HistoryIte
   );
 }
 
-function EventTimeline({events}: {events: StateResponse["events"] | undefined}) {
+function EventTimeline({events, compact = false}: {events: StateResponse["events"] | undefined; compact?: boolean}) {
   const items = events?.items || [];
   const malformed = events?.malformed_count || 0;
+  const visibleItems = compact ? items.slice(0, 6) : items;
   return (
     <section className="panel timeline-panel" aria-labelledby="timelineHeading">
       <div className="panel-heading">
@@ -1463,7 +1692,7 @@ function EventTimeline({events}: {events: StateResponse["events"] | undefined}) 
         {malformed > 0 && (
           <div className="timeline-warning">Ignored {malformed} malformed event row{malformed === 1 ? "" : "s"}.</div>
         )}
-        {items.length ? items.map((event) => (
+        {visibleItems.length ? visibleItems.map((event) => (
           <div className={`timeline-item event-${event.severity}`} key={event.event_id || `${event.created_at}-${event.message}`} role="listitem">
             <span className="timeline-severity">{event.severity}</span>
             <div>
@@ -1480,10 +1709,11 @@ function EventTimeline({events}: {events: StateResponse["events"] | undefined}) 
   );
 }
 
-function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact}: {
+function RunDetailPanel({detail, landing, onRunAction, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact}: {
   detail: RunDetail | null;
   landing: LandingState | undefined;
   onRunAction: (action: string, label?: string) => void;
+  onShowTryProduct: () => void;
   onShowProof: () => void;
   onShowLogs: () => void;
   onShowDiff: () => void;
@@ -1500,6 +1730,7 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
         <>
           <div className="detail-scroll">
             <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} onLoadArtifact={onLoadArtifact} onShowArtifacts={onShowArtifacts} />
+            <PhaseTimeline phases={detail.phase_timeline || []} />
             <details className="detail-body detail-metadata">
               <summary>
                 <span>Run metadata</span>
@@ -1513,6 +1744,12 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
                   <dt>Branch</dt><dd>{detail.branch || "-"}</dd>
                   <dt>Worktree</dt><dd>{detail.worktree || detail.cwd || "-"}</dd>
                   <dt>Provider</dt><dd>{providerLine(detail)}</dd>
+                  <dt>Certification</dt><dd>{certificationLine(detail.build_config)}</dd>
+                  <dt>Timeouts</dt><dd>{timeoutLine(detail.build_config)}</dd>
+                  <dt>Limits</dt><dd>{limitLine(detail.build_config)}</dd>
+                  <dt>Run flags</dt><dd>{flagsLine(detail.build_config)}</dd>
+                  <dt>Agents</dt><dd>{agentsLine(detail.build_config)}</dd>
+                  <dt>Project</dt><dd>{projectConfigLine(detail.build_config)}</dd>
                   <dt>Artifacts</dt><dd>{detail.artifacts.length}</dd>
                   {detail.overlay && <><dt>Overlay</dt><dd>{detail.overlay.reason}</dd></>}
                   {detail.summary_lines.map((line, index) => <DetailLine key={`${line}-${index}`} line={line} />)}
@@ -1522,7 +1759,8 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
             <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
           </div>
           <div className="detail-inspector-actions" aria-label="Evidence shortcuts">
-            <button className="primary" type="button" data-testid="open-proof-button" onClick={onShowProof}>Open proof</button>
+            <button className="primary" type="button" data-testid="open-try-product-button" onClick={onShowTryProduct}>Try product</button>
+            <button type="button" data-testid="open-proof-button" onClick={onShowProof}>Proof</button>
             <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} onClick={onShowDiff}>Diff</button>
             <button type="button" data-testid="open-logs-button" onClick={onShowLogs}>Logs</button>
             <button type="button" data-testid="open-artifacts-button" onClick={onShowArtifacts}>Artifacts</button>
@@ -1535,7 +1773,47 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
   );
 }
 
-function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, diffContent, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onBackToArtifacts, onClose}: {
+function PhaseTimeline({phases}: {phases: RunDetail["phase_timeline"]}) {
+  if (!phases.length) return null;
+  return (
+    <section className="detail-body phase-timeline" aria-label="Execution phases">
+      <div className="phase-timeline-heading">
+        <h3>Execution</h3>
+        <span>{phases.length} phase{phases.length === 1 ? "" : "s"}</span>
+      </div>
+      <div className="phase-timeline-list">
+        {phases.map((phase) => (
+          <article key={phase.phase} className={`phase-item phase-${phase.status}`}>
+            <span className="phase-status">{phase.status}</span>
+            <strong>{phase.label}</strong>
+            <p>{phaseProviderLine(phase)}</p>
+            <em>{phaseUsageLine(phase)}</em>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function phaseProviderLine(phase: RunDetail["phase_timeline"][number]): string {
+  return [
+    phase.provider || "provider default",
+    phase.model || "model default",
+    phase.reasoning_effort || "reasoning default",
+  ].join(" / ");
+}
+
+function phaseUsageLine(phase: RunDetail["phase_timeline"][number]): string {
+  const parts = [
+    typeof phase.duration_s === "number" ? formatDuration(phase.duration_s) : "",
+    phase.rounds ? `${phase.rounds} round${phase.rounds === 1 ? "" : "s"}` : "",
+    tokenTotal(phase.token_usage) ? `${formatCompactNumber(tokenTotal(phase.token_usage))} tokens` : "",
+    phase.cost_usd && phase.cost_usd > 0 ? `$${phase.cost_usd.toFixed(2)}` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "No usage recorded";
+}
+
+function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, diffContent, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onBackToArtifacts, onClose}: {
   detail: RunDetail;
   mode: InspectorMode;
   logText: string;
@@ -1544,6 +1822,7 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
   proofArtifactIndex: number | null;
   proofContent: ArtifactContentResponse | null;
   diffContent: DiffResponse | null;
+  onShowTryProduct: () => void;
   onShowProof: () => void;
   onShowLogs: () => void;
   onShowDiff: () => void;
@@ -1570,6 +1849,7 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
           <p>{detailStatusLabel(detail)} evidence packet</p>
         </div>
         <div className="detail-tabs" role="tablist" aria-label="Evidence view">
+          <button className={`tab ${mode === "try" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "try"} onClick={onShowTryProduct}>Try Product</button>
           <button className={`tab ${mode === "proof" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "proof"} onClick={onShowProof}>Proof</button>
           <button className={`tab ${mode === "diff" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "diff"} disabled={!canShowDiff(detail)} onClick={onShowDiff}>Diff</button>
           <button className={`tab ${mode === "logs" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "logs"} onClick={onShowLogs}>Logs</button>
@@ -1578,7 +1858,9 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
         <button type="button" data-testid="close-inspector-button" onClick={onClose}>Close inspector</button>
       </div>
       <div className="run-inspector-body">
-        {mode === "proof" ? (
+        {mode === "try" ? (
+          <ProductHandoffPane detail={detail} />
+        ) : mode === "proof" ? (
           <ProofPane detail={detail} proofArtifactIndex={proofArtifactIndex} proofContent={proofContent} onShowDiff={onShowDiff} onLoadProofArtifact={onLoadProofArtifact} />
         ) : mode === "diff" ? (
           <DiffPane diff={diffContent} />
@@ -1595,6 +1877,148 @@ function RunInspector({detail, mode, logText, selectedArtifactIndex, artifactCon
         )}
       </div>
     </section>
+  );
+}
+
+function ProductHandoffPane({detail}: {detail: RunDetail}) {
+  const handoff = detail.review_packet.product_handoff;
+  const hasLaunch = handoff.launch.length > 0;
+  const hasReset = handoff.reset.length > 0;
+  const hasSamples = handoff.sample_data.length > 0;
+  const hasUrls = handoff.urls.length > 0;
+  const hasTaskContext = Boolean(handoff.task_summary || handoff.task_flows.length || handoff.task_changed_files.length);
+  return (
+    <div className="product-handoff-pane" data-testid="product-handoff-pane">
+      <section className="product-handoff-hero" aria-labelledby="productHandoffHeading">
+        <div>
+          <span>{handoff.label}</span>
+          <h3 id="productHandoffHeading">Try product</h3>
+          <p>{handoff.summary || productKindHint(handoff.kind)}</p>
+        </div>
+        <dl>
+          <dt>Root</dt>
+          <dd title={handoff.root}>{shortPath(handoff.root)}</dd>
+          <dt>Source</dt>
+          <dd>{handoff.source_path ? `${handoff.source} · ${shortPath(handoff.source_path)}` : handoff.source}</dd>
+        </dl>
+      </section>
+
+      {hasTaskContext && (
+        <section className="product-handoff-section handoff-task-section" aria-labelledby="productTaskHeading">
+          <div className="handoff-section-heading">
+            <h3 id="productTaskHeading">This task</h3>
+            <span>{[handoff.task_status, handoff.task_branch].filter(Boolean).join(" · ") || "task-specific"}</span>
+          </div>
+          {handoff.task_summary ? <p className="handoff-task-summary">{handoff.task_summary}</p> : null}
+          {handoff.task_flows.length ? (
+            <div className="handoff-flow-list">
+              {handoff.task_flows.map((flow, index) => (
+                <article className="handoff-flow" key={`${flow.title}-${index}`}>
+                  <strong>{flow.title}</strong>
+                  {flow.steps.length ? (
+                    <ol>
+                      {flow.steps.map((step) => <li key={step}>{step}</li>)}
+                    </ol>
+                  ) : null}
+                </article>
+              ))}
+            </div>
+          ) : null}
+          {handoff.task_changed_files.length ? (
+            <details className="handoff-files">
+              <summary>Changed files <strong>{handoff.task_changed_files.length}</strong></summary>
+              <ul>
+                {handoff.task_changed_files.map((path) => <li key={path}>{path}</li>)}
+              </ul>
+            </details>
+          ) : null}
+        </section>
+      )}
+
+      <section className="product-handoff-section" aria-labelledby="productLaunchHeading">
+        <div className="handoff-section-heading">
+          <h3 id="productLaunchHeading">Launch</h3>
+          <span>{hasLaunch ? `${handoff.launch.length} command${handoff.launch.length === 1 ? "" : "s"}` : "not declared"}</span>
+        </div>
+        {hasLaunch ? (
+          <CommandList commands={handoff.launch} />
+        ) : (
+          <p>{productKindHint(handoff.kind)}</p>
+        )}
+        {hasUrls && (
+          <div className="handoff-links" aria-label="Product URLs">
+            {handoff.urls.map((url) => (
+              <a href={url} target="_blank" rel="noreferrer" key={url}>{url}</a>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="product-handoff-section" aria-labelledby="productFlowsHeading">
+        <div className="handoff-section-heading">
+          <h3 id="productFlowsHeading">General journeys</h3>
+          <span>{handoff.try_flows.length} flow{handoff.try_flows.length === 1 ? "" : "s"}</span>
+        </div>
+        <div className="handoff-flow-list">
+          {handoff.try_flows.map((flow, index) => (
+            <article className="handoff-flow" key={`${flow.title}-${index}`}>
+              <strong>{flow.title}</strong>
+              {flow.steps.length ? (
+                <ol>
+                  {flow.steps.map((step) => <li key={step}>{step}</li>)}
+                </ol>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      </section>
+
+      {hasSamples && (
+        <section className="product-handoff-section" aria-labelledby="productSampleHeading">
+          <div className="handoff-section-heading">
+            <h3 id="productSampleHeading">Sample data</h3>
+            <span>{handoff.sample_data.length} item{handoff.sample_data.length === 1 ? "" : "s"}</span>
+          </div>
+          <div className="handoff-samples">
+            {handoff.sample_data.map((sample, index) => (
+              <div key={`${sample.label}-${sample.value}-${index}`}>
+                <span>{sample.label}</span>
+                <strong>{sample.value}</strong>
+                {sample.detail ? <p>{sample.detail}</p> : null}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {(hasReset || handoff.notes.length > 0) && (
+        <section className="product-handoff-section" aria-labelledby="productOpsHeading">
+          <div className="handoff-section-heading">
+            <h3 id="productOpsHeading">Reset and notes</h3>
+            <span>{hasReset ? `${handoff.reset.length} reset command${handoff.reset.length === 1 ? "" : "s"}` : "notes"}</span>
+          </div>
+          {hasReset ? <CommandList commands={handoff.reset} /> : null}
+          {handoff.notes.length ? (
+            <ul className="handoff-notes">
+              {handoff.notes.map((note) => <li key={note}>{note}</li>)}
+            </ul>
+          ) : null}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function CommandList({commands}: {commands: Array<{label: string; command: string}>}) {
+  return (
+    <div className="handoff-command-list">
+      {commands.map((command, index) => (
+        <div className="handoff-command" key={`${command.command}-${index}`}>
+          <span>{command.label}</span>
+          <code>{command.command}</code>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -1804,8 +2228,9 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
   const action = packet.next_action;
   const blockers = packet.readiness.blockers || [];
   const inProgress = packet.readiness.state === "in_progress";
-  const artifactCount = packet.evidence.length;
-  const readableEvidence = packet.evidence.filter(isReadableArtifact);
+  const reviewEvidence = packet.evidence.filter(isReviewEvidenceArtifact);
+  const artifactCount = reviewEvidence.length;
+  const readableEvidence = reviewEvidence.filter(isReadableArtifact);
   const evidence = readableEvidence.slice(0, 4);
   const showActionButton = Boolean(action.action_key);
   const hasFailure = Boolean(packet.failure);
@@ -1819,8 +2244,8 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
     ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}`
     : `${packet.changes.files.length} file${packet.changes.files.length === 1 ? "" : "s"}`;
   const evidenceSummary = readableEvidence.length
-    ? `${readableEvidence.length}/${packet.evidence.length}`
-    : `${packet.evidence.length}`;
+    ? `${readableEvidence.length}/${reviewEvidence.length}`
+    : `${reviewEvidence.length}`;
   return (
     <section className={`review-packet review-${packet.readiness.tone || "info"}`} aria-label="Review packet">
       <div className="review-head">
@@ -2034,16 +2459,31 @@ function JobDialog({project, onClose, onQueued, onError}: {
   const [intent, setIntent] = useState("");
   const [taskId, setTaskId] = useState("");
   const [after, setAfter] = useState("");
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>("split");
+  const [planning, setPlanning] = useState<PlanningMode>("direct");
+  const [specFilePath, setSpecFilePath] = useState("");
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
+  const [buildProvider, setBuildProvider] = useState("");
+  const [buildModel, setBuildModel] = useState("");
+  const [buildEffort, setBuildEffort] = useState("");
+  const [certifierProvider, setCertifierProvider] = useState("");
+  const [certifierModel, setCertifierModel] = useState("");
+  const [certifierEffort, setCertifierEffort] = useState("");
+  const [fixProvider, setFixProvider] = useState("");
+  const [fixModel, setFixModel] = useState("");
+  const [fixEffort, setFixEffort] = useState("");
   const [certification, setCertification] = useState<CertificationPolicy>("");
   const [targetConfirmed, setTargetConfirmed] = useState(false);
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const dialogRef = useDialogFocus<HTMLFormElement>(onClose, submitting);
   const targetNeedsConfirmation = Boolean(project?.dirty);
-  const submitDisabled = submitting || (command === "build" && !intent.trim()) || (targetNeedsConfirmation && !targetConfirmed);
+  const submitDisabled = submitting
+    || (command === "build" && !intent.trim())
+    || (command === "build" && planning === "spec-file" && !specFilePath.trim())
+    || (targetNeedsConfirmation && !targetConfirmed);
 
   useEffect(() => {
     setTargetConfirmed(false);
@@ -2052,6 +2492,10 @@ function JobDialog({project, onClose, onQueued, onError}: {
   useEffect(() => {
     if (!certificationPolicyAllowed(command, subcommand, certification)) {
       setCertification("");
+    }
+    if (command !== "build") {
+      setPlanning("direct");
+      setSpecFilePath("");
     }
   }, [certification, command, subcommand]);
 
@@ -2074,10 +2518,22 @@ function JobDialog({project, onClose, onQueued, onError}: {
         intent: intent.trim(),
         taskId: taskId.trim(),
         after,
+        executionMode,
         provider,
         model,
         effort,
+        buildProvider,
+        buildModel,
+        buildEffort,
+        certifierProvider,
+        certifierModel,
+        certifierEffort,
+        fixProvider,
+        fixModel,
+        fixEffort,
         certification,
+        planning,
+        specFilePath: specFilePath.trim(),
       });
       const result = await api<QueueResult>(`/api/queue/${command}`, {method: "POST", body: JSON.stringify(payload)});
       await onQueued(result.message);
@@ -2147,6 +2603,37 @@ function JobDialog({project, onClose, onQueued, onError}: {
         </label>
         <details className="job-advanced">
           <summary>Advanced options</summary>
+          {command !== "certify" && (
+            <label>Execution mode
+              <select data-testid="job-execution-mode-select" value={executionMode} onChange={(event) => setExecutionMode(event.target.value as ExecutionMode)}>
+                <option value="split">Reliable split mode</option>
+                <option value="agentic">Agentic single session</option>
+              </select>
+              <span className="field-hint">{executionModeHelp(executionMode, command)}</span>
+            </label>
+          )}
+          {command === "build" && (
+            <label>Planning
+              <select data-testid="job-planning-select" value={planning} onChange={(event) => setPlanning(event.target.value as PlanningMode)}>
+                <option value="direct">Direct build</option>
+                <option value="spec-review">Generate spec for review</option>
+                <option value="spec-auto">Generate spec and approve automatically</option>
+                <option value="spec-file">Use spec file</option>
+              </select>
+              <span className="field-hint">{planningHelp(planning)}</span>
+            </label>
+          )}
+          {command === "build" && planning === "spec-file" && (
+            <label>Spec file path
+              <input
+                data-testid="job-spec-file-input"
+                value={specFilePath}
+                type="text"
+                placeholder="/path/to/spec.md"
+                onChange={(event) => setSpecFilePath(event.target.value)}
+              />
+            </label>
+          )}
           <div className="field-grid">
             <label>Task id
               <input value={taskId} type="text" placeholder="auto-generated" onChange={(event) => setTaskId(event.target.value)} />
@@ -2176,6 +2663,52 @@ function JobDialog({project, onClose, onQueued, onError}: {
           <label>Model
             <input value={model} type="text" placeholder={modelDefaultPlaceholder(project)} onChange={(event) => setModel(event.target.value)} />
           </label>
+          <details className="job-agent-routing">
+            <summary>{executionMode === "agentic" && command !== "certify" ? "Agent session" : "Phase routing"}</summary>
+            {command !== "certify" && executionMode === "agentic" && (
+              <div className="static-field">
+                <span>Routing model</span>
+                <strong>Single session</strong>
+                <p className="field-hint">Use Provider, Model, and Reasoning above for the main agent. Split-only phase overrides are hidden because agentic mode does not run separate build/certify/fix calls.</p>
+              </div>
+            )}
+            {command === "build" && executionMode === "split" && (
+              <PhaseRoutingFields
+                label="Build"
+                testKey="build"
+                provider={buildProvider}
+                model={buildModel}
+                effort={buildEffort}
+                onProvider={setBuildProvider}
+                onModel={setBuildModel}
+                onEffort={setBuildEffort}
+              />
+            )}
+            {(command === "certify" || executionMode === "split") && (
+              <PhaseRoutingFields
+                label={command === "improve" ? "Certifier / evaluator" : "Certifier"}
+                testKey="certifier"
+                provider={certifierProvider}
+                model={certifierModel}
+                effort={certifierEffort}
+                onProvider={setCertifierProvider}
+                onModel={setCertifierModel}
+                onEffort={setCertifierEffort}
+              />
+            )}
+            {command !== "certify" && executionMode === "split" && (
+              <PhaseRoutingFields
+                label={command === "improve" ? "Improver / fixer" : "Fix"}
+                testKey="fix"
+                provider={fixProvider}
+                model={fixModel}
+                effort={fixEffort}
+                onProvider={setFixProvider}
+                onModel={setFixModel}
+                onEffort={setFixEffort}
+              />
+            )}
+          </details>
           {certificationOptions(command, subcommand, project).length > 0 ? (
             <label>Certification
               <select
@@ -2203,6 +2736,60 @@ function JobDialog({project, onClose, onQueued, onError}: {
       </form>
     </div>
   );
+}
+
+function PhaseRoutingFields({label, testKey, provider, model, effort, onProvider, onModel, onEffort}: {
+  label: string;
+  testKey: string;
+  provider: string;
+  model: string;
+  effort: string;
+  onProvider: (value: string) => void;
+  onModel: (value: string) => void;
+  onEffort: (value: string) => void;
+}) {
+  return (
+    <section className="phase-routing-group" aria-label={`${label} routing`}>
+      <h3>{label}</h3>
+      <div className="field-grid">
+        <label>Provider
+          <select data-testid={`job-${testKey}-provider-select`} value={provider} onChange={(event) => onProvider(event.target.value)}>
+            <option value="">Inherit</option>
+            <option value="codex">Codex</option>
+            <option value="claude">Claude</option>
+          </select>
+        </label>
+        <label>Reasoning
+          <select data-testid={`job-${testKey}-effort-select`} value={effort} onChange={(event) => onEffort(event.target.value)}>
+            <option value="">Inherit</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="max">Max</option>
+          </select>
+        </label>
+      </div>
+      <label>Model
+        <input value={model} type="text" placeholder="inherit" onChange={(event) => onModel(event.target.value)} />
+      </label>
+    </section>
+  );
+}
+
+function executionModeHelp(mode: ExecutionMode, command: JobCommand): string {
+  if (mode !== "split") {
+    return "A single agent session owns the whole loop; useful for exploration or fallback.";
+  }
+  return command === "improve"
+    ? "Otto owns evaluation, improvement/fix, and recovery as separate phases."
+    : "Otto owns build, certify, fix, and recovery as separate phases.";
+}
+
+function planningHelp(planning: PlanningMode): string {
+  if (planning === "spec-review") return "Otto generates a spec, pauses, and waits for approval in Mission Control.";
+  if (planning === "spec-auto") return "Otto generates a spec and uses it immediately without a human gate.";
+  if (planning === "spec-file") return "Use an existing approved spec file; the CLI validates it before building.";
+  return "Start implementation directly from the intent.";
 }
 
 function certificationOptions(
@@ -2326,7 +2913,7 @@ function missionFocus(data: StateResponse | null): {
   title: string;
   body: string;
   tone: "neutral" | "info" | "success" | "warning" | "danger";
-  primary: "new" | "start" | "land" | "diagnostics";
+  primary: "new" | "start" | "land" | "diagnostics" | "recover" | "resolve";
   working: number;
   needsAction: number;
   ready: number;
@@ -2351,6 +2938,18 @@ function missionFocus(data: StateResponse | null): {
   const queued = data.watcher.counts.queued || 0;
   const commandBacklog = Number(data.runtime.command_backlog.pending || 0) + Number(data.runtime.command_backlog.processing || 0);
   const target = data.landing.target || "main";
+  if (mergeRecoveryNeeded(data.landing)) {
+    return {
+      kicker: "Landing",
+      title: "Landing needs recovery",
+      body: "A previous landing left git mid-merge. Recover will clean up that state and relaunch conflict-resolving landing for the remaining ready work.",
+      tone: "danger",
+      primary: "recover",
+      working,
+      needsAction,
+      ready,
+    };
+  }
   if (commandBacklog && data.watcher.health.state !== "running") {
     return {
       kicker: "Commands",
@@ -2377,10 +2976,22 @@ function missionFocus(data: StateResponse | null): {
     };
   }
   if (needsAction) {
+    if (supersededFailedTaskIds(data.landing).length) {
+      return {
+        kicker: "Release",
+        title: `${needsAction} stale task${needsAction === 1 ? "" : "s"} can be cleaned`,
+        body: "A failed attempt is superseded by landed work. Otto can clean the stale card and leave the board focused on current release state.",
+        tone: "warning",
+        primary: "resolve",
+        working,
+        needsAction,
+        ready,
+      };
+    }
     return {
       kicker: "Attention",
       title: `${needsAction} task${needsAction === 1 ? "" : "s"} need action`,
-      body: "Open blocked work to inspect the failure, stale run, missing branch, or recovery action.",
+      body: "Open blocked work or the health view to inspect the failure, stale run, missing branch, or recovery action.",
       tone: "warning",
       primary: "diagnostics",
       working,
@@ -2528,11 +3139,17 @@ function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllo
     proof: proofLine(item),
     reason: boardReasonForLanding(item, mergeAllowed, live),
     active,
-    elapsedDisplay: live?.elapsed_display || null,
+    elapsedDisplay: live?.elapsed_display || landingDurationDisplay(item),
     lastEvent: live?.last_event || null,
     progress: live?.progress || null,
+    buildConfig: live?.build_config || item.build_config || null,
     source: "landing",
   };
+}
+
+function landingDurationDisplay(item: LandingItem): string | null {
+  if (!["done", "failed", "cancelled", "interrupted", "removed"].includes(item.queue_status)) return null;
+  return typeof item.duration_s === "number" ? formatDuration(item.duration_s) : null;
 }
 
 function boardTaskFromLive(item: LiveRunItem): BoardTask {
@@ -2552,6 +3169,7 @@ function boardTaskFromLive(item: LiveRunItem): BoardTask {
     elapsedDisplay: item.elapsed_display || null,
     lastEvent: item.last_event || null,
     progress: item.progress || null,
+    buildConfig: item.build_config || null,
     source: "live",
   };
 }
@@ -2599,6 +3217,29 @@ function taskProofMeta(task: BoardTask): string {
   return proof;
 }
 
+function taskConfigChip(task: BoardTask): string {
+  const config = task.buildConfig;
+  if (!config) return "";
+  const primaryAgent = primaryAgentConfig(config);
+  const provider = primaryAgent?.provider || config.provider || "provider default";
+  const mode = config.split_mode ? "split" : "agentic";
+  const planning = config.planning === "spec_review" ? "spec review" : config.planning === "spec_auto" ? "spec" : config.planning === "spec_file" ? "spec file" : "";
+  const cert = config.skip_product_qa ? "no cert" : (config.certification || `${config.certifier_mode || "fast"} certification`);
+  const timeout = config.queue?.task_timeout_s ? formatDuration(config.queue.task_timeout_s) : "";
+  return [mode, provider, planning, cert, timeout].filter(Boolean).join(" · ");
+}
+
+function taskConfigSummary(config: RunBuildConfig | null): string {
+  if (!config) return "No build config recorded.";
+  return [
+    config.split_mode ? "split mode" : "agentic mode",
+    providerConfigLine(config),
+    planningLine(config),
+    certificationLine(config),
+    timeoutLine(config),
+  ].filter(Boolean).join(" · ");
+}
+
 function isActiveQueueStatus(status: string): boolean {
   return ["initializing", "starting", "running", "terminating"].includes(status);
 }
@@ -2618,11 +3259,18 @@ function progressLabel(task: BoardTask): string | null {
   return shortText(progress, 110);
 }
 
-function activeProgressItems(data: StateResponse | null): LiveRunItem[] {
-  if (!data) return [];
-  return data.live.items
-    .filter((item) => item.active && item.progress)
-    .slice(0, 3);
+function activeRunSummary(data: StateResponse | null): {label: string; detail: string} | null {
+  if (!data) return null;
+  const active = data.live.items.filter((item) => item.active);
+  if (!active.length) return null;
+  if (active.length === 1) {
+    const item = active[0];
+    if (!item) return null;
+    const label = shortText(item.queue_task_id || item.display_id || item.run_id, 56);
+    const status = titleCase(item.display_status || item.status || "running");
+    return {label, detail: [status, item.elapsed_display].filter(Boolean).join(" · ")};
+  }
+  return {label: `${active.length} active runs`, detail: "Detailed progress is shown on each task card."};
 }
 
 function compareBoardTasks(left: BoardTask, right: BoardTask): number {
@@ -2706,7 +3354,65 @@ function commandBacklogLine(command: CommandBacklogItem): string {
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-  return `${Math.round(seconds / 3600)}h`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.round((seconds % 3600) / 60);
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+function tokenBreakdownLine(tokenUsage?: StateResponse["project_stats"]["token_usage"]): string {
+  if (!tokenUsage) return "No token usage recorded";
+  const input = Number(tokenUsage.input_tokens || 0);
+  const cacheRead = Number(tokenUsage.cache_read_input_tokens || tokenUsage.cached_input_tokens || 0);
+  const cacheWrite = Number(tokenUsage.cache_creation_input_tokens || 0);
+  const output = Number(tokenUsage.output_tokens || 0);
+  const reasoning = Number(tokenUsage.reasoning_tokens || 0);
+  const parts = [
+    input ? `${formatCompactNumber(input)} input` : "",
+    cacheRead ? `${formatCompactNumber(cacheRead)} cache read` : "",
+    cacheWrite ? `${formatCompactNumber(cacheWrite)} cache write` : "",
+    output ? `${formatCompactNumber(output)} output` : "",
+    reasoning ? `${formatCompactNumber(reasoning)} reasoning` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "No token usage recorded";
+}
+
+function usageLine(item: HistoryItem): string {
+  const tokens = tokenTotal(item.token_usage);
+  const cost = item.cost_usd && item.cost_usd > 0 ? `$${item.cost_usd.toFixed(2)}` : "";
+  const tokenText = tokens ? `${formatCompactNumber(tokens)} tokens` : item.cost_display || "";
+  return [tokenText, cost && cost !== tokenText ? cost : ""].filter(Boolean).join(" · ") || "-";
+}
+
+function storyTotalsFromLanding(items: LandingItem[]): {passed: number; tested: number} {
+  return items.reduce(
+    (totals, item) => {
+      totals.passed += Number(item.stories_passed || 0);
+      totals.tested += Number(item.stories_tested || 0);
+      return totals;
+    },
+    {passed: 0, tested: 0},
+  );
+}
+
+function tokenTotal(tokenUsage?: StateResponse["project_stats"]["token_usage"]): number {
+  if (!tokenUsage) return 0;
+  const explicit = Number(tokenUsage.total_tokens || 0);
+  const cacheCreation = Number(tokenUsage.cache_creation_input_tokens || 0);
+  let cacheRead = Number(tokenUsage.cache_read_input_tokens || 0);
+  if (!cacheCreation && !cacheRead) cacheRead = Number(tokenUsage.cached_input_tokens || 0);
+  const derived = Number(tokenUsage.input_tokens || 0)
+    + cacheCreation
+    + cacheRead
+    + Number(tokenUsage.output_tokens || 0)
+    + Number(tokenUsage.reasoning_tokens || 0);
+  return Math.max(explicit, derived);
+}
+
+function formatCompactNumber(value: number): string {
+  const amount = Math.max(Number(value || 0), 0);
+  if (amount >= 1_000_000) return `${(amount / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (amount >= 1_000) return `${(amount / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
+  return String(Math.round(amount));
 }
 
 function workflowHealth(data: StateResponse | null): {
@@ -2875,11 +3581,27 @@ function canMerge(landing?: LandingState): boolean {
   return Boolean(landing && landing.counts.ready > 0 && !landing.merge_blocked);
 }
 
+function canResolveRelease(data?: StateResponse | null): boolean {
+  const landing = data?.landing;
+  if (!landing) return false;
+  if (mergeRecoveryNeeded(landing)) return true;
+  if (canMerge(landing)) return true;
+  return supersededFailedTaskIds(landing).length > 0;
+}
+
+function mergeRecoveryNeeded(landing?: LandingState): boolean {
+  if (!landing?.merge_blocked) return false;
+  const blockers = landing.merge_blockers.join(" ").toLowerCase();
+  return blockers.includes("merge in progress") || blockers.includes("unmerged path");
+}
+
 function mergeButtonTitle(landing?: LandingState): string {
+  if (mergeRecoveryNeeded(landing)) return "Recover or abort the interrupted landing before merging.";
   return landing?.merge_blocked ? "Commit, stash, or revert local project changes before merging." : "";
 }
 
 function mergeBlockedText(landing: LandingState): string {
+  if (mergeRecoveryNeeded(landing)) return "Landing is blocked by an interrupted git merge. Use Recover landing.";
   const suffix = landing.dirty_files.length ? `: ${landing.dirty_files.slice(0, 3).join(", ")}` : "";
   return `Merge blocked by local changes${suffix}`;
 }
@@ -2890,7 +3612,49 @@ function landingBulkConfirmation(landing?: LandingState): string {
   const taskList = ready.slice(0, 5).map((item) => item.task_id).join(", ");
   const suffix = ready.length > 5 ? `, +${ready.length - 5} more` : "";
   const changed = ready.reduce((sum, item) => sum + Number(item.changed_file_count || 0), 0);
-  return `Land ${ready.length} ready task${ready.length === 1 ? "" : "s"} into ${target}: ${taskList}${suffix}. This will land ${changed} changed file${changed === 1 ? "" : "s"} across the ready work.`;
+  const collisionCount = landing?.collisions.length || 0;
+  const collisionNote = collisionCount
+    ? ` ${collisionCount} ready-task collision${collisionCount === 1 ? "" : "s"} detected; Otto will fail safely if git cannot merge them.`
+    : "";
+  return `Land ${ready.length} ready task${ready.length === 1 ? "" : "s"} into ${target}: ${taskList}${suffix}. This uses transactional fast merge, so ${target} updates only if every branch merges cleanly. It will stage ${changed} changed file${changed === 1 ? "" : "s"} across the ready work.${collisionNote}`;
+}
+
+function releaseResolutionConfirmation(data: StateResponse | null): string {
+  const landing = data?.landing;
+  if (!landing) return "Otto will inspect release state and run the first safe recovery action it can prove.";
+  if (mergeRecoveryNeeded(landing)) {
+    return "Otto will abort the interrupted git merge, then relaunch conflict-resolving landing for the remaining ready work. This may invoke the configured merge provider.";
+  }
+  if (canMerge(landing)) {
+    return landingBulkConfirmation(landing);
+  }
+  const cleanup = supersededFailedTaskIds(landing);
+  if (cleanup.length) {
+    const preview = cleanup.slice(0, 4).join(", ");
+    const suffix = cleanup.length > 4 ? `, +${cleanup.length - 4} more` : "";
+    return `Otto will clean ${cleanup.length} failed card${cleanup.length === 1 ? "" : "s"} already superseded by landed work: ${preview}${suffix}. Branches and history stay preserved.`;
+  }
+  return "Otto will inspect release state and report if no safe automated action is available.";
+}
+
+function supersededFailedTaskIds(landing?: LandingState): string[] {
+  if (!landing) return [];
+  const landed = new Set(
+    landing.items
+      .filter((item) => item.landing_state === "merged")
+      .map((item) => summarySignature(item.summary))
+      .filter(Boolean),
+  );
+  if (!landed.size) return [];
+  return landing.items
+    .filter((item) => ["failed", "interrupted", "cancelled", "stale"].includes(item.queue_status))
+    .filter((item) => item.landing_state === "blocked")
+    .filter((item) => landed.has(summarySignature(item.summary)))
+    .map((item) => item.task_id);
+}
+
+function summarySignature(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ").slice(0, 500);
 }
 
 function isWaitingLandingItem(item: LandingItem): boolean {
@@ -2898,7 +3662,129 @@ function isWaitingLandingItem(item: LandingItem): boolean {
 }
 
 function providerLine(detail: RunDetail): string {
-  return [detail.provider, detail.model, detail.reasoning_effort].filter(Boolean).join(" / ") || "-";
+  return providerConfigLine(detail.build_config) || [detail.provider, detail.model, detail.reasoning_effort].filter(Boolean).join(" / ") || "-";
+}
+
+function providerConfigLine(config: RunBuildConfig | null | undefined): string {
+  if (!config) return "";
+  const buildAgent = primaryAgentConfig(config);
+  return [
+    buildAgent?.provider || config.provider,
+    buildAgent?.model || config.model || "provider default model",
+    buildAgent?.reasoning_effort || config.reasoning_effort || "provider default reasoning",
+  ]
+    .filter(Boolean)
+    .join(" / ");
+}
+
+function certificationLine(config: RunBuildConfig | null | undefined): string {
+  if (!config) return "-";
+  if (config.skip_product_qa) return "Skipped product certification";
+  return capitalize(config.certification || `${config.certifier_mode || "fast"} certification`);
+}
+
+function planningLine(config: RunBuildConfig | null | undefined): string {
+  if (!config) return "";
+  if (config.planning === "spec_review") return "Spec review gate";
+  if (config.planning === "spec_auto") return "Spec auto-approved";
+  if (config.planning === "spec_file") return config.spec_file_path ? `Spec file ${config.spec_file_path}` : "Spec file";
+  return "";
+}
+
+function timeoutLine(config: RunBuildConfig | null | undefined): string {
+  if (!config) return "-";
+  return [
+    config.queue?.task_timeout_s !== null && config.queue?.task_timeout_s !== undefined
+      ? `queue timeout ${formatDuration(config.queue.task_timeout_s)}`
+      : "queue timeout disabled",
+    config.run_budget_seconds ? `run budget ${formatDuration(config.run_budget_seconds)}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function limitLine(config: RunBuildConfig | null | undefined): string {
+  if (!config) return "-";
+  return [
+    config.max_certify_rounds ? `${config.max_certify_rounds} cert rounds` : "",
+    config.max_turns_per_call ? `${config.max_turns_per_call} max turns/call` : "",
+  ].filter(Boolean).join(" · ") || "-";
+}
+
+function flagsLine(config: RunBuildConfig | null | undefined): string {
+  if (!config) return "-";
+  const flags = [
+    config.split_mode ? "split mode" : "agentic mode",
+    config.strict_mode ? "strict" : "",
+    config.allow_dirty_repo ? "dirty repo allowed" : "",
+  ].filter(Boolean);
+  return flags.length ? flags.join(" · ") : "default safeguards";
+}
+
+function agentsLine(config: RunBuildConfig | null | undefined): string {
+  const agents = config?.agents;
+  if (!agents) return "-";
+  const rows = agentRowsForConfig(config).map(([name, label]) => {
+    const agent = agents[name];
+    const parts = [agent?.provider, agent?.model, agent?.reasoning_effort].filter(Boolean);
+    return `${label}: ${parts.join("/") || "default"}`;
+  });
+  return rows.join(" · ");
+}
+
+function primaryAgentConfig(config: RunBuildConfig): AgentBuildConfig | undefined {
+  if (config.command_family === "certify") return config.agents?.certifier;
+  if (config.command_family === "improve" && config.split_mode) return config.agents?.fix;
+  return config.agents?.build;
+}
+
+function agentRowsForConfig(config: RunBuildConfig): Array<["build" | "certifier" | "spec" | "fix", string]> {
+  if (config.command_family === "certify") return [["certifier", "certifier"]];
+  if (config.command_family === "improve") {
+    return config.split_mode
+      ? [["certifier", "evaluator"], ["fix", "improver"]]
+      : [["build", "improver"]];
+  }
+  return config.split_mode
+    ? [["build", "builder"], ["certifier", "certifier"], ["fix", "fixer"]]
+    : [["build", "builder"]];
+}
+
+function projectConfigLine(config: RunBuildConfig | null | undefined): string {
+  if (!config) return "-";
+  return [
+    config.default_branch ? `target ${config.default_branch}` : "",
+    config.test_command ? `tests: ${config.test_command}` : "",
+    config.queue?.concurrent ? `${config.queue.concurrent} parallel` : "",
+    config.queue?.worktree_dir ? `worktrees ${config.queue.worktree_dir}` : "",
+    config.queue?.merge_certifier_mode ? `merge cert ${config.queue.merge_certifier_mode}` : "",
+  ].filter(Boolean).join(" · ") || "-";
+}
+
+function productKindHint(kind: string): string {
+  switch (kind) {
+    case "web":
+      return "Start the web server, open the local URL, and exercise the primary browser workflow.";
+    case "api":
+      return "Start the API service, call the documented endpoints, and verify response bodies and status codes.";
+    case "cli":
+      return "Run the CLI help, then execute the main happy-path command and check stdout, stderr, and exit code.";
+    case "desktop":
+      return "Launch the desktop app and walk through the primary window interaction.";
+    case "library":
+      return "Import the public package from a fresh script and call the documented API.";
+    case "worker":
+    case "service":
+    case "pipeline":
+      return "Run the process with a small fixture and verify its output, side effects, and logs.";
+    default:
+      return "Use the README and artifacts to run the product's main user workflow.";
+  }
+}
+
+function shortPath(path: string | null | undefined): string {
+  if (!path) return "-";
+  const parts = path.split("/");
+  if (parts.length <= 4) return path;
+  return `.../${parts.slice(-3).join("/")}`;
 }
 
 function detailStatusLabel(detail: RunDetail): string {
@@ -2908,17 +3794,19 @@ function detailStatusLabel(detail: RunDetail): string {
 }
 
 function actionName(key: string): string {
-  return {c: "cancel", r: "resume", R: "retry", x: "cleanup", m: "merge", M: "merge-all"}[key] || key;
+  return {c: "cancel", r: "resume", R: "retry", x: "cleanup", m: "merge", M: "merge-all", a: "approve-spec", g: "regenerate-spec"}[key] || key;
 }
 
 function actionConfirmationBody(action: string, label?: string): string {
   const normalized = (label || action).toLowerCase();
   if (action === "cancel") return "Cancel this run?";
   if (action === "merge") return "Land this task into the target branch?";
+  if (action === "approve-spec") return "Approve this spec and start the build?";
+  if (action === "regenerate-spec") return "Request spec changes and regenerate before build starts?";
   if (normalized === "remove") return "Remove this queue task?";
   if (normalized === "cleanup") return "Clean up this run?";
   if (normalized === "requeue") return "Requeue this task?";
-  if (normalized === "resume") return "Resume this run?";
+  if (normalized.startsWith("resume")) return "Resume this run from the saved checkpoint?";
   return `${capitalize(normalized)} this run?`;
 }
 
@@ -2933,16 +3821,17 @@ function proofLine(item: LandingItem): string {
 function evidenceLine(packet: RunDetail["review_packet"]): string {
   if (packet.readiness.state === "in_progress") return "-";
   if (isRepositoryBlockedPacket(packet)) return "-";
-  const existing = packet.evidence.filter(isReadableArtifact).length;
-  if (!packet.evidence.length) return "-";
+  const reviewEvidence = packet.evidence.filter(isReviewEvidenceArtifact);
+  const existing = reviewEvidence.filter(isReadableArtifact).length;
+  if (!reviewEvidence.length) return "-";
   if (!existing) return "not attached";
-  return `${existing}/${packet.evidence.length}`;
+  return `${existing}/${reviewEvidence.length}`;
 }
 
 function preferredProofArtifact(artifacts: ArtifactRef[]): ArtifactRef | null {
   const existing = artifacts.filter(isReadableArtifact);
   if (!existing.length) return null;
-  const preferredLabels = ["summary", "queue manifest", "manifest", "intent", "primary log"];
+  const preferredLabels = ["proof markdown", "proof json", "summary", "queue manifest", "manifest", "primary log", "intent"];
   for (const label of preferredLabels) {
     const match = existing.find((artifact) => artifact.label.toLowerCase() === label);
     if (match) return match;
@@ -2961,6 +3850,10 @@ function isReadableArtifact(artifact: ArtifactRef): boolean {
   return artifact.exists && artifact.kind !== "directory";
 }
 
+function isReviewEvidenceArtifact(artifact: ArtifactRef): boolean {
+  return artifact.kind !== "directory";
+}
+
 function isLogArtifact(artifact: ArtifactRef | null): boolean {
   if (!artifact) return false;
   const kind = artifact.kind.toLowerCase();
@@ -2972,6 +3865,11 @@ function isLogArtifact(artifact: ArtifactRef | null): boolean {
 function artifactKindLabel(artifact: ArtifactRef): string {
   if (!artifact.exists) return `${artifact.kind} (missing)`;
   if (artifact.kind === "directory") return "directory - use Diff for code review";
+  if (artifact.kind === "html") return "HTML report";
+  if (artifact.kind === "json") return "JSON metadata";
+  if (artifact.kind === "text") return "readable text";
+  if (artifact.kind === "image") return "image evidence";
+  if (artifact.kind === "video") return "video evidence";
   return artifact.kind;
 }
 
@@ -3039,10 +3937,11 @@ function renderLogText(text: string) {
 
 function logLineClass(line: string): string {
   const clean = stripAnsi(line).toLowerCase();
+  if (/(— .*starting —|— .*complete —|certify round|fix round|run summary|━━━)/.test(clean)) return "log-line-phase";
   if (/(\bfatal\b|\berror\b|traceback|exception|\bfailed\b|\bfail\b|exit code [1-9])/.test(clean)) return "log-line-error";
   if (/(\bwarn\b|warning|blocked|stale|retry|skipped|caution)/.test(clean)) return "log-line-warn";
   if (/(\bpass\b|passed|success|completed|ready|done)/.test(clean)) return "log-line-success";
-  if (/(story_result|story result|pytest|npm|uv run|\btest\b|collecting|running|\[build\]|\[certify\]|\[merge\]|\[queue\]|\binfo\b)/.test(clean)) return "log-line-info";
+  if (/(story_result|story result|stories_tested|stories_passed|verdict|diagnosis|coverage_observed|coverage_gaps|pytest|npm|uv run|\btest\b|collecting|running|\[build\]|\[certify\]|\[merge\]|\[queue\]|\binfo\b)/.test(clean)) return "log-line-info";
   return "log-line-muted";
 }
 

@@ -8,12 +8,24 @@ from pathlib import Path
 
 from otto import paths
 from otto.manifest import queue_index_path_for
-from otto.queue.runtime import IN_FLIGHT_STATUSES, INTERRUPTED_STATUS, checkpoint_path_for_task, task_display_status
+from otto.queue.runtime import (
+    IN_FLIGHT_STATUSES,
+    INTERRUPTED_STATUS,
+    RESUMABLE_QUEUE_STATUSES,
+    checkpoint_path_for_task,
+    task_display_status,
+    task_resume_block_reason,
+)
 from otto.queue.schema import load_queue, load_state
 from otto.runs.registry import make_run_record, writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
 from otto.mission_control.actions import ActionExecutingAdapter, make_action
+from otto.mission_control.adapters.common import (
+    artifact_ref_for_path,
+    expanded_artifact_paths,
+    supplemental_session_artifact_paths,
+)
 from otto.mission_control.model import ArtifactRef, DetailModel, HistoryRow
 
 
@@ -63,6 +75,7 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
         checkpoint_path = str(record.artifacts.get("checkpoint_path") or "").strip()
         summary_path = str(record.artifacts.get("summary_path") or "").strip()
         primary_log = str(record.artifacts.get("primary_log_path") or "").strip()
+        session_dir = str(record.artifacts.get("session_dir") or "").strip()
         extra_log_paths = [str(path).strip() for path in record.artifacts.get("extra_log_paths") or [] if str(path).strip()]
 
         if intent_path:
@@ -85,9 +98,18 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
             messages_path = Path(primary_log).with_name("messages.jsonl")
             if messages_path.exists():
                 items.append(ArtifactRef.from_path("messages", str(messages_path), kind="log"))
-        for index, path in enumerate(extra_log_paths, start=1):
-            label = "watcher log" if path.endswith("watcher.log") else f"extra {index}"
-            items.append(ArtifactRef.from_path(label, path, kind="log"))
+        seen_extra_paths = {artifact.path for artifact in items}
+        for index, path in enumerate([*supplemental_session_artifact_paths(session_dir), *extra_log_paths], start=1):
+            if path.endswith("watcher.log"):
+                if path not in seen_extra_paths:
+                    seen_extra_paths.add(path)
+                    items.append(ArtifactRef.from_path("watcher log", path, kind="log"))
+            else:
+                for expanded_path in expanded_artifact_paths(path):
+                    if expanded_path in seen_extra_paths:
+                        continue
+                    seen_extra_paths.add(expanded_path)
+                    items.append(artifact_ref_for_path(expanded_path, fallback_label=f"extra {index}"))
         if worktree:
             items.append(ArtifactRef.from_path("worktree", worktree))
         return items
@@ -105,6 +127,16 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
         legacy_artifacts_reason = "legacy queue mode has no registry-backed artifacts"
         stale_overlay = overlay is not None and overlay.level == "stale"
         task_present = _queue_task_present(Path(record.project_dir), queue_task_id)
+        spec_review_pending, spec_review_reason = _spec_review_pending(record)
+        resume_enabled, resume_reason = _queue_resume_action_state(
+            Path(record.project_dir),
+            queue_task_id,
+            record.status,
+            checkpoint_path,
+        )
+        if spec_review_pending:
+            resume_enabled = False
+            resume_reason = "approve the spec or request changes first"
         cleanup_enabled = (
             task_present
             and (
@@ -143,20 +175,24 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
                 preview=f"would append queue cancel for {task_id}",
             ),
             make_action(
+                "a",
+                "approve spec",
+                enabled=spec_review_pending,
+                reason=None if spec_review_pending else spec_review_reason,
+                preview=f"would approve spec and resume {task_id}",
+            ),
+            make_action(
+                "g",
+                "request spec changes",
+                enabled=spec_review_pending,
+                reason=None if spec_review_pending else spec_review_reason,
+                preview=f"would regenerate spec for {task_id}",
+            ),
+            make_action(
                 "r",
-                "resume",
-                enabled=(
-                    record.status in {INTERRUPTED_STATUS, "paused"}
-                    and bool(checkpoint_path)
-                    and Path(checkpoint_path).exists()
-                ),
-                reason=(
-                    "run is not interrupted"
-                    if record.status not in {INTERRUPTED_STATUS, "paused"}
-                    else "checkpoint missing"
-                    if not checkpoint_path or not Path(checkpoint_path).exists()
-                    else None
-                ),
+                "resume from checkpoint",
+                enabled=resume_enabled,
+                reason=resume_reason,
                 preview=f"would shell `otto queue resume {task_id}`",
             ),
             make_action(
@@ -211,7 +247,7 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
                 "merge all",
                 enabled=True,
                 reason=None,
-                preview="would shell `otto merge --fast --no-certify --all`",
+                preview="would shell `otto merge --fast --transactional --no-certify --all`",
             ),
             make_action(
                 "o",
@@ -287,6 +323,71 @@ def _queue_task_present(project_dir: Path, task_id: str) -> bool:
         return False
 
 
+def _queue_resume_action_state(
+    project_dir: Path,
+    task_id: str,
+    status: str,
+    checkpoint_path: str,
+) -> tuple[bool, str | None]:
+    if not task_id:
+        return False, "queue task id unknown"
+    if status not in RESUMABLE_QUEUE_STATUSES:
+        return False, "run is not checkpoint-resumable"
+    if not checkpoint_path or not Path(checkpoint_path).exists():
+        return False, "checkpoint missing"
+    try:
+        tasks = load_queue(project_dir)
+        state = load_state(project_dir)
+    except Exception as exc:
+        return False, f"queue state unavailable: {exc}"
+    task = next((task for task in tasks if task.id == task_id), None)
+    if task is None:
+        return False, "queue task definition missing"
+    task_state = state.get("tasks", {}).get(task_id, {"status": status})
+    current_status = task_display_status(task_state)
+    if current_status not in RESUMABLE_QUEUE_STATUSES:
+        return False, f"current task state is {current_status}"
+    reason = task_resume_block_reason(project_dir, task, task_state)
+    if reason is not None:
+        return False, reason
+    return True, None
+
+
+def _spec_review_pending(record) -> tuple[bool, str | None]:
+    if record.status != "paused":
+        return False, "run is not paused for spec review"
+    checkpoint_path = str(record.artifacts.get("checkpoint_path") or "").strip()
+    if not checkpoint_path:
+        return False, "checkpoint missing"
+    try:
+        checkpoint = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        return False, f"checkpoint unreadable: {exc}"
+    if not isinstance(checkpoint, dict):
+        return False, "checkpoint is malformed"
+    if str(checkpoint.get("phase") or "") != "spec_review":
+        return False, "run is not waiting at the spec review gate"
+    spec_path = str(checkpoint.get("spec_path") or "").strip()
+    if not spec_path or not Path(spec_path).exists():
+        return False, "spec file missing"
+    return True, None
+
+
+def _checkpoint_spec_path(checkpoint_path: Path | None) -> str | None:
+    if checkpoint_path is None:
+        return None
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(checkpoint, dict):
+        return None
+    spec_path = str(checkpoint.get("spec_path") or "").strip()
+    if spec_path and Path(spec_path).exists():
+        return spec_path
+    return None
+
+
 def _legacy_queue_record(project_dir, task, task_state, now):
     state = task_state if isinstance(task_state, dict) else {}
     status = task_display_status(state)
@@ -331,7 +432,11 @@ def _legacy_queue_record(project_dir, task, task_state, now):
             "resumable": bool(task.resumable),
         },
         git={"branch": task.branch, "worktree": task.worktree, "target_branch": None, "head_sha": None},
-        intent={"summary": task.resolved_intent or task.id, "intent_path": None, "spec_path": task.spec_file_path},
+        intent={
+            "summary": task.resolved_intent or task.id,
+            "intent_path": None,
+            "spec_path": _checkpoint_spec_path(checkpoint_path) or task.spec_file_path,
+        },
         artifacts={
             "session_dir": str(session_dir),
             "manifest_path": str(child_manifest.resolve(strict=False)) if child_manifest and child_manifest.exists() else None,

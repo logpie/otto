@@ -46,6 +46,15 @@ _STATUS_PRIORITY = {
     "cancelled": 4,
     "removed": 4,
 }
+_TOKEN_USAGE_KEYS = (
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+)
 
 
 @dataclass(slots=True)
@@ -81,6 +90,7 @@ class MissionControlAdapter(Protocol):
         *,
         selected_artifact_path: str | None = None,
         selected_queue_task_ids: list[str] | None = None,
+        action_payload: dict[str, Any] | None = None,
         post_result: Callable[[ActionResult], None] | None = None,
     ) -> ActionResult: ...
     def detail_panel_renderer(self, record: RunRecord) -> DetailModel: ...
@@ -141,6 +151,7 @@ class LiveRunItem:
     elapsed_display: str
     cost_usd: float | None
     cost_display: str
+    token_usage: dict[str, int]
     event: str
     progress: str
     row_label: str
@@ -153,7 +164,25 @@ class HistoryItem:
     outcome_display: str
     duration_display: str
     cost_display: str
+    token_usage: dict[str, int]
     summary: str
+
+
+@dataclass(slots=True)
+class ProjectStats:
+    active_count: int = 0
+    history_count: int = 0
+    success_count: int = 0
+    failed_count: int = 0
+    total_duration_s: float = 0.0
+    duration_display: str = "-"
+    reported_cost_usd: float | None = None
+    cost_display: str = "-"
+    token_usage: dict[str, int] = field(default_factory=dict)
+    total_tokens: int = 0
+    token_display: str = "-"
+    stories_passed: int = 0
+    stories_tested: int = 0
 
 
 @dataclass(slots=True)
@@ -194,6 +223,7 @@ class MissionControlFilters:
 class MissionControlState:
     live_runs: LiveRunsView
     history_page: HistoryView
+    project_stats: ProjectStats
     selection: SelectionState
     selected_run_ids: set[str]
     focus: PaneName
@@ -350,6 +380,7 @@ class MissionControlModel:
             previous_state=MissionControlState(
                 live_runs=LiveRunsView([], 0, 0, 1.5),
                 history_page=HistoryView([], 0, self.history_page_size, 0, 0),
+                project_stats=ProjectStats(),
                 selection=SelectionState(),
                 selected_run_ids=set(),
                 focus=focus,
@@ -379,6 +410,7 @@ class MissionControlModel:
 
         history_rows = self._dedupe_history_rows(load_project_history_rows(self.project_dir))
         history_items = self._build_history_items(history_rows, filters)
+        project_stats = self._build_project_stats(live_items, history_rows)
         total_rows = len(history_items)
         total_pages = max(1, (total_rows + self.history_page_size - 1) // self.history_page_size) if total_rows else 1
         page = min(max(filters.history_page, 0), max(0, total_pages - 1))
@@ -402,6 +434,7 @@ class MissionControlModel:
         return MissionControlState(
             live_runs=live_view,
             history_page=history_view,
+            project_stats=project_stats,
             selection=selection,
             selected_run_ids=selected_run_ids,
             focus=focus,
@@ -586,6 +619,7 @@ class MissionControlModel:
                     elapsed_display=_format_elapsed(elapsed_s),
                     cost_usd=cost_usd,
                     cost_display=_format_usage(cost_usd, token_usage, pending=effectively_active),
+                    token_usage=token_usage,
                     event=_live_event(record, overlay),
                     progress=_live_progress(record) if effectively_active else "",
                     row_label=row_label,
@@ -605,18 +639,81 @@ class MissionControlModel:
             if filters.query and not _history_matches_query(row, filters.query):
                 continue
             adapter = self._adapter_for_key(row.adapter_key)
+            token_usage = _history_token_usage(row)
             items.append(
                 HistoryItem(
                     row=row,
                     completed_at_display=_short_timestamp(row.finished_at or row.timestamp),
                     outcome_display=(row.terminal_outcome or row.status or "-").upper(),
                     duration_display=_format_elapsed(row.duration_s),
-                    cost_display=_format_usage(row.cost_usd, _history_token_usage(row)),
+                    cost_display=_format_usage(row.cost_usd, token_usage),
+                    token_usage=token_usage,
                     summary=adapter.history_summary(row),
                 )
             )
         items.sort(key=lambda item: -(_parse_iso(item.row.finished_at or item.row.timestamp) or _epoch()).timestamp())
         return items
+
+    def _build_project_stats(self, live_items: list[LiveRunItem], history_rows: list[HistoryRow]) -> ProjectStats:
+        token_usage = _empty_token_usage()
+        duration_s = 0.0
+        reported_cost = 0.0
+        cost_seen = False
+        stories_passed = 0
+        stories_tested = 0
+        success_count = 0
+        failed_count = 0
+        seen_run_ids: set[str] = set()
+
+        for row in history_rows:
+            seen_run_ids.add(row.run_id)
+            _add_token_usage(token_usage, _history_token_usage(row))
+            if row.duration_s is not None:
+                duration_s += max(float(row.duration_s), 0.0)
+            if isinstance(row.cost_usd, int | float):
+                reported_cost += max(float(row.cost_usd), 0.0)
+                cost_seen = True
+            outcome = _history_outcome(row)
+            if outcome == "success":
+                success_count += 1
+            elif outcome in {"failed", "interrupted", "cancelled"}:
+                failed_count += 1
+            passed, tested = _stories_from_mapping(row.raw)
+            stories_passed += passed
+            stories_tested += tested
+
+        active_count = 0
+        for item in live_items:
+            if _live_item_is_active(item):
+                active_count += 1
+            if item.record.run_id in seen_run_ids:
+                continue
+            _add_token_usage(token_usage, item.token_usage)
+            if item.elapsed_s is not None:
+                duration_s += max(float(item.elapsed_s), 0.0)
+            if isinstance(item.cost_usd, int | float):
+                reported_cost += max(float(item.cost_usd), 0.0)
+                cost_seen = True
+            passed, tested = _stories_from_mapping(item.record.metrics)
+            stories_passed += passed
+            stories_tested += tested
+
+        total_tokens = _token_total(token_usage)
+        return ProjectStats(
+            active_count=active_count,
+            history_count=len(history_rows),
+            success_count=success_count,
+            failed_count=failed_count,
+            total_duration_s=duration_s,
+            duration_display=_format_elapsed(duration_s) if duration_s else "-",
+            reported_cost_usd=reported_cost if cost_seen else None,
+            cost_display=f"${reported_cost:.2f}" if cost_seen else "-",
+            token_usage=_prune_zero_token_usage(token_usage),
+            total_tokens=total_tokens,
+            token_display=f"{_format_compact_number(total_tokens)} tokens" if total_tokens else "-",
+            stories_passed=stories_passed,
+            stories_tested=stories_tested,
+        )
 
     def _dedupe_history_rows(self, raw_rows: list[dict[str, Any]]) -> list[HistoryRow]:
         best_by_dedupe: dict[str, HistoryRow] = {}
@@ -690,7 +787,7 @@ class MissionControlModel:
         now: datetime,
         monotonic_now: float,
     ) -> StaleOverlay | None:
-        if is_terminal_status(record.status):
+        if is_terminal_status(record.status) or record.status == "paused":
             self._stale_trackers.pop(record.run_id, None)
             return None
 
@@ -764,6 +861,7 @@ def _normalize_history_row(raw: dict[str, Any]) -> HistoryRow | None:
     run_type = str(raw.get("run_type") or command_family(command) or "build")
     domain = str(raw.get("domain") or ("merge" if run_type == "merge" else "queue" if run_type == "queue" else "atomic"))
     status = str(raw.get("status") or ("done" if raw.get("passed") else "failed"))
+    started_at = _string_or_none(raw.get("started_at"))
     finished_at = _string_or_none(raw.get("finished_at") or raw.get("timestamp"))
     timestamp = _string_or_none(raw.get("timestamp")) or finished_at or _utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
     return HistoryRow(
@@ -774,7 +872,7 @@ def _normalize_history_row(raw: dict[str, Any]) -> HistoryRow | None:
         status=status,
         terminal_outcome=_string_or_none(raw.get("terminal_outcome")),
         timestamp=timestamp,
-        started_at=_string_or_none(raw.get("started_at")),
+        started_at=started_at,
         finished_at=finished_at,
         queue_task_id=_string_or_none(raw.get("queue_task_id")),
         merge_id=_string_or_none(raw.get("merge_id")),
@@ -784,7 +882,7 @@ def _normalize_history_row(raw: dict[str, Any]) -> HistoryRow | None:
         head_sha=_string_or_none(raw.get("head_sha")),
         worktree=_string_or_none(raw.get("worktree")),
         cost_usd=_coerce_float(raw.get("cost_usd")),
-        duration_s=_coerce_float(raw.get("duration_s")),
+        duration_s=_history_duration_s(raw, started_at, finished_at),
         resumable=bool(raw.get("resumable", False)),
         session_dir=_history_artifact_path(raw, "session_dir"),
         intent_path=_string_or_none((raw.get("intent") or {}).get("intent_path")) if isinstance(raw.get("intent"), dict) else _string_or_none(raw.get("intent_path")),
@@ -816,12 +914,15 @@ def _retain_terminal_live_record(record: RunRecord) -> bool:
 def _status_is_effectively_active(status: str | None, overlay: StaleOverlay | None) -> bool:
     if is_terminal_status(status):
         return False
+    if status == "paused":
+        return False
     if overlay is not None and overlay.level == "stale":
         return False
     return True
 
 
 def _history_row_to_record(project_dir: Path, row: HistoryRow) -> RunRecord:
+    failure_reason = _string_or_none(row.raw.get("failure_reason")) or _queue_history_failure_reason(project_dir, row.queue_task_id)
     return RunRecord(
         run_id=row.run_id,
         domain=row.domain,
@@ -833,12 +934,8 @@ def _history_row_to_record(project_dir: Path, row: HistoryRow) -> RunRecord:
         project_dir=str(project_dir.resolve(strict=False)),
         cwd=str(project_dir.resolve(strict=False)),
         writer={},
-        identity={
-            "queue_task_id": row.queue_task_id,
-            "merge_id": row.merge_id,
-            "parent_run_id": None,
-        },
-        source=_history_source(row),
+        identity=_history_identity(row),
+        source=_history_source(project_dir, row),
         timing={
             "started_at": row.started_at,
             "updated_at": row.finished_at or row.timestamp,
@@ -860,7 +957,7 @@ def _history_row_to_record(project_dir: Path, row: HistoryRow) -> RunRecord:
         },
         metrics={"cost_usd": row.cost_usd},
         adapter_key=row.adapter_key,
-        last_event=row.terminal_outcome or row.status,
+        last_event=failure_reason or row.terminal_outcome or row.status,
     )
 
 
@@ -878,7 +975,45 @@ def _run_history_preference_key(row: HistoryRow) -> tuple[int, int, float]:
     )
 
 
-def _history_source(row: HistoryRow) -> dict[str, Any]:
+def _history_identity(row: HistoryRow) -> dict[str, Any]:
+    raw_identity = row.raw.get("identity")
+    identity = dict(raw_identity) if isinstance(raw_identity, dict) else {}
+    child_run_id = _string_or_none(row.raw.get("child_run_id")) or _string_or_none(identity.get("child_run_id"))
+    expected_child_run_id = (
+        _string_or_none(row.raw.get("expected_child_run_id"))
+        or _string_or_none(identity.get("expected_child_run_id"))
+    )
+    if row.domain == "queue":
+        child_run_id = child_run_id or row.run_id
+        expected_child_run_id = expected_child_run_id or row.run_id
+    return {
+        "queue_task_id": row.queue_task_id,
+        "merge_id": row.merge_id,
+        "parent_run_id": _string_or_none(identity.get("parent_run_id")),
+        "child_run_id": child_run_id,
+        "expected_child_run_id": expected_child_run_id,
+        "compatibility_warning": (
+            _string_or_none(row.raw.get("compatibility_warning"))
+            or _string_or_none(identity.get("compatibility_warning"))
+        ),
+    }
+
+
+def _history_duration_s(raw: dict[str, Any], started_at: str | None, finished_at: str | None) -> float | None:
+    recorded = _coerce_float(raw.get("duration_s"))
+    if recorded and recorded > 0:
+        return recorded
+    if not started_at or not finished_at:
+        return recorded
+    started = _parse_iso(started_at)
+    finished = _parse_iso(finished_at)
+    if started is None or finished is None:
+        return recorded
+    elapsed = max(0.0, (finished - started).total_seconds())
+    return elapsed if elapsed > 0 else recorded
+
+
+def _history_source(project_dir: Path, row: HistoryRow) -> dict[str, Any]:
     source: dict[str, Any] = {"argv": [], "resumable": row.resumable, "invoked_via": "history"}
     raw_source = row.raw.get("source")
     if isinstance(raw_source, dict):
@@ -891,7 +1026,39 @@ def _history_source(row: HistoryRow) -> dict[str, Any]:
         argv = manifest.get("argv") if isinstance(manifest, dict) else None
         if isinstance(argv, list) and argv:
             source["argv"] = [str(part) for part in argv]
+    if not source.get("argv") and row.queue_task_id:
+        argv = _queue_history_argv(project_dir, row.queue_task_id)
+        if argv:
+            source["argv"] = argv
     return source
+
+
+def _queue_history_argv(project_dir: Path, task_id: str) -> list[str]:
+    try:
+        from otto.queue.schema import load_queue
+
+        for task in load_queue(project_dir):
+            if task.id == task_id:
+                return list(task.command_argv)
+    except Exception:
+        return []
+    return []
+
+
+def _queue_history_failure_reason(project_dir: Path, task_id: str | None) -> str | None:
+    if not task_id:
+        return None
+    try:
+        from otto.queue.schema import load_state
+
+        state = load_state(project_dir)
+    except Exception:
+        return None
+    tasks = state.get("tasks") if isinstance(state, dict) else None
+    task_state = tasks.get(task_id) if isinstance(tasks, dict) else None
+    if not isinstance(task_state, dict):
+        return None
+    return _string_or_none(task_state.get("failure_reason"))
 
 
 def _read_history_manifest(path_value: Any) -> dict[str, Any]:
@@ -1013,6 +1180,12 @@ def _live_event(record: RunRecord, overlay: StaleOverlay | None) -> str:
 
 
 def _live_progress(record: RunRecord) -> str:
+    split_progress = _split_checkpoint_progress(record)
+    if split_progress:
+        return split_progress
+    merge_progress = _merge_conflict_agent_progress(record)
+    if merge_progress:
+        return merge_progress
     path_text = _string_or_none(record.artifacts.get("primary_log_path"))
     if not path_text:
         return ""
@@ -1026,6 +1199,66 @@ def _live_progress(record: RunRecord) -> str:
         line = _truncate(_strip_terminal_escapes(raw_line), 140)
         if line:
             return line
+    return ""
+
+
+def _merge_conflict_agent_progress(record: RunRecord) -> str:
+    if record.domain != "merge" or record.run_type != "merge":
+        return ""
+    started_at = _parse_iso(record.timing.get("started_at"))
+    log_path = paths.logs_dir(Path(record.project_dir)) / "merge" / "conflict-agent-agentic" / "narrative.log"
+    if not log_path.exists():
+        return ""
+    if started_at is not None:
+        try:
+            if log_path.stat().st_mtime < started_at.timestamp() - 5:
+                return ""
+        except OSError:
+            return ""
+    return _tail_last_line(log_path, limit_bytes=8192, limit_chars=140)
+
+
+def _tail_last_line(path: Path, *, limit_bytes: int, limit_chars: int) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    text = data[-limit_bytes:].decode("utf-8", errors="replace")
+    for raw_line in reversed(text.splitlines()):
+        line = _truncate(_strip_terminal_escapes(raw_line), limit_chars)
+        if line:
+            return line
+    return ""
+
+
+def _split_checkpoint_progress(record: RunRecord) -> str:
+    checkpoint_path = _string_or_none(record.artifacts.get("checkpoint_path"))
+    if not checkpoint_path:
+        return ""
+    try:
+        checkpoint = json.loads(Path(checkpoint_path).expanduser().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    if checkpoint.get("split_mode") is not True:
+        return ""
+    phase = str(checkpoint.get("phase") or "").strip()
+    try:
+        current_round = int(checkpoint.get("current_round") or 0)
+    except (TypeError, ValueError):
+        current_round = 0
+    failures = checkpoint.get("last_round_failures")
+    failure_count = len(failures) if isinstance(failures, list) else 0
+    if phase == "initial_build":
+        return "Building initial implementation"
+    if phase == "certify":
+        return f"Certifying round {max(current_round + 1, 1)}"
+    if phase == "fix":
+        suffix = f" for {failure_count} failing stories" if failure_count else ""
+        return f"Fixing round {max(current_round, 1)}{suffix}"
+    if phase == "round_complete":
+        return f"Round {max(current_round, 1)} complete"
+    if phase:
+        return phase.replace("_", " ")
     return ""
 
 
@@ -1089,8 +1322,9 @@ def _format_usage(cost: float | None, token_usage: dict[str, int] | None = None,
     if isinstance(cost, (int, float)) and float(cost) > 0:
         return f"${float(cost):.2f}"
     if token_usage:
-        input_tokens = int(token_usage.get("input_tokens", 0) or 0)
-        output_tokens = int(token_usage.get("output_tokens", 0) or 0)
+        normalized = _normalize_token_usage(token_usage)
+        input_tokens = int(normalized.get("input_tokens", 0) or 0)
+        output_tokens = int(normalized.get("output_tokens", 0) or 0)
         if input_tokens or output_tokens:
             return f"{_format_compact_number(input_tokens)} in / {_format_compact_number(output_tokens)} out"
     if isinstance(cost, (int, float)):
@@ -1137,22 +1371,92 @@ def _token_usage_from_mapping(mapping: Any) -> dict[str, int]:
     raw_usage = mapping.get("token_usage")
     if isinstance(raw_usage, dict):
         mapping = {**mapping, **raw_usage}
-    totals = {
-        "input_tokens": _coerce_int(mapping.get("input_tokens")),
-        "cached_input_tokens": _coerce_int(mapping.get("cached_input_tokens")),
-        "output_tokens": _coerce_int(mapping.get("output_tokens")),
-    }
+    totals = _normalize_token_usage(mapping)
     if any(totals.values()):
-        return totals
+        return _prune_zero_token_usage(totals)
     breakdown = mapping.get("breakdown")
     if not isinstance(breakdown, dict):
         return {}
     for phase in breakdown.values():
         if not isinstance(phase, dict):
             continue
-        for key in totals:
-            totals[key] += _coerce_int(phase.get(key))
-    return totals if any(totals.values()) else {}
+        _add_token_usage(totals, _normalize_token_usage(phase))
+    return _prune_zero_token_usage(totals) if any(totals.values()) else {}
+
+
+def _empty_token_usage() -> dict[str, int]:
+    return dict.fromkeys(_TOKEN_USAGE_KEYS, 0)
+
+
+def _normalize_token_usage(mapping: Any) -> dict[str, int]:
+    if not isinstance(mapping, dict):
+        return _empty_token_usage()
+    raw_usage = mapping.get("token_usage")
+    if isinstance(raw_usage, dict):
+        mapping = {**mapping, **raw_usage}
+    cache_creation = _coerce_int(mapping.get("cache_creation_input_tokens"))
+    cache_read = _coerce_int(mapping.get("cache_read_input_tokens"))
+    legacy_cached = _coerce_int(mapping.get("cached_input_tokens"))
+    if not cache_read and legacy_cached and not cache_creation:
+        cache_read = legacy_cached
+    cached_total = cache_creation + cache_read
+    if legacy_cached and legacy_cached > cached_total:
+        cached_total = legacy_cached
+    totals = {
+        "input_tokens": _coerce_int(mapping.get("input_tokens") or mapping.get("tokens_in")),
+        "cache_creation_input_tokens": cache_creation,
+        "cache_read_input_tokens": cache_read,
+        "cached_input_tokens": cached_total,
+        "output_tokens": _coerce_int(mapping.get("output_tokens") or mapping.get("tokens_out")),
+        "reasoning_tokens": _coerce_int(mapping.get("reasoning_tokens")),
+        "total_tokens": 0,
+    }
+    explicit_total = _coerce_int(mapping.get("total_tokens"))
+    derived_total = _token_total(totals)
+    totals["total_tokens"] = explicit_total if explicit_total > derived_total else derived_total
+    return totals
+
+
+def _add_token_usage(target: dict[str, int], usage: dict[str, int] | None) -> None:
+    normalized = _normalize_token_usage(usage or {})
+    for key in _TOKEN_USAGE_KEYS:
+        if key == "total_tokens":
+            continue
+        target[key] = int(target.get(key, 0) or 0) + int(normalized.get(key, 0) or 0)
+    target["total_tokens"] = _token_total(target)
+
+
+def _token_total(token_usage: dict[str, int] | None) -> int:
+    if not token_usage:
+        return 0
+    explicit = int(token_usage.get("total_tokens", 0) or 0)
+    cache_creation = int(token_usage.get("cache_creation_input_tokens", 0) or 0)
+    cache_read = int(token_usage.get("cache_read_input_tokens", 0) or 0)
+    if not cache_creation and not cache_read:
+        cache_read = int(token_usage.get("cached_input_tokens", 0) or 0)
+    derived = (
+        int(token_usage.get("input_tokens", 0) or 0)
+        + cache_creation
+        + cache_read
+        + int(token_usage.get("output_tokens", 0) or 0)
+        + int(token_usage.get("reasoning_tokens", 0) or 0)
+    )
+    return max(explicit, derived)
+
+
+def _prune_zero_token_usage(token_usage: dict[str, int]) -> dict[str, int]:
+    return {key: int(token_usage.get(key, 0) or 0) for key in _TOKEN_USAGE_KEYS if int(token_usage.get(key, 0) or 0)}
+
+
+def _stories_from_mapping(mapping: Any) -> tuple[int, int]:
+    if not isinstance(mapping, dict):
+        return 0, 0
+    raw_summary = mapping.get("summary")
+    if isinstance(raw_summary, dict):
+        mapping = {**raw_summary, **mapping}
+    passed = _coerce_int(mapping.get("stories_passed"))
+    tested = _coerce_int(mapping.get("stories_tested"))
+    return passed, tested
 
 
 def _token_usage_from_summary_paths(paths: list[Path], *, base_dir: Path | None) -> dict[str, int]:

@@ -22,6 +22,7 @@ INITIALIZING_STATUS = "initializing"
 RUNNING_STATUS = "running"
 QUEUE_READY_SCHEMA_VERSION = 1
 IN_FLIGHT_STATUSES = {"starting", INITIALIZING_STATUS, RUNNING_STATUS, "terminating"}
+RESUMABLE_QUEUE_STATUSES = {INTERRUPTED_STATUS, "paused", "failed", "cancelled"}
 
 _QUEUE_RUNNER_CHILD = False
 logger = logging.getLogger("otto.queue.runtime")
@@ -193,3 +194,46 @@ def task_resume_available(project_dir: Path, task: QueueTask) -> bool:
     if not task.resumable:
         return False
     return checkpoint_path_for_task(project_dir, task) is not None
+
+
+def task_resume_block_reason(project_dir: Path, task: QueueTask, task_state: dict | None) -> str | None:
+    """Return why a task cannot be safely resumed, or None when it can."""
+    if not task.resumable:
+        return "task does not support resume"
+    status = task_display_status(task_state)
+    if status not in RESUMABLE_QUEUE_STATUSES:
+        return f"task status is {status}"
+    checkpoint_path = checkpoint_path_for_task(project_dir, task)
+    if checkpoint_path is None:
+        return "checkpoint missing"
+    worktree_dir = worktree_path_for_task(project_dir, task)
+    if worktree_dir is None:
+        return "worktree missing"
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text())
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return "checkpoint unreadable"
+    try:
+        from otto.config import checkpoint_fingerprint
+
+        current = checkpoint_fingerprint(worktree_dir)
+    except Exception as exc:
+        return f"checkpoint compatibility unknown: {exc}"
+    checkpoint_sha = str(checkpoint.get("git_sha") or "")
+    checkpoint_status = str(checkpoint.get("git_status") or "")
+    checkpoint_prompt = str(checkpoint.get("prompt_hash") or "")
+    current_sha = str(current.get("git_sha") or "")
+    current_status = str(current.get("git_status") or "")
+    current_prompt = str(current.get("prompt_hash") or "")
+    if checkpoint_sha and checkpoint_sha != current_sha:
+        return "checkpoint is stale: git HEAD changed"
+    if "git_status" in checkpoint and checkpoint_status != current_status:
+        return "checkpoint is stale: worktree status changed"
+    if checkpoint_prompt and checkpoint_prompt != current_prompt:
+        return "checkpoint is stale: Otto prompts changed"
+    return None
+
+
+def task_resume_allowed(project_dir: Path, task: QueueTask, task_state: dict | None) -> bool:
+    """Return True when an operator can safely requeue this task with --resume."""
+    return task_resume_block_reason(project_dir, task, task_state) is None

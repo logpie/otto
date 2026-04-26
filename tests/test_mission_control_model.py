@@ -401,6 +401,49 @@ def test_detail_view_uses_adapter_artifact_ordering(tmp_path: Path) -> None:
     ]
 
 
+def test_split_progress_tolerates_malformed_checkpoint_round(tmp_path: Path) -> None:
+    run_id = "split-progress"
+    checkpoint_path = paths.session_checkpoint(tmp_path, run_id)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text(
+        json.dumps({"split_mode": True, "phase": "certify", "current_round": "bad"}),
+        encoding="utf-8",
+    )
+    record = make_run_record(
+        project_dir=tmp_path,
+        run_id=run_id,
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="build",
+        status="running",
+        cwd=tmp_path,
+        artifacts={"checkpoint_path": str(checkpoint_path)},
+        adapter_key="atomic.build",
+    )
+    write_record(tmp_path, record)
+
+    model = MissionControlModel(tmp_path, process_probe=lambda writer: True)
+    state = model.initial_state()
+
+    assert state.live_runs.items[0].progress == "Certifying round 1"
+
+
+def test_merge_live_progress_uses_conflict_agent_narrative(tmp_path: Path) -> None:
+    _record(tmp_path, run_id="merge-live", run_type="merge", status="running", updated_at="2026-04-23T12:00:00Z")
+    conflict_log = paths.logs_dir(tmp_path) / "merge" / "conflict-agent-agentic" / "narrative.log"
+    conflict_log.parent.mkdir(parents=True)
+    conflict_log.write_text(
+        "[+0:01] read conflict files\n[+0:02] running project tests\n",
+        encoding="utf-8",
+    )
+
+    model = MissionControlModel(tmp_path, process_probe=lambda writer: True)
+    state = model.initial_state()
+
+    assert state.live_runs.items[0].progress == "[+0:02] running project tests"
+
+
 def test_selection_preservation_across_live_to_history_transition(tmp_path: Path) -> None:
     clock = _Clock(datetime(2026, 4, 23, 12, 0, tzinfo=timezone.utc))
     _record(tmp_path, run_id="transient", run_type="build", status="running", updated_at="2026-04-23T12:00:00Z")
@@ -470,6 +513,63 @@ def test_history_rows_default_missing_resumable_to_false(tmp_path: Path) -> None
     state = model.initial_state()
 
     assert state.history_page.items[0].row.resumable is False
+
+
+def test_queue_history_detail_recovers_argv_and_child_identity(tmp_path: Path) -> None:
+    append_task(
+        tmp_path,
+        QueueTask(
+            id="queued-timeout",
+            command_argv=["build", "long task", "--provider", "codex", "--thorough"],
+            added_at="2026-04-23T12:00:00Z",
+            resolved_intent="long task",
+            branch="build/queued-timeout",
+            worktree=".worktrees/queued-timeout",
+        ),
+    )
+    append_history_entry(
+        tmp_path,
+        {
+            "schema_version": 2,
+            "history_kind": "terminal_snapshot",
+            "dedupe_key": "terminal_snapshot:queue-run",
+            "run_id": "queue-run",
+            "domain": "queue",
+            "run_type": "queue",
+            "command": "build long task",
+            "status": "failed",
+            "terminal_outcome": "failure",
+            "queue_task_id": "queued-timeout",
+            "started_at": "2026-04-23T12:00:00Z",
+            "finished_at": "2026-04-23T12:30:00Z",
+            "timestamp": "2026-04-23T12:30:00Z",
+            "duration_s": 0.0,
+        },
+    )
+    write_state(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "tasks": {
+                "queued-timeout": {
+                    "status": "failed",
+                    "failure_reason": "timed out after 1800s (limit 1800s)",
+                }
+            },
+        },
+    )
+
+    model = MissionControlModel(tmp_path)
+    state = model.initial_state()
+    record, _, source = model.selected_record(state)
+
+    assert source == "history"
+    assert record is not None
+    assert record.source["argv"] == ["build", "long task", "--provider", "codex", "--thorough"]
+    assert record.identity["child_run_id"] == "queue-run"
+    assert record.identity["expected_child_run_id"] == "queue-run"
+    assert record.last_event == "timed out after 1800s (limit 1800s)"
+    assert state.history_page.items[0].row.duration_s == 1800.0
 
 
 def test_history_outcome_removed_filters_correctly(tmp_path: Path) -> None:

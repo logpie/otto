@@ -10,6 +10,11 @@ from otto.runs.registry import writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
 from otto.mission_control.actions import ActionExecutingAdapter, make_action
+from otto.mission_control.adapters.common import (
+    artifact_ref_for_path,
+    expanded_artifact_paths,
+    supplemental_session_artifact_paths,
+)
 from otto.mission_control.model import ArtifactRef, DetailModel, HistoryRow
 
 
@@ -37,6 +42,7 @@ class AtomicMissionControlAdapter(ActionExecutingAdapter):
         summary_path = str(record.artifacts.get("summary_path") or "").strip()
         checkpoint_path = str(record.artifacts.get("checkpoint_path") or "").strip()
         primary_log = str(record.artifacts.get("primary_log_path") or "").strip()
+        session_dir = str(record.artifacts.get("session_dir") or "").strip()
         extra_log_paths = [str(path).strip() for path in record.artifacts.get("extra_log_paths") or [] if str(path).strip()]
 
         if intent_path:
@@ -54,9 +60,13 @@ class AtomicMissionControlAdapter(ActionExecutingAdapter):
             messages_path = Path(primary_log).with_name("messages.jsonl")
             if messages_path.exists():
                 items.append(ArtifactRef.from_path("messages", str(messages_path), kind="log"))
-        for index, path in enumerate(extra_log_paths, start=1):
-            kind = "log" if path.endswith(".log") else "file"
-            items.append(ArtifactRef.from_path(f"extra {index}", path, kind=kind))
+        seen_extra_paths = {artifact.path for artifact in items}
+        for index, path in enumerate([*supplemental_session_artifact_paths(session_dir), *extra_log_paths], start=1):
+            for expanded_path in expanded_artifact_paths(path):
+                if expanded_path in seen_extra_paths:
+                    continue
+                seen_extra_paths.add(expanded_path)
+                items.append(artifact_ref_for_path(expanded_path, fallback_label=f"extra {index}"))
         return items
 
     def legal_actions(self, record, overlay):

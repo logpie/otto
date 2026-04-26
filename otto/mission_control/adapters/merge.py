@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from otto import paths
 from otto.merge.state import load_state
 from otto.runs.registry import writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
@@ -38,6 +39,13 @@ class MergeMissionControlAdapter(ActionExecutingAdapter):
             items.append(ArtifactRef.from_path("state", state_path))
         if primary_log:
             items.append(ArtifactRef.from_path("merge log", primary_log, kind="log"))
+        conflict_log_dir = paths.logs_dir(Path(record.project_dir)) / "merge" / "conflict-agent-agentic"
+        conflict_narrative = conflict_log_dir / "narrative.log"
+        conflict_messages = conflict_log_dir / "messages.jsonl"
+        if conflict_narrative.exists():
+            items.append(ArtifactRef.from_path("conflict agent log", str(conflict_narrative), kind="log"))
+        if conflict_messages.exists():
+            items.append(ArtifactRef.from_path("conflict agent messages", str(conflict_messages), kind="log"))
         extra_index = 1
         for path in extra_log_paths:
             if path == state_path:

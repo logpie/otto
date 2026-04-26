@@ -52,7 +52,7 @@ class Manifest:
     resolved_intent: str | None        # the intent actually used by the run
     focus: str | None = None
     target: str | None = None
-    exit_status: str = "success"       # 'success' | 'failure'
+    exit_status: str = "success"       # 'success' | 'failure' | 'paused'
     schema_version: int = 1
     extra: dict[str, object] = field(default_factory=dict)
 

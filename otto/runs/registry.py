@@ -674,6 +674,8 @@ def _normalize_record_before_write(record: RunRecord, *, heartbeat: bool) -> Non
     record.timing["updated_at"] = now
     record.timing.setdefault("heartbeat_interval_s", HEARTBEAT_INTERVAL_S)
     record.timing.setdefault("finished_at", None)
+    if is_terminal_status(record.status) and not record.timing.get("finished_at"):
+        record.timing["finished_at"] = now
     if heartbeat:
         record.timing["heartbeat_at"] = now
         record.timing["heartbeat_seq"] = int(record.timing.get("heartbeat_seq") or 0) + 1

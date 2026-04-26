@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from otto.config import DEFAULTS
 from otto.manifest import queue_index_path_for
 from otto import paths
 from otto.queue.artifacts import preserve_queue_session_artifacts
@@ -46,7 +47,10 @@ from otto.queue.runtime import (
     INITIALIZING_STATUS,
     INTERRUPTED_STATUS,
     RUNNING_STATUS,
+    RESUMABLE_QUEUE_STATUSES,
     checkpoint_path_for_task,
+    task_display_status,
+    task_resume_block_reason,
 )
 from otto.queue import schema as queue_schema
 from otto.queue.schema import (
@@ -91,8 +95,10 @@ class RunnerConfig:
     # Per-task wall-clock timeout. A hung child (agent stuck in a bash
     # `wait` for an unkilled background process, infinite loop, etc.)
     # would otherwise occupy its concurrency slot forever. None disables.
-    # Default: 30 minutes — generous for thorough builds, fatal for hangs.
-    task_timeout_s: float | None = 1800.0
+    # Default: 70 minutes. The child build budget defaults to 60 minutes; this
+    # outer guard should catch wedged children without preempting normal budget
+    # handling and manifest finalization.
+    task_timeout_s: float | None = 4200.0
     # Grace period after SIGTERM before escalating a terminating child to
     # SIGKILL. Keeps cancellation graceful without letting ignored SIGTERM
     # wedge queue concurrency forever.
@@ -144,6 +150,7 @@ def now_iso() -> str:
 def _mark_failed(ts: dict[str, Any], reason: str) -> None:
     ts["status"] = "failed"
     ts["finished_at"] = now_iso()
+    ts["duration_s"] = _terminal_duration_s(ts)
     ts["child"] = None
     ts["failure_reason"] = reason
 
@@ -207,18 +214,82 @@ def _summary_path_from_manifest(manifest: dict[str, Any]) -> Path | None:
 
 
 def _token_usage_from_summary(summary: dict[str, Any]) -> dict[str, int]:
-    totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+    totals = _empty_token_usage()
+    direct = _token_usage_from_mapping(summary)
+    if any(direct.values()):
+        return {key: value for key, value in direct.items() if value}
     breakdown = summary.get("breakdown")
     if not isinstance(breakdown, dict):
         return {}
     for phase in breakdown.values():
         if not isinstance(phase, dict):
             continue
-        for key in totals:
-            value = _int_or_none(phase.get(key))
-            if value is not None:
-                totals[key] += value
+        _add_token_usage(totals, _token_usage_from_mapping(phase))
     return {key: value for key, value in totals.items() if value}
+
+
+_TOKEN_USAGE_KEYS = (
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+)
+
+
+def _empty_token_usage() -> dict[str, int]:
+    return dict.fromkeys(_TOKEN_USAGE_KEYS, 0)
+
+
+def _token_usage_from_mapping(mapping: Any) -> dict[str, int]:
+    if not isinstance(mapping, dict):
+        return _empty_token_usage()
+    raw_usage = mapping.get("token_usage")
+    if isinstance(raw_usage, dict):
+        mapping = {**mapping, **raw_usage}
+    cache_creation = _int_or_none(mapping.get("cache_creation_input_tokens")) or 0
+    cache_read = _int_or_none(mapping.get("cache_read_input_tokens")) or 0
+    legacy_cached = _int_or_none(mapping.get("cached_input_tokens")) or 0
+    if not cache_read and legacy_cached and not cache_creation:
+        cache_read = legacy_cached
+    cached_total = max(legacy_cached, cache_creation + cache_read)
+    totals = {
+        "input_tokens": (_int_or_none(mapping.get("input_tokens")) or _int_or_none(mapping.get("tokens_in")) or 0),
+        "cache_creation_input_tokens": cache_creation,
+        "cache_read_input_tokens": cache_read,
+        "cached_input_tokens": cached_total,
+        "output_tokens": (_int_or_none(mapping.get("output_tokens")) or _int_or_none(mapping.get("tokens_out")) or 0),
+        "reasoning_tokens": _int_or_none(mapping.get("reasoning_tokens")) or 0,
+        "total_tokens": 0,
+    }
+    explicit_total = _int_or_none(mapping.get("total_tokens")) or 0
+    totals["total_tokens"] = max(explicit_total, _token_total(totals))
+    return totals
+
+
+def _add_token_usage(target: dict[str, int], usage: dict[str, int]) -> None:
+    for key in _TOKEN_USAGE_KEYS:
+        if key == "total_tokens":
+            continue
+        target[key] = int(target.get(key, 0) or 0) + int(usage.get(key, 0) or 0)
+    target["total_tokens"] = _token_total(target)
+
+
+def _token_total(token_usage: dict[str, int]) -> int:
+    cache_creation = int(token_usage.get("cache_creation_input_tokens", 0) or 0)
+    cache_read = int(token_usage.get("cache_read_input_tokens", 0) or 0)
+    if not cache_creation and not cache_read:
+        cache_read = int(token_usage.get("cached_input_tokens", 0) or 0)
+    derived = (
+        int(token_usage.get("input_tokens", 0) or 0)
+        + cache_creation
+        + cache_read
+        + int(token_usage.get("output_tokens", 0) or 0)
+        + int(token_usage.get("reasoning_tokens", 0) or 0)
+    )
+    return max(int(token_usage.get("total_tokens", 0) or 0), derived)
 
 
 # ---------- PID-reuse-safe child validation ----------
@@ -720,6 +791,7 @@ class Runner:
             ts["definition_removal_pending"] = True
             ts["status"] = "cancelled"
             ts["finished_at"] = now_iso()
+            ts["duration_s"] = _terminal_duration_s(ts)
             ts["child"] = None
             ts["failure_reason"] = "cancelled by user"
         elif kind == "remove":
@@ -749,14 +821,25 @@ class Runner:
             ts["definition_removal_pending"] = True
             ts["status"] = "removed"
             ts["finished_at"] = now_iso()
+            ts["duration_s"] = _terminal_duration_s(ts)
             ts.pop("terminal_status", None)
         elif kind == "resume":
-            if status != INTERRUPTED_STATUS:
-                logger.warning("resume ignored for %s in status=%s", tid, status)
+            display_status = task_display_status(ts)
+            task = next((task for task in self._load_queue_or_empty(context="resume command") if task.id == tid), None)
+            if task is None:
+                logger.warning("resume ignored for %s; queue task definition missing", tid)
+                return
+            if display_status not in RESUMABLE_QUEUE_STATUSES:
+                logger.warning("resume ignored for %s in status=%s", tid, display_status)
+                return
+            reason = task_resume_block_reason(self.project_dir, task, ts)
+            if reason is not None:
+                logger.warning("resume ignored for %s; %s", tid, reason)
                 return
             ts["status"] = "queued"
             ts["started_at"] = None
             ts["finished_at"] = None
+            ts["duration_s"] = None
             ts["exit_code"] = None
             ts["child"] = None
             ts["failure_reason"] = None
@@ -794,6 +877,7 @@ class Runner:
                 return
             ts["status"] = "removed"
             ts["finished_at"] = ts.get("finished_at") or now_iso()
+            ts["duration_s"] = _terminal_duration_s(ts)
             ts["child"] = None
             ts["failure_reason"] = ts.get("failure_reason") or "cleaned up"
             logger.info("cleanup: removed terminal task %s from queue", tid)
@@ -1317,12 +1401,14 @@ class Runner:
             "stories_passed": ts.get("stories_passed"),
             "stories_tested": ts.get("stories_tested"),
         }
+        if isinstance(ts.get("breakdown"), dict):
+            metrics["breakdown"] = ts["breakdown"]
         metrics.update(self._queue_usage_fields(ts))
         return metrics
 
     def _queue_usage_fields(self, ts: dict[str, Any]) -> dict[str, int]:
         fields: dict[str, int] = {}
-        for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+        for key in _TOKEN_USAGE_KEYS:
             value = _int_or_none(ts.get(key))
             if value is not None:
                 fields[key] = value
@@ -1340,6 +1426,8 @@ class Runner:
             value = _int_or_none(summary.get(key))
             if value is not None:
                 ts[key] = value
+        if isinstance(summary.get("breakdown"), dict):
+            ts["breakdown"] = summary["breakdown"]
 
     def _append_queue_history_snapshot(
         self,
@@ -1354,6 +1442,26 @@ class Runner:
 
         artifacts = self._queue_run_artifacts(task, ts)
         wt_path = self._worktree_for(task)
+        source = {
+            "invoked_via": "queue",
+            "argv": list(task.command_argv),
+            "resumable": bool(task.resumable),
+        }
+        identity = {
+            "queue_task_id": task.id,
+            "child_run_id": ts.get("child_run_id"),
+            "expected_child_run_id": ts.get("attempt_run_id"),
+            "compatibility_warning": ts.get("compatibility_warning"),
+        }
+        extra_fields = {
+            **self._queue_usage_fields(ts),
+            "argv": list(task.command_argv),
+            "source": source,
+            "child_run_id": identity["child_run_id"],
+            "expected_child_run_id": identity["expected_child_run_id"],
+            "compatibility_warning": identity["compatibility_warning"],
+            "failure_reason": ts.get("failure_reason"),
+        }
         append_history_snapshot(
             self.project_dir,
             build_terminal_snapshot(
@@ -1372,17 +1480,17 @@ class Runner:
                     "started_at": str(ts.get("started_at") or "") or None,
                     "finished_at": str(ts.get("finished_at") or now_iso()) or now_iso(),
                     "timestamp": str(ts.get("finished_at") or now_iso()),
-                    "duration_s": float(ts.get("duration_s") or 0.0),
+                    "duration_s": _terminal_duration_s(ts),
                 },
                 metrics=self._queue_metrics(ts),
                 git={
                     "branch": task.branch,
                     "worktree": str(wt_path.resolve(strict=False)) if task.worktree else None,
                 },
-                source={"resumable": bool(task.resumable)},
-                identity={"queue_task_id": task.id},
+                source=source,
+                identity=identity,
                 artifacts=artifacts,
-                extra_fields=self._queue_usage_fields(ts),
+                extra_fields=extra_fields,
             ),
             strict=True,
         )
@@ -1456,6 +1564,21 @@ class Runner:
                 changed = changed or _json_fingerprint(ts) != before
                 continue
             status = str(ts.get("status") or "queued")
+            timing_updates: dict[str, Any] = {
+                "heartbeat_interval_s": self.config.heartbeat_interval_s,
+            }
+            if status in TERMINAL_STATUSES:
+                started_at = str(ts.get("started_at") or "").strip()
+                finished_at = str(ts.get("finished_at") or "").strip() or now_iso()
+                ts["finished_at"] = finished_at
+                duration_s = _terminal_duration_s(ts)
+                ts["duration_s"] = duration_s
+                timing_updates.update({
+                    "finished_at": finished_at,
+                    "duration_s": duration_s,
+                })
+                if started_at:
+                    timing_updates["started_at"] = started_at
             try:
                 update_record(
                     self.project_dir,
@@ -1467,7 +1590,7 @@ class Runner:
                             "expected_child_run_id": str(ts.get("attempt_run_id") or "").strip() or None,
                             "compatibility_warning": ts.get("compatibility_warning"),
                         },
-                        "timing": {"heartbeat_interval_s": self.config.heartbeat_interval_s},
+                        "timing": timing_updates,
                         "artifacts": self._queue_run_artifacts(task, ts),
                         "metrics": self._queue_metrics(ts),
                         "last_event": str(ts.get("failure_reason") or status),
@@ -1673,16 +1796,25 @@ class Runner:
         if exit_code not in (None, 0):
             _mark_failed(ts, f"exit_code={exit_code}")
             return
+        if manifest_exit_status == "paused":
+            ts["status"] = "paused"
+            ts["duration_s"] = _terminal_duration_s(ts)
+            extra = manifest.get("extra") if isinstance(manifest.get("extra"), dict) else {}
+            next_action = str(extra.get("next_action") or "").strip()
+            ts["failure_reason"] = next_action or "paused; resume available"
+            return
         if manifest_exit_status != "success":
             _mark_failed(ts, f"manifest exit_status={manifest_exit_status}")
             return
 
         ts["status"] = "done"
+        ts["duration_s"] = _terminal_duration_s(ts)
         ts["failure_reason"] = None
 
     def _finish_terminating(self, ts: dict[str, Any]) -> None:
         ts["status"] = ts.pop("terminal_status", "cancelled")
         ts["finished_at"] = now_iso()
+        ts["duration_s"] = _terminal_duration_s(ts)
         ts["child"] = None
         ts.pop("terminating_since", None)
         ts.pop("sigkill_sent_at", None)
@@ -1826,6 +1958,25 @@ class Runner:
             raise StatePersistenceError(str(exc)) from exc
 
 
+def _terminal_duration_s(ts: dict[str, Any]) -> float | None:
+    raw_duration = ts.get("duration_s")
+    if raw_duration not in (None, ""):
+        try:
+            return float(raw_duration)
+        except (TypeError, ValueError):
+            pass
+    started_at = str(ts.get("started_at") or "").strip()
+    finished_at = str(ts.get("finished_at") or "").strip()
+    if not started_at or not finished_at:
+        return None
+    try:
+        started = datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        finished = datetime.strptime(finished_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return max(0.0, (finished - started).total_seconds())
+
+
 def runner_config_from_otto_config(config: dict[str, Any]) -> RunnerConfig:
     """Build a RunnerConfig from the parsed otto.yaml dict."""
     q = config.get("queue") or {}
@@ -1835,7 +1986,8 @@ def runner_config_from_otto_config(config: dict[str, Any]) -> RunnerConfig:
     concurrent = raw_concurrent
     if concurrent < 1:
         raise ValueError("queue.concurrent must be >= 1")
-    raw_timeout = q.get("task_timeout_s", 1800.0)
+    queue_defaults = DEFAULTS["queue"] if isinstance(DEFAULTS.get("queue"), dict) else {}
+    raw_timeout = q.get("task_timeout_s", queue_defaults.get("task_timeout_s", 4200.0))
     task_timeout: float | None
     if raw_timeout is None:
         task_timeout = None  # explicit opt-out

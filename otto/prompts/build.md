@@ -32,16 +32,35 @@ You are a senior developer. Work autonomously.
    - Write NEW tests for the new/changed functionality.
    - All tests must pass before proceeding.
 
-5. **Self-review**: Read your changes. Check for regressions, missing error
+5. **Product handoff**: Write `{session_dir}/product-handoff.json` so Otto can
+   show the user how to try the product. Keep it truthful and product-specific.
+   Use this schema:
+   ```json
+   {
+     "kind": "web | api | cli | desktop | library | service | worker | pipeline",
+     "summary": "One sentence describing what the user can try.",
+     "launch": [{"label": "Start app", "command": "exact local command"}],
+     "urls": ["http://127.0.0.1:PORT"],
+     "try_flows": [{"title": "User journey", "steps": ["step one", "step two"]}],
+     "sample_data": [{"label": "Demo user", "value": "name or email", "detail": "role/password if relevant"}],
+     "reset": [{"label": "Reset demo state", "command": "exact command"}],
+     "notes": ["known limitation or setup caveat"]
+   }
+   ```
+   For APIs include curlable endpoints; for CLIs include commands and expected
+   outputs; for libraries include import/call examples; for desktop apps include
+   the launch command and UI walkthrough.
+
+6. **Self-review**: Read your changes. Check for regressions, missing error
    handling, and consistency with existing code style.
 
-6. **Commit**: When all tests pass, commit.
+7. **Commit**: When all tests pass, commit.
 
-7. **Certify**: Dispatch a certifier agent using the Agent tool.
+8. **Certify**: Dispatch a certifier agent using the Agent tool.
    Use the EXACT prompt from the "Pre-filled Certifier Prompt" section below.
    Copy it verbatim — do NOT modify, shorten, or paraphrase it.
 
-8. **Read the certifier's findings.**
+9. **Read the certifier's findings.**
    - If FAIL: read each failed story's diagnosis, fix the root causes in your
      code, run tests, commit the fix, and re-dispatch the certifier. Add the
      failed stories to the re-dispatch prompt so the certifier re-tests them.
@@ -50,7 +69,7 @@ You are a senior developer. Work autonomously.
    - Stop after {max_certify_rounds} certification rounds maximum — if issues
      remain, report what's still failing and move on.
 
-9. **Report the final result.** After the certifier passes (or after your best effort),
+10. **Report the final result.** After the certifier passes (or after your best effort),
    you MUST include the certifier's results in your final message. Copy them EXACTLY:
 
    CERTIFY_ROUND: <round number — 1 for first attempt, 2 for after first fix, etc.>
