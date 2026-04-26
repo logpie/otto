@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -25,16 +26,87 @@ from otto.mission_control.model import (
 from otto.runs.schema import RunRecord
 
 
+# Otto's own runtime files at the project root; the dirty-target preflight
+# in JobDialog must not fire when these are the *only* uncommitted files,
+# because Otto created them itself (W11-CRITICAL-1). Keep this list
+# narrowly scoped to project-root state so genuine user edits anywhere
+# else still surface as dirty.
+_OTTO_OWNED_DIRTY_PATTERNS: tuple[str, ...] = (
+    ".otto-queue*",
+    "otto_logs/*",
+    "otto_logs",
+    ".worktrees/*",
+    ".worktrees",
+    ".watcher.log",
+)
+
+
 def serialize_project(project_dir: Path) -> dict[str, Any]:
     project_dir = Path(project_dir).resolve(strict=False)
     return {
         "path": str(project_dir),
         "name": project_dir.name,
         "branch": _git_output(project_dir, ["branch", "--show-current"]) or None,
-        "dirty": bool(_git_output(project_dir, ["status", "--porcelain"])),
+        "dirty": _project_is_user_dirty(project_dir),
         "head_sha": _git_output(project_dir, ["rev-parse", "--short", "HEAD"]) or None,
         "defaults": _project_defaults(project_dir),
     }
+
+
+def _project_is_user_dirty(project_dir: Path) -> bool:
+    """True if the project tree has user-owned uncommitted state.
+
+    Excludes Otto-owned untracked runtime files (queue state, otto_logs/,
+    .worktrees/, watcher log) so the JobDialog dirty-target preflight does
+    not fire for files Otto wrote itself between enqueues
+    (W11-CRITICAL-1). Tracked-file modifications and any non-Otto
+    untracked path still mark the project dirty.
+    """
+    porcelain = _git_output(project_dir, ["status", "--porcelain"])
+    if not porcelain:
+        return False
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        # Porcelain v1 format: "XY path" with X/Y status codes in cols 0/1.
+        status = line[:2]
+        path = line[3:].strip() if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1].strip()
+        if not path:
+            return True
+        # Only the "?? path" untracked rows are eligible for the
+        # Otto-owned exemption. Modifications to a tracked Otto runtime
+        # file (theoretical — should never happen if .gitignore is right)
+        # would still flag dirty so we notice the regression.
+        if status != "??":
+            return True
+        if not _is_otto_owned_path(path):
+            return True
+    return False
+
+
+def _is_otto_owned_path(path: str) -> bool:
+    norm = path.strip()
+    while norm.startswith("./"):
+        norm = norm[2:]
+    norm = norm.rstrip("/")
+    if not norm:
+        return False
+    for pattern in _OTTO_OWNED_DIRTY_PATTERNS:
+        bare = pattern.rstrip("/").rstrip("*").rstrip("/")
+        if not bare:
+            continue
+        if fnmatch.fnmatch(norm, pattern):
+            return True
+        # Treat the bare prefix as covering descendants too — git's
+        # porcelain reports an untracked directory itself (with a
+        # trailing slash) without enumerating its children.
+        if norm == bare or norm.startswith(bare + "/"):
+            return True
+        if fnmatch.fnmatch(norm, bare):
+            return True
+    return False
 
 
 def serialize_filters(filters: MissionControlFilters) -> dict[str, Any]:

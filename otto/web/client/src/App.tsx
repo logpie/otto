@@ -1,5 +1,5 @@
 import {FormEvent, useCallback, useEffect, useMemo, useRef, useState} from "react";
-import type {ReactNode} from "react";
+import type {KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode} from "react";
 import {ApiError, api, buildQueuePayload, friendlyApiMessage, stateQueryParams} from "./api";
 import {Spinner} from "./components/Spinner";
 import {useInFlight} from "./hooks/useInFlight";
@@ -44,9 +44,17 @@ interface ResultBannerState {
 
 interface ConfirmState {
   title: string;
+  // Plain-text body. Always populated so existing callers keep working;
+  // structured callers can also provide `bodyContent` for a richer render.
   body: string;
+  // Optional rich body (scrollable list, dl, etc). Renders BELOW `body`.
+  bodyContent?: ReactNode;
   confirmLabel: string;
   tone?: "primary" | "danger";
+  // When set, the confirm button stays disabled until the user ticks the
+  // checkbox. Used for high-blast-radius bulk operations like "Land 7 tasks"
+  // (mc-audit codex-destructive-action-safety #1).
+  requireCheckbox?: {label: string} | undefined;
   onConfirm: () => Promise<void>;
 }
 
@@ -265,12 +273,24 @@ export function App() {
   const [resultBanner, setResultBanner] = useState<ResultBannerState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [confirmPending, setConfirmPending] = useState(false);
+  // Inline error rendered inside the confirm dialog when the action POST
+  // fails. Dialog STAYS OPEN so the user can read the server reason and
+  // retry / close. mc-audit codex-destructive-action-safety #6 — the prior
+  // behavior swallowed 4xx as a successful confirm and silently closed.
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [confirmCheckboxAck, setConfirmCheckboxAck] = useState(false);
   // Synchronous lock for the confirm dialog. `confirmPending` is React state
   // and updates asynchronously; a fast double-click on the modal Confirm
   // button can read `pending=false` for both clicks. The ref is checked and
   // set in the same microtask, eliminating the duplicate POST race that
   // mc-audit codex-state-management #10 documented.
   const confirmLockRef = useRef(false);
+  // Forward-ref to `refresh` so callbacks defined BEFORE refresh's
+  // useCallback can still trigger a state refresh without forming a
+  // dependency cycle. We populate the ref in a useEffect below the
+  // refresh declaration. Used by `executeConfirmedAction` after a
+  // failed action POST per mc-audit codex-destructive-action-safety #6.
+  const refreshRef = useRef<((showStatus?: boolean) => Promise<void>) | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialRoute.viewMode);
   const watcherInFlight = useInFlight();
   const refreshInFlight = useInFlight();
@@ -363,8 +383,19 @@ export function App() {
   }, []);
 
   const requestConfirm = useCallback((next: ConfirmState) => {
+    // Reset transient per-confirm state so a stale error or checkbox tick
+    // from a previous dialog does not leak into the new one.
+    setConfirmError(null);
+    setConfirmCheckboxAck(false);
     setConfirm(next);
   }, []);
+
+  const dismissConfirm = useCallback(() => {
+    if (confirmPending) return;
+    setConfirm(null);
+    setConfirmError(null);
+    setConfirmCheckboxAck(false);
+  }, [confirmPending]);
 
   const openJobDialog = useCallback(() => {
     setInspectorOpen(false);
@@ -395,18 +426,35 @@ export function App() {
     // drives the visual disabled state but cannot block a click that arrived
     // in the same React batch as the previous one.
     if (!confirm || confirmLockRef.current) return;
+    if (confirm.requireCheckbox && !confirmCheckboxAck) return;
     confirmLockRef.current = true;
     setConfirmPending(true);
+    setConfirmError(null);
     try {
       await confirm.onConfirm();
+      // Success path: clear dialog + transient state.
       setConfirm(null);
+      setConfirmError(null);
+      setConfirmCheckboxAck(false);
     } catch (error) {
-      showToast(errorMessage(error), "error");
+      // Action POST failed (4xx/5xx, network, etc). Per
+      // mc-audit codex-destructive-action-safety #6 we MUST NOT close the
+      // dialog and we MUST NOT swallow the error as success. Surface the
+      // server's reason inline in the dialog footer; user can read it,
+      // retry, or close. We also kick a state refresh so the surrounding
+      // app reflects the now-known server state (action may no longer be
+      // applicable, e.g. cancelled by another tab). `refresh` is hoisted
+      // through a ref so this callback does not depend on its identity.
+      setConfirmError(errorMessage(error));
+      const refreshFn = refreshRef.current;
+      if (refreshFn) {
+        void refreshFn(false).catch(() => {/* best-effort */});
+      }
     } finally {
       confirmLockRef.current = false;
       setConfirmPending(false);
     }
-  }, [confirm, showToast]);
+  }, [confirm, confirmCheckboxAck, showToast]);
 
   const loadLogs = useCallback(async (runId: string, reset = false) => {
     if ((inspectorMode !== "logs" || !inspectorOpen) && !reset) return;
@@ -542,6 +590,13 @@ export function App() {
       showToast(errorMessage(error), "error");
     }
   }, [filters, historyPage, historyPageSize, loadProjects, refreshDetail, selectedRunId, showToast, currentRouteState]);
+
+  // Keep `refreshRef` pointed at the latest `refresh` closure so callbacks
+  // declared BEFORE this declaration (e.g. executeConfirmedAction) can fire
+  // a refresh without forming a dependency cycle.
+  useEffect(() => {
+    refreshRef.current = refresh;
+  }, [refresh]);
 
   useEffect(() => {
     void refresh(false);
@@ -685,38 +740,65 @@ export function App() {
       return;
     }
     const actionLabel = capitalize(label || action);
+    const isMerge = action === "merge";
+    const isCleanup = action === "cleanup";
+    const isCancel = action === "cancel";
     // For merge actions we forward the SHAs from the most-recent diff
     // fetch so the server can refuse to merge code that differs from
     // what the operator reviewed (CRITICAL diff-freshness contract). The
     // confirm body is rebuilt to spell out exactly which branch+SHA is
     // about to land into which target+SHA.
-    const isMerge = action === "merge";
     const liveDiff = isMerge ? diffContent : null;
-    const mergeBody = isMerge && liveDiff
-      ? mergeConfirmationBody(liveDiff)
-      : message;
     const requestPayload: Record<string, string> = {};
     if (isMerge && liveDiff?.target_sha) requestPayload.expected_target_sha = liveDiff.target_sha;
     if (isMerge && liveDiff?.branch_sha) requestPayload.expected_branch_sha = liveDiff.branch_sha;
+    // Build per-action confirm payload. mc-audit
+    // codex-destructive-action-safety #2/#3/#4: enrich copy so the operator
+    // can identify exactly which run + branch + worktree is being changed.
+    let title: string;
+    let body: string;
+    let bodyContent: ReactNode | undefined;
+    let confirmLabel: string;
+    if (isMerge) {
+      title = "Land task";
+      body = liveDiff ? mergeConfirmationBody(liveDiff) : message;
+      bodyContent = <SingleMergeConfirmDetails detail={detail} diff={liveDiff} />;
+      confirmLabel = "Land task";
+    } else if (isCleanup) {
+      const cleanup = describeCleanupConfirm(detail);
+      title = cleanup.title;
+      body = cleanup.body;
+      confirmLabel = cleanup.confirmLabel;
+    } else if (isCancel) {
+      const cancelInfo = describeCancelConfirm(detail, runId);
+      title = cancelInfo.title;
+      body = cancelInfo.body;
+      confirmLabel = cancelInfo.confirmLabel;
+    } else {
+      title = `${actionLabel} run`;
+      body = message;
+      confirmLabel = actionLabel;
+    }
     requestConfirm({
-      title: isMerge ? "Land task" : `${actionLabel} run`,
-      body: mergeBody,
-      confirmLabel: isMerge ? "Land task" : actionLabel,
-      tone: ["cancel", "cleanup"].includes(action) ? "danger" : "primary",
+      title,
+      body,
+      bodyContent,
+      confirmLabel,
+      tone: isCancel || isCleanup ? "danger" : "primary",
+      // The onConfirm contract: throw on failure. `executeConfirmedAction`
+      // surfaces the thrown message inline in the dialog (per mc-audit
+      // codex-destructive-action-safety #6). Do NOT catch + showToast here —
+      // that would silently close the dialog on 4xx/5xx.
       onConfirm: async () => {
-        try {
-          const result = await api<ActionResult>(`/api/runs/${encodeURIComponent(runId)}/actions/${action}`, {
-            method: "POST",
-            body: JSON.stringify(requestPayload),
-          });
-          handleActionResult(result, `${action} requested`, showToast, setResultBanner);
-          if (result.refresh !== false) await refresh(true);
-        } catch (error) {
-          showToast(errorMessage(error), "error");
-        }
+        const result = await api<ActionResult>(`/api/runs/${encodeURIComponent(runId)}/actions/${action}`, {
+          method: "POST",
+          body: JSON.stringify(requestPayload),
+        });
+        handleActionResult(result, `${action} requested`, showToast, setResultBanner);
+        if (result.refresh !== false) await refresh(true);
       },
     });
-  }, [data?.landing, diffContent, refresh, requestConfirm, showToast]);
+  }, [data?.landing, detail, diffContent, refresh, requestConfirm, showToast]);
 
   const mergeReadyTasks = useCallback(async () => {
     const landing = data?.landing;
@@ -729,18 +811,25 @@ export function App() {
       showToast("No land-ready tasks", "warning");
       return;
     }
+    // mc-audit codex-destructive-action-safety #1 (CRITICAL): replace the
+    // first-five preview with a SCROLLABLE LIST of every task that will
+    // land. For N>1 require an explicit checkbox tick — a typed phrase was
+    // considered but rejected as too friction-heavy for a frequent op.
+    const readyItems = (landing?.items || []).filter((item) => item.landing_state === "ready");
+    const target = landing?.target || "main";
     requestConfirm({
       title: "Land ready tasks",
       body: landingBulkConfirmation(landing),
+      bodyContent: <BulkLandingConfirmList items={readyItems} target={target} />,
       confirmLabel: ready === 1 ? "Land 1 task" : `Land ${ready} tasks`,
+      tone: "primary",
+      requireCheckbox: ready > 1
+        ? {label: `Yes, land all ${ready} tasks above into ${target}.`}
+        : undefined,
       onConfirm: () => mergeAllInFlight.run(async () => {
-        try {
-          const result = await api<ActionResult>("/api/actions/merge-all", {method: "POST", body: "{}"});
-          handleActionResult(result, "merge all requested", showToast, setResultBanner);
-          if (result.refresh !== false) await refresh(true);
-        } catch (error) {
-          showToast(errorMessage(error), "error");
-        }
+        const result = await api<ActionResult>("/api/actions/merge-all", {method: "POST", body: "{}"});
+        handleActionResult(result, "merge all requested", showToast, setResultBanner);
+        if (result.refresh !== false) await refresh(true);
       }),
     });
   }, [data?.landing, mergeAllInFlight, refresh, requestConfirm, showToast]);
@@ -751,29 +840,35 @@ export function App() {
     // trigger button must also disable for the duration of the POST, not just
     // the modal pause. mc-audit microinteractions C2 / first-time-user #14.
     const execute = () => watcherInFlight.run(async () => {
-      try {
-        const result = await api<ActionResult | {message?: string}>(`/api/watcher/${action}`, {
-          method: "POST",
-          body: action === "start" ? JSON.stringify({concurrent: 2}) : "{}",
-        });
-        showToast(result.message || `watcher ${action} requested`);
-        await refresh(true);
-      } catch (error) {
-        showToast(errorMessage(error), "error");
-      }
+      const result = await api<ActionResult | {message?: string}>(`/api/watcher/${action}`, {
+        method: "POST",
+        body: action === "start" ? JSON.stringify({concurrent: 2}) : "{}",
+      });
+      showToast(result.message || `watcher ${action} requested`);
+      await refresh(true);
     });
     if (action === "stop") {
+      // mc-audit codex-destructive-action-safety #5: build the confirm body
+      // from live runtime counts so the operator sees the operational impact
+      // (pid, running tasks at risk, queued+backlog that will wait).
+      const stopInfo = describeWatcherStopConfirm(data);
       requestConfirm({
         title: "Stop watcher",
-        body: "Stop the queue watcher? Running tasks will be interrupted.",
+        body: stopInfo.body,
+        bodyContent: stopInfo.detail,
         confirmLabel: "Stop watcher",
         tone: "danger",
-        onConfirm: execute,
+        // For a non-empty workload, require explicit ack to avoid an Enter
+        // keystroke from the previous dialog interrupting running tasks.
+        requireCheckbox: stopInfo.requireAck
+          ? {label: "Yes, stop the watcher now."}
+          : undefined,
+        onConfirm: () => execute(),
       });
       return;
     }
     await execute();
-  }, [refresh, requestConfirm, showToast, watcherInFlight]);
+  }, [data, refresh, requestConfirm, showToast, watcherInFlight]);
 
   const loadArtifact = useCallback(async (index: number) => {
     const runId = selectedRunIdRef.current;
@@ -861,7 +956,42 @@ export function App() {
   const landing = data?.landing;
   const active = activeCount(watcher);
   const watcherHint = watcherControlHint(data);
+  // `modalOpen` is reserved for the topmost overlay (job/confirm dialogs)
+  // that needs the rest of the page to be inert. The inspector has its own
+  // inert ownership (see sidebarInert / mainSiblingsInert below) so that an
+  // open inspector with a stacked confirm/job still keeps the inspector
+  // interactive while the rest of the page goes quiet. mc-audit a11y A11Y-01,
+  // A11Y-02.
   const modalOpen = jobOpen || Boolean(confirm);
+  // Sidebar is inert whenever ANY overlay (inspector, job, confirm) is open.
+  const sidebarInert = inspectorOpen || modalOpen;
+  // The mid-layer (toolbar + main content sans inspector) is inert whenever
+  // the inspector or a top-level dialog is open. The inspector itself lives
+  // in the same layer but its container is given an `inertSiblings` flag that
+  // applies inert ONLY to its non-inspector siblings. See `MainShellInert`.
+  const mainContentInert = inspectorOpen || modalOpen;
+  // The inspector is inert when a job/confirm dialog stacks above it — the
+  // dialog has focus + Tab trap, so the inspector should not capture either.
+  const inspectorInert = modalOpen;
+
+  // Document title — announces "page" change to screen readers via SR
+  // re-read of the title bar. mc-audit a11y A11Y-09.
+  useDocumentTitle({
+    viewMode,
+    selectedRunId,
+    selectedDetail: detail,
+    inspectorOpen,
+    inspectorMode,
+  });
+
+  // aria-live region content. Updated when view, run selection, inspector
+  // open/close, or inspector tab changes. mc-audit a11y A11Y-10.
+  const liveAnnouncement = useLiveAnnouncement({
+    viewMode,
+    selectedRunId,
+    inspectorOpen,
+    inspectorMode,
+  });
 
   const createManagedProject = useCallback(async (name: string) => {
     const result = await api<ProjectMutationResponse>("/api/projects/create", {
@@ -1073,7 +1203,17 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar" aria-hidden={modalOpen ? true : undefined}>
+      {/* Skip link must be the first focusable element so a single Tab from
+          page load lands on it. Visually hidden until focused. mc-audit a11y
+          A11Y-08, K-09. */}
+      <a href="#main-content" className="skip-link" data-testid="skip-link">
+        Skip to main content
+      </a>
+      <InertEffect active={sidebarInert} selector=".sidebar" />
+      <InertEffect active={mainContentInert} selector=".main-shell-content" />
+      <InertEffect active={inspectorInert} selector="[data-mc-inspector]" />
+      <LiveRegion message={liveAnnouncement} />
+      <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">O</div>
           <div>
@@ -1091,16 +1231,16 @@ export function App() {
         <p id="watcher-action-hint" className="sidebar-hint">{watcherHint}</p>
       </aside>
 
-      <main className="workspace" aria-hidden={modalOpen ? true : undefined}>
-        <Toolbar
-          filters={filters}
-          refreshStatus={refreshStatus}
-          refreshPending={refreshInFlight.pending}
-          viewMode={viewMode}
-          onChange={updateFilters}
-          onRefresh={onManualRefresh}
-          onViewChange={navigateView}
-        />
+      <main className="workspace main-shell-content" id="main-content" tabIndex={-1}>
+          <Toolbar
+            filters={filters}
+            refreshStatus={refreshStatus}
+            refreshPending={refreshInFlight.pending}
+            viewMode={viewMode}
+            onChange={updateFilters}
+            onRefresh={onManualRefresh}
+            onViewChange={navigateView}
+          />
         {viewMode === "tasks" ? (
           <section className="mission-layout" aria-label="Mission Control task workflow">
             <div className="main-stack">
@@ -1135,30 +1275,6 @@ export function App() {
               onShowArtifacts={showArtifacts}
               onLoadArtifact={(index) => void loadArtifact(index)}
             />
-            {inspectorOpen && detail && (
-              <RunInspector
-                detail={detail}
-                mode={inspectorMode}
-                logState={logState}
-                selectedArtifactIndex={selectedArtifactIndex}
-                artifactContent={artifactContent}
-                proofArtifactIndex={proofArtifactIndex}
-                proofContent={proofContent}
-                diffContent={diffContent}
-                onShowLogs={showLogs}
-                onShowProof={showProof}
-                onShowDiff={showDiff}
-                onShowArtifacts={showArtifacts}
-                onLoadProofArtifact={(index) => void loadProofArtifact(index)}
-                onLoadArtifact={(index) => void loadArtifact(index)}
-                onRefreshDiff={() => void loadDiff()}
-                onBackToArtifacts={() => {
-                  setSelectedArtifactIndex(null);
-                  setArtifactContent(null);
-                }}
-                onClose={() => setInspectorOpen(false)}
-              />
-            )}
           </section>
         ) : (
           <section className="diagnostics-layout" aria-label="Mission Control diagnostics">
@@ -1198,34 +1314,38 @@ export function App() {
                 onShowArtifacts={showArtifacts}
                 onLoadArtifact={(index) => void loadArtifact(index)}
               />
-              {inspectorOpen && detail && (
-                <RunInspector
-                  detail={detail}
-                  mode={inspectorMode}
-                  logState={logState}
-                  selectedArtifactIndex={selectedArtifactIndex}
-                  artifactContent={artifactContent}
-                  proofArtifactIndex={proofArtifactIndex}
-                  proofContent={proofContent}
-                  diffContent={diffContent}
-                  onShowLogs={showLogs}
-                  onShowProof={showProof}
-                  onShowDiff={showDiff}
-                  onShowArtifacts={showArtifacts}
-                  onLoadProofArtifact={(index) => void loadProofArtifact(index)}
-                  onLoadArtifact={(index) => void loadArtifact(index)}
-                  onRefreshDiff={() => void loadDiff()}
-                  onBackToArtifacts={() => {
-                    setSelectedArtifactIndex(null);
-                    setArtifactContent(null);
-                  }}
-                  onClose={() => setInspectorOpen(false)}
-                />
-              )}
             </div>
           </section>
         )}
       </main>
+
+      {/* Inspector mounted as a sibling of <main>, OUTSIDE main-shell-content,
+          so the inert flag on main-shell-content doesn't propagate down into
+          the inspector. mc-audit a11y A11Y-01, A11Y-02. */}
+      {inspectorOpen && detail && (
+        <RunInspector
+          detail={detail}
+          mode={inspectorMode}
+          logState={logState}
+          selectedArtifactIndex={selectedArtifactIndex}
+          artifactContent={artifactContent}
+          proofArtifactIndex={proofArtifactIndex}
+          proofContent={proofContent}
+          diffContent={diffContent}
+          onShowLogs={showLogs}
+          onShowProof={showProof}
+          onShowDiff={showDiff}
+          onShowArtifacts={showArtifacts}
+          onLoadProofArtifact={(index) => void loadProofArtifact(index)}
+          onLoadArtifact={(index) => void loadArtifact(index)}
+          onRefreshDiff={() => void loadDiff()}
+          onBackToArtifacts={() => {
+            setSelectedArtifactIndex(null);
+            setArtifactContent(null);
+          }}
+          onClose={() => setInspectorOpen(false)}
+        />
+      )}
 
       {jobOpen && (
         <JobDialog
@@ -1244,9 +1364,10 @@ export function App() {
         <ConfirmDialog
           confirm={confirm}
           pending={confirmPending}
-          onCancel={() => {
-            if (!confirmPending) setConfirm(null);
-          }}
+          error={confirmError}
+          checkboxAck={confirmCheckboxAck}
+          onChangeCheckboxAck={setConfirmCheckboxAck}
+          onCancel={dismissConfirm}
           onConfirm={() => void executeConfirmedAction()}
         />
       )}
@@ -1469,7 +1590,7 @@ function Toolbar({filters, refreshStatus, refreshPending, viewMode, onChange, on
   }, [filters.query]);
   return (
     <header className="toolbar">
-      <div className="view-tabs" aria-label="Mission Control views">
+      <div className="view-tabs" role="group" aria-label="Mission Control views">
         <button
           className={viewMode === "tasks" ? "active" : ""}
           type="button"
@@ -1489,7 +1610,7 @@ function Toolbar({filters, refreshStatus, refreshPending, viewMode, onChange, on
           Diagnostics
         </button>
       </div>
-      <div className="filters" aria-label="Run filters">
+      <div className="filters" role="group" aria-label="Run filters">
         <label>Type
           <select data-testid="filter-type-select" value={filters.type} onChange={(event) => onChange({...filters, type: event.target.value as RunTypeFilter})}>
             <option value="all">All</option>
@@ -1547,7 +1668,8 @@ function OperationalOverview({data, lastError, resultBanner, onDismissError, onD
 }) {
   const health = workflowHealth(data);
   return (
-    <section className="overview" aria-label="Mission overview">
+    <div className="overview" role="region" aria-labelledby="missionOverviewHeading">
+      <h2 id="missionOverviewHeading" className="sr-only">Mission overview</h2>
       <div className="overview-strip">
         <OverviewMetric label="Active" value={String(health.active)} tone={health.active ? "info" : "neutral"} />
         <OverviewMetric label="Needs attention" value={String(health.needsAttention)} tone={health.needsAttention ? "danger" : "neutral"} />
@@ -1571,7 +1693,7 @@ function OperationalOverview({data, lastError, resultBanner, onDismissError, onD
         </div>
       )}
       {data?.runtime.issues.length ? <RuntimeWarnings data={data} /> : null}
-    </section>
+    </div>
   );
 }
 
@@ -1624,7 +1746,7 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
         <span className="pill" title="Runtime issues, command backlog items, and review items." aria-label={`${diagnosticCount} diagnostic items`}>{diagnosticCount}</span>
       </div>
       <div className="diagnostics-summary-body">
-        <section aria-label="Command backlog">
+        <div>
           <h3>Command Backlog</h3>
           {commands.length ? commands.map((command, index) => (
             <details className={`diagnostic-card command-${command.state}`} key={`${command.command_id || command.run_id || "command"}-${index}`}>
@@ -1637,8 +1759,8 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
               <em>{commandBacklogLine(command)}</em>
             </details>
           )) : <div className="diagnostic-empty">No pending commands.</div>}
-        </section>
-        <section aria-label="Runtime issues">
+        </div>
+        <div>
           <h3>Runtime Issues</h3>
           {issues.length ? issues.slice(0, 4).map((issue, index) => (
             <details className={`diagnostic-card severity-${issue.severity}`} key={`${issue.label}-${index}`} open={issue.severity === "error"}>
@@ -1651,8 +1773,8 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
               <em>{issue.next_action}</em>
             </details>
           )) : <div className="diagnostic-empty">No runtime issues.</div>}
-        </section>
-        <section aria-label="Landing states" className="wide-diagnostics-section">
+        </div>
+        <div className="wide-diagnostics-section">
           <h3>Review And Landing</h3>
           {visibleLanding.length ? visibleLanding.map((item) => (
             <button
@@ -1668,7 +1790,7 @@ function DiagnosticsSummary({data, onSelect}: {data: StateResponse | null; onSel
               <em>{diagnosticLandingAction(item)}</em>
             </button>
           )) : <div className="diagnostic-empty">No queued work.</div>}
-        </section>
+        </div>
       </div>
     </section>
   );
@@ -1689,10 +1811,10 @@ function MissionFocus({data, lastError, resultBanner, watcherPending, landPendin
 }) {
   const focus = missionFocus(data);
   return (
-    <section className={`mission-focus focus-${focus.tone}`} data-testid="mission-focus" aria-label="Mission focus">
+    <section className={`mission-focus focus-${focus.tone}`} data-testid="mission-focus" aria-labelledby="missionFocusHeading">
       <div className="focus-copy">
         <span>{focus.kicker}</span>
-        <h2>{focus.title}</h2>
+        <h2 id="missionFocusHeading">{focus.title}</h2>
         <p>{focus.body}</p>
       </div>
       <div className="focus-actions">
@@ -1772,7 +1894,7 @@ function TaskBoard({data, filters, selectedRunId, onSelect}: {
       </div>
       <div className="task-board">
         {columns.map((column) => (
-          <section className="task-column" key={column.stage} aria-label={column.title}>
+          <div className="task-column" key={column.stage}>
             <header>
               <span>{column.title}</span>
               <strong>{column.items.length}</strong>
@@ -1789,7 +1911,7 @@ function TaskBoard({data, filters, selectedRunId, onSelect}: {
                 <div className="task-empty">{column.empty}</div>
               )}
             </div>
-          </section>
+          </div>
         ))}
       </div>
     </section>
@@ -1919,19 +2041,27 @@ function LiveRuns({items, landing, selectedRunId, onSelect}: {
               <tr
                 key={item.run_id}
                 className={item.run_id === selectedRunId ? "selected" : ""}
-                role="button"
-                tabIndex={0}
                 aria-selected={item.run_id === selectedRunId}
-                aria-label={`Open live run ${item.display_id || item.run_id}`}
-                onClick={() => onSelect(item.run_id)}
-                onKeyDown={(event) => selectOnKeyboard(event, () => onSelect(item.run_id))}
               >
-                <td className={`status-${item.display_status}`} title={item.overlay?.reason || item.display_status}>{item.display_status.toUpperCase()}</td>
-                <td title={item.run_id}>{item.display_id || item.run_id}</td>
-                <td title={item.branch_task || ""}>{item.branch_task || "-"}</td>
+                <td className={`status-${item.display_status}`} aria-label={item.overlay?.reason || item.display_status}>{item.display_status.toUpperCase()}</td>
+                <td>
+                  <button
+                    type="button"
+                    className="row-link"
+                    data-testid={`live-row-activator-${item.run_id}`}
+                    aria-label={`Open live run ${item.display_id || item.run_id}`}
+                    title={item.run_id}
+                    onClick={() => onSelect(item.run_id)}
+                  >{item.display_id || item.run_id}</button>
+                </td>
+                <td>
+                  <span className="cell-overflow" aria-label={item.branch_task || ""}>{item.branch_task || "-"}</span>
+                </td>
                 <td>{item.elapsed_display || "-"}</td>
                 <td>{item.cost_display || "-"}</td>
-                <td title={runEventText(item, landingByTask)}>{runEventText(item, landingByTask)}</td>
+                <td>
+                  <span className="cell-overflow" aria-label={runEventText(item, landingByTask)}>{runEventText(item, landingByTask)}</span>
+                </td>
               </tr>
             )) : (
               <tr><td colSpan={6} className="empty-cell">No live runs.</td></tr>
@@ -2026,16 +2156,22 @@ function History({
               <tr
                 key={item.run_id}
                 className={item.run_id === selectedRunId ? "selected" : ""}
-                role="button"
-                tabIndex={0}
                 aria-selected={item.run_id === selectedRunId}
-                aria-label={`Open history run ${item.queue_task_id || item.run_id}`}
-                onClick={() => onSelect(item.run_id)}
-                onKeyDown={(event) => selectOnKeyboard(event, () => onSelect(item.run_id))}
               >
                 <td className={`status-${(item.terminal_outcome || item.status || "").toLowerCase()}`}>{item.outcome_display || "-"}</td>
-                <td title={item.run_id}>{item.queue_task_id || item.run_id}</td>
-                <td title={item.summary || ""}>{item.summary || "-"}</td>
+                <td>
+                  <button
+                    type="button"
+                    className="row-link"
+                    data-testid={`history-row-activator-${item.run_id}`}
+                    aria-label={`Open history run ${item.queue_task_id || item.run_id}`}
+                    title={item.run_id}
+                    onClick={() => onSelect(item.run_id)}
+                  >{item.queue_task_id || item.run_id}</button>
+                </td>
+                <td>
+                  <span className="cell-overflow" aria-label={item.summary || ""}>{item.summary || "-"}</span>
+                </td>
                 <td>{item.duration_display || "-"}</td>
                 <td>{item.cost_display || "-"}</td>
               </tr>
@@ -2186,7 +2322,7 @@ function RunDetailPanel({detail, landing, onRunAction, onShowProof, onShowLogs, 
             </details>
             <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
           </div>
-          <div className="detail-inspector-actions" aria-label="Evidence shortcuts">
+          <div className="detail-inspector-actions" role="group" aria-label="Evidence shortcuts">
             <button className="primary" type="button" data-testid="open-proof-button" onClick={onShowProof}>Review result</button>
             <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Code changes</button>
             <button type="button" data-testid="open-logs-button" onClick={onShowLogs}>Logs</button>
@@ -2222,6 +2358,45 @@ function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactCo
   onClose: () => void;
 }) {
   const inspectorRef = useDialogFocus<HTMLElement>(onClose, false);
+  // WAI-ARIA tablist pattern: roving tabindex + arrow keys + Home/End. Tabs
+  // that are disabled (Code changes, when diff isn't available) skip in
+  // arrow rotation. mc-audit a11y A11Y-03, K-04.
+  const tabModes = useMemo<InspectorMode[]>(() => ["proof", "diff", "logs", "artifacts"], []);
+  const tabHandlers: Record<InspectorMode, () => void> = {
+    proof: onShowProof,
+    diff: onShowDiff,
+    logs: onShowLogs,
+    artifacts: onShowArtifacts,
+  };
+  const tabLabels: Record<InspectorMode, string> = {
+    proof: "Result",
+    diff: "Code changes",
+    logs: "Logs",
+    artifacts: "Artifacts",
+  };
+  const tabDisabled = (m: InspectorMode): boolean => m === "diff" && !canShowDiff(detail);
+  const onTabKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const key = event.key;
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(key)) return;
+    event.preventDefault();
+    const enabled = tabModes.filter((m) => !tabDisabled(m));
+    if (!enabled.length) return;
+    const currentIndex = enabled.indexOf(mode);
+    let nextIndex = 0;
+    if (key === "Home") nextIndex = 0;
+    else if (key === "End") nextIndex = enabled.length - 1;
+    else if (key === "ArrowLeft") nextIndex = ((currentIndex < 0 ? 0 : currentIndex) - 1 + enabled.length) % enabled.length;
+    else if (key === "ArrowRight") nextIndex = ((currentIndex < 0 ? -1 : currentIndex) + 1) % enabled.length;
+    const nextMode = enabled[nextIndex];
+    if (!nextMode) return;
+    tabHandlers[nextMode]();
+    window.requestAnimationFrame(() => {
+      const root = inspectorRef.current;
+      if (!root) return;
+      const target = root.querySelector<HTMLButtonElement>(`[data-tab-id="${nextMode}"]`);
+      target?.focus();
+    });
+  };
   return (
     <section
       ref={inspectorRef}
@@ -2230,6 +2405,7 @@ function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactCo
       aria-modal="true"
       aria-labelledby="runInspectorHeading"
       data-testid="run-inspector"
+      data-mc-inspector="true"
       tabIndex={-1}
     >
       <div className="run-inspector-heading">
@@ -2237,15 +2413,38 @@ function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactCo
           <h2 id="runInspectorHeading">{detail.title || detail.run_id}</h2>
           <p>{detailStatusLabel(detail)} review</p>
         </div>
-        <div className="detail-tabs" role="tablist" aria-label="Evidence view">
-          <button className={`tab ${mode === "proof" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "proof"} onClick={onShowProof}>Result</button>
-          <button className={`tab ${mode === "diff" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "diff"} disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Code changes</button>
-          <button className={`tab ${mode === "logs" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "logs"} onClick={onShowLogs}>Logs</button>
-          <button className={`tab ${mode === "artifacts" ? "active" : ""}`} type="button" role="tab" aria-selected={mode === "artifacts"} onClick={onShowArtifacts}>Artifacts</button>
+        <div className="detail-tabs" role="tablist" aria-label="Evidence view" onKeyDown={onTabKeyDown}>
+          {tabModes.map((m) => {
+            const isSelected = mode === m;
+            const isDisabled = tabDisabled(m);
+            return (
+              <button
+                key={m}
+                id={`run-inspector-tab-${m}`}
+                data-tab-id={m}
+                className={`tab ${isSelected ? "active" : ""}`}
+                type="button"
+                role="tab"
+                aria-selected={isSelected}
+                aria-controls="run-inspector-panel"
+                tabIndex={isSelected ? 0 : -1}
+                disabled={isDisabled}
+                title={isDisabled ? diffDisabledReason(detail) : ""}
+                onClick={tabHandlers[m]}
+              >
+                {tabLabels[m]}
+              </button>
+            );
+          })}
         </div>
         <button type="button" data-testid="close-inspector-button" onClick={onClose}>Close inspector</button>
       </div>
-      <div className="run-inspector-body">
+      <div
+        className="run-inspector-body"
+        id="run-inspector-panel"
+        role="tabpanel"
+        aria-labelledby={`run-inspector-tab-${mode}`}
+      >
         {mode === "proof" ? (
           <ProofPane detail={detail} proofArtifactIndex={proofArtifactIndex} proofContent={proofContent} onShowDiff={onShowDiff} onLoadProofArtifact={onLoadProofArtifact} />
         ) : mode === "diff" ? (
@@ -2371,7 +2570,7 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
   const proofChecks = packet.failure ? packet.checks.filter((check) => check.key !== "run" && check.key !== "landing") : packet.checks;
   return (
     <div className="proof-pane" data-testid="proof-pane">
-      <section className="proof-summary" aria-labelledby="proofHeading">
+      <div className="proof-summary" aria-labelledby="proofHeading">
         <div>
           <span>{packet.readiness.label}</span>
           <h3 id="proofHeading">Proof of work</h3>
@@ -2382,8 +2581,8 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
           <ReviewMetric label="Changes" value={packet.changes.file_count ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}` : "-"} />
           <ReviewMetric label="Evidence" value={evidenceLine(packet)} />
         </div>
-      </section>
-      <section className="proof-section" aria-labelledby="proofNextHeading">
+      </div>
+      <div className="proof-section" aria-labelledby="proofNextHeading">
         <h3 id="proofNextHeading">Next action</h3>
         <p>{packet.readiness.next_step}</p>
         <div className="proof-report-actions">
@@ -2393,14 +2592,14 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
             <span>No HTML proof report is linked for this run.</span>
           )}
         </div>
-      </section>
+      </div>
       {packet.failure && (
-        <section className="proof-section proof-failure" aria-labelledby="proofFailureHeading">
+        <div className="proof-section proof-failure" aria-labelledby="proofFailureHeading">
           <h3 id="proofFailureHeading">What failed</h3>
           <FailureSummary failure={packet.failure} showExcerpt />
-        </section>
+        </div>
       )}
-      <section className="proof-section" aria-labelledby="proofChecksHeading">
+      <div className="proof-section" aria-labelledby="proofChecksHeading">
         <h3 id="proofChecksHeading">Verification</h3>
         {proofChecks.length ? (
           <div className="proof-checks">
@@ -2417,8 +2616,8 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
         ) : (
           <p>No additional checks were recorded before the task failed.</p>
         )}
-      </section>
-      <section className="proof-section" aria-labelledby="proofStoriesHeading">
+      </div>
+      <div className="proof-section" aria-labelledby="proofStoriesHeading">
         <h3 id="proofStoriesHeading">Stories tested</h3>
         {stories.length ? (
           <div className="proof-stories" data-testid="proof-story-list">
@@ -2436,8 +2635,8 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
         ) : (
           <p>No per-story certification details were recorded. Open the HTML report or summary artifact if available.</p>
         )}
-      </section>
-      <section className="proof-section" aria-labelledby="proofFilesHeading">
+      </div>
+      <div className="proof-section" aria-labelledby="proofFilesHeading">
         <h3 id="proofFilesHeading">Changed files</h3>
         {changedFiles.length ? (
           <ul className="proof-files">
@@ -2447,8 +2646,8 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
         ) : (
           <p>No changed files reported yet.</p>
         )}
-      </section>
-      <section className="proof-section" aria-labelledby="proofDiffHeading">
+      </div>
+      <div className="proof-section" aria-labelledby="proofDiffHeading">
         <h3 id="proofDiffHeading">Code diff</h3>
         {packet.changes.diff_error ? (
           <p>{formatTechnicalIssue(packet.changes.diff_error)}</p>
@@ -2460,8 +2659,8 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
         ) : (
           <p>No code diff is available for this run yet.</p>
         )}
-      </section>
-      <section className="proof-section" aria-labelledby="proofArtifactsHeading">
+      </div>
+      <div className="proof-section" aria-labelledby="proofArtifactsHeading">
         <h3 id="proofArtifactsHeading">Evidence artifacts</h3>
         {evidence.length ? (
           <div className="proof-artifacts">
@@ -2475,8 +2674,8 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
         ) : (
           <p>No readable evidence artifacts are attached.</p>
         )}
-      </section>
-      <section className="proof-section proof-content" aria-labelledby="proofContentHeading">
+      </div>
+      <div className="proof-section proof-content" aria-labelledby="proofContentHeading">
         <div className="proof-content-heading">
           <div>
             <h3 id="proofContentHeading">Evidence content</h3>
@@ -2487,7 +2686,7 @@ function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoad
         <pre className={proofContentIsLog ? "log-content" : ""} tabIndex={0} aria-label="Selected evidence content">
           {compact.text ? (proofContentIsLog ? renderLogText(compact.text) : compact.text) : "Loading evidence content..."}
         </pre>
-      </section>
+      </div>
     </div>
   );
 }
@@ -2672,7 +2871,7 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
     ? `${readableEvidence.length}/${packet.evidence.length}`
     : `${packet.evidence.length}`;
   return (
-    <section className={`review-packet review-${packet.readiness.tone || "info"}`} aria-label="Review packet">
+    <div className={`review-packet review-${packet.readiness.tone || "info"}`}>
       <div className="review-head">
         <div>
           <span className="review-kicker">{packet.readiness.label}</span>
@@ -2755,7 +2954,7 @@ function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
           View all evidence
         </button>
       )}
-    </section>
+    </div>
   );
 }
 
@@ -2887,7 +3086,7 @@ function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]
   return (
     <details className="advanced-actions">
       <summary>Advanced run actions</summary>
-      <div className="action-bar" aria-label="Advanced run actions">
+      <div className="action-bar" role="group" aria-label="Advanced run actions">
         {visible.map((action) => {
           const name = actionName(action.key);
           const disabled = !action.enabled || (action.key === "m" && mergeBlocked);
@@ -2964,6 +3163,14 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
   // jargon. mc-audit codex-first-time-user.md #2.
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const advancedRef = useRef<HTMLDetailsElement | null>(null);
+  // mc-audit codex-destructive-action-safety #7: cost-incurring jobs queue
+  // immediately on Submit and the watcher dispatches with no cancel window.
+  // Add a 3-second grace banner with a [Cancel] button between submit and
+  // the actual POST. The form/dialog stay editable during the grace period.
+  const [pendingSeconds, setPendingSeconds] = useState<number | null>(null);
+  const pendingTimerRef = useRef<number | null>(null);
+  const pendingTickRef = useRef<number | null>(null);
+  const pendingCancelledRef = useRef<boolean>(false);
   const dialogRef = useDialogFocus<HTMLFormElement>(onClose, submitting);
   const targetNeedsConfirmation = Boolean(project?.dirty);
   // ALL commands now require a non-empty intent (or focus). Codex flagged
@@ -3050,8 +3257,20 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
   const dirtyPreview = dirtyFiles.slice(0, 5);
   const dirtyOverflow = Math.max(0, dirtyFiles.length - dirtyPreview.length);
 
+  // mc-audit live W11-CRITICAL-2: clicking the backdrop dismisses the dialog
+  // (standard modal UX). Without this, a dialog whose Submit was silently
+  // rejected (e.g. dirty-target guard) appears closed-but-stuck — the
+  // backdrop intercepts every subsequent page click. Skip dismissal while a
+  // POST is mid-flight or a grace window is counting down so the user can
+  // never lose an in-flight job by missing the dialog and hitting backdrop.
+  const onBackdropClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (submitting) return;
+    onClose();
+  };
+
   return (
-    <div className="modal-backdrop" role="presentation">
+    <div className="modal-backdrop" role="presentation" onClick={onBackdropClick}>
       <form
         ref={dialogRef}
         className="job-dialog"
@@ -3087,7 +3306,7 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
           </select>
           <span className="field-hint" data-testid="job-command-help">{commandHelpMap[command]}</span>
         </label>
-        <div className={`target-guard ${project?.dirty ? "target-dirty" : ""}`} aria-label="Target project">
+        <div className={`target-guard ${project?.dirty ? "target-dirty" : ""}`} role="group" aria-label="Target project">
           <strong>Target project</strong>
           <dl>
             <dt>Path</dt><dd title={project?.path || ""}>{project?.path || "loading"}</dd>
@@ -3345,17 +3564,31 @@ function titleCase(value: string): string {
   return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
 
-function ConfirmDialog({confirm, pending, onCancel, onConfirm}: {
+function ConfirmDialog({confirm, pending, error, checkboxAck, onChangeCheckboxAck, onCancel, onConfirm}: {
   confirm: ConfirmState;
   pending: boolean;
+  error: string | null;
+  checkboxAck: boolean;
+  onChangeCheckboxAck: (next: boolean) => void;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const confirmClass = confirm.tone === "danger" ? "danger-button" : "primary";
   const dialogRef = useDialogFocus<HTMLDivElement>(onCancel, pending);
+  const blockedByCheckbox = Boolean(confirm.requireCheckbox) && !checkboxAck;
+  const submitDisabled = pending || blockedByCheckbox;
+
+  // mc-audit live W11-CRITICAL-2: clicking the backdrop dismisses the
+  // confirm dialog (matches Escape behaviour). Skip while a confirm POST is
+  // pending so a stray click can never abandon an in-flight action.
+  const onBackdropClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (pending) return;
+    onCancel();
+  };
 
   return (
-    <div className="modal-backdrop" role="presentation">
+    <div className="modal-backdrop" role="presentation" onClick={onBackdropClick}>
       <div
         ref={dialogRef}
         className="confirm-dialog"
@@ -3369,10 +3602,44 @@ function ConfirmDialog({confirm, pending, onCancel, onConfirm}: {
           <h2 id="confirmHeading">{confirm.title}</h2>
           <button type="button" disabled={pending} onClick={onCancel}>Close</button>
         </header>
-        <p id="confirmBody">{confirm.body}</p>
+        <div id="confirmBody" className="confirm-body">
+          {confirm.body && <p className="confirm-body-text">{confirm.body}</p>}
+          {confirm.bodyContent}
+        </div>
+        {confirm.requireCheckbox && (
+          <label className="confirm-ack" data-testid="confirm-dialog-ack">
+            <input
+              type="checkbox"
+              data-testid="confirm-dialog-ack-checkbox"
+              checked={checkboxAck}
+              disabled={pending}
+              onChange={(event) => onChangeCheckboxAck(event.target.checked)}
+            />
+            <span>{confirm.requireCheckbox.label}</span>
+          </label>
+        )}
+        {error && (
+          <div
+            className="confirm-error"
+            data-testid="confirm-dialog-error"
+            role="alert"
+            aria-live="assertive"
+          >
+            <strong>Action did not complete</strong>
+            <span>{error}</span>
+          </div>
+        )}
         <footer>
           <button type="button" disabled={pending} onClick={onCancel}>Cancel</button>
-          <button className={confirmClass} type="button" data-testid="confirm-dialog-confirm-button" disabled={pending} aria-busy={pending} onClick={onConfirm}>
+          <button
+            className={confirmClass}
+            type="button"
+            data-testid="confirm-dialog-confirm-button"
+            disabled={submitDisabled}
+            aria-busy={pending}
+            title={blockedByCheckbox ? "Tick the acknowledgement above to enable this action." : undefined}
+            onClick={onConfirm}
+          >
             {pending ? <><Spinner /> Working…</> : confirm.confirmLabel}
           </button>
         </footer>
@@ -3794,6 +4061,104 @@ function selectOnKeyboard(event: {key: string; preventDefault: () => void}, onSe
   onSelect();
 }
 
+/**
+ * Toggle the `inert` attribute on every element matching `selector`. Used
+ * to make sidebars / main content / inspector quiet for AT and keyboard
+ * users when an overlay (inspector / job dialog / confirm dialog) takes
+ * focus. Replacing the previous `aria-hidden` toggle pattern, which broke
+ * when the inspector itself was a child of `<main>` (mc-audit a11y A11Y-01,
+ * A11Y-02). `inert` removes the entire subtree from focus, click, and AT
+ * tree — exactly the semantics we want.
+ */
+function InertEffect({active, selector}: {active: boolean; selector: string}) {
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector));
+    if (!nodes.length) return;
+    const previous = nodes.map((node) => node.hasAttribute("inert"));
+    if (active) {
+      for (const node of nodes) node.setAttribute("inert", "");
+    } else {
+      for (const node of nodes) node.removeAttribute("inert");
+    }
+    return () => {
+      nodes.forEach((node, idx) => {
+        if (previous[idx]) node.setAttribute("inert", "");
+        else node.removeAttribute("inert");
+      });
+    };
+  }, [active, selector]);
+  return null;
+}
+
+/**
+ * Polite singleton aria-live region. mc-audit a11y A11Y-10.
+ */
+function LiveRegion({message}: {message: string}) {
+  return (
+    <div
+      id="mc-live-region"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      className="sr-only"
+      data-testid="mc-live-region"
+    >
+      {message}
+    </div>
+  );
+}
+
+/**
+ * Per-view document.title. mc-audit a11y A11Y-09.
+ */
+function useDocumentTitle({viewMode, selectedRunId, selectedDetail, inspectorOpen, inspectorMode}: {
+  viewMode: ViewMode;
+  selectedRunId: string | null;
+  selectedDetail: RunDetail | null;
+  inspectorOpen: boolean;
+  inspectorMode: InspectorMode;
+}) {
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const base = "Otto Mission Control";
+    let prefix = viewMode === "diagnostics" ? "Diagnostics" : "Tasks";
+    if (selectedRunId && selectedDetail) {
+      const intent = selectedDetail.title || selectedDetail.run_id;
+      const truncated = intent.length > 60 ? `${intent.slice(0, 57)}...` : intent;
+      prefix = truncated;
+      if (inspectorOpen) {
+        const tabLabel = {proof: "Result", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
+        prefix = `${truncated} - ${tabLabel}`;
+      }
+    }
+    document.title = `${prefix} · ${base}`;
+  }, [viewMode, selectedRunId, selectedDetail, inspectorOpen, inspectorMode]);
+}
+
+/**
+ * Live-region message generator. mc-audit a11y A11Y-10.
+ */
+function useLiveAnnouncement({viewMode, selectedRunId, inspectorOpen, inspectorMode}: {
+  viewMode: ViewMode;
+  selectedRunId: string | null;
+  inspectorOpen: boolean;
+  inspectorMode: InspectorMode;
+}): string {
+  return useMemo(() => {
+    const parts: string[] = [];
+    parts.push(`Viewing ${viewMode === "diagnostics" ? "Diagnostics" : "Tasks"}`);
+    if (selectedRunId) {
+      parts.push(`run ${selectedRunId}`);
+      if (inspectorOpen) {
+        const tabLabel = {proof: "Result", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
+        parts.push(`${tabLabel} tab`);
+      }
+    }
+    return parts.join(", ");
+  }, [viewMode, selectedRunId, inspectorOpen, inspectorMode]);
+}
+
 function useDialogFocus<T extends HTMLElement>(onCancel: () => void, disabled: boolean) {
   const dialogRef = useRef<T | null>(null);
   const onCancelRef = useRef(onCancel);
@@ -3965,6 +4330,199 @@ function mergeConfirmationBody(diff: DiffResponse): string {
   const targetPart = targetSha ? `${target} @ ${targetSha}` : target;
   const lead = `Land branch ${branchPart} into target ${targetPart}?`;
   return `${lead} This is the diff you reviewed.`;
+}
+
+// --------------------------------------------------------------------------
+// Destructive-action confirm helpers (mc-audit Phase 4 cluster H).
+// Findings closed:
+//   #1 Land all ready: scrollable enumeration + checkbox gate
+//   #2 Single merge: task id, branch->target, file count, files preview
+//   #3 Cleanup: status-specific irreversible copy, mentions worktree
+//   #4 Cancel: task id + SIGTERM 30s + work-loss warning
+//   #5 Watcher stop: pid + running/queued/backlog counts
+// --------------------------------------------------------------------------
+
+function BulkLandingConfirmList({items, target}: {
+  items: LandingItem[];
+  target: string;
+}) {
+  if (!items.length) return null;
+  return (
+    <div
+      className="confirm-bulk-list"
+      data-testid="confirm-bulk-list"
+      role="region"
+      aria-label="Tasks to land"
+    >
+      <ul>
+        {items.map((item) => {
+          const branch = item.branch || "(no branch)";
+          const fileCount = Number(item.changed_file_count || 0);
+          const previewFiles = (item.changed_files || []).slice(0, 3);
+          const overflow = Math.max(0, fileCount - previewFiles.length);
+          return (
+            <li
+              key={item.task_id}
+              className="confirm-bulk-row"
+              data-testid={`confirm-bulk-row-${item.task_id}`}
+            >
+              <div className="confirm-bulk-row-head">
+                <strong>{item.task_id}</strong>
+                <span>
+                  <code>{branch}</code> &rarr; <code>{target}</code>
+                </span>
+                <span className="confirm-bulk-row-count">
+                  {fileCount} file{fileCount === 1 ? "" : "s"}
+                </span>
+              </div>
+              {previewFiles.length > 0 && (
+                <ul className="confirm-bulk-row-files">
+                  {previewFiles.map((path) => <li key={path}><code>{path}</code></li>)}
+                  {overflow > 0 && <li className="muted">+{overflow} more</li>}
+                </ul>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function SingleMergeConfirmDetails({detail, diff}: {
+  detail: RunDetail | null;
+  diff: DiffResponse | null;
+}) {
+  if (!detail) return null;
+  const packet = detail.review_packet;
+  const taskId = detail.queue_task_id || detail.run_id;
+  const branch = packet.changes.branch || diff?.branch || detail.branch || "(no branch)";
+  const target = packet.changes.target || diff?.target || "main";
+  const fileCount = Number(packet.changes.file_count || diff?.file_count || 0);
+  const files = (packet.changes.files && packet.changes.files.length
+    ? packet.changes.files
+    : diff?.files || []).slice(0, 5);
+  const overflow = Math.max(0, fileCount - files.length);
+  return (
+    <div
+      className="confirm-merge-details"
+      data-testid="confirm-merge-details"
+      role="region"
+      aria-label="Merge details"
+    >
+      <dl>
+        <dt>Task</dt>
+        <dd data-testid="confirm-merge-task-id"><code>{taskId}</code></dd>
+        <dt>Branch</dt>
+        <dd>
+          <code>{branch}</code> &rarr; <code>{target}</code>
+        </dd>
+        <dt>Files</dt>
+        <dd data-testid="confirm-merge-file-count">{fileCount} file{fileCount === 1 ? "" : "s"}</dd>
+      </dl>
+      {files.length > 0 && (
+        <ul className="confirm-merge-files" data-testid="confirm-merge-files">
+          {files.map((path) => <li key={path}><code>{path}</code></li>)}
+          {overflow > 0 && <li className="muted">+{overflow} more</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function describeCleanupConfirm(detail: RunDetail | null): {
+  title: string;
+  body: string;
+  confirmLabel: string;
+} {
+  if (!detail) {
+    return {
+      title: "Cleanup",
+      body: "Remove this run record? This cannot be undone from Mission Control.",
+      confirmLabel: "Cleanup",
+    };
+  }
+  const status = String(detail.status || "").toLowerCase();
+  const queuedStatuses = new Set(["queued", "pending", "waiting", "starting"]);
+  const isQueued = queuedStatuses.has(status);
+  if (isQueued) {
+    const taskId = detail.queue_task_id || detail.run_id;
+    return {
+      title: "Remove queued task",
+      body: `Remove queued task ${taskId} from the queue? It will not run; this cannot be undone from Mission Control.`,
+      confirmLabel: "Remove queued task",
+    };
+  }
+  const worktreeName = (detail.worktree || "").split("/").pop() || detail.worktree || detail.run_id;
+  return {
+    title: "Remove run + cleanup",
+    body: `Remove run record and cleanup worktree ${worktreeName}? This cannot be undone from Mission Control.`,
+    confirmLabel: "Remove and cleanup",
+  };
+}
+
+function describeCancelConfirm(detail: RunDetail | null, runId: string): {
+  title: string;
+  body: string;
+  confirmLabel: string;
+} {
+  const taskId = detail?.queue_task_id || runId;
+  const body = `Cancel task ${taskId}. Otto will signal the agent to stop. If it doesn't acknowledge within 30s, Mission Control will terminate the process. Work in progress may be lost.`;
+  return {
+    title: "Cancel task",
+    body,
+    confirmLabel: "Cancel task",
+  };
+}
+
+function describeWatcherStopConfirm(data: StateResponse | null): {
+  body: string;
+  detail: ReactNode;
+  requireAck: boolean;
+} {
+  if (!data) {
+    return {
+      body: "Stop the queue watcher?",
+      detail: null,
+      requireAck: false,
+    };
+  }
+  const counts = data.watcher.counts || {};
+  const pid = data.watcher.health.blocking_pid || data.watcher.health.watcher_pid;
+  const running = Number(counts.running || 0) + Number(counts.terminating || 0);
+  const queued = Number(counts.queued || 0);
+  const backlog = Number(data.runtime.command_backlog.pending || 0)
+    + Number(data.runtime.command_backlog.processing || 0);
+  const pidText = pid ? `pid ${pid}` : "process";
+  const body = `Stop watcher (${pidText}).`;
+  const requireAck = running > 0 || queued > 0 || backlog > 0;
+  const detail = (
+    <ul
+      className="confirm-watcher-stop"
+      data-testid="confirm-watcher-stop-detail"
+      aria-label="Watcher stop impact"
+    >
+      <li>
+        <strong data-testid="confirm-watcher-stop-pid">{pidText}</strong>
+      </li>
+      <li>
+        <span data-testid="confirm-watcher-stop-running">
+          {running} running task{running === 1 ? "" : "s"} may be interrupted.
+        </span>
+      </li>
+      <li>
+        <span data-testid="confirm-watcher-stop-queued">
+          {queued} queued task{queued === 1 ? "" : "s"}
+        </span>
+        {" and "}
+        <span data-testid="confirm-watcher-stop-backlog">
+          {backlog} pending command{backlog === 1 ? "" : "s"}
+        </span>
+        {" will wait until you restart the watcher."}
+      </li>
+    </ul>
+  );
+  return {body, detail, requireAck};
 }
 
 function proofLine(item: LandingItem): string {

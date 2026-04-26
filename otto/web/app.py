@@ -18,6 +18,7 @@ from otto.mission_control.service import (
     MissionControlServiceError,
     filters_from_params,
 )
+from otto.setup_gitignore import OTTO_PATTERNS
 from otto.web.bundle import verify_bundle_freshness
 
 
@@ -278,10 +279,12 @@ def _create_managed_project(root: Path, name: str) -> Path:
         _run_git(path, "config", "user.name", "Otto")
         (path / "README.md").write_text(f"# {name.strip()}\n\nManaged by Otto.\n", encoding="utf-8")
         (path / "otto.yaml").write_text("default_branch: main\nqueue:\n  bookkeeping_files: []\n", encoding="utf-8")
-        (path / ".gitignore").write_text(
-            "\n".join(["otto_logs/", ".worktrees/", ".otto-queue*.lock"]) + "\n",
-            encoding="utf-8",
-        )
+        # Cover all Otto runtime artifacts so untracked queue/state files
+        # don't dirty the project tree on first enqueue (W11-CRITICAL-1).
+        # Single source of truth is otto.setup_gitignore.OTTO_PATTERNS so a
+        # new runtime artifact only needs to be added in one place.
+        gitignore_lines = ["# Otto runtime (auto-managed; safe to edit comments)", *OTTO_PATTERNS]
+        (path / ".gitignore").write_text("\n".join(gitignore_lines) + "\n", encoding="utf-8")
         _run_git(path, "add", ".")
         _run_git(path, "commit", "-q", "-m", "Initial Otto project")
     except Exception as exc:

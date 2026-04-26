@@ -1,19 +1,118 @@
 :root {
-  color-scheme: light;
+  /* `light dark` lets the OS nudge UA-managed UI (form widgets, scrollbars)
+     into a system-appropriate scheme even though the explicit token set
+     below is light-only for now. mc-audit a11y A11Y-22. A full dark token
+     set is a future cluster — at minimum this stops Otto from actively
+     rejecting the user's preference. */
+  color-scheme: light dark;
   --bg: #f7f8fa;
   --surface: #ffffff;
   --surface-alt: #f4f7fb;
   --line: #d5dce6;
   --text: #18202a;
-  --muted: #647180;
+  /* Darkened muted/amber/magenta tokens to clear AA on every surface tint
+     used in the app (white, --surface-alt, #f8fafc, #eef1f5). mc-audit
+     a11y A11Y-12, A11Y-13, visual-coherence #11. */
+  --muted: #4b5563;
   --accent: #0f766e;
   --accent-strong: #115e59;
   --blue: #1d4ed8;
   --green: #15803d;
-  --amber: #a16207;
+  --amber: #854d0e;
   --red: #b91c1c;
-  --magenta: #a21caf;
+  --magenta: #86198f;
   --shadow: 0 10px 30px rgba(24, 32, 42, 0.09);
+  /* Focus-ring color: #1d4ed8 (deep blue) provides ≥3:1 contrast against
+     every primary CTA background in the app (--accent #0f766e, --red #b91c1c,
+     and white). Outline-offset keeps the ring visible against tinted
+     backgrounds. mc-audit a11y K-15. */
+  --focus-ring: #1d4ed8;
+}
+
+@media (prefers-color-scheme: dark) {
+  /*
+   * Minimum dark-mode acknowledgement (mc-audit a11y A11Y-22). The full
+   * Otto color system has not yet been authored for dark mode; the goal
+   * here is simply to make sure the app remains legible if the OS forces
+   * dark UA defaults onto our system-fallback layers (form fields, etc.).
+   * Backgrounds stay light so contrast tokens above remain valid. A
+   * proper dark mode is tracked as a future cluster.
+   */
+  :root {
+    /* Keep tokens largely the same but let the body background follow OS;
+       form fields will pick up `color-scheme: light dark`. */
+    color-scheme: light dark;
+  }
+}
+
+/* Visually-hidden helper used by SR-only labels and the skip link
+   default state. Does NOT remove the element from the AT tree. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skip-link — first focusable element in the tree, hidden until focused.
+   Per mc-audit a11y A11Y-08 / K-09. */
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 8px;
+  padding: 10px 14px;
+  background: var(--surface);
+  color: var(--text);
+  border: 2px solid var(--focus-ring);
+  border-radius: 6px;
+  font-weight: 600;
+  text-decoration: none;
+  z-index: 1000;
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  top: 8px;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Cell-overflow helper: replaces previous `title=`-on-truncated-cell
+   pattern. Visually clips overflow with ellipsis but exposes the full
+   text via aria-label (set by the React component). mc-audit a11y A11Y-23. */
+.cell-overflow {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+/* Row-link button used inside <td> cells. Made to look like inline text so
+   the visual rhythm of the table is preserved while screen readers hear a
+   real activator. mc-audit a11y A11Y-04. */
+.row-link {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline dotted transparent;
+  text-underline-offset: 2px;
+}
+
+.row-link:hover:not(:disabled),
+.row-link:focus-visible {
+  text-decoration-color: var(--accent);
 }
 
 * {
@@ -101,13 +200,28 @@ a:active {
   }
 }
 
+/* Focus-ring rules. Use --focus-ring and a generous offset so the ring is
+   visible against EVERY background in the app — including the primary CTA
+   (--accent #0f766e) which is dark teal. mc-audit a11y K-15. The double-
+   layer outline (white inner + colored outer) makes the ring visible
+   against both light and dark backgrounds without an extra DOM node. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.95);
+}
+
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
-[tabindex]:focus-visible {
-  outline: 3px solid #2563eb;
+[tabindex]:focus-visible,
+.row-link:focus-visible {
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
+  /* The white halo layer gives the focus ring 3:1 contrast against the
+     dark teal primary CTA without altering layout. */
+  box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.95);
 }
 
 .primary {
@@ -1683,6 +1797,12 @@ tbody tr.selected {
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
   background: #fbfcfd;
+  /* Defensive stacking: keep the heading (and its tablist) above the
+     body's <pre> log/diff content. A stacking context change in
+     `.run-inspector-body` (or any descendant) cannot push the body's
+     content over the tab buttons. mc-audit W1-CRITICAL-1. */
+  position: relative;
+  z-index: 1;
 }
 
 .run-inspector-heading h2,
@@ -1705,6 +1825,12 @@ tbody tr.selected {
   min-height: 0;
   display: grid;
   overflow: hidden;
+  /* Anchor the body in its own stacking layer below the heading. Pairs
+     with the `position: relative; z-index: 1` on `.run-inspector-heading`
+     so the body's <pre> can never overlap the tab toolbar even if a
+     descendant introduces a new stacking context. mc-audit W1-CRITICAL-1. */
+  position: relative;
+  z-index: 0;
 }
 
 .run-inspector .log-viewer,
@@ -2917,4 +3043,72 @@ tbody tr.selected {
   margin: 0;
   color: var(--muted);
   font-size: 13px;
+}
+
+/*
+ * Touch-target enlargement for mobile viewports. WCAG 2.2 AA requires
+ * 24×24 minimum, AAA requires 44×44; iOS HIG recommends 44×44. mc-audit
+ * a11y A11Y-25. We bump primary interactive controls to ≥44px on
+ * <=768px viewports so single-tap precision is reliable on phones.
+ */
+@media (max-width: 768px) {
+  button,
+  select,
+  input,
+  textarea,
+  .row-link {
+    min-height: 44px;
+  }
+
+  .view-tabs button {
+    min-height: 44px;
+  }
+
+  /* Inline icon-style helpers (job-summary edit, etc.) get a slightly
+     smaller floor so they don't overwhelm the layout but still hit AA. */
+  .job-summary-edit {
+    min-height: 36px;
+  }
+}
+
+/*
+ * Honor `prefers-reduced-motion` globally. We had a `.mc-spinner` carve-out
+ * earlier in the file; this is the catch-all for any `transition` /
+ * `animation` we might add later (mc-audit a11y A11Y-21). Spinner exception
+ * stays — a slowed spinner is more useful than a still one.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .mc-spinner {
+    animation-duration: 1.6s !important;
+  }
+}
+
+/*
+ * The main-shell-content wrapper needs `inert` to actually disable its
+ * subtree from focus. Modern browsers handle this natively; we add the
+ * visual cue (slight desaturation) so sighted users can also tell the
+ * area is non-interactive when an overlay is open.
+ */
+.main-shell-content[inert],
+.sidebar[inert],
+[data-mc-inspector][inert] {
+  filter: saturate(0.8);
+}
+
+/*
+ * Focus halo overrides for elements where the standard halo collides with
+ * tight layouts. The disclosure summary needs the box-shadow to NOT be
+ * applied because the inset shadow is already in use; we keep the outline
+ * but drop the halo for these specific cases.
+ */
+details > summary:focus-visible {
+  box-shadow: none;
 }
