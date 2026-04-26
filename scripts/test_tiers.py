@@ -45,6 +45,7 @@ def commands_for_tier(tier: str, pytest_args: Sequence[str]) -> list[tuple[dict[
                 "tests/test_web_mission_control.py",
                 "tests/test_web_project_launcher.py",
                 "tests/test_web_review_packet.py",
+                "tests/test_web_watcher_controls.py",
                 "tests/test_mission_control_model.py",
                 "tests/test_mission_control_actions.py",
                 "tests/test_web_bundle_freshness.py",
