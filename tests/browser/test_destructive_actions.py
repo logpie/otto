@@ -532,7 +532,6 @@ def test_cleanup_copy_mentions_worktree_irreversible(mc_backend: Any, page: Any,
     assert item["task_id"] in body_text, body_text
 
 
-@pytest.mark.xfail(reason="cluster H impl incomplete (agent crashed mid-implementation); see plan-mc-audit.md Phase 4 cluster H followup", strict=False)
 def test_cleanup_queued_task_uses_different_copy(mc_backend: Any, page: Any, disable_animations: Any) -> None:
     """Queued-task cleanup confirm uses 'Remove queued task' wording."""
 
@@ -585,7 +584,6 @@ def test_cleanup_queued_task_uses_different_copy(mc_backend: Any, page: Any, dis
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(reason="cluster H impl incomplete (agent crashed mid-implementation); see plan-mc-audit.md Phase 4 cluster H followup", strict=False)
 def test_cancel_copy_mentions_sigterm_30s_loss(mc_backend: Any, page: Any, disable_animations: Any) -> None:
     """Cancel confirm contains '30s' AND 'Work in progress may be lost'."""
 
@@ -671,7 +669,6 @@ def test_watcher_stop_shows_counts(mc_backend: Any, page: Any, disable_animation
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(reason="cluster H impl incomplete (agent crashed mid-implementation); see plan-mc-audit.md Phase 4 cluster H followup", strict=False)
 def test_action_error_keeps_dialog_open_with_inline_error(mc_backend: Any, page: Any, disable_animations: Any) -> None:
     """Cancel POST returns 409 → dialog STAYS OPEN, inline error visible."""
 
@@ -750,7 +747,6 @@ def _fill_minimum_intent(page: Any) -> None:
     page.get_by_test_id("job-dialog-intent").fill("Write a short script that does X.")
 
 
-@pytest.mark.xfail(reason="cluster H impl incomplete (agent crashed mid-implementation); see plan-mc-audit.md Phase 4 cluster H followup", strict=False)
 def test_queue_job_3s_grace_window_cancellable(mc_backend: Any, page: Any, disable_animations: Any) -> None:
     """Submit shows 'Queueing in 3s' banner; clicking Cancel within 1s skips POST."""
 
@@ -791,7 +787,6 @@ def test_queue_job_3s_grace_window_cancellable(mc_backend: Any, page: Any, disab
     assert page.locator('.job-dialog').count() == 1
 
 
-@pytest.mark.xfail(reason="cluster H impl incomplete (agent crashed mid-implementation); see plan-mc-audit.md Phase 4 cluster H followup", strict=False)
 def test_queue_job_grace_window_completes(mc_backend: Any, page: Any, disable_animations: Any) -> None:
     """Without Cancel, the POST fires after the 3-second grace window."""
 

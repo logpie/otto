@@ -3092,7 +3092,14 @@ function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]
           const disabled = !action.enabled || (action.key === "m" && mergeBlocked);
           const title = action.key === "m" && mergeBlocked ? "Commit, stash, or revert local project changes before merging." : action.reason || action.preview || "";
           return (
-            <button key={action.key} type="button" disabled={disabled} title={title} onClick={() => onRunAction(name, action.label)}>
+            <button
+              key={action.key}
+              type="button"
+              data-testid={`advanced-action-${name}`}
+              disabled={disabled}
+              title={title}
+              onClick={() => onRunAction(name, action.label)}
+            >
               {reviewActionLabel(action.label)}
             </button>
           );
@@ -3219,18 +3226,23 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
     if (advancedOpen && !el.open) el.open = true;
   }, [advancedOpen]);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (intentRequired) {
-      setStatus(`${intentLabelMap[command]} is required.`);
-      return;
-    }
-    if (targetNeedsConfirmation && !targetConfirmed) {
-      setStatus("Confirm the dirty target project before queueing.");
-      return;
-    }
+  // mc-audit codex-destructive-action-safety #7: clear timers on unmount so a
+  // half-finished grace countdown can't fire after the dialog closes.
+  useEffect(() => {
+    return () => {
+      if (pendingTimerRef.current !== null) {
+        window.clearTimeout(pendingTimerRef.current);
+        pendingTimerRef.current = null;
+      }
+      if (pendingTickRef.current !== null) {
+        window.clearInterval(pendingTickRef.current);
+        pendingTickRef.current = null;
+      }
+    };
+  }, []);
+
+  async function performQueue(): Promise<void> {
     setStatus("queueing");
-    setSubmitting(true);
     try {
       const payload = buildQueuePayload({
         command,
@@ -3252,6 +3264,61 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function cancelGraceWindow(): void {
+    pendingCancelledRef.current = true;
+    if (pendingTimerRef.current !== null) {
+      window.clearTimeout(pendingTimerRef.current);
+      pendingTimerRef.current = null;
+    }
+    if (pendingTickRef.current !== null) {
+      window.clearInterval(pendingTickRef.current);
+      pendingTickRef.current = null;
+    }
+    setPendingSeconds(null);
+    setSubmitting(false);
+    setStatus("Queueing cancelled. Edit and resubmit if you still want to queue.");
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (intentRequired) {
+      setStatus(`${intentLabelMap[command]} is required.`);
+      return;
+    }
+    if (targetNeedsConfirmation && !targetConfirmed) {
+      setStatus("Confirm the dirty target project before queueing.");
+      return;
+    }
+    // mc-audit codex-destructive-action-safety #7: 3-second grace window.
+    // Show a banner with countdown; user can hit [Cancel] to abort before
+    // the POST fires. Form fields stay editable so the user can fix a typo
+    // and resubmit. After the grace expires (and no cancel), POST fires.
+    setSubmitting(true);
+    pendingCancelledRef.current = false;
+    setPendingSeconds(3);
+    setStatus("Queueing in 3s — click Cancel to keep editing.");
+    pendingTickRef.current = window.setInterval(() => {
+      setPendingSeconds((prev) => {
+        if (prev === null) return null;
+        const next = Math.max(0, prev - 1);
+        if (next > 0) {
+          setStatus(`Queueing in ${next}s — click Cancel to keep editing.`);
+        }
+        return next;
+      });
+    }, 1000);
+    pendingTimerRef.current = window.setTimeout(() => {
+      if (pendingTickRef.current !== null) {
+        window.clearInterval(pendingTickRef.current);
+        pendingTickRef.current = null;
+      }
+      pendingTimerRef.current = null;
+      setPendingSeconds(null);
+      if (pendingCancelledRef.current) return;
+      void performQueue();
+    }, 3000);
   }
 
   const dirtyPreview = dirtyFiles.slice(0, 5);
@@ -3423,6 +3490,26 @@ function JobDialog({project, dirtyFiles, onClose, onQueued, onError}: {
             </div>
           )}
         </details>
+        {pendingSeconds !== null && (
+          <div
+            className="job-grace-banner"
+            data-testid="job-grace-banner"
+            role="status"
+            aria-live="polite"
+          >
+            <span>
+              Queueing in <strong data-testid="job-grace-countdown">{pendingSeconds}s</strong>… edit fields above or cancel to abort.
+            </span>
+            <button
+              type="button"
+              className="job-grace-cancel"
+              data-testid="job-grace-cancel-button"
+              onClick={cancelGraceWindow}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
         <footer>
           <span id="jobDialogStatus" className="muted" aria-live="polite">{status}</span>
           <button

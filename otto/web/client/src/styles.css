@@ -2839,6 +2839,43 @@ tbody tr.selected {
   font-size: 12px;
 }
 
+/*
+ * Job-queue grace banner — 3-second cancellable countdown shown between Submit
+ * and the actual POST (mc-audit codex-destructive-action-safety #7). The
+ * banner sits above the footer so the [Cancel] button is the first action a
+ * user reaches with the keyboard if they had second thoughts.
+ */
+.job-grace-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #fef3c7;
+  color: #78350f;
+  font-size: 13px;
+}
+
+.job-grace-banner strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.job-grace-cancel {
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid #b45309;
+  background: #ffffff;
+  color: #78350f;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.job-grace-cancel:hover {
+  background: #fef3c7;
+}
+
 /* History pagination — sits below the run-history table. Power users with
  * 200+ runs need fast access to all pages; the previously-shipped
  * `total_rows=247` pill displayed the count but offered no navigation
