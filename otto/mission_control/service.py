@@ -1846,6 +1846,152 @@ def _event_severity(payload: dict[str, Any]) -> str:
     return "success"
 
 
+def terminate_watcher_blocking(
+    project_dir: Path,
+    *,
+    grace: float = 3.0,
+    reason: str = "backend shutdown",
+) -> dict[str, Any]:
+    """Force-terminate any watcher subprocess this project owns.
+
+    Reads the supervisor metadata, sends ``SIGTERM`` to the watcher's
+    process group (the watcher is launched with ``start_new_session=True``
+    so its grandchildren — e.g. an in-flight ``otto build`` — share the
+    pgid). Waits up to ``grace`` seconds for the leader to exit, then
+    escalates to ``SIGKILL`` on the same pgid.
+
+    Idempotent: if no supervisor metadata exists, or the watcher pid is
+    already dead, returns a status dict with ``terminated=False`` and
+    no side effects beyond a stop-record write.
+
+    Returned dict keys:
+    - ``terminated`` (bool): whether we sent any signal
+    - ``pid`` (int | None): the watcher leader pid we targeted
+    - ``pgid`` (int | None): the process group we signalled
+    - ``escalated`` (bool): whether SIGKILL was needed after the grace
+    - ``error`` (str | None): unexpected OS error string if any
+
+    Used by:
+    - ``MCBackend.stop()`` (test harness) to ensure no orphan survives a
+      tempdir teardown.
+    - FastAPI shutdown lifespan in ``otto/web/app.py`` for production.
+    """
+
+    result: dict[str, Any] = {
+        "terminated": False,
+        "pid": None,
+        "pgid": None,
+        "escalated": False,
+        "error": None,
+    }
+    try:
+        metadata, _err = read_supervisor(project_dir)
+    except Exception as exc:  # pragma: no cover — defensive
+        result["error"] = f"supervisor read failed: {exc}"
+        return result
+    if not metadata:
+        return result
+    pid = metadata.get("watcher_pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return result
+    result["pid"] = pid
+    if not _pid_alive(pid):
+        # Already dead — record the stop so health probes stop reporting it.
+        try:
+            record_watcher_stop(project_dir, target_pid=pid, reason=f"{reason} (already dead)")
+        except Exception:
+            pass
+        return result
+
+    pgid = _safe_getpgid(pid)
+    result["pgid"] = pgid
+    target_for_signal = pgid if pgid is not None else pid
+    signaller = os.killpg if pgid is not None else os.kill
+    try:
+        signaller(target_for_signal, signal.SIGTERM)
+        result["terminated"] = True
+    except ProcessLookupError:
+        try:
+            record_watcher_stop(project_dir, target_pid=pid, reason=f"{reason} (lookup miss)")
+        except Exception:
+            pass
+        return result
+    except OSError as exc:
+        result["error"] = f"SIGTERM failed: {exc}"
+        return result
+
+    deadline = time.monotonic() + max(0.0, grace)
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.05)
+
+    if _pid_alive(pid):
+        # Escalate to SIGKILL on the same target.
+        try:
+            signaller(target_for_signal, signal.SIGKILL)
+            result["escalated"] = True
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            result["error"] = f"SIGKILL failed: {exc}"
+        # Final brief wait for the kernel to reap.
+        kill_deadline = time.monotonic() + 1.0
+        while time.monotonic() < kill_deadline:
+            if not _pid_alive(pid):
+                break
+            time.sleep(0.05)
+
+    try:
+        record_watcher_stop(project_dir, target_pid=pid, reason=reason)
+    except Exception:
+        pass
+    return result
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if ``pid`` is a running, non-zombie process.
+
+    A zombie process still answers ``os.kill(pid, 0)`` until its parent
+    reaps it, but it consumes no resources and should not block shutdown.
+    We try ``psutil`` first to detect zombies; if psutil isn't available
+    or fails, fall back to ``os.kill(pid, 0)`` semantics.
+    """
+
+    try:
+        import psutil  # local import keeps this helper standalone
+    except ImportError:  # pragma: no cover — psutil is a runtime dep
+        psutil = None  # type: ignore[assignment]
+
+    if psutil is not None:
+        try:
+            proc = psutil.Process(pid)
+            return proc.status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.AccessDenied:
+            return True
+        except Exception:
+            pass  # fall through to os.kill
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _safe_getpgid(pid: int) -> int | None:
+    try:
+        return os.getpgid(pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return None
+
+
 def _watcher_stop_identity_issue(project_dir: Path, pid: int, health: dict[str, Any]) -> str | None:
     lock_pid = _int_or_none(health.get("lock_pid"))
     if lock_pid == pid:

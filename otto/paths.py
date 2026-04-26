@@ -116,6 +116,57 @@ def session_dir(project_dir: Path, session_id: str) -> Path:
     return sessions_root(project_dir) / session_id
 
 
+def session_dir_for_record(record: object, *, project_dir: Path | None = None) -> Path | None:
+    """Resolve the on-disk session dir for a live run record.
+
+    Queue-domain runs live in a worktree (`<project>/.worktrees/<task>/`) and
+    write their session dir under that worktree, not under the project root.
+    The live record's ``cwd`` field already points at the writer's working
+    directory (worktree for queue, project_dir for atomic), so this helper
+    uses that as the root.
+
+    Merge-domain runs are synthetic: they have a live record (so cancel/UI
+    can act on them) but no real ``otto_logs/sessions/<run_id>/`` directory.
+    Their artifacts live under ``otto_logs/merge/<merge_id>/``. Callers that
+    enforce a session-dir invariant should skip records where this helper
+    returns ``None``.
+
+    Args:
+        record: A ``RunRecord`` instance or a plain dict from a live record
+            JSON file. Must expose ``run_id``, ``cwd`` (optional), and
+            ``domain`` (optional).
+        project_dir: Optional fallback project dir. Used only when the
+            record has no usable ``cwd`` field.
+
+    Returns:
+        The expected session dir path, or ``None`` for merge-domain records.
+    """
+    if isinstance(record, dict):
+        run_id = str(record.get("run_id") or "").strip()
+        cwd = str(record.get("cwd") or "").strip()
+        domain = str(record.get("domain") or "").strip()
+    else:
+        run_id = str(getattr(record, "run_id", "") or "").strip()
+        cwd = str(getattr(record, "cwd", "") or "").strip()
+        domain = str(getattr(record, "domain", "") or "").strip()
+
+    if not run_id:
+        raise ValueError("run record missing run_id")
+
+    # Merge runs have no sessions/<id>/ dir — their artifacts live under
+    # otto_logs/merge/<merge_id>/. Signal "not applicable" to callers.
+    if domain == "merge":
+        return None
+
+    if cwd:
+        return Path(cwd) / LOGS_ROOT_NAME / SESSIONS_DIR_NAME / run_id
+    if project_dir is not None:
+        return session_dir(project_dir, run_id)
+    raise ValueError(
+        f"record {run_id!r} has no cwd and no project_dir fallback was provided"
+    )
+
+
 def spec_dir(project_dir: Path, session_id: str) -> Path:
     return session_dir(project_dir, session_id) / "spec"
 

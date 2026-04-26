@@ -116,6 +116,19 @@ def start_backend(
             sock.close()
         except OSError:
             pass
+        # Belt and braces — even if the FastAPI lifespan already cleaned
+        # up watcher subprocesses, sweep the project's supervisor metadata
+        # and ensure no orphan survives. The W11-IMPORTANT-4 bug had the
+        # watcher outliving every code path that touched it.
+        from otto.mission_control.service import terminate_watcher_blocking
+
+        for tracked in list(getattr(app.state, "tracked_projects", []) or []):
+            try:
+                terminate_watcher_blocking(tracked, reason="harness stop")
+            except Exception:
+                # Harness teardown must never raise; tests have their own
+                # orphan-detection assertion downstream.
+                pass
 
     return MCBackend(
         url=f"http://127.0.0.1:{port}",

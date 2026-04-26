@@ -1,6 +1,6 @@
 import {FormEvent, useCallback, useEffect, useMemo, useRef, useState} from "react";
 import type {KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode} from "react";
-import {ApiError, api, buildQueuePayload, friendlyApiMessage, stateQueryParams} from "./api";
+import {ApiError, api, buildQueuePayload, friendlyApiMessage, runDetailUrl, stateQueryParams} from "./api";
 import {Spinner} from "./components/Spinner";
 import {useInFlight} from "./hooks/useInFlight";
 import {useDebouncedValue} from "./hooks/useDebouncedValue";
@@ -525,14 +525,17 @@ export function App() {
   }, [inspectorMode, inspectorOpen]);
 
   const refreshDetail = useCallback(async (runId: string) => {
-    // Detail responses don't carry the history page slice, but the server
-    // accepts the params and we send them so a future detail-side feature
-    // can rely on the same query convention.
-    const params = stateQueryParams({...filters, historyPage, historyPageSize}).toString();
-    const nextDetail = await api<RunDetail>(`/api/runs/${encodeURIComponent(runId)}?${params}`);
+    // Per-run detail URL must NOT carry state-pane filter params
+    // (type / outcome / query / active_only / history_page). Reusing
+    // `stateQueryParams` here mis-routed `queue-compat:<task>` lookups to
+    // 404 (live-findings W2-IMPORTANT-1 / W13-IMPORTANT-1). Use the
+    // detail-specific URL builder which only forwards `history_page_size`
+    // for the inspector's history paging.
+    const url = runDetailUrl(runId, {historyPageSize});
+    const nextDetail = await api<RunDetail>(url);
     if (selectedRunIdRef.current !== runId) return;
     setDetail(nextDetail);
-  }, [filters, historyPage, historyPageSize]);
+  }, [historyPageSize]);
 
   const loadProjects = useCallback(async () => {
     try {

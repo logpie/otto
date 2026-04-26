@@ -90,6 +90,29 @@ export function stateQueryParams(query: StateQuery): URLSearchParams {
   return params;
 }
 
+/**
+ * Per-run detail URL builder.
+ *
+ * The detail endpoint (`GET /api/runs/{run_id}`) is per-run — it must NOT
+ * inherit state-pane filter params (`type` / `outcome` / `query` /
+ * `active_only` / `history_page`). Earlier code reused `stateQueryParams`
+ * here, which appended state-pane filters even for detail fetches. With
+ * synthetic queue-compat run-ids (e.g. `queue-compat:<task>`) the resulting
+ * URL is misrouted on the server and returns 404 (see live-findings
+ * W2-IMPORTANT-1 / W13-IMPORTANT-1). The detail endpoint accepts only
+ * `history_page_size` here so the inspector can show consistent paging if
+ * a future detail-side history slice is added.
+ */
+export function runDetailUrl(runId: string, opts: {historyPageSize?: number} = {}): string {
+  const params = new URLSearchParams();
+  if (opts.historyPageSize && opts.historyPageSize > 0) {
+    params.set("history_page_size", String(opts.historyPageSize));
+  }
+  const qs = params.toString();
+  const base = `/api/runs/${encodeURIComponent(runId)}`;
+  return qs ? `${base}?${qs}` : base;
+}
+
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     headers: {"Content-Type": "application/json", ...(options.headers || {})},

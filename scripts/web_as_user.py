@@ -161,15 +161,22 @@ def artifact_mine_pass(project_dir: Path, failures: RunFailures) -> None:
                     f"queue task {task_id!r} listed in state but has no manifest at {manifest}"
                 )
 
-    live_runs = paths.live_runs_dir(project_dir)
-    if live_runs.is_dir():
-        for live_path in live_runs.glob("*.json"):
-            run_id = live_path.stem
-            sess = paths.session_dir(project_dir, run_id)
-            if not sess.exists():
-                failures.fail(
-                    f"live run {run_id!r} has no session dir at {sess}"
-                )
+    # Walk live records via the registry so we get each record's recorded
+    # cwd — queue-domain runs live in a worktree (`<project>/.worktrees/<task>/`)
+    # and their session dir lives under that worktree, not under project_dir.
+    # Merge-domain runs have no real session dir at all (artifacts live under
+    # `otto_logs/merge/<merge_id>/`). `session_dir_for_record` handles both.
+    from otto.runs import read_live_records
+
+    for record in read_live_records(project_dir):
+        sess = paths.session_dir_for_record(record, project_dir=project_dir)
+        if sess is None:
+            # Merge-domain records have no sessions/<id>/ dir by design.
+            continue
+        if not sess.exists():
+            failures.fail(
+                f"live run {record.run_id!r} has no session dir at {sess}"
+            )
 
     # Orchestrator extends with worktree + gitignore + leakage checks.
 

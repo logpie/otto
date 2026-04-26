@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from pathlib import Path
 import re
 import subprocess
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import Body, FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -17,9 +19,13 @@ from otto.mission_control.service import (
     MissionControlService,
     MissionControlServiceError,
     filters_from_params,
+    terminate_watcher_blocking,
 )
 from otto.setup_gitignore import OTTO_PATTERNS
 from otto.web.bundle import verify_bundle_freshness
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 PROJECT_SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -68,17 +74,61 @@ def create_app(
     # Fail fast if the bundle is stale / broken / missing. See
     # `otto/web/bundle.py` for the env-var overrides.
     verify_bundle_freshness(static_dir=static_dir)
-    app = FastAPI(title="Otto Mission Control", version="0.1.0")
+
+    # Track every project this app has ever been bound to so that on
+    # FastAPI shutdown we can iterate through them and force-terminate any
+    # watcher subprocess that is still alive (W11-IMPORTANT-4 — orphan
+    # watchers survived `backend.stop()`). Production paths and the test
+    # harness both rely on this list.
+    tracked_projects: list[Path] = []
+
+    def _track_project(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = Path(path).resolve(strict=False)
+        for existing in tracked_projects:
+            if existing == resolved:
+                return
+        tracked_projects.append(resolved)
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            # Best-effort: stop every watcher this app launched. This must
+            # not raise — uvicorn shutdown swallows lifespan exceptions but
+            # logging the error is more useful than silent failure.
+            for tracked in list(_app.state.tracked_projects):
+                try:
+                    outcome = terminate_watcher_blocking(tracked, reason="backend shutdown")
+                except Exception as exc:  # pragma: no cover — defensive
+                    _LOGGER.warning("watcher cleanup failed for %s: %s", tracked, exc)
+                    continue
+                if outcome.get("terminated"):
+                    _LOGGER.info(
+                        "terminated orphan watcher pid=%s pgid=%s escalated=%s for %s",
+                        outcome.get("pid"),
+                        outcome.get("pgid"),
+                        outcome.get("escalated"),
+                        tracked,
+                    )
+
+    app = FastAPI(title="Otto Mission Control", version="0.1.0", lifespan=_lifespan)
     app.state.project_dir = None if project_launcher else project_dir
     app.state.projects_root = projects_root
     app.state.project_launcher = project_launcher
     app.state.service = service
+    app.state.tracked_projects = tracked_projects
+    if not project_launcher:
+        _track_project(project_dir)
 
     def _set_project(next_project_dir: Path) -> dict[str, Any]:
         resolved = Path(next_project_dir).expanduser().resolve(strict=False)
         _ensure_git_project(resolved)
         app.state.project_dir = resolved
         app.state.service = MissionControlService(resolved, queue_compat=queue_compat)
+        _track_project(resolved)
         return serialize_project(resolved)
 
     def _service() -> MissionControlService:
