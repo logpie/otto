@@ -231,7 +231,7 @@ class _StateRouter:
 
 def _hydrate(page: Any, mc_backend: Any, disable_animations: Any) -> None:
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
 
@@ -410,7 +410,7 @@ def test_history_deep_link_loads_correct_page(
     router.install(page)
 
     page.goto(f"{mc_backend.url}?view=diagnostics&hp=3", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.locator("[data-testid=history-pagination]").wait_for(state="visible", timeout=5_000)
@@ -432,7 +432,7 @@ def test_history_invalid_deep_link_recovers(
     router.install(page)
 
     page.goto(f"{mc_backend.url}?view=diagnostics&hp=99", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.locator("[data-testid=history-out-of-range]").wait_for(state="visible", timeout=5_000)
@@ -456,7 +456,7 @@ def test_history_filter_resets_page(
     router.install(page)
 
     page.goto(f"{mc_backend.url}?view=diagnostics&hp=3", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.locator("[data-testid=history-pagination]").wait_for(state="visible", timeout=5_000)

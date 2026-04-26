@@ -342,10 +342,7 @@ def _hydrate(mc_backend: Any, page: Any, disable_animations: Any, *, run_id: str
         f"{mc_backend.url}?view=tasks&run={run_id}",
         wait_until="networkidle",
     )
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0",
-        timeout=10_000,
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
 
@@ -435,10 +432,7 @@ def test_inspector_tabs_clickable_after_reload(
 
     # ---- Force a reload — equivalent to the user reopening the browser ----
     page.reload(wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0",
-        timeout=10_000,
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     # The persisted route restores the inspector state. Wait until the SPA
@@ -518,10 +512,7 @@ def test_no_app_shell_intercepts_visible_primary_buttons(
 
     # Force a reload (the W13 trigger) and re-check post-reload layout.
     page.reload(wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0",
-        timeout=10_000,
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
     page.get_by_test_id("run-detail-panel").wait_for(state="visible", timeout=5_000)
 

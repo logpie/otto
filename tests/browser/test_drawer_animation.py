@@ -189,7 +189,7 @@ def _install_routes(page: Any) -> None:
 
 def _hydrate(mc_backend: Any, page: Any) -> None:
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
 
 
 def test_drawer_chevron_rotates_on_toggle(mc_backend: Any, page: Any) -> None:

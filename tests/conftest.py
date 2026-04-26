@@ -22,12 +22,13 @@ SMOKE_TEST_FILES = {
 }
 
 SMOKE_TEST_NODEIDS = {
-    "tests/test_web_mission_control.py::test_web_project_launcher_starts_without_selected_project",
+    "tests/test_web_project_launcher.py::test_web_project_launcher_starts_without_selected_project",
     "tests/test_web_mission_control.py::test_web_state_detail_logs_and_artifact_content",
-    "tests/test_web_mission_control.py::test_web_state_includes_watcher_status",
+    "tests/test_web_watcher_controls.py::test_web_state_includes_watcher_status",
 }
 
 SLOW_TEST_FILES = {
+    "tests/test_mission_control_integration.py",
     "tests/test_watcher_orphan_cleanup.py",
     "tests/integration/test_queue_flow.py",
 }
@@ -48,7 +49,13 @@ HEAVY_TEST_FILES = {
     "tests/test_merge_orchestrator.py",
     "tests/test_queue_runner.py",
     "tests/test_v3_pipeline.py",
+    "tests/test_web_events_history.py",
+    "tests/test_web_landing.py",
     "tests/test_web_mission_control.py",
+    "tests/test_web_project_launcher.py",
+    "tests/test_web_queue_actions.py",
+    "tests/test_web_review_packet.py",
+    "tests/test_web_watcher_controls.py",
 }
 
 

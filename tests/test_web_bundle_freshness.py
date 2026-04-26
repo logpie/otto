@@ -191,18 +191,13 @@ def test_prod_mode_skips_hash_compare(
     verify_bundle_freshness(static_dir=static, src_dir=src)
 
 
-def test_referenced_static_assets_picks_js_and_css() -> None:
+def test_referenced_static_assets_picks_js_and_css(tmp_path: Path) -> None:
     text = (
         '<script src="/static/assets/a.js"></script>'
         '<link rel=stylesheet href="/static/assets/b.css">'
         '<script src="/static/assets/a.js"></script>'  # duplicate
     )
-    refs = referenced_static_assets_from_text(text)
+    index_html = tmp_path / "index.html"
+    index_html.write_text(text, encoding="utf-8")
+    refs = referenced_static_assets(index_html)
     assert refs == ["assets/a.js", "assets/b.css"]
-
-
-def referenced_static_assets_from_text(text: str) -> list[str]:
-    """Tiny helper so the regex behaviour is testable without a tmp file."""
-    import re
-    pattern = re.compile(r'(?:src|href)\s*=\s*["\']/static/([^"\']+)["\']', re.IGNORECASE)
-    return list(dict.fromkeys(pattern.findall(text)))

@@ -252,7 +252,7 @@ def _install_routes(page: Any, *, state: dict[str, Any] | None = None, detail: d
 
 def _hydrate(page: Any, mc_url: str, *, disable_animations: Any) -> None:
     page.goto(mc_url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
 

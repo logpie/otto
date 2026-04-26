@@ -318,9 +318,7 @@ def test_disabled_diff_tab_visually_distinct_from_inactive_tabs(
     _install_artifacts_route(page)
 
     page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0", timeout=10_000
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
 
     # Open the inspector (Logs is enabled, so use that as the entry point).
     open_btn = page.get_by_test_id("open-logs-button")

@@ -165,7 +165,7 @@ def _install_routes(page: Any) -> None:
 def _hydrate(page: Any, mc_backend: Any, disable_animations: Any, query: str = "") -> None:
     target = f"{mc_backend.url}?view=diagnostics{query}"
     page.goto(target, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
     page.locator("[data-testid=history-pagination]").wait_for(state="visible", timeout=5_000)
 

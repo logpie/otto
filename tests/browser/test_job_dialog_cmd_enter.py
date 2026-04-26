@@ -58,9 +58,7 @@ def _modifier() -> str:
 
 def _open_dialog(page: Any, mc_backend: Any) -> None:
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0", timeout=10_000
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     page.get_by_test_id("new-job-button").click()
     page.wait_for_selector("[data-testid=job-dialog-submit-button]", timeout=5_000)
 

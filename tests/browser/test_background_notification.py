@@ -229,7 +229,7 @@ def test_notification_fires_when_run_finishes_in_background(
     page.add_init_script(f"({_NOTIFICATION_STUB})()")
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     # Sanity: Notification stub is installed.
@@ -288,7 +288,7 @@ def test_notification_does_not_fire_when_tab_visible(
     )
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.wait_for_function(

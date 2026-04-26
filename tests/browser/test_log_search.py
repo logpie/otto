@@ -247,7 +247,7 @@ def _install_routes(page: Any) -> None:
 
 def _open_logs(page: Any, mc_backend: Any, disable_animations: Any) -> None:
     page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
     page.get_by_test_id("open-logs-button").click()
     page.get_by_test_id("run-log-pane").wait_for(state="visible", timeout=5_000)

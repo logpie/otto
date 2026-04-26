@@ -373,10 +373,7 @@ def test_inspector_tab_buttons_are_clickable_from_logs(
         f"{mc_backend.url}?view=tasks&run={RUN_ID}",
         wait_until="networkidle",
     )
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0",
-        timeout=10_000,
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     _open_inspector_logs(page)

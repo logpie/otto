@@ -301,7 +301,7 @@ def test_proof_drawer_renders_round_tabs_for_multi_round_run(
 
     _install_routes(page, detail=_detail_payload(round_count=2))
     page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     _open_proof_drawer(page)
@@ -325,7 +325,7 @@ def test_round_tab_shows_per_round_verdict_and_timestamp(
 
     _install_routes(page, detail=_detail_payload(round_count=2))
     page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     _open_proof_drawer(page)
@@ -352,7 +352,7 @@ def test_proof_provenance_renders_run_id_and_sha(
 
     _install_routes(page, detail=_detail_payload(round_count=2))
     page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     _open_proof_drawer(page)
@@ -374,7 +374,7 @@ def test_proof_provenance_warns_on_run_id_mismatch(
     detail["review_packet"]["certification"]["proof_report"]["run_id_matches"] = False
     _install_routes(page, detail=detail)
     page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     _open_proof_drawer(page)

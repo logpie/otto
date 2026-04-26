@@ -203,8 +203,8 @@ npm run web:typecheck
 npm run web:build
 
 # Browser tests
-OTTO_BROWSER_SKIP_BUILD=1 uv run pytest -q -m "browser and smoke" -p playwright
-OTTO_BROWSER_SKIP_BUILD=1 uv run pytest -q -m browser -p playwright
+uv run python scripts/test_tiers.py browser-smoke
+uv run python scripts/test_tiers.py browser
 
 # Pre-push gate
 uv run python scripts/test_tiers.py prepush

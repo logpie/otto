@@ -191,7 +191,7 @@ def test_start_watcher_disables_button_during_post(mc_backend: Any, page: Any, d
     page.route("**/api/watcher/start", watcher_start_handler)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     button = page.get_by_test_id("start-watcher-button")
@@ -240,7 +240,7 @@ def test_start_watcher_shows_spinner_and_starting_label(mc_backend: Any, page: A
     page.route("**/api/watcher/start", watcher_start_handler)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.wait_for_function(
@@ -302,7 +302,7 @@ def test_refresh_button_disables_during_refresh(mc_backend: Any, page: Any, disa
     page.route("**/api/state*", state_handler)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     refresh_btn = page.get_by_test_id("toolbar-refresh-button")
@@ -361,7 +361,7 @@ def test_search_input_debounces(mc_backend: Any, page: Any, disable_animations: 
     page.route("**/api/state*", state_handler)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     # Wait for the initial poll to settle.
@@ -406,7 +406,7 @@ def test_active_state_rule_present_in_stylesheet(mc_backend: Any, page: Any) -> 
     """
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
 
     # Walk every CSSStyleSheet attached to the page; find at least one rule
     # whose selector text includes ':active' targeting buttons or [role=button].
@@ -447,7 +447,7 @@ def test_job_dialog_shows_inline_validation_hint_when_intent_empty(mc_backend: A
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.get_by_test_id("new-job-button").click()
@@ -467,7 +467,7 @@ def test_job_dialog_hint_clears_when_intent_typed(mc_backend: Any, page: Any, di
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.get_by_test_id("new-job-button").click()

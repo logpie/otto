@@ -142,9 +142,7 @@ def _install_state_route(page: Any) -> None:
 
 def _hydrate(mc_backend: Any, page: Any) -> None:
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0", timeout=10_000
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
 
 
 def _trigger_watcher_start_error(page: Any) -> None:

@@ -117,7 +117,7 @@ def _install_routes(page: Any) -> None:
 
 def _hydrate(page: Any, mc_backend: Any, disable_animations: Any, query: str = "") -> None:
     page.goto(f"{mc_backend.url}{query}", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
     # Toolbar filter selects need to be present before tests poke them.
     page.get_by_test_id("filter-type-select").wait_for(state="visible", timeout=5_000)

@@ -267,17 +267,22 @@ def disable_animations() -> Callable[[Any], None]:
 # ---------------------------------------------------------------------------
 
 
+def wait_for_mc_ready(page: Any, *, timeout: int = 10_000) -> None:
+    """Wait for the real Mission Control app, not the boot skeleton."""
+
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=timeout)
+    page.wait_for_function("window.__OTTO_MC_READY === true", timeout=timeout)
+
+
 @pytest.fixture
 def mc_page(mc_backend: MCBackend, page: Any, disable_animations: Callable[[Any], None]) -> Any:
     """Navigate ``page`` to the backend, wait for hydration, return the page.
 
-    Hydration check: we wait for ``#root`` to have at least one child element,
-    which is what React mounts into per ``otto/web/static/index.html``. Tests
-    that need a stricter readiness signal should add their own waits.
+    Readiness check: wait for Mission Control's explicit boot-complete marker.
     """
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    wait_for_mc_ready(page)
     disable_animations(page)
     return page
 

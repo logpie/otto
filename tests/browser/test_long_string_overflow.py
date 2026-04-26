@@ -435,9 +435,7 @@ def _install_diff_route(page: Any, payload: dict[str, Any]) -> None:
 
 def _hydrate(mc_backend: Any, page: Any, disable_animations: Any) -> None:
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0", timeout=10_000
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
 
@@ -448,9 +446,7 @@ def _hydrate_diagnostics(
     ``live-row-activator-<run_id>`` buttons used to open the inspector."""
 
     page.goto(f"{mc_backend.url}/?view=diagnostics", wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0", timeout=10_000
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
 

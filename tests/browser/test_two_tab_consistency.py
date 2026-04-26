@@ -127,9 +127,7 @@ def _wait_for_hydration(page: Any) -> None:
     render committed).
     """
 
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0", timeout=10_000
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     page.wait_for_selector(_TASK_BOARD_SELECTOR, timeout=10_000)
 
 

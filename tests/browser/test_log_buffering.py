@@ -316,7 +316,7 @@ def test_log_pane_does_not_render_more_than_max_bytes(
     page.route(f"**/api/runs/{RUN_ID}/logs**", logs_handler)
 
     page.goto(_open_logs_url(mc_backend), wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     _open_inspector_logs(page)
@@ -382,7 +382,7 @@ def test_log_pane_shows_live_state_for_active_run(
     )
 
     page.goto(_open_logs_url(mc_backend), wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
     _open_inspector_logs(page)
 
@@ -422,7 +422,7 @@ def test_log_pane_shows_final_state_for_terminal_run(
     )
 
     page.goto(_open_logs_url(mc_backend), wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
     _open_inspector_logs(page)
 
@@ -476,7 +476,7 @@ def test_log_pane_shows_path_when_log_does_not_exist(
     page.route(f"**/api/runs/{RUN_ID}/logs**", logs_handler)
 
     page.goto(_open_logs_url(mc_backend), wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
     _open_inspector_logs(page)
 
@@ -552,7 +552,7 @@ def test_log_polling_backoff_on_errors(
     page.route(f"**/api/runs/{RUN_ID}/logs**", logs_handler)
 
     page.goto(_open_logs_url(mc_backend), wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
     _open_inspector_logs(page)
 
@@ -621,7 +621,7 @@ def test_log_polling_stops_when_inspector_closed(
     page.route(f"**/api/runs/{RUN_ID}/logs**", logs_handler)
 
     page.goto(_open_logs_url(mc_backend), wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
     _open_inspector_logs(page)
 
@@ -688,7 +688,7 @@ def test_log_polling_stops_when_tab_hidden(
     page.route(f"**/api/runs/{RUN_ID}/logs**", logs_handler)
 
     page.goto(_open_logs_url(mc_backend), wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
     _open_inspector_logs(page)
 

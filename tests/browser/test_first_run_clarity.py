@@ -352,7 +352,7 @@ def test_main_shell_renders_after_boot_loading_completes(mc_backend: Any, page: 
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     btn = page.get_by_test_id("new-job-button")
@@ -373,7 +373,7 @@ def test_job_dialog_shows_pre_submit_summary(mc_backend: Any, page: Any, disable
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.get_by_test_id("new-job-button").click()
@@ -396,7 +396,7 @@ def test_job_dialog_summary_updates_on_advanced_change(mc_backend: Any, page: An
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.get_by_test_id("new-job-button").click()
@@ -423,7 +423,7 @@ def test_launcher_shows_what_mc_does(mc_backend: Any, page: Any, disable_animati
     # No state stubbing — launcher is rendered before /api/state ever fires.
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     sub = page.get_by_test_id("launcher-subhead")
@@ -444,7 +444,7 @@ def test_launcher_empty_state_has_actionable_cta(mc_backend: Any, page: Any, dis
     _install_projects_route(page, _projects_payload(launcher_enabled=True, projects=[]))
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     empty = page.get_by_test_id("launcher-empty-state")
@@ -466,7 +466,7 @@ def test_first_run_cta_says_start_first_build(mc_backend: Any, page: Any, disabl
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     cta = page.get_by_test_id("mission-new-job-button")
@@ -483,7 +483,7 @@ def test_first_run_cta_reverts_after_first_run(mc_backend: Any, page: Any, disab
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     cta = page.get_by_test_id("mission-new-job-button")
@@ -505,7 +505,7 @@ def test_command_select_shows_description(mc_backend: Any, page: Any, disable_an
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.get_by_test_id("new-job-button").click()
@@ -539,7 +539,7 @@ def test_improve_requires_focus(mc_backend: Any, page: Any, disable_animations: 
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.get_by_test_id("new-job-button").click()
@@ -565,7 +565,7 @@ def test_certify_requires_focus(mc_backend: Any, page: Any, disable_animations: 
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.get_by_test_id("new-job-button").click()
@@ -592,7 +592,7 @@ def test_dirty_confirm_lists_files(mc_backend: Any, page: Any, disable_animation
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.get_by_test_id("new-job-button").click()
@@ -622,7 +622,7 @@ def test_after_queue_cta_says_start_queued_job(mc_backend: Any, page: Any, disab
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     cta = page.get_by_test_id("mission-start-watcher-button")
@@ -644,7 +644,7 @@ def test_empty_detail_shows_descriptive_copy(mc_backend: Any, page: Any, disable
     _install_state_route(page, payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     empty = page.get_by_test_id("run-detail-empty")
@@ -671,7 +671,7 @@ def test_recovery_action_surfaced_for_failed_run(mc_backend: Any, page: Any, dis
     _install_run_detail_route(page, "run-failed-1", detail_payload)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     bar = page.get_by_test_id("recovery-action-bar")
@@ -701,7 +701,7 @@ def test_project_create_409_shows_recovery_copy(mc_backend: Any, page: Any, disa
     page.route("**/api/projects/create", create_handler)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     page.get_by_test_id("launcher-create-name-input").fill("duplicate")
@@ -728,7 +728,7 @@ def test_launcher_managed_root_help_explains_isolation(mc_backend: Any, page: An
     _install_projects_route(page, _projects_payload(launcher_enabled=True, projects=[]))
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     help_el = page.get_by_test_id("launcher-managed-root-help")

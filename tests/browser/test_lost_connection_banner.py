@@ -167,9 +167,7 @@ class StateRouteController:
 
 def _hydrate(page: Any, mc_backend: Any) -> None:
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0", timeout=10_000
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
 
 
 def _wait_for_banner(page: Any, *, present: bool, timeout_s: float) -> None:

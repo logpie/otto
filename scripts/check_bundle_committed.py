@@ -74,6 +74,16 @@ def _stamp_diff_is_only_volatile() -> bool:
     return True
 
 
+def _restore_committed_stamp() -> None:
+    """Keep successful verify runs from leaving timestamp-only dirt behind."""
+
+    head = _git("show", f"HEAD:{STAMP_REL}")
+    if head.returncode != 0:
+        sys.stderr.write(head.stderr)
+        sys.exit(head.returncode)
+    (REPO_ROOT / STAMP_REL).write_text(head.stdout, encoding="utf-8")
+
+
 def main() -> int:
     changed = _changed_files()
     if not changed:
@@ -82,9 +92,10 @@ def main() -> int:
 
     # Allow stamp-only volatile drift.
     if changed == [STAMP_REL] and _stamp_diff_is_only_volatile():
+        _restore_committed_stamp()
         print(
             f"OK: only {STAMP_REL} changed and the diff is metadata "
-            "(built_at/git_commit). Bundle content is unchanged."
+            "(built_at/git_commit). Bundle content is unchanged; restored committed stamp."
         )
         return 0
 

@@ -9,18 +9,22 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from otto import paths
+from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
 from otto.runs.registry import make_run_record, write_record
 from otto.web.app import create_app
 
+from tests._helpers import init_repo
+
 
 def _init_repo(repo: Path) -> None:
-    repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "web@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Web Test"], cwd=repo, check=True)
-    (repo / "README.md").write_text("# web\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+    repo.parent.mkdir(parents=True, exist_ok=True)
+    init_repo(
+        repo,
+        subdir=None,
+        commit_file="README.md",
+        commit_content="# web\n",
+        commit_msg="initial",
+    )
 
 
 def _app(project_dir: Path, **kwargs: Any) -> FastAPI:
@@ -51,6 +55,38 @@ def _create_branch_file(repo: Path, branch: str, filename: str = "feature.txt", 
     subprocess.run(["git", "add", filename], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", f"add {filename}"], cwd=repo, check=True)
     subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+
+
+def _queue_task(
+    task_id: str,
+    *,
+    command_argv: list[str] | None = None,
+    added_at: str = "2026-04-24T00:00:00Z",
+    resolved_intent: str | None = None,
+    branch: str | None = None,
+    worktree: str | None = None,
+    resumable: bool = False,
+) -> QueueTask:
+    summary = resolved_intent or task_id.replace("-", " ")
+    return QueueTask(
+        id=task_id,
+        command_argv=command_argv or ["build", summary],
+        added_at=added_at,
+        resolved_intent=summary,
+        branch=branch or f"build/{task_id}",
+        worktree=worktree or f".worktrees/{task_id}",
+        resumable=resumable,
+    )
+
+
+def _append_queue_task(repo: Path, task_id: str, **kwargs: Any) -> QueueTask:
+    task = _queue_task(task_id, **kwargs)
+    append_task(repo, task)
+    return task
+
+
+def _write_empty_queue_state(repo: Path) -> None:
+    write_queue_state(repo, {"schema_version": 1, "watcher": None, "tasks": {}})
 
 
 def _write_run(repo: Path, *, run_id: str = "build-web", outside_artifact: str | None = None) -> None:

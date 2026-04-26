@@ -12,8 +12,8 @@ uv run playwright install chromium webkit
 uv run pytest tests/browser/ -m browser -p playwright -v
 ```
 
-The first run builds the SPA bundle (`npm run web:typecheck && npm run web:build`)
-once for the session; subsequent runs reuse it.
+The first run verifies the SPA bundle (`npm run web:verify`) once for the
+session; subsequent tests in the same session reuse it.
 
 ## Skipping the build
 
@@ -54,7 +54,7 @@ Other useful pytest-playwright flags: `--video=retain-on-failure`,
 
 | Fixture                            | Scope    | Purpose |
 |------------------------------------|----------|---------|
-| `build_bundle`                     | session  | Run `npm run web:typecheck && web:build` once; verify assets exist |
+| `build_bundle`                     | session  | Run `npm run web:verify` once; verify assets exist |
 | `mc_backend`                       | function | Spin up `create_app(...)` on an atomically-bound free port; isolated `projects_root` |
 | `monkeypatch_watcher_subprocess`   | function | Replace `subprocess.Popen` in the watcher path with a fake; track spawned argv |
 | `frozen_clock`                     | function | Pin Python wall clock to `2026-04-25T12:00:00Z` UTC via freezegun |

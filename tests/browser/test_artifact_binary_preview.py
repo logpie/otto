@@ -319,7 +319,7 @@ def test_image_artifact_renders_as_img_tag(
     _install_raw_route(page, artifact_index=0, mime="image/png")
 
     page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     _open_proof_drawer(page)
@@ -351,7 +351,7 @@ def test_binary_artifact_shows_no_text_preview_message(
     _install_raw_route(page, artifact_index=0, mime="application/pdf")
 
     page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     _open_proof_drawer(page)

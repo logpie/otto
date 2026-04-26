@@ -280,7 +280,7 @@ def test_inspector_displays_atomic_as_build(
 
     # Pre-select the run via URL so the inspector opens immediately on hydrate.
     page.goto(f"{mc_backend.url}?view=tasks&run={ATOMIC_RUN_ID}", wait_until="networkidle")
-    page.wait_for_function("document.querySelector('#root')?.children.length > 0", timeout=10_000)
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
     # The Type field lives inside a collapsed <details> "Run metadata" panel.

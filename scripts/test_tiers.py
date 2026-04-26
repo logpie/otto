@@ -43,11 +43,16 @@ def commands_for_tier(tier: str, pytest_args: Sequence[str]) -> list[tuple[dict[
             (None, pytest_cmd(
                 "-q",
                 "tests/test_web_mission_control.py",
+                "tests/test_web_events_history.py",
+                "tests/test_web_landing.py",
                 "tests/test_web_project_launcher.py",
+                "tests/test_web_queue_actions.py",
                 "tests/test_web_review_packet.py",
                 "tests/test_web_watcher_controls.py",
+                "tests/test_mission_control_adapters.py",
                 "tests/test_mission_control_model.py",
                 "tests/test_mission_control_actions.py",
+                "tests/test_mission_control_polish.py",
                 "tests/test_web_bundle_freshness.py",
                 "tests/test_web_cache_headers.py",
                 *extra,
@@ -55,7 +60,7 @@ def commands_for_tier(tier: str, pytest_args: Sequence[str]) -> list[tuple[dict[
         ]
     if tier == "browser-smoke":
         return [
-            ({"OTTO_BROWSER_SKIP_BUILD": "1"}, pytest_cmd(
+            (None, pytest_cmd(
                 "-q",
                 "-m",
                 "browser and smoke",
@@ -66,7 +71,7 @@ def commands_for_tier(tier: str, pytest_args: Sequence[str]) -> list[tuple[dict[
         ]
     if tier == "browser":
         return [
-            ({"OTTO_BROWSER_SKIP_BUILD": "1"}, pytest_cmd(
+            (None, pytest_cmd(
                 "-q",
                 "-m",
                 "browser",
@@ -78,7 +83,7 @@ def commands_for_tier(tier: str, pytest_args: Sequence[str]) -> list[tuple[dict[
     if tier == "prepush":
         return [
             (None, ["uv", "run", "ruff", "check", "otto", "scripts", "tests"]),
-            (None, ["npm", "run", "web:typecheck"]),
+            (None, ["npm", "run", "web:verify"]),
             (None, pytest_cmd("-q", "--maxfail=10", *extra)),
         ]
     raise ValueError(f"unknown tier: {tier}")

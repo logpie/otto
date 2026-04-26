@@ -24,7 +24,7 @@ STATIC_ASSETS_DIR: Final[Path] = REPO_ROOT / "otto" / "web" / "static" / "assets
 
 
 class BundleBuildError(RuntimeError):
-    """Raised when ``npm run web:typecheck && npm run web:build`` fails."""
+    """Raised when ``npm run web:verify`` fails."""
 
 
 def ensure_bundle_built() -> Path:
@@ -43,8 +43,7 @@ def ensure_bundle_built() -> Path:
         _verify_assets_present(reason="bundle was previously built but assets disappeared")
         return STATIC_ASSETS_DIR
 
-    _run_npm("web:typecheck")
-    _run_npm("web:build")
+    _run_npm("web:verify")
     _verify_assets_present(reason="npm run web:build succeeded but produced no assets")
     setattr(ensure_bundle_built, "_done", True)
     return STATIC_ASSETS_DIR

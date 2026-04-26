@@ -82,10 +82,7 @@ def test_submit_button_reachable_on_iphone_14(
     page = context.new_page()
     try:
         page.goto(mc_backend.url, wait_until="networkidle")
-        page.wait_for_function(
-            "document.querySelector('#root')?.children.length > 0",
-            timeout=10_000,
-        )
+        page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
 
         # Open the new-job dialog (cluster G app-ready marker first so
         # we know the SPA hydrated).
@@ -148,9 +145,7 @@ def test_job_dialog_uses_dvh_max_height(mc_backend: Any, page: Any) -> None:
     """
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0", timeout=10_000
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     page.get_by_test_id("new-job-button").click()
     page.wait_for_selector("[data-testid=job-dialog-submit-button]", timeout=5_000)
 
@@ -193,9 +188,7 @@ def test_job_dialog_footer_is_sticky(mc_backend: Any, page: Any) -> None:
     """
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0", timeout=10_000
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     page.get_by_test_id("new-job-button").click()
     page.wait_for_selector("[data-testid=job-dialog-submit-button]", timeout=5_000)
 

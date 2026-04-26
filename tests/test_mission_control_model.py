@@ -194,7 +194,15 @@ def test_history_pagination_and_dedup(tmp_path: Path) -> None:
 
     state.filters.history_page = 1
     state = model.refresh(state)
-    assert len(state.history_page.items) == 5
+    assert state.history_page.page == 1
+    assert state.history_page.page_size == 50
+    assert [item.row.run_id for item in state.history_page.items] == [
+        "run-4",
+        "run-3",
+        "run-2",
+        "run-1",
+        "run-0",
+    ]
 
 
 def test_history_merges_v1_v2_and_archived_sources_before_pagination(tmp_path: Path) -> None:

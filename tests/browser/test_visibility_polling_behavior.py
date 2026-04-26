@@ -236,10 +236,7 @@ def _set_visibility(page: Any, state: str) -> None:
 
 
 def _wait_for_app_ready(page: Any) -> None:
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0",
-        timeout=10_000,
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
 
 
 # ---------------------------------------------------------------------------

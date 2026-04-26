@@ -315,10 +315,7 @@ def _hydrate_with_run(page: Any, mc_backend: Any, disable_animations: Any, run_i
     # `?run=<id>` causes the SPA to start with that run selected, which
     # triggers `refreshDetail` on first hydration.
     page.goto(f"{mc_backend.url}?view=tasks&run={run_id}", wait_until="networkidle")
-    page.wait_for_function(
-        "document.querySelector('#root')?.children.length > 0",
-        timeout=10_000,
-    )
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
 

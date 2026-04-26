@@ -33,7 +33,7 @@ def test_smoke_app_shell_renders(mc_page: Any, console_must_be_clean: Any) -> No
     # `index()` route served the file and Playwright loaded it.
     assert "Otto Mission Control" in mc_page.title()
 
-    # React mounts into #root; mc_page already waited for at least one child.
+    # mc_page waited for the explicit Mission Control ready marker.
     root_children = mc_page.evaluate("document.querySelector('#root').children.length")
     assert root_children >= 1, "expected React to render at least one element into #root"
 
