@@ -1,8 +1,7 @@
-import {FormEvent, useCallback, useEffect, useMemo, useRef, useState} from "react";
-import type {KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode} from "react";
-import {ApiError, api, buildQueuePayload, friendlyApiMessage, runDetailUrl, stateQueryParams} from "./api";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
+import type {ReactNode} from "react";
+import {ApiError, api, buildQueuePayload, friendlyApiMessage, stateQueryParams} from "./api";
 import {Spinner} from "./components/Spinner";
-import type {PillTone} from "./components/Pill";
 import {BrandMark} from "./components/BrandMark";
 import {HelpOverlay} from "./components/HelpOverlay";
 import {LauncherExplainer} from "./components/launcher/LauncherExplainer";
@@ -28,31 +27,12 @@ import {CommandPalette} from "./components/CommandPalette";
 import {InertEffect, LiveRegion} from "./components/a11y";
 import {ConfirmDialog, type ConfirmState} from "./components/ConfirmDialog";
 import {EventTimeline} from "./components/EventTimeline";
-import {
-  CommandList,
-  FocusMetric,
-  HealthCard,
-  MetaItem,
-  OverviewMetric,
-  ProjectStatCard,
-  ReviewDrawer,
-  ReviewMetric,
-} from "./components/MicroComponents";
 import {useInFlight} from "./hooks/useInFlight";
 import {useDebouncedValue} from "./hooks/useDebouncedValue";
 import {useCrossTabChannel} from "./hooks/useCrossTabChannel";
 import {useToastController} from "./hooks/useToastController";
-import {
-  LOG_BUFFER_MAX_BYTES,
-  LOG_POLL_BACKOFF_MS,
-  LOG_POLL_BASE_MS,
-  appendToLogBuffer,
-  bytesToString,
-  countLines,
-  initialLogState,
-  type LogState,
-  type LogStatus,
-} from "./logBuffer";
+import {useRunResources} from "./hooks/useRunResources";
+import {useMissionStatePolling} from "./hooks/useMissionStatePolling";
 import {
   capitalize,
   configSourceLabel,
@@ -74,36 +54,9 @@ import {
 } from "./utils/format";
 import type {
   ActionResult,
-  ActionState,
-  AgentBuildConfig,
-  ArtifactContentResponse,
-  ArtifactRef,
-  CertificationPolicy,
-  CertificationRound,
-  CommandBacklogItem,
-  DiffResponse,
-  ExecutionMode,
-  HistoryItem,
-  ImproveSubcommand,
-  JobCommand,
-  LandingItem,
-  LandingState,
-  LiveRunItem,
-  LogsResponse,
-  ManagedProjectInfo,
-  MissionEvent,
-  OutcomeFilter,
-  PlanningMode,
-  ProductHandoff,
   ProjectMutationResponse,
   ProjectsResponse,
-  ProofReportInfo,
-  QueueResult,
-  RunBuildConfig,
-  RunDetail,
-  RunTypeFilter,
   StateResponse,
-  WatcherInfo,
 } from "./types";
 import {DEFAULT_HISTORY_PAGE_SIZE, defaultFilters, HISTORY_PAGE_SIZE_OPTIONS} from "./uiTypes";
 import type {
@@ -133,7 +86,6 @@ import {
   mergeConfirmationBody,
   mergeRecoveryNeeded,
   activeCount,
-  preferredProofArtifact,
   releaseResolutionConfirmation,
   requestNotificationPermissionOnce,
   selectOnKeyboard,
@@ -143,27 +95,9 @@ import {
   useNotificationsOnRunFinish,
   visibleRunIds,
   watcherControlHint,
-  refreshIntervalMs,
 } from "./utils/missionControl";
 import {defaultRouteState, readRouteState, writeRouteState} from "./routeState";
 import type {RouteState} from "./routeState";
-
-// W9-CRITICAL-1: cadence used for `/api/state` polling while the tab is
-// hidden. We don't STOP polling (otherwise notification gates and live
-// state go stale for the whole hide window — see live-findings W9), we
-// just slow it down so a backgrounded tab doesn't hammer the server while
-// the user is elsewhere. Browser timer-throttling already brings this
-// close to once-per-minute when truly hidden, but we set it explicitly
-// so the resume catch-up is bounded.
-const STATE_POLL_HIDDEN_MS = 30_000;
-// W9-CRITICAL-1: hard floor between consecutive `/api/state` polls.
-// Defends against the 175-poll-in-10s burst that browsers fire when they
-// unthrottle a previously-hidden tab — without this, accumulated state
-// updates / re-rendered effects can re-fire `refresh()` in a tight loop.
-// 1s is well below LOG_POLL_BASE_MS / refreshIntervalMs() floor (700ms)
-// so it never throttles the steady-state cadence in practice; it only
-// gates the burst.
-const STATE_POLL_MIN_GAP_MS = 1000;
 
 // Codex error-empty-states #1: number of consecutive `/api/state` poll
 // failures required before the connection-lost banner appears. Three
@@ -200,15 +134,6 @@ export function App() {
   // task" hint here and the RunDetailPanel renders a "Waiting for watcher"
   // placeholder. Cleared when a real run is selected or polling resolves it.
   const [selectedQueuedTask, setSelectedQueuedTask] = useState<BoardTask | null>(null);
-  const [detail, setDetail] = useState<RunDetail | null>(null);
-  const [logState, setLogState] = useState<LogState>(initialLogState);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [inspectorMode, setInspectorMode] = useState<InspectorMode>("proof");
-  const [selectedArtifactIndex, setSelectedArtifactIndex] = useState<number | null>(null);
-  const [artifactContent, setArtifactContent] = useState<ArtifactContentResponse | null>(null);
-  const [proofArtifactIndex, setProofArtifactIndex] = useState<number | null>(null);
-  const [proofContent, setProofContent] = useState<ArtifactContentResponse | null>(null);
-  const [diffContent, setDiffContent] = useState<DiffResponse | null>(null);
   const [refreshStatus, setRefreshStatus] = useState("idle");
   // Codex error-empty-states #1: count of consecutive `/api/state` poll
   // failures. When this hits ``CONNECTION_LOST_THRESHOLD`` we render a
@@ -269,31 +194,6 @@ export function App() {
   // refresh_interval_s seconds). On POST failure, we drop the overlay so
   // the row reverts to its server-provided state.
   const [optimisticRunStates, setOptimisticRunStates] = useState<Record<string, "cancelling">>({});
-  // Server byte-offset for the next log fetch. Tracked in a ref because the
-  // poll loop reads-modifies it from inside a setInterval callback that must
-  // not retrigger React effects.
-  const logOffsetRef = useRef(0);
-  // Mirror of logState.text — the poll loop computes the next buffer
-  // synchronously without going through React state, so the next chunk's
-  // append doesn't race against an unflushed state update.
-  const logTextRef = useRef("");
-  // setTimeout id for the recurring poll, plus a flag for whether the tab is
-  // currently visible. The poll is rescheduled at variable cadence to
-  // implement exponential backoff on errors, so we keep the id outside React.
-  const logPollTimeoutRef = useRef<number | null>(null);
-  const logPollVisibleRef = useRef(true);
-  // W9-CRITICAL-1: state-poll timer book-keeping. Single timer ref ensures
-  // a re-rendered effect cannot stack a second `setInterval` alongside the
-  // first (which is how visibility-restore previously fired multi-hundred
-  // request bursts). `statePollVisibleRef` mirrors document.visibilityState
-  // so the recursive scheduler can pick the right cadence without forcing
-  // a re-render. `statePollLastAtRef` enforces a 1s minimum gap between
-  // polls (`STATE_POLL_MIN_GAP_MS`) — defense-in-depth against any future
-  // code path that calls into the poll loop too eagerly.
-  const statePollTimerRef = useRef<number | null>(null);
-  const statePollVisibleRef = useRef(true);
-  const statePollLastAtRef = useRef<number>(0);
-  const statePollAbortRef = useRef<AbortController | null>(null);
   const selectedRunIdRef = useRef<string | null>(initialRoute.selectedRunId);
   const viewModeRef = useRef<ViewMode>(initialRoute.viewMode);
   // History pagination state. We keep refs alongside the state so the
@@ -356,6 +256,39 @@ export function App() {
   useEffect(() => {
     historyPageSizeRef.current = historyPageSize;
   }, [historyPageSize]);
+
+  const {
+    detail,
+    logState,
+    inspectorOpen,
+    inspectorMode,
+    selectedArtifactIndex,
+    artifactContent,
+    proofArtifactIndex,
+    proofContent,
+    diffContent,
+    setInspectorOpen,
+    setInspectorMode,
+    setSelectedArtifactIndex,
+    setArtifactContent,
+    resetRunResources,
+    refreshDetail,
+    loadArtifact,
+    loadProofArtifact,
+    loadDiff,
+    showLogs,
+    showArtifacts,
+    showDiff,
+    showProof,
+    showTryProduct,
+  } = useRunResources({
+    selectedRunId,
+    selectedRunIdRef,
+    historyPageSize,
+    currentRouteState,
+    setSelectedRunId,
+    showToast,
+  });
 
   // ---- W3-CRITICAL-2: deterministic shell-ready marker for external automation.
   //
@@ -469,23 +402,14 @@ export function App() {
   const selectRun = useCallback((runId: string) => {
     setInspectorOpen(false);
     if (runId !== selectedRunIdRef.current) {
-      setDetail(null);
-      logOffsetRef.current = 0;
-      logTextRef.current = "";
-      setLogState(initialLogState);
-      setArtifactContent(null);
-      setProofContent(null);
-      setDiffContent(null);
-      setProofArtifactIndex(null);
-      setSelectedArtifactIndex(null);
-      setInspectorMode("proof");
+      resetRunResources();
     }
     selectedRunIdRef.current = runId;
     setSelectedRunId(runId);
     // Clear queued-task hint — real run selection wins.
     setSelectedQueuedTask(null);
     writeRouteState(currentRouteState(), "push");
-  }, [currentRouteState]);
+  }, [currentRouteState, resetRunResources, setInspectorOpen]);
 
   // mc-audit codex-first-time-user #19: select a queued task that has no
   // runId yet. We don't change selectedRunId (no run exists), but the
@@ -494,9 +418,9 @@ export function App() {
     setInspectorOpen(false);
     setSelectedRunId(null);
     selectedRunIdRef.current = null;
-    setDetail(null);
+    resetRunResources({resetMode: false});
     setSelectedQueuedTask(task);
-  }, []);
+  }, [resetRunResources, setInspectorOpen]);
 
   // mc-audit microinteractions I4: drop optimistic "cancelling" overlays
   // once the server reflects a terminal/cancelled state for that run, so
@@ -585,87 +509,6 @@ export function App() {
     }
   }, [confirm, confirmCheckboxAck, showToast]);
 
-  const loadLogs = useCallback(async (runId: string, reset = false) => {
-    if ((inspectorMode !== "logs" || !inspectorOpen) && !reset) return;
-    if (reset) {
-      logOffsetRef.current = 0;
-      logTextRef.current = "";
-      setLogState({...initialLogState, status: "loading"});
-    } else {
-      setLogState((prev) => (prev.status === "idle" ? {...prev, status: "loading"} : prev));
-    }
-    const offset = reset ? 0 : logOffsetRef.current;
-    try {
-      const logs = await api<LogsResponse>(`/api/runs/${encodeURIComponent(runId)}/logs?offset=${offset}`);
-      if (selectedRunIdRef.current !== runId) return;
-      logOffsetRef.current = typeof logs.next_offset === "number" ? logs.next_offset : offset;
-      // Build the next buffer synchronously off `logTextRef` so concurrent
-      // reset+poll cycles do not race over the React state update.
-      const baseText = reset ? "" : logTextRef.current;
-      const incoming = logs.text || "";
-      const {text: nextText, droppedBytes: newlyDropped} = appendToLogBuffer(baseText, incoming, LOG_BUFFER_MAX_BYTES);
-      logTextRef.current = nextText;
-      const incomingLines = countLines(incoming);
-      const incomingBytes = bytesToString(incoming);
-      setLogState((prev) => {
-        const droppedBytes = (reset ? 0 : prev.droppedBytes) + newlyDropped;
-        // Total lines/bytes accumulate unbounded — they describe the original
-        // file, not the rendered tail. Use server-provided total_bytes when
-        // available; fall back to the running counter so older payloads still
-        // render a sensible "Final · {N} bytes" label.
-        const baseLines = reset ? 0 : prev.totalLines;
-        const baseBytes = reset ? 0 : prev.totalBytes;
-        const totalBytes = typeof logs.total_bytes === "number" && logs.total_bytes > 0
-          ? logs.total_bytes
-          : baseBytes + incomingBytes;
-        return {
-          text: nextText,
-          totalLines: baseLines + incomingLines,
-          totalBytes,
-          droppedBytes,
-          path: logs.path ?? null,
-          status: logs.exists ? "ok" : "missing",
-          error: null,
-          lastUpdatedAt: Date.now(),
-          pollIntervalMs: LOG_POLL_BASE_MS,
-          consecutiveErrors: 0,
-        };
-      });
-    } catch (error) {
-      if (selectedRunIdRef.current !== runId) return;
-      if (detailWasRemoved(error)) {
-        setLogState((prev) => ({...prev, status: "missing", error: null}));
-        return;
-      }
-      const message = errorMessage(error);
-      setLogState((prev) => {
-        const consecutiveErrors = prev.consecutiveErrors + 1;
-        const idx = Math.min(consecutiveErrors - 1, LOG_POLL_BACKOFF_MS.length - 1);
-        const backoff = LOG_POLL_BACKOFF_MS[idx] ?? LOG_POLL_BACKOFF_MS[LOG_POLL_BACKOFF_MS.length - 1] ?? LOG_POLL_BASE_MS;
-        return {
-          ...prev,
-          status: "error",
-          error: message,
-          consecutiveErrors,
-          pollIntervalMs: backoff,
-        };
-      });
-    }
-  }, [inspectorMode, inspectorOpen]);
-
-  const refreshDetail = useCallback(async (runId: string) => {
-    // Per-run detail URL must NOT carry state-pane filter params
-    // (type / outcome / query / active_only / history_page). Reusing
-    // `stateQueryParams` here mis-routed `queue-compat:<task>` lookups to
-    // 404 (live-findings W2-IMPORTANT-1 / W13-IMPORTANT-1). Use the
-    // detail-specific URL builder which only forwards `history_page_size`
-    // for the inspector's history paging.
-    const url = runDetailUrl(runId, {historyPageSize});
-    const nextDetail = await api<RunDetail>(url);
-    if (selectedRunIdRef.current !== runId) return;
-    setDetail(nextDetail);
-  }, [historyPageSize]);
-
   const loadProjects = useCallback(async () => {
     try {
       const next = await api<ProjectsResponse>("/api/projects");
@@ -689,15 +532,7 @@ export function App() {
       if (projectStatus.launcher_enabled && !projectStatus.current) {
         setData(null);
         setSelectedRunId(null);
-        setDetail(null);
-        logOffsetRef.current = 0;
-        logTextRef.current = "";
-        setLogState(initialLogState);
-        setArtifactContent(null);
-        setProofContent(null);
-        setDiffContent(null);
-        setProofArtifactIndex(null);
-        setInspectorOpen(false);
+        resetRunResources({closeInspector: true});
         setLastError(null);
         setRefreshStatus((current) => showStatus || current === "error" ? "idle" : current);
         return;
@@ -752,7 +587,7 @@ export function App() {
       setStateFailureStreak((prev) => prev + 1);
       showToast(errorMessage(error), "error");
     }
-  }, [filters, historyPage, historyPageSize, loadProjects, refreshDetail, selectedRunId, showToast, currentRouteState]);
+  }, [filters, historyPage, historyPageSize, loadProjects, refreshDetail, resetRunResources, selectedRunId, showToast, currentRouteState]);
 
   // Keep `refreshRef` pointed at the latest `refresh` closure so callbacks
   // declared BEFORE this declaration (e.g. executeConfirmedAction) can fire
@@ -777,126 +612,7 @@ export function App() {
     crossTabPublishRef.current = crossTab.publish;
   }, [crossTab.publish]);
 
-  // W9-CRITICAL-1: visibility-aware single-timer poll for `/api/state`.
-  //
-  // The previous implementation used `window.setInterval(refresh, fastMs)`
-  // and relied on the browser's natural timer-throttling under hidden
-  // tabs to slow it down. Two compound bugs resulted:
-  //   1. Hidden behaviour was implementation-defined — Chrome stopped the
-  //      poll entirely (~0 polls during a 110s hide window in W9), leaving
-  //      the SPA stale and the heavy-user notification gate cold.
-  //   2. On visibility restore, the unthrottled timer combined with
-  //      cascading effect re-runs (every state update changed `refresh`'s
-  //      identity, re-firing the effect) to send a 175-poll burst within a
-  //      single 10s window — request-flood territory on hosted backends.
-  //
-  // The replacement schedules ONE recursive `setTimeout` whose cadence
-  // varies with visibility: 1.2-5s while visible (driven by the server's
-  // refresh_interval_s hint), 30s while hidden. A `visibilitychange`
-  // handler aborts any in-flight request, fires a single immediate
-  // catch-up poll on hidden→visible, and reschedules. The
-  // `STATE_POLL_MIN_GAP_MS` floor caps the worst case at one poll/sec
-  // even if multiple call paths race.
-  useEffect(() => {
-    let cancelled = false;
-
-    const cadenceMs = (): number =>
-      statePollVisibleRef.current ? refreshIntervalMs(data) : STATE_POLL_HIDDEN_MS;
-
-    const cancelPending = () => {
-      if (statePollTimerRef.current !== null) {
-        window.clearTimeout(statePollTimerRef.current);
-        statePollTimerRef.current = null;
-      }
-    };
-
-    const fireOnce = async () => {
-      if (cancelled) return;
-      // Hard floor between polls. We don't drop the call entirely — we
-      // reschedule it so the cadence stays approximately on track.
-      const now = Date.now();
-      const sinceLast = now - statePollLastAtRef.current;
-      if (sinceLast < STATE_POLL_MIN_GAP_MS) {
-        scheduleNext(STATE_POLL_MIN_GAP_MS - sinceLast);
-        return;
-      }
-      statePollLastAtRef.current = now;
-      // Cancel any prior in-flight refresh — visibility flips can otherwise
-      // leave the previous fetch hanging while the new one starts, doubling
-      // server load briefly.
-      if (statePollAbortRef.current) {
-        statePollAbortRef.current.abort();
-      }
-      const controller = new AbortController();
-      statePollAbortRef.current = controller;
-      try {
-        await refresh(false, controller.signal);
-      } finally {
-        if (statePollAbortRef.current === controller) {
-          statePollAbortRef.current = null;
-        }
-      }
-      if (cancelled) return;
-      scheduleNext(cadenceMs());
-    };
-
-    const scheduleNext = (delayMs: number) => {
-      if (cancelled) return;
-      cancelPending();
-      statePollTimerRef.current = window.setTimeout(() => {
-        statePollTimerRef.current = null;
-        void fireOnce();
-      }, delayMs);
-    };
-
-    const onVisibilityChange = () => {
-      if (typeof document === "undefined") return;
-      const visible = document.visibilityState !== "hidden";
-      const wasVisible = statePollVisibleRef.current;
-      statePollVisibleRef.current = visible;
-      if (visible === wasVisible) return;
-      // Tab transitioned. Cancel any in-flight request (its result may be
-      // about to land in the wrong cadence) and reset the timer at the
-      // new cadence. On hidden→visible we ALSO fire a single immediate
-      // catch-up poll so the user sees fresh state right away — but the
-      // STATE_POLL_MIN_GAP_MS floor + single-timer ref guarantee we never
-      // burst.
-      if (statePollAbortRef.current) {
-        statePollAbortRef.current.abort();
-        statePollAbortRef.current = null;
-      }
-      cancelPending();
-      if (visible) {
-        // Single catch-up. fireOnce() will reschedule after it returns.
-        void fireOnce();
-      } else {
-        scheduleNext(cadenceMs());
-      }
-    };
-
-    // Seed visibility state from the document so the first tick uses the
-    // correct cadence (e.g. tests that pre-set `visibilityState=hidden`).
-    if (typeof document !== "undefined") {
-      statePollVisibleRef.current = document.visibilityState !== "hidden";
-    }
-
-    void fireOnce();
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", onVisibilityChange);
-    }
-
-    return () => {
-      cancelled = true;
-      cancelPending();
-      if (statePollAbortRef.current) {
-        statePollAbortRef.current.abort();
-        statePollAbortRef.current = null;
-      }
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", onVisibilityChange);
-      }
-    };
-  }, [refresh, data?.live.refresh_interval_s]);
+  useMissionStatePolling(refresh, data);
 
   // Heavy-user paper-cut #3: browser Notification when a long run finishes
   // while the tab is hidden. We track the previous live-run set; any run
@@ -1014,128 +730,6 @@ export function App() {
   const onManualRefresh = useCallback(() => {
     void refreshInFlight.run(() => refresh(true));
   }, [refresh, refreshInFlight]);
-
-  useEffect(() => {
-    if (!selectedRunId) {
-      setDetail(null);
-      logOffsetRef.current = 0;
-      logTextRef.current = "";
-      setLogState(initialLogState);
-      setArtifactContent(null);
-      setProofContent(null);
-      setDiffContent(null);
-      setProofArtifactIndex(null);
-      setInspectorOpen(false);
-      return;
-    }
-    setInspectorMode("proof");
-    setDetail(null);
-    logOffsetRef.current = 0;
-    logTextRef.current = "";
-    setLogState(initialLogState);
-    setArtifactContent(null);
-    setProofContent(null);
-    setDiffContent(null);
-    setProofArtifactIndex(null);
-    setSelectedArtifactIndex(null);
-    refreshDetail(selectedRunId).catch((error) => {
-      if (detailWasRemoved(error)) {
-        selectedRunIdRef.current = null;
-        setSelectedRunId(null);
-        setDetail(null);
-        logOffsetRef.current = 0;
-        logTextRef.current = "";
-        setLogState(initialLogState);
-        setArtifactContent(null);
-        setProofContent(null);
-        setDiffContent(null);
-        setProofArtifactIndex(null);
-        setInspectorOpen(false);
-        writeRouteState(currentRouteState(), "replace");
-        return;
-      }
-      showToast(errorMessage(error), "error");
-    });
-  }, [refreshDetail, selectedRunId, showToast, currentRouteState]);
-
-  // Log polling with three controls the simple `setInterval` version lacked:
-  //   1. Exponential backoff on consecutive errors (1.2s -> 2s -> 5s -> ...).
-  //      `pollIntervalMs` lives in `logState`; on error the previous loadLogs
-  //      raised it, on success it dropped it back to LOG_POLL_BASE_MS.
-  //   2. Pause when the tab is hidden — keeps the SPA from flooding the
-  //      server when the user has the inspector parked in a background tab.
-  //   3. Stop entirely when the run is terminal AND we've drained the file.
-  //      `detail.active` flips to false on completion, so once we have one
-  //      successful read after that we stop scheduling.
-  useEffect(() => {
-    if (!selectedRunId || inspectorMode !== "logs" || !inspectorOpen) return;
-    const runIsActive = detail?.active === true;
-    // Stop polling when the run has terminated and we have at least one
-    // successful read of the final state. The first successful read after
-    // termination is what makes the header flip to "Final · ..." too.
-    const shouldKeepPolling = runIsActive || logState.status === "loading" || logState.status === "idle" || logState.status === "error";
-    if (!shouldKeepPolling) return;
-
-    let cancelled = false;
-
-    const scheduleNext = (delayMs: number) => {
-      if (cancelled) return;
-      logPollTimeoutRef.current = window.setTimeout(async () => {
-        if (cancelled) return;
-        if (!logPollVisibleRef.current) {
-          // Tab is hidden — re-check on visibility change, do not poll now.
-          // The visibilitychange handler below will resume by re-running this
-          // effect (it sets state which forces a render).
-          return;
-        }
-        await loadLogs(selectedRunId);
-        if (cancelled) return;
-        scheduleNext(logState.pollIntervalMs);
-      }, delayMs);
-    };
-
-    scheduleNext(logState.pollIntervalMs);
-
-    return () => {
-      cancelled = true;
-      if (logPollTimeoutRef.current !== null) {
-        window.clearTimeout(logPollTimeoutRef.current);
-        logPollTimeoutRef.current = null;
-      }
-    };
-  }, [inspectorMode, inspectorOpen, loadLogs, selectedRunId, detail?.active, logState.status, logState.pollIntervalMs]);
-
-  // Pause/resume polling on tab visibility. We track visibility in a ref so
-  // the polling timer can cheaply consult it without re-rendering, and bump
-  // a state setter on transitions so the polling effect's deps fire and a
-  // hidden->visible flip resumes the loop immediately.
-  const [logVisibilityTick, setLogVisibilityTick] = useState(0);
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const update = () => {
-      const visible = document.visibilityState !== "hidden";
-      const wasVisible = logPollVisibleRef.current;
-      logPollVisibleRef.current = visible;
-      if (visible && !wasVisible) {
-        // Re-arm polling immediately on resume rather than waiting up to
-        // `pollIntervalMs` for the previously-scheduled tick to run.
-        setLogVisibilityTick((tick) => tick + 1);
-      }
-    };
-    update();
-    document.addEventListener("visibilitychange", update);
-    return () => document.removeEventListener("visibilitychange", update);
-  }, []);
-
-  // When the visibility tick advances *and* the inspector is showing logs,
-  // kick a single immediate fetch so the user sees fresh content the moment
-  // they return to the tab. The recurring polling effect above continues
-  // from there at the normal cadence.
-  useEffect(() => {
-    if (logVisibilityTick === 0) return;
-    if (!selectedRunId || inspectorMode !== "logs" || !inspectorOpen) return;
-    void loadLogs(selectedRunId);
-  }, [logVisibilityTick, selectedRunId, inspectorMode, inspectorOpen, loadLogs]);
 
   const runActionForRun = useCallback(async (runId: string, action: string, message: string, label?: string) => {
     if (action === "merge" && data?.landing.merge_blocked) {
@@ -1391,132 +985,6 @@ export function App() {
     await execute();
   }, [data, refresh, requestConfirm, showToast, watcherInFlight]);
 
-  const loadArtifact = useCallback(async (index: number) => {
-    const runId = selectedRunIdRef.current;
-    if (!runId) return;
-    setSelectedArtifactIndex(index);
-    setInspectorMode("artifacts");
-    setInspectorOpen(true);
-    setArtifactContent(null);
-    try {
-      const content = await api<ArtifactContentResponse>(`/api/runs/${encodeURIComponent(runId)}/artifacts/${index}/content`);
-      if (selectedRunIdRef.current !== runId) return;
-      setArtifactContent(content);
-    } catch (error) {
-      if (detailWasRemoved(error) || selectedRunIdRef.current !== runId) return;
-      showToast(errorMessage(error), "error");
-    }
-  }, [showToast]);
-
-  const loadProofArtifact = useCallback(async (index: number) => {
-    const runId = selectedRunIdRef.current;
-    if (!runId) return;
-    setProofArtifactIndex(index);
-    setProofContent(null);
-    try {
-      const content = await api<ArtifactContentResponse>(`/api/runs/${encodeURIComponent(runId)}/artifacts/${index}/content`);
-      if (selectedRunIdRef.current !== runId) return;
-      setProofContent(content);
-    } catch (error) {
-      if (detailWasRemoved(error) || selectedRunIdRef.current !== runId) return;
-      showToast(errorMessage(error), "error");
-    }
-  }, [showToast]);
-
-  const loadDiff = useCallback(async () => {
-    const runId = selectedRunIdRef.current;
-    if (!runId) return;
-    setDiffContent(null);
-    try {
-      const content = await api<DiffResponse>(`/api/runs/${encodeURIComponent(runId)}/diff`);
-      if (selectedRunIdRef.current !== runId) return;
-      setDiffContent(content);
-    } catch (error) {
-      if (detailWasRemoved(error) || selectedRunIdRef.current !== runId) return;
-      showToast(errorMessage(error), "error");
-    }
-  }, [showToast]);
-
-  const showLogs = useCallback(() => {
-    setInspectorOpen(true);
-    setInspectorMode("logs");
-    setArtifactContent(null);
-    const runId = selectedRunIdRef.current;
-    if (runId) void loadLogs(runId, true);
-  }, [loadLogs]);
-
-  const showArtifacts = useCallback(() => {
-    setInspectorOpen(true);
-    setInspectorMode("artifacts");
-    setSelectedArtifactIndex(null);
-    setArtifactContent(null);
-  }, []);
-
-  const showDiff = useCallback(() => {
-    setInspectorOpen(true);
-    setInspectorMode("diff");
-    setArtifactContent(null);
-    void loadDiff();
-  }, [loadDiff]);
-
-  const showProof = useCallback(() => {
-    setInspectorOpen(true);
-    setInspectorMode("proof");
-  }, []);
-
-  // State-derived "open inspector" — picks the most useful tab for the
-  // selected run's state instead of always opening on Result. mc-audit
-  // redesign §5 W5.2 / §1.3.
-  //   • In-flight                    → Logs
-  //   • Ready / needs-review         → Code changes
-  //   • Merged / has proof           → Result
-  //   • Otherwise                    → Result
-  const showInspectorContextual = useCallback(() => {
-    setInspectorOpen(true);
-    const next: InspectorMode = (() => {
-      if (!detail) return "proof";
-      if (detail.active) return "logs";
-      const state = detail.review_packet?.readiness?.state;
-      if (state === "ready") return "diff";
-      return "proof";
-    })();
-    setInspectorMode(next);
-    if (next === "logs") {
-      const runId = selectedRunIdRef.current;
-      if (runId) void loadLogs(runId, true);
-    } else if (next === "diff") {
-      void loadDiff();
-    }
-  }, [detail, loadLogs, loadDiff]);
-
-  const showTryProduct = useCallback(() => {
-    setInspectorOpen(true);
-    setInspectorMode("try");
-  }, []);
-
-  useEffect(() => {
-    if (!detail || !inspectorOpen || inspectorMode !== "proof") return;
-    const artifact = preferredProofArtifact(detail.artifacts);
-    if (!artifact) return;
-    if (proofArtifactIndex === artifact.index && proofContent) return;
-    void loadProofArtifact(artifact.index);
-  }, [detail, inspectorMode, inspectorOpen, loadProofArtifact, proofArtifactIndex, proofContent]);
-
-  // Cluster-evidence-trustworthiness #3: invalidate the cached proof
-  // content whenever the proof-of-work file's mtime/sha changes (a
-  // re-cert wrote a fresh report) or when the run version bumps. Without
-  // this the drawer keeps showing stale evidence after the certifier
-  // re-runs against the same artifact path.
-  const proofReport = detail?.review_packet?.certification?.proof_report;
-  const proofIdentity = `${detail?.run_id || ""}|${detail?.version ?? ""}|${proofReport?.sha256 || ""}|${proofReport?.file_mtime || ""}`;
-  useEffect(() => {
-    setProofContent(null);
-    setProofArtifactIndex(null);
-    // Effect intentionally depends only on the identity string — we
-    // want a fresh fetch whenever any of the provenance fields move.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proofIdentity]);
-
   const project = data?.project;
   const watcher = data?.watcher;
   const landing = data?.landing;
@@ -1578,6 +1046,7 @@ export function App() {
     selectedRunIdRef.current = null;
     setViewMode("tasks");
     setSelectedRunId(null);
+    resetRunResources({closeInspector: true});
     historyPageRef.current = 1;
     historyPageSizeRef.current = DEFAULT_HISTORY_PAGE_SIZE;
     historySortRef.current = null;
@@ -1591,7 +1060,7 @@ export function App() {
     writeRouteState(defaultRouteState(), "replace");
     showToast(`Created ${result.project?.name || "project"}`);
     await refresh(true);
-  }, [refresh, showToast]);
+  }, [refresh, resetRunResources, showToast]);
 
   const selectManagedProject = useCallback(async (path: string) => {
     const result = await api<ProjectMutationResponse>("/api/projects/select", {
@@ -1618,6 +1087,7 @@ export function App() {
     selectedRunIdRef.current = carryRunId;
     setViewMode("tasks");
     setSelectedRunId(carryRunId);
+    resetRunResources({closeInspector: true});
     historyPageRef.current = 1;
     historyPageSizeRef.current = DEFAULT_HISTORY_PAGE_SIZE;
     historySortRef.current = null;
@@ -1633,7 +1103,7 @@ export function App() {
     writeRouteState(nextRoute, "replace");
     showToast(`Opened ${result.project?.name || "project"}`);
     await refresh(true);
-  }, [refresh, showToast]);
+  }, [refresh, resetRunResources, showToast]);
 
   const switchProject = useCallback(async () => {
     const result = await api<ProjectMutationResponse>("/api/projects/clear", {
@@ -1648,16 +1118,7 @@ export function App() {
     }));
     setData(null);
     setSelectedRunId(null);
-    setDetail(null);
-    logOffsetRef.current = 0;
-    logTextRef.current = "";
-    setLogState(initialLogState);
-    setArtifactContent(null);
-    setProofContent(null);
-    setDiffContent(null);
-    setProofArtifactIndex(null);
-    setSelectedArtifactIndex(null);
-    setInspectorOpen(false);
+    resetRunResources({closeInspector: true});
     setJobOpen(false);
     viewModeRef.current = "tasks";
     selectedRunIdRef.current = null;
@@ -1674,7 +1135,7 @@ export function App() {
     setFilters(defaultFilters);
     writeRouteState(defaultRouteState(), "replace");
     showToast("Choose a project");
-  }, [showToast]);
+  }, [resetRunResources, showToast]);
 
   // Wrap setFilters so any filter change resets the history page back to 1.
   // Without this, filtering on page 5 with 0 matches would render an
