@@ -170,6 +170,102 @@ def _normalize_story_result(story: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _verification_status_from_story(story: dict[str, Any]) -> str:
+    verdict = _story_verdict(story).strip().upper()
+    return {
+        "PASS": "pass",
+        "FAIL": "fail",
+        "WARN": "warn",
+        "SKIPPED": "skipped",
+        "FLAG_FOR_HUMAN": "flag_for_human",
+    }.get(verdict, "pending")
+
+
+def _verification_policy_from_mode(mode: str) -> str:
+    return {
+        "fast": "fast",
+        "thorough": "full",
+        "standard": "smart",
+        "hillclimb": "smart",
+        "target": "smart",
+    }.get(str(mode or "").strip().lower(), "smart")
+
+
+def _write_certifier_verification_plan(
+    *,
+    report_dir: Path,
+    mode: str,
+    target: str | None,
+    story_results: list[dict[str, Any]],
+    explicit_stories: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Persist the shared verification plan for standalone certifier runs."""
+    from otto.verification import VerificationCheck, VerificationPlan, write_verification_plan
+
+    checks: list[VerificationCheck] = []
+    source_stories = story_results or explicit_stories or []
+    for index, story in enumerate(source_stories, start=1):
+        story_id = str(
+            story.get("story_id")
+            or story.get("id")
+            or story.get("name")
+            or story.get("summary")
+            or f"story-{index}"
+        )
+        label = str(story.get("claim") or story.get("summary") or story.get("name") or story_id)
+        status = _verification_status_from_story(story) if story_results else "pending"
+        reason = str(
+            story.get("observed_result")
+            or story.get("key_finding")
+            or story.get("evidence")
+            or story.get("failure_evidence")
+            or ""
+        )
+        checks.append(
+            VerificationCheck(
+                id=story_id,
+                label=label,
+                action="CHECK",
+                status=status,  # type: ignore[arg-type]
+                reason=reason,
+                source=str(story.get("source_branch") or ""),
+                metadata={
+                    "surface": story.get("surface") or "",
+                    "methodology": story.get("methodology") or story.get("interaction_method") or "",
+                    "verdict": _story_verdict(story) if story_results else "",
+                },
+            )
+        )
+    if not checks:
+        checks = [
+            VerificationCheck(
+                id="certifier-scope",
+                label="Certifier scope",
+                action="PLAN_AND_CHECK",
+                status="pending",
+                reason="Certifier was asked to derive checks from the product intent.",
+            )
+        ]
+    profile = _mode_profile(mode)
+    plan = VerificationPlan(
+        scope="certify",
+        target=target or "",
+        policy=_verification_policy_from_mode(mode),  # type: ignore[arg-type]
+        risk_level=str(mode or "standard"),
+        verification_level=str(mode or "standard"),
+        allow_skip=False,
+        reasons=[
+            str(profile.get("meaning") or f"{mode} certification"),
+            *[str(item) for item in profile.get("tested", [])[:3]],
+        ],
+        checks=checks,
+        metadata={"certifier_mode": mode},
+    )
+    plan_path = report_dir / "verification-plan.json"
+    write_verification_plan(plan_path, plan)
+    return plan.to_dict()
+
+
 def _story_verdict_display(story: dict[str, Any]) -> tuple[str, str, str]:
     """Return (verdict, icon, css_class) for PoW rendering."""
     verdict = _story_verdict(story)
@@ -2463,7 +2559,10 @@ async def run_agentic_certifier(
                 "checkpoint_path": None,
                 "summary_path": str(paths.session_summary(project_dir, run_id)),
                 "primary_log_path": str(report_dir / "narrative.log"),
-                "extra_log_paths": [str(report_dir / "proof-of-work.html")],
+                "extra_log_paths": [
+                    str(report_dir / "verification-plan.json"),
+                    str(report_dir / "proof-of-work.html"),
+                ],
             },
             adapter_key="atomic.certify",
         )
@@ -2514,6 +2613,19 @@ async def run_agentic_certifier(
                 "Certifier produced no structured output — see narrative.log"
             )
         story_results = [_normalize_story_result(s) for s in compact_story_results(parsed.stories)]
+        if isinstance(merge_context, dict) and isinstance(merge_context.get("verification_plan"), dict):
+            verification_plan = dict(merge_context["verification_plan"])
+            from otto.verification import write_verification_plan
+
+            write_verification_plan(report_dir / "verification-plan.json", verification_plan)
+        else:
+            verification_plan = _write_certifier_verification_plan(
+                report_dir=report_dir,
+                mode=mode,
+                target=target,
+                story_results=story_results,
+                explicit_stories=stories,
+            )
         has_failures = any(_story_verdict(story) == "FAIL" for story in story_results)
         passed = parsed.verdict_pass and not has_failures and bool(story_results)
         target_mode = mode == "target" or bool(target) or bool(config.get("_target"))
@@ -2628,6 +2740,17 @@ async def run_agentic_certifier(
                 command="certify",
                 breakdown=breakdown_summary,
             )
+            if verification_plan:
+                from otto.observability import write_json_file
+
+                summary_path = paths.session_summary(project_dir, run_id)
+                try:
+                    summary_payload = json.loads(summary_path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    summary_payload = {}
+                if isinstance(summary_payload, dict):
+                    summary_payload["verification_plan"] = verification_plan
+                    write_json_file(summary_path, summary_payload, strict=True)
 
         final_record = None
         if publisher is not None:

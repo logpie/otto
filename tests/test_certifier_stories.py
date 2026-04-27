@@ -15,6 +15,7 @@ from otto.certifier import (
     _format_stories_section,
     _render_certifier_prompt,
     _render_pow_markdown,
+    _write_certifier_verification_plan,
 )
 from tests._helpers import write_test_pow_report
 
@@ -253,6 +254,30 @@ def test_merge_context_with_full_verify_suppresses_skip_but_keeps_flag(tmp_path:
     assert "SKIPPED" not in out
     assert "FLAG_FOR_HUMAN" in out
     assert "Skipping is disabled for this merge" in out
+
+
+def test_write_certifier_verification_plan_records_story_results(tmp_path: Path):
+    plan = _write_certifier_verification_plan(
+        report_dir=tmp_path,
+        mode="thorough",
+        target=None,
+        story_results=[
+            {
+                "story_id": "pdf-export",
+                "summary": "PDF export works",
+                "verdict": "PASS",
+                "observed_result": "Downloaded a PDF.",
+                "surface": "HTTP",
+            }
+        ],
+        explicit_stories=None,
+    )
+
+    assert (tmp_path / "verification-plan.json").exists()
+    assert plan["scope"] == "certify"
+    assert plan["policy"] == "full"
+    assert plan["checks"][0]["id"] == "pdf-export"
+    assert plan["checks"][0]["status"] == "pass"
 
 
 def test_merge_context_omitted_when_none(tmp_path: Path):

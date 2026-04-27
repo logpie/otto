@@ -725,10 +725,10 @@ def test_web_review_packet_does_not_diff_queued_future_branch(tmp_path: Path) ->
     checks = {check["key"]: check for check in packet["checks"]}
 
     assert detail["display_status"] == "queued"
-    assert packet["headline"] == "Waiting for watcher"
+    assert packet["headline"] == "Waiting for queue runner"
     assert packet["readiness"]["label"] == "Queued"
-    assert packet["readiness"]["next_step"] == "Start the watcher when you want this queued task to run."
-    assert packet["next_action"]["label"] == "Start watcher"
+    assert packet["readiness"]["next_step"] == "Start the queue runner when you want this queued task to run."
+    assert packet["next_action"]["label"] == "Start queue runner"
     assert packet["next_action"]["enabled"] is False
     assert packet["changes"]["diff_error"] is None
     assert packet["changes"]["diff_command"] is None
@@ -737,6 +737,11 @@ def test_web_review_packet_does_not_diff_queued_future_branch(tmp_path: Path) ->
     assert checks["changes"]["status"] == "pending"
     assert checks["certification"]["status"] == "pending"
     assert checks["evidence"]["status"] == "pending"
+    verification_plan = detail["verification_plan"]
+    assert verification_plan["scope"] == "queue/queue"
+    assert verification_plan["policy"] == "smart"
+    assert verification_plan["verification_level"] == "provisional"
+    assert {check["id"]: check["status"] for check in verification_plan["checks"]}["certification"] == "pending"
 
 def test_web_merge_run_review_packet_is_landing_audit_not_landable(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -857,7 +862,7 @@ def test_web_merge_action_uses_fast_merge_and_reports_immediate_failure(tmp_path
     assert response.status_code == 200
     assert response.json()["ok"] is False
     assert "merge failed" in response.json()["message"]
-    assert any(call[-4:] == ["merge", "--fast", "--no-certify", "hello-web"] for call in calls)
+    assert any(call[-5:] == ["merge", "--fast", "--verify", "smart", "hello-web"] for call in calls)
     event = client.get("/api/events").json()["items"][0]
     assert event["kind"] == "run.merge"
     assert event["severity"] == "error"

@@ -51,8 +51,10 @@ class MergeMissionControlAdapter(ActionExecutingAdapter):
             if path == state_path:
                 continue
             kind = "log" if path.endswith(".log") else "file"
-            items.append(ArtifactRef.from_path(f"extra {extra_index}", path, kind=kind))
-            extra_index += 1
+            label = "verification plan" if Path(path).name == "verification-plan.json" else f"extra {extra_index}"
+            items.append(ArtifactRef.from_path(label, path, kind=kind))
+            if label.startswith("extra "):
+                extra_index += 1
         return items
 
     def legal_actions(self, record, overlay):

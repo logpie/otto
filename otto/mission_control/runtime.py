@@ -88,7 +88,7 @@ def runtime_status(
                 "warning",
                 "Watcher runtime is stale",
                 str(health.get("next_action") or "A watcher or queue lock is blocking new dispatch."),
-                "Use Stop watcher, then Start watcher when ready.",
+                "Stop the stale queue runner, then start it when ready.",
             )
         )
     if queued_count and watcher_state != "running":
@@ -96,8 +96,8 @@ def runtime_status(
             _runtime_issue(
                 "warning",
                 "Queued work is paused",
-                f"{queued_count} queued task{'' if queued_count == 1 else 's'} will not start while the watcher is {watcher_state}.",
-                "Start the watcher when queued work should run.",
+                f"{queued_count} queued task{'' if queued_count == 1 else 's'} will not start while the queue runner is {watcher_state}.",
+                "Start the queue runner when queued work should run.",
             )
         )
     if processing_commands and watcher_state != "running":
@@ -106,7 +106,7 @@ def runtime_status(
                 "warning",
                 "Command drain is unfinished",
                 f"{processing_commands} command{'' if processing_commands == 1 else 's'} remain in `.processing`.",
-                "Start the watcher so it can finish acknowledging queued actions.",
+                "Start the queue runner so it can finish acknowledging queued actions.",
             )
         )
     elif pending_commands and watcher_state != "running":
@@ -114,8 +114,8 @@ def runtime_status(
             _runtime_issue(
                 "info",
                 "Commands are waiting",
-                f"{pending_commands} command{'' if pending_commands == 1 else 's'} are waiting for the watcher.",
-                "Start the watcher to apply queued actions.",
+                f"{pending_commands} command{'' if pending_commands == 1 else 's'} are waiting for the queue runner.",
+                "Start the queue runner to apply queued actions.",
             )
         )
     if malformed_commands:
@@ -195,13 +195,13 @@ def watcher_health(project_dir: Path, state: dict[str, Any], *, probe_lock: bool
     blocking_pid = watcher_pid if running else lock_pid if lock_process_alive else None
     if running:
         health_state = "running"
-        next_action = "Stop watcher to pause queue dispatch."
+        next_action = "Stop queue runner to pause queue dispatch."
     elif blocking_pid:
         health_state = "stale"
-        next_action = "Stop the stale watcher before starting another one."
+        next_action = "Stop the stale queue runner before starting another one."
     else:
         health_state = "stopped"
-        next_action = "Start watcher when queued tasks should run."
+        next_action = "Start queue runner when queued tasks should run."
     return {
         "state": health_state,
         "blocking_pid": blocking_pid,

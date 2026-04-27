@@ -413,13 +413,32 @@ def test_job_dialog_summary_updates_on_advanced_change(mc_backend: Any, page: An
     page.get_by_test_id("new-job-button").click()
     page.get_by_test_id("job-dialog-summary").wait_for(state="visible")
 
-    page.get_by_test_id("job-dialog-summary-edit").click()
+    summary = page.get_by_test_id("job-dialog-summary-text")
+    edit = page.get_by_test_id("job-dialog-summary-edit")
+    summary_box = summary.bounding_box()
+    edit_box = edit.bounding_box()
+    assert summary_box and edit_box
+    assert (
+        summary_box["x"] + summary_box["width"] <= edit_box["x"]
+        or edit_box["x"] + edit_box["width"] <= summary_box["x"]
+        or summary_box["y"] + summary_box["height"] <= edit_box["y"]
+        or edit_box["y"] + edit_box["height"] <= summary_box["y"]
+    ), "summary text should not overlap the options toggle"
+
+    edit.click()
+    assert edit.get_attribute("aria-expanded") == "true"
+    assert "Hide options" in (edit.text_content() or "")
     page.get_by_test_id("job-effort-select").select_option("low")
 
     page.wait_for_function(
         "() => (document.querySelector('[data-testid=job-dialog-summary-text]')?.textContent || '').includes('effort=low')",
         timeout=2_000,
     )
+
+    edit.click()
+    assert edit.get_attribute("aria-expanded") == "false"
+    assert "Edit options" in (edit.text_content() or "")
+    page.get_by_test_id("job-effort-select").wait_for(state="hidden", timeout=2_000)
 
 
 # --------------------------------------------------------------------------- #

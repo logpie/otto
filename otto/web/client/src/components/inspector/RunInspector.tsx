@@ -75,8 +75,9 @@ import {
 } from "../../utils/missionControl";
 import type {BoardTask, InspectorMode} from "../../uiTypes";
 
-export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, loadingRunId, watcherRunning, onRunAction, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact, onStartWatcher, onClose}: {
+export function RunDetailPanel({detail, logState, landing, inspectorOpen, queuedTask, loadingRunId, watcherRunning, onRunAction, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact, onStartWatcher, onClose}: {
   detail: RunDetail | null;
+  logState: LogState;
   landing: LandingState | undefined;
   inspectorOpen: boolean;
   queuedTask?: BoardTask | null;
@@ -103,6 +104,15 @@ export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, load
       && !watcherRunning
       && onStartWatcher,
   );
+  const hideDuplicateProvisionalPlan = Boolean(
+    queuedRunWaiting
+      && detail?.verification_plan
+      && [
+        detail.verification_plan.scope,
+        detail.verification_plan.verification_level,
+        detail.verification_plan.risk_level,
+      ].some((value) => String(value || "").toLowerCase() === "provisional"),
+  );
   return (
     <>
       <div className="run-drawer-backdrop" onClick={onClose} aria-hidden="true" />
@@ -121,11 +131,12 @@ export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, load
           <div className="detail-scroll">
             <RecoveryActionBar actions={detail.legal_actions || []} status={detail.display_status} onRunAction={onRunAction} />
             <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} onLoadArtifact={onLoadArtifact} onShowArtifacts={onShowArtifacts} />
+            {detail.active && <LiveLogPreview logState={logState} onShowLogs={onShowLogs} />}
+            {!hideDuplicateProvisionalPlan && <VerificationPlanPanel plan={detail.verification_plan} />}
             {queuedRunWaiting && (
               <div className="review-note recovery-note queued-start-note">
                 <strong>Queue runner stopped</strong>
-                <span>Start the queue runner to process all queued tasks.</span>
-                <button type="button" className="primary" data-testid="queued-detail-start-watcher" onClick={onStartWatcher}>Start queue runner</button>
+                <span>This task is waiting. Use the top-right queue runner control to start processing queued work.</span>
               </div>
             )}
             <PhaseTimeline phases={detail.phase_timeline || []} />
@@ -193,16 +204,8 @@ export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, load
             <strong>Next:</strong>{" "}
             {watcherRunning
               ? "Queue runner is running — task should pick up shortly."
-              : "Start the queue runner to process queued tasks."}
+              : "Start the queue runner from the top-right control."}
           </p>
-          {!watcherRunning && onStartWatcher && (
-            <button
-              type="button"
-              className="primary"
-              data-testid="run-detail-queued-start-watcher"
-              onClick={onStartWatcher}
-            >Start queue runner</button>
-          )}
         </div>
       ) : (
         <div className="detail-body empty run-detail-loading" data-testid="run-detail-loading">
@@ -262,6 +265,131 @@ export function PhaseTimeline({phases}: {phases: RunDetail["phase_timeline"]}) {
   );
 }
 
+export function VerificationPlanPanel({plan}: {plan: RunDetail["verification_plan"]}) {
+  if (!plan) return null;
+  const checks = plan.checks || [];
+  const activeChecks = checks.filter((check) => String(check.status || "").toLowerCase() !== "skipped");
+  const attentionChecks = activeChecks.filter((check) => isAttentionCheckStatus(check.status));
+  const pendingChecks = activeChecks.filter((check) => isPendingCheckStatus(check.status));
+  const meta = [
+    verificationPolicyLabel(plan.policy),
+    activeChecks.length ? `${activeChecks.length} check${activeChecks.length === 1 ? "" : "s"}` : "",
+    attentionChecks.length ? `${attentionChecks.length} need review` : pendingChecks.length ? `${pendingChecks.length} pending` : "",
+  ].filter(Boolean).join(" · ");
+  return (
+    <details className="verification-plan-panel" data-testid="verification-plan-panel" open={attentionChecks.length > 0 || undefined}>
+      <summary>
+        <span>Verification plan</span>
+        <strong>{meta || "planned checks"}</strong>
+      </summary>
+      <div className="verification-plan-body">
+        <div className="verification-plan-note">
+          <strong>{verificationPolicyLabel(plan.policy)}</strong>
+          <span>{verificationPolicyDescription(plan.policy)}</span>
+        </div>
+        {plan.reasons?.length ? (
+          <ul className="verification-plan-reasons">
+            {plan.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+          </ul>
+        ) : null}
+        {checks.length ? (
+          <div className="verification-plan-checks" aria-label="Verification checks">
+            {checks.map((check) => (
+              <div className={`verification-check check-${String(check.status || "pending").toLowerCase()}`} key={check.id}>
+                <CheckStatusBadge status={check.status || "pending"} />
+                <div>
+                  <strong>{check.label || check.id}</strong>
+                  <p>
+                    {check.action || "CHECK"}
+                    {check.source ? ` · ${check.source}` : ""}
+                    {check.reason ? ` · ${check.reason}` : ""}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">No explicit checks recorded yet.</p>
+        )}
+        {!activeChecks.length && checks.length > 0 ? (
+          <p className="muted">All checks are skipped by policy or scope.</p>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function isAttentionCheckStatus(status: string | null | undefined): boolean {
+  return ["fail", "warn", "error", "danger", "flag_for_human"].includes(String(status || "").toLowerCase());
+}
+
+function isPendingCheckStatus(status: string | null | undefined): boolean {
+  return ["pending", "running"].includes(String(status || "").toLowerCase());
+}
+
+function verificationPolicyLabel(policy: string | null | undefined): string {
+  switch (String(policy || "").toLowerCase()) {
+    case "fast":
+      return "Fast smoke";
+    case "full":
+      return "Full verification";
+    case "skip":
+      return "Verification skipped";
+    case "smart":
+      return "Smart verification";
+    default:
+      return "Verification";
+  }
+}
+
+function verificationPolicyDescription(policy: string | null | undefined): string {
+  switch (String(policy || "").toLowerCase()) {
+    case "fast":
+      return "Checks the core happy path only.";
+    case "full":
+      return "Runs the broadest available certification scope.";
+    case "skip":
+      return "Records that certification was intentionally skipped.";
+    case "smart":
+      return "Chooses checks based on changed code, risk, and available evidence.";
+    default:
+      return "Records what Otto plans to verify and what evidence it produced.";
+  }
+}
+
+export function LiveLogPreview({logState, onShowLogs}: {logState: LogState; onShowLogs: () => void}) {
+  const rawLines = logState.text
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+  const preview = rawLines.slice(-6).join("\n");
+  const displayLines = logState.totalLines > 0 ? logState.totalLines : countLines(logState.text);
+  const status = describeLogHeader({
+    runActive: true,
+    status: logState.status,
+    lastUpdatedAt: logState.lastUpdatedAt,
+    pollIntervalMs: logState.pollIntervalMs,
+    displayLines,
+    totalBytes: logState.totalBytes,
+  });
+  return (
+    <section className="live-log-preview" data-testid="run-detail-log-preview" aria-label="Live log preview">
+      <div className="live-log-preview-head">
+        <div>
+          <strong>Live log</strong>
+          <span>{status}</span>
+        </div>
+        <button type="button" data-testid="run-detail-open-logs-button" onClick={onShowLogs}>Open logs</button>
+      </div>
+      {preview ? (
+        <pre className="live-log-preview-body">{renderLogText(preview)}</pre>
+      ) : (
+        <p>{logState.status === "loading" ? "Loading latest output..." : "Waiting for agent output."}</p>
+      )}
+    </section>
+  );
+}
+
 export function phaseProviderLine(phase: RunDetail["phase_timeline"][number]): string {
   return [
     phase.provider || "provider default",
@@ -275,7 +403,6 @@ export function phaseUsageLine(phase: RunDetail["phase_timeline"][number]): stri
     typeof phase.duration_s === "number" ? formatDuration(phase.duration_s) : "",
     phase.rounds ? `${phase.rounds} round${phase.rounds === 1 ? "" : "s"}` : "",
     tokenTotal(phase.token_usage) ? `${formatCompactNumber(tokenTotal(phase.token_usage))} tokens` : "",
-    phase.cost_usd && phase.cost_usd > 0 ? `reported $${phase.cost_usd.toFixed(2)}` : "",
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "No usage recorded";
 }
@@ -317,15 +444,11 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
       document.documentElement.style.removeProperty("--run-inspector-width");
     };
   }, [inspectorWidth]);
-  const tryProductAvailable = canTryProduct(detail);
-  const activeMode: InspectorMode = mode === "try" && !tryProductAvailable ? "proof" : mode;
+  const activeMode: InspectorMode = mode;
   // WAI-ARIA tablist pattern: roving tabindex + arrow keys + Home/End. Tabs
   // that are disabled (Code changes, when diff isn't available) skip in
   // arrow rotation. mc-audit a11y A11Y-03, K-04.
-  const tabModes = useMemo<InspectorMode[]>(
-    () => tryProductAvailable ? ["try", "proof", "diff", "logs", "artifacts"] : ["proof", "diff", "logs", "artifacts"],
-    [tryProductAvailable],
-  );
+  const tabModes = useMemo<InspectorMode[]>(() => ["try", "proof", "diff", "logs", "artifacts"], []);
   const tabHandlers: Record<InspectorMode, () => void> = {
     try: onShowTryProduct,
     proof: onShowProof,
@@ -1125,7 +1248,6 @@ export function CertificationRoundTabs({rounds}: {rounds: CertificationRound[]})
             <dt>Verdict</dt><dd data-testid="proof-round-verdict">{active.verdict}</dd>
             {active.stories_tested != null && (<><dt>Stories</dt><dd data-testid="proof-round-stories">{active.passed_count ?? 0} passed / {active.failed_count ?? 0} failed / {active.warn_count ?? 0} warn / {active.stories_tested} tested</dd></>)}
             {active.duration_human && (<><dt>Duration</dt><dd data-testid="proof-round-duration">{active.duration_human}</dd></>)}
-            {active.cost_usd != null && (<><dt>Reported cost</dt><dd data-testid="proof-round-cost">${active.cost_usd.toFixed(2)}{active.cost_estimated ? " (est)" : ""}</dd></>)}
           </dl>
           {active.diagnosis && <p className="proof-round-diagnosis" data-testid="proof-round-diagnosis">{active.diagnosis}</p>}
           {active.failing_story_ids.length > 0 && (
@@ -1327,11 +1449,14 @@ export function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifac
   const artifactCount = reviewEvidence.length;
   const showActionButton = Boolean(action.action_key);
   const hasFailure = Boolean(packet.failure);
-  const attentionChecks = packet.checks.filter((check) => !["pass", "info"].includes(check.status));
+  const attentionChecks = packet.checks.filter((check) => isAttentionCheckStatus(check.status));
+  const pendingChecks = packet.checks.filter((check) => isPendingCheckStatus(check.status));
   const drawerChecks = attentionChecks.length ? attentionChecks : packet.checks;
   const checksDefaultOpen = hasFailure || attentionChecks.length > 0;
   const checkSummary = attentionChecks.length
     ? `${attentionChecks.length} need review`
+    : pendingChecks.length
+      ? `${pendingChecks.length} pending`
     : `${packet.checks.length} recorded`;
   const filesSummary = packet.changes.file_count
     ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}`

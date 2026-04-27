@@ -113,7 +113,7 @@ def test_queue_adapter_includes_queue_manifest_and_merge_action_preview(tmp_path
     assert labels[:4] == ["queue manifest", "manifest", "proof report", "proof markdown"]
     assert "certifier log" in labels
     assert actions["m"].enabled is True
-    assert "otto merge --fast --no-certify queue-task" in actions["m"].preview
+    assert "otto merge --fast --verify smart queue-task" in actions["m"].preview
 
 
 def test_queue_adapter_disables_cancel_without_task_id_and_cleanup_while_writer_alive(tmp_path: Path, monkeypatch) -> None:

@@ -238,21 +238,24 @@ def test_clicking_queued_card_opens_waiting_placeholder(
     )
 
 
-def test_queued_placeholder_offers_start_watcher_when_stopped(
+def test_task_board_points_to_global_queue_runner_when_stopped(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """When the watcher is stopped, the placeholder must surface a
-    Start queue runner CTA. When it's running, the CTA is hidden."""
+    """When the queue runner is stopped, the task board explains the wait
+    while the top bar remains the single start control."""
 
     # Stopped watcher
     item = _queued_landing_item(task_id="needs-watcher")
     _install_routes(page, _state_with_queued_task(item, watcher_running=False))
     _hydrate(mc_backend, page, disable_animations)
 
-    page.locator("[data-testid='task-card-needs-watcher']").click()
-    cta = page.locator("[data-testid='run-detail-queued-start-watcher']")
-    cta.wait_for(state="visible", timeout=5_000)
-    assert cta.is_enabled()
+    banner = page.locator("[data-testid='queue-start-banner']")
+    banner.wait_for(state="visible", timeout=5_000)
+    text = banner.text_content() or ""
+    assert "not running yet" in text
+    assert "top-right queue runner" in text
+    assert page.locator("[data-testid='task-board-start-queue-runner']").count() == 0
+    assert page.get_by_test_id("start-watcher-button").is_enabled()
 
 
 def _seed_real_queued_task(project_dir: Path, *, task_id: str) -> None:
@@ -302,7 +305,11 @@ def test_real_backend_queued_task_with_stopped_watcher_is_waiting_not_running(
     row_text = row.text_content() or ""
     assert "Queued" in row_text
     assert "Running" not in row_text
-    assert "Waiting for the queue runner" in row_text or "Start the queue runner" in row_text
+    assert "Waiting" in row_text
+    assert "queued for" in row_text
+    assert page.get_by_test_id("queue-start-banner").is_visible()
+    assert page.locator("[data-testid='task-board-start-queue-runner']").count() == 0
+    assert page.get_by_test_id("start-watcher-button").is_enabled()
 
     active_filter = page.locator(".toolbar input[type=checkbox]").first
     active_filter.check()
@@ -317,12 +324,12 @@ def test_real_backend_queued_task_with_stopped_watcher_is_waiting_not_running(
     page.get_by_text("Queue runner stopped").wait_for(state="visible", timeout=5_000)
     detail_text = detail.text_content() or ""
     assert "Queue runner stopped" in detail_text
-    assert "process all queued tasks" in detail_text
+    assert "top-right queue runner" in detail_text
+    assert page.get_by_test_id("verification-plan-panel").count() == 0
     pending_badges = page.locator(".review-check.check-pending > span")
     for index in range(pending_badges.count()):
         badge_text = (pending_badges.nth(index).text_content() or "").strip()
         assert badge_text == "Pending", (
             f"pending badge should not include decorative dots: {badge_text!r}"
         )
-    page.get_by_test_id("queued-detail-start-watcher").wait_for(state="visible", timeout=5_000)
     assert page.get_by_test_id("open-try-product-button").count() == 0

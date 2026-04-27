@@ -49,6 +49,7 @@ export function TaskQueueList({
   const emptyReason = computeBoardEmptyReason(data, filters, columns);
   const totalLabel = items.length === 1 ? "1 task" : `${items.length} tasks`;
   const target = data?.landing.target || "main";
+  const queuedCount = Number(data?.watcher.counts.queued || 0);
   return (
     <section className="queue-list" data-testid="task-board" aria-labelledby="taskBoardHeading">
       <header className="queue-list-head">
@@ -75,6 +76,14 @@ export function TaskQueueList({
         <div className="status-banner warning queue-merge-blocked" data-testid="merge-blocked-banner">
           <strong>Landing blocked</strong>
           <span>{mergeBlockedText(data.landing)}</span>
+        </div>
+      ) : null}
+      {queuedCount > 0 && data?.watcher.health.state !== "running" ? (
+        <div className="queue-start-banner" data-testid="queue-start-banner" role="status">
+          <div>
+            <strong>{queuedCount === 1 ? "1 queued task is waiting" : `${queuedCount} queued tasks are waiting`}</strong>
+            <span>Queued tasks are not running yet. Use the top-right queue runner control to start processing.</span>
+          </div>
         </div>
       ) : null}
       {emptyReason && emptyReason !== "has-tasks" ? (
@@ -166,15 +175,20 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
   })();
   const stageTitle = task.stage === "ready" ? "Ready to land" : stageLabel;
   const tone = statusTone(task.status, task.stage);
-  const icon = task.stage === "ready" ? "" : toneIcon(tone);
+  const icon = toneIcon(tone);
   const stories = task.storiesTested && task.storiesTested > 0
     ? `${task.storiesPassed || 0}/${task.storiesTested}`
     : "—";
   const files = typeof task.changedFileCount === "number" ? `${task.changedFileCount}` : "—";
-  const time = task.elapsedDisplay || task.durationDisplay || "—";
+  const statusLower = String(task.status || "").toLowerCase();
+  const waitingInQueue = task.stage === "working"
+    && !task.active
+    && ["queued", "waiting", "pending"].some((value) => statusLower.includes(value));
+  const time = waitingInQueue ? "Waiting" : task.elapsedDisplay || task.durationDisplay || "—";
   const visibleEvent = liveEventLabel(task);
   const waitingReason = task.stage === "working" && !task.active ? task.reason : null;
-  const meta = [task.branch, visibleEvent || waitingReason, task.usageDisplay].filter((part): part is string => Boolean(part && part.trim()));
+  const queuedAge = waitingInQueue && task.elapsedDisplay ? `queued for ${task.elapsedDisplay}` : null;
+  const meta = [task.branch, queuedAge, visibleEvent || waitingReason, task.usageDisplay].filter((part): part is string => Boolean(part && part.trim()));
   const onClick = () => {
     if (task.runId) onSelect(task.runId);
     else if (onSelectQueued) onSelectQueued(task);
@@ -186,6 +200,7 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
       data-run-id={task.runId || undefined}
       data-task-id={task.id}
       data-stage={task.stage}
+      data-queued-waiting={waitingInQueue ? "true" : undefined}
     >
       <button
         type="button"
@@ -220,7 +235,7 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
           {typeof task.changedFileCount === "number" ? <span className="task-chip" data-chip-kind="files">{task.changedFileCount} file{task.changedFileCount === 1 ? "" : "s"}</span> : null}
           {task.storiesTested && task.storiesTested > 0 ? <span className="task-chip" data-chip-kind="stories">{task.storiesPassed || 0}/{task.storiesTested} stories</span> : null}
           {task.usageDisplay ? <span className="task-chip" data-chip-kind="usage">{task.usageDisplay}</span> : null}
-          {task.elapsedDisplay || task.durationDisplay ? <span className="task-chip" data-chip-kind="time">{task.elapsedDisplay || task.durationDisplay}</span> : null}
+          {time !== "—" ? <span className="task-chip" data-chip-kind="time">{time}</span> : null}
         </span>
       </button>
       <span className="queue-list-cell queue-list-cell-actions" role="cell">

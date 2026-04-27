@@ -71,8 +71,8 @@ export function useRunResources({
     setDetail(nextDetail);
   }, [historyPageSize, selectedRunIdRef]);
 
-  const loadLogs = useCallback(async (runId: string, reset = false) => {
-    if ((inspectorMode !== "logs" || !inspectorOpen) && !reset) return;
+  const loadLogs = useCallback(async (runId: string, reset = false, force = false) => {
+    if (!force && (inspectorMode !== "logs" || !inspectorOpen) && !reset) return;
     if (reset) {
       logOffsetRef.current = 0;
       logTextRef.current = "";
@@ -152,7 +152,9 @@ export function useRunResources({
   }, [currentRouteState, refreshDetail, resetRunResources, selectedRunId, selectedRunIdRef, setSelectedRunId, showToast]);
 
   useEffect(() => {
-    if (!selectedRunId || inspectorMode !== "logs" || !inspectorOpen) return;
+    const logsVisible = inspectorMode === "logs" && inspectorOpen;
+    const previewActive = detail?.active === true;
+    if (!selectedRunId || (!logsVisible && !previewActive)) return;
     const runIsActive = detail?.active === true;
     const shouldKeepPolling = runIsActive || logState.status === "loading" || logState.status === "idle" || logState.status === "error";
     if (!shouldKeepPolling) return;
@@ -164,7 +166,7 @@ export function useRunResources({
       logPollTimeoutRef.current = window.setTimeout(async () => {
         if (cancelled) return;
         if (!logPollVisibleRef.current) return;
-        await loadLogs(selectedRunId);
+        await loadLogs(selectedRunId, false, true);
         if (cancelled) return;
         scheduleNext(logState.pollIntervalMs);
       }, delayMs);
@@ -180,6 +182,14 @@ export function useRunResources({
       }
     };
   }, [inspectorMode, inspectorOpen, loadLogs, selectedRunId, detail?.active, logState.status, logState.pollIntervalMs]);
+
+  useEffect(() => {
+    const logsVisible = inspectorMode === "logs" && inspectorOpen;
+    const previewActive = detail?.active === true;
+    if (!selectedRunId || (!logsVisible && !previewActive)) return;
+    if (logState.status !== "idle") return;
+    void loadLogs(selectedRunId, true, true);
+  }, [detail?.active, inspectorMode, inspectorOpen, loadLogs, selectedRunId, logState.status]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -199,7 +209,7 @@ export function useRunResources({
   useEffect(() => {
     if (logVisibilityTick === 0) return;
     if (!selectedRunId || inspectorMode !== "logs" || !inspectorOpen) return;
-    void loadLogs(selectedRunId);
+    void loadLogs(selectedRunId, false, true);
   }, [logVisibilityTick, selectedRunId, inspectorMode, inspectorOpen, loadLogs]);
 
   const loadArtifact = useCallback(async (index: number) => {

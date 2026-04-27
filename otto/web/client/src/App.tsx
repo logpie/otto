@@ -57,6 +57,7 @@ import type {
   ProjectMutationResponse,
   ProjectsResponse,
   StateResponse,
+  VerificationPolicy,
 } from "./types";
 import {DEFAULT_HISTORY_PAGE_SIZE, defaultFilters, HISTORY_PAGE_SIZE_OPTIONS} from "./uiTypes";
 import type {
@@ -75,7 +76,6 @@ import {
   canMerge,
   canResolveRelease,
   canShowDiff,
-  canTryProduct,
   dedupeLiveAgainstHistory,
   detailWasRemoved,
   errorMessage,
@@ -132,7 +132,7 @@ export function App() {
   // mc-audit codex-first-time-user #19: when a queued task has no run_id yet
   // (waiting for the watcher to spawn it), the user should still be able to
   // click the card to inspect *what* is queued. We store a "selected queued
-  // task" hint here and the RunDetailPanel renders a "Waiting for watcher"
+  // task" hint here and the RunDetailPanel renders a "Waiting for queue runner"
   // placeholder. Cleared when a real run is selected or polling resolves it.
   const [selectedQueuedTask, setSelectedQueuedTask] = useState<BoardTask | null>(null);
   const [refreshStatus, setRefreshStatus] = useState("idle");
@@ -167,6 +167,8 @@ export function App() {
   // set in the same microtask, eliminating the duplicate POST race that
   // mc-audit codex-state-management #10 documented.
   const confirmLockRef = useRef(false);
+  const runVerificationPolicyRef = useRef<VerificationPolicy>("smart");
+  const landingVerificationPolicyRef = useRef<VerificationPolicy>("smart");
   // Forward-ref to `refresh` so callbacks defined BEFORE refresh's
   // useCallback can still trigger a state refresh without forming a
   // dependency cycle. We populate the ref in a useEffect below the
@@ -715,7 +717,6 @@ export function App() {
         const mode = tabModes[Number(event.key) - 1];
         if (mode) {
           event.preventDefault();
-          if (mode === "try" && !canTryProduct(detail)) return;
           setInspectorMode(mode);
         }
         return;
@@ -770,9 +771,10 @@ export function App() {
     let bodyContent: ReactNode | undefined;
     let confirmLabel: string;
     if (isMerge) {
+      runVerificationPolicyRef.current = "smart";
       title = "Land task";
       body = liveDiff ? mergeConfirmationBody(liveDiff) : message;
-      bodyContent = <SingleMergeConfirmDetails detail={detail} diff={liveDiff} />;
+      bodyContent = <SingleMergeConfirmDetails detail={detail} diff={liveDiff} verificationPolicyRef={runVerificationPolicyRef} />;
       confirmLabel = "Land task";
     } else if (specAction) {
       title = actionLabel;
@@ -813,6 +815,9 @@ export function App() {
           setOptimisticRunStates((prev) => ({...prev, [runId]: "cancelling"}));
         }
         try {
+          if (isMerge) {
+            requestPayload.verification_policy = runVerificationPolicyRef.current;
+          }
           const result = await api<ActionResult>(`/api/runs/${encodeURIComponent(runId)}/actions/${action}`, {
             method: "POST",
             body: JSON.stringify(requestPayload),
@@ -860,17 +865,27 @@ export function App() {
     // considered but rejected as too friction-heavy for a frequent op.
     const readyItems = (landing?.items || []).filter((item) => item.landing_state === "ready");
     const target = landing?.target || "main";
+    landingVerificationPolicyRef.current = "smart";
     requestConfirm({
       title: "Land ready tasks",
       body: landingBulkConfirmation(landing),
-      bodyContent: <BulkLandingConfirmList items={readyItems} target={target} />,
+      bodyContent: (
+        <BulkLandingConfirmList
+          items={readyItems}
+          target={target}
+          verificationPolicyRef={landingVerificationPolicyRef}
+        />
+      ),
       confirmLabel: ready === 1 ? "Land 1 task" : `Land ${ready} tasks`,
       tone: "primary",
       requireCheckbox: ready > 1
         ? {label: `Yes, land all ${ready} tasks above into ${target}.`}
         : undefined,
       onConfirm: () => mergeAllInFlight.run(async () => {
-        const result = await api<ActionResult>("/api/actions/merge-all", {method: "POST", body: "{}"});
+        const result = await api<ActionResult>("/api/actions/merge-all", {
+          method: "POST",
+          body: JSON.stringify({verification_policy: landingVerificationPolicyRef.current}),
+        });
         handleActionResult(result, "merge all requested", showToast, setResultBanner);
         // W10-CRITICAL-1/2: notify peer tabs so the landing/task board
         // reflects the merge before their next poll tick.
@@ -933,6 +948,9 @@ export function App() {
   }, [data, refresh, requestConfirm, showToast]);
 
   const runWatcherAction = useCallback(async (action: "start" | "stop") => {
+    if (!data?.project) {
+      return;
+    }
     // Heavy-user paper-cut #3: requesting permission on watcher start gives
     // us a second natural moment to capture consent — in case the user
     // skipped the New Job dialog and went straight to "start watcher" on a
@@ -970,15 +988,15 @@ export function App() {
       // (pid, running tasks at risk, queued+backlog that will wait).
       const stopInfo = describeWatcherStopConfirm(data);
       requestConfirm({
-        title: "Stop watcher",
+        title: "Stop queue runner",
         body: stopInfo.body,
         bodyContent: stopInfo.detail,
-        confirmLabel: "Stop watcher",
+        confirmLabel: "Stop queue runner",
         tone: "danger",
         // For a non-empty workload, require explicit ack to avoid an Enter
         // keystroke from the previous dialog interrupting running tasks.
         requireCheckbox: stopInfo.requireAck
-          ? {label: "Stop watcher"}
+          ? {label: "Stop queue runner"}
           : undefined,
         onConfirm: () => execute(),
       });
@@ -1003,11 +1021,11 @@ export function App() {
   // interactive while the rest of the page goes quiet. mc-audit a11y A11Y-01,
   // A11Y-02.
   const modalOpen = jobOpen || Boolean(confirm) || paletteOpen;
-  // Top-level dialogs make the rest of the app inert. The run inspector is
-  // intentionally non-modal now: users can keep it open while landing ready
-  // work or selecting another task from the table.
-  const sidebarInert = modalOpen;
-  const mainContentInert = modalOpen;
+  // Top-level dialogs and the run inspector make the rest of the app inert.
+  // The detail drawer remains non-modal; the full inspector is a modal review
+  // surface and owns focus while it is open.
+  const sidebarInert = modalOpen || inspectorOpen;
+  const mainContentInert = modalOpen || inspectorOpen;
   // The inspector is inert when a job/confirm dialog stacks above it — the
   // dialog has focus + Tab trap, so the inspector should not capture either.
   const inspectorInert = modalOpen;
@@ -1101,9 +1119,8 @@ export function App() {
     const nextRoute = defaultRouteState();
     if (carryRunId) nextRoute.selectedRunId = carryRunId;
     writeRouteState(nextRoute, "replace");
-    showToast(`Opened ${result.project?.name || "project"}`);
     await refresh(true);
-  }, [refresh, resetRunResources, showToast]);
+  }, [refresh, resetRunResources]);
 
   const switchProject = useCallback(async () => {
     const result = await api<ProjectMutationResponse>("/api/projects/clear", {
@@ -1134,8 +1151,7 @@ export function App() {
     setHistorySortDir(null);
     setFilters(defaultFilters);
     writeRouteState(defaultRouteState(), "replace");
-    showToast("Choose a project");
-  }, [resetRunResources, showToast]);
+  }, [resetRunResources]);
 
   // Wrap setFilters so any filter change resets the history page back to 1.
   // Without this, filtering on page 5 with 0 matches would render an
@@ -1404,6 +1420,7 @@ export function App() {
               </details>
               <RunDetailPanel
                 detail={detail}
+                logState={logState}
                 landing={landing}
                 inspectorOpen={inspectorOpen}
                 queuedTask={selectedQueuedTask}
@@ -1464,6 +1481,7 @@ export function App() {
               </div>
               <RunDetailPanel
                 detail={detail}
+                logState={logState}
                 landing={landing}
                 inspectorOpen={inspectorOpen}
                 queuedTask={selectedQueuedTask}
@@ -1530,12 +1548,14 @@ export function App() {
           onClose={() => setJobOpen(false)}
           onQueued={async (message) => {
             setJobOpen(false);
-            showToast(message || "queued");
+            const shouldAutoStart = Boolean(project) && data?.watcher.health.state !== "running";
+            showToast(shouldAutoStart ? `${message || "queued"}; starting queue runner` : (message || "queued"));
             // W10-CRITICAL-1: tell peer tabs immediately about the new
             // queued job so their task board renders the row within
             // a render frame instead of waiting for the next poll.
             crossTabPublishRef.current?.("queue.submit");
             await refresh();
+            if (shouldAutoStart) await runWatcherAction("start");
           }}
           onError={(message) => showToast(message, "error")}
         />

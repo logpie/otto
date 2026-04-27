@@ -299,8 +299,11 @@ def create_app(
         )
 
     @app.post("/api/actions/merge-all")
-    def merge_all() -> dict[str, Any]:
-        return _service().merge_all()
+    def merge_all(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+        verification_policy = payload.get("verification_policy") if isinstance(payload, dict) else None
+        return _service().merge_all(
+            verification_policy=str(verification_policy) if verification_policy is not None else "smart"
+        )
 
     @app.post("/api/actions/merge-abort")
     def merge_abort() -> dict[str, Any]:

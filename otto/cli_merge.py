@@ -4,6 +4,7 @@ Single command with mode flags:
     otto merge --all                  # land all done queue tasks into target
     otto merge t3 build/x             # explicit task ids or branches
     otto merge --target develop       # merge target other than default_branch
+    otto merge --verify smart         # risk-based post-merge verification
     otto merge --no-certify           # skip post-merge verification
     otto merge --full-verify          # test every merged story
     otto merge --fast                 # pure git, NO LLM, bail on first conflict
@@ -72,6 +73,10 @@ def register_merge_command(main: click.Group) -> None:
                   help="Target branch (default from otto.yaml default_branch)")
     @click.option("--no-certify", is_flag=True,
                   help="Skip post-merge story verification")
+    @click.option("--verify", "verification_policy",
+                  type=click.Choice(["smart", "fast", "full", "skip"]),
+                  default=None,
+                  help="Post-merge verification policy (default: smart)")
     @click.option("--full-verify", is_flag=True,
                   help="Verify the full merged story union; don't allow per-story skips")
     @click.option("--fast", is_flag=True,
@@ -87,6 +92,7 @@ def register_merge_command(main: click.Group) -> None:
         all_done: bool,
         target: str | None,
         no_certify: bool,
+        verification_policy: str | None,
         full_verify: bool,
         fast: bool,
         transactional: bool,
@@ -117,6 +123,7 @@ def register_merge_command(main: click.Group) -> None:
             merge_lock,
             run_merge,
         )
+        from otto.verification import normalize_verification_policy
 
         try:
             project_dir = resolve_project_dir(Path.cwd())
@@ -137,10 +144,18 @@ def register_merge_command(main: click.Group) -> None:
             pass  # non-fatal; downstream precondition checks will surface a clearer error
 
         target_branch = target or str(config.get("default_branch", "main"))
+        resolved_verification_policy = normalize_verification_policy(
+            verification_policy or ("fast" if fast else "smart")
+        )
+        if no_certify:
+            resolved_verification_policy = "skip"
+        if full_verify:
+            resolved_verification_policy = "full"
         opts = MergeOptions(
             target=target_branch,
-            no_certify=no_certify,
-            full_verify=full_verify,
+            no_certify=resolved_verification_policy == "skip",
+            full_verify=resolved_verification_policy == "full",
+            verification_policy=resolved_verification_policy,
             fast=fast,
             transactional=transactional,
             cleanup_on_success=cleanup_on_success,
@@ -158,13 +173,20 @@ def register_merge_command(main: click.Group) -> None:
 
         console.print(f"  [bold]Merging[/bold] into [info]{target_branch}[/info]")
         if fast:
-            console.print("  [dim]Mode:[/dim] [yellow]--fast[/yellow] (pure git, no LLM)")
+            fast_note = (
+                "pure git merge; no LLM"
+                if resolved_verification_policy in {"fast", "skip"}
+                else "pure git merge; verification may invoke LLM"
+            )
+            console.print(f"  [dim]Mode:[/dim] [yellow]--fast[/yellow] ({fast_note})")
         if transactional:
             console.print("  [dim]Mode:[/dim] [yellow]--transactional[/yellow] (stage before target update)")
         if no_certify:
             console.print("  [dim]Mode:[/dim] [yellow]--no-certify[/yellow]")
         if full_verify:
             console.print("  [dim]Mode:[/dim] [yellow]--full-verify[/yellow]")
+        if not no_certify and not full_verify:
+            console.print(f"  [dim]Verification:[/dim] [info]{resolved_verification_policy}[/info]")
         if allow_any_branch:
             console.print("  [dim]Mode:[/dim] [yellow]--allow-any-branch[/yellow]")
 

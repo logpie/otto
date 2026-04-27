@@ -5,11 +5,11 @@ Source: ``docs/mc-audit/findings.md`` info-density theme. The prior copy
 read ``"<N> task(s) in flight"`` even when only one run was active. With
 multi-second LLM builds + several queue tasks racing, the user couldn't
 tell which run was hottest, what branch it was on, how long it had run,
-how much it had cost, or what the latest event was — all data available
+how many tokens it spent, or what the latest event was — all data available
 in ``data.live.items``.
 
 The fix in ``otto/web/client/src/App.tsx`` (``missionFocus`` working
-branch) joins ``task-id · branch · elapsed · cost · last event`` for the
+branch) joins ``task-id · branch · elapsed · token spend · last event`` for the
 freshest live item. Each segment is omitted when missing so the line
 never reads as ``" ·  · "``.
 
@@ -37,7 +37,7 @@ def _live_running_item(
     branch: str = "build/build-feature-x",
     elapsed_s: float = 42.0,
     elapsed_display: str = "42s",
-    cost_display: str = "$0.12",
+    cost_display: str = "12.3K tokens",
     last_event: str = "tool_use:Bash",
 ) -> dict[str, Any]:
     return {
@@ -67,6 +67,7 @@ def _live_running_item(
         "elapsed_display": elapsed_display,
         "cost_usd": 0.12,
         "cost_display": cost_display,
+        "token_usage": {"total_tokens": 12_300},
         "last_event": last_event,
         "row_label": "build-feature-x",
         "overlay": None,
@@ -187,7 +188,7 @@ def _hydrate(mc_backend: Any, page: Any, disable_animations: Any) -> None:
     disable_animations(page)
 
 
-def test_mission_focus_headline_includes_task_branch_elapsed_cost_and_event(
+def test_mission_focus_headline_includes_task_branch_elapsed_tokens_and_event(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
     """When one task is running, the headline must include identifying info."""
@@ -207,7 +208,7 @@ def test_mission_focus_headline_includes_task_branch_elapsed_cost_and_event(
         f"task row regressed to plain count: {text!r}"
     )
 
-    # Must include the task id, branch, elapsed display, cost display, and
+    # Must include the task id, branch, elapsed display, token spend, and
     # the last event — all separated by a middle dot.
     for needle in [
         item["queue_task_id"],
@@ -222,7 +223,7 @@ def test_mission_focus_headline_includes_task_branch_elapsed_cost_and_event(
 def test_mission_focus_headline_omits_missing_segments(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """When cost is the loading placeholder ('…'), it is omitted from the headline."""
+    """When token spend is unknown, it is omitted from the headline."""
 
     item = _live_running_item(cost_display="…")
     _install_projects_route(page)
@@ -240,6 +241,25 @@ def test_mission_focus_headline_omits_missing_segments(
     # task id + branch + elapsed + last event still surface
     assert item["queue_task_id"] in text
     assert item["branch"] in text
+
+
+def test_mission_focus_headline_suppresses_legacy_money_spend(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """Provider-specific dollars are metadata, not the user-facing spend unit."""
+
+    item = _live_running_item(cost_display="$0.12")
+    item.pop("token_usage", None)
+    _install_projects_route(page)
+    _install_state_route(page, _state_with_running_task(item))
+
+    _hydrate(mc_backend, page, disable_animations)
+
+    row = page.get_by_test_id(f"task-card-{item['queue_task_id']}")
+    row.wait_for(state="visible", timeout=5_000)
+    text = row.text_content() or ""
+
+    assert "$0.12" not in text
 
 
 def test_mission_focus_headline_falls_back_to_count_when_no_live_items(

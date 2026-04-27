@@ -348,6 +348,42 @@ def test_transactional_fast_clean_merge_updates_target_after_all_branches(tmp_pa
     assert not (paths.merge_dir(repo) / result.merge_id / "staging-worktree").exists()
 
 
+def test_transactional_fast_smart_policy_runs_post_merge_verification(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    _make_branch(repo, "feat-a", "a.txt", "A\n")
+    captured: dict[str, object] = {}
+
+    async def fake_post_merge_verification(**kwargs):
+        captured.update(kwargs)
+        return MergeRunResult(
+            success=True,
+            merge_id=kwargs["merge_id"],
+            state=kwargs["state"],
+            cert_passed=True,
+            note="cert passed",
+        )
+
+    monkeypatch.setattr("otto.merge.orchestrator._run_post_merge_verification", fake_post_merge_verification)
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(
+            target="main",
+            verification_policy="smart",
+            fast=True,
+            transactional=True,
+            allow_any_branch=True,
+        ),
+        explicit_ids_or_branches=["feat-a"],
+    ))
+
+    assert result.success is True
+    assert result.note == "cert passed"
+    assert captured["branches"] == ["feat-a"]
+    assert getattr(captured["options"], "verification_policy") == "smart"
+
+
 def test_transactional_requires_fast_mode(tmp_path: Path):
     repo = _init_repo_with_gitattributes(tmp_path)
     _make_branch(repo, "feat-a", "a.txt", "A\n")
@@ -427,6 +463,16 @@ def test_fast_mode_clean_merge_skips_certification(tmp_path: Path, monkeypatch: 
     assert result.success is True
     assert "cert skipped per --fast" in result.note
     assert (repo / "a.txt").read_text() == "A\n"
+    plan_path = paths.merge_dir(repo) / result.merge_id / "verification-plan.json"
+    plan = json.loads(plan_path.read_text())
+    assert plan["scope"] == "merge"
+    assert plan["policy"] == "fast"
+    assert {check["id"]: check["status"] for check in plan["checks"]} == {
+        "merge-applied": "pass",
+        "post-merge-certification": "skipped",
+    }
+    live_record = load_live_record(repo, result.merge_id)
+    assert str(plan_path) in live_record.artifacts["extra_log_paths"]
 
 
 def test_conflict_agent_cleans_new_untracked_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -819,6 +865,8 @@ def test_post_merge_verification_full_verify_preserves_merge_context_flag(
     assert captured["merge_context"]["diff_files"] == ["app/csv.py"]
     assert captured["merge_context"]["allow_skip"] is False
     assert captured["merge_context"]["verification_plan"]["verification_level"] == "full"
+    assert captured["merge_context"]["verification_policy"] == "full"
+    assert (paths.merge_dir(tmp_path) / "merge-test" / "verification-plan.json").exists()
     assert "Merge Verification Plan" in captured["merge_context"]["plan_text"]
 
 

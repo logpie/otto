@@ -38,15 +38,13 @@ def format_token_spend(
 ) -> str:
     """Return the canonical user-facing spend string.
 
-    Tokens are the primary cross-provider spend unit. Provider-reported USD
-    remains useful metadata, but it is not comparable across Claude/Codex
-    runs and is only shown as a fallback when no token usage was recorded.
+    Tokens are the primary cross-provider spend unit. Provider-reported USD is
+    kept as machine-readable metadata elsewhere, but it is not comparable
+    across Claude/Codex runs and should not be shown as the spend unit.
     """
     tokens = token_total(normalize_token_usage(token_usage or {}))
     if tokens:
         return f"{format_compact_token_count(tokens)} tokens"
-    if isinstance(reported_cost_usd, (int, float)) and float(reported_cost_usd) > 0:
-        return f"reported ${float(reported_cost_usd):.2f}"
     return "..." if pending else "-"
 
 
@@ -184,12 +182,36 @@ def _prefer_subset_cached_result_usage(
     for (phase, phase_usage, phase_event), result_event in zip(phase_events, result_events, strict=False):
         raw_phase_usage = phase_event.get("usage")
         raw_result_usage = result_event.get("usage")
-        if _looks_like_subset_cached_result(raw_phase_usage, raw_result_usage):
+        if _looks_like_authoritative_result_usage(raw_phase_usage, raw_result_usage):
             result_usage = token_usage_from_mapping(raw_result_usage)
             corrected.append((phase, result_usage))
         else:
             corrected.append((phase, phase_usage))
     return corrected
+
+
+def _looks_like_authoritative_result_usage(phase_usage: Any, result_usage: Any) -> bool:
+    """Return true when a final result event is the safer phase total.
+
+    Claude Code streams assistant usage snapshots and then emits a final
+    ``result`` usage payload. Older Otto logs accumulated the streamed
+    snapshots and then added the final result again, inflating phase totals.
+    When a phase log contains exactly one result for one phase, the result is
+    the provider's authoritative total for that call.
+    """
+    if not isinstance(result_usage, dict):
+        return False
+    result = token_usage_from_mapping(result_usage)
+    if not result:
+        return False
+    if _looks_like_subset_cached_result(phase_usage, result_usage):
+        return True
+    if not isinstance(phase_usage, dict):
+        return True
+    phase = token_usage_from_mapping(phase_usage)
+    if not phase:
+        return True
+    return token_total(result) <= token_total(phase)
 
 
 def _looks_like_subset_cached_result(phase_usage: Any, result_usage: Any) -> bool:

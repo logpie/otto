@@ -3,6 +3,7 @@ export type OutcomeFilter = "all" | "success" | "failed" | "interrupted" | "canc
 export type JobCommand = "build" | "improve" | "certify";
 export type ImproveSubcommand = "bugs" | "feature" | "target";
 export type CertificationPolicy = "" | "fast" | "standard" | "thorough" | "skip";
+export type VerificationPolicy = "smart" | "fast" | "full" | "skip";
 export type ExecutionMode = "split" | "agentic";
 export type PlanningMode = "direct" | "spec-review" | "spec-auto" | "spec-file";
 
@@ -382,6 +383,30 @@ export interface PhaseTimelineItem {
   reasoning_effort: string | null;
 }
 
+export interface VerificationCheck {
+  id: string;
+  label: string;
+  action: string;
+  status: "pending" | "running" | "pass" | "fail" | "warn" | "skipped" | "flag_for_human" | string;
+  reason: string;
+  source: string;
+  evidence: string[];
+  metadata: Record<string, unknown>;
+}
+
+export interface VerificationPlan {
+  schema_version: number;
+  scope: string;
+  target: string;
+  policy: VerificationPolicy | string;
+  risk_level: string;
+  verification_level: string;
+  allow_skip: boolean;
+  reasons: string[];
+  checks: VerificationCheck[];
+  metadata: Record<string, unknown>;
+}
+
 export interface RunDetail extends RunSummary {
   display_status: string;
   active: boolean;
@@ -395,6 +420,7 @@ export interface RunDetail extends RunSummary {
   selected_log_path: string | null;
   legal_actions: ActionState[];
   review_packet: ReviewPacket;
+  verification_plan: VerificationPlan | null;
   phase_timeline: PhaseTimelineItem[];
   landing_state: string | null;
   merge_info?: Record<string, unknown> | null;

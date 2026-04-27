@@ -48,6 +48,45 @@ def _write_codex_subset_cache_messages(session_dir: Path, phase: str = "build") 
     )
 
 
+def _write_claude_result_and_inflated_phase_messages(session_dir: Path, phase: str = "build") -> None:
+    phase_dir = session_dir / phase
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    (phase_dir / "messages.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "type": "assistant",
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_creation_input_tokens": 10_000,
+                    "cache_read_input_tokens": 200_000,
+                    "output_tokens": 100,
+                },
+            }),
+            json.dumps({
+                "type": "result",
+                "usage": {
+                    "input_tokens": 20,
+                    "cache_creation_input_tokens": 1_000,
+                    "cache_read_input_tokens": 2_000,
+                    "output_tokens": 30,
+                },
+            }),
+            json.dumps({
+                "type": "phase_end",
+                "phase": phase,
+                "usage": {
+                    "input_tokens": 120,
+                    "cache_creation_input_tokens": 11_000,
+                    "cache_read_input_tokens": 202_000,
+                    "output_tokens": 130,
+                    "total_tokens": 213_250,
+                },
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_session_summary_includes_tokens_from_phase_messages(tmp_path: Path) -> None:
     repo = init_repo(tmp_path)
     run_id = "phase-token-run"
@@ -162,6 +201,25 @@ def test_phase_messages_override_stale_inflated_summary_tokens(tmp_path: Path) -
         "cached_input_tokens": 800,
         "output_tokens": 50,
         "total_tokens": 1_050,
+    }
+
+
+def test_claude_result_usage_overrides_inflated_phase_end_tokens(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    run_id = "claude-inflated-phase-run"
+    session_dir = paths.session_dir(repo, run_id)
+    _write_claude_result_and_inflated_phase_messages(session_dir)
+    paths.session_summary(repo, run_id).write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+
+    usage = _token_usage_from_summary_paths([paths.session_summary(repo, run_id)], base_dir=None)
+
+    assert usage == {
+        "input_tokens": 20,
+        "cache_creation_input_tokens": 1_000,
+        "cache_read_input_tokens": 2_000,
+        "cached_input_tokens": 3_000,
+        "output_tokens": 30,
+        "total_tokens": 3_050,
     }
 
 

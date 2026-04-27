@@ -133,6 +133,28 @@ def test_merge_transactional_flag_reaches_orchestrator(tmp_path: Path, monkeypat
     assert getattr(seen["options"], "transactional") is True
 
 
+def test_merge_verify_policy_reaches_orchestrator(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+    seen: dict[str, object] = {}
+
+    async def fake_run_merge(**kwargs):
+        seen["options"] = kwargs["options"]
+        return MergeRunResult(
+            success=True,
+            merge_id="merge-test",
+            state=MergeState(merge_id="merge-test", target="main", outcomes=[]),
+            note="ok",
+        )
+
+    monkeypatch.setattr("otto.merge.orchestrator.run_merge", fake_run_merge)
+
+    code, out = _run(["merge", "--all", "--verify", "full"], cwd=repo)
+
+    assert code == 0, out
+    assert getattr(seen["options"], "verification_policy") == "full"
+    assert getattr(seen["options"], "full_verify") is True
+
+
 def test_merge_from_subdirectory_uses_repo_root(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
     nested = repo / "src" / "pkg"

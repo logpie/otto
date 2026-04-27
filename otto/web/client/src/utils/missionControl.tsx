@@ -1014,7 +1014,7 @@ export function mergeBlockedText(landing: LandingState): string {
   return `Merge blocked by local changes${suffix}`;
 }
 
-export function landingBulkConfirmation(landing?: LandingState): string {
+export function landingBulkConfirmation(landing?: LandingState, includeChoice = true): string {
   const ready = (landing?.items || []).filter((item) => item.landing_state === "ready");
   const target = landing?.target || "main";
   const taskList = ready.slice(0, 5).map((item) => item.task_id).join(", ");
@@ -1024,7 +1024,10 @@ export function landingBulkConfirmation(landing?: LandingState): string {
   const collisionNote = collisionCount
     ? ` ${collisionCount} ready-task collision${collisionCount === 1 ? "" : "s"} detected; Otto will fail safely if git cannot merge them.`
     : "";
-  return `Land ${ready.length} ready task${ready.length === 1 ? "" : "s"} into ${target}: ${taskList}${suffix}. This uses transactional fast merge, so ${target} updates only if every branch merges cleanly. It will stage ${changed} changed file${changed === 1 ? "" : "s"} across the ready work.${collisionNote}`;
+  const verificationText = includeChoice
+    ? "Choose the verification level below."
+    : "Otto will use smart verification.";
+  return `Land ${ready.length} ready task${ready.length === 1 ? "" : "s"} into ${target}: ${taskList}${suffix}. ${verificationText} Otto will stage ${changed} changed file${changed === 1 ? "" : "s"} across the ready work.${collisionNote}`;
 }
 
 export function releaseResolutionConfirmation(data: StateResponse | null): string {
@@ -1034,7 +1037,7 @@ export function releaseResolutionConfirmation(data: StateResponse | null): strin
     return "Otto will abort the interrupted git merge, then relaunch conflict-resolving landing for the remaining ready work. This may invoke the configured merge provider.";
   }
   if (canMerge(landing)) {
-    return landingBulkConfirmation(landing);
+    return landingBulkConfirmation(landing, false);
   }
   const cleanup = supersededFailedTaskIds(landing);
   if (cleanup.length) {

@@ -280,5 +280,5 @@ def test_ready_and_landed_badges_are_visually_distinct(
     assert "Ready" in (ready_badge.text_content() or "")
     assert "Ready to land" in (ready_badge.get_attribute("title") or "")
     assert "Landed" in (landed_badge.text_content() or "")
-    assert ready_badge.locator(".status-icon").count() == 0
+    assert "→" in (ready_badge.locator(".status-icon").text_content() or "")
     assert "✓" in (landed_badge.locator(".status-icon").text_content() or "")

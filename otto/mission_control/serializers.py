@@ -34,6 +34,7 @@ from otto.mission_control.model import (
     is_effectively_active_status,
 )
 from otto.runs.schema import RunRecord
+from otto.token_usage import phase_token_usage_from_messages
 from otto.token_usage import token_usage_from_mapping as _shared_token_usage_from_mapping
 
 
@@ -642,6 +643,7 @@ def _phase_timeline(record: Any, run_config: dict[str, Any]) -> list[dict[str, A
     breakdown = record.metrics.get("breakdown")
     if not isinstance(breakdown, dict):
         breakdown = {}
+    phase_message_usage = _phase_message_usage(record)
     command_family = _first_string(run_config.get("command_family"))
     if run_config.get("split_mode") and command_family == "improve":
         phases = ["certify", "fix"]
@@ -651,9 +653,11 @@ def _phase_timeline(record: Any, run_config: dict[str, Any]) -> list[dict[str, A
         phases = ["build"]
     timeline: list[dict[str, Any]] = []
     for phase in phases:
-        data = breakdown.get(phase if phase != "agentic" else "build")
+        data_key = phase if phase != "agentic" else "build"
+        data = breakdown.get(data_key)
         if not isinstance(data, dict):
             data = {}
+        token_usage = phase_message_usage.get(data_key) or _token_usage_from_mapping(data)
         agent_key = "build" if phase == "agentic" else ("certifier" if phase == "certify" else phase)
         agent = (run_config.get("agents") or {}).get(agent_key, {}) or {}
         status = "pending"
@@ -668,7 +672,7 @@ def _phase_timeline(record: Any, run_config: dict[str, Any]) -> list[dict[str, A
             "duration_s": _first_float(data.get("duration_s")),
             "cost_usd": _first_float(data.get("cost_usd")),
             "rounds": _first_int(data.get("rounds")),
-            "token_usage": _token_usage_from_mapping(data),
+            "token_usage": token_usage,
             "provider": _first_string(agent.get("provider"), run_config.get("provider")),
             "model": _first_string(agent.get("model"), run_config.get("model")),
             "reasoning_effort": _first_string(
@@ -678,6 +682,21 @@ def _phase_timeline(record: Any, run_config: dict[str, Any]) -> list[dict[str, A
             ),
         })
     return timeline
+
+
+def _phase_message_usage(record: Any) -> dict[str, dict[str, int]]:
+    artifacts = getattr(record, "artifacts", {})
+    summary_path = artifacts.get("summary_path") if isinstance(artifacts, dict) else None
+    summary_text = _first_string(summary_path)
+    if not summary_text:
+        return {}
+    path = Path(summary_text).expanduser()
+    if not path.is_absolute():
+        project_dir = _first_string(getattr(record, "project_dir", None))
+        if not project_dir:
+            return {}
+        path = Path(project_dir) / path
+    return phase_token_usage_from_messages(path.parent)
 
 
 def _phase_label(phase: str, *, command_family: str | None = None) -> str:

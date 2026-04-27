@@ -269,7 +269,7 @@ def test_web_start_watcher_blocks_when_runtime_is_stale(tmp_path: Path, monkeypa
         lock.close()
 
     assert response.status_code == 409
-    assert "Stop the stale watcher" in response.json()["message"]
+    assert "Stop the stale queue runner" in response.json()["message"]
     assert calls == []
     event = client.get("/api/events").json()["items"][0]
     assert event["kind"] == "watcher.start.blocked"

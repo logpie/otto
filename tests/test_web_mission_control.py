@@ -180,6 +180,128 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     content = client.get(f"/api/runs/build-web/artifacts/{summary['index']}/content").json()
     assert '"passed"' in content["content"]
 
+
+def test_web_usage_recovers_authoritative_phase_result_tokens(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_id = "usage-recovery"
+    session_dir = paths.session_dir(repo, run_id)
+    build_dir = session_dir / "build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    (build_dir / "messages.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "type": "result",
+                "usage": {
+                    "input_tokens": 20,
+                    "cache_creation_input_tokens": 1000,
+                    "cache_read_input_tokens": 2000,
+                    "output_tokens": 30,
+                },
+            }),
+            json.dumps({
+                "type": "phase_end",
+                "phase": "build",
+                "usage": {
+                    "input_tokens": 120,
+                    "cache_creation_input_tokens": 11000,
+                    "cache_read_input_tokens": 202000,
+                    "output_tokens": 130,
+                    "total_tokens": 213250,
+                },
+            }),
+        ])
+        + "\n",
+        encoding="utf-8",
+    )
+    summary_path = paths.session_summary(repo, run_id)
+    summary_path.write_text(
+        json.dumps({
+            "run_id": run_id,
+            "token_usage": {
+                "input_tokens": 120,
+                "cache_creation_input_tokens": 11000,
+                "cache_read_input_tokens": 202000,
+                "output_tokens": 130,
+                "total_tokens": 213250,
+            },
+            "breakdown": {
+                "build": {
+                    "duration_s": 10,
+                    "input_tokens": 120,
+                    "cache_creation_input_tokens": 11000,
+                    "cache_read_input_tokens": 202000,
+                    "output_tokens": 130,
+                    "total_tokens": 213250,
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+    record = make_run_record(
+        project_dir=repo,
+        run_id=run_id,
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="build usage recovery",
+        status="done",
+        cwd=repo,
+        source={"argv": ["build", "usage recovery"]},
+        git={"branch": "main", "worktree": None},
+        intent={"summary": "usage recovery"},
+        artifacts={"summary_path": str(summary_path)},
+        metrics={
+            "breakdown": {
+                "build": {
+                    "duration_s": 10,
+                    "input_tokens": 120,
+                    "cache_creation_input_tokens": 11000,
+                    "cache_read_input_tokens": 202000,
+                    "output_tokens": 130,
+                    "total_tokens": 213250,
+                }
+            }
+        },
+        adapter_key="atomic.build",
+        last_event="completed",
+    )
+    record.terminal_outcome = "success"
+    write_record(repo, record)
+    append_history_snapshot(
+        repo,
+        build_terminal_snapshot(
+            run_id=run_id,
+            domain="atomic",
+            run_type="build",
+            command="build",
+            intent_meta={"summary": "usage recovery"},
+            status="done",
+            terminal_outcome="success",
+            timing={"finished_at": "2026-04-24T00:00:00Z"},
+            artifacts={"summary_path": str(summary_path)},
+            extra_fields={
+                "token_usage": {
+                    "input_tokens": 120,
+                    "cache_creation_input_tokens": 11000,
+                    "cache_read_input_tokens": 202000,
+                    "output_tokens": 130,
+                    "total_tokens": 213250,
+                },
+            },
+        ),
+    )
+
+    client = _client(repo)
+    state = client.get("/api/state").json()
+    detail = client.get(f"/api/runs/{run_id}").json()
+
+    history_row = next(item for item in state["history"]["items"] if item["run_id"] == run_id)
+    assert history_row["cost_display"] == "3.1K tokens"
+    assert history_row["token_usage"]["total_tokens"] == 3050
+    assert detail["phase_timeline"][0]["token_usage"]["total_tokens"] == 3050
+
+
 def test_web_run_detail_is_not_hidden_by_list_filters(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -674,6 +796,42 @@ def test_web_cleaned_failed_queue_history_is_audit_only(tmp_path: Path) -> None:
     assert actions["x"]["reason"] == "queue task already cleaned up"
     assert detail["review_packet"]["next_action"]["label"] == "No action"
     assert detail["review_packet"]["next_action"]["enabled"] is False
+
+
+def test_web_running_merge_detail_uses_pending_not_failure_checks(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_id = "merge-running"
+    primary_log = paths.merge_dir(repo) / "merge.log"
+    primary_log.parent.mkdir(parents=True, exist_ok=True)
+    primary_log.write_text("merge started\n", encoding="utf-8")
+    record = make_run_record(
+        project_dir=repo,
+        run_id=run_id,
+        domain="merge",
+        run_type="merge",
+        command="merge",
+        display_name="merge",
+        status="running",
+        cwd=repo,
+        source={"argv": ["merge", "ready-task"]},
+        git={"target_branch": "main"},
+        intent={"summary": "land ready task"},
+        artifacts={"session_dir": str(paths.merge_dir(repo) / run_id), "primary_log_path": str(primary_log)},
+        identity={"merge_id": run_id},
+        adapter_key="merge.run",
+    )
+    write_record(repo, record)
+
+    detail = _client(repo).get(f"/api/runs/{run_id}").json()
+
+    assert detail["review_packet"]["readiness"]["state"] == "in_progress"
+    checks = {check["key"]: check for check in detail["review_packet"]["checks"]}
+    assert checks["run"]["status"] == "pending"
+    assert checks["certification"]["status"] == "pending"
+    assert checks["landing"]["status"] == "pending"
+    assert all(check["status"] != "fail" for check in detail["review_packet"]["checks"])
+
 
 def test_web_artifact_content_rejects_paths_outside_project(tmp_path: Path) -> None:
     repo = tmp_path / "repo"

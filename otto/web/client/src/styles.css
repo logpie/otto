@@ -577,6 +577,18 @@ textarea:focus-visible,
   color: var(--color-warning-fg);
 }
 
+.topbar-watcher.is-startable {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  box-shadow: var(--shadow);
+}
+
+.topbar-watcher.is-startable .watcher-dot {
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
+}
+
 .watcher-dot {
   width: 8px;
   height: 8px;
@@ -594,6 +606,15 @@ textarea:focus-visible,
 }
 
 .task-status.status-tone-running .status-icon {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-info-fg);
+  color: transparent;
+  font-size: 0;
+  line-height: 1;
+  flex: 0 0 auto;
   animation: task-live-pulse 1.4s ease-out infinite;
 }
 
@@ -2833,6 +2854,127 @@ tbody tr.selected {
   text-transform: uppercase;
 }
 
+.verification-plan-panel {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.verification-plan-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.verification-plan-panel summary span {
+  font-weight: 800;
+}
+
+.verification-plan-panel summary strong {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.verification-plan-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+
+.verification-plan-note {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.verification-plan-note strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.verification-plan-meta {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 5px 10px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.verification-plan-meta dt {
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.verification-plan-meta dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.verification-plan-reasons {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.verification-plan-checks {
+  display: grid;
+  gap: 8px;
+}
+
+.verification-check {
+  display: grid;
+  grid-template-columns: 94px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt);
+}
+
+.verification-check > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  white-space: nowrap;
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.verification-check div {
+  min-width: 0;
+}
+
+.verification-check p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .phase-done .phase-status {
   background: var(--color-success-bg);
   color: var(--color-success-fg);
@@ -2893,6 +3035,34 @@ tbody tr.selected {
 .queue-list-actions {
   display: flex;
   gap: 8px;
+}
+
+.queue-start-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 22px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+}
+
+.queue-start-banner > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.queue-start-banner strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.queue-start-banner span {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .queue-list-empty {
@@ -3111,6 +3281,10 @@ tbody tr.selected {
   font-variant-numeric: tabular-nums;
   font-size: 13px;
   color: var(--text);
+}
+
+.queue-list-row-task[data-queued-waiting="true"] .queue-list-cell-num {
+  color: var(--muted);
 }
 
 .queue-list-cell-actions {
@@ -3442,6 +3616,59 @@ tbody tr.selected {
   color: var(--muted);
   cursor: pointer;
   font-size: 12px;
+}
+
+.live-log-preview {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.live-log-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.live-log-preview-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.live-log-preview-head strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.live-log-preview-head span,
+.live-log-preview p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.live-log-preview-head button {
+  flex: 0 0 auto;
+  min-height: 30px;
+}
+
+.live-log-preview-body {
+  max-height: 132px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #0b1020;
+  color: #e5e7eb;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .action-bar {
@@ -4984,15 +5211,31 @@ tbody tr.selected {
 }
 
 .job-palette-target {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(280px, 1fr);
   align-items: center;
-  gap: 6px;
+  gap: 8px 16px;
   padding: 10px 0;
   font-size: 12px;
   color: var(--muted);
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
+}
+
+.job-palette-target-main,
+.job-palette-target-controls {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.job-palette-target-main {
   flex-wrap: wrap;
+}
+
+.job-palette-target-controls {
+  justify-content: flex-end;
 }
 
 .job-palette-target code {
@@ -5010,14 +5253,15 @@ tbody tr.selected {
 }
 
 .job-palette-target-summary {
-  margin-left: auto;
   font-size: 11px;
   color: var(--muted);
   text-align: right;
-  flex: 1 1 280px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .job-palette-summary-edit {
+  flex: 0 0 auto;
   min-height: 28px;
   padding: 4px 8px;
   font-size: 12px;
@@ -5025,6 +5269,11 @@ tbody tr.selected {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 6px;
+}
+
+.job-palette-summary-edit[aria-expanded="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
 }
 
 .job-palette-prior {
@@ -5074,8 +5323,8 @@ tbody tr.selected {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  position: relative;
-  bottom: auto;
+  position: sticky;
+  bottom: 0;
   flex: 0 0 auto;
 }
 
@@ -5117,8 +5366,8 @@ tbody tr.selected {
 }
 
 .job-dialog.job-palette footer {
-  position: relative;
-  bottom: auto;
+  position: sticky;
+  bottom: 0;
   z-index: 1;
   margin: 0;
   padding: 12px 18px;
@@ -5525,6 +5774,12 @@ html, body {
   .queue-list-head h2 { font-size: 15px; }
   .queue-list-head p { font-size: 12px; }
 
+  .queue-start-banner {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 14px;
+  }
+
   /* Run drawer: full-width on phones. */
   .detail.run-drawer {
     width: 100vw;
@@ -5582,6 +5837,19 @@ html, body {
   }
 
   .job-palette-intent textarea { font-size: 16px; }
+
+  .job-palette-target {
+    grid-template-columns: 1fr;
+  }
+
+  .job-palette-target-controls {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .job-palette-target-summary {
+    text-align: left;
+  }
 
   /* Old sidebar fallback rules below — irrelevant in topbar layout but
      keeping for any leftover legacy markup. */
@@ -6253,6 +6521,35 @@ details > summary:focus-visible {
   overflow-wrap: anywhere;
   word-break: break-word;
   white-space: normal;
+}
+
+.confirm-verification-policy {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+}
+
+.confirm-verification-policy label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.confirm-verification-policy select {
+  width: 100%;
+}
+
+.confirm-verification-policy p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 /* #10 — Review packet headline / summary / next-step / failure must

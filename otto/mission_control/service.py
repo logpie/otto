@@ -59,6 +59,7 @@ from otto.queue.runtime import IN_FLIGHT_STATUSES, task_display_status, watcher_
 from otto.queue.runner import child_is_alive, kill_child_safely, runner_config_from_otto_config
 from otto.queue.schema import load_queue, load_state as load_queue_state
 from otto.token_usage import token_usage_from_mapping as _token_usage_from_mapping
+from otto.verification import VerificationCheck, VerificationPlan
 
 LOGGER = logging.getLogger(__name__)
 REVIEW_IN_PROGRESS_STATUSES = {"queued", "starting", "initializing", "running", "terminating"}
@@ -229,7 +230,12 @@ class MissionControlService:
     def detail(self, run_id: str, filters: MissionControlFilters | None = None) -> dict[str, Any]:
         detail = self._detail_view(run_id, filters)
         payload = serialize_detail(detail)
-        payload["review_packet"] = _review_packet(self.project_dir, detail)
+        review_packet = _review_packet(self.project_dir, detail)
+        payload["review_packet"] = review_packet
+        payload["verification_plan"] = _verification_plan_for_detail(detail) or _verification_plan_from_review_packet(
+            detail,
+            review_packet,
+        )
         _apply_landing_context(self.project_dir, payload, detail)
         return payload
 
@@ -588,15 +594,16 @@ class MissionControlService:
                 status_code=409,
             )
 
-    def merge_all(self) -> dict[str, Any]:
+    def merge_all(self, *, verification_policy: str | None = "smart") -> dict[str, Any]:
         _ensure_merge_unblocked(self.project_dir)
         payload = serialize_action_result(
             execute_merge_all(
                 self.project_dir,
+                verification_policy=verification_policy,
                 post_result=lambda item: self._record_async_action_result(
                     kind="merge.all.completed",
                     result=item,
-                    details={"action": "merge-all"},
+                    details={"action": "merge-all", "verification_policy": verification_policy or "smart"},
                 ),
             )
         )
@@ -604,7 +611,7 @@ class MissionControlService:
             kind="merge.all",
             severity=_event_severity(payload),
             message=payload.get("message") or "merge ready tasks requested",
-            details={"ok": payload.get("ok")},
+            details={"ok": payload.get("ok"), "verification_policy": verification_policy or "smart"},
         )
         return payload
 
@@ -666,10 +673,11 @@ class MissionControlService:
             payload = serialize_action_result(
                 execute_merge_all(
                     self.project_dir,
+                    verification_policy="smart",
                     post_result=lambda item: self._record_async_action_result(
                         kind="release.resolve.completed",
                         result=item,
-                        details={"action": "merge-all"},
+                        details={"action": "merge-all", "verification_policy": "smart"},
                     ),
                 )
             )
@@ -848,7 +856,7 @@ class MissionControlService:
     def start_watcher(self, *, concurrent: int | None = None, exit_when_empty: bool = False) -> dict[str, Any]:
         status = self.watcher_status()
         if status["alive"]:
-            payload = {"ok": True, "message": "watcher already running", "refresh": True, "watcher": status}
+            payload = {"ok": True, "message": "queue runner already running", "refresh": True, "watcher": status}
             self._record_event(
                 kind="watcher.start.skipped",
                 severity="info",
@@ -858,7 +866,7 @@ class MissionControlService:
             return payload
         health = status.get("health") if isinstance(status.get("health"), dict) else {}
         if health.get("state") != "stopped":
-            message = str(health.get("next_action") or "Stop the stale watcher before starting another one.")
+            message = str(health.get("next_action") or "Stop the stale queue runner before starting another one.")
             self._record_event(
                 kind="watcher.start.blocked",
                 severity="warning",
@@ -1522,9 +1530,10 @@ def _merge_review_checks(
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     terminal_success = readiness["state"] == "merged"
+    in_progress = display_status in REVIEW_IN_PROGRESS_STATUSES
     if terminal_success:
         checks.append(_review_check("run", "Landing run", "pass", f"Landing completed into {target}."))
-    elif display_status in REVIEW_IN_PROGRESS_STATUSES:
+    elif in_progress:
         checks.append(_review_check("run", "Landing run", "pending", "Landing is still in flight."))
     else:
         checks.append(_review_check("run", "Landing run", "fail", f"Landing status is {display_status or 'unknown'}."))
@@ -1535,6 +1544,8 @@ def _merge_review_checks(
         checks.append(_review_check("certification", "Post-landing certification", "pass", f"{stories_passed}/{stories_tested} stories passed."))
     elif stories_tested and stories_passed is not None:
         checks.append(_review_check("certification", "Post-landing certification", "fail", f"{stories_passed}/{stories_tested} stories passed."))
+    elif in_progress:
+        checks.append(_review_check("certification", "Post-landing certification", "pending", "Certification results appear after the landing run finishes."))
     else:
         checks.append(_review_check("certification", "Post-landing certification", "info", "No post-landing story count was recorded."))
 
@@ -1546,6 +1557,9 @@ def _merge_review_checks(
 
     if terminal_success:
         checks.append(_review_check("landing", "Landing state", "pass", "No further landing action is needed."))
+    elif in_progress:
+        detail = "; ".join(str(item) for item in readiness.get("blockers", []) if item) or "Landing is still in progress."
+        checks.append(_review_check("landing", "Landing state", "pending", detail))
     else:
         detail = "; ".join(str(item) for item in readiness.get("blockers", []) if item) or "Landing is not complete."
         checks.append(_review_check("landing", "Landing state", "fail", detail))
@@ -1582,7 +1596,7 @@ def _review_readiness(
             "terminating": "Stopping",
         }.get(display_status, "In progress")
         next_step = (
-            "Start the watcher when you want this queued task to run."
+            "Start the queue runner when you want this queued task to run."
             if display_status == "queued"
             else "Watch logs or wait for completion."
         )
@@ -1674,7 +1688,7 @@ def _review_checks(
     elif display_status in REVIEW_IN_PROGRESS_STATUSES:
         run_label = "Waiting to start" if display_status == "queued" else "Run in progress"
         run_detail = (
-            "The watcher has not started this queued task yet."
+            "The queue runner has not started this queued task yet."
             if display_status == "queued"
             else "Task is still in flight."
         )
@@ -1805,7 +1819,7 @@ def _review_headline(record: Any, display_status: str) -> str:
     if display_status == "stale":
         return "Stale; stop or remove the orphaned work"
     if display_status == "queued":
-        return "Waiting for watcher"
+        return "Waiting for queue runner"
     if display_status in REVIEW_IN_PROGRESS_STATUSES:
         return "In progress"
     if display_status == "paused" and _spec_review_pending(record):
@@ -1823,10 +1837,10 @@ def _suggested_next_action(
 ) -> dict[str, Any]:
     if display_status == "queued":
         return {
-            "label": "Start watcher",
+            "label": "Start queue runner",
             "action_key": None,
             "enabled": False,
-            "reason": "Use Start watcher in the sidebar to run queued work.",
+            "reason": "Use Start queue runner to run queued work.",
         }
     by_key = {action.key: action for action in actions}
     preferred = {
@@ -2642,6 +2656,100 @@ def _summary_for_record(record: Any) -> dict[str, Any] | None:
         if value is not None:
             return value
     return None
+
+
+def _verification_plan_for_detail(detail: DetailView) -> dict[str, Any] | None:
+    """Return the operator-visible verification plan for a run, if present."""
+    record = detail.record
+    summary = _summary_for_record(record)
+    if isinstance(summary, dict):
+        for key in ("verification_plan", "merge_verification_plan"):
+            value = summary.get(key)
+            if isinstance(value, dict):
+                return value
+
+    artifacts = getattr(record, "artifacts", {}) if isinstance(getattr(record, "artifacts", {}), dict) else {}
+    candidates: list[Path] = []
+    for raw in artifacts.get("extra_log_paths") or []:
+        text = _optional_str(raw)
+        if text:
+            candidates.append(Path(text).expanduser())
+    for artifact in detail.artifacts:
+        text = _optional_str(getattr(artifact, "path", None))
+        if text:
+            candidates.append(Path(text).expanduser())
+
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve(strict=False)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.name != "verification-plan.json":
+            continue
+        value = _read_json_object(resolved)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _verification_plan_from_review_packet(detail: DetailView, review_packet: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a provisional operator plan when a run has not written one yet."""
+    raw_checks = review_packet.get("checks")
+    if not isinstance(raw_checks, list) or not raw_checks:
+        return None
+
+    checks: list[VerificationCheck] = []
+    status_map = {
+        "pass": "pass",
+        "fail": "fail",
+        "warn": "warn",
+        "pending": "pending",
+        "info": "pending",
+        "skipped": "skipped",
+    }
+    for raw in raw_checks:
+        if not isinstance(raw, dict):
+            continue
+        key = _optional_str(raw.get("key")) or _optional_str(raw.get("label")) or "check"
+        status = status_map.get((_optional_str(raw.get("status")) or "pending").lower(), "pending")
+        checks.append(
+            VerificationCheck(
+                id=key,
+                label=_optional_str(raw.get("label")) or key,
+                action="CHECK",
+                status=status,  # type: ignore[arg-type]
+                reason=_optional_str(raw.get("detail")) or "",
+                source="review-packet",
+            )
+        )
+    if not checks:
+        return None
+
+    record = detail.record
+    changes = review_packet.get("changes") if isinstance(review_packet.get("changes"), dict) else {}
+    target = _optional_str(changes.get("target")) or _optional_str(record.git.get("target_branch")) or ""
+    display_status = _optional_str(review_packet.get("status")) or record.status or ""
+    policy = "smart"
+    if display_status in {"queued", "starting", "initializing", "running", "terminating"}:
+        reasons = ["Provisional plan from the current run state; final story checks appear after certification."]
+    else:
+        reasons = ["Plan reconstructed from the review packet because no verification-plan artifact was recorded."]
+    return VerificationPlan(
+        scope=f"{record.domain}/{record.run_type}",
+        target=target,
+        policy=policy,
+        risk_level="unknown",
+        verification_level="provisional",
+        allow_skip=True,
+        reasons=reasons,
+        checks=checks,
+        metadata={
+            "run_id": detail.run_id,
+            "source": "review-packet",
+            "status": display_status,
+        },
+    ).to_dict()
 
 
 def _proof_report_info(project_dir: Path, record: Any) -> dict[str, Any]:

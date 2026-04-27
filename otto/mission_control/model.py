@@ -481,7 +481,7 @@ class MissionControlModel:
             return self._detail_view_from_record(record, overlay, "live", log_index)
 
         for row in self._dedupe_history_rows(load_project_history_rows(self.project_dir)):
-            if str(row.get("run_id") or "").strip() != run_id:
+            if str(row.run_id or "").strip() != run_id:
                 continue
             return self._detail_view_from_record(
                 _history_row_to_record(self.project_dir, row),
@@ -655,7 +655,7 @@ class MissionControlModel:
             if filters.query and not _live_record_matches_query(record, row_label, filters.query):
                 continue
             overlay = adapter.live_overlay(record, self._derive_overlay(record, now, monotonic_now))
-            if filters.active_only and not _status_is_effectively_active(record.status, overlay):
+            if filters.active_only and not _status_is_active_filter_match(record.status, overlay):
                 continue
             elapsed_s = _elapsed_seconds(record, now, overlay)
             cost_usd = _coerce_float(record.metrics.get("cost_usd"))
@@ -964,6 +964,7 @@ def _retain_terminal_live_record(record: RunRecord) -> bool:
 
 
 ACTIVE_RUN_STATUSES = frozenset({"starting", "initializing", "running", "terminating"})
+ACTIVE_FILTER_STATUSES = ACTIVE_RUN_STATUSES | {"queued"}
 
 
 def is_effectively_active_status(status: str | None, overlay: StaleOverlay | None) -> bool:
@@ -977,6 +978,15 @@ def is_effectively_active_status(status: str | None, overlay: StaleOverlay | Non
 
 def _status_is_effectively_active(status: str | None, overlay: StaleOverlay | None) -> bool:
     return is_effectively_active_status(status, overlay)
+
+
+def _status_is_active_filter_match(status: str | None, overlay: StaleOverlay | None) -> bool:
+    normalized = str(status or "").strip().lower()
+    if is_terminal_status(normalized):
+        return False
+    if overlay is not None and overlay.level == "stale":
+        return False
+    return normalized in ACTIVE_FILTER_STATUSES
 
 
 def _history_row_to_record(project_dir: Path, row: HistoryRow) -> RunRecord:
@@ -1385,10 +1395,7 @@ def _format_compact_number(value: int | float) -> str:
 
 
 def _record_token_usage(record: RunRecord) -> dict[str, int]:
-    usage = _token_usage_from_mapping(record.metrics)
-    if usage:
-        return usage
-    return _token_usage_from_summary_paths(
+    summary_usage = _token_usage_from_summary_paths(
         _summary_path_candidates(
             record.artifacts.get("summary_path"),
             record.artifacts.get("extra_log_paths"),
@@ -1396,16 +1403,22 @@ def _record_token_usage(record: RunRecord) -> dict[str, int]:
         ),
         base_dir=Path(record.project_dir),
     )
+    if summary_usage:
+        return summary_usage
+    usage = _token_usage_from_mapping(record.metrics)
+    if usage:
+        return usage
+    return {}
 
 
 def _history_token_usage(row: HistoryRow) -> dict[str, int]:
-    usage = _token_usage_from_mapping(row.raw)
-    if usage:
-        return usage
-    return _token_usage_from_summary_paths(
+    usage = _token_usage_from_summary_paths(
         _summary_path_candidates(row.summary_path, row.extra_log_paths, row.raw.get("last_event")),
         base_dir=None,
     )
+    if usage:
+        return usage
+    return _token_usage_from_mapping(row.raw)
 
 
 def _token_usage_from_mapping(mapping: Any) -> dict[str, int]:

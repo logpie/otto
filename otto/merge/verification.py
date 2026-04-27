@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.merge import git_ops
+from otto.verification import VerificationCheck, VerificationPlan, VerificationPolicy
 
 
 HIGH_RISK_PATH_PARTS = (
@@ -56,7 +57,10 @@ class MergeVerificationPlan:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": 1,
+            "scope": "merge",
             "target": self.target,
+            "policy": "full" if self.verification_level == "full" else "smart",
             "risk_level": self.risk_level,
             "verification_level": self.verification_level,
             "allow_skip": self.allow_skip,
@@ -66,7 +70,48 @@ class MergeVerificationPlan:
             "high_risk_files": list(self.high_risk_files),
             "reasons": list(self.reasons),
             "stories": [story.to_dict() for story in self.stories],
+            "checks": [
+                {
+                    "id": story.story_id,
+                    "label": story.story_id,
+                    "action": story.action,
+                    "status": "pending",
+                    "reason": story.reason,
+                    "source": story.source_branch,
+                    "evidence": [],
+                    "metadata": {"story_id": story.story_id},
+                }
+                for story in self.stories
+            ],
         }
+
+    def to_verification_plan(self, *, policy: VerificationPolicy = "smart") -> VerificationPlan:
+        return VerificationPlan(
+            scope="merge",
+            target=self.target,
+            policy=policy,
+            risk_level=self.risk_level,
+            verification_level=self.verification_level,
+            allow_skip=self.allow_skip,
+            reasons=list(self.reasons),
+            checks=[
+                VerificationCheck(
+                    id=story.story_id,
+                    label=story.story_id,
+                    action=story.action,
+                    reason=story.reason,
+                    source=story.source_branch,
+                    metadata={"story_id": story.story_id},
+                )
+                for story in self.stories
+            ],
+            metadata={
+                "branches": [dict(branch) for branch in self.branches],
+                "changed_files": list(self.changed_files),
+                "overlapping_files": list(self.overlapping_files),
+                "high_risk_files": list(self.high_risk_files),
+            },
+        )
 
 
 def build_merge_verification_plan(

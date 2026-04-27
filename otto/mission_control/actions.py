@@ -30,6 +30,7 @@ from otto.runs.registry import (
     writer_identity_matches_live_process,
 )
 from otto.runs.schema import RunRecord, is_terminal_status
+from otto.verification import VerificationPolicy, normalize_verification_policy
 
 _COMMAND_COUNTER = itertools.count(1)
 
@@ -112,6 +113,7 @@ def execute_action(
             record,
             project_dir,
             selected_queue_task_ids=selected_queue_task_ids,
+            verification_policy=_payload_verification_policy(action_payload),
             post_result=post_result,
         )
     if action_kind == "e":
@@ -139,12 +141,17 @@ def execute_action(
 def execute_merge_all(
     project_dir: Path,
     *,
+    verification_policy: str | None = "smart",
     post_result: Callable[[ActionResult], None] | None = None,
 ) -> ActionResult:
+    try:
+        policy = normalize_verification_policy(verification_policy, default="smart")
+    except ValueError as exc:
+        return _error_result("Landing failed", str(exc))
     return _launch_process(
-        _otto_cli_argv("merge", "--fast", "--transactional", "--no-certify", "--all"),
+        _otto_cli_argv(*_merge_argv(policy, all_done=True, transactional=True)),
         cwd=Path(project_dir),
-        description="merge all",
+        description=f"merge all ({policy} verification)",
         post_result=post_result,
         settle_timeout_s=2.0,
     )
@@ -179,9 +186,9 @@ def execute_merge_recover(
             detail = (abort.stderr or abort.stdout or "git merge --abort failed").strip()
             return _error_result("Recover landing failed", detail)
     return _launch_process(
-        _otto_cli_argv("merge", "--no-certify", "--all"),
+        _otto_cli_argv("merge", "--verify", "smart", "--all"),
         cwd=project_dir,
-        description="recover landing",
+        description="recover landing (smart verification)",
         post_result=post_result,
         settle_timeout_s=2.0,
     )
@@ -434,6 +441,7 @@ def _execute_merge_selected(
     project_dir: Path,
     *,
     selected_queue_task_ids: list[str] | None,
+    verification_policy: str | None,
     post_result: Callable[[ActionResult], None] | None,
 ) -> ActionResult:
     task_ids = [task_id for task_id in (selected_queue_task_ids or []) if task_id]
@@ -443,13 +451,42 @@ def _execute_merge_selected(
             task_ids = [task_id]
     if not task_ids:
         return _error_result("Merge failed", "queue task id missing")
+    try:
+        policy = normalize_verification_policy(verification_policy, default="smart")
+    except ValueError as exc:
+        return _error_result("Merge failed", str(exc))
     return _launch_process(
-        _otto_cli_argv("merge", "--fast", "--no-certify", *task_ids),
+        _otto_cli_argv(*_merge_argv(policy, ids=task_ids, transactional=False)),
         cwd=project_dir,
-        description=f"merge {' '.join(task_ids)}",
+        description=f"merge {' '.join(task_ids)} ({policy} verification)",
         post_result=post_result,
         settle_timeout_s=2.0,
     )
+
+
+def _payload_verification_policy(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("verification_policy")
+    return str(value) if value is not None else None
+
+
+def _merge_argv(
+    policy: VerificationPolicy,
+    *,
+    ids: list[str] | None = None,
+    all_done: bool = False,
+    transactional: bool = False,
+) -> list[str]:
+    argv = ["merge", "--fast"]
+    if transactional:
+        argv.append("--transactional")
+    argv.extend(["--verify", policy])
+    if all_done:
+        argv.append("--all")
+    else:
+        argv.extend(ids or [])
+    return argv
 
 
 def _execute_open_editor(

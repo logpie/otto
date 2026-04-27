@@ -1181,6 +1181,55 @@ class TestMakeSessionLogger:
         assert phase_end["usage"]["output_tokens"] == 15
         assert phase_end["usage"]["cost_usd"] == 0.2
 
+    def test_phase_usage_does_not_count_duplicate_snapshots_twice(self, tmp_path):
+        cbs = make_session_logger(tmp_path)
+        try:
+            usage = {"input_tokens": 100, "output_tokens": 10}
+            cbs["on_message"](AssistantMessage(content=[TextBlock(text="first")], usage=usage))
+            cbs["on_message"](AssistantMessage(content=[TextBlock(text="same")], usage=usage))
+        finally:
+            cbs["_close"]()
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "messages.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        phase_end = [rec for rec in records if rec.get("type") == "phase_end"][-1]
+        assert phase_end["usage"]["input_tokens"] == 100
+        assert phase_end["usage"]["output_tokens"] == 10
+
+    def test_single_phase_result_usage_overrides_streamed_snapshots(self, tmp_path):
+        cbs = make_session_logger(tmp_path)
+        try:
+            cbs["on_message"](
+                AssistantMessage(
+                    content=[TextBlock(text="streamed")],
+                    usage={"input_tokens": 100, "cache_read_input_tokens": 500, "output_tokens": 10},
+                )
+            )
+            cbs["on_message"](
+                ResultMessage(
+                    subtype="success",
+                    is_error=False,
+                    total_cost_usd=0.42,
+                    usage={"input_tokens": 20, "cache_read_input_tokens": 200, "output_tokens": 5},
+                )
+            )
+        finally:
+            cbs["_close"]()
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "messages.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        phase_end = [rec for rec in records if rec.get("type") == "phase_end"][-1]
+        assert phase_end["usage"]["input_tokens"] == 20
+        assert phase_end["usage"]["cache_read_input_tokens"] == 200
+        assert phase_end["usage"]["output_tokens"] == 5
+        assert phase_end["usage"]["cost_usd"] == 0.42
+
     def test_subagent_error_event_is_written(self, tmp_path):
         cbs = make_session_logger(tmp_path)
         try:

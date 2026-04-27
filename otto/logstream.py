@@ -292,6 +292,7 @@ class JsonlMessageWriter:
         self._phase_usage_current = _empty_usage()
         self._phase_usage_totals: dict[str, dict[str, float | int]] = {}
         self._last_usage_seen: dict[str, float | int] | None = None
+        self._phase_switch_count = 0
         self._tool_by_id: dict[str, str] = {}
         self._agent_input_by_id: dict[str, dict[str, Any]] = {}
         self._subagent_retry_counts: dict[str, int] = {}
@@ -429,7 +430,7 @@ class JsonlMessageWriter:
         if previous is None:
             return current
         monotonic_tokens = all(current[key] >= previous.get(key, 0) for key in TOKEN_USAGE_KEYS)
-        if monotonic_tokens and any(current[key] > previous.get(key, 0) for key in TOKEN_USAGE_KEYS):
+        if monotonic_tokens:
             delta = {key: (current[key] - previous.get(key, 0)) for key in TOKEN_USAGE_KEYS}
             previous_cost = float(previous.get("cost_usd", 0.0) or 0.0)
             current_cost = float(current.get("cost_usd", 0.0) or 0.0)
@@ -438,6 +439,18 @@ class JsonlMessageWriter:
         return current
 
     def _record_usage(self, record: dict[str, Any]) -> None:
+        if (
+            record.get("type") == "result"
+            and self._phase_switch_count == 0
+            and isinstance(record.get("usage"), dict)
+        ):
+            usage = {
+                **normalize_token_usage(record["usage"]),
+                "cost_usd": float(record.get("cost_usd") or 0.0),
+            }
+            self._phase_usage_current = usage
+            self._last_usage_seen = usage
+            return
         delta = self._usage_delta(record.get("usage"))
         add_token_usage(self._phase_usage_current, delta)
         self._phase_usage_current["cost_usd"] += float(delta.get("cost_usd", 0.0) or 0.0)
@@ -469,6 +482,7 @@ class JsonlMessageWriter:
     def _start_phase(self, phase: str) -> None:
         self._phase = phase
         self._phase_started_monotonic = time.monotonic()
+        self._phase_switch_count += 1
         if self._emit_phase_events:
             self._write_phase_event("phase_start", phase)
 

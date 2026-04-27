@@ -229,13 +229,13 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
     }
   }, [command, priorRunOptions, priorRunId]);
 
-  // Sync the <details> open state when the user clicks the "Edit" link in
-  // the summary. The native attribute change has to land on the DOM node so
-  // the disclosure widget actually toggles open without a re-render race.
+  // Sync the <details> open state when the user clicks the summary control.
+  // The native attribute change has to land on the DOM node so the disclosure
+  // widget actually toggles without a re-render race.
   useEffect(() => {
     const el = advancedRef.current;
     if (!el) return;
-    if (advancedOpen && !el.open) el.open = true;
+    if (el.open !== advancedOpen) el.open = advancedOpen;
   }, [advancedOpen]);
 
   // mc-audit codex-destructive-action-safety #7: clear timers on unmount so a
@@ -463,23 +463,32 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
           </p>
           {/* Compact target line — shown subtly. Dirty confirm flow stays. */}
           <div className={`job-palette-target ${project?.dirty ? "is-dirty" : ""}`} data-testid="job-dialog-summary">
-            <span>Target</span>
-            <code title={project?.path || ""}>{project?.name || project?.path || "loading"}</code>
-            <span>on</span>
-            <code>{project?.branch || "-"}</code>
-            {project?.dirty ? <em>· dirty</em> : null}
-            <span className="job-palette-target-summary" data-testid="job-dialog-summary-text">{summary}</span>
-            <button
-              type="button"
-              className="job-palette-summary-edit"
-              data-testid="job-dialog-summary-edit"
-              onClick={() => {
-                setAdvancedOpen(true);
-                window.requestAnimationFrame(() => advancedRef.current?.scrollIntoView({block: "nearest"}));
-              }}
-            >
-              Edit options
-            </button>
+            <span className="job-palette-target-main">
+              <span>Target</span>
+              <code title={project?.path || ""}>{project?.name || project?.path || "loading"}</code>
+              <span>on</span>
+              <code>{project?.branch || "-"}</code>
+              {project?.dirty ? <em>· dirty</em> : null}
+            </span>
+            <span className="job-palette-target-controls">
+              <span className="job-palette-target-summary" data-testid="job-dialog-summary-text">{summary}</span>
+              <button
+                type="button"
+                className="job-palette-summary-edit"
+                data-testid="job-dialog-summary-edit"
+                aria-controls="jobAdvancedOptions"
+                aria-expanded={advancedOpen}
+                onClick={() => {
+                  const next = !advancedOpen;
+                  setAdvancedOpen(next);
+                  if (next) {
+                    window.requestAnimationFrame(() => advancedRef.current?.scrollIntoView({block: "nearest"}));
+                  }
+                }}
+              >
+                {advancedOpen ? "Hide options" : "Edit options"}
+              </button>
+            </span>
           </div>
           {targetNeedsConfirmation && (
             <div className="job-palette-dirty">
@@ -539,6 +548,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
             </p>
           )}
           <details
+            id="jobAdvancedOptions"
             className="job-advanced"
             ref={advancedRef}
             open={advancedOpen}

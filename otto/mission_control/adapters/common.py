@@ -33,6 +33,7 @@ def supplemental_session_artifact_paths(session_dir: str | None) -> list[str]:
     candidates = [
         root / "product-handoff.json",
         root / "product-playbook.json",
+        certify_dir / "verification-plan.json",
         certify_dir / "proof-of-work.html",
         certify_dir / "narrative.log",
         certify_dir / "messages.jsonl",
@@ -56,6 +57,8 @@ def _artifact_label(path: Path, *, fallback_label: str) -> str:
         return "proof markdown"
     if name == "proof-of-work.json":
         return "proof json"
+    if name == "verification-plan.json":
+        return "verification plan"
     if name == "product-handoff.json":
         return "product handoff"
     if name == "product-playbook.json":

@@ -23,6 +23,7 @@ export function TopBar({
 }) {
   const watcherState = watcher?.health.state || "stopped";
   const watcherTone: PillTone = watcherState === "running" ? "success" : watcherState === "stale" ? "warning" : "neutral";
+  const startable = watcherState !== "running" && canStartWatcher(data);
   const heartbeat = watcher?.health.heartbeat_age_s;
   const heartbeatHint = heartbeat === null || heartbeat === undefined ? "" : `${Math.round(heartbeat)}s ago`;
   const heartbeatTitle = heartbeatHint ? ` Last heartbeat ${heartbeatHint}.` : "";
@@ -30,7 +31,7 @@ export function TopBar({
     if (watcherPending) return watcherState === "running" ? "Stopping runner..." : "Starting runner...";
     if (watcherState === "running") return "Queue running";
     if (watcherState === "stale") return "Queue runner stale";
-    if (canStartWatcher(data)) return "Start queue";
+    if (startable) return "Start queue runner";
     return "Queue idle";
   })();
   return (
@@ -68,7 +69,7 @@ export function TopBar({
         ) : null}
         <button
           type="button"
-          className={`topbar-watcher pill-tone-${watcherTone} ${watcherState === "running" ? "is-live" : ""}`}
+          className={`topbar-watcher pill-tone-${watcherTone} ${watcherState === "running" ? "is-live" : ""} ${startable ? "is-startable" : ""}`}
           data-testid={watcherState === "running" ? "stop-watcher-button" : "start-watcher-button"}
           disabled={watcherPending || (watcherState === "running" ? !canStopWatcher(data) : !canStartWatcher(data))}
           aria-busy={watcherPending}

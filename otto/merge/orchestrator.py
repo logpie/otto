@@ -52,6 +52,13 @@ from otto.runs.registry import (
     write_record,
 )
 from otto.runs.schema import is_terminal_status
+from otto.verification import (
+    VerificationCheck,
+    VerificationPlan,
+    VerificationPolicy,
+    normalize_verification_policy,
+    write_verification_plan,
+)
 
 logger = logging.getLogger("otto.merge.orchestrator")
 
@@ -87,10 +94,102 @@ class MergeOptions:
     target: str = "main"
     no_certify: bool = False
     full_verify: bool = False
+    verification_policy: VerificationPolicy | None = None
     fast: bool = False                  # pure git, bail on first conflict
     cleanup_on_success: bool = False    # remove worktrees after merge
     allow_any_branch: bool = False
     transactional: bool = False         # experimental: stage pure-git fast merges before target update
+
+
+def _normalize_merge_verification_options(options: MergeOptions) -> None:
+    if options.no_certify:
+        options.verification_policy = "skip"
+    elif options.full_verify:
+        options.verification_policy = "full"
+    elif options.verification_policy is None:
+        options.verification_policy = "fast" if options.fast else "smart"
+    else:
+        options.verification_policy = normalize_verification_policy(options.verification_policy)
+    options.no_certify = options.verification_policy == "skip"
+    options.full_verify = options.verification_policy == "full"
+
+
+def _skip_post_merge_verification(options: MergeOptions) -> bool:
+    return options.verification_policy in {"skip", "fast"} or options.no_certify
+
+
+def _skip_post_merge_verification_reason(options: MergeOptions) -> str:
+    if options.verification_policy == "fast":
+        return "--fast"
+    if options.verification_policy == "skip" or options.no_certify:
+        return "--no-certify"
+    return f"verification policy {options.verification_policy}"
+
+
+def _write_skipped_merge_verification_plan(
+    project_dir: Path,
+    state: MergeState,
+    options: MergeOptions,
+    *,
+    success: bool,
+    note: str,
+) -> Path:
+    """Persist an audit plan even when post-merge certification is skipped."""
+
+    policy = normalize_verification_policy(
+        options.verification_policy,
+        default="fast" if options.fast else "skip",
+    )
+    skip_reason = _skip_post_merge_verification_reason(options)
+    merge_status = "pass" if success else "fail"
+    merge_reason = note or state.note or ("Merge completed." if success else "Merge did not complete.")
+    plan = VerificationPlan(
+        scope="merge",
+        target=state.target,
+        policy=policy,
+        risk_level="fast" if policy == "fast" else "skipped",
+        verification_level=policy,
+        allow_skip=True,
+        reasons=[
+            f"Post-landing certification skipped by merge verification policy `{policy}`.",
+            f"Skip reason: {skip_reason}.",
+        ],
+        checks=[
+            VerificationCheck(
+                id="merge-applied",
+                label="Merge applied",
+                status=merge_status,  # type: ignore[arg-type]
+                reason=merge_reason,
+                source=state.target,
+                metadata={
+                    "branches": list(state.branches_in_order),
+                    "outcomes": [
+                        {"branch": outcome.branch, "status": outcome.status}
+                        for outcome in state.outcomes
+                    ],
+                },
+            ),
+            VerificationCheck(
+                id="post-merge-certification",
+                label="Post-landing certification",
+                status="skipped",
+                reason=(
+                    "Fast landing relies on each source task's existing proof packet and clean git merge."
+                    if policy == "fast"
+                    else "Operator selected skip verification for this landing."
+                ),
+                source=state.target,
+            ),
+        ],
+        metadata={
+            "merge_id": state.merge_id,
+            "target_head_before": state.target_head_before,
+            "branches": list(state.branches_in_order),
+            "note": note or state.note or "",
+        },
+    )
+    path = paths.merge_dir(project_dir) / state.merge_id / "verification-plan.json"
+    return write_verification_plan(path, plan)
 
 
 def _short_sha(value: str | None) -> str:
@@ -394,6 +493,9 @@ def _append_merge_history(project_dir: Path, state: MergeState) -> None:
                 str(paths.certify_dir(project_dir, state.cert_run_id) / "proof-of-work.html"),
             ]
         )
+    verification_plan_path = merge_run_dir / "verification-plan.json"
+    if verification_plan_path.exists():
+        extra_artifacts.append(str(verification_plan_path))
     append_history_snapshot(
         project_dir,
         build_terminal_snapshot(
@@ -436,6 +538,12 @@ def _append_merge_history(project_dir: Path, state: MergeState) -> None:
 def _merge_run_artifacts(project_dir: Path, state: MergeState) -> dict[str, Any]:
     merge_run_dir = paths.merge_dir(project_dir) / state.merge_id
     artifacts = _merge_artifacts(project_dir, state.merge_id)
+    verification_plan_path = merge_run_dir / "verification-plan.json"
+    if verification_plan_path.exists():
+        artifacts["extra_log_paths"] = [
+            *list(artifacts.get("extra_log_paths") or []),
+            str(verification_plan_path),
+        ]
     if state.cert_run_id:
         cert_session_dir = paths.session_dir(project_dir, state.cert_run_id)
         artifacts["extra_log_paths"] = [
@@ -774,7 +882,7 @@ def _run_transactional_fast_merge(
                 state=state,
                 note=f"transactional fast-forward failed: {(ff_result.stderr or ff_result.stdout).strip()}",
             )
-        if options.cleanup_on_success:
+        if options.cleanup_on_success and _skip_post_merge_verification(options):
             _graduate_merged_task_sessions(project_dir, queue_lookup)
         return MergeRunResult(
             success=True,
@@ -802,6 +910,7 @@ async def run_merge(
     from otto.config import agent_provider, repo_preflight_issues
     from otto.runs.registry import garbage_collect_live_records
 
+    _normalize_merge_verification_options(options)
     _repair_merge_run_records(project_dir)
     _repair_merge_history(project_dir)
     garbage_collect_live_records(project_dir)
@@ -929,6 +1038,20 @@ async def run_merge(
                 queue_lookup=queue_lookup,
                 target_head_before=target_head_before,
             )
+            if result.success and not _skip_post_merge_verification(options):
+                result = await _run_post_merge_verification(
+                    project_dir=project_dir,
+                    config=config,
+                    options=options,
+                    state=result.state,
+                    merge_id=merge_id,
+                    branches=branches,
+                    queue_lookup=queue_lookup,
+                    target_head_before=target_head_before,
+                    budget=budget,
+                )
+                if result.success and options.cleanup_on_success:
+                    _graduate_merged_task_sessions(project_dir, queue_lookup)
         else:
             result = await _run_consolidated_agentic_merge(
                 project_dir=project_dir,
@@ -962,6 +1085,14 @@ async def run_merge(
                 result.state,
                 status=final_status,
                 note=result.note or ("completed" if result.success else "failed"),
+            )
+        if _skip_post_merge_verification(options) and result.state.merge_id:
+            _write_skipped_merge_verification_plan(
+                project_dir,
+                result.state,
+                options,
+                success=result.success,
+                note=result.note or result.state.note or final_status,
             )
 
         publisher.finalize(
@@ -1090,6 +1221,7 @@ def _annotate_merge_cert_summary(
     run_id: str,
     merged_from: list[str],
     merge_verification_plan: dict[str, Any] | None = None,
+    verification_plan: dict[str, Any] | None = None,
 ) -> None:
     from otto import paths
 
@@ -1105,6 +1237,8 @@ def _annotate_merge_cert_summary(
     summary["merged_from"] = list(merged_from)
     if merge_verification_plan:
         summary["merge_verification_plan"] = merge_verification_plan
+    if verification_plan:
+        summary["verification_plan"] = verification_plan
     _atomic_write_json(summary_path, summary)
 
 
@@ -1207,6 +1341,7 @@ async def _run_post_merge_verification(
     FLAG_FOR_HUMAN per story, but the scope is deterministic instead of left
     to general certifier story discovery.
     """
+    _normalize_merge_verification_options(options)
     # Collect all stories from merged branches
     all_stories = collect_stories_from_branches(
         project_dir=project_dir, branches=branches, queue_task_lookup=queue_lookup,
@@ -1248,11 +1383,17 @@ async def _run_post_merge_verification(
         outcomes=list(state.outcomes),
         full_verify=options.full_verify,
     )
+    shared_plan = plan.to_verification_plan(policy=options.verification_policy)
+    plan_path = paths.merge_dir(project_dir) / merge_id / "verification-plan.json"
+    write_verification_plan(plan_path, shared_plan)
     merge_context: dict[str, Any] = {
         "target": options.target,
         "diff_files": diff_files,
         "allow_skip": plan.allow_skip,
-        "verification_plan": plan.to_dict(),
+        "verification_plan": shared_plan.to_dict(),
+        "merge_verification_plan": plan.to_dict(),
+        "verification_policy": options.verification_policy,
+        "verification_plan_path": str(plan_path),
         "plan_text": format_merge_verification_plan(plan),
     }
 
@@ -1327,6 +1468,7 @@ async def _run_post_merge_verification(
         run_id=cert_report.run_id,
         merged_from=_merged_from_labels(branches, queue_lookup),
         merge_verification_plan=plan.to_dict(),
+        verification_plan=shared_plan.to_dict(),
     )
 
     return MergeRunResult(
@@ -1497,12 +1639,10 @@ async def _run_consolidated_agentic_merge(
                 merge_id=merge_id,
                 note="merge cancelled after clean merge phase",
             )
-        # --fast is documented as pure git/no LLM, so it must not fall
-        # through into post-merge certification.
-        if options.fast or options.no_certify:
+        if _skip_post_merge_verification(options):
             if options.cleanup_on_success:
                 _graduate_merged_task_sessions(project_dir, queue_lookup)
-            reason = "--fast" if options.fast else "--no-certify"
+            reason = _skip_post_merge_verification_reason(options)
             return MergeRunResult(
                 success=True, merge_id=merge_id, state=state,
                 note=f"all clean merges, cert skipped per {reason}",
@@ -1713,12 +1853,11 @@ async def _run_consolidated_agentic_merge(
     state.paused_branch = None
     write_state(project_dir, state)
 
-    # Phase 4: post-merge certification (unless disabled). --fast cannot
-    # reach conflict-agent resolution, but keep this guard defensive.
-    if options.fast or options.no_certify:
+    # Phase 4: post-merge certification (unless disabled).
+    if _skip_post_merge_verification(options):
         if options.cleanup_on_success:
             _graduate_merged_task_sessions(project_dir, queue_lookup)
-        reason = "--fast" if options.fast else "--no-certify"
+        reason = _skip_post_merge_verification_reason(options)
         return MergeRunResult(
             success=True, merge_id=merge_id, state=state,
             source_pow_paths=_resolve_source_pow_paths(
