@@ -394,233 +394,240 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
             onClick={onClose}
           ><span aria-hidden="true">×</span><span className="sr-only">Close</span></button>
         </header>
-        {/* Intent textarea is THE primary field — front and center, autofocused. */}
-        <label className="job-palette-intent" aria-label={intentLabelMap[command]}>
-          <textarea
-            value={intent}
-            data-testid="job-dialog-intent"
-            rows={4}
-            autoFocus
-            placeholder={intentPlaceholderMap[command]}
-            aria-describedby={submitDisabled && !submitting && pendingSeconds === null ? "jobDialogValidationHint" : undefined}
-            aria-invalid={intentRequired ? true : undefined}
-            onChange={(event) => setIntent(event.target.value)}
-            onKeyDown={(event) => {
-              // W8-IMPORTANT-1: documented power-user shortcut. Cmd+Enter
-              // (mac) / Ctrl+Enter (linux/windows) submits the dialog from
-              // the textarea — universal in code-gen tools and in MC's own
-              // accelerator catalogue. The default `<textarea>` swallows
-              // Enter as a newline, so we intercept here. The submit goes
-              // through the form's onSubmit so the validation gating (grace
-              // window, dirty-target confirm, prior-run requirement) stays
-              // in one place.
-              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                if (submitDisabled) return;
-                event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
-          />
-        </label>
-        {/* Command pills — Build / Improve / Certify, sentence-style not select. */}
-        <div className="job-palette-commands" role="radiogroup" aria-label="Command">
-          {(["build", "improve", "certify"] as const).map((cmd) => (
-            <button
-              key={cmd}
-              type="button"
-              role="radio"
-              aria-checked={command === cmd}
-              data-testid={cmd === "build" ? "job-command-select" : `job-command-${cmd}`}
-              className={`job-palette-pill ${command === cmd ? "active" : ""}`}
-              onClick={() => setCommand(cmd)}
-            >
-              {cmd === "build" ? "Build" : cmd === "improve" ? "Improve" : "Certify"}
-            </button>
-          ))}
-          {/* Improve sub-mode pills, only shown when Improve is selected. */}
-          {command === "improve" && (
-            <span className="job-palette-submodes">
-              {(["bugs", "feature", "target"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  role="radio"
-                  aria-checked={subcommand === mode}
-                  className={`job-palette-pill job-palette-pill-sub ${subcommand === mode ? "active" : ""}`}
-                  onClick={() => setSubcommand(mode)}
-                  data-testid={`job-improve-mode-${mode}`}
-                >
-                  {mode === "bugs" ? "Bugs" : mode === "feature" ? "Feature" : "Target"}
-                </button>
-              ))}
-            </span>
-          )}
-        </div>
-        <p className="field-hint job-command-help" data-testid="job-command-help">
-          {commandHelpMap[command]}
-        </p>
-        {/* Compact target line — shown subtly. Dirty confirm flow stays. */}
-        <div className={`job-palette-target ${project?.dirty ? "is-dirty" : ""}`} data-testid="job-dialog-summary">
-          <span>Target</span>
-          <code title={project?.path || ""}>{project?.name || project?.path || "loading"}</code>
-          <span>on</span>
-          <code>{project?.branch || "-"}</code>
-          {project?.dirty ? <em>· dirty</em> : null}
-          <span className="job-palette-target-summary" data-testid="job-dialog-summary-text">{summary}</span>
-          <button
-            type="button"
-            className="job-palette-summary-edit"
-            data-testid="job-dialog-summary-edit"
-            onClick={() => {
-              setAdvancedOpen(true);
-              window.requestAnimationFrame(() => advancedRef.current?.scrollIntoView({block: "nearest"}));
-            }}
-          >
-            Edit options
-          </button>
-        </div>
-        {targetNeedsConfirmation && (
-          <div className="job-palette-dirty">
-            {dirtyPreview.length ? (
-              <div className="target-dirty-files" data-testid="job-dialog-dirty-files" aria-label="Uncommitted files">
-                <strong>Uncommitted changes ({dirtyFiles.length})</strong>
-                <ul>
-                  {dirtyPreview.map((path) => <li key={path}>{path}</li>)}
-                  {dirtyOverflow > 0 && <li>+{dirtyOverflow} more</li>}
-                </ul>
-              </div>
-            ) : null}
-            <label className="check-label target-confirm">
-              <input
-                checked={targetConfirmed}
-                data-testid="target-project-confirm"
-                type="checkbox"
-                onChange={(event) => setTargetConfirmed(event.target.checked)}
-              />
-              I understand this dirty project may affect the queued work
-            </label>
-          </div>
-        )}
-        {/* Prior run selector — shown only for Improve. */}
-        {command === "improve" && priorRunOptionsAvailable && (
-          <label className="job-palette-prior">
-            <span>Prior run</span>
-            <select
-              data-testid="job-prior-run-select"
-              value={priorRunId}
-              onChange={(event) => setPriorRunId(event.target.value)}
-            >
-              {priorRunOptions.map((option) => (
-                <option key={option.run_id} value={option.run_id}>{option.label}</option>
-              ))}
-            </select>
-          </label>
-        )}
-        {command === "improve" && !priorRunOptionsAvailable && (
-          <span className="field-hint" data-testid="job-prior-run-empty">No prior runs. Run a build first.</span>
-        )}
-        {submitDisabled && !submitting && pendingSeconds === null && (
-          <p id="jobDialogValidationHint" className="job-dialog-validation" data-testid="job-dialog-validation-hint" aria-live="polite">
-            {intentRequired
-              ? command === "build"
-                ? "Describe the requested outcome to queue."
-                : `Describe the ${intentLabelMap[command].toLowerCase()} to queue.`
-              : specFileRequired
-              ? "Enter the spec file path."
-              : targetNeedsConfirmation && !targetConfirmed
-              ? "Confirm the dirty target project above."
-              : priorRunMissing
-              ? (priorRunOptionsAvailable
-                  ? "Select a prior run to improve."
-                  : "No prior runs. Run a build first.")
-              : null}
-          </p>
-        )}
-        <details
-          className="job-advanced"
-          ref={advancedRef}
-          open={advancedOpen}
-          onToggle={(event) => setAdvancedOpen((event.target as HTMLDetailsElement).open)}
-        >
-          <summary>Advanced options</summary>
-          {command !== "certify" && (
-            <label>Execution mode
-              <select data-testid="job-execution-mode-select" value={executionMode} onChange={(event) => setExecutionMode(event.target.value as ExecutionMode)}>
-                <option value="split">Reliable split mode</option>
-                <option value="agentic">Agentic single session</option>
-              </select>
-              <span className="field-hint">{executionModeHelp(executionMode, command)}</span>
-            </label>
-          )}
-          {command === "build" && (
-            <label>Planning
-              <select data-testid="job-planning-select" value={planning} onChange={(event) => setPlanning(event.target.value as PlanningMode)}>
-                <option value="direct">Direct build</option>
-                <option value="spec-review">Generate spec for review</option>
-                <option value="spec-auto">Generate spec and approve automatically</option>
-                <option value="spec-file">Use spec file</option>
-              </select>
-              <span className="field-hint">{planningHelp(planning)}</span>
-            </label>
-          )}
-          {command === "build" && planning === "spec-file" && (
-            <label>Spec file path
-              <input
-                data-testid="job-spec-file-input"
-                value={specFilePath}
-                type="text"
-                placeholder="/path/to/spec.md"
-                onChange={(event) => setSpecFilePath(event.target.value)}
-              />
-            </label>
-          )}
-          <div className="field-grid">
-            <label>Task id
-              <input value={taskId} type="text" placeholder="auto-generated" onChange={(event) => setTaskId(event.target.value)} />
-            </label>
-            <label>After
-              <input value={after} type="text" placeholder="optional dependencies" onChange={(event) => setAfter(event.target.value)} />
-            </label>
-          </div>
-          <label>Max rounds
-            <input
-              data-testid="job-rounds-input"
-              value={rounds}
-              type="number"
-              min={1}
-              max={50}
-              placeholder={project?.defaults?.max_certify_rounds ? `inherit: ${project.defaults.max_certify_rounds}` : "inherit"}
-              onChange={(event) => setRounds(event.target.value)}
+        <div className="job-palette-body">
+          {/* Intent textarea is THE primary field — front and center, autofocused. */}
+          <label className="job-palette-intent">
+            <span className="job-palette-intent-label">{intentLabelMap[command]}</span>
+            <textarea
+              value={intent}
+              data-testid="job-dialog-intent"
+              rows={4}
+              autoFocus
+              placeholder={intentPlaceholderMap[command]}
+              aria-describedby={submitDisabled && !submitting && pendingSeconds === null ? "jobDialogValidationHint" : undefined}
+              aria-invalid={intentRequired ? true : undefined}
+              onChange={(event) => setIntent(event.target.value)}
+              onKeyDown={(event) => {
+                // W8-IMPORTANT-1: documented power-user shortcut. Cmd+Enter
+                // (mac) / Ctrl+Enter (linux/windows) submits the dialog from
+                // the textarea — universal in code-gen tools and in MC's own
+                // accelerator catalogue. The default `<textarea>` swallows
+                // Enter as a newline, so we intercept here. The submit goes
+                // through the form's onSubmit so the validation gating (grace
+                // window, dirty-target confirm, prior-run requirement) stays
+                // in one place.
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  if (submitDisabled) return;
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }
+              }}
             />
-            <span className={`field-hint ${improveOneRoundWarning ? "field-warning" : ""}`} data-testid="job-rounds-help">
-              {improveOneRoundWarning
-                ? "One split improve round only evaluates existing work. Use 2+ rounds to let Otto fix/improve and re-check."
-                : "Maximum certify/evaluate rounds for this queued job."}
-            </span>
           </label>
-          <div className="field-grid">
-            <label>Provider
-              <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
-                <option value="">{providerDefaultLabel(project)}</option>
-                <option value="codex">Codex</option>
-                <option value="claude">Claude</option>
-              </select>
-            </label>
-            <label>Reasoning effort
-              <select data-testid="job-effort-select" value={effort} onChange={(event) => setEffort(event.target.value)}>
-                <option value="">{effortDefaultLabel(project)}</option>
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-                <option value="max">Max</option>
-              </select>
-            </label>
+          {/* Command pills — Build / Improve / Certify, sentence-style not select. */}
+          <div className="job-palette-commands" role="radiogroup" aria-label="Command">
+            {(["build", "improve", "certify"] as const).map((cmd) => (
+              <button
+                key={cmd}
+                type="button"
+                role="radio"
+                aria-checked={command === cmd}
+                data-testid={cmd === "build" ? "job-command-select" : `job-command-${cmd}`}
+                className={`job-palette-pill ${command === cmd ? "active" : ""}`}
+                onClick={() => setCommand(cmd)}
+              >
+                {cmd === "build" ? "Build" : cmd === "improve" ? "Improve" : "Certify"}
+              </button>
+            ))}
+            {/* Improve sub-mode pills, only shown when Improve is selected. */}
+            {command === "improve" && (
+              <span className="job-palette-submodes">
+                {(["bugs", "feature", "target"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="radio"
+                    aria-checked={subcommand === mode}
+                    className={`job-palette-pill job-palette-pill-sub ${subcommand === mode ? "active" : ""}`}
+                    onClick={() => setSubcommand(mode)}
+                    data-testid={`job-improve-mode-${mode}`}
+                  >
+                    {mode === "bugs" ? "Bugs" : mode === "feature" ? "Feature" : "Target"}
+                  </button>
+                ))}
+              </span>
+            )}
           </div>
-          <label>Model
-            <input value={model} type="text" placeholder={modelDefaultPlaceholder(project)} onChange={(event) => setModel(event.target.value)} />
-          </label>
-          <details className="job-agent-routing">
-            <summary>{executionMode === "agentic" && command !== "certify" ? "Agent session" : "Phase routing"}</summary>
+          <p className="field-hint job-command-help" data-testid="job-command-help">
+            {commandHelpMap[command]}
+          </p>
+          {/* Compact target line — shown subtly. Dirty confirm flow stays. */}
+          <div className={`job-palette-target ${project?.dirty ? "is-dirty" : ""}`} data-testid="job-dialog-summary">
+            <span>Target</span>
+            <code title={project?.path || ""}>{project?.name || project?.path || "loading"}</code>
+            <span>on</span>
+            <code>{project?.branch || "-"}</code>
+            {project?.dirty ? <em>· dirty</em> : null}
+            <span className="job-palette-target-summary" data-testid="job-dialog-summary-text">{summary}</span>
+            <button
+              type="button"
+              className="job-palette-summary-edit"
+              data-testid="job-dialog-summary-edit"
+              onClick={() => {
+                setAdvancedOpen(true);
+                window.requestAnimationFrame(() => advancedRef.current?.scrollIntoView({block: "nearest"}));
+              }}
+            >
+              Edit options
+            </button>
+          </div>
+          {targetNeedsConfirmation && (
+            <div className="job-palette-dirty">
+              {dirtyPreview.length ? (
+                <div className="target-dirty-files" data-testid="job-dialog-dirty-files" aria-label="Uncommitted files">
+                  <strong>Uncommitted changes ({dirtyFiles.length})</strong>
+                  <ul>
+                    {dirtyPreview.map((path) => <li key={path}>{path}</li>)}
+                    {dirtyOverflow > 0 && <li>+{dirtyOverflow} more</li>}
+                  </ul>
+                </div>
+              ) : null}
+              <label className="check-label target-confirm">
+                <input
+                  checked={targetConfirmed}
+                  data-testid="target-project-confirm"
+                  type="checkbox"
+                  onChange={(event) => setTargetConfirmed(event.target.checked)}
+                />
+                I understand this dirty project may affect the queued work
+              </label>
+            </div>
+          )}
+          {/* Prior run selector — shown only for Improve. */}
+          {command === "improve" && priorRunOptionsAvailable && (
+            <label className="job-palette-prior">
+              <span>Prior run</span>
+              <select
+                data-testid="job-prior-run-select"
+                value={priorRunId}
+                onChange={(event) => setPriorRunId(event.target.value)}
+              >
+                {priorRunOptions.map((option) => (
+                  <option key={option.run_id} value={option.run_id}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {command === "improve" && !priorRunOptionsAvailable && (
+            <span className="field-hint" data-testid="job-prior-run-empty">No prior runs. Run a build first.</span>
+          )}
+          {submitDisabled && !submitting && pendingSeconds === null && (
+            <p id="jobDialogValidationHint" className="job-dialog-validation" data-testid="job-dialog-validation-hint" aria-live="polite">
+              {intentRequired
+                ? command === "build"
+                  ? "Describe the requested outcome to queue."
+                  : `Describe the ${intentLabelMap[command].toLowerCase()} to queue.`
+                : specFileRequired
+                ? "Enter the spec file path."
+                : targetNeedsConfirmation && !targetConfirmed
+                ? "Confirm the dirty target project above."
+                : priorRunMissing
+                ? (priorRunOptionsAvailable
+                    ? "Select a prior run to improve."
+                    : "No prior runs. Run a build first.")
+                : null}
+            </p>
+          )}
+          <details
+            className="job-advanced"
+            ref={advancedRef}
+            open={advancedOpen}
+            onToggle={(event) => setAdvancedOpen((event.target as HTMLDetailsElement).open)}
+          >
+            <summary>Advanced options</summary>
+            {command !== "certify" && (
+              <label>Execution mode
+                <select data-testid="job-execution-mode-select" value={executionMode} onChange={(event) => setExecutionMode(event.target.value as ExecutionMode)}>
+                  <option value="split">Reliable split mode</option>
+                  <option value="agentic">Agentic single session</option>
+                </select>
+                <span className="field-hint">{executionModeHelp(executionMode, command)}</span>
+              </label>
+            )}
+            {command === "build" && (
+              <label>Planning
+                <select data-testid="job-planning-select" value={planning} onChange={(event) => setPlanning(event.target.value as PlanningMode)}>
+                  <option value="direct">Direct build</option>
+                  <option value="spec-review">Generate spec for review</option>
+                  <option value="spec-auto">Generate spec and approve automatically</option>
+                  <option value="spec-file">Use spec file</option>
+                </select>
+                <span className="field-hint">{planningHelp(planning)}</span>
+              </label>
+            )}
+            {command === "build" && planning === "spec-file" && (
+              <label>Spec file path
+                <input
+                  data-testid="job-spec-file-input"
+                  value={specFilePath}
+                  type="text"
+                  placeholder="/path/to/spec.md"
+                  onChange={(event) => setSpecFilePath(event.target.value)}
+                />
+              </label>
+            )}
+            <div className="field-grid">
+              <label>Task id
+                <input value={taskId} type="text" placeholder="auto-generated" onChange={(event) => setTaskId(event.target.value)} />
+              </label>
+              <label>After
+                <input value={after} type="text" placeholder="optional dependencies" onChange={(event) => setAfter(event.target.value)} />
+              </label>
+            </div>
+            <label>Max rounds
+              <input
+                data-testid="job-rounds-input"
+                value={rounds}
+                type="number"
+                min={1}
+                max={50}
+                placeholder={project?.defaults?.max_certify_rounds ? `inherit: ${project.defaults.max_certify_rounds}` : "inherit"}
+                onChange={(event) => setRounds(event.target.value)}
+              />
+              <span className={`field-hint ${improveOneRoundWarning ? "field-warning" : ""}`} data-testid="job-rounds-help">
+                {improveOneRoundWarning
+                  ? "One split improve round only evaluates existing work. Use 2+ rounds to let Otto fix/improve and re-check."
+                  : "Maximum certify/evaluate rounds for this queued job."}
+              </span>
+            </label>
+            <div className="field-grid">
+              <label>Default provider
+                <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
+                  <option value="">{providerDefaultLabel(project)}</option>
+                  <option value="codex">Codex</option>
+                  <option value="claude">Claude</option>
+                </select>
+              </label>
+              <label>Default reasoning
+                <select data-testid="job-effort-select" value={effort} onChange={(event) => setEffort(event.target.value)}>
+                  <option value="">{effortDefaultLabel(project)}</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                  <option value="max">Max</option>
+                </select>
+              </label>
+            </div>
+            <label>Default model
+              <input value={model} type="text" placeholder={modelDefaultPlaceholder(project)} onChange={(event) => setModel(event.target.value)} />
+            </label>
+            <details className="job-agent-routing">
+              <summary>{executionMode === "agentic" && command !== "certify" ? "Agent session" : "Per-phase overrides"}</summary>
+              {executionMode === "split" && (
+                <p className="field-hint job-routing-hint">
+                  Leave these inherited unless a phase should use a different provider, model, or reasoning effort.
+                </p>
+              )}
             {command !== "certify" && executionMode === "agentic" && (
               <div className="static-field">
                 <span>Routing model</span>
@@ -664,47 +671,48 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
                 onEffort={setFixEffort}
               />
             )}
+            </details>
+            {certificationOptions(command, subcommand, project).length > 0 ? (
+              <label>Certification
+                <select
+                  data-testid="job-certification-select"
+                  value={certification}
+                  onChange={(event) => setCertification(event.target.value as CertificationPolicy)}
+                >
+                  {certificationOptions(command, subcommand, project).map((option) => (
+                    <option key={option.value || "inherit"} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <span className="field-hint">{certificationHelp(command, subcommand, certification, project)}</span>
+              </label>
+            ) : (
+              <div className="static-field" data-testid="job-certification-static">
+                <span>Evaluation policy</span>
+                <strong>{staticCertificationLabel(command, subcommand)}</strong>
+              </div>
+            )}
           </details>
-          {certificationOptions(command, subcommand, project).length > 0 ? (
-            <label>Certification
-              <select
-                data-testid="job-certification-select"
-                value={certification}
-                onChange={(event) => setCertification(event.target.value as CertificationPolicy)}
+          {pendingSeconds !== null && (
+            <div
+              className="job-grace-banner"
+              data-testid="job-grace-banner"
+              role="status"
+              aria-live="polite"
+            >
+              <span>
+                Queueing in <strong data-testid="job-grace-countdown">{pendingSeconds}s</strong>... edit fields above or cancel to abort.
+              </span>
+              <button
+                type="button"
+                className="job-grace-cancel"
+                data-testid="job-grace-cancel-button"
+                onClick={cancelGraceWindow}
               >
-                {certificationOptions(command, subcommand, project).map((option) => (
-                  <option key={option.value || "inherit"} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-              <span className="field-hint">{certificationHelp(command, subcommand, certification, project)}</span>
-            </label>
-          ) : (
-            <div className="static-field" data-testid="job-certification-static">
-              <span>Evaluation policy</span>
-              <strong>{staticCertificationLabel(command, subcommand)}</strong>
+                Cancel
+              </button>
             </div>
           )}
-        </details>
-        {pendingSeconds !== null && (
-          <div
-            className="job-grace-banner"
-            data-testid="job-grace-banner"
-            role="status"
-            aria-live="polite"
-          >
-            <span>
-              Queueing in <strong data-testid="job-grace-countdown">{pendingSeconds}s</strong>… edit fields above or cancel to abort.
-            </span>
-            <button
-              type="button"
-              className="job-grace-cancel"
-              data-testid="job-grace-cancel-button"
-              onClick={cancelGraceWindow}
-            >
-              Cancel
-            </button>
-          </div>
-        )}
+        </div>
         <footer>
           <span id="jobDialogStatus" className="muted" aria-live="polite">{status}</span>
           <button
@@ -747,14 +755,14 @@ export function PhaseRoutingFields({label, testKey, provider, model, effort, onP
     <section className="phase-routing-group" aria-label={`${label} routing`}>
       <h3>{label}</h3>
       <div className="field-grid">
-        <label>Provider
+        <label>Provider override
           <select data-testid={`job-${testKey}-provider-select`} value={provider} onChange={(event) => onProvider(event.target.value)}>
             <option value="">Inherit</option>
             <option value="codex">Codex</option>
             <option value="claude">Claude</option>
           </select>
         </label>
-        <label>Reasoning
+        <label>Reasoning override
           <select data-testid={`job-${testKey}-effort-select`} value={effort} onChange={(event) => onEffort(event.target.value)}>
             <option value="">Inherit</option>
             <option value="low">Low</option>
@@ -764,7 +772,7 @@ export function PhaseRoutingFields({label, testKey, provider, model, effort, onP
           </select>
         </label>
       </div>
-      <label>Model
+      <label>Model override
         <input value={model} type="text" placeholder="inherit" onChange={(event) => onModel(event.target.value)} />
       </label>
     </section>
