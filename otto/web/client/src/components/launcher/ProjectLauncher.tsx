@@ -1,6 +1,6 @@
 import {FormEvent, useEffect, useRef, useState} from "react";
 import {ApiError, friendlyApiMessage} from "../../api";
-import {errorMessage, watcherSummary} from "../../App";
+import {errorMessage, watcherSummary} from "../../utils/missionControl";
 import {BrandMark} from "../BrandMark";
 import {Spinner} from "../Spinner";
 import {LauncherExplainer} from "./LauncherExplainer";
@@ -128,7 +128,7 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
         <BrandMark size={48} />
         <h1 id="projectLauncherHeading" className="launcher-hero-title">otto</h1>
         <p className="launcher-hero-tagline" data-testid="launcher-subhead">
-          Describe a feature. Otto builds, verifies, and lands it in an isolated git worktree.
+          Describe a feature. Otto builds, verifies, and lands it in an isolated git worktree with logs ready to review.
         </p>
         <button
           type="button"
@@ -173,7 +173,10 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
         </div>
       )}
 
-      <div className={`launcher-section launcher-create ${projects.length === 0 ? "launcher-create-hero" : ""}`}>
+      <div
+        className={`launcher-section launcher-create ${projects.length === 0 ? "launcher-create-hero" : ""}`}
+        data-testid={projects.length === 0 ? "launcher-empty-state" : undefined}
+      >
         <div className="launcher-section-head">
           <h2>{projects.length === 0 ? "Create your first project" : "Create new"}</h2>
         </div>
@@ -198,7 +201,7 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
           >{status}</p>
         ) : null}
         <p className="launcher-create-hint" data-testid="launcher-managed-root-help">
-          Stored under <code title={projectsState.projects_root}>{projectsState.projects_root}</code>. Pick or create a managed project; other repos are intentionally excluded and are not affected.
+          Stored under <code title={projectsState.projects_root}>{projectsState.projects_root}</code>. Pick or create a managed git worktree project; other repos are intentionally excluded and are not affected.
         </p>
       </div>
     </section>

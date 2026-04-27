@@ -1,5 +1,6 @@
-import {canStartWatcher, canStopWatcher, startWatcherTooltip} from "../../App";
+import {canStartWatcher, canStopWatcher, startWatcherTooltip} from "../../utils/missionControl";
 import {BrandMark} from "../BrandMark";
+import {Spinner} from "../Spinner";
 import type {PillTone} from "../Pill";
 import type {ProjectsResponse, StateResponse, WatcherInfo} from "../../types";
 
@@ -29,6 +30,9 @@ export function TopBar({
   })();
   const heartbeat = watcher?.health.heartbeat_age_s;
   const heartbeatHint = heartbeat === null || heartbeat === undefined ? "" : `${Math.round(heartbeat)}s ago`;
+  const watcherActionLabel = watcherPending
+    ? watcherState === "running" ? "Stopping..." : "Starting..."
+    : `Watcher: ${watcherLabel}`;
   return (
     <header className="topbar" role="banner">
       <div className="topbar-brand">
@@ -62,17 +66,35 @@ export function TopBar({
             {project.dirty ? "Dirty" : "Clean"}
           </span>
         ) : null}
+        {watcherState === "running" ? (
+          <button
+            type="button"
+            className="topbar-watcher topbar-watcher-state pill-tone-success"
+            data-testid="start-watcher-button"
+            disabled
+            title="Watcher is already running."
+          >
+            <span className="watcher-dot tone-success" aria-hidden="true" />
+            Watcher running
+          </button>
+        ) : null}
         <button
           type="button"
           className={`topbar-watcher pill-tone-${watcherTone}`}
           data-testid={watcherState === "running" ? "stop-watcher-button" : "start-watcher-button"}
           disabled={watcherPending || (watcherState === "running" ? !canStopWatcher(data) : !canStartWatcher(data))}
           aria-busy={watcherPending}
-          title={watcherState === "running" ? watcher?.health.next_action || "Stop watcher" : startWatcherTooltip(data)}
+          title={
+            watcherPending
+              ? watcherActionLabel
+              : watcherState === "running"
+              ? watcher?.health.next_action || "Stop watcher"
+              : startWatcherTooltip(data) || "Start watcher to run queued jobs."
+          }
           onClick={watcherState === "running" ? onStopWatcher : onStartWatcher}
         >
-          <span className={`watcher-dot tone-${watcherTone}`} aria-hidden="true" />
-          Watcher: {watcherLabel}
+          {watcherPending ? <Spinner /> : <span className={`watcher-dot tone-${watcherTone}`} aria-hidden="true" />}
+          {watcherActionLabel}
           {heartbeatHint && watcherState === "running" ? <em>· {heartbeatHint}</em> : null}
         </button>
         <button

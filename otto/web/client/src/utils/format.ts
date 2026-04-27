@@ -75,7 +75,8 @@ export function tokenBreakdownLine(tokenUsage?: TokenUsage): string {
 export function usageLine(item: {token_usage?: TokenUsage; cost_usd?: number | null; cost_display?: string | null}): string {
   const tokens = tokenTotal(item.token_usage);
   const cost = item.cost_usd && item.cost_usd > 0 ? `$${item.cost_usd.toFixed(2)}` : "";
-  const tokenText = tokens ? `${formatCompactNumber(tokens)} tokens` : item.cost_display || "";
+  const display = item.cost_display && item.cost_display !== "…" ? item.cost_display : "";
+  const tokenText = tokens ? `${formatCompactNumber(tokens)} tokens` : display;
   return [tokenText, cost && cost !== tokenText ? cost : ""].filter(Boolean).join(" · ") || "-";
 }
 

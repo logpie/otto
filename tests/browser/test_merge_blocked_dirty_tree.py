@@ -306,27 +306,18 @@ def test_merge_button_shows_dirty_block_in_dialog(mc_backend: Any, page: Any, di
     _install_routes(page, state, detail)
     _hydrate(mc_backend, page, disable_animations)
 
-    # mission-land-ready-button is rendered only when missionFocus
-    # returns primary="land". When merge_blocked AND there is at least
-    # one ready task, the focus collapses to "diagnostics" — the merge
-    # CTA disappears entirely so the operator cannot accidentally trip
-    # the same W5 path. Assert the CTA is absent.
-    focus = page.get_by_test_id("mission-focus")
-    focus.wait_for(state="visible", timeout=5_000)
     land_btn = page.get_by_test_id("mission-land-ready-button")
     assert land_btn.count() == 0, (
-        "mission Land button must NOT render when merge is blocked by "
-        "dirty tree (missionFocus pivots to diagnostics)."
+        "Land button must NOT expose the merge action when merge is blocked by dirty tree."
     )
 
-    # The mission-focus copy must name the dirty file so the operator
-    # knows exactly which path to commit/stash/revert before merging.
-    focus_text = focus.text_content() or ""
-    assert "Cleanup required before landing" in focus_text, focus_text
-    assert DIRTY_FILE in focus_text, (
-        f"expected dirty file ({DIRTY_FILE}) to appear in mission-focus "
-        f"body so the operator can identify what to clean. "
-        f"Focus text: {focus_text!r}"
+    banner = page.get_by_test_id("merge-blocked-banner")
+    banner.wait_for(state="visible", timeout=5_000)
+    banner_text = banner.text_content() or ""
+    assert "Landing blocked" in banner_text, banner_text
+    assert DIRTY_FILE in banner_text, (
+        f"expected dirty file ({DIRTY_FILE}) to appear in blocked landing banner. "
+        f"Banner text: {banner_text!r}"
     )
 
     # Defence-in-depth: even via the inspector ActionBar (which exposes

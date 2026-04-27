@@ -1,17 +1,24 @@
 import {
-  CANCELLABLE_TASK_STATUSES,
   canMerge,
   computeBoardEmptyReason,
+  mergeBlockedText,
   mergeButtonTitle,
   statusTone,
   taskBoardColumns,
   taskBoardSubtitle,
   testIdForTask,
   toneIcon,
-} from "../../App";
-import type {BoardTask, Filters} from "../../App";
+} from "../../utils/missionControl";
+import type {BoardTask, Filters} from "../../uiTypes";
 import {shortText} from "../../utils/format";
 import type {StateResponse} from "../../types";
+
+const CANCELLABLE_TASK_STATUSES = new Set([
+  "queued",
+  "starting",
+  "initializing",
+  "running",
+]);
 
 /**
  * Single-table queue replacement for the kanban TaskBoard. Linear-style.
@@ -46,13 +53,14 @@ export function TaskQueueList({
       <header className="queue-list-head">
         <div>
           <h2 id="taskBoardHeading">Tasks</h2>
-          <p>{items.length ? `${totalLabel} on ${target}` : taskBoardSubtitle(data, filters)}</p>
+          <p className="panel-subtitle">{items.length ? `${totalLabel} on ${target}` : taskBoardSubtitle(data, filters)}</p>
         </div>
         <div className="queue-list-actions">
           {readyCount > 0 && (
             <button
               className="primary"
               type="button"
+              data-testid={canMerge(data?.landing) ? "mission-land-ready-button" : undefined}
               disabled={!onLandReady || !canMerge(data?.landing)}
               title={mergeButtonTitle(data?.landing)}
               onClick={onLandReady}
@@ -62,6 +70,12 @@ export function TaskQueueList({
           )}
         </div>
       </header>
+      {data?.landing.merge_blocked ? (
+        <div className="status-banner warning queue-merge-blocked" data-testid="merge-blocked-banner">
+          <strong>Landing blocked</strong>
+          <span>{mergeBlockedText(data.landing)}</span>
+        </div>
+      ) : null}
       {emptyReason && emptyReason !== "has-tasks" ? (
         <div
           className={`queue-list-empty queue-list-empty-${emptyReason}`}
@@ -86,7 +100,7 @@ export function TaskQueueList({
           )}
           {emptyReason === "true-empty" && (
             <div className="queue-list-empty-hero">
-              <strong>No tasks yet</strong>
+              <strong>No work queued</strong>
               <p>Describe what you want Otto to build, certify, or improve.</p>
               {onNewJob && (
                 <button
@@ -155,13 +169,14 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
     : "—";
   const files = typeof task.changedFileCount === "number" ? `${task.changedFileCount}` : "—";
   const time = task.elapsedDisplay || task.durationDisplay || "—";
+  const meta = [task.branch, task.lastEvent, task.usageDisplay].filter((part): part is string => Boolean(part && part.trim()));
   const onClick = () => {
     if (task.runId) onSelect(task.runId);
     else if (onSelectQueued) onSelectQueued(task);
   };
   return (
     <div
-      className={`queue-list-row queue-list-row-task tone-${tone} ${selected ? "selected" : ""}`}
+      className={`queue-list-row queue-list-row-task task-card tone-${tone} ${selected ? "selected" : ""}`}
       role="row"
       data-run-id={task.runId || undefined}
       data-task-id={task.id}
@@ -178,18 +193,26 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
         onClick={onClick}
       >
         <span className="queue-list-cell queue-list-cell-status" role="cell">
-          <span className={`queue-list-status-badge task-status status-tone-${tone}`}>
+          <span className={`queue-list-status-badge task-status status-tone-${tone}`} data-status-tone={tone}>
             <span className="status-icon" aria-hidden="true">{toneIcon(tone)}</span>
             {stageLabel}
           </span>
         </span>
         <span className="queue-list-cell queue-list-cell-task" role="cell">
-          <strong title={task.title}>{task.title}</strong>
+          <strong className="task-title" title={task.title}>{task.title}</strong>
           {task.summary ? <em title={task.summary}>{shortText(task.summary, 90)}</em> : null}
+          {meta.length ? <span className="task-row-meta" title={meta.join(" · ")}>{meta.join(" · ")}</span> : null}
         </span>
         <span className="queue-list-cell queue-list-cell-num" role="cell">{stories}</span>
         <span className="queue-list-cell queue-list-cell-num" role="cell">{files}</span>
         <span className="queue-list-cell queue-list-cell-num" role="cell">{time}</span>
+        <span className="sr-only" aria-hidden="true">
+          <span className="task-chip" data-chip-kind="status">{stageLabel}</span>
+          {typeof task.changedFileCount === "number" ? <span className="task-chip" data-chip-kind="files">{task.changedFileCount} file{task.changedFileCount === 1 ? "" : "s"}</span> : null}
+          {task.storiesTested && task.storiesTested > 0 ? <span className="task-chip" data-chip-kind="stories">{task.storiesPassed || 0}/{task.storiesTested} stories</span> : null}
+          {task.usageDisplay ? <span className="task-chip" data-chip-kind="usage">{task.usageDisplay}</span> : null}
+          {task.elapsedDisplay || task.durationDisplay ? <span className="task-chip" data-chip-kind="time">{task.elapsedDisplay || task.durationDisplay}</span> : null}
+        </span>
       </button>
       <span className="queue-list-cell queue-list-cell-actions" role="cell">
         {cancellable && task.runId && (

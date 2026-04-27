@@ -581,10 +581,11 @@ def test_keyboard_cancel_does_not_fire_inspector_next_action(
 def test_keyboard_cancel_target_matches_visual_focus(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """The focused element when a user Tab-walks from the queued card's
-    main button must be the per-row cancel — NOT the inspector's
-    review-next-action-button. Asserts on the focused element's
-    data-testid attribute."""
+    """Tab-walking from a queued row's main button lands on its row cancel.
+
+    The redesigned inspector makes the task list inert while open, so this
+    row-level focus invariant is now checked before opening the inspector.
+    """
 
     _install_projects_route(page)
     _install_state_route(page)
@@ -592,18 +593,6 @@ def test_keyboard_cancel_target_matches_visual_focus(
     _install_artifacts_route(page)
 
     _hydrate(mc_backend, page, disable_animations)
-
-    # Open the inspector on the RUNNING run so its
-    # `review-next-action-button` is in the DOM (it's where the bug used
-    # to land). The QUEUED card's row-level focus chain must still walk
-    # to the per-row cancel before any inspector tabstop.
-    running_main = page.get_by_test_id(f"task-card-{RUNNING_TASK_ID}")
-    running_main.wait_for(state="visible", timeout=5_000)
-    running_main.click()
-
-    page.wait_for_selector(
-        "[data-testid='review-next-action-button']", timeout=5_000
-    )
 
     # Focus the queued task's main card button explicitly.
     queued_main_id = f"task-card-{QUEUED_TASK_ID}"

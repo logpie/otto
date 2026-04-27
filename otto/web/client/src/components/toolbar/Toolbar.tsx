@@ -3,7 +3,7 @@ import {useEffect, useRef, useState} from "react";
 import {Spinner} from "../Spinner";
 import {useDebouncedValue} from "../../hooks/useDebouncedValue";
 import {refreshLabel} from "../../utils/format";
-import type {Filters, ViewMode} from "../../App";
+import type {Filters, ViewMode} from "../../uiTypes";
 import type {OutcomeFilter, RunTypeFilter} from "../../types";
 
 const defaultFilters: Filters = {

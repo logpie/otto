@@ -1,6 +1,5 @@
-"""Browser regression for mc-audit codex-first-time-user #15 — sidebar
-collapses Watcher/Heartbeat/In-flight/queued/ready/landed counters when
-the project has zero history AND no live runs.
+"""Browser regression for mc-audit codex-first-time-user #15 — first-run
+projects avoid internal counters and show an actionable task-list empty state.
 
 Before fix: a brand-new project showed ``Watcher: stopped``,
 ``Heartbeat: -``, ``In flight: 0``, ``queued 0 / ready 0 / landed 0`` —
@@ -178,53 +177,38 @@ def _hydrate(mc_backend: Any, page: Any, disable_animations: Any) -> None:
 def test_first_run_collapses_to_single_status_line(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """Empty project shows the collapsed first-run sidebar variant."""
+    """Empty project shows a concise first-run task-board empty state."""
 
     _install_routes(page, _state_empty())
     _hydrate(mc_backend, page, disable_animations)
 
-    collapsed = page.get_by_test_id("project-meta-first-run")
+    collapsed = page.get_by_test_id("task-board-empty")
     collapsed.wait_for(state="visible", timeout=5_000)
 
     text = collapsed.text_content() or ""
-    assert "Project ready" in text and "No jobs yet" in text, (
-        f"expected first-run collapsed status line; got {text!r}"
+    assert "No work queued" in text and "Queue your first job" in text, (
+        f"expected first-run empty state; got {text!r}"
     )
 
-    # Detailed counters MUST NOT be rendered on first-run.
-    info = page.evaluate(
-        """() => ({
-            watcher: !!document.body.textContent && /Watcher/.test(document.querySelector('.project-meta')?.textContent || ''),
-            heartbeat: /Heartbeat/.test(document.querySelector('.project-meta')?.textContent || ''),
-            inFlight: /In flight/.test(document.querySelector('.project-meta')?.textContent || ''),
-            tasks: /queued .* ready .* landed/.test(document.querySelector('.project-meta')?.textContent || ''),
-        })"""
-    )
-    assert not info["watcher"], f"first-run sidebar must not show Watcher counter; got {info!r}"
-    assert not info["heartbeat"], f"first-run sidebar must not show Heartbeat counter; got {info!r}"
-    assert not info["inFlight"], f"first-run sidebar must not show In flight counter; got {info!r}"
-    assert not info["tasks"], f"first-run sidebar must not show queued/ready/landed line; got {info!r}"
+    assert page.locator("[data-testid=project-meta-first-run]").count() == 0
+    assert page.locator("[data-testid=project-meta-full]").count() == 0
 
 
 def test_populated_project_shows_full_counters(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """Once a project has a single history row, the full sidebar counters render."""
+    """Once a project has history, project stats are available in the supplementary section."""
 
     _install_routes(page, _state_with_history())
     _hydrate(mc_backend, page, disable_animations)
 
-    full = page.get_by_test_id("project-meta-full")
-    full.wait_for(state="visible", timeout=5_000)
+    page.get_by_test_id("tasks-supplementary").locator("summary").click()
+    overview = page.locator(".project-overview")
+    overview.wait_for(state="visible", timeout=5_000)
 
-    text = full.text_content() or ""
-    assert "Watcher" in text, f"expected Watcher counter; got {text!r}"
-    assert "Heartbeat" in text, f"expected Heartbeat counter; got {text!r}"
-    assert "In flight" in text, f"expected In flight counter; got {text!r}"
-    assert "queued" in text and "ready" in text and "landed" in text, (
-        f"expected queued/ready/landed counter line; got {text!r}"
-    )
+    text = overview.text_content() or ""
+    assert "Run history" in text and "1 runs" in text, f"expected project overview stats; got {text!r}"
 
-    # The collapsed first-run variant must NOT be present when full is rendered.
+    # Legacy sidebar metadata is no longer rendered in the topbar redesign.
     collapsed_count = page.locator("[data-testid=project-meta-first-run]").count()
-    assert collapsed_count == 0, "first-run variant must not coexist with full ProjectMeta"
+    assert collapsed_count == 0, "legacy first-run project meta should not render"
