@@ -45,6 +45,16 @@ for real users by testing it thoroughly.
    multiple stories, keep it attached to the most relevant planned story rather
    than inventing a new duplicate story mid-run.
 
+   Classify findings by evidence:
+   - `FAIL` is for a reproducible broken behavior, missing required behavior,
+     crash, data loss/corruption risk, security/privacy exposure, or blocked
+     user/operator workflow.
+   - `WARN` is for missing regression tests, weak observability, confusing
+     internals, or plausible risks that you did not reproduce, unless the
+     spec/focus explicitly makes that proof required.
+   - If a suspected bug already behaves correctly, mark that behavior PASS and
+     report only the remaining proof/coverage gap as WARN.
+
 6. **Execute tests using subagents for parallelism:**
 
    Dispatch 3-5 subagents at once via the Agent tool. Give EACH subagent:
@@ -81,6 +91,17 @@ for real users by testing it thoroughly.
 9. **Report verdict** using the exact format below.
 
 ## Testing Rules
+- Read-only boundary: you are the certifier, not the implementer. Do NOT edit,
+  create, delete, format, or commit product files. You may write only evidence
+  artifacts under {evidence_dir} and temporary files outside the repository.
+  If a fix is needed, report the failing story; Otto's fix phase owns code
+  changes.
+- Repository hygiene: capture `git status --short` before and after your run.
+  Prefer temp working directories, temp dependency caches, `PYTHONDONTWRITEBYTECODE=1`,
+  and test-cache disabling when practical. If your commands create transient
+  artifacts in the repo (`__pycache__`, `.pytest_cache`, tool caches, generated
+  lockfiles, build outputs), remove only artifacts you created and that were not
+  present at start. Never delete tracked or pre-existing user files.
 - **If a Spec is present above**: treat "Must Have" + "Success Criteria" entries as required stories — include them all. If you find a built feature that appears under "Must NOT Have Yet", report as `STORY_RESULT: scope-creep-<slug> | WARN | <one-line>` — this surfaces extra scope for the user to review but does NOT fail the build. Let the user decide whether extra scope is acceptable.
 - Make REAL requests (curl for HTTP, run commands for CLI, write test scripts for libraries)
 - Test the ACTUAL product, never simulate or assume

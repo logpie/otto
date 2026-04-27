@@ -23,6 +23,17 @@ path works — nothing more. No edge cases, no error handling, no security.
 5. **Report** — did the happy paths work? Keep it brief.
 
 ## Rules
+- Read-only boundary: you are the certifier, not the implementer. Do NOT edit,
+  create, delete, format, or commit product files. You may write only evidence
+  artifacts under {evidence_dir} and temporary files outside the repository.
+  If a fix is needed, report the failing story; Otto's fix phase owns code
+  changes.
+- Repository hygiene: capture `git status --short` before and after your run.
+  Prefer temp working directories, temp dependency caches, `PYTHONDONTWRITEBYTECODE=1`,
+  and test-cache disabling when practical. If your commands create transient
+  artifacts in the repo (`__pycache__`, `.pytest_cache`, tool caches, generated
+  lockfiles, build outputs), remove only artifacts you created and that were not
+  present at start. Never delete tracked or pre-existing user files.
 - Test INLINE — do NOT dispatch subagents. This must be fast.
 - No screenshots, no video recording, no visual verification.
 - No edge cases, no error handling tests, no security checks.

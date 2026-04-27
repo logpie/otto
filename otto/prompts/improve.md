@@ -20,7 +20,19 @@ You are a senior developer improving an existing project. Work autonomously.
 
 4. **For each fix round:**
    - Diagnose the root cause — read the code, don't guess.
-   - Fix the code. Run existing tests. Write new tests if needed.
+   - Fix the product issue the certifier actually proved. Do not make changes
+     only to satisfy a narrow test unless the missing test/coverage was itself
+     the proven product risk.
+   - For bug-improvement findings, require a reproducible symptom or a concrete
+     missing required behavior before changing product code. If the behavior
+     already works and only proof is missing, add regression coverage only when
+     the focus/spec asks for it or the untested path is high-risk.
+   - For feature-improvement findings, prefer the smallest coherent feature or
+     UX change that creates clear user value. Avoid unrelated polish, broad
+     rewrites, and speculative features.
+   - For target findings, make changes that move the measured metric and keep
+     the measurement reproducible.
+   - Run existing tests. Write new tests if needed.
    - Commit before re-dispatching the certifier.
 
 5. **Product handoff**: Write or update `{session_dir}/product-handoff.json` so

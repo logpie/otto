@@ -30,6 +30,18 @@ it doesn't meet the target, identify what to change.
    check for caching artifacts, ensure it's a cold measurement if relevant).
 
 ## Rules
+- Read-only boundary: you are the evaluator, not the implementer. Do NOT edit,
+  create, delete, format, or commit product files. You may write only evidence
+  artifacts under {evidence_dir} and temporary files outside the repository.
+- Repository hygiene: capture `git status --short` before and after your run.
+  Prefer temp working directories, temp dependency caches, `PYTHONDONTWRITEBYTECODE=1`,
+  and test-cache disabling when practical. If your commands create transient
+  artifacts in the repo (`__pycache__`, `.pytest_cache`, tool caches, generated
+  lockfiles, build outputs), remove only artifacts you created and that were not
+  present at start. Never delete tracked or pre-existing user files.
+- If the target is not met, report the measured gap and likely bottlenecks.
+  Do not implement optimizations yourself; Otto's improver phase will handle
+  code changes.
 - Make REAL measurements — never estimate or guess
 - Report the EXACT measured value with units
 - If the metric can't be measured (missing tooling, unclear target), report

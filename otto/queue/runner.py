@@ -41,7 +41,7 @@ from typing import Any, Callable
 from otto.config import DEFAULTS
 from otto.manifest import queue_index_path_for
 from otto import paths
-from otto.queue.artifacts import preserve_queue_session_artifacts
+from otto.queue.artifacts import preserve_queue_session_artifacts, queue_primary_log_path
 from otto.token_usage import (
     TOKEN_USAGE_KEYS,
     add_token_usage,
@@ -156,6 +156,14 @@ def now_iso() -> str:
 
 def _mark_failed(ts: dict[str, Any], reason: str) -> None:
     ts["status"] = "failed"
+    ts["finished_at"] = now_iso()
+    ts["duration_s"] = _terminal_duration_s(ts)
+    ts["child"] = None
+    ts["failure_reason"] = reason
+
+
+def _mark_interrupted(ts: dict[str, Any], reason: str) -> None:
+    ts["status"] = INTERRUPTED_STATUS
     ts["finished_at"] = now_iso()
     ts["duration_s"] = _terminal_duration_s(ts)
     ts["child"] = None
@@ -1362,20 +1370,11 @@ class Runner:
         wt_path = self._worktree_for(task)
         session_dir = paths.session_dir(wt_path, session_run_id) if session_run_id else paths.sessions_root(wt_path)
         manifest_path = ts.get("manifest_path") or (session_dir / "manifest.json")
-        primary_log = None
-        if session_run_id:
-            # W3-IMPORTANT-5: improve runs write narrative.log under improve/,
-            # not build/. Prefer build/ (the legacy location for build runs)
-            # but fall back to improve/ so queue task displays for `otto
-            # improve` resolve a real log instead of a phantom build path.
-            build_log = paths.build_dir(wt_path, session_run_id) / "narrative.log"
-            improve_log = paths.improve_dir(wt_path, session_run_id) / "narrative.log"
-            if build_log.exists():
-                primary_log = build_log
-            elif improve_log.exists():
-                primary_log = improve_log
-            else:
-                primary_log = build_log  # default presented even when missing
+        primary_log = (
+            queue_primary_log_path(wt_path, session_run_id, command_argv=task.command_argv)
+            if session_run_id
+            else None
+        )
         return {
             "session_dir": str(session_dir),
             "manifest_path": str(manifest_path) if manifest_path else None,
@@ -1787,6 +1786,9 @@ class Runner:
             _mark_failed(ts, f"missing queue task id for manifest lookup: {task_id!r}")
             return
         if not manifest_p.exists():
+            if self.shutdown_level == "immediate":
+                _mark_interrupted(ts, self._shutdown_interrupted_reason(task_id))
+                return
             if exit_code is None:
                 reason = f"child exited but no manifest at {manifest_p}"
             elif exit_code == 0:
@@ -1827,6 +1829,15 @@ class Runner:
         ts["status"] = "done"
         ts["duration_s"] = _terminal_duration_s(ts)
         ts["failure_reason"] = None
+
+    def _shutdown_interrupted_reason(self, task_id: str) -> str:
+        task = next(
+            (candidate for candidate in self._load_queue_or_empty(context="shutdown interrupt reason") if candidate.id == task_id),
+            None,
+        )
+        if task is not None and checkpoint_path_for_task(self.project_dir, task) is not None:
+            return "interrupted by watcher shutdown; resume available"
+        return "interrupted by watcher shutdown before manifest was written"
 
     def _finish_terminating(self, ts: dict[str, Any]) -> None:
         ts["status"] = ts.pop("terminal_status", "cancelled")

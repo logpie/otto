@@ -114,6 +114,77 @@ def test_all_certifier_modes_accept_stories(tmp_path: Path, mode: str):
     assert "story-a" in out, f"mode={mode}: stories_section not rendered"
 
 
+@pytest.mark.parametrize("mode", ["standard", "fast", "thorough", "hillclimb", "target"])
+def test_all_certifier_modes_are_read_only(tmp_path: Path, mode: str):
+    """Split-mode certifiers must evaluate only; implementation belongs to fix/improve."""
+    out = _render_certifier_prompt(
+        mode=mode,
+        intent="test product",
+        evidence_dir=tmp_path,
+        target="latency < 100ms" if mode == "target" else None,
+    )
+    assert "Read-only boundary" in out
+    assert "Do NOT edit" in out
+    assert "Otto's" in out and ("fix phase" in out or "improver phase" in out)
+    assert "Repository hygiene" in out
+    assert "git status --short" in out
+    assert "__pycache__" in out
+    assert "Never delete tracked or pre-existing user files" in out
+
+
+@pytest.mark.parametrize("mode", ["standard", "thorough"])
+def test_bug_certifier_modes_require_reproducible_failures(tmp_path: Path, mode: str):
+    """Bug certifiers should not turn hypothetical or coverage-only gaps into fake bugs."""
+    out = _render_certifier_prompt(
+        mode=mode,
+        intent="test product",
+        evidence_dir=tmp_path,
+    )
+    assert "reproducible" in out
+    assert "WARN" in out
+    assert "missing regression tests" in out or "weak coverage" in out
+    assert "already" in out and "PASS" in out
+
+
+def test_hillclimb_defaults_to_agent_browser_for_web_products(tmp_path: Path):
+    out = _render_certifier_prompt(
+        mode="hillclimb",
+        intent="test web product",
+        evidence_dir=tmp_path,
+    )
+    assert "default to `agent-browser`" in out
+    assert "Use scripted Playwright only when" in out
+    assert "1-3 highest-impact improvements" in out
+
+
+def test_hillclimb_keeps_scoped_improvement_stable_across_rounds(tmp_path: Path):
+    out = _render_certifier_prompt(
+        mode="hillclimb",
+        intent="test web product",
+        evidence_dir=tmp_path,
+        focus="choose one small high-impact improvement",
+    )
+    assert "Keep scope stable across rounds" in out
+    assert "emit one primary" in out
+    assert "Do not introduce a new `FAIL` in a later round" in out
+    assert "reported as `WARN`, not blockers" in out
+    assert "story IDs stable between rounds" in out
+
+
+def test_improve_prompt_discourages_test_only_or_speculative_churn():
+    from otto.prompts import render_prompt
+
+    out = render_prompt(
+        "improve.md",
+        session_dir="/tmp/session",
+        max_certify_rounds="2",
+    )
+    assert "Fix the product issue the certifier actually proved" in out
+    assert "only to satisfy a narrow test" in out
+    assert "already works" in out
+    assert "clear user value" in out
+
+
 # ---------- merge_context preamble for post-merge cert pruning ----------
 
 

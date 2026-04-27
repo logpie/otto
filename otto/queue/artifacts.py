@@ -24,6 +24,62 @@ _TOP_LEVEL_SESSION_PATH_KEYS = (
 )
 
 
+def queue_session_log_candidates(
+    worktree_path: Path,
+    run_id: str,
+    *,
+    command_argv: Any = None,
+) -> list[Path]:
+    """Return likely narrative logs for a queued run, in operator priority order."""
+
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return []
+    command = ""
+    if isinstance(command_argv, (list, tuple)) and command_argv:
+        command = str(command_argv[0] or "").strip()
+
+    session_dir = paths.session_dir(worktree_path, run_id)
+    by_phase = {
+        "build": paths.build_dir(worktree_path, run_id) / "narrative.log",
+        "certify": paths.certify_dir(worktree_path, run_id) / "narrative.log",
+        "improve": paths.improve_dir(worktree_path, run_id) / "narrative.log",
+    }
+    order = {
+        "certify": ("certify", "build", "improve"),
+        # Split improve may produce only certify/narrative.log when the first
+        # evaluation fails before a fix phase. Agentic improve uses improve/.
+        "improve": ("improve", "certify", "build"),
+    }.get(command, ("build", "certify", "improve"))
+    candidates = [by_phase[phase] for phase in order]
+    generic = session_dir / "narrative.log"
+    if generic not in candidates:
+        candidates.append(generic)
+    return candidates
+
+
+def queue_primary_log_path(
+    worktree_path: Path,
+    run_id: str,
+    *,
+    command_argv: Any = None,
+    require_exists: bool = False,
+) -> Path | None:
+    """Pick the best primary narrative log for a queued run."""
+
+    candidates = queue_session_log_candidates(
+        worktree_path,
+        run_id,
+        command_argv=command_argv,
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    if require_exists:
+        return None
+    return candidates[0] if candidates else None
+
+
 def preserve_queue_session_artifacts(
     project_dir: Path,
     *,

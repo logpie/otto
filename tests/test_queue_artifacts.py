@@ -5,7 +5,7 @@ from pathlib import Path
 
 from otto import paths
 from otto.manifest import queue_index_path_for
-from otto.queue.artifacts import preserve_queue_session_artifacts
+from otto.queue.artifacts import preserve_queue_session_artifacts, queue_primary_log_path
 from otto.runs.history import append_history_snapshot, read_history_rows
 
 
@@ -78,3 +78,39 @@ def test_preserve_queue_session_artifacts_rewrites_top_level_intent_and_spec_pat
     assert row["spec_path"] == str((paths.spec_dir(project_dir, run_id) / "spec.md").resolve())
     assert row["manifest_path"] == str((paths.session_dir(project_dir, run_id) / "manifest.json").resolve())
     assert row["artifacts"]["manifest_path"] == row["manifest_path"]
+
+
+def test_queue_primary_log_path_uses_certify_log_for_evaluate_only_improve(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "repo" / ".worktrees" / "task1"
+    run_id = "run-improve"
+    certify_log = paths.certify_dir(worktree_path, run_id) / "narrative.log"
+    certify_log.parent.mkdir(parents=True)
+    certify_log.write_text("certifier evidence\n", encoding="utf-8")
+
+    selected = queue_primary_log_path(
+        worktree_path,
+        run_id,
+        command_argv=["improve", "bugs", "focus"],
+        require_exists=True,
+    )
+
+    assert selected == certify_log
+
+
+def test_queue_primary_log_path_prefers_build_log_for_build_tasks(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "repo" / ".worktrees" / "task1"
+    run_id = "run-build"
+    build_log = paths.build_dir(worktree_path, run_id) / "narrative.log"
+    certify_log = paths.certify_dir(worktree_path, run_id) / "narrative.log"
+    for path in (build_log, certify_log):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(path.parent.name, encoding="utf-8")
+
+    selected = queue_primary_log_path(
+        worktree_path,
+        run_id,
+        command_argv=["build", "thing"],
+        require_exists=True,
+    )
+
+    assert selected == build_log

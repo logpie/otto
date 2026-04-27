@@ -505,6 +505,33 @@ def test_runner_marks_failed_when_no_manifest(tmp_path: Path):
         runner._lock_fh.close()
 
 
+def test_immediate_shutdown_marks_missing_manifest_interrupted(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["improve", "bugs", "fix validation"],
+        branch="improve/t1-test",
+        worktree=".worktrees/t1",
+        resumable=True,
+    )
+    append_task(repo, task)
+    _write_resume_checkpoint(repo, task)
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    runner.shutdown_level = "immediate"
+    ts = {
+        "status": "running",
+        "started_at": "2026-04-26T00:00:00Z",
+        "child": {"pid": 12345},
+    }
+
+    runner._finalize_task_from_manifest(ts, "t1", exit_code=0)
+
+    assert ts["status"] == INTERRUPTED_STATUS
+    assert ts["failure_reason"] == "interrupted by watcher shutdown; resume available"
+    assert "no manifest" not in ts["failure_reason"]
+    assert ts["child"] is None
+
+
 def test_runner_marks_failed_on_nonzero_exit(tmp_path: Path):
     repo = init_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, exit_code=1, sleep=0.1, write_manifest=False)

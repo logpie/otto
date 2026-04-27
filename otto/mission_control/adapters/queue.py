@@ -16,6 +16,7 @@ from otto.queue.runtime import (
     task_display_status,
     task_resume_block_reason,
 )
+from otto.queue.artifacts import queue_primary_log_path
 from otto.queue.schema import load_queue, load_state
 from otto.runs.registry import make_run_record, writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
@@ -398,18 +399,16 @@ def _legacy_queue_record(project_dir, task, task_state, now):
     checkpoint_path = checkpoint_path_for_task(project_dir, task)
     queue_manifest = queue_index_path_for(project_dir, task.id)
     child_manifest = session_dir / "manifest.json" if session_run_id else None
-    # W3-IMPORTANT-5: prefer build/narrative.log; fall back to improve/ for
-    # `otto improve` queue tasks whose stream now lives under improve/.
-    primary_log_path = None
-    if session_run_id:
-        build_log = paths.build_dir(worktree_path, session_run_id) / "narrative.log"
-        improve_log = paths.improve_dir(worktree_path, session_run_id) / "narrative.log"
-        if build_log.exists():
-            primary_log_path = build_log
-        elif improve_log.exists():
-            primary_log_path = improve_log
-        else:
-            primary_log_path = build_log
+    primary_log_path = (
+        queue_primary_log_path(
+            worktree_path,
+            session_run_id,
+            command_argv=task.command_argv,
+            require_exists=True,
+        )
+        if session_run_id
+        else None
+    )
     extra_log_paths: list[str] = []
     if status in {"failed", "cancelled", INTERRUPTED_STATUS} and not (primary_log_path and primary_log_path.exists()):
         for candidate in (paths.logs_dir(project_dir) / "web" / "watcher.log", paths.queue_dir(project_dir) / "watcher.log"):

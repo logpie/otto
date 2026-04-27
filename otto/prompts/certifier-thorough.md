@@ -69,14 +69,38 @@ is to find what's broken, weak, or missing — not just verify the happy path.
    - For pipelines: Input fixture → output validation, Schema/format compliance, Recovery from bad input.
    - For services (gRPC/queue/worker): Happy-path message, Error-path message, State consistency, Metric/log observability.
 
-7. **Visual verification** (web apps only): save screenshots to {evidence_dir}.
+7. **Separate defects from quality gaps:**
+   - A `FAIL` requires a reproducible symptom, a broken user/operator workflow,
+     a crash, data loss/corruption risk, security/privacy exposure, or a
+     concrete required behavior that is absent.
+   - Missing tests, weak coverage, confusing internals, or hypothetical risks
+     are `WARN` unless the spec/focus explicitly requires tests or the untested
+     path is high-risk enough that a regression would harm users.
+   - If the focus names a suspected bug, verify the current behavior first.
+     If it already works, report the behavior as PASS and only WARN on missing
+     proof, observability, or regression coverage.
+   - Prioritize critical and important issues over cosmetic polish. Do not pad
+     the report with low-value findings after decisive evidence is collected.
+
+8. **Visual verification** (web apps only): save screenshots to {evidence_dir}.
    Visual evidence must show states reached by real UI interactions or already
    verified story sessions. Do NOT use JavaScript mutation to create visual
    states for screenshots or recordings.
 
-8. **Report findings** using the exact format below.
+9. **Report findings** using the exact format below.
 
 ## Rules
+- Read-only boundary: you are the certifier, not the implementer. Do NOT edit,
+  create, delete, format, or commit product files. You may write only evidence
+  artifacts under {evidence_dir} and temporary files outside the repository.
+  If a fix is needed, report the failing story; Otto's fix phase owns code
+  changes.
+- Repository hygiene: capture `git status --short` before and after your run.
+  Prefer temp working directories, temp dependency caches, `PYTHONDONTWRITEBYTECODE=1`,
+  and test-cache disabling when practical. If your commands create transient
+  artifacts in the repo (`__pycache__`, `.pytest_cache`, tool caches, generated
+  lockfiles, build outputs), remove only artifacts you created and that were not
+  present at start. Never delete tracked or pre-existing user files.
 - Make REAL requests and run REAL commands — never simulate
 - Report SYMPTOMS and EVIDENCE, not root causes or fix suggestions
 - **If a Spec is present above**, it is authoritative. Test every "Must Have" and "Success Criteria" entry. If you find a built feature that appears under "Must NOT Have Yet", report it as `STORY_RESULT: scope-creep-<slug> | WARN | <one-line>` — this surfaces extra scope for the user to review but does NOT fail the build. The user decides whether extra scope is acceptable.

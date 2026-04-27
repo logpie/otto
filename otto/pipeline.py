@@ -1818,6 +1818,11 @@ async def run_certify_fix_loop(
         fix_phase_cost = 0.0
         spec_cost_remaining = float(spec_cost or 0.0)
         pending_resume_session_id = resume_session_id or None
+        checkpoint_prompt_mode = (
+            "improve"
+            if is_improve_run or str(command or "").startswith("improve")
+            else "build"
+        )
         improve_dir = _paths.improve_dir(project_dir, build_id)
         attempt_history_path = improve_dir / "attempt-history.json"
         from otto.observability import load_attempt_history, update_input_provenance, write_attempt_history
@@ -1860,6 +1865,7 @@ async def run_certify_fix_loop(
                     project_dir,
                     run_id=build_id, command=command,
                     certifier_mode=certifier_mode,
+                    prompt_mode=checkpoint_prompt_mode,
                     split_mode=True,
                     focus=focus, target=target,
                     max_rounds=max_rounds, phase=checkpoint_phase,

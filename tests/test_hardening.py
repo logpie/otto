@@ -517,6 +517,8 @@ class TestHistoryWrites:
         assert entry["run_id"] == "run-improve-1"
         assert entry["command"] == "improve bugs"
         assert entry["certifier_mode"] == "thorough"
+        checkpoint = json.loads(paths.session_checkpoint(tmp_git_repo, "run-improve-1").read_text())
+        assert checkpoint["prompt_mode"] == "improve"
 
 
 class TestImproveCLIHardening:
