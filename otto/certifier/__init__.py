@@ -272,6 +272,47 @@ def _format_stories_section(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _format_merge_section(merge_context: dict[str, Any] | None) -> str:
+    """Format merge-specific verification scope for the merge cert prompt."""
+    if not merge_context:
+        return ""
+    allow_skip = bool(merge_context.get("allow_skip", True))
+    plan_text = str(merge_context.get("plan_text") or "").strip()
+    if plan_text:
+        return plan_text + "\n" + _merge_story_scope_rule(allow_skip)
+
+    target = merge_context.get("target", "the target branch")
+    diff_files = merge_context.get("diff_files") or []
+    files_block = "\n".join(f"- `{f}`" for f in diff_files) or "(no files in merge diff)"
+    return "\n".join(
+        [
+            "## Merge Verification Plan",
+            "",
+            f"- Target: `{target}`",
+            f"- Story skipping allowed: `{'yes' if allow_skip else 'no'}`",
+            "",
+            "Files touched by the merge:",
+            files_block,
+            "",
+        ]
+    ) + _merge_story_scope_rule(allow_skip)
+
+
+def _merge_story_scope_rule(allow_skip: bool) -> str:
+    if allow_skip:
+        return (
+            "\nStory scope rule:\n"
+            "- Stories marked `SKIP_ALLOWED` may be emitted as `SKIPPED` only when the plan's reason still holds.\n"
+            "- A prior task's proof-of-work can justify `SKIPPED`; it cannot justify `PASS` for a merge integration check.\n"
+            "\n"
+        )
+    return (
+        "\nStory scope rule:\n"
+        "- Skipping is disabled for this merge. Test every story, warn on non-blocking gaps, fail on reproduced defects, or flag genuine cross-branch contradictions.\n"
+        "\n"
+    )
+
+
 def _render_certifier_prompt(
     *,
     mode: str,
@@ -292,7 +333,7 @@ def _render_certifier_prompt(
 
     mode = validate_certifier_mode(mode)
     focus_section = f"## Improvement Focus\n{focus}" if focus else ""
-    stories_section = _format_stories_section(stories, merge_context=merge_context)
+    stories_section = _format_stories_section(stories)
     spec_section = ""
     if project_dir is not None:
         spec_section = format_spec_section(
@@ -309,6 +350,18 @@ def _render_certifier_prompt(
         "hillclimb": "certifier-hillclimb.md",
         "target": "certifier-target.md",
     }[mode]
+    if merge_context:
+        prompt_name = "certifier-merge-integration.md"
+    story_verdict_options = (
+        "PASS or FAIL or WARN or SKIPPED or FLAG_FOR_HUMAN"
+        if not merge_context or bool(merge_context.get("allow_skip", True))
+        else "PASS or FAIL or WARN or FLAG_FOR_HUMAN"
+    )
+    story_evidence_scope = (
+        "you check or intentionally skip"
+        if not merge_context or bool(merge_context.get("allow_skip", True))
+        else "you check or flag for human review"
+    )
     return render_prompt(
         prompt_name,
         intent=intent,
@@ -317,6 +370,9 @@ def _render_certifier_prompt(
         stories_section=stories_section,
         spec_section=spec_section,
         target=target or "",
+        merge_section=_format_merge_section(merge_context),
+        story_verdict_options=story_verdict_options,
+        story_evidence_scope=story_evidence_scope,
     )
 
 

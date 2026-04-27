@@ -1089,6 +1089,7 @@ def _annotate_merge_cert_summary(
     *,
     run_id: str,
     merged_from: list[str],
+    merge_verification_plan: dict[str, Any] | None = None,
 ) -> None:
     from otto import paths
 
@@ -1102,6 +1103,8 @@ def _annotate_merge_cert_summary(
         logger.warning("merge-cert summary unreadable for %s: %s", run_id, exc)
         return
     summary["merged_from"] = list(merged_from)
+    if merge_verification_plan:
+        summary["merge_verification_plan"] = merge_verification_plan
     _atomic_write_json(summary_path, summary)
 
 
@@ -1196,17 +1199,13 @@ async def _run_post_merge_verification(
     target_head_before: str,
     budget: Any | None = None,
 ) -> MergeRunResult:
-    """Cert all merged-branch stories in one call.
+    """Cert merged-branch integration through a merge-specific plan.
 
-    Pruning (skip stories whose feature lives in files the merge didn't
-    touch) and contradiction-flagging happen inline inside the cert agent
-    via a merge_context preamble in the rendered stories section. The
-    cert emits per-story verdicts (PASS / FAIL / SKIPPED / FLAG_FOR_HUMAN)
-    that the orchestrator records directly — no separate planning call.
-
-    `--full-verify` still passes merge context to the certifier, but with
-    `allow_skip=False` so it tests every story while still surfacing
-    cross-branch contradictions as FLAG_FOR_HUMAN.
+    The planner computes the risk level from branch overlap, high-risk files,
+    and conflict-resolution outcomes, then feeds a dedicated merge certifier
+    prompt. The certifier may emit PASS / FAIL / WARN / SKIPPED /
+    FLAG_FOR_HUMAN per story, but the scope is deterministic instead of left
+    to general certifier story discovery.
     """
     # Collect all stories from merged branches
     all_stories = collect_stories_from_branches(
@@ -1235,10 +1234,26 @@ async def _run_post_merge_verification(
     diff_files = git_ops.changed_files_between(
         project_dir, target_head_before, git_ops.head_sha(project_dir),
     )
+    from otto.merge.verification import build_merge_verification_plan, format_merge_verification_plan
+
+    plan = build_merge_verification_plan(
+        project_dir=project_dir,
+        target=options.target,
+        branches=branches,
+        queue_lookup=queue_lookup,
+        target_head_before=target_head_before,
+        target_head_after=git_ops.head_sha(project_dir),
+        changed_files=diff_files,
+        stories=deduped,
+        outcomes=list(state.outcomes),
+        full_verify=options.full_verify,
+    )
     merge_context: dict[str, Any] = {
         "target": options.target,
         "diff_files": diff_files,
-        "allow_skip": not options.full_verify,
+        "allow_skip": plan.allow_skip,
+        "verification_plan": plan.to_dict(),
+        "plan_text": format_merge_verification_plan(plan),
     }
 
     from otto.config import resolve_intent
@@ -1299,7 +1314,11 @@ async def _run_post_merge_verification(
         )
 
     from otto.certifier.report import CertificationOutcome
-    cert_passed = cert_report.outcome == CertificationOutcome.PASSED
+    flagged_for_human = any(
+        str(story.get("verdict") or "").strip().upper() == "FLAG_FOR_HUMAN"
+        for story in cert_report.story_results
+    )
+    cert_passed = cert_report.outcome == CertificationOutcome.PASSED and not flagged_for_human
     state.cert_passed = cert_passed
     state.cert_run_id = cert_report.run_id
     write_state(project_dir, state)
@@ -1307,6 +1326,7 @@ async def _run_post_merge_verification(
         project_dir,
         run_id=cert_report.run_id,
         merged_from=_merged_from_labels(branches, queue_lookup),
+        merge_verification_plan=plan.to_dict(),
     )
 
     return MergeRunResult(
@@ -1318,7 +1338,8 @@ async def _run_post_merge_verification(
         ),
         note=(
             f"cert {'PASSED' if cert_passed else 'FAILED'} "
-            f"({cert_report.outcome.value}); see "
+            f"({cert_report.outcome.value}"
+            f"{'; human review required' if flagged_for_human else ''}); see "
             f"{paths.certify_dir(project_dir, cert_report.run_id).relative_to(project_dir) / 'proof-of-work.html'}"
         ),
     )

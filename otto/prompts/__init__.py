@@ -25,6 +25,8 @@ _KNOWN_PLACEHOLDERS = frozenset({
     "project_context",
     "project_intent_section",
     "merge_section",
+    "story_verdict_options",
+    "story_evidence_scope",
 })
 
 _PLACEHOLDER_PATTERN = re.compile(

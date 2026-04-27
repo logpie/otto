@@ -188,10 +188,8 @@ def test_improve_prompt_discourages_test_only_or_speculative_churn():
 # ---------- merge_context preamble for post-merge cert pruning ----------
 
 
-def test_merge_context_preamble_renders_when_provided(tmp_path: Path):
-    """When stories carry a merge_context, the rendered prompt includes the
-    skip/flag instructions and the merge-diff file list. This is what
-    lets the cert agent prune inline during post-merge verification."""
+def test_merge_context_renders_dedicated_merge_prompt_when_provided(tmp_path: Path):
+    """Merge cert uses the dedicated prompt and keeps scope in the plan."""
     out = _render_certifier_prompt(
         mode="standard",
         intent="bookmark manager",
@@ -206,19 +204,37 @@ def test_merge_context_preamble_renders_when_provided(tmp_path: Path):
             "allow_skip": True,
         },
     )
-    # Preamble appears
-    assert "Merge Verification Context" in out
-    assert "multi-branch merge into `main`" in out
-    # Diff file list rendered
+    assert "You are certifying an integrated merge before it lands" in out
+    assert "Merge Verification Plan" in out
     assert "`app/csv.py`" in out
     assert "`app/utils.py`" in out
-    # Verdict tokens documented in the prompt
     assert "SKIPPED" in out
     assert "FLAG_FOR_HUMAN" in out
-    assert "When in doubt, test it." in out
+    assert "A prior task's proof-of-work can justify `SKIPPED`" in out
+    assert "Merge Verification Context" not in out
     # Stories still rendered after the preamble
     assert "csv export works" in out
     assert "settings page renders" in out
+
+
+def test_merge_context_uses_merge_specific_certifier_prompt(tmp_path: Path):
+    out = _render_certifier_prompt(
+        mode="standard",
+        intent="bookmark manager",
+        evidence_dir=tmp_path,
+        stories=[{"name": "csv export works", "source_branch": "build/csv"}],
+        merge_context={
+            "target": "main",
+            "diff_files": ["app/csv.py"],
+            "allow_skip": True,
+            "plan_text": "## Merge Verification Plan\n\n- Risk level: `clean_disjoint`\n",
+        },
+    )
+
+    assert "You are certifying an integrated merge before it lands" in out
+    assert "Risk level: `clean_disjoint`" in out
+    assert "A prior task's proof-of-work can justify `SKIPPED`" in out
+    assert "If any story is `FLAG_FOR_HUMAN`, the final `VERDICT` must be `FAIL`" in out
 
 
 def test_merge_context_with_full_verify_suppresses_skip_but_keeps_flag(tmp_path: Path):
@@ -233,10 +249,10 @@ def test_merge_context_with_full_verify_suppresses_skip_but_keeps_flag(tmp_path:
             "allow_skip": False,
         },
     )
-    assert "Merge Verification Context" in out
+    assert "Merge Verification Plan" in out
     assert "SKIPPED" not in out
     assert "FLAG_FOR_HUMAN" in out
-    assert "Test every story below; do not skip on file overlap." in out
+    assert "Skipping is disabled for this merge" in out
 
 
 def test_merge_context_omitted_when_none(tmp_path: Path):
@@ -263,7 +279,7 @@ def test_merge_context_with_no_diff_files_renders_safely(tmp_path: Path):
         stories=[{"name": "story-a"}],
         merge_context={"target": "main", "diff_files": [], "allow_skip": True},
     )
-    assert "Merge Verification Context" in out
+    assert "Merge Verification Plan" in out
     assert "no files in merge diff" in out
 
 

@@ -815,11 +815,11 @@ def test_post_merge_verification_full_verify_preserves_merge_context_flag(
     ))
 
     assert result.success is True
-    assert captured["merge_context"] == {
-        "target": "main",
-        "diff_files": ["app/csv.py"],
-        "allow_skip": False,
-    }
+    assert captured["merge_context"]["target"] == "main"
+    assert captured["merge_context"]["diff_files"] == ["app/csv.py"]
+    assert captured["merge_context"]["allow_skip"] is False
+    assert captured["merge_context"]["verification_plan"]["verification_level"] == "full"
+    assert "Merge Verification Plan" in captured["merge_context"]["plan_text"]
 
 
 def test_post_merge_verification_writes_merged_from_to_summary(
@@ -880,6 +880,70 @@ def test_post_merge_verification_writes_merged_from_to_summary(
     assert result.success is True
     summary = json.loads((session_dir / "summary.json").read_text())
     assert summary["merged_from"] == ["add", "feature/random"]
+    assert summary["merge_verification_plan"]["target"] == "main"
+    assert summary["merge_verification_plan"]["changed_files"] == ["app/csv.py"]
+
+
+def test_post_merge_verification_blocks_human_flag_even_if_certifier_verdict_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.collect_stories_from_branches",
+        lambda **kwargs: [{"story_id": "story-a", "summary": "summary"}],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.dedupe_stories",
+        lambda stories: (stories, []),
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.changed_files_between",
+        lambda *args, **kwargs: ["app/csv.py"],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.head_sha",
+        lambda *args, **kwargs: "new-head",
+    )
+    monkeypatch.setattr("otto.config.resolve_intent", lambda project_dir: "intent")
+
+    async def fake_run_agentic_certifier(**kwargs):
+        return CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            story_results=[
+                {
+                    "story_id": "story-a",
+                    "verdict": "FLAG_FOR_HUMAN",
+                    "passed": False,
+                    "summary": "semantic contradiction",
+                }
+            ],
+            run_id="cert-human-flag",
+        )
+
+    monkeypatch.setattr("otto.certifier.run_agentic_certifier", fake_run_agentic_certifier)
+
+    state = MergeState(
+        merge_id="merge-test",
+        started_at="2026-04-20T00:00:00Z",
+        target="main",
+        target_head_before="old-head",
+    )
+    result = asyncio.run(
+        _run_post_merge_verification(
+            project_dir=tmp_path,
+            config=_config_no_bookkeeping(),
+            options=MergeOptions(target="main"),
+            state=state,
+            merge_id="merge-test",
+            branches=["feature/random"],
+            queue_lookup={},
+            target_head_before="old-head",
+        )
+    )
+
+    assert result.success is False
+    assert result.cert_passed is False
+    assert "human review required" in result.note
 
 
 def test_post_merge_verification_honors_cancel_after_certifier_returns(
