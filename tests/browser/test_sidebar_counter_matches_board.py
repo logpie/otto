@@ -1,5 +1,5 @@
-"""Browser regression for W11-IMPORTANT-1 — Sidebar IN FLIGHT counter must
-include atomic-domain runs (standalone ``otto build``), not just queue.
+"""Browser regression for W11-IMPORTANT-1 — the task list must include
+atomic-domain runs (standalone ``otto build``), not just queue.
 
 Source: live W11 dogfood — a standalone CLI build was running and visible
 on the Task Board, but the sidebar's IN FLIGHT counter still read "0".
@@ -186,30 +186,23 @@ def _hydrate(mc_backend: Any, page: Any, disable_animations: Any) -> None:
 def test_sidebar_in_flight_counts_atomic_run(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """Sidebar In flight must read "1" when an atomic run is live and
-    watcher.counts.running is 0 (the W11 reproduction)."""
+    """Task list must show an atomic run even when watcher.counts.running is 0."""
 
     _install_projects_route(page)
     _install_state_route(page, _state_with_atomic_run())
 
     _hydrate(mc_backend, page, disable_animations)
 
-    # The sidebar's "In flight" MetaItem renders <dt>In flight</dt><dd>N</dd>.
-    # We assert the dd value via locator text.
-    in_flight = page.locator(
-        "dl.project-meta div:has(dt:text('In flight')) dd"
-    ).first
-    in_flight.wait_for(state="visible", timeout=5_000)
-    text = in_flight.text_content()
-    assert text and text.strip() == "1", (
-        f"sidebar In flight counter should reflect live.active_count=1, got {text!r}"
-    )
+    row = page.get_by_test_id("task-card-2026-04-26-011751-aaaaaa")
+    row.wait_for(state="visible", timeout=5_000)
+    text = row.text_content() or ""
+    assert "build kanban" in text or "running" in text.lower(), text
 
 
 def test_sidebar_in_flight_zero_with_no_runs(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """Negative: sidebar still shows 0 when nothing is live (regression check)."""
+    """Negative: no live runs means no active task rows."""
 
     payload = _state_with_atomic_run()
     payload["live"]["items"] = []
@@ -251,9 +244,7 @@ def test_sidebar_in_flight_zero_with_no_runs(
 
     _hydrate(mc_backend, page, disable_animations)
 
-    in_flight = page.locator(
-        "dl.project-meta div:has(dt:text('In flight')) dd"
-    ).first
-    in_flight.wait_for(state="visible", timeout=5_000)
-    text = in_flight.text_content()
-    assert text and text.strip() == "0"
+    empty = page.get_by_test_id("task-board-empty")
+    empty.wait_for(state="visible", timeout=5_000)
+    text = empty.text_content() or ""
+    assert "No work queued" in text

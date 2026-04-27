@@ -3,8 +3,7 @@ Activity subtitle uses user-facing copy.
 
 Banned: "queue, watcher, land, and run outcomes" (four Otto terms in one
 sentence).
-Replacement: "Recent job activity, approvals, merges, and errors appear
-here."
+Replacement: "Jobs, merges, and errors."
 
 Run::
 
@@ -178,11 +177,12 @@ def test_recent_activity_subtitle_is_user_facing(
     _install_routes(page)
     _hydrate(mc_backend, page, disable_animations)
 
+    page.get_by_test_id("tasks-supplementary").locator("summary").click()
     sub = page.get_by_test_id("activity-subtitle")
     sub.wait_for(state="visible", timeout=5_000)
     text = (sub.text_content() or "").strip()
 
-    expected = "Recent job activity, approvals, merges, and errors appear here."
+    expected = "Jobs, merges, and errors."
     assert text == expected, f"expected friendly copy; got {text!r}"
 
     # Banned legacy copy must be absent from the activity panel scope.

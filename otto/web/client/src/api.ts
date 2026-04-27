@@ -153,6 +153,7 @@ export function buildQueuePayload(args: {
   fixModel: string;
   fixEffort: string;
   certification: CertificationPolicy;
+  rounds: string;
   planning: PlanningMode;
   specFilePath: string;
   priorRunId?: string;
@@ -167,6 +168,8 @@ export function buildQueuePayload(args: {
   if (args.provider) payload.extra_args.push("--provider", args.provider);
   if (args.model) payload.extra_args.push("--model", args.model);
   if (args.effort) payload.extra_args.push("--effort", args.effort);
+  const rounds = args.rounds.trim();
+  if (rounds) payload.extra_args.push("--rounds", rounds);
   if (args.command === "build" && args.executionMode === "split") {
     pushPhaseArgs(payload.extra_args, "build", args.buildProvider, args.buildModel, args.buildEffort);
   }

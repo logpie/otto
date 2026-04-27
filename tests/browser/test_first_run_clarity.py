@@ -319,6 +319,17 @@ def _install_run_detail_route(page: Any, run_id: str, payload: dict[str, Any]) -
     page.route(f"**/api/runs/{run_id}*", handler)
 
 
+def _wait_launcher(page: Any) -> None:
+    page.wait_for_selector('[data-testid="launcher-subhead"]', timeout=10_000)
+
+
+def _switch_command(page: Any, command: str) -> None:
+    if command == "build":
+        page.get_by_test_id("job-command-select").click()
+    else:
+        page.get_by_test_id(f"job-command-{command}").click()
+
+
 # --------------------------------------------------------------------------- #
 # CRITICAL #1 — boot-loading gate
 # --------------------------------------------------------------------------- #
@@ -423,13 +434,13 @@ def test_launcher_shows_what_mc_does(mc_backend: Any, page: Any, disable_animati
     # No state stubbing — launcher is rendered before /api/state ever fires.
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    _wait_launcher(page)
     disable_animations(page)
 
     sub = page.get_by_test_id("launcher-subhead")
     sub.wait_for(state="visible", timeout=5_000)
     text = sub.text_content() or ""
-    assert "isolated git worktrees" in text, f"expected explanatory subhead; got {text!r}"
+    assert "isolated git worktree" in text, f"expected explanatory subhead; got {text!r}"
     assert "review logs" in text or "logs" in text, f"subhead should mention reviewing logs; got {text!r}"
 
 
@@ -444,7 +455,7 @@ def test_launcher_empty_state_has_actionable_cta(mc_backend: Any, page: Any, dis
     _install_projects_route(page, _projects_payload(launcher_enabled=True, projects=[]))
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    _wait_launcher(page)
     disable_animations(page)
 
     empty = page.get_by_test_id("launcher-empty-state")
@@ -469,10 +480,10 @@ def test_first_run_cta_says_start_first_build(mc_backend: Any, page: Any, disabl
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
-    cta = page.get_by_test_id("mission-new-job-button")
+    cta = page.get_by_test_id("task-board-empty-queue-job")
     cta.wait_for(state="visible", timeout=5_000)
     text = cta.text_content() or ""
-    assert "Start first build" in text, f"expected 'Start first build' on first-run; got {text!r}"
+    assert "Queue your first job" in text, f"expected first-run queue CTA; got {text!r}"
 
 
 def test_first_run_cta_reverts_after_first_run(mc_backend: Any, page: Any, disable_animations: Any) -> None:
@@ -486,7 +497,7 @@ def test_first_run_cta_reverts_after_first_run(mc_backend: Any, page: Any, disab
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
-    cta = page.get_by_test_id("mission-new-job-button")
+    cta = page.get_by_test_id("new-job-button")
     cta.wait_for(state="visible", timeout=5_000)
     text = (cta.text_content() or "").strip()
     assert text == "New job", f"expected 'New job' once history has runs; got {text!r}"
@@ -513,13 +524,13 @@ def test_command_select_shows_description(mc_backend: Any, page: Any, disable_an
     help_text.wait_for(state="visible", timeout=2_000)
     assert "Build new work" in (help_text.text_content() or "")
 
-    page.get_by_test_id("job-command-select").select_option("improve")
+    _switch_command(page, "improve")
     page.wait_for_function(
         "() => (document.querySelector('[data-testid=job-command-help]')?.textContent || '').includes('Iterate on an existing run')",
         timeout=2_000,
     )
 
-    page.get_by_test_id("job-command-select").select_option("certify")
+    _switch_command(page, "certify")
     page.wait_for_function(
         "() => (document.querySelector('[data-testid=job-command-help]')?.textContent || '').includes('Verify an existing run')",
         timeout=2_000,
@@ -543,7 +554,7 @@ def test_improve_requires_focus(mc_backend: Any, page: Any, disable_animations: 
     disable_animations(page)
 
     page.get_by_test_id("new-job-button").click()
-    page.get_by_test_id("job-command-select").select_option("improve")
+    _switch_command(page, "improve")
 
     submit = page.get_by_test_id("job-dialog-submit-button")
     page.wait_for_function(
@@ -569,7 +580,7 @@ def test_certify_requires_focus(mc_backend: Any, page: Any, disable_animations: 
     disable_animations(page)
 
     page.get_by_test_id("new-job-button").click()
-    page.get_by_test_id("job-command-select").select_option("certify")
+    _switch_command(page, "certify")
 
     page.wait_for_function(
         "() => document.querySelector('[data-testid=job-dialog-submit-button]')?.disabled === true",
@@ -625,10 +636,10 @@ def test_after_queue_cta_says_start_queued_job(mc_backend: Any, page: Any, disab
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
-    cta = page.get_by_test_id("mission-start-watcher-button")
+    cta = page.get_by_test_id("start-watcher-button")
     cta.wait_for(state="visible", timeout=5_000)
-    text = (cta.text_content() or "").strip()
-    assert "Start queued job" in text, f"expected 'Start queued job' once a job is queued; got {text!r}"
+    title = cta.get_attribute("title") or ""
+    assert "Start" in title or "queued" in title.lower(), f"expected actionable watcher start title; got {title!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -647,11 +658,11 @@ def test_empty_detail_shows_descriptive_copy(mc_backend: Any, page: Any, disable
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
-    empty = page.get_by_test_id("run-detail-empty")
+    empty = page.get_by_test_id("task-board-empty")
     empty.wait_for(state="visible", timeout=5_000)
     text = empty.text_content() or ""
-    assert "logs" in text and "code changes" in text and "verification" in text and "next action" in text, (
-        f"empty detail copy missing expected keywords; got {text!r}"
+    assert "No work queued" in text and "build" in text and "certify" in text and "improve" in text, (
+        f"empty task-board copy missing expected keywords; got {text!r}"
     )
 
 
@@ -674,6 +685,7 @@ def test_recovery_action_surfaced_for_failed_run(mc_backend: Any, page: Any, dis
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
+    page.get_by_test_id("task-card-task-failed").click()
     bar = page.get_by_test_id("recovery-action-bar")
     bar.wait_for(state="visible", timeout=5_000)
     retry = page.get_by_test_id("recovery-action-retry")
@@ -701,7 +713,7 @@ def test_project_create_409_shows_recovery_copy(mc_backend: Any, page: Any, disa
     page.route("**/api/projects/create", create_handler)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    _wait_launcher(page)
     disable_animations(page)
 
     page.get_by_test_id("launcher-create-name-input").fill("duplicate")
@@ -728,7 +740,7 @@ def test_launcher_managed_root_help_explains_isolation(mc_backend: Any, page: An
     _install_projects_route(page, _projects_payload(launcher_enabled=True, projects=[]))
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    _wait_launcher(page)
     disable_animations(page)
 
     help_el = page.get_by_test_id("launcher-managed-root-help")

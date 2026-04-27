@@ -256,6 +256,7 @@ export interface LandingItem {
   merge_run_status: string | null;
   duration_s: number | null;
   cost_usd: number | null;
+  token_usage?: TokenUsage;
   stories_passed: number | null;
   stories_tested: number | null;
   changed_file_count: number;

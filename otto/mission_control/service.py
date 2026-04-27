@@ -59,6 +59,7 @@ from otto.queue.enqueue import enqueue_task
 from otto.queue.runtime import IN_FLIGHT_STATUSES, task_display_status, watcher_alive
 from otto.queue.runner import child_is_alive, kill_child_safely, runner_config_from_otto_config
 from otto.queue.schema import load_queue, load_state as load_queue_state
+from otto.token_usage import token_usage_from_mapping as _token_usage_from_mapping
 
 LOGGER = logging.getLogger(__name__)
 REVIEW_IN_PROGRESS_STATUSES = {"queued", "starting", "initializing", "running", "terminating"}
@@ -813,6 +814,7 @@ class MissionControlService:
                 "merge_run_status": merge_info.get("merge_run_status") if merge_info else None,
                 "duration_s": _number_from_mapping(raw_state, "duration_s"),
                 "cost_usd": _number_from_mapping(raw_state, "cost_usd"),
+                "token_usage": _token_usage_from_mapping(raw_state) if isinstance(raw_state, dict) else {},
                 "stories_passed": _number_from_mapping(raw_state, "stories_passed"),
                 "stories_tested": _number_from_mapping(raw_state, "stories_tested"),
             }

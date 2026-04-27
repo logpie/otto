@@ -216,9 +216,9 @@ def _open_dialog(page: Any) -> None:
 
 
 def _switch_to_improve(page: Any) -> None:
-    page.get_by_test_id("job-command-select").select_option("improve")
-    # The improve mode select is the marker that improve is fully rendered.
-    page.wait_for_selector("[data-testid=job-improve-mode-select]", timeout=5_000)
+    page.get_by_test_id("job-command-improve").click()
+    # The improve sub-mode pills are the marker that improve is fully rendered.
+    page.wait_for_selector("[data-testid=job-improve-mode-bugs]", timeout=5_000)
 
 
 # ---------------------------------------------------------------------------

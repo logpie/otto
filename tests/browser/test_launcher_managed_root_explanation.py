@@ -59,7 +59,7 @@ def _install_route(page: Any, payload: dict[str, Any]) -> None:
 
 def _hydrate(page: Any, mc_backend: Any) -> None:
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    page.wait_for_selector('[data-testid="launcher-subhead"]', timeout=10_000)
 
 
 def test_launcher_explains_isolated_worktrees(

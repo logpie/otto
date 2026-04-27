@@ -544,22 +544,22 @@ def test_inert_subtree_blocks_pointer_events(
     _install_routes(page)
     _hydrate(mc_backend, page, disable_animations, run_id=RUN_ID)
 
-    # Open the inspector — `.main-shell-content` and `.sidebar` go inert.
+    # Open the inspector — `.main-shell-content` and `.topbar` go inert.
     page.get_by_test_id("open-logs-button").click(timeout=CLICK_TIMEOUT_MS)
     page.get_by_test_id("run-inspector").wait_for(state="visible", timeout=5_000)
 
     inert_state = page.evaluate(
         """() => ({
-            sidebarInert: document.querySelector('.sidebar')?.hasAttribute('inert') === true,
+            topbarInert: document.querySelector('.topbar')?.hasAttribute('inert') === true,
             mainInert: document.querySelector('.main-shell-content')?.hasAttribute('inert') === true,
-            sidebarPointerEvents: getComputedStyle(document.querySelector('.sidebar')).pointerEvents,
+            topbarPointerEvents: getComputedStyle(document.querySelector('.topbar')).pointerEvents,
             mainPointerEvents: getComputedStyle(document.querySelector('.main-shell-content')).pointerEvents,
         })"""
     )
-    assert inert_state["sidebarInert"], ".sidebar should be inert when inspector is open"
+    assert inert_state["topbarInert"], ".topbar should be inert when inspector is open"
     assert inert_state["mainInert"], ".main-shell-content should be inert when inspector is open"
-    assert inert_state["sidebarPointerEvents"] == "none", (
-        ".sidebar[inert] must compute to pointer-events: none — defense-in-depth "
+    assert inert_state["topbarPointerEvents"] == "none", (
+        ".topbar[inert] must compute to pointer-events: none — defense-in-depth "
         "against script-driven clicks bypassing the inert gate."
     )
     assert inert_state["mainPointerEvents"] == "none", (

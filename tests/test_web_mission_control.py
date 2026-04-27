@@ -161,7 +161,7 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     assert row["provider"] == "codex"
     assert row["model"] == "gpt-5.4"
     assert row["reasoning_effort"] == "medium"
-    assert row["cost_display"] == "1.2K in / 56 out"
+    assert row["cost_display"] == "1.3K tokens"
     assert row["token_usage"]["cached_input_tokens"] == 1000
     assert state["project_stats"]["total_tokens"] == 1290
     assert state["project_stats"]["token_display"] == "1.3K tokens"
@@ -230,7 +230,7 @@ def test_web_state_marks_abandoned_live_runs_stale_not_active(tmp_path: Path) ->
     assert row["display_status"] == "stale"
     assert row["active"] is False
     assert row["elapsed_display"] == "-"
-    assert row["cost_display"] == "1.2K in / 56 out"
+    assert row["cost_display"] == "1.3K tokens"
     assert row["last_event"] == "heartbeat stalled and writer identity is gone"
 
     detail = client.get("/api/runs/stale-web").json()

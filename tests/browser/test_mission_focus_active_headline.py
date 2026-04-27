@@ -198,14 +198,13 @@ def test_mission_focus_headline_includes_task_branch_elapsed_cost_and_event(
 
     _hydrate(mc_backend, page, disable_animations)
 
-    focus = page.locator("[data-testid='mission-focus']")
-    focus.wait_for(state="visible", timeout=5_000)
-    heading = focus.locator("h2").first
-    text = heading.text_content() or ""
+    row = page.get_by_test_id(f"task-card-{item['queue_task_id']}")
+    row.wait_for(state="visible", timeout=5_000)
+    text = row.text_content() or ""
 
     # Must NOT be the bare-count fallback.
     assert "task in flight" not in text and "tasks in flight" not in text, (
-        f"mission focus headline regressed to plain count: {text!r}"
+        f"task row regressed to plain count: {text!r}"
     )
 
     # Must include the task id, branch, elapsed display, cost display, and
@@ -217,7 +216,7 @@ def test_mission_focus_headline_includes_task_branch_elapsed_cost_and_event(
         item["cost_display"],
         item["last_event"],
     ]:
-        assert needle in text, f"expected {needle!r} in headline {text!r}"
+        assert needle in text, f"expected {needle!r} in task row {text!r}"
 
 
 def test_mission_focus_headline_omits_missing_segments(
@@ -231,13 +230,12 @@ def test_mission_focus_headline_omits_missing_segments(
 
     _hydrate(mc_backend, page, disable_animations)
 
-    focus = page.locator("[data-testid='mission-focus']")
-    focus.wait_for(state="visible", timeout=5_000)
-    heading = focus.locator("h2").first
-    text = heading.text_content() or ""
+    row = page.get_by_test_id(f"task-card-{item['queue_task_id']}")
+    row.wait_for(state="visible", timeout=5_000)
+    text = row.text_content() or ""
 
     assert "…" not in text, (
-        f"placeholder cost ('…') leaked into mission focus headline: {text!r}"
+        f"placeholder cost ('…') leaked into task row: {text!r}"
     )
     # task id + branch + elapsed + last event still surface
     assert item["queue_task_id"] in text
@@ -296,11 +294,10 @@ def test_mission_focus_headline_falls_back_to_count_when_no_live_items(
 
     _hydrate(mc_backend, page, disable_animations)
 
-    focus = page.locator("[data-testid='mission-focus']")
-    focus.wait_for(state="visible", timeout=5_000)
-    heading = focus.locator("h2").first
-    text = heading.text_content() or ""
+    row = page.get_by_test_id("task-card-build-feature-x")
+    row.wait_for(state="visible", timeout=5_000)
+    text = row.text_content() or ""
 
     # Either the landing-derived headline OR the bare count fallback is
     # acceptable — the test is that the page renders without crashing.
-    assert text.strip(), f"mission focus headline must not be empty, got {text!r}"
+    assert text.strip(), f"task row must not be empty, got {text!r}"

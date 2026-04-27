@@ -1,19 +1,9 @@
-"""Browser regression for mc-audit microinteractions I5 — drawer animation.
+"""Browser regression for task-list microinteractions.
 
-The TaskCard's More/Less drawer used to expand/collapse instantly with no
-visual cue:
-
-* No height transition — layout snapped open/closed.
-* No chevron — only the label "More"/"Less" changed.
-
-Fix:
-
-* Drawer wraps in a grid container that animates ``grid-template-rows``
-  ``0fr → 1fr`` over ``180ms`` ease-out (≤200ms requirement).
-* Chevron child rotates ``0deg → 90deg`` via ``transform`` transition,
-  driven by the toggle button's ``aria-expanded`` attribute.
-* The global ``prefers-reduced-motion: reduce`` rule shortens every
-  animation/transition to ``0.001ms`` (≤1ms requirement).
+Mission Control now uses a single task list instead of the older card drawer.
+These tests preserve the original intent of the drawer-animation regression:
+state changes should be visually legible, fast, and disabled under reduced
+motion.
 
 Run::
 
@@ -192,114 +182,50 @@ def _hydrate(mc_backend: Any, page: Any) -> None:
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
 
 
-def test_drawer_chevron_rotates_on_toggle(mc_backend: Any, page: Any) -> None:
-    """Click the More toggle: chevron transform rotates from 0deg to 90deg."""
+def test_task_row_marks_selection_on_click(mc_backend: Any, page: Any) -> None:
+    """Clicking a task row gives it a selected treatment."""
 
     _install_routes(page)
     _hydrate(mc_backend, page)
 
-    # Find the first task-card-toggle button.
-    toggle = page.locator(".task-card-toggle").first
-    toggle.wait_for(state="visible", timeout=5_000)
-
-    chevron = page.locator(".task-card-toggle .task-card-toggle-chevron").first
-    chevron.wait_for(state="visible", timeout=2_000)
-
-    # Initial collapsed state: aria-expanded is "false", chevron rotation is identity.
-    initial = page.evaluate(
-        """() => {
-            const btn = document.querySelector('.task-card-toggle');
-            const chev = btn?.querySelector('.task-card-toggle-chevron');
-            return {
-                expanded: btn?.getAttribute('aria-expanded'),
-                transform: chev ? window.getComputedStyle(chev).transform : null,
-            };
-        }"""
-    )
-    assert initial["expanded"] == "false", f"toggle should start collapsed; got {initial!r}"
-    # transform should be 'none' or matrix(1,0,0,1,0,0) (no rotation).
-    assert initial["transform"] in {"none", "matrix(1, 0, 0, 1, 0, 0)"}, (
-        f"chevron should start unrotated; got {initial!r}"
-    )
-
-    toggle.click()
+    row_button = page.get_by_test_id("task-card-task-drawer")
+    row_button.wait_for(state="visible", timeout=5_000)
+    row_button.click()
     page.wait_for_function(
-        "() => document.querySelector('.task-card-toggle')?.getAttribute('aria-expanded') === 'true'",
+        "() => document.querySelector('.queue-list-row-task')?.classList.contains('selected') === true",
         timeout=2_000,
     )
-    # Wait for the chevron CSS transition (≤180ms) to finish before sampling
-    # the computed transform — otherwise we may see an intermediate matrix.
-    page.wait_for_function(
-        """() => {
-            const chev = document.querySelector('.task-card-toggle .task-card-toggle-chevron');
-            if (!chev) return false;
-            const t = window.getComputedStyle(chev).transform;
-            if (t === 'none') return false;
-            const nums = t.startsWith('matrix(') ? t.slice(7, -1).split(',').map(Number) : [];
-            // matrix[0] = cos(angle); we want angle ≈ 90deg → cos ≈ 0.
-            return nums.length >= 2 && Math.abs(nums[0]) < 0.05 && Math.abs(nums[1] - 1) < 0.05;
-        }""",
-        timeout=2_000,
-    )
-    # After the transition completes the chevron should be at 90deg rotation.
-    expanded = page.evaluate(
-        """() => {
-            const btn = document.querySelector('.task-card-toggle');
-            const chev = btn?.querySelector('.task-card-toggle-chevron');
-            return {
-                expanded: btn?.getAttribute('aria-expanded'),
-                transform: chev ? window.getComputedStyle(chev).transform : null,
-            };
-        }"""
-    )
-    assert expanded["expanded"] == "true"
-    # 90deg rotation = matrix(cos90, sin90, -sin90, cos90, 0, 0) ≈ matrix(0, 1, -1, 0, 0, 0)
-    # Browsers may render with floating-point precision (e.g. 6.12e-17). Assert
-    # that the matrix encodes a 90-ish-degree rotation by extracting its
-    # components rather than string-matching.
-    transform = expanded["transform"] or ""
-    assert transform.startswith("matrix("), (
-        f"chevron transform should be a matrix() after expand; got {transform!r}"
-    )
-    # Parse "matrix(a, b, c, d, e, f)" → a should be near 0 (cos 90°),
-    # b should be near 1 (sin 90°). Tolerate floating-point noise.
-    nums = [float(x) for x in transform[len("matrix("):-1].split(",")]
-    assert abs(nums[0]) < 0.1, f"matrix[0]=cos(angle) should be near 0; got {transform!r}"
-    assert abs(nums[1] - 1.0) < 0.1, f"matrix[1]=sin(angle) should be near 1; got {transform!r}"
 
 
-def test_drawer_height_transition_under_200ms(mc_backend: Any, page: Any) -> None:
-    """Drawer wrap has a transition on grid-template-rows of ≤200ms."""
+def test_task_row_background_transition_under_200ms(mc_backend: Any, page: Any) -> None:
+    """Task row hover/selection transition is fast enough for list scanning."""
 
     _install_routes(page)
     _hydrate(mc_backend, page)
 
-    toggle = page.locator(".task-card-toggle").first
-    toggle.wait_for(state="visible", timeout=5_000)
+    row = page.locator(".queue-list-row-task").first
+    row.wait_for(state="visible", timeout=5_000)
 
     info = page.evaluate(
         """() => {
-            const wrap = document.querySelector('.task-card-drawer-wrap');
-            if (!wrap) return null;
-            const style = window.getComputedStyle(wrap);
+            const row = document.querySelector('.queue-list-row-task');
+            if (!row) return null;
+            const style = window.getComputedStyle(row);
             return {
                 transitionProperty: style.transitionProperty,
                 transitionDuration: style.transitionDuration,
-                gridTemplateRows: style.gridTemplateRows,
             };
         }"""
     )
-    assert info is not None, "expected .task-card-drawer-wrap on the page"
-    # transitionProperty should reference grid-template-rows (or 'all').
+    assert info is not None, "expected .queue-list-row-task on the page"
     prop = info["transitionProperty"] or ""
-    assert "grid-template-rows" in prop or prop == "all", (
-        f"drawer wrap should transition grid-template-rows; got {info!r}"
+    assert "background" in prop or prop == "all", (
+        f"task row should transition background; got {info!r}"
     )
-    # transitionDuration parses to seconds; assert ≤0.2s.
     duration = info["transitionDuration"] or "0s"
     seconds = float(duration.split(",")[0].rstrip("s"))
     assert seconds <= 0.20, (
-        f"drawer transition must be ≤200ms; got {duration!r}"
+        f"task row transition must be ≤200ms; got {duration!r}"
     )
 
 
@@ -314,26 +240,21 @@ def test_drawer_transition_disabled_under_reduced_motion(
         _install_routes(page)
         _hydrate(mc_backend, page)
 
-        toggle = page.locator(".task-card-toggle").first
-        toggle.wait_for(state="visible", timeout=5_000)
+        row = page.locator(".queue-list-row-task").first
+        row.wait_for(state="visible", timeout=5_000)
 
         info = page.evaluate(
             """() => {
-                const wrap = document.querySelector('.task-card-drawer-wrap');
-                const chev = document.querySelector('.task-card-toggle .task-card-toggle-chevron');
+                const row = document.querySelector('.queue-list-row-task');
                 return {
-                    wrapDuration: wrap ? window.getComputedStyle(wrap).transitionDuration : null,
-                    chevronDuration: chev ? window.getComputedStyle(chev).transitionDuration : null,
+                    rowDuration: row ? window.getComputedStyle(row).transitionDuration : null,
                 };
             }"""
         )
-        for key in ("wrapDuration", "chevronDuration"):
-            duration = info[key] or "0s"
-            # Take the first transition entry if comma-separated.
-            seconds = float(duration.split(",")[0].rstrip("s"))
-            # ≤1ms = 0.001s, allow a tiny epsilon.
-            assert seconds <= 0.0011, (
-                f"{key} under prefers-reduced-motion must be ≤1ms; got {duration!r}"
-            )
+        duration = info["rowDuration"] or "0s"
+        seconds = float(duration.split(",")[0].rstrip("s"))
+        assert seconds <= 0.0011, (
+            f"row transition under prefers-reduced-motion must be ≤1ms; got {duration!r}"
+        )
     finally:
         context.close()

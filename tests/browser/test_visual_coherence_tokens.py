@@ -23,8 +23,8 @@ on:
   - Hover state on a clickable row produces a defined background or
     filter (not the same as the resting state).
   - Toolbar input height differs from button height by < 2px.
-  - At least 90 % of visible elements use a font-size from the canonical
-    {12,14,16,18,22,28} scale.
+  - At least 90 % of visible elements use a font-size from the redesigned
+    {11,12,13,14,16,18,22,28} scale.
 
 Run::
 
@@ -361,10 +361,10 @@ def test_hover_treatment_consistent(
     board = page.locator("[data-testid='task-board']")
     board.wait_for(state="visible", timeout=5_000)
 
-    card = page.locator(".task-card").first
+    card = page.locator(".queue-list-row-task").first
     card.wait_for(state="visible", timeout=5_000)
 
-    rest_border = card.evaluate("(el) => window.getComputedStyle(el).borderColor")
+    rest_bg = card.evaluate("(el) => window.getComputedStyle(el).backgroundColor")
     # Hover via JS dispatch — Playwright .hover() can flake under
     # disable-animations injection. Use mouse positioning.
     box = card.bounding_box()
@@ -372,12 +372,12 @@ def test_hover_treatment_consistent(
     page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
     page.wait_for_timeout(50)
 
-    hover_border = card.evaluate("(el) => window.getComputedStyle(el).borderColor")
+    hover_bg = card.evaluate("(el) => window.getComputedStyle(el).backgroundColor")
 
-    # On hover the task-card border becomes var(--accent) — must differ
-    # from resting var(--line). If they match, the hover rule didn't fire.
-    assert hover_border != rest_border, (
-        f"task-card hover did not change border-color (rest={rest_border!r}, hover={hover_border!r})"
+    # On hover the queue row background changes — must differ
+    # from the resting background. If they match, the hover rule didn't fire.
+    assert hover_bg != rest_bg, (
+        f"queue row hover did not change background-color (rest={rest_bg!r}, hover={hover_bg!r})"
     )
 
 
@@ -439,7 +439,7 @@ def test_font_sizes_use_canonical_scale(
         }
     """)
 
-    canonical = {12, 14, 16, 18, 22, 28}
+    canonical = {11, 12, 13, 14, 16, 18, 22, 28}
     if not sizes_px:
         pytest.skip("no visible text elements measured")
 

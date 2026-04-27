@@ -5,23 +5,28 @@
      set is a future cluster — at minimum this stops Otto from actively
      rejecting the user's preference. */
   color-scheme: light dark;
-  --bg: #f7f8fa;
+  /* Calmer surfaces — warmer off-whites, softer chrome. The previous palette
+     paired a #f7f8fa workspace against a near-black sidebar, which read as
+     "internal dashboard." This pass moves to slightly warmer whites and
+     reserves the dark navy for one accent only. mc-audit redesign Phase B. */
+  --bg: #fafbfb;
   --surface: #ffffff;
-  --surface-alt: #f4f7fb;
-  --line: #d5dce6;
-  --text: #18202a;
-  /* Darkened muted/amber/magenta tokens to clear AA on every surface tint
-     used in the app (white, --surface-alt, #f8fafc, #eef1f5). mc-audit
-     a11y A11Y-12, A11Y-13, visual-coherence #11. */
-  --muted: #4b5563;
-  --accent: #0f766e;
-  --accent-strong: #115e59;
-  --blue: #1d4ed8;
+  --surface-alt: #f4f6f9;
+  --line: #e3e7ed;
+  --text: #1a2231;
+  --muted: #5a6473;
+  --accent: #0d8b81;
+  --accent-strong: #0a6e66;
+  --accent-soft: #e6f4f2;
+  --blue: #2557d4;
   --green: #15803d;
   --amber: #854d0e;
   --red: #b91c1c;
   --magenta: #86198f;
-  --shadow: 0 10px 30px rgba(24, 32, 42, 0.09);
+  /* Softer shadow: smaller spread and lower alpha so cards feel like paper
+     not modals. */
+  --shadow: 0 1px 2px rgba(20, 28, 41, 0.04), 0 4px 14px rgba(20, 28, 41, 0.06);
+  --shadow-strong: 0 8px 28px rgba(20, 28, 41, 0.10);
   /* Focus-ring color: #1d4ed8 (deep blue) provides ≥3:1 contrast against
      every primary CTA background in the app (--accent #0f766e, --red #b91c1c,
      and white). Outline-offset keeps the ring visible against tinted
@@ -44,6 +49,18 @@
   --text-md: 18px;
   --text-lg: 22px;
   --text-xl: 28px;
+
+  /* Semantic typographic scale — apply these in components rather than
+     raw pixel sizes. mc-audit redesign §3.2.
+     Display: page primary object (one per screen)
+     Section: large region heading (Task Board, Health, etc.)
+     Subsection: card heading
+     Meta: small-caps labels (PROJECT, BRANCH, eyebrow tags) */
+  --font-display: 700 var(--text-xl)/1.2 inherit;
+  --font-section: 700 var(--text-lg)/1.25 inherit;
+  --font-subsection: 600 var(--text-md)/1.3 inherit;
+  --font-meta: 700 var(--text-xs)/1.2 inherit;
+  --eyebrow-letter-spacing: 0.06em;
 
   /* Spacing scale (8px grid). Allow 4px as the half-grid for tight
      pill paddings; everything else snaps to 8/12/16/24/32. */
@@ -95,19 +112,70 @@
   --control-height: 32px;
 }
 
+/* ============================================================================
+   Dark mode — opt-in via OS preference. Same semantic tokens, swapped
+   neutral hues. Accent stays teal for brand consistency. mc-audit redesign
+   Phase F.
+   ============================================================================ */
 @media (prefers-color-scheme: dark) {
-  /*
-   * Minimum dark-mode acknowledgement (mc-audit a11y A11Y-22). The full
-   * Otto color system has not yet been authored for dark mode; the goal
-   * here is simply to make sure the app remains legible if the OS forces
-   * dark UA defaults onto our system-fallback layers (form fields, etc.).
-   * Backgrounds stay light so contrast tokens above remain valid. A
-   * proper dark mode is tracked as a future cluster.
-   */
   :root {
-    /* Keep tokens largely the same but let the body background follow OS;
-       form fields will pick up `color-scheme: light dark`. */
     color-scheme: light dark;
+
+    --bg: #0d1117;
+    --surface: #151b23;
+    --surface-alt: #1c232c;
+    --line: #2a3340;
+    --text: #e8edf2;
+    --muted: #9aa5b1;
+    --accent: #1aa89c;
+    --accent-strong: #15877e;
+    --accent-soft: rgba(26, 168, 156, 0.16);
+    --blue: #60a5fa;
+    --green: #4ade80;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --magenta: #c084fc;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.4);
+    --shadow-strong: 0 8px 28px rgba(0, 0, 0, 0.5);
+
+    --color-success-fg: #4ade80;
+    --color-success-bg: rgba(34, 197, 94, 0.15);
+    --color-success-border: rgba(34, 197, 94, 0.3);
+
+    --color-warning-fg: #fbbf24;
+    --color-warning-bg: rgba(245, 158, 11, 0.15);
+    --color-warning-border: rgba(245, 158, 11, 0.3);
+
+    --color-danger-fg: #f87171;
+    --color-danger-bg: rgba(239, 68, 68, 0.15);
+    --color-danger-border: rgba(239, 68, 68, 0.3);
+
+    --color-info-fg: #60a5fa;
+    --color-info-bg: rgba(74, 130, 232, 0.15);
+    --color-info-border: rgba(74, 130, 232, 0.3);
+
+    --hover-bg: rgba(26, 168, 156, 0.08);
+    --focus-ring: #60a5fa;
+  }
+
+  /* Override remaining hardcoded color references for dark mode. */
+  .managed-root code,
+  .project-row code,
+  .project-row-branch,
+  .launcher-create-hint code,
+  .topbar-project-branch,
+  .job-palette-target code {
+    background: var(--surface-alt);
+    color: var(--text);
+  }
+
+  /* Inspector log/proof panes stay dark — they're already dark in light
+     mode. No override needed. */
+
+  /* Soften focus halo in dark mode (white halo doesn't work). */
+  :focus-visible {
+    box-shadow: 0 0 0 4px rgba(13, 17, 23, 0.85);
   }
 }
 
@@ -203,10 +271,31 @@ body,
 
 body {
   margin: 0;
-  background: linear-gradient(180deg, #fbfcfd 0, var(--bg) 180px);
+  background: var(--bg);
   color: var(--text);
-  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  letter-spacing: 0;
+  /* Inter as the primary face — modern, slightly tighter than system-ui,
+     better numeric tabular nums for stat columns. JetBrains Mono for code.
+     mc-audit redesign Phase D. */
+  font: 14px/1.55 "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-feature-settings: "cv11" on, "ss03" on;
+  letter-spacing: -0.005em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code,
+pre,
+kbd,
+samp,
+.handoff-command code,
+.diff-pane,
+.log-content {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Larger headings get tighter tracking. */
+h1, h2, h3 {
+  letter-spacing: -0.015em;
 }
 
 button,
@@ -221,19 +310,22 @@ select,
 input,
 textarea {
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--surface);
   color: var(--text);
+  transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
 }
 
 button {
-  min-height: 34px;
-  padding: 0 12px;
+  min-height: 36px;
+  padding: 0 14px;
   cursor: pointer;
+  font-weight: 500;
 }
 
 button:hover:not(:disabled) {
   border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 /* Canonical disabled idiom (mc-audit visual-coherence F4). One pattern
@@ -250,6 +342,13 @@ button:hover:not(:disabled) {
 button:disabled {
   cursor: not-allowed;
   opacity: var(--disabled-opacity);
+  /* Disabled buttons render as outlined-ghost rather than gray-fill so they
+     don't read as primary buttons or as decorative chips. mc-audit redesign
+     §6 D10. */
+  background: transparent !important;
+  border: 1px dashed var(--line);
+  color: var(--text-muted);
+  box-shadow: none !important;
 }
 
 /*
@@ -304,10 +403,13 @@ textarea:focus-visible,
   border-color: var(--accent);
   background: var(--accent);
   color: white;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(13, 139, 129, 0.18);
 }
 
 .primary:hover:not(:disabled) {
   background: var(--accent-strong);
+  border-color: var(--accent-strong);
 }
 
 .danger-button {
@@ -322,19 +424,207 @@ textarea:focus-visible,
 
 .app-shell {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   height: 100%;
+  background: var(--bg);
+}
+
+/* ===========================================================================
+   TopBar — replaces the old sidebar. Linear/Vercel-style slim header.
+   mc-audit redesign Phase C.
+   =========================================================================== */
+.topbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  min-height: 56px;
+  position: relative;
+  z-index: 60; /* Above drawer + backdrop so it's always visible. */
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-wordmark {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  color: var(--text);
+  line-height: 1;
+  text-transform: lowercase;
+}
+
+.topbar-brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+}
+
+.topbar-brand-text strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.topbar-brand-text span {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.topbar-context {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  min-height: 32px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.topbar-project:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.topbar-project-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.topbar-project-branch {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.topbar-project-dirty {
+  color: var(--amber);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.topbar-project-chevron {
+  color: var(--muted);
+  font-size: 10px;
+  margin-left: 2px;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.topbar-watcher,
+.topbar-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  min-height: 30px;
+  cursor: pointer;
+}
+
+.topbar-status {
+  cursor: default;
+}
+
+.topbar-watcher em {
+  color: var(--muted);
+  font-style: normal;
+  font-size: 11px;
+}
+
+.topbar-watcher.pill-tone-success,
+.topbar-status.pill-tone-success {
+  background: var(--color-success-bg);
+  border-color: var(--color-success-border);
+  color: var(--color-success-fg);
+}
+
+.topbar-watcher.pill-tone-warning,
+.topbar-status.pill-tone-warning {
+  background: var(--color-warning-bg);
+  border-color: var(--color-warning-border);
+  color: var(--color-warning-fg);
+}
+
+.watcher-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.watcher-dot.tone-success {
+  background: var(--color-success-fg);
+  box-shadow: 0 0 0 3px rgba(21, 128, 61, 0.15);
+}
+
+.watcher-dot.tone-warning {
+  background: var(--color-warning-fg);
+}
+
+.topbar-new-job {
+  min-height: 32px;
+  padding: 0 14px;
+  font-size: 13px;
 }
 
 .sidebar {
+  /* Light sidebar — mc-audit redesign Phase B. The previous deep-navy
+     sidebar against a near-white workspace was the strongest "internal
+     dashboard" cue; this pass moves to a soft warm surface with a single
+     accent line, so the app reads as one continuous canvas instead of two
+     stitched panels. */
   border-right: 1px solid var(--line);
-  background: #111827;
-  color: white;
-  padding: 18px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 22px 20px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 18px;
+}
+
+.sidebar dt,
+.sidebar .project-meta dt {
+  color: var(--muted);
+}
+
+.sidebar .project-meta dd {
+  color: var(--text);
+}
+
+.sidebar .sidebar-hint {
+  color: var(--muted);
 }
 
 .brand {
@@ -346,11 +636,13 @@ textarea:focus-visible,
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
-  border-radius: 6px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   background: var(--accent);
+  color: white;
   font-weight: 700;
+  font-size: 16px;
 }
 
 .brand h1,
@@ -363,7 +655,7 @@ textarea:focus-visible,
 }
 
 .brand p {
-  color: #cbd5e1;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -374,24 +666,27 @@ textarea:focus-visible,
 }
 
 .project-meta div {
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  border-top: 1px solid var(--line);
   padding-top: 10px;
 }
 
 .project-meta dt {
-  color: #cbd5e1;
-  font-size: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .project-meta dd {
   margin: 2px 0 0;
   word-break: break-word;
+  color: var(--text);
 }
 
 .sidebar-hint {
   margin: -4px 0 0;
-  color: #cbd5e1;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -404,77 +699,166 @@ textarea:focus-visible,
   overflow: hidden;
 }
 
+/* ============================================================================
+   Launcher / onboarding page — sidebar dropped, centered hero + sections.
+   mc-audit redesign Phase D.
+   ============================================================================ */
 .launcher-shell {
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  background: var(--bg);
 }
 
-.launcher-workspace {
-  display: block;
-  padding: 18px;
+.launcher-shell-main {
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 56px 24px;
+  overflow: auto;
 }
 
-.project-launcher {
-  display: grid;
-  gap: 14px;
-  max-width: 1180px;
-  margin: 0 auto;
+.launcher-page {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
 }
 
-.launcher-head {
+.launcher-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+  position: relative;
+  padding: 12px 0 4px;
+}
+
+.launcher-hero-title {
+  margin: 0;
+  font-size: 36px;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  color: var(--text);
+  text-transform: lowercase;
+  line-height: 1;
+}
+
+.launcher-hero-tagline {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  max-width: 420px;
+}
+
+.launcher-hero-refresh {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.launcher-hero-refresh:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.launcher-section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.launcher-section-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  box-shadow: var(--shadow);
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
 }
 
-.launcher-head > div:first-child > span {
-  color: var(--accent-strong);
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.launcher-head h2,
-.launcher-head p,
-.launcher-panel h3,
-.launcher-panel p {
+.launcher-section-head h2 {
   margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-.launcher-head h2 {
-  font-size: 22px;
-}
-
-.launcher-head p,
-.launcher-panel p,
-.launcher-status,
-.launcher-empty {
+.launcher-section-head .muted {
   color: var(--muted);
+  font-size: 12px;
 }
 
-.launcher-actions {
+/* Onboarding explainer card on the launcher. mc-audit redesign §7 W7.1. */
+.launcher-explainer {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  background: var(--surface-alt);
+  color: var(--muted);
+  border-radius: 10px;
+  font-size: 13px;
 }
 
-.launcher-grid {
-  display: grid;
-  grid-template-columns: minmax(320px, 1fr) minmax(260px, 0.8fr);
-  gap: 14px;
+.launcher-explainer-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.launcher-explainer-body strong {
+  display: inline;
+  margin-right: 4px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.launcher-explainer-body p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.launcher-explainer-dismiss {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  min-height: auto;
+}
+
+.launcher-explainer-dismiss:hover {
+  color: var(--text);
+  background: transparent;
 }
 
 .launcher-panel {
   display: grid;
-  gap: 12px;
-  padding: 16px;
+  gap: 14px;
+  padding: 22px 24px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--surface);
   box-shadow: var(--shadow);
 }
@@ -501,34 +885,146 @@ textarea:focus-visible,
 }
 
 .project-list {
-  display: grid;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
 }
 
 .project-row {
   height: auto;
-  min-height: 68px;
+  min-height: 64px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 36px minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 12px;
-  padding: 10px;
+  gap: 14px;
+  padding: 12px 18px;
   text-align: left;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  cursor: pointer;
+  width: 100%;
+  transition: background 0.12s ease;
 }
 
-.project-row > span:first-child {
-  min-width: 0;
+.project-row:first-child {
+  border-top: 0;
+}
+
+.project-row:hover:not(:disabled) {
+  background: var(--surface-alt);
+  border-color: var(--line);
+}
+
+.project-row-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
   display: grid;
-  gap: 4px;
+  place-items: center;
+  font-size: 14px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.project-row-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.project-row-main strong {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-row-meta {
   display: flex;
+  align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
-  justify-content: end;
   color: var(--muted);
   font-size: 12px;
+}
+
+.project-row-branch {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-alt);
+  color: var(--muted);
+}
+
+.project-row-dirty {
+  color: var(--amber);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.project-row-arrow {
+  color: var(--muted);
+  font-size: 16px;
+  opacity: 0;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.project-row:hover:not(:disabled) .project-row-arrow {
+  opacity: 0.6;
+  transform: translateX(2px);
+}
+
+/* Create-project section. Slim when projects exist, hero when empty. */
+.launcher-create-form {
+  display: flex;
+  gap: 8px;
+  padding: 14px 18px 4px;
+}
+
+.launcher-create-form input {
+  flex: 1 1 auto;
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 14px;
+}
+
+.launcher-create-form button.primary {
+  flex-shrink: 0;
+}
+
+.launcher-create-hint {
+  margin: 0;
+  padding: 4px 18px 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.launcher-create-hint code {
+  font-size: 11px;
+  padding: 1px 5px;
+  background: var(--surface-alt);
+  border-radius: 4px;
+  color: var(--text);
+}
+
+.launcher-create-hero .launcher-create-form {
+  padding: 18px;
+}
+
+.launcher-create .launcher-status {
+  margin: 0;
+  padding: 0 18px 8px;
+  font-size: 12px;
+}
+
+.launcher-status-error {
+  color: var(--red);
 }
 
 .project-row-meta span {
@@ -550,7 +1046,7 @@ textarea:focus-visible,
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 18px;
+  padding: 14px 22px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
 }
@@ -647,16 +1143,38 @@ textarea {
   height: 100%;
   min-height: 0;
   display: block;
-  padding: 14px;
+  padding: 24px 32px;
   overflow: auto;
+  max-width: 1280px;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+  /* Smooth transition when drawer/inspector slides in/out. */
+  transition: padding-right 0.18s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* When the drawer is open, give the workspace right padding so task rows
+   are not clipped by the drawer overlay. mc-audit redesign Phase F.
+   Drawer width: 560px (capped at 100vw - 80px on small screens).
+   Inspector width: 960px (capped). At <1100px, drawer becomes full-width
+   so we don't shift here. */
+@media (min-width: 1100px) {
+  [data-drawer-open="true"] .mission-layout {
+    padding-right: calc(560px + 32px);
+    max-width: none;
+  }
+  [data-inspector-open="true"] .mission-layout {
+    padding-right: calc(min(960px, 100vw - 80px) + 16px);
+    max-width: none;
+  }
 }
 
 .main-stack {
   min-width: 0;
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto auto;
-  gap: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .mission-focus {
@@ -664,9 +1182,9 @@ textarea {
   grid-template-columns: minmax(0, 1.4fr) auto minmax(220px, 0.75fr);
   gap: 12px;
   align-items: center;
-  padding: 14px;
+  padding: 16px 22px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--surface);
   box-shadow: var(--shadow);
 }
@@ -719,19 +1237,23 @@ textarea {
 }
 
 .focus-copy span {
-  color: var(--accent-strong);
-  font-size: 12px;
-  font-weight: 700;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .focus-copy h2 {
-  font-size: 22px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .focus-copy p {
   margin: 0;
   color: var(--muted);
+  font-size: 13px;
 }
 
 .focus-actions {
@@ -900,11 +1422,11 @@ textarea {
   min-width: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  gap: 10px;
-  padding: 10px;
+  gap: 12px;
+  padding: 14px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #f8fafc;
+  border-radius: 12px;
+  background: var(--surface-alt);
 }
 
 .task-column header {
@@ -912,10 +1434,11 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .task-column header strong {
@@ -937,19 +1460,25 @@ textarea {
 
 .task-card {
   display: grid;
-  gap: 8px;
-  padding: 10px;
+  gap: 10px;
+  padding: 14px 16px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--surface);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
-.task-card.selected,
 .task-card:hover,
 .task-card:has(.task-card-main:hover),
 .task-card:has(.task-card-toggle:hover),
 .task-card:has(.task-card-cancel:hover) {
+  border-color: rgba(13, 139, 129, 0.4);
+  box-shadow: 0 1px 2px rgba(20, 28, 41, 0.06);
+}
+
+.task-card.selected {
   border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .task-ready {
@@ -1175,7 +1704,7 @@ textarea {
 
 /* mc-audit info-density #2: typed chips so the meta row is not a wall of
    identical unlabeled pills. Each chip kind has a distinct hue so files
-   (blue), stories (green), cost (amber), and time (neutral) scan apart at
+   (blue), stories (green), usage (amber), and time (neutral) scan apart at
    a glance. The icon glyph keeps the chip identifiable when colour is not
    conveyed (colour-blind users / monochrome rendering). */
 .task-card-meta .task-chip {
@@ -1195,6 +1724,7 @@ textarea {
   color: #0f766e;
 }
 
+.task-card-meta .task-chip-usage,
 .task-card-meta .task-chip-cost {
   background: rgba(202, 138, 4, 0.10);
   color: #92400e;
@@ -1826,7 +2356,7 @@ button.diagnostic-card {
 .detail {
   min-height: 0;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--surface);
   box-shadow: var(--shadow);
 }
@@ -1852,7 +2382,7 @@ button.diagnostic-card {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 14px 18px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -1870,13 +2400,16 @@ button.diagnostic-card {
 
 h2 {
   margin: 0;
-  font-size: 14px;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
 }
 
 .panel-subtitle {
-  margin: 3px 0 0;
+  margin: 4px 0 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .pill {
@@ -1886,6 +2419,32 @@ h2 {
   background: var(--surface-alt);
   color: var(--muted);
   text-align: center;
+}
+
+/* Tone variants for the Pill primitive. mc-audit redesign §3 W3.2. */
+.pill-tone-success {
+  background: var(--color-success-bg);
+  color: var(--color-success-fg);
+}
+
+.pill-tone-info {
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
+}
+
+.pill-tone-warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+}
+
+.pill-tone-danger {
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+}
+
+.pill-tone-neutral {
+  background: var(--surface-alt);
+  color: var(--muted);
 }
 
 .review-next-step span,
@@ -2178,23 +2737,526 @@ tbody tr.selected {
 }
 
 .phase-done .phase-status {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--color-success-bg);
+  color: var(--color-success-fg);
 }
 
 .phase-active .phase-status {
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
 }
 
 .phase-skipped .phase-status,
 .phase-pending .phase-status {
-  background: #f1f5f9;
+  background: var(--surface-alt);
   color: var(--muted);
 }
 
 .empty {
   color: var(--muted);
+}
+
+/* ============================================================================
+   Queue list — single-table replacement for the kanban TaskBoard.
+   mc-audit redesign Phase C. Linear-style table with one row per task.
+   ============================================================================ */
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.queue-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.queue-list-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.queue-list-head p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.queue-list-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.queue-list-empty {
+  padding: 28px 22px;
+  color: var(--muted);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.queue-list-empty-hero {
+  width: 100%;
+  text-align: center;
+  padding: 32px 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.queue-list-empty-hero strong {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.queue-list-empty-hero p {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.queue-list-empty-action {
+  background: transparent;
+  border: 1px solid var(--line);
+}
+
+.queue-list-table {
+  display: flex;
+  flex-direction: column;
+}
+
+.queue-list-row {
+  display: grid;
+  grid-template-columns: 140px minmax(220px, 1fr) 80px 80px 80px 100px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+
+.queue-list-row:last-child {
+  border-bottom: 0;
+}
+
+.queue-list-row-head {
+  padding: 10px 22px;
+  background: var(--surface-alt);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.queue-list-row-head > span {
+  text-align: left;
+}
+
+.queue-list-row-head > span:nth-child(3),
+.queue-list-row-head > span:nth-child(4),
+.queue-list-row-head > span:nth-child(5) {
+  text-align: right;
+}
+
+.queue-list-row-task {
+  position: relative;
+  transition: background 0.12s ease;
+}
+
+.queue-list-row-task:hover {
+  background: var(--surface-alt);
+}
+
+.queue-list-row-task.selected {
+  background: var(--accent-soft);
+}
+
+.queue-list-row-task.selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent);
+}
+
+.queue-list-row-main {
+  display: grid;
+  grid-column: 1 / 6;
+  grid-template-columns: subgrid;
+  align-items: center;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.queue-list-row-main:hover {
+  background: transparent;
+  border: 0;
+}
+
+.queue-list-cell {
+  padding: 14px 22px;
+}
+
+.queue-list-cell-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.queue-list-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+
+.queue-list-status-dot.tone-success {
+  background: var(--color-success-fg);
+}
+
+.queue-list-status-dot.tone-running {
+  background: var(--color-info-fg);
+  box-shadow: 0 0 0 3px rgba(37, 87, 212, 0.15);
+}
+
+.queue-list-status-dot.tone-warning {
+  background: var(--color-warning-fg);
+}
+
+.queue-list-status-dot.tone-danger {
+  background: var(--color-danger-fg);
+}
+
+.queue-list-cell-task {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.queue-list-cell-task strong {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-list-cell-task em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-row-meta {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-list-cell-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.queue-list-cell-actions {
+  text-align: right;
+  padding-right: 22px;
+}
+
+.queue-list-row-cancel {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  min-height: 26px;
+}
+
+.queue-list-row-cancel:hover {
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--color-danger-bg);
+}
+
+.page-banners {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+/* ============================================================================
+   Help overlay — keyboard shortcuts cheat sheet. mc-audit redesign Phase F.
+   ============================================================================ */
+.help-overlay {
+  width: min(440px, calc(100vw - 28px));
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 24px 48px rgba(20, 28, 41, 0.18);
+  overflow: hidden;
+}
+
+.help-overlay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.help-overlay-head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.help-overlay-head button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  padding: 4px 8px;
+  cursor: pointer;
+  min-height: 28px;
+  border-radius: 6px;
+}
+
+.help-overlay-head button:hover {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.help-overlay-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+}
+
+.help-overlay-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 18px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.help-overlay-list li:hover {
+  background: var(--surface-alt);
+}
+
+.help-overlay-keys {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.help-overlay kbd {
+  display: inline-block;
+  min-width: 22px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ============================================================================
+   Run drawer — replaces the inline right-rail Review Packet. Slides in from
+   the right when a task is selected. mc-audit redesign Phase C.
+   ============================================================================ */
+.run-drawer-backdrop {
+  /* Above 1100px the drawer pushes content via padding-right, so the
+     queue is fully readable and a backdrop is unnecessary noise. Below
+     1100 we keep a subtle dim since the drawer overlays content. */
+  position: fixed;
+  inset: 0;
+  background: transparent;
+  z-index: 40;
+}
+
+@media (max-width: 1100px) {
+  .run-drawer-backdrop {
+    background: rgba(20, 28, 41, 0.12);
+    animation: drawer-fade-in 0.16s ease-out;
+  }
+}
+
+@keyframes drawer-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes drawer-slide-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+.detail.run-drawer {
+  position: fixed;
+  /* Sit below the topbar (~56px) instead of overlapping it. */
+  top: 57px;
+  right: 0;
+  bottom: 0;
+  width: min(560px, calc(100vw - 80px));
+  z-index: 50;
+  border-radius: 0;
+  border: 0;
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 32px rgba(20, 28, 41, 0.12);
+  animation: drawer-slide-in 0.18s cubic-bezier(0.32, 0.72, 0, 1);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.run-drawer-backdrop {
+  /* Don't cover the topbar — start below it so the user can still navigate. */
+  top: 57px;
+}
+
+.run-drawer-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.run-drawer-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.run-drawer-close {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.run-drawer-close:hover {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .run-drawer-backdrop,
+  .detail.run-drawer {
+    animation: none;
+  }
+}
+
+/* Tasks-supplementary expander — Project Overview + Recent Activity behind
+   a single details disclosure. Default closed so the Tasks view stays
+   focused on the kanban + Run Detail. mc-audit redesign Phase B. */
+.tasks-supplementary {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.tasks-supplementary > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 14px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tasks-supplementary > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tasks-supplementary > summary::after {
+  content: "▾";
+  font-size: 11px;
+  opacity: 0.6;
+  transition: transform 0.12s ease;
+}
+
+.tasks-supplementary[open] > summary::after {
+  transform: rotate(180deg);
+}
+
+.tasks-supplementary > summary:hover {
+  color: var(--text);
+  background: var(--surface-alt);
+}
+
+.tasks-supplementary-body {
+  display: grid;
+  gap: 12px;
+  padding: 6px 14px 14px;
+  border-top: 1px solid var(--line);
+}
+
+/* Single eyebrow utility — small-caps label intended for things like
+   "PROJECT FOLDER" / "LANDED IN MAIN" / "PROJECT / BRANCH / STATE". Use this
+   on new code; existing eyebrows still set their own sizes. mc-audit
+   redesign §3a/T8. */
+.eyebrow {
+  font: var(--font-meta);
+  text-transform: uppercase;
+  letter-spacing: var(--eyebrow-letter-spacing);
+  color: var(--muted);
+}
+
+/* Tooltip-trigger help glyph next to a label. mc-audit redesign §7 W7.3. */
+.meta-help {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-left: 2px;
 }
 
 .advanced-actions {
@@ -2570,21 +3632,31 @@ tbody tr.selected {
 }
 
 .run-inspector {
+  /* mc-audit redesign Phase D: inspector now lives at the right side, sized
+     wider than the drawer so logs/diffs have horizontal room. The queue
+     remains partially visible on the left so the user keeps task context
+     while reading inspector content. */
   position: fixed;
-  left: 254px;
-  right: 18px;
-  top: 96px;
-  bottom: 18px;
-  z-index: 30;
+  right: 0;
+  top: 57px;
+  bottom: 0;
+  width: min(960px, calc(100vw - 80px));
+  z-index: 55;
   min-height: 0;
   height: auto;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
   background: var(--surface);
-  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+  box-shadow: -8px 0 32px rgba(20, 28, 41, 0.16);
+  animation: drawer-slide-in 0.18s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .run-inspector { animation: none; }
 }
 
 .run-inspector-heading {
@@ -2592,9 +3664,9 @@ tbody tr.selected {
   grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: center;
-  padding: 12px 14px;
+  padding: 12px 18px;
   border-bottom: 1px solid var(--line);
-  background: #fbfcfd;
+  background: var(--surface);
   /* Defensive stacking: keep the heading (and its tablist) above the
      body's <pre> log/diff content. A stacking context change in
      `.run-inspector-body` (or any descendant) cannot push the body's
@@ -3101,6 +4173,29 @@ tbody tr.selected {
   color: #94a3b8;
 }
 
+.log-toolbar-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.log-toolbar-jump {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #cbd5e1;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.log-toolbar-jump:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .artifact-pane {
   min-height: 0;
   margin: 0;
@@ -3399,22 +4494,23 @@ tbody tr.selected {
 }
 
 #toast {
+  /* Top-right: avoids overlapping the Review Packet bottom action row that
+     lives at the bottom-right of the workspace. mc-audit redesign §6 D5. */
   position: fixed;
   right: 18px;
-  bottom: 18px;
+  top: 18px;
   max-width: min(420px, calc(100vw - 36px));
   padding: 10px 12px;
   border-radius: 8px;
   background: #111827;
   color: white;
   opacity: 0;
-  transform: translateY(8px);
+  transform: translateY(-8px);
   transition: opacity 0.16s ease, transform 0.16s ease;
-  /* mc-audit microinteractions I8: layout the message + close-button so the
-     ✕ stays at the right edge regardless of message length. */
   display: flex;
   align-items: flex-start;
   gap: 8px;
+  z-index: 100;
 }
 
 #toast.visible {
@@ -3456,10 +4552,227 @@ tbody tr.selected {
   position: fixed;
   inset: 0;
   display: grid;
-  place-items: center;
-  padding: 14px;
-  background: rgba(17, 24, 39, 0.45);
+  place-items: start center;
+  padding-top: 16vh;
+  padding-left: 14px;
+  padding-right: 14px;
+  background: rgba(20, 28, 41, 0.45);
+  backdrop-filter: blur(2px);
   z-index: 70;
+}
+
+/* ============================================================================
+   New Job — command-palette style. mc-audit redesign Phase D.
+   Replaces the old vertical-stack form with a centered overlay where the
+   intent textarea is the dominant element. Linear/Raycast-ish.
+   ============================================================================ */
+.job-palette {
+  width: min(640px, calc(100vw - 28px));
+  max-height: calc(100vh - 32vh);
+  max-height: calc(100dvh - 32vh);
+  padding: 0;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: 0 24px 48px rgba(20, 28, 41, 0.18);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.job-palette-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 0;
+}
+
+.job-palette-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.job-palette-close {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  min-height: 28px;
+}
+
+.job-palette-close:hover {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.job-palette-intent {
+  display: block;
+  padding: 4px 16px 0;
+}
+
+.job-palette-intent textarea {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  padding: 8px 0;
+  font-size: 18px;
+  line-height: 1.4;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  font-family: inherit;
+}
+
+.job-palette-intent textarea::placeholder {
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+.job-palette-commands {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.job-palette-pill {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  min-height: 26px;
+  transition: all 0.12s ease;
+}
+
+.job-palette-pill:hover:not(.active) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: transparent;
+}
+
+.job-palette-pill.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.job-palette-submodes {
+  display: inline-flex;
+  gap: 6px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
+.job-palette-pill-sub.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.job-palette-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.job-palette-target code {
+  font-size: 11px;
+  padding: 2px 6px;
+  background: var(--surface-alt);
+  color: var(--text);
+  border-radius: 4px;
+}
+
+.job-palette-target em {
+  color: var(--amber);
+  font-style: normal;
+  font-weight: 500;
+}
+
+.job-palette-target-summary {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: right;
+  flex: 1 1 280px;
+}
+
+.job-palette-summary-edit {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--accent-strong);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.job-palette-prior {
+  padding: 0 16px;
+}
+
+.job-palette-prior select {
+  width: 100%;
+}
+
+.job-palette-dirty {
+  padding: 0 16px;
+}
+
+.job-palette .job-advanced {
+  border-top: 1px solid var(--line);
+  margin: 0;
+  padding: 0 16px;
+}
+
+.job-palette .job-advanced summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.job-palette .job-advanced summary::after {
+  content: " ▾";
+  font-size: 10px;
+}
+
+.job-palette .job-advanced[open] summary::after {
+  content: " ▴";
+}
+
+.job-palette footer {
+  margin: 0;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-alt);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  position: sticky;
+  bottom: 0;
 }
 
 .job-dialog,
@@ -3552,6 +4865,11 @@ tbody tr.selected {
   font-size: 12px;
   font-weight: 500;
   line-height: 1.35;
+}
+
+.field-hint.field-warning {
+  color: #9a3412;
+  font-weight: 650;
 }
 
 .static-field {
@@ -3711,7 +5029,12 @@ html, body {
   overflow-x: hidden;
 }
 
-@media (max-width: 1024px) {
+/* mc-audit redesign §5 W6.1: previous breakpoint 1024px was too aggressive
+   (caught 13" laptops and iPad-landscape, where the stacked sidebar pushed
+   content ~700px below the fold). 900px is the new collapse point. The
+   sub-980 cascade below picks up the rest of the kanban/diagnostics
+   adaptations. */
+@media (max-width: 900px) {
   .app-shell {
     grid-template-columns: 1fr;
     min-height: 100vh;
@@ -3803,10 +5126,176 @@ html, body {
   }
 }
 
+/* ============================================================================
+   Mobile (≤640px) — phone layout. Top bar simplifies, queue table stacks.
+   mc-audit redesign Phase D.
+   ============================================================================ */
 @media (max-width: 640px) {
+  /* Topbar: drop the wordmark + status pills on phones; keep brand mark,
+     project picker, and primary CTA only. */
+  .topbar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 10px;
+    padding: 10px 14px;
+    min-height: 52px;
+  }
+
+  .brand-wordmark { display: none; }
+
+  .topbar-status,
+  .topbar-watcher {
+    display: none;
+  }
+
+  .topbar-project {
+    padding: 5px 10px;
+    font-size: 12px;
+  }
+
+  .topbar-project-branch { display: none; }
+
+  .topbar-new-job {
+    padding: 0 12px;
+    font-size: 12px;
+    min-height: 44px;
+  }
+
+  /* Mission layout — drop the max-width and trim padding on phones. */
+  .mission-layout {
+    padding: 12px;
+    max-width: none;
+  }
+
+  /* Toolbar fields stack vertically on phone. */
+  .toolbar {
+    padding: 10px 12px;
+    gap: 8px;
+    align-items: stretch;
+  }
+
+  /* Queue table: drop secondary columns (Files / Time) so the title isn't
+     truncated to nothing. Keep Status / Task / Stories. */
+  .queue-list-row {
+    grid-template-columns: 90px minmax(0, 1fr) 56px;
+    padding: 0;
+  }
+
+  .queue-list-row-head {
+    padding: 8px 14px;
+  }
+
+  .queue-list-row-head > span:nth-child(4),
+  .queue-list-row-head > span:nth-child(5),
+  .queue-list-row-head > span:nth-child(6) {
+    display: none;
+  }
+
+  .queue-list-cell {
+    padding: 12px 14px;
+  }
+
+  /* Hide Files and Time num cells on phones — keep Status / Task / Stories
+     only. The cells are children of the contents-button so we use sibling
+     selectors. Stories is the 1st num cell; subsequent ones get hidden. */
+  .queue-list-cell-num ~ .queue-list-cell-num {
+    display: none;
+  }
+
+  .queue-list-cell-actions {
+    display: none;
+  }
+
+  .queue-list-head {
+    padding: 14px;
+  }
+
+  .queue-list-head h2 { font-size: 15px; }
+  .queue-list-head p { font-size: 12px; }
+
+  /* Run drawer: full-width on phones. */
+  .detail.run-drawer {
+    width: 100vw;
+    top: 53px;
+  }
+
+  .run-drawer-backdrop { display: none; }
+
+  /* Inspector also full-width on phones. */
+  .run-inspector {
+    width: 100vw;
+    top: 53px;
+  }
+
+  /* Launcher: tighter spacing on phones. */
+  .launcher-shell-main {
+    padding: 32px 16px;
+  }
+
+  .launcher-page {
+    gap: 20px;
+  }
+
+  .launcher-hero-title { font-size: 28px; }
+
+  .launcher-hero-tagline { font-size: 14px; }
+
+  .launcher-hero-refresh {
+    width: 28px;
+    height: 28px;
+    min-height: 28px;
+    font-size: 14px;
+  }
+
+  /* Create form goes vertical on phone. */
+  .launcher-create-form {
+    flex-direction: column;
+  }
+
+  .launcher-create-form button.primary {
+    width: 100%;
+  }
+
+  /* New Job palette goes near full-width on phone. */
+  .modal-backdrop {
+    padding-top: 5vh;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .job-palette {
+    width: 100%;
+    max-height: 90vh;
+    max-height: 90dvh;
+  }
+
+  .job-palette-intent textarea { font-size: 16px; }
+
+  /* Old sidebar fallback rules below — irrelevant in topbar layout but
+     keeping for any leftover legacy markup. */
   .sidebar {
     gap: 10px;
     padding: 14px 18px;
+  }
+
+  /* mc-audit redesign §5 W6.3: on phone widths, the sidebar's stack of
+     four full-width buttons (Switch project / New job / Start watcher /
+     Stop watcher) eats the entire viewport before any content. Compress
+     secondary actions into a 2-up grid and demote the helper text. */
+  .sidebar .sidebar-actions {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+  }
+
+  .sidebar .sidebar-actions .primary,
+  .sidebar .sidebar-actions [data-testid="mission-new-job-button"] {
+    grid-column: 1 / -1;
+  }
+
+  .sidebar .watcher-helper-text,
+  .sidebar [data-testid="watcher-helper-text"] {
+    font-size: 11px;
+    color: var(--text-muted);
   }
 
   .project-meta {
@@ -4140,7 +5629,7 @@ html, body {
 
 /*
  * Job dialog pre-submit summary — surfaces provider/model/effort/verification
- * outside the Advanced disclosure so cost-affecting defaults are not
+ * outside the Advanced disclosure so spend-affecting defaults are not
  * hidden. mc-audit codex-first-time-user.md #2.
  */
 .job-summary {
@@ -4306,6 +5795,7 @@ html, body {
  * that are visually buried under a fixed-position overlay.
  */
 .main-shell-content[inert],
+.topbar[inert],
 .sidebar[inert],
 [data-mc-inspector][inert] {
   filter: saturate(0.8);
