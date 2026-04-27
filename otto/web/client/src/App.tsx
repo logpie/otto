@@ -1985,7 +1985,7 @@ export function App() {
 
   if (projectsState?.launcher_enabled && !data) {
     return (
-      <div className="app-shell launcher-shell">
+      <div className="app-shell launcher-shell" data-mc-shell="ready">
         <main className="launcher-shell-main">
           <ProjectLauncher
             projectsState={projectsState}
@@ -5379,7 +5379,13 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
       >
         <div className="job-palette-head">
           <h2 id="jobDialogHeading">{command === "improve" ? "Improve" : command === "certify" ? "Certify" : "New job"}</h2>
-          <button type="button" className="job-palette-close" aria-label="Close" onClick={onClose}>×</button>
+          <button
+            type="button"
+            className="job-palette-close"
+            data-testid="job-dialog-close-button"
+            aria-label="Close"
+            onClick={onClose}
+          >×</button>
         </div>
         {/* Intent textarea is THE primary field — front and center, autofocused. */}
         <label className="job-palette-intent" aria-label={intentLabelMap[command]}>
@@ -5444,7 +5450,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
           )}
         </div>
         {/* Compact target line — shown subtly. Dirty confirm flow stays. */}
-        <div className={`job-palette-target ${project?.dirty ? "is-dirty" : ""}`} data-testid="job-target-summary">
+        <div className={`job-palette-target ${project?.dirty ? "is-dirty" : ""}`} data-testid="job-dialog-summary">
           <span>Target</span>
           <code title={project?.path || ""}>{project?.name || project?.path || "loading"}</code>
           <span>on</span>

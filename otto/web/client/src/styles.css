@@ -5136,6 +5136,7 @@ html, body {
   .topbar-new-job {
     padding: 0 12px;
     font-size: 12px;
+    min-height: 44px;
   }
 
   /* Mission layout — drop the max-width and trim padding on phones. */

@@ -7,6 +7,7 @@ import {
   taskBoardColumns,
   taskBoardSubtitle,
   testIdForTask,
+  toneIcon,
 } from "../../App";
 import type {BoardTask, Filters} from "../../App";
 import {shortText} from "../../utils/format";
@@ -177,8 +178,10 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
         onClick={onClick}
       >
         <span className="queue-list-cell queue-list-cell-status" role="cell">
-          <span className={`queue-list-status-dot tone-${tone}`} aria-hidden="true" />
-          {stageLabel}
+          <span className={`queue-list-status-badge task-status status-tone-${tone}`}>
+            <span className="status-icon" aria-hidden="true">{toneIcon(tone)}</span>
+            {stageLabel}
+          </span>
         </span>
         <span className="queue-list-cell queue-list-cell-task" role="cell">
           <strong title={task.title}>{task.title}</strong>

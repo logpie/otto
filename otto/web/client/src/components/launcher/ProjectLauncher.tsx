@@ -127,8 +127,8 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
       <header className="launcher-hero">
         <BrandMark size={48} />
         <h1 id="projectLauncherHeading" className="launcher-hero-title">otto</h1>
-        <p className="launcher-hero-tagline">
-          Describe a feature. Otto builds, verifies, and lands it.
+        <p className="launcher-hero-tagline" data-testid="launcher-subhead">
+          Describe a feature. Otto builds, verifies, and lands it in an isolated git worktree.
         </p>
         <button
           type="button"
@@ -198,7 +198,7 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
           >{status}</p>
         ) : null}
         <p className="launcher-create-hint" data-testid="launcher-managed-root-help">
-          Stored under <code title={projectsState.projects_root}>{projectsState.projects_root}</code>
+          Stored under <code title={projectsState.projects_root}>{projectsState.projects_root}</code>. Pick or create a managed project; other repos are intentionally excluded and are not affected.
         </p>
       </div>
     </section>

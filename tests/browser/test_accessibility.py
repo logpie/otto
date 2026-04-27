@@ -302,7 +302,7 @@ def test_skip_link_present_and_focuses_main(mc_backend: Any, page: Any, disable_
 
 
 def test_inspector_inert_isolates_background(mc_backend: Any, page: Any, disable_animations: Any) -> None:
-    """Opening the inspector should make sidebar + main content `inert`.
+    """Opening the inspector should make topbar + main content `inert`.
 
     Inspector itself stays interactive. mc-audit a11y A11Y-01.
     """
@@ -323,37 +323,37 @@ def test_inspector_inert_isolates_background(mc_backend: Any, page: Any, disable
 
     info = page.evaluate(
         """() => ({
-            sidebarInert: document.querySelector('.sidebar')?.hasAttribute('inert') === true,
+            topbarInert: document.querySelector('.topbar')?.hasAttribute('inert') === true,
             mainInert: document.querySelector('.main-shell-content')?.hasAttribute('inert') === true,
             inspectorInert: document.querySelector('[data-mc-inspector]')?.hasAttribute('inert') === true,
         })"""
     )
-    assert info["sidebarInert"], f"sidebar must be inert when inspector is open; got {info!r}"
+    assert info["topbarInert"], f"topbar must be inert when inspector is open; got {info!r}"
     assert info["mainInert"], f"main shell must be inert when inspector is open; got {info!r}"
     assert not info["inspectorInert"], "inspector itself must remain interactive when only it is open"
 
 
 def test_inspector_remains_active_when_dialog_stacks(mc_backend: Any, page: Any, disable_animations: Any) -> None:
-    """When a confirm/job dialog stacks on top of the inspector, inspector + sidebar + main go inert.
+    """When a confirm/job dialog stacks on top of the inspector, inspector + topbar + main go inert.
 
     The inspector subtree must NOT be hidden by aria-hidden=true on <main>; this
     was the broken pattern from before cluster G. mc-audit a11y A11Y-02.
 
     We use the New job button BEFORE opening the inspector (the click would
-    otherwise be intercepted by sidebar `inert` once the inspector is open).
+    otherwise be intercepted once the page chrome is inert.
     Then we drive the inspector open via URL to force the stacking scenario.
     """
 
     _install_routes(page)
     _hydrate(page, mc_backend.url, disable_animations=disable_animations)
 
-    # Open the JobDialog FIRST (before the inspector adds inert to sidebar).
+    # Open the JobDialog FIRST (before the inspector adds inert to the page chrome).
     page.get_by_test_id("new-job-button").click()
     page.wait_for_selector("[data-testid=job-dialog-summary]", timeout=5_000)
     # Now while the dialog is open, simulate the inspector opening by setting
     # the React state via the URL hash mechanism — the inspector gets opened
     # programmatically by the SPA when a run is selected from the diagnostics
-    # view. We can't drive it from the UI here (sidebar is inert), so we open
+    # view. We can't drive it from the UI here (page chrome is inert), so we open
     # the inspector via React-internal helpers exposed in tests. Since none
     # exist, instead we drive the test via the route: navigate to a URL that
     # selects the run, open the inspector via a synthetic click on the
@@ -361,7 +361,7 @@ def test_inspector_remains_active_when_dialog_stacks(mc_backend: Any, page: Any,
     # post-condition by toggling state ourselves through the DOM API.
 
     # Close the dialog so we can open the inspector via the standard click flow.
-    page.locator(".job-dialog header button", has_text="Close").click()
+    page.get_by_test_id("job-dialog-close-button").click()
     page.wait_for_selector("[data-testid=job-dialog-summary]", state="detached", timeout=2_000)
 
     # Open inspector via the diagnostics view path.
@@ -372,15 +372,15 @@ def test_inspector_remains_active_when_dialog_stacks(mc_backend: Any, page: Any,
     page.get_by_test_id("open-logs-button").click()
     page.wait_for_selector("[data-testid=run-inspector]", timeout=5_000)
 
-    # At this point inspector is open; sidebar + main are inert; inspector is interactive.
+    # At this point inspector is open; topbar + main are inert; inspector is interactive.
     pre_dialog = page.evaluate(
         """() => ({
-            sidebarInert: document.querySelector('.sidebar')?.hasAttribute('inert') === true,
+            topbarInert: document.querySelector('.topbar')?.hasAttribute('inert') === true,
             mainInert: document.querySelector('.main-shell-content')?.hasAttribute('inert') === true,
             inspectorInert: document.querySelector('[data-mc-inspector]')?.hasAttribute('inert') === true,
         })"""
     )
-    assert pre_dialog["sidebarInert"]
+    assert pre_dialog["topbarInert"]
     assert pre_dialog["mainInert"]
     assert not pre_dialog["inspectorInert"]
 
