@@ -75,6 +75,7 @@ import {
   canMerge,
   canResolveRelease,
   canShowDiff,
+  canTryProduct,
   dedupeLiveAgainstHistory,
   detailWasRemoved,
   errorMessage,
@@ -308,7 +309,7 @@ export function App() {
   // launcher placeholder is showing the marker stays unset — the launcher
   // is its own destination, not the actionable Mission Control shell.
   const mcShellReady =
-    projectsLoaded && !!data && !!data.project && !projectsState?.launcher_enabled;
+    projectsLoaded && !!data && !!data.project;
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -690,7 +691,7 @@ export function App() {
           setInspectorOpen(false);
           return;
         }
-        if (selectedRunIdRef.current || selectedQueuedTask) {
+        if (selectedRunIdRef.current || selectedRunId || selectedQueuedTask) {
           setSelectedRunId(null);
           setSelectedQueuedTask(null);
           selectedRunIdRef.current = null;
@@ -714,6 +715,7 @@ export function App() {
         const mode = tabModes[Number(event.key) - 1];
         if (mode) {
           event.preventDefault();
+          if (mode === "try" && !canTryProduct(detail)) return;
           setInspectorMode(mode);
         }
         return;
@@ -721,7 +723,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [jobOpen, confirm, paletteOpen, inspectorOpen, selectedQueuedTask, helpOpen]);
+  }, [jobOpen, confirm, paletteOpen, inspectorOpen, selectedRunId, selectedQueuedTask, helpOpen, detail]);
 
   // Manual-refresh handler: wraps `refresh(true)` in a synchronous in-flight
   // latch so the toolbar/launcher Refresh buttons disable while a fetch is in
@@ -1001,13 +1003,11 @@ export function App() {
   // interactive while the rest of the page goes quiet. mc-audit a11y A11Y-01,
   // A11Y-02.
   const modalOpen = jobOpen || Boolean(confirm) || paletteOpen;
-  // Sidebar is inert whenever ANY overlay (inspector, job, confirm) is open.
-  const sidebarInert = inspectorOpen || modalOpen;
-  // The mid-layer (toolbar + main content sans inspector) is inert whenever
-  // the inspector or a top-level dialog is open. The inspector itself lives
-  // in the same layer but its container is given an `inertSiblings` flag that
-  // applies inert ONLY to its non-inspector siblings. See `MainShellInert`.
-  const mainContentInert = inspectorOpen || modalOpen;
+  // Top-level dialogs make the rest of the app inert. The run inspector is
+  // intentionally non-modal now: users can keep it open while landing ready
+  // work or selecting another task from the table.
+  const sidebarInert = modalOpen;
+  const mainContentInert = modalOpen;
   // The inspector is inert when a job/confirm dialog stacks above it — the
   // dialog has focus + Tab trap, so the inspector should not capture either.
   const inspectorInert = modalOpen;
@@ -1320,7 +1320,7 @@ export function App() {
     <div
       className="app-shell"
       data-mc-shell="ready"
-      data-drawer-open={(detail || selectedQueuedTask) ? "true" : "false"}
+      data-drawer-open={(detail || selectedRunId || selectedQueuedTask) ? "true" : "false"}
       data-inspector-open={inspectorOpen ? "true" : "false"}
     >
       {/* Skip link must be the first focusable element so a single Tab from
@@ -1407,6 +1407,7 @@ export function App() {
                 landing={landing}
                 inspectorOpen={inspectorOpen}
                 queuedTask={selectedQueuedTask}
+                loadingRunId={selectedRunId && !detail ? selectedRunId : null}
                 watcherRunning={data?.watcher.health.state === "running"}
                 onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
                 onShowTryProduct={showTryProduct}
@@ -1466,6 +1467,7 @@ export function App() {
                 landing={landing}
                 inspectorOpen={inspectorOpen}
                 queuedTask={selectedQueuedTask}
+                loadingRunId={selectedRunId && !detail ? selectedRunId : null}
                 watcherRunning={data?.watcher.health.state === "running"}
                 onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
                 onShowTryProduct={showTryProduct}

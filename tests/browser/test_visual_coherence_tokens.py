@@ -302,7 +302,7 @@ def test_status_includes_icon_prefix(
         glyph = (icon.text_content() or "").strip()
         assert glyph, f"badge #{i} .status-icon is empty"
         # Sanity — must be one of the canonical glyphs from toneIcon().
-        assert glyph in {"✓", "⚠", "✗", "●", "·"}, (
+        assert glyph in {"✓", "⚠", "✗", "●", "·", "→"}, (
             f"badge #{i} .status-icon is unexpected glyph={glyph!r}"
         )
 

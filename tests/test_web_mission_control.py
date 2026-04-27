@@ -192,6 +192,25 @@ def test_web_run_detail_is_not_hidden_by_list_filters(tmp_path: Path) -> None:
     assert detail["run_id"] == "build-web"
     assert detail["title"].startswith("build:")
 
+def test_web_live_run_detail_avoids_full_history_refresh(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write_run(repo)
+
+    def fail_if_history_is_loaded(_project_dir: Path) -> list[dict]:
+        raise AssertionError("live run detail should not rebuild history")
+
+    monkeypatch.setattr(
+        "otto.mission_control.model.load_project_history_rows",
+        fail_if_history_is_loaded,
+    )
+
+    detail = _client(repo).get("/api/runs/build-web").json()
+
+    assert detail["run_id"] == "build-web"
+    assert detail["source"] == "live"
+    assert detail["title"].startswith("build:")
+
 def test_web_state_marks_abandoned_live_runs_stale_not_active(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -286,6 +305,33 @@ def test_web_state_marks_abandoned_legacy_queue_runs_stale(tmp_path: Path) -> No
     assert actions["c"]["enabled"] is False
     assert actions["x"]["label"] == "remove"
     assert actions["x"]["enabled"] is True
+
+def test_web_state_marks_queued_compat_task_waiting_not_active(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    append_task(
+        repo,
+        QueueTask(
+            id="queued-task",
+            command_argv=["build", "queued task"],
+            added_at="2026-04-24T00:00:00Z",
+            resolved_intent="queued task",
+            branch="build/queued-task",
+            worktree=".worktrees/queued-task",
+        ),
+    )
+    write_queue_state(repo, {"schema_version": 1, "watcher": None, "tasks": {}})
+
+    state = _client(repo).get("/api/state").json()
+
+    row = state["live"]["items"][0]
+    assert row["run_id"] == "queue-compat:queued-task"
+    assert row["status"] == "queued"
+    assert row["display_status"] == "queued"
+    assert row["active"] is False
+    assert state["live"]["active_count"] == 0
+    assert state["live"]["refresh_interval_s"] == 1.5
+    assert state["watcher"]["counts"]["queued"] == 1
 
 def test_web_state_marks_abandoned_starting_queue_runs_stale(tmp_path: Path) -> None:
     repo = tmp_path / "repo"

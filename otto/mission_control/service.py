@@ -41,7 +41,6 @@ from otto.mission_control.model import (
     MissionControlFilters,
     MissionControlModel,
     MissionControlState,
-    SelectionState,
 )
 from otto.mission_control.serializers import (
     run_config_from_argv,
@@ -1167,9 +1166,7 @@ class MissionControlService:
 
     def _detail_view(self, run_id: str, filters: MissionControlFilters | None) -> DetailView:
         del filters
-        state = self._state(MissionControlFilters())
-        state.selection = SelectionState(run_id=run_id)
-        detail = self.model.detail_view(state)
+        detail = self.model.detail_view_for_run_id(run_id)
         if detail is None:
             raise MissionControlServiceError("run not found", status_code=404)
         return detail

@@ -265,7 +265,7 @@ def _install_artifact_content_route(
             "index": artifact_index,
             "label": label,
             "path": "/tmp/proj/x/" + label,
-            "kind": "image" if mime.startswith("image/") else "video" if mime.startswith("video/") else "binary",
+            "kind": "image" if mime.startswith("image/") else "video" if mime.startswith("video/") else "html" if mime.startswith("text/html") else "binary",
             "exists": True,
             "size_bytes": 4096,
             "mtime": "2026-04-25T12:00:00Z",
@@ -293,11 +293,34 @@ def _install_raw_route(page: Any, *, artifact_index: int, mime: str) -> None:
     )
 
 
+def _install_proof_report_route(page: Any) -> None:
+    page.route(
+        f"**/api/runs/{RUN_ID}/proof-report",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/html",
+            body="<html><body><h1>Rendered proof</h1><img src='/api/runs/binary-preview-run/proof-assets/evidence%2Fshot.png'></body></html>",
+        ),
+    )
+    page.route(
+        f"**/api/runs/{RUN_ID}/proof-assets/evidence%2Fshot.png",
+        lambda route: route.fulfill(status=200, content_type="image/png", body=b"\x89PNG\r\n\x1a\n"),
+    )
+
+
 def _open_proof_drawer(page: Any) -> None:
     btn = page.get_by_test_id("open-proof-button")
     btn.wait_for(state="visible", timeout=5_000)
     btn.click()
     page.get_by_test_id("proof-pane").wait_for(state="visible", timeout=5_000)
+
+
+def _open_artifact(page: Any, artifact_index: int = 0) -> None:
+    btn = page.get_by_test_id("open-artifacts-button")
+    btn.wait_for(state="visible", timeout=5_000)
+    btn.click()
+    page.locator(".run-inspector .artifact-pane").wait_for(state="visible", timeout=5_000)
+    page.get_by_test_id(f"artifact-list-item-{artifact_index}").click()
 
 
 def test_image_artifact_renders_as_img_tag(
@@ -332,10 +355,10 @@ def test_image_artifact_renders_as_img_tag(
     assert "image/png" in mime_label
 
 
-def test_binary_artifact_shows_no_text_preview_message(
+def test_pdf_artifact_embeds_document_preview(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """A non-image binary (PDF) shows the 'No text preview' card + download link."""
+    """PDF artifacts should render in a document frame, not as source text."""
 
     artifact = _artifact("binary", "report.pdf", "/tmp/proj/x/report.pdf")
     detail = _detail_payload([artifact])
@@ -355,11 +378,70 @@ def test_binary_artifact_shows_no_text_preview_message(
     disable_animations(page)
 
     _open_proof_drawer(page)
-    no_preview = page.get_by_test_id("proof-evidence-no-preview")
-    no_preview.wait_for(state="visible", timeout=5_000)
-    text = no_preview.text_content() or ""
-    assert "No text preview" in text
-    download = page.get_by_test_id("proof-evidence-download")
-    download.wait_for(state="visible", timeout=2_000)
-    href = download.get_attribute("href") or ""
+    frame = page.get_by_test_id("proof-evidence-pdf-frame")
+    frame.wait_for(state="visible", timeout=5_000)
+    src = frame.get_attribute("src") or ""
+    assert src.endswith(f"/api/runs/{RUN_ID}/artifacts/0/raw"), src
+    open_link = page.get_by_test_id("proof-evidence-pdf-frame-open")
+    href = open_link.get_attribute("href") or ""
     assert href.endswith(f"/api/runs/{RUN_ID}/artifacts/0/raw"), href
+
+
+def test_html_artifact_renders_in_artifacts_panel_iframe(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """HTML reports in Artifacts render as pages instead of raw HTML source."""
+
+    artifact = _artifact("html", "dashboard.html", "/tmp/proj/x/dashboard.html")
+    detail = _detail_payload([artifact])
+    _install_state_routes(page, detail=detail)
+    _install_artifact_content_route(
+        page,
+        artifact_index=0,
+        label="dashboard.html",
+        mime="text/html",
+        previewable=True,
+        content="<html><body><h1>Dashboard</h1></body></html>",
+    )
+    _install_raw_route(page, artifact_index=0, mime="text/html")
+
+    page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    _open_artifact(page)
+    frame = page.get_by_test_id("artifact-html-frame")
+    frame.wait_for(state="visible", timeout=5_000)
+    src = frame.get_attribute("src") or ""
+    assert src.endswith(f"/api/runs/{RUN_ID}/artifacts/0/raw"), src
+    assert page.locator(".artifact-pane pre[aria-label='Artifact content']").count() == 0
+
+
+def test_proof_report_artifact_uses_rewritten_report_endpoint(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """Proof HTML must use /proof-report so embedded relative evidence images resolve."""
+
+    artifact = _artifact("html", "proof report", "/tmp/proj/x/certify/proof-of-work.html")
+    detail = _detail_payload([artifact])
+    _install_state_routes(page, detail=detail)
+    _install_artifact_content_route(
+        page,
+        artifact_index=0,
+        label="proof report",
+        mime="text/html",
+        previewable=True,
+        content="<html><body><img src='evidence/shot.png'></body></html>",
+    )
+    _install_raw_route(page, artifact_index=0, mime="text/html")
+    _install_proof_report_route(page)
+
+    page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    _open_artifact(page)
+    frame = page.get_by_test_id("artifact-html-frame")
+    frame.wait_for(state="visible", timeout=5_000)
+    src = frame.get_attribute("src") or ""
+    assert src.endswith(f"/api/runs/{RUN_ID}/proof-report"), src

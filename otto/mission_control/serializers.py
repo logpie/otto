@@ -31,6 +31,7 @@ from otto.mission_control.model import (
     MissionControlState,
     ProjectStats,
     StaleOverlay,
+    is_effectively_active_status,
 )
 from otto.runs.schema import RunRecord
 from otto.token_usage import token_usage_from_mapping as _shared_token_usage_from_mapping
@@ -317,11 +318,7 @@ def _display_status(status: str | None, overlay: StaleOverlay | None) -> str:
 
 
 def _is_effectively_active(status: str | None, overlay: StaleOverlay | None) -> bool:
-    if str(status or "") in {"done", "failed", "cancelled", "removed", "interrupted", "paused"}:
-        return False
-    if overlay is not None and overlay.level == "stale":
-        return False
-    return True
+    return is_effectively_active_status(status, overlay)
 
 
 def _record_summary(record: RunRecord) -> dict[str, Any]:

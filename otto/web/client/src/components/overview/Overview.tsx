@@ -174,13 +174,13 @@ export function MissionFocus({data, lastError, resultBanner, watcherPending, lan
                 ? "Starting watcher…"
                 : (data?.runtime.supervisor.start_blocked_reason
                     || data?.watcher.health.next_action
-                    || "Start the watcher process to run queued jobs.")
+                    || "Start the queue runner to process queued jobs.")
             }
             onClick={onStartWatcher}
           >
             {watcherPending
               ? <><Spinner /> Starting…</>
-              : (Number(data?.watcher.counts.queued || 0) > 0 ? "Start queued job" : "Start watcher")}
+              : (Number(data?.watcher.counts.queued || 0) > 0 ? "Start queued job" : "Start queue runner")}
           </button>
         )}
         {focus.primary === "diagnostics" && (

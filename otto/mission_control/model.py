@@ -457,10 +457,51 @@ class MissionControlModel:
         selected_record, overlay, source = self.selected_record(state)
         if selected_record is None:
             return None
+        return self._detail_view_from_record(selected_record, overlay, source, state.selection.log_index)
+
+    def detail_view_for_run_id(self, run_id: str, *, log_index: int = 0) -> DetailView | None:
+        """Return a run detail without rebuilding the whole board state.
+
+        The web API uses this for row selection. Rebuilding full state just to
+        open the drawer forces history pagination, stats, and board
+        derivation onto the click path; this direct lookup keeps detail fetches
+        bounded to live records plus a history fallback.
+        """
+
+        if not run_id:
+            return None
+        now = self._now_fn()
+        monotonic_now = self._monotonic_fn()
+        self._detect_suspend(now, monotonic_now)
+        for record in self._load_live_records(now):
+            if record.run_id != run_id:
+                continue
+            adapter = self._adapter_for_key(record.adapter_key or _adapter_key_for_record(record))
+            overlay = adapter.live_overlay(record, self._derive_overlay(record, now, monotonic_now))
+            return self._detail_view_from_record(record, overlay, "live", log_index)
+
+        for row in self._dedupe_history_rows(load_project_history_rows(self.project_dir)):
+            if str(row.get("run_id") or "").strip() != run_id:
+                continue
+            return self._detail_view_from_record(
+                _history_row_to_record(self.project_dir, row),
+                None,
+                "history",
+                log_index,
+            )
+        return None
+
+    def _detail_view_from_record(
+        self,
+        selected_record: RunRecord,
+        overlay: StaleOverlay | None,
+        source: Literal["live", "history"],
+        log_index: int,
+    ) -> DetailView:
         adapter = self._adapter_for_key(selected_record.adapter_key or _adapter_key_for_record(selected_record))
         artifacts = adapter.artifacts(selected_record)
         log_paths = [artifact.path for artifact in artifacts if artifact.kind == "log"]
-        selected_log_index = min(max(state.selection.log_index, 0), max(0, len(log_paths) - 1)) if log_paths else 0
+        selected_log_index = min(max(log_index, 0), max(0, len(log_paths) - 1)) if log_paths else 0
         legal_actions = adapter.legal_actions(selected_record, overlay)
         return DetailView(
             run_id=selected_record.run_id,
@@ -922,14 +963,20 @@ def _retain_terminal_live_record(record: RunRecord) -> bool:
     )
 
 
-def _status_is_effectively_active(status: str | None, overlay: StaleOverlay | None) -> bool:
-    if is_terminal_status(status):
-        return False
-    if status == "paused":
+ACTIVE_RUN_STATUSES = frozenset({"starting", "initializing", "running", "terminating"})
+
+
+def is_effectively_active_status(status: str | None, overlay: StaleOverlay | None) -> bool:
+    normalized = str(status or "").strip().lower()
+    if is_terminal_status(normalized):
         return False
     if overlay is not None and overlay.level == "stale":
         return False
-    return True
+    return normalized in ACTIVE_RUN_STATUSES
+
+
+def _status_is_effectively_active(status: str | None, overlay: StaleOverlay | None) -> bool:
+    return is_effectively_active_status(status, overlay)
 
 
 def _history_row_to_record(project_dir: Path, row: HistoryRow) -> RunRecord:

@@ -8,6 +8,7 @@ import {
   taskBoardSubtitle,
   testIdForTask,
   toneIcon,
+  liveEventLabel,
 } from "../../utils/missionControl";
 import type {BoardTask, Filters} from "../../uiTypes";
 import {shortText} from "../../utils/format";
@@ -163,13 +164,17 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
       default:          return task.status;
     }
   })();
+  const stageTitle = task.stage === "ready" ? "Ready to land" : stageLabel;
   const tone = statusTone(task.status, task.stage);
+  const icon = task.stage === "ready" ? "" : toneIcon(tone);
   const stories = task.storiesTested && task.storiesTested > 0
     ? `${task.storiesPassed || 0}/${task.storiesTested}`
     : "—";
   const files = typeof task.changedFileCount === "number" ? `${task.changedFileCount}` : "—";
   const time = task.elapsedDisplay || task.durationDisplay || "—";
-  const meta = [task.branch, task.lastEvent, task.usageDisplay].filter((part): part is string => Boolean(part && part.trim()));
+  const visibleEvent = liveEventLabel(task);
+  const waitingReason = task.stage === "working" && !task.active ? task.reason : null;
+  const meta = [task.branch, visibleEvent || waitingReason, task.usageDisplay].filter((part): part is string => Boolean(part && part.trim()));
   const onClick = () => {
     if (task.runId) onSelect(task.runId);
     else if (onSelectQueued) onSelectQueued(task);
@@ -193,8 +198,12 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
         onClick={onClick}
       >
         <span className="queue-list-cell queue-list-cell-status" role="cell">
-          <span className={`queue-list-status-badge task-status status-tone-${tone}`} data-status-tone={tone}>
-            <span className="status-icon" aria-hidden="true">{toneIcon(tone)}</span>
+          <span
+            className={`queue-list-status-badge task-status status-tone-${tone} status-stage-${task.stage}`}
+            data-status-tone={tone}
+            title={stageTitle}
+          >
+            {icon ? <span className="status-icon" aria-hidden="true">{icon}</span> : null}
             {stageLabel}
           </span>
         </span>

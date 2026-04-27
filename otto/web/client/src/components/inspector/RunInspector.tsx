@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
-import type {KeyboardEvent as ReactKeyboardEvent, ReactNode} from "react";
+import type {CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode} from "react";
 import {CommandList, ReviewDrawer, ReviewMetric} from "../MicroComponents";
 import {useDialogFocus} from "../../hooks/useDialogFocus";
 import {
@@ -38,6 +38,7 @@ import {
   actionName,
   artifactKindLabel,
   canShowDiff,
+  canTryProduct,
   certificationLine,
   checkStatusIcon,
   checkStatusLabel,
@@ -67,17 +68,19 @@ import {
   storyStatusIcon,
   storyStatusLabel,
   timeoutLine,
+  planningLine,
   userVisibleDetailLine,
   isTypingTarget,
   agentsLine,
 } from "../../utils/missionControl";
 import type {BoardTask, InspectorMode} from "../../uiTypes";
 
-export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watcherRunning, onRunAction, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact, onStartWatcher, onClose}: {
+export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, loadingRunId, watcherRunning, onRunAction, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact, onStartWatcher, onClose}: {
   detail: RunDetail | null;
   landing: LandingState | undefined;
   inspectorOpen: boolean;
   queuedTask?: BoardTask | null;
+  loadingRunId?: string | null;
   watcherRunning?: boolean;
   onRunAction: (action: string, label?: string) => void;
   onShowTryProduct: () => void;
@@ -92,14 +95,21 @@ export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watc
   // Drawer-mode: only render when a task is selected. Replaces the inline
   // right-rail Review Packet that used to show "Already merged into main"
   // permanently. mc-audit redesign Phase C.
-  if (!detail && !queuedTask) return null;
+  if (!detail && !queuedTask && !loadingRunId) return null;
+  const tryProductAvailable = canTryProduct(detail);
+  const queuedRunWaiting = Boolean(
+    detail
+      && ["queued", "waiting", "pending"].includes(String(detail.display_status || detail.status || "").toLowerCase())
+      && !watcherRunning
+      && onStartWatcher,
+  );
   return (
     <>
       <div className="run-drawer-backdrop" onClick={onClose} aria-hidden="true" />
       <aside className="detail run-drawer" aria-labelledby="detailHeading" data-testid="run-detail-panel">
         <div className="panel-heading run-drawer-heading">
           <div>
-            <h2 id="detailHeading">{detail ? "Run detail" : "Queued task"}</h2>
+            <h2 id="detailHeading">{detail || loadingRunId ? "Run detail" : "Queued task"}</h2>
             <span className="pill">{detail ? detailStatusLabel(detail) : "-"}</span>
           </div>
           {onClose ? (
@@ -111,6 +121,13 @@ export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watc
           <div className="detail-scroll">
             <RecoveryActionBar actions={detail.legal_actions || []} status={detail.display_status} onRunAction={onRunAction} />
             <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} onLoadArtifact={onLoadArtifact} onShowArtifacts={onShowArtifacts} />
+            {queuedRunWaiting && (
+              <div className="review-note recovery-note queued-start-note">
+                <strong>Queue runner stopped</strong>
+                <span>Start the queue runner to process all queued tasks.</span>
+                <button type="button" className="primary" data-testid="queued-detail-start-watcher" onClick={onStartWatcher}>Start queue runner</button>
+              </div>
+            )}
             <PhaseTimeline phases={detail.phase_timeline || []} />
             <details className="detail-body detail-metadata">
               <summary>
@@ -126,6 +143,7 @@ export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watc
                   <dt>Worktree</dt><dd>{detail.worktree || detail.cwd || "-"}</dd>
                   <dt>Provider</dt><dd>{providerLine(detail)}</dd>
                   <dt>Certification</dt><dd>{certificationLine(detail.build_config)}</dd>
+                  <dt>Planning</dt><dd>{planningLine(detail.build_config) || "-"}</dd>
                   <dt>Timeouts</dt><dd>{timeoutLine(detail.build_config)}</dd>
                   <dt>Limits</dt><dd>{limitLine(detail.build_config)}</dd>
                   <dt>Run flags</dt><dd>{flagsLine(detail.build_config)}</dd>
@@ -149,7 +167,7 @@ export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watc
               correct UX too. */}
           {!inspectorOpen && (
             <div className="detail-inspector-actions" role="group" aria-label="Evidence shortcuts">
-              <button className="primary" type="button" data-testid="open-try-product-button" onClick={onShowTryProduct}>Try product</button>
+              {tryProductAvailable && <button className="primary" type="button" data-testid="open-try-product-button" onClick={onShowTryProduct}>Try product</button>}
               <button type="button" data-testid="open-proof-button" onClick={onShowProof}>Review result</button>
               <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Code changes</button>
               <button type="button" data-testid="open-logs-button" onClick={onShowLogs}>Logs</button>
@@ -161,9 +179,9 @@ export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watc
         <div className="detail-body empty queued-task-detail" data-testid="run-detail-queued" data-queued-task-id={queuedTask.id}>
           <h3>{queuedTask.title}</h3>
           <p className="queued-task-subtitle">
-            <strong>Waiting for watcher</strong> — this task is queued but no
+            <strong>Waiting for queue runner</strong> — this task is queued but no
             run has started yet. Logs, diffs, and proof become available once
-            the watcher picks it up.
+            the queue runner picks it up.
           </p>
           <dl className="queued-task-meta">
             <dt>Status</dt><dd>{queuedTask.status}</dd>
@@ -174,8 +192,8 @@ export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watc
           <p className="queued-task-next-action">
             <strong>Next:</strong>{" "}
             {watcherRunning
-              ? "Watcher is running — task should pick up shortly."
-              : "Start the watcher to run this task."}
+              ? "Queue runner is running — task should pick up shortly."
+              : "Start the queue runner to process queued tasks."}
           </p>
           {!watcherRunning && onStartWatcher && (
             <button
@@ -183,12 +201,36 @@ export function RunDetailPanel({detail, landing, inspectorOpen, queuedTask, watc
               className="primary"
               data-testid="run-detail-queued-start-watcher"
               onClick={onStartWatcher}
-            >Start watcher</button>
+            >Start queue runner</button>
           )}
         </div>
-      ) : null}
+      ) : (
+        <div className="detail-body empty run-detail-loading" data-testid="run-detail-loading">
+          <h3>Loading run detail</h3>
+          <p>{loadingRunId || "Selected run"}</p>
+          <div className="run-detail-loading-bars" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+        </div>
+      )}
       </aside>
     </>
+  );
+}
+
+function CheckStatusBadge({status}: {status: string}) {
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  const icon = checkStatusIcon(normalizedStatus);
+  if (!icon) {
+    return <span>{checkStatusLabel(normalizedStatus)}</span>;
+  }
+  return (
+    <span>
+      <span className="status-icon" aria-hidden="true">{icon}</span>{" "}
+      {checkStatusLabel(normalizedStatus)}
+    </span>
   );
 }
 
@@ -259,10 +301,31 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
   onClose: () => void;
 }) {
   const inspectorRef = useDialogFocus<HTMLElement>(onClose, false);
+  const [inspectorWidth, setInspectorWidth] = useState<number>(() => {
+    if (typeof window === "undefined") return 960;
+    const saved = Number(window.localStorage.getItem("otto.inspectorWidth"));
+    if (Number.isFinite(saved) && saved > 0) {
+      return Math.min(Math.max(saved, 520), Math.max(560, window.innerWidth - 48));
+    }
+    return 960;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("otto.inspectorWidth", String(Math.round(inspectorWidth)));
+    document.documentElement.style.setProperty("--run-inspector-width", `${Math.round(inspectorWidth)}px`);
+    return () => {
+      document.documentElement.style.removeProperty("--run-inspector-width");
+    };
+  }, [inspectorWidth]);
+  const tryProductAvailable = canTryProduct(detail);
+  const activeMode: InspectorMode = mode === "try" && !tryProductAvailable ? "proof" : mode;
   // WAI-ARIA tablist pattern: roving tabindex + arrow keys + Home/End. Tabs
   // that are disabled (Code changes, when diff isn't available) skip in
   // arrow rotation. mc-audit a11y A11Y-03, K-04.
-  const tabModes = useMemo<InspectorMode[]>(() => ["try", "proof", "diff", "logs", "artifacts"], []);
+  const tabModes = useMemo<InspectorMode[]>(
+    () => tryProductAvailable ? ["try", "proof", "diff", "logs", "artifacts"] : ["proof", "diff", "logs", "artifacts"],
+    [tryProductAvailable],
+  );
   const tabHandlers: Record<InspectorMode, () => void> = {
     try: onShowTryProduct,
     proof: onShowProof,
@@ -289,7 +352,7 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
         ? event.target.getAttribute("data-tab-id")
         : ""
     ) as InspectorMode | "";
-    const currentMode = focusedMode && enabled.includes(focusedMode) ? focusedMode : mode;
+    const currentMode = focusedMode && enabled.includes(focusedMode) ? focusedMode : activeMode;
     const currentIndex = enabled.indexOf(currentMode);
     let nextIndex = 0;
     if (key === "Home") nextIndex = 0;
@@ -302,10 +365,37 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
     const target = inspectorRef.current?.querySelector<HTMLButtonElement>(`[data-tab-id="${nextMode}"]`);
     target?.focus();
   };
+  const startInspectorResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (typeof window === "undefined") return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = inspectorRef.current?.getBoundingClientRect().width || inspectorWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "ew-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (moveEvent: PointerEvent) => {
+      const maxWidth = Math.max(560, window.innerWidth - 48);
+      const next = startWidth + startX - moveEvent.clientX;
+      setInspectorWidth(Math.min(Math.max(next, 520), maxWidth));
+    };
+    const onUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }, [inspectorRef, inspectorWidth]);
+  const inspectorStyle = {"--run-inspector-width": `${Math.round(inspectorWidth)}px`} as CSSProperties;
   return (
     <section
       ref={inspectorRef}
       className="run-inspector"
+      style={inspectorStyle}
       role="dialog"
       aria-modal="true"
       aria-labelledby="runInspectorHeading"
@@ -313,6 +403,25 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
       data-mc-inspector="true"
       tabIndex={-1}
     >
+      <div
+        className="run-inspector-resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize inspector panel"
+        title="Drag to resize inspector"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          const step = event.shiftKey ? 80 : 24;
+          setInspectorWidth((current) => {
+            const maxWidth = typeof window === "undefined" ? 1400 : Math.max(560, window.innerWidth - 48);
+            const next = event.key === "ArrowLeft" ? current + step : current - step;
+            return Math.min(Math.max(next, 520), maxWidth);
+          });
+        }}
+        onPointerDown={startInspectorResize}
+      />
       <div className="run-inspector-heading">
         <div>
           <h2 id="runInspectorHeading">{detail.title || detail.run_id}</h2>
@@ -320,7 +429,7 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
         </div>
         <div className="detail-tabs" role="tablist" aria-label="Evidence view" onKeyDown={onTabKeyDown}>
           {tabModes.map((m) => {
-            const isSelected = mode === m;
+            const isSelected = activeMode === m;
             const isDisabled = tabDisabled(m);
             return (
               <button
@@ -348,15 +457,15 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
         className="run-inspector-body"
         id="run-inspector-panel"
         role="tabpanel"
-        aria-labelledby={`run-inspector-tab-${mode}`}
+        aria-labelledby={`run-inspector-tab-${activeMode}`}
       >
-        {mode === "try" ? (
+        {activeMode === "try" ? (
           <ProductHandoffPane detail={detail} />
-        ) : mode === "proof" ? (
+        ) : activeMode === "proof" ? (
           <ProofPane detail={detail} proofArtifactIndex={proofArtifactIndex} proofContent={proofContent} onShowDiff={onShowDiff} onLoadProofArtifact={onLoadProofArtifact} />
-        ) : mode === "diff" ? (
+        ) : activeMode === "diff" ? (
           <DiffPane diff={diffContent} onRefresh={onRefreshDiff} />
-        ) : mode === "logs" ? (
+        ) : activeMode === "logs" ? (
           <LogPane logState={logState} runActive={detail.active} onRetry={onShowLogs} />
         ) : (
           <ArtifactPane
@@ -498,6 +607,30 @@ export function ProductHandoffPane({detail}: {detail: RunDetail}) {
           ) : null}
         </section>
       )}
+    </div>
+  );
+}
+
+function ArtifactFrame({rawUrl, label, mime, testId}: {
+  rawUrl: string;
+  label: string;
+  mime: string;
+  testId: string;
+}) {
+  const isHtml = mime.toLowerCase().includes("html");
+  return (
+    <div className="artifact-frame-preview" data-testid={`${testId}-wrap`}>
+      <div className="artifact-frame-actions">
+        <span>{mime || "rendered artifact"}</span>
+        <a href={rawUrl} target="_blank" rel="noreferrer" data-testid={`${testId}-open`}>Open in new tab</a>
+      </div>
+      <iframe
+        src={rawUrl}
+        title={label}
+        data-testid={testId}
+        className="artifact-frame"
+        sandbox={isHtml ? "allow-same-origin allow-scripts" : undefined}
+      />
     </div>
   );
 }
@@ -849,12 +982,8 @@ export function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff,
         {proofChecks.length ? (
           <div className="proof-checks">
             {proofChecks.map((check) => (
-              <div className={`review-check check-${check.status}`} key={check.key}>
-                <span>
-                  <span className="status-icon" aria-hidden="true">{checkStatusIcon(check.status)}</span>
-                  {" "}
-                  {checkStatusLabel(check.status)}
-                </span>
+              <div className={`review-check check-${String(check.status || "").trim().toLowerCase()}`} key={check.key}>
+                <CheckStatusBadge status={check.status} />
                 <div>
                   <strong>{check.label}</strong>
                   <p>{formatReviewText(check.detail)}</p>
@@ -1029,6 +1158,9 @@ export function ProofEvidenceContent({runId, artifactIndex, content}: {
   const proofContentText = content?.content || "";
   const compact = compactLongText(artifactIsLog ? proofContentText : formatArtifactContent(proofContentText), 20000);
   const rawUrl = artifactIndex != null ? `/api/runs/${encodeURIComponent(runId)}/artifacts/${artifactIndex}/raw` : null;
+  const artifactLabel = content?.artifact.label || "artifact";
+  const renderHtml = Boolean(rawUrl && previewable && mime.toLowerCase().includes("html"));
+  const renderPdf = Boolean(rawUrl && mime.toLowerCase() === "application/pdf");
   return (
     <div className="proof-section proof-content" aria-labelledby="proofContentHeading">
       <div className="proof-content-heading">
@@ -1041,8 +1173,12 @@ export function ProofEvidenceContent({runId, artifactIndex, content}: {
       </div>
       {!content ? (
         <pre className={artifactIsLog ? "log-content" : ""} tabIndex={0} aria-label="Selected evidence content">Loading evidence content...</pre>
+      ) : renderHtml && rawUrl ? (
+        <ArtifactFrame rawUrl={rawUrl} label={artifactLabel} mime={mime} testId="proof-evidence-html-frame" />
       ) : !previewable ? (
-        rawUrl && mime.startsWith("image/") ? (
+        renderPdf && rawUrl ? (
+          <ArtifactFrame rawUrl={rawUrl} label={artifactLabel} mime={mime} testId="proof-evidence-pdf-frame" />
+        ) : rawUrl && mime.startsWith("image/") ? (
           <a href={rawUrl} target="_blank" rel="noreferrer">
             <img src={rawUrl} alt={content.artifact.label} data-testid="proof-evidence-image" className="proof-evidence-image" />
           </a>
@@ -1241,12 +1377,8 @@ export function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifac
         <ReviewDrawer title="Checks" meta={checkSummary} defaultOpen={checksDefaultOpen}>
           <div className="review-checklist" aria-label="Readiness checklist">
             {drawerChecks.map((check) => (
-              <div className={`review-check check-${check.status}`} key={check.key}>
-                <span>
-                  <span className="status-icon" aria-hidden="true">{checkStatusIcon(check.status)}</span>
-                  {" "}
-                  {checkStatusLabel(check.status)}
-                </span>
+              <div className={`review-check check-${String(check.status || "").trim().toLowerCase()}`} key={check.key}>
+                <CheckStatusBadge status={check.status} />
                 <div>
                   <strong>{check.label}</strong>
                   <p>{formatReviewText(check.detail)}</p>
@@ -1341,7 +1473,7 @@ export function RecoveryActionBar({actions, status, onRunAction}: {
           <button
             key={action.key}
             type="button"
-            className={idx === 0 ? "primary" : ""}
+            className={actionButtonClass(action, idx === 0)}
             data-testid={`recovery-action-${name}`}
             disabled={!action.enabled}
             title={action.reason || action.preview || ""}
@@ -1396,6 +1528,7 @@ export function ActionBar({actions, mergeBlocked, onRunAction}: {actions: Action
             <button
               key={action.key}
               type="button"
+              className={actionButtonClass(action)}
               data-testid={`advanced-action-${name}`}
               disabled={disabled}
               title={title}
@@ -1410,6 +1543,13 @@ export function ActionBar({actions, mergeBlocked, onRunAction}: {actions: Action
   );
 }
 
+function actionButtonClass(action: ActionState, primary = false): string {
+  const normalized = `${actionName(action.key)} ${action.label}`.toLowerCase();
+  if (normalized.includes("cancel") || normalized.includes("remove")) return "danger-button";
+  if (primary) return "primary";
+  return "";
+}
+
 export function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoadArtifact, onBack, runId}: {
   artifacts: ArtifactRef[];
   selectedArtifactIndex: number | null;
@@ -1419,26 +1559,38 @@ export function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent,
   runId: string;
 }) {
   if (selectedArtifactIndex !== null) {
+    const selectedArtifact = artifacts.find((artifact) => artifact.index === selectedArtifactIndex) || null;
+    const artifactRef = artifactContent?.artifact || selectedArtifact;
     const previewable = artifactContent ? artifactContent.previewable !== false : true;
     const mime = artifactContent?.mime_type || "";
     const sizeBytes = artifactContent?.size_bytes ?? 0;
-    const artifactIsLog = isLogArtifact(artifactContent?.artifact || null);
+    const artifactIsLog = isLogArtifact(artifactRef || null);
     const rawContent = artifactContent?.content || "No content.";
     const compact = compactLongText(artifactIsLog ? rawContent : formatArtifactContent(rawContent), 20000);
-    const rawUrl = `/api/runs/${encodeURIComponent(runId)}/artifacts/${selectedArtifactIndex}/raw`;
+    const proofReportUrl = artifactRef && isProofReportArtifact(artifactRef)
+      ? `/api/runs/${encodeURIComponent(runId)}/proof-report`
+      : null;
+    const rawUrl = proofReportUrl || `/api/runs/${encodeURIComponent(runId)}/artifacts/${selectedArtifactIndex}/raw`;
+    const artifactLabel = artifactRef?.label || "artifact";
+    const renderHtml = Boolean(proofReportUrl || (artifactContent && previewable && mime.toLowerCase().includes("html")));
+    const renderPdf = Boolean(artifactContent && mime.toLowerCase() === "application/pdf");
     return (
       <div className="artifact-pane">
         <button type="button" onClick={onBack}>Back to artifacts</button>
         <div className="artifact-meta">
-          {artifactContent?.artifact.label || "artifact"} {(artifactContent?.truncated || compact.truncated) && previewable ? "(truncated)" : ""}
+          {artifactLabel} {(artifactContent?.truncated || compact.truncated) && previewable && !proofReportUrl ? "(truncated)" : ""}
           {mime && <small data-testid="artifact-mime">{` · ${mime}${sizeBytes > 0 ? ` · ${humanBytes(sizeBytes)}` : ""}`}</small>}
         </div>
-        {!artifactContent ? (
+        {!artifactContent && !proofReportUrl ? (
           <pre tabIndex={0}>Loading…</pre>
+        ) : renderHtml ? (
+          <ArtifactFrame rawUrl={rawUrl} label={artifactLabel} mime={mime} testId="artifact-html-frame" />
         ) : !previewable ? (
-          mime.startsWith("image/") ? (
+          renderPdf ? (
+            <ArtifactFrame rawUrl={rawUrl} label={artifactLabel} mime={mime} testId="artifact-pdf-frame" />
+          ) : mime.startsWith("image/") ? (
             <a href={rawUrl} target="_blank" rel="noreferrer">
-              <img src={rawUrl} alt={artifactContent.artifact.label} data-testid="artifact-image" className="artifact-image" />
+              <img src={rawUrl} alt={artifactLabel} data-testid="artifact-image" className="artifact-image" />
             </a>
           ) : mime.startsWith("video/") ? (
             <video controls data-testid="artifact-video" className="artifact-video"><source src={rawUrl} type={mime} /></video>
@@ -1457,28 +1609,106 @@ export function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent,
     );
   }
   if (!artifacts.length) return <div className="artifact-pane">No artifacts.</div>;
+  const groups = artifactGroups(artifacts);
   return (
-    <div className="artifact-pane artifact-list">
-      {artifacts.map((artifact) => (
-        <button
-          key={artifact.index}
-          type="button"
-          disabled={!isReadableArtifact(artifact)}
-          onClick={() => onLoadArtifact(artifact.index)}
-          title={artifactProvenanceTooltip(artifact)}
-          data-testid={`artifact-list-item-${artifact.index}`}
-        >
-          <strong>{artifact.label}</strong>
-          <span>{artifactKindLabel(artifact)}</span>
-          <small className="artifact-provenance">
-            {artifact.size_bytes != null && <span data-testid={`artifact-size-${artifact.index}`}>{humanBytes(artifact.size_bytes)}</span>}
-            {artifact.mtime && <span data-testid={`artifact-mtime-${artifact.index}`}>{artifact.mtime}</span>}
-            {artifact.sha256 && <span data-testid={`artifact-sha-${artifact.index}`}>{artifact.sha256.slice(0, 12)}</span>}
-          </small>
-        </button>
-      ))}
+    <div className="artifact-pane artifact-list artifact-list-grouped">
+      {groups.map((group) => {
+        const content = (
+          <div className="artifact-group-grid">
+            {group.items.map((artifact) => (
+              <ArtifactButton key={artifact.index} artifact={artifact} onLoadArtifact={onLoadArtifact} />
+            ))}
+          </div>
+        );
+        if (group.defaultOpen) {
+          return (
+            <section className="artifact-group" key={group.key} data-artifact-group={group.key}>
+              <header>
+                <h3>{group.title}</h3>
+                <span>{group.items.length}</span>
+              </header>
+              {content}
+            </section>
+          );
+        }
+        return (
+          <details className="artifact-group" key={group.key} data-artifact-group={group.key}>
+            <summary>
+              <span>{group.title}</span>
+              <strong>{group.items.length}</strong>
+            </summary>
+            {content}
+          </details>
+        );
+      })}
     </div>
   );
+}
+
+function ArtifactButton({artifact, onLoadArtifact}: {
+  artifact: ArtifactRef;
+  onLoadArtifact: (index: number) => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={!isReadableArtifact(artifact)}
+      onClick={() => onLoadArtifact(artifact.index)}
+      title={artifactProvenanceTooltip(artifact)}
+      data-testid={`artifact-list-item-${artifact.index}`}
+    >
+      <strong>{artifact.label}</strong>
+      <span>{artifactKindLabel(artifact)}</span>
+      <small className="artifact-provenance">
+        {artifact.size_bytes != null && <span data-testid={`artifact-size-${artifact.index}`}>{humanBytes(artifact.size_bytes)}</span>}
+        {artifact.mtime && <span data-testid={`artifact-mtime-${artifact.index}`}>{artifact.mtime}</span>}
+        {artifact.sha256 && <span data-testid={`artifact-sha-${artifact.index}`}>{artifact.sha256.slice(0, 12)}</span>}
+      </small>
+    </button>
+  );
+}
+
+function isProofReportArtifact(artifact: ArtifactRef): boolean {
+  const text = `${artifact.label} ${artifact.path}`.toLowerCase();
+  return text.includes("proof report") || text.includes("proof-report") || text.includes("proof-of-work.html");
+}
+
+type ArtifactGroup = {
+  key: string;
+  title: string;
+  defaultOpen: boolean;
+  items: ArtifactRef[];
+};
+
+function artifactGroups(artifacts: ArtifactRef[]): ArtifactGroup[] {
+  const groups: ArtifactGroup[] = [
+    {key: "review", title: "Review first", defaultOpen: true, items: []},
+    {key: "visual", title: "Visual evidence", defaultOpen: true, items: []},
+    {key: "logs", title: "Logs", defaultOpen: true, items: []},
+    {key: "internals", title: "Run internals", defaultOpen: false, items: []},
+  ];
+  const byKey = new Map(groups.map((group) => [group.key, group]));
+  for (const artifact of artifacts) {
+    const kind = artifact.kind.toLowerCase();
+    const text = `${artifact.label} ${artifact.path}`.toLowerCase();
+    let key = "internals";
+    if (
+      isProofReportArtifact(artifact)
+      || kind === "html"
+      || text.includes("proof markdown")
+      || text.includes("summary")
+      || text.includes("proof-of-work.md")
+      || text.includes("proof-of-work.json")
+    ) {
+      key = "review";
+    } else if (["image", "video"].includes(kind) || text.endsWith(".png") || text.endsWith(".webm") || text.endsWith(".pdf")) {
+      key = "visual";
+    } else if (isLogArtifact(artifact)) {
+      key = "logs";
+    }
+    byKey.get(key)?.items.push(artifact);
+  }
+  return groups.filter((group) => group.items.length > 0);
 }
 
 export function artifactProvenanceTooltip(artifact: ArtifactRef): string {

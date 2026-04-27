@@ -589,8 +589,57 @@ textarea:focus-visible,
   box-shadow: 0 0 0 3px rgba(21, 128, 61, 0.15);
 }
 
+.topbar-watcher.is-live .watcher-dot.tone-success {
+  animation: queue-runner-pulse 1.4s ease-out infinite;
+}
+
+.task-status.status-tone-running .status-icon {
+  animation: task-live-pulse 1.4s ease-out infinite;
+}
+
+.artifact-frame-preview {
+  display: grid;
+  gap: 8px;
+}
+
+.artifact-frame-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.artifact-frame {
+  width: 100%;
+  min-height: min(68vh, 720px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
 .watcher-dot.tone-warning {
   background: var(--color-warning-fg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topbar-watcher.is-live .watcher-dot.tone-success,
+  .task-status.status-tone-running .status-icon {
+    animation: none;
+  }
+}
+
+@keyframes queue-runner-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(21, 128, 61, 0.28);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(21, 128, 61, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(21, 128, 61, 0);
+  }
 }
 
 .topbar-new-job {
@@ -1189,7 +1238,7 @@ textarea {
     max-width: none;
   }
   [data-inspector-open="true"] .mission-layout {
-    padding-right: calc(min(960px, 100vw - 80px) + 16px);
+    padding-right: calc(min(var(--run-inspector-width, 960px), 100vw - 80px) + 16px);
     max-width: none;
   }
 }
@@ -1663,6 +1712,23 @@ textarea {
   border: 1px solid transparent;
 }
 
+.queue-list-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: max-content;
+  max-width: 100%;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.queue-list-status-badge.status-stage-ready {
+  background: var(--surface);
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent), transparent 56%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent), transparent 86%);
+}
+
 /* mc-audit info-density #3: tone classes for task-status badges so
    ready/blocked/running/failed/cancelled scan distinctly. Colour values
    reuse existing palette tokens (--green/--amber/--red/--blue) on tinted
@@ -1671,6 +1737,12 @@ textarea {
   background: var(--color-success-bg);
   color: var(--color-success-fg);
   border-color: var(--color-success-border);
+}
+
+.task-status.status-tone-info {
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
+  border-color: var(--color-info-border);
 }
 
 .task-status.status-tone-running {
@@ -3047,10 +3119,11 @@ tbody tr.selected {
 }
 
 .queue-list-row-cancel {
-  background: transparent;
-  border: 1px solid var(--line);
-  color: var(--muted);
+  background: var(--color-danger-bg);
+  border: 1px solid var(--color-danger-border);
+  color: var(--color-danger-fg);
   font-size: 12px;
+  font-weight: 650;
   padding: 4px 10px;
   border-radius: 6px;
   cursor: pointer;
@@ -3058,9 +3131,8 @@ tbody tr.selected {
 }
 
 .queue-list-row-cancel:hover {
-  border-color: var(--red);
-  color: var(--red);
-  background: var(--color-danger-bg);
+  border-color: var(--color-danger-fg);
+  background: color-mix(in srgb, var(--color-danger-bg), var(--color-danger-fg) 10%);
 }
 
 .page-banners {
@@ -3163,12 +3235,14 @@ tbody tr.selected {
   inset: 0;
   background: transparent;
   z-index: 40;
+  pointer-events: none;
 }
 
 @media (max-width: 1100px) {
   .run-drawer-backdrop {
     background: rgba(20, 28, 41, 0.12);
     animation: drawer-fade-in 0.16s ease-out;
+    pointer-events: auto;
   }
 }
 
@@ -3233,6 +3307,50 @@ tbody tr.selected {
 .run-drawer-close:hover {
   background: var(--surface-alt);
   color: var(--text);
+}
+
+.run-detail-loading {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.run-detail-loading h3,
+.run-detail-loading p {
+  margin: 0;
+}
+
+.run-detail-loading p {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.run-detail-loading-bars {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.run-detail-loading-bars span {
+  display: block;
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--surface-alt), var(--line), var(--surface-alt));
+  background-size: 200% 100%;
+  animation: loading-shimmer 1.1s ease-in-out infinite;
+}
+
+.run-detail-loading-bars span:nth-child(2) {
+  width: 76%;
+}
+
+.run-detail-loading-bars span:nth-child(3) {
+  width: 54%;
+}
+
+@keyframes loading-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3494,7 +3612,7 @@ tbody tr.selected {
 
 .review-check {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 76px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
   padding: var(--space-2);
@@ -3504,13 +3622,16 @@ tbody tr.selected {
 }
 
 .review-check > span {
-  display: inline-grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 22px;
+  padding: 2px 8px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .review-check div {
@@ -3526,10 +3647,24 @@ tbody tr.selected {
   color: var(--color-success-fg);
 }
 
-.check-warn > span,
-.check-pending > span {
+.check-warn > span {
   background: var(--color-warning-bg);
   color: var(--color-warning-fg);
+}
+
+.check-pending > span {
+  background: var(--surface-alt);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.queued-start-note {
+  align-items: center;
+}
+
+.queued-start-note button {
+  justify-self: start;
+  min-height: 32px;
 }
 
 .check-fail > span {
@@ -3691,7 +3826,7 @@ tbody tr.selected {
   right: 0;
   top: 57px;
   bottom: 0;
-  width: min(960px, calc(100vw - 80px));
+  width: min(var(--run-inspector-width, 960px), calc(100vw - 80px));
   z-index: 55;
   min-height: 0;
   height: auto;
@@ -3704,6 +3839,33 @@ tbody tr.selected {
   background: var(--surface);
   box-shadow: -8px 0 32px rgba(20, 28, 41, 0.16);
   animation: drawer-slide-in 0.18s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.run-inspector-resize-handle {
+  position: absolute;
+  inset: 0 auto 0 -5px;
+  width: 10px;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 3;
+}
+
+.run-inspector-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  width: 2px;
+  height: 54px;
+  border-radius: 999px;
+  background: transparent;
+  transform: translateY(-50%);
+  transition: background 0.12s ease;
+}
+
+.run-inspector-resize-handle:hover::after,
+.run-inspector-resize-handle:focus-visible::after {
+  background: var(--accent);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4507,6 +4669,61 @@ tbody tr.selected {
   align-content: start;
   background: #f8fafc;
   color: var(--text);
+}
+
+.artifact-list-grouped {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  align-content: start;
+  padding: 12px;
+  overflow: auto;
+}
+
+.artifact-group {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.artifact-group > header,
+.artifact-group > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 30px;
+  padding: 0 2px;
+  color: var(--muted);
+}
+
+.artifact-group > summary {
+  cursor: pointer;
+}
+
+.artifact-group h3,
+.artifact-group > summary span {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.artifact-group > header span,
+.artifact-group > summary strong {
+  min-width: 22px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  text-align: center;
+  font-size: 12px;
+}
+
+.artifact-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 8px;
 }
 
 .artifact-list button {

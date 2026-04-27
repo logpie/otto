@@ -23,16 +23,16 @@ export function TopBar({
 }) {
   const watcherState = watcher?.health.state || "stopped";
   const watcherTone: PillTone = watcherState === "running" ? "success" : watcherState === "stale" ? "warning" : "neutral";
-  const watcherLabel = (() => {
-    if (watcherState === "running") return "Running";
-    if (watcherState === "stale") return "Stale";
-    return "Stopped";
-  })();
   const heartbeat = watcher?.health.heartbeat_age_s;
   const heartbeatHint = heartbeat === null || heartbeat === undefined ? "" : `${Math.round(heartbeat)}s ago`;
-  const watcherActionLabel = watcherPending
-    ? watcherState === "running" ? "Stopping..." : "Starting..."
-    : `Watcher: ${watcherLabel}`;
+  const heartbeatTitle = heartbeatHint ? ` Last heartbeat ${heartbeatHint}.` : "";
+  const watcherActionLabel = (() => {
+    if (watcherPending) return watcherState === "running" ? "Stopping runner..." : "Starting runner...";
+    if (watcherState === "running") return "Queue running";
+    if (watcherState === "stale") return "Queue runner stale";
+    if (canStartWatcher(data)) return "Start queue";
+    return "Queue idle";
+  })();
   return (
     <header className="topbar" role="banner">
       <div className="topbar-brand">
@@ -60,42 +60,30 @@ export function TopBar({
         {project ? (
           <span
             className={`topbar-status pill-tone-${project.dirty ? "warning" : "success"}`}
-            title={project.dirty ? "Local changes present" : "Repository clean"}
+            title={project.dirty ? "Git working tree has uncommitted local changes." : "Git working tree is clean; no uncommitted local changes."}
           >
             <span className={`watcher-dot tone-${project.dirty ? "warning" : "success"}`} aria-hidden="true" />
-            {project.dirty ? "Dirty" : "Clean"}
+            {project.dirty ? "Git dirty" : "Git clean"}
           </span>
-        ) : null}
-        {watcherState === "running" ? (
-          <button
-            type="button"
-            className="topbar-watcher topbar-watcher-state pill-tone-success"
-            data-testid="start-watcher-button"
-            disabled
-            title="Watcher is already running."
-          >
-            <span className="watcher-dot tone-success" aria-hidden="true" />
-            Watcher running
-          </button>
         ) : null}
         <button
           type="button"
-          className={`topbar-watcher pill-tone-${watcherTone}`}
+          className={`topbar-watcher pill-tone-${watcherTone} ${watcherState === "running" ? "is-live" : ""}`}
           data-testid={watcherState === "running" ? "stop-watcher-button" : "start-watcher-button"}
           disabled={watcherPending || (watcherState === "running" ? !canStopWatcher(data) : !canStartWatcher(data))}
           aria-busy={watcherPending}
+          aria-label={watcherState === "running" ? "Queue runner is running. Click to pause queue processing." : watcherActionLabel}
           title={
             watcherPending
               ? watcherActionLabel
               : watcherState === "running"
-              ? watcher?.health.next_action || "Stop watcher"
-              : startWatcherTooltip(data) || "Start watcher to run queued jobs."
+              ? `Pause queue processing. Running tasks may continue until they reach a stop point.${heartbeatTitle}`
+              : startWatcherTooltip(data) || "Start the queue runner to process queued jobs."
           }
           onClick={watcherState === "running" ? onStopWatcher : onStartWatcher}
         >
           {watcherPending ? <Spinner /> : <span className={`watcher-dot tone-${watcherTone}`} aria-hidden="true" />}
           {watcherActionLabel}
-          {heartbeatHint && watcherState === "running" ? <em>· {heartbeatHint}</em> : null}
         </button>
         <button
           className="primary topbar-new-job"

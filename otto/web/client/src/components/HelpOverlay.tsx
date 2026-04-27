@@ -8,7 +8,7 @@ export function HelpOverlay({onClose}: {onClose: () => void}) {
     {keys: ["⌘", "K"], label: "Command palette / project picker"},
     {keys: ["j"], label: "Next task"},
     {keys: ["k"], label: "Previous task"},
-    {keys: ["1"], label: "Inspector: Try product"},
+    {keys: ["1"], label: "Inspector: Try product when available"},
     {keys: ["2"], label: "Inspector: Result"},
     {keys: ["3"], label: "Inspector: Code changes"},
     {keys: ["4"], label: "Inspector: Logs"},

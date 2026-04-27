@@ -1,5 +1,4 @@
-"""W3-IMPORTANT-6 regression — Start watcher tooltip stays consistent
-with its own action when disabled.
+"""Queue-runner control regressions.
 
 Live W3 dogfood: with the watcher already running, the sidebar showed
 two buttons:
@@ -13,6 +12,10 @@ reasonably concludes the disabled control is the one to enact.
 Fix: Start watcher gets a Start-specific tooltip — "Watcher already
 running." when the watcher is alive — instead of falling back to the
 shared next_action that was authored for the Stop button.
+
+The redesigned top bar now renders one queue-runner control. When it is
+running, the only visible control is the stop/pause action; there is no
+second disabled "Start" chip to confuse the operator.
 """
 
 from __future__ import annotations
@@ -136,57 +139,46 @@ def _install_route(page: Any, url_glob: str, payload: dict[str, Any]) -> None:
     page.route(url_glob, handler)
 
 
-def test_start_watcher_disabled_tooltip_does_not_say_stop(
+def test_running_queue_renders_one_stop_control_not_duplicate_start(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """The contradictory "Stop watcher to pause queue dispatch." MUST NOT
-    appear as the Start watcher button's tooltip when the watcher is
-    already running."""
+    """Running queue state should not render both Start and Stop controls."""
+
     _install_route(page, "**/api/projects", _projects_payload())
     _install_route(page, "**/api/state*", _state_with_watcher_running())
 
     page.goto(mc_backend.url, wait_until="networkidle")
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
-    # Wait for the Start watcher button itself to render.
-    page.wait_for_selector('[data-testid="start-watcher-button"]', timeout=10_000)
+    page.wait_for_selector('[data-testid="stop-watcher-button"]', timeout=10_000)
 
-    title = page.evaluate(
-        """() => document.querySelector('[data-testid=\"start-watcher-button\"]')?.getAttribute('title')"""
-    )
-    disabled = page.evaluate(
-        """() => document.querySelector('[data-testid=\"start-watcher-button\"]')?.disabled"""
-    )
-
-    assert disabled is True, (
-        f"Start watcher button must be disabled when watcher is running. "
-        f"title={title!r}"
-    )
-    assert title is not None, "Start watcher button missing"
-    assert "Stop watcher" not in title, (
-        f"Start watcher tooltip must not describe the Stop action. Got: {title!r}"
-    )
+    assert page.locator('[data-testid="start-watcher-button"]').count() == 0
+    assert page.locator(".topbar .topbar-watcher").count() == 1
 
 
-def test_start_watcher_disabled_tooltip_says_already_running(
+def test_running_queue_control_uses_queue_language(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """Positive form: the Start watcher tooltip should explain WHY it's
-    disabled (watcher already running), so operators don't waste time
-    trying to click it."""
+    """Visible topbar copy should describe the user-facing queue runner."""
+
     _install_route(page, "**/api/projects", _projects_payload())
     _install_route(page, "**/api/state*", _state_with_watcher_running())
 
     page.goto(mc_backend.url, wait_until="networkidle")
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
-    page.wait_for_selector('[data-testid="start-watcher-button"]', timeout=10_000)
+    button = page.get_by_test_id("stop-watcher-button")
+    button.wait_for(state="visible", timeout=10_000)
 
-    title = page.evaluate(
-        """() => document.querySelector('[data-testid=\"start-watcher-button\"]')?.getAttribute('title') || ''"""
-    )
+    title = button.get_attribute("title") or ""
+    text = button.text_content() or ""
+    git_status = page.locator(".topbar .topbar-status").first
+    git_title = git_status.get_attribute("title") or ""
+    git_text = git_status.text_content() or ""
 
-    # Accept any of these phrasings — the contract is "tooltip explains
-    # the disabled state from the Start button's perspective".
-    assert any(phrase in title.lower() for phrase in ("already running", "already started", "running")), (
-        f"Start watcher tooltip should indicate the watcher is already "
-        f"running, got: {title!r}"
-    )
+    assert "Queue running" in text
+    assert "ago" not in text
+    assert "Pause queue processing" in title
+    assert "Last heartbeat 5s ago" in title
+    assert "Watcher" not in text
+    assert "watcher" not in title.lower()
+    assert "Git clean" in git_text
+    assert "Git working tree is clean" in git_title

@@ -1,6 +1,4 @@
-"""Browser regression for W11-IMPORTANT-3 — Start watcher button must
-surface a reason (title=) when disabled and a toast when an action call
-is rejected by the server.
+"""Browser regressions for queue-runner controls.
 
 Source: live W11 dogfood — after a silently-rejected enqueue (W11-CRITICAL-1)
 the user clicked Start watcher, but the button stayed disabled (no queued
@@ -17,10 +15,8 @@ See ``docs/mc-audit/live-findings.md`` (search "W11-IMPORTANT-3").
 
 Invariants pinned by this test:
 
-1. With supervisor.start_blocked_reason set, the MissionFocus start-watcher
-   button (``mission-start-watcher-button``) ``title`` attribute reflects
-   that reason — not the generic "Start the watcher process to run queued
-   jobs."
+1. When the queue runner is already running, the top bar renders the single
+   pause/stop control instead of a duplicate disabled Start control.
 2. When the watcher start POST fails with 4xx/5xx, an error toast appears
    (``data-testid="toast"`` rendered with class containing "error").
 
@@ -211,17 +207,12 @@ def test_start_watcher_failure_shows_error_toast(
     )
 
 
-def test_mission_focus_button_title_reflects_disabled_reason(
+def test_running_queue_uses_single_pause_control(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """When the MissionFocus start-watcher button is disabled because of a
-    supervisor block, its title must say so — not the generic 'Start the
-    watcher process'."""
+    """When the queue runner is active, show one pause control."""
 
     payload = _base_state()
-    # Watcher is "startable" from supervisor's POV (so the focus banner shows
-    # the start CTA), but the supervisor publishes a blocking reason. We want
-    # to confirm the title surfaces that reason.
     payload["watcher"]["counts"]["queued"] = 1
     payload["runtime"]["supervisor"]["can_start"] = False
     payload["runtime"]["supervisor"]["start_blocked_reason"] = (
@@ -238,21 +229,10 @@ def test_mission_focus_button_title_reflects_disabled_reason(
 
     _hydrate(mc_backend, page, disable_animations)
 
-    # The MissionFocus banner shows the start CTA only when focus.primary
-    # is "start". When the watcher is healthy + running this shifts. We
-    # accept either the focus button OR fall back to checking the sidebar
-    # button title — the regression invariant is "disabled reason surfaces
-    # via title", regardless of which control is visible.
-    sidebar_btn = page.get_by_test_id("start-watcher-button")
-    sidebar_btn.wait_for(state="attached", timeout=5_000)
-    sidebar_title = sidebar_btn.get_attribute("title") or ""
-
-    focus_btn_locator = page.locator("[data-testid=mission-start-watcher-button]")
-    focus_title = ""
-    if focus_btn_locator.count() > 0:
-        focus_title = focus_btn_locator.first.get_attribute("title") or ""
-
-    combined = f"{sidebar_title} | {focus_title}".lower()
-    assert "already running" in combined or "watcher" in combined, (
-        f"disabled reason should surface via title=. sidebar={sidebar_title!r}, focus={focus_title!r}"
-    )
+    pause_btn = page.get_by_test_id("stop-watcher-button")
+    pause_btn.wait_for(state="visible", timeout=5_000)
+    title = pause_btn.get_attribute("title") or ""
+    text = pause_btn.text_content() or ""
+    assert page.locator('[data-testid="start-watcher-button"]').count() == 0
+    assert "Queue running" in text
+    assert "Pause queue processing" in title

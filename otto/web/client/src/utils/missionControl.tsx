@@ -244,7 +244,7 @@ export function missionFocus(data: StateResponse | null): {
     return {
       kicker: "Commands",
       title: `${commandBacklog} command${commandBacklog === 1 ? "" : "s"} waiting`,
-      body: "Start the watcher to run pending commands.",
+      body: "Start the queue runner to run pending commands.",
       tone: "warning",
       primary: "start",
       working,
@@ -310,7 +310,7 @@ export function missionFocus(data: StateResponse | null): {
     return {
       kicker: "Queue",
       title: `${queued} queued task${queued === 1 ? "" : "s"} waiting`,
-      body: "Start the watcher to run this task.",
+      body: "Start the queue runner to process queued tasks.",
       tone: "info",
       primary: "start",
       working,
@@ -432,7 +432,7 @@ export function boardTaskMatchesFilters(task: BoardTask, filters: Filters): bool
       .toLowerCase();
     if (!haystack.includes(query)) return false;
   }
-  if (filters.activeOnly && task.stage !== "working") return false;
+  if (filters.activeOnly && !task.active) return false;
   if (filters.outcome !== "all" && !boardTaskMatchesOutcome(task, filters.outcome)) return false;
   return true;
 }
@@ -451,6 +451,7 @@ export function boardTaskMatchesOutcome(task: BoardTask, outcome: OutcomeFilter)
 export function boardTaskFromLanding(item: LandingItem, runId: string | null, mergeAllowed: boolean, live?: LiveRunItem): BoardTask {
   const stage = boardStageForLanding(item, mergeAllowed);
   const active = Boolean(live?.active) || isActiveQueueStatus(item.queue_status);
+  const lastEvent = live ? userFacingLiveLastEvent(live) : null;
   return {
     id: item.task_id,
     runId,
@@ -464,7 +465,7 @@ export function boardTaskFromLanding(item: LandingItem, runId: string | null, me
     reason: boardReasonForLanding(item, mergeAllowed, live),
     active,
     elapsedDisplay: live?.elapsed_display || landingDurationDisplay(item),
-    lastEvent: live?.last_event || null,
+    lastEvent,
     progress: live?.progress || null,
     buildConfig: live?.build_config || item.build_config || null,
     source: "landing",
@@ -482,20 +483,22 @@ export function landingDurationDisplay(item: LandingItem): string | null {
 
 export function boardTaskFromLive(item: LiveRunItem): BoardTask {
   const stage: BoardStage = item.active ? "working" : isAttentionStatus(item.display_status) ? "attention" : "working";
+  const lastEvent = userFacingLiveLastEvent(item);
+  const reason = item.overlay?.reason || lastEvent || liveWaitingReason(item) || item.elapsed_display || item.display_status;
   return {
     id: item.queue_task_id || item.run_id,
     runId: item.run_id,
     title: item.queue_task_id || item.display_id || item.run_id,
-    summary: item.command || item.last_event || item.run_id,
+    summary: item.command || lastEvent || item.run_id,
     stage,
     status: item.display_status,
     branch: item.branch,
     changedFileCount: null,
     proof: usageLine(item),
-    reason: item.overlay?.reason || item.last_event || item.elapsed_display || item.display_status,
+    reason,
     active: item.active,
     elapsedDisplay: item.elapsed_display || null,
-    lastEvent: item.last_event || null,
+    lastEvent,
     progress: item.progress || null,
     buildConfig: item.build_config || null,
     source: "live",
@@ -504,6 +507,21 @@ export function boardTaskFromLive(item: LiveRunItem): BoardTask {
     usageDisplay: usageLine(item) !== "-" ? usageLine(item) : null,
     durationDisplay: item.elapsed_display && item.elapsed_display !== "-" ? item.elapsed_display : null,
   };
+}
+
+export function userFacingLiveLastEvent(item: LiveRunItem): string | null {
+  const event = String(item.last_event || "").trim();
+  if (!event || event === "-") return null;
+  if (event.toLowerCase() === "legacy queue mode") return null;
+  return event;
+}
+
+function liveWaitingReason(item: LiveRunItem): string | null {
+  const status = String(item.display_status || item.status || "").toLowerCase();
+  if (status === "queued") return "Start the queue runner to process queued tasks.";
+  if (status === "waiting" || status === "pending") return "Waiting for the next queue step.";
+  if (status === "paused") return "Paused.";
+  return null;
 }
 
 export function boardStageForLanding(item: LandingItem, mergeAllowed: boolean): BoardStage {
@@ -521,9 +539,9 @@ export function boardStatusLabel(item: LandingItem, mergeAllowed: boolean): stri
 
 export function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean, live?: LiveRunItem): string {
   if (item.landing_state === "ready" && !mergeAllowed) return "Repository cleanup required before landing.";
-  if (item.landing_state === "ready") return `${changeLine(item)} changed; ${proofLine(item)} recorded.`;
+  if (item.landing_state === "ready") return `${changeLine(item)} changed; ${proofLine(item)} recorded. Review, then land.`;
   if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";
-  if (item.queue_status === "queued") return "Waiting for the watcher.";
+  if (item.queue_status === "queued") return "Waiting for the queue runner.";
   if (item.queue_status === "initializing") return "Child process started; waiting for Otto session readiness.";
   if (["starting", "running", "terminating"].includes(item.queue_status)) {
     if (live?.elapsed_display) return `Running for ${live.elapsed_display}.`;
@@ -576,18 +594,21 @@ export function activeRunSummary(data: StateResponse | null): {label: string; de
 // mc-audit info-density #3: map a task's status string + stage to a tone
 // keyword so the CSS can colour ready/running/failed/cancelled etc. with
 // distinct hues. Tone values:
-//   success — ready/landed/done/merged
+//   info    — ready for operator review/landing
+//   success — landed/done/merged
 //   running — starting/running/initializing/terminating/in flight
-//   warning — blocked/queued/waiting/paused/interrupted/stale
+//   warning — blocked/paused/interrupted/stale
 //   danger  — failed/cancelled/removed/error
-//   neutral — anything else
+//   neutral — queued/waiting/pending and anything else
 // mc-audit visual-coherence F10 — tone-to-glyph map for status badges so
 // signal isn't carried by colour alone. ✓ pass-like, ⚠ warning,
 // ✗ danger, ● running (filled circle reads as "in flight"),
 // · neutral. Marked aria-hidden where applied; the surrounding label
 // already communicates the status to screen readers.
-export function toneIcon(tone: "success" | "running" | "warning" | "danger" | "neutral" | string): string {
+export function toneIcon(tone: "info" | "success" | "running" | "warning" | "danger" | "neutral" | string): string {
   switch (tone) {
+    case "info":
+      return "→";
     case "success":
       return "✓";
     case "warning":
@@ -604,9 +625,12 @@ export function toneIcon(tone: "success" | "running" | "warning" | "danger" | "n
 export function statusTone(
   status: string,
   stage: BoardStage,
-): "success" | "running" | "warning" | "danger" | "neutral" {
+): "info" | "success" | "running" | "warning" | "danger" | "neutral" {
   const lower = status.toLowerCase();
-  if (["ready", "landed", "merged", "done", "success"].some((value) => lower.includes(value))) {
+  if (lower.includes("ready")) {
+    return "info";
+  }
+  if (["landed", "merged", "done", "success"].some((value) => lower.includes(value))) {
     return "success";
   }
   if (["failed", "cancelled", "canceled", "removed", "error"].some((value) => lower.includes(value))) {
@@ -615,13 +639,16 @@ export function statusTone(
   if (["starting", "running", "initializing", "terminating", "in flight", "in_flight"].some((value) => lower.includes(value))) {
     return "running";
   }
-  if (["queued", "waiting", "paused", "interrupted", "stale", "blocked"].some((value) => lower.includes(value))) {
+  if (["queued", "waiting", "pending"].some((value) => lower.includes(value))) {
+    return "neutral";
+  }
+  if (["paused", "interrupted", "stale", "blocked"].some((value) => lower.includes(value))) {
     return "warning";
   }
   // Stage-based fallback for empty/odd statuses.
-  if (stage === "ready") return "success";
+  if (stage === "ready") return "info";
   if (stage === "attention") return "danger";
-  if (stage === "working") return "running";
+  if (stage === "working") return "neutral";
   if (stage === "landed") return "success";
   return "neutral";
 }
@@ -760,8 +787,8 @@ export function canStartWatcher(data?: StateResponse | null): boolean {
 export function startWatcherTooltip(data?: StateResponse | null): string {
   const blocked = data?.runtime.supervisor.start_blocked_reason || "";
   if (blocked) return blocked;
-  if (data?.watcher.health.state === "running") return "Watcher already running.";
-  if (data?.watcher.health.state === "stale") return "Stop the stale watcher before starting another one.";
+  if (data?.watcher.health.state === "running") return "Queue runner already running.";
+  if (data?.watcher.health.state === "stale") return "Stop the stale queue runner before starting another one.";
   // Falls back to the shared next_action only when the action is actually
   // about starting (state is "stopped" or unknown).
   return data?.watcher.health.next_action || "";
@@ -777,12 +804,12 @@ export function watcherControlHint(data?: StateResponse | null): string {
   const backlog = Number(data.runtime.command_backlog.pending || 0) + Number(data.runtime.command_backlog.processing || 0);
   if (canStartWatcher(data)) {
     const work = [queued ? `${queued} queued` : "", backlog ? `${backlog} command${backlog === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ");
-    return `Start watcher to process ${work}.`;
+    return `Start queue runner to process ${work}.`;
   }
-  if (canStopWatcher(data)) return "Running. Stop to pause the queue.";
+  if (canStopWatcher(data)) return "Queue runner is active. Stop to pause the queue.";
   if (data.runtime.supervisor.start_blocked_reason) return `Start unavailable: ${data.runtime.supervisor.start_blocked_reason}`;
   if (!queued && !backlog) return "Queue a job to start.";
-  return data.watcher.health.next_action || "Watcher controls are unavailable.";
+  return data.watcher.health.next_action || "Queue runner controls are unavailable.";
 }
 
 export function watcherSummary(watcher?: WatcherInfo): string {
@@ -1069,16 +1096,20 @@ export function planningLine(config: RunBuildConfig | null | undefined): string 
   if (config.planning === "spec_review") return "Spec review gate";
   if (config.planning === "spec_auto") return "Spec auto-approved";
   if (config.planning === "spec_file") return config.spec_file_path ? `Spec file ${config.spec_file_path}` : "Spec file";
-  return "";
+  return "Direct build";
 }
 
 export function timeoutLine(config: RunBuildConfig | null | undefined): string {
   if (!config) return "-";
+  const usesSpecTimeout = ["spec_review", "spec_auto", "spec_file"].includes(String(config.planning || ""));
   return [
-    config.queue?.task_timeout_s !== null && config.queue?.task_timeout_s !== undefined
-      ? `queue timeout ${formatDuration(config.queue.task_timeout_s)}`
-      : "queue timeout disabled",
     config.run_budget_seconds ? `run budget ${formatDuration(config.run_budget_seconds)}` : "",
+    config.queue?.task_timeout_s !== null && config.queue?.task_timeout_s !== undefined
+      ? `queue kill ${formatDuration(config.queue.task_timeout_s)}`
+      : "queue kill disabled",
+    config.spec_timeout
+      ? `spec cap ${formatDuration(config.spec_timeout)}${usesSpecTimeout ? "" : " (unused for direct build)"}`
+      : "",
   ].filter(Boolean).join(" · ");
 }
 
@@ -1274,6 +1305,17 @@ export function canShowDiff(detail: RunDetail | null): boolean {
   const packet = detail.review_packet;
   if (!packet.changes.branch || packet.changes.diff_error) return false;
   return packet.readiness.state !== "in_progress";
+}
+
+export function canTryProduct(detail: RunDetail | null): boolean {
+  if (!detail) return false;
+  const packet = detail.review_packet;
+  const status = String(detail.display_status || detail.status || "").toLowerCase();
+  if (packet.readiness.state === "in_progress") return false;
+  if (["queued", "waiting", "pending", "starting", "initializing", "running", "terminating"].some((value) => status.includes(value))) {
+    return false;
+  }
+  return Boolean(packet.product_handoff);
 }
 
 /**
@@ -1478,7 +1520,7 @@ export function landingStateText(item: LandingItem): string {
 export function diagnosticLandingAction(item: LandingItem): string {
   if (item.landing_state === "ready") return `${changeLine(item)} changed; review evidence before landing.`;
   if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";
-  if (item.queue_status === "queued") return "Start the watcher to run this task.";
+  if (item.queue_status === "queued") return "Start the queue runner to process queued tasks.";
   if (item.queue_status === "failed") return "Open review packet and requeue or remove.";
   if (item.queue_status === "stale") return "Open review packet and remove stale work.";
   if (item.diff_error) return formatTechnicalIssue(item.diff_error);
@@ -1520,43 +1562,48 @@ export function userVisibleDetailLine(line: string): string | null {
 // The icon char is exposed via a `.status-icon` span so test harnesses
 // and styling can target it independently of the text label.
 export function checkStatusIcon(status: string): string {
-  return {
+  const normalized = String(status || "").trim().toLowerCase();
+  const icons: Record<string, string> = {
     pass: "✓",
     warn: "⚠",
     fail: "✗",
-    pending: "…",
+    pending: "",
     info: "i",
-  }[status] || "i";
+  };
+  return normalized in icons ? icons[normalized]! : "i";
 }
 
 export function storyStatusIcon(status: string): string {
+  const normalized = String(status || "").trim().toLowerCase();
   return {
     pass: "✓",
     warn: "⚠",
     fail: "✗",
     skipped: "–",
     unknown: "i",
-  }[status] || "i";
+  }[normalized] || "i";
 }
 
 export function checkStatusLabel(status: string): string {
+  const normalized = String(status || "").trim().toLowerCase();
   return {
     pass: "Pass",
     warn: "Warn",
     fail: "Fail",
-    pending: "Wait",
+    pending: "Pending",
     info: "Info",
-  }[status] || capitalize(status || "info");
+  }[normalized] || capitalize(normalized || "info");
 }
 
 export function storyStatusLabel(status: string): string {
+  const normalized = String(status || "").trim().toLowerCase();
   return {
     pass: "Pass",
     warn: "Warn",
     fail: "Fail",
     skipped: "Skip",
     unknown: "Info",
-  }[status] || capitalize(status || "info");
+  }[normalized] || capitalize(normalized || "info");
 }
 
 export function storyStatusClass(status: string): string {

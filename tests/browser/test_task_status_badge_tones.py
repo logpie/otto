@@ -6,13 +6,13 @@ Source: ``docs/mc-audit/findings.md`` info-density theme #3. The prior
 ``.task-status`` class was a single gray pill regardless of meaning.
 
 The fix in ``otto/web/client/src/styles.css`` adds tone variants
-(``status-tone-success`` / ``status-tone-running`` / ``status-tone-warning``
-/ ``status-tone-danger`` / ``status-tone-neutral``) and ``App.tsx``'s
+(``status-tone-info`` / ``status-tone-success`` / ``status-tone-running`` /
+``status-tone-warning`` / ``status-tone-danger`` / ``status-tone-neutral``) and ``App.tsx``'s
 ``TaskCard`` adds them via the ``statusTone()`` helper.
 
 Invariant: every visible task-status badge has a ``status-tone-*`` class
 suffix; the data-attribute ``data-status-tone`` matches the visible
-status semantics (success/running/warning/danger).
+status semantics (info/success/running/warning/danger).
 """
 
 from __future__ import annotations
@@ -216,7 +216,7 @@ def test_status_badges_carry_distinct_tones(
         assert "status-tone-" in cls, (
             f"badge #{index} missing status-tone-* class: {cls!r}"
         )
-        assert tone_attr in {"success", "running", "warning", "danger", "neutral"}, (
+        assert tone_attr in {"info", "success", "running", "warning", "danger", "neutral"}, (
             f"badge #{index} has unexpected data-status-tone={tone_attr!r}"
         )
         # The tone class suffix must match the data attribute.
@@ -225,11 +225,11 @@ def test_status_badges_carry_distinct_tones(
         )
         tones.add(tone_attr or "")
 
-    # With ready + failed + queued + landed in the mix, we expect at LEAST
-    # success + danger + warning tones — three distinct tones.
+    # With ready + failed + queued + landed in the mix, ready must be its
+    # own action-needed info tone instead of looking identical to landed.
+    assert "info" in tones, f"missing ready/action-needed info tone, observed {tones}"
     assert "success" in tones, f"missing success tone, observed {tones}"
     assert "danger" in tones, f"missing danger tone, observed {tones}"
-    assert "warning" in tones, f"missing warning tone, observed {tones}"
 
 
 def test_status_badge_visual_color_differs_per_tone(
@@ -260,3 +260,25 @@ def test_status_badge_visual_color_differs_per_tone(
         f"success ({success_bg}) and danger ({danger_bg}) badges share "
         "the same background — tone classes have no visual effect."
     )
+
+
+def test_ready_and_landed_badges_are_visually_distinct(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """Ready means review/land; landed is terminal. They must not look identical."""
+
+    _install_routes(page, _state_with_mixed_tasks())
+    _hydrate(mc_backend, page, disable_animations)
+
+    ready_badge = page.locator("[data-task-id='ready-task'] .task-status")
+    landed_badge = page.locator("[data-task-id='landed-task'] .task-status")
+    ready_badge.wait_for(state="visible", timeout=5_000)
+    landed_badge.wait_for(state="visible", timeout=5_000)
+
+    assert ready_badge.get_attribute("data-status-tone") == "info"
+    assert landed_badge.get_attribute("data-status-tone") == "success"
+    assert "Ready" in (ready_badge.text_content() or "")
+    assert "Ready to land" in (ready_badge.get_attribute("title") or "")
+    assert "Landed" in (landed_badge.text_content() or "")
+    assert ready_badge.locator(".status-icon").count() == 0
+    assert "✓" in (landed_badge.locator(".status-icon").text_content() or "")
