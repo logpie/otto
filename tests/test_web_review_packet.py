@@ -5,8 +5,16 @@ import subprocess
 from pathlib import Path
 
 from otto import paths
+from otto.queue.schema import write_state as write_queue_state
 
-from tests._web_mc_helpers import _client, _create_branch_file, _init_repo, _set_origin_head, _write_run
+from tests._web_mc_helpers import (
+    _append_queue_task,
+    _client,
+    _create_branch_file,
+    _init_repo,
+    _set_origin_head,
+    _write_run,
+)
 
 
 def test_web_review_packet_includes_story_details_and_html_report(tmp_path: Path) -> None:
@@ -227,3 +235,114 @@ def test_web_review_packet_hides_preview_for_test_only_smoke_task(tmp_path: Path
     assert handoff["urls"] == ["http://127.0.0.1:5000"]
     assert handoff["preview_available"] is False
     assert "changed only tests" in handoff["preview_reason"]
+
+
+def test_web_review_packet_treats_certification_only_run_as_proof_not_landing(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _set_origin_head(repo, "main")
+    subprocess.run(["git", "branch", "certify/pdf-export"], cwd=repo, check=True)
+    certify_dir = paths.certify_dir(repo, "cert-only")
+    certify_dir.mkdir(parents=True, exist_ok=True)
+    (certify_dir / "proof-of-work.html").write_text("<html><body>cert proof</body></html>", encoding="utf-8")
+    (certify_dir / "proof-of-work.json").write_text(
+        json.dumps(
+            {
+                "outcome": "passed",
+                "stories_tested": 1,
+                "stories_passed": 1,
+                "stories": [
+                    {
+                        "story_id": "pdf-export-ui-flow",
+                        "status": "pass",
+                        "claim": "PDF export can be certified from the browser UI.",
+                        "observed_result": "Dashboard export generated a PDF.",
+                        "methodology": "live-ui-events",
+                        "surface": "DOM / screenshot",
+                    }
+                ],
+                "demo_evidence": {
+                    "schema_version": 1,
+                    "app_kind": "web",
+                    "demo_required": True,
+                    "demo_status": "strong",
+                    "demo_reason": "Proof maps the task stories to concrete evidence.",
+                    "primary_demo": None,
+                    "stories": [],
+                    "counts": {"story_videos": 1},
+                },
+                "evidence_gate": {"schema_version": 1, "status": "pass", "blocks_pass": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    missing_intent = repo / ".otto" / "live" / "runs" / "cert-only-intent.txt"
+    missing_checkpoint = repo / ".otto" / "live" / "runs" / "cert-only-checkpoint.json"
+    _write_run(
+        repo,
+        run_id="cert-only",
+        branch="certify/pdf-export",
+        intent_summary="Certify the existing PDF export feature.",
+        status="done",
+        domain="queue",
+        run_type="queue",
+        command="certify",
+        source={"argv": ["certify", "the existing PDF export feature"]},
+        intent_extra={"intent_path": str(missing_intent)},
+        artifacts_extra={"checkpoint_path": str(missing_checkpoint)},
+    )
+
+    packet = _client(repo).get("/api/runs/cert-only").json()["review_packet"]
+    checks = {check["key"]: check for check in packet["checks"]}
+
+    assert packet["headline"] == "Certification complete"
+    assert packet["readiness"]["state"] == "reviewed"
+    assert packet["next_action"]["action_key"] is None
+    assert "do not land code" in packet["next_action"]["reason"]
+    assert packet["changes"]["file_count"] == 0
+    assert checks["changes"]["status"] == "pass"
+    assert checks["changes"]["detail"] == "No code changes expected for a certification-only run."
+    assert checks["evidence"]["status"] == "pass"
+    assert checks["landing"]["label"] == "Merge action"
+    assert checks["landing"]["status"] == "pass"
+    assert "No merge action" in checks["landing"]["detail"]
+
+
+def test_landing_status_marks_certification_only_queue_task_reviewed(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _set_origin_head(repo, "main")
+    _append_queue_task(
+        repo,
+        "certify-pdf-export",
+        command_argv=["certify", "the existing PDF export feature"],
+        branch="certify/pdf-export",
+        resolved_intent="Certify the existing PDF export feature.",
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "certify-pdf-export": {
+                    "status": "done",
+                    "attempt_run_id": "cert-only",
+                    "duration_s": 180,
+                    "stories_passed": 5,
+                    "stories_tested": 5,
+                }
+            },
+        },
+    )
+
+    landing = _client(repo).get("/api/state").json()["landing"]
+    item = landing["items"][0]
+
+    assert landing["counts"]["ready"] == 0
+    assert landing["counts"]["reviewed"] == 1
+    assert landing["counts"]["blocked"] == 0
+    assert item["landing_state"] == "reviewed"
+    assert item["label"] == "Certified"
+    assert item["changed_file_count"] == 0
+    assert item["diff_error"] is None

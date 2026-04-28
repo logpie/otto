@@ -20,7 +20,22 @@ export interface Filters {
 
 export type ViewMode = "tasks" | "diagnostics";
 
-export type BoardStage = "attention" | "working" | "ready" | "landed";
+export type BoardStage = "attention" | "working" | "ready" | "reviewed" | "landed";
+export interface BoardStageColumn {
+  stage: BoardStage;
+  title: string;
+  empty: string;
+}
+
+export const BOARD_STAGE_COLUMNS: readonly BoardStageColumn[] = [
+  {stage: "working", title: "In progress", empty: "No tasks."},
+  {stage: "attention", title: "Needs action", empty: "No tasks."},
+  {stage: "ready", title: "Ready to land", empty: "No tasks."},
+  {stage: "reviewed", title: "Certified", empty: "No certifications."},
+  {stage: "landed", title: "Landed", empty: "Nothing landed yet."},
+];
+export const BOARD_STAGE_ORDER: readonly BoardStage[] = BOARD_STAGE_COLUMNS.map((column) => column.stage);
+
 export type InspectorMode = "try" | "proof" | "logs" | "artifacts" | "diff";
 
 export type HistorySortColumn = "outcome" | "run" | "summary" | "duration" | "usage";

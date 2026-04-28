@@ -97,6 +97,12 @@ def _write_run(
     branch: str = "main",
     intent_summary: str = "build the web surface",
     status: str = "running",
+    domain: str = "atomic",
+    run_type: str = "build",
+    command: str = "build",
+    source: dict[str, Any] | None = None,
+    intent_extra: dict[str, Any] | None = None,
+    artifacts_extra: dict[str, Any] | None = None,
 ) -> None:
     primary_log = paths.build_dir(repo, run_id) / "narrative.log"
     primary_log.parent.mkdir(parents=True, exist_ok=True)
@@ -107,23 +113,25 @@ def _write_run(
     record = make_run_record(
         project_dir=repo,
         run_id=run_id,
-        domain="atomic",
-        run_type="build",
-        command="build",
+        domain=domain,
+        run_type=run_type,
+        command=command,
         display_name="build web",
         status=status,
         cwd=repo,
         source={
-            "argv": ["build", "web"],
+            "argv": [command, "web"],
             "provider": "codex",
             "model": "gpt-5.4",
             "reasoning_effort": "medium",
+            **dict(source or {}),
         },
         git={"branch": branch, "worktree": None},
-        intent={"summary": intent_summary},
+        intent={"summary": intent_summary, **dict(intent_extra or {})},
         artifacts={
             "summary_path": outside_artifact or str(summary_path),
             "primary_log_path": str(primary_log),
+            **dict(artifacts_extra or {}),
         },
         metrics={
             "cost_usd": 0.0,

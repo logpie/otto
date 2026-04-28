@@ -618,6 +618,59 @@ def test_pow_demo_evidence_marks_generic_recording_plus_screenshot_partial(tmp_p
     assert report["evidence_gate"]["status"] == "warn"
 
 
+def test_pow_demo_evidence_does_not_require_video_for_http_file_story(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "recording.webm").write_bytes(b"video")
+    (evidence_dir / "pdf-export-ui-flow.webm").write_bytes(b"story-video")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "pdf-export-ui-flow",
+                "summary": "PDF export can be downloaded from the dashboard",
+                "claim": "User can click the dashboard export control and download a PDF.",
+                "observed_steps": ["opened dashboard", "clicked Export PDF"],
+                "observed_result": "browser downloaded a PDF",
+                "surface": "DOM / screenshot / video",
+                "methodology": "live-ui-events",
+                "evidence": "Browser recording showed the export flow and file validation confirmed application/pdf.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "pdf-export-alias",
+                "summary": "/expenses.pdf aliases /tickets.pdf",
+                "claim": "/expenses.pdf alias works identically to /tickets.pdf.",
+                "observed_steps": ["requested /expenses.pdf with curl"],
+                "observed_result": "200 OK, application/pdf, correct Content-Disposition",
+                "surface": "HTTP",
+                "methodology": "http-request",
+                "evidence": "HTTP GET /expenses.pdf => 200, application/pdf, content-type and bytes verified.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        2,
+        2,
+        evidence_dir=evidence_dir,
+        intent="Certify the existing PDF export feature as a user-visible product flow.",
+    )
+
+    demo = report["demo_evidence"]
+    alias_story = next(story for story in demo["stories"] if story["id"] == "pdf-export-alias")
+    ui_story = next(story for story in demo["stories"] if story["id"] == "pdf-export-ui-flow")
+    assert ui_story["needs_visual"] is True
+    assert alias_story["needs_visual"] is False
+    assert alias_story["needs_file_validation"] is True
+    assert alias_story["proof_level"] == "file validation"
+    assert demo["demo_status"] == "strong"
+    assert report["verdict_label"] == "PASS"
+
+
 def test_pow_demo_evidence_marks_fast_mode_video_not_required(tmp_path: Path):
     report = write_test_pow_report(
         tmp_path,

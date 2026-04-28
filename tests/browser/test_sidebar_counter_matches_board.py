@@ -106,7 +106,7 @@ def _state_with_atomic_run() -> dict[str, Any]:
         },
         "landing": {
             "items": [],
-            "counts": {"ready": 0, "merged": 0, "blocked": 0, "total": 0},
+            "counts": {"ready": 0, "merged": 0, "blocked": 0, "reviewed": 0, "total": 0},
             "collisions": [],
             "merge_blocked": False,
             "merge_blockers": [],
@@ -152,6 +152,41 @@ def _state_with_atomic_run() -> dict[str, Any]:
             "issues": [],
         },
     }
+
+
+def _certified_landing_item() -> dict[str, Any]:
+    return {
+        "task_id": "certify-pdf-export",
+        "run_id": "2026-04-28-082607-a69a04",
+        "branch": "certify/certify-pdf-export",
+        "worktree": ".worktrees/certify-pdf-export",
+        "summary": "Certify the existing PDF export feature.",
+        "build_config": None,
+        "queue_status": "done",
+        "landing_state": "reviewed",
+        "label": "Certified",
+        "merge_id": None,
+        "merge_status": None,
+        "merge_run_status": None,
+        "duration_s": 300,
+        "cost_usd": None,
+        "token_usage": {"total_tokens": 1234},
+        "stories_passed": 5,
+        "stories_tested": 5,
+        "changed_file_count": 0,
+        "changed_files": [],
+        "diff_error": None,
+    }
+
+
+def _state_with_certified_task() -> dict[str, Any]:
+    state = _state_with_atomic_run()
+    state["live"]["items"] = []
+    state["live"]["total_count"] = 0
+    state["live"]["active_count"] = 0
+    state["landing"]["items"] = [_certified_landing_item()]
+    state["landing"]["counts"] = {"ready": 0, "merged": 0, "blocked": 0, "reviewed": 1, "total": 1}
+    return state
 
 
 def _install_projects_route(page: Any) -> None:
@@ -248,3 +283,21 @@ def test_sidebar_in_flight_zero_with_no_runs(
     empty.wait_for(state="visible", timeout=5_000)
     text = empty.text_content() or ""
     assert "No work queued" in text
+
+
+def test_certification_only_task_is_visible_but_not_ready_to_land(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """Cert-only proof is a visible reviewed task, not a ready-to-land build."""
+
+    _install_projects_route(page)
+    _install_state_route(page, _state_with_certified_task())
+
+    _hydrate(mc_backend, page, disable_animations)
+
+    row = page.get_by_test_id("task-card-certify-pdf-export")
+    row.wait_for(state="visible", timeout=5_000)
+    text = row.text_content() or ""
+    assert "Certified" in text
+    assert "Ready" not in text
+    assert page.get_by_test_id("mission-land-ready-button").count() == 0

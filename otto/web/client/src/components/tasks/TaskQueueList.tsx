@@ -4,6 +4,8 @@ import {
   mergeBlockedText,
   mergeButtonTitle,
   statusTone,
+  boardTaskStageLabel,
+  boardTaskStageTitle,
   taskBoardColumns,
   taskBoardSubtitle,
   testIdForTask,
@@ -40,11 +42,7 @@ export function TaskQueueList({
   onNewJob?: () => void;
 }) {
   const columns = taskBoardColumns(data, filters);
-  const items: BoardTask[] = [];
-  for (const stage of ["working", "attention", "ready", "landed"] as const) {
-    const column = columns.find((c) => c.stage === stage);
-    if (column) items.push(...column.items);
-  }
+  const items = columns.flatMap((column) => column.items);
   const readyCount = data?.landing.counts.ready || 0;
   const emptyReason = computeBoardEmptyReason(data, filters, columns);
   const totalLabel = items.length === 1 ? "1 task" : `${items.length} tasks`;
@@ -164,16 +162,8 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
   const cancellable = Boolean(task.runId)
     && Boolean(onCancelRun)
     && CANCELLABLE_TASK_STATUSES.has(String(task.status || "").toLowerCase());
-  const stageLabel = (() => {
-    switch (task.stage) {
-      case "attention": return "Needs action";
-      case "working":   return task.active ? "Running" : "Queued";
-      case "ready":     return "Ready";
-      case "landed":    return "Landed";
-      default:          return task.status;
-    }
-  })();
-  const stageTitle = task.stage === "ready" ? "Ready to land" : stageLabel;
+  const stageLabel = boardTaskStageLabel(task);
+  const stageTitle = boardTaskStageTitle(task);
   const tone = statusTone(task.status, task.stage);
   const icon = toneIcon(tone);
   const stories = task.storiesTested && task.storiesTested > 0

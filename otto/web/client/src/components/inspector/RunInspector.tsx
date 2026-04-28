@@ -1277,39 +1277,52 @@ export function ProofPane({detail, onShowDiff, onShowArtifacts}: {
   const proofChecks = packet.failure ? packet.checks.filter((check) => check.key !== "run" && check.key !== "landing") : packet.checks;
   const visibleChecks = proofChecks.filter((check) => !["run", "landing"].includes(check.key)).slice(0, 5);
   const keyEvidenceCount = keyReviewEvidenceArtifacts(evidence).length;
+  const showNextAction = packet.readiness.state !== "reviewed" && (
+    packet.readiness.state !== "merged"
+    || Boolean(packet.next_action.action_key)
+    || Boolean(packet.failure)
+    || Boolean(packet.readiness.blockers?.length)
+  );
+  const showChangedFiles = changedFiles.length > 0;
+  const verificationDefaultOpen = visibleChecks.some((check) => isAttentionCheckStatus(check.status))
+    || packet.readiness.state === "in_progress";
   return (
     <div className="proof-pane" data-testid="proof-pane">
       <div className="proof-summary" aria-labelledby="proofHeading">
         <div>
           <span>{packet.readiness.label}</span>
-          <h3 id="proofHeading">Review summary</h3>
-          <p>{packet.headline}</p>
+          <h3 id="proofHeading">Proof of work</h3>
+          <p>{packet.summary}</p>
         </div>
         <div className="proof-metrics">
           <ReviewMetric label="Stories" value={storiesLine(packet)} />
-          <ReviewMetric label="Changes" value={packet.changes.file_count ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}` : "-"} />
           <ReviewMetric label="Demo" value={demoEvidenceLine(packet)} />
           <ReviewMetric label="Evidence" value={reviewEvidenceLine(packet)} />
+          {packet.changes.file_count ? (
+            <ReviewMetric label="Files" value={`${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}`} />
+          ) : null}
         </div>
       </div>
       <DemoEvidenceSection detail={detail} demo={demoEvidence} />
-      <div className="proof-section" aria-labelledby="proofNextHeading">
+      {showNextAction ? (
+        <div className="proof-section" aria-labelledby="proofNextHeading">
         <h3 id="proofNextHeading">Next action</h3>
         <p>{packet.readiness.next_step}</p>
         <div className="proof-report-actions">
           {proofReport?.html_url ? (
-            <a href={proofReport.html_url} target="_blank" rel="noreferrer" data-testid="proof-report-link">Open HTML proof report</a>
+            <a href={proofReport.html_url} target="_blank" rel="noreferrer" data-testid="proof-report-link">Open full HTML report</a>
           ) : (
             <span>No HTML proof report is linked for this run.</span>
           )}
           <button type="button" data-testid="proof-open-artifacts-button" onClick={onShowArtifacts}>
-            {keyEvidenceCount ? "Open evidence artifacts" : "Open artifacts"}
+            {keyEvidenceCount ? "Browse evidence" : "Browse artifacts"}
           </button>
           {canShowDiff(detail) ? (
             <button type="button" data-testid="proof-open-diff-button" onClick={onShowDiff}>Open code diff</button>
           ) : null}
         </div>
       </div>
+      ) : null}
       {rounds.length > 1 && <CertificationRoundTabs rounds={rounds} />}
       {packet.failure && (
         <div className="proof-section proof-failure" aria-labelledby="proofFailureHeading">
@@ -1317,24 +1330,6 @@ export function ProofPane({detail, onShowDiff, onShowArtifacts}: {
           <FailureSummary failure={packet.failure} showExcerpt />
         </div>
       )}
-      <div className="proof-section" aria-labelledby="proofChecksHeading">
-        <h3 id="proofChecksHeading">Verification</h3>
-        {visibleChecks.length ? (
-          <div className="proof-checks">
-            {visibleChecks.map((check) => (
-              <div className={`review-check check-${String(check.status || "").trim().toLowerCase()}`} key={check.key}>
-                <CheckStatusBadge status={check.status} />
-                <div>
-                  <strong>{check.label}</strong>
-                  <p>{formatReviewText(check.detail)}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p>No additional verification checks were recorded for this run.</p>
-        )}
-      </div>
       <div className="proof-section" aria-labelledby="proofStoriesHeading">
         <h3 id="proofStoriesHeading">Stories tested</h3>
         {stories.length ? (
@@ -1358,7 +1353,27 @@ export function ProofPane({detail, onShowDiff, onShowArtifacts}: {
           <p>No per-story certification details were recorded. Open the HTML report or summary artifact if available.</p>
         )}
       </div>
-      <div className="proof-section" aria-labelledby="proofFilesHeading">
+      {visibleChecks.length ? (
+        <details className="proof-section proof-checks-details" open={verificationDefaultOpen}>
+          <summary>
+            <span>Verification checks</span>
+            <strong>{visibleChecks.length}</strong>
+          </summary>
+          <div className="proof-checks">
+            {visibleChecks.map((check) => (
+              <div className={`review-check check-${String(check.status || "").trim().toLowerCase()}`} key={check.key}>
+                <CheckStatusBadge status={check.status} />
+                <div>
+                  <strong>{check.label}</strong>
+                  <p>{formatReviewText(check.detail)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
+      {showChangedFiles ? (
+        <div className="proof-section" aria-labelledby="proofFilesHeading">
         <h3 id="proofFilesHeading">What changed</h3>
         {changedFiles.length ? (
           <ul className="proof-files">
@@ -1369,6 +1384,7 @@ export function ProofPane({detail, onShowDiff, onShowArtifacts}: {
           <p>No changed files reported yet.</p>
         )}
       </div>
+      ) : null}
       {packet.changes.diff_error ? (
         <div className="proof-section proof-failure" aria-labelledby="proofDiffIssueHeading">
           <h3 id="proofDiffIssueHeading">Diff issue</h3>
@@ -1476,6 +1492,7 @@ function reviewEvidenceLine(packet: RunDetail["review_packet"]): string {
 }
 
 function demoEvidenceLine(packet: RunDetail["review_packet"]): string {
+  if (packet.readiness.state === "in_progress") return "-";
   const demo = packet.certification.demo_evidence;
   if (!demo) return "-";
   return demoStatusLabel(demo.demo_status);

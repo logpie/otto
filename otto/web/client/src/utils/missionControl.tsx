@@ -25,7 +25,7 @@ import type {
   ToastState,
   ViewMode,
 } from "../uiTypes";
-import {defaultFilters} from "../uiTypes";
+import {BOARD_STAGE_COLUMNS, BOARD_STAGE_ORDER, defaultFilters} from "../uiTypes";
 import {
   capitalize,
   formatCompactNumber,
@@ -389,12 +389,10 @@ export function taskBoardColumns(data: StateResponse | null, filters: Filters = 
   empty: string;
   items: BoardTask[];
 }> {
-  const columns: Array<{stage: BoardStage; title: string; empty: string; items: BoardTask[]}> = [
-    {stage: "attention", title: "Needs action", empty: "No tasks.", items: []},
-    {stage: "working", title: "In progress", empty: "No tasks.", items: []},
-    {stage: "ready", title: "Ready to land", empty: "No tasks.", items: []},
-    {stage: "landed", title: "Landed", empty: "Nothing landed yet.", items: []},
-  ];
+  const columns: Array<{stage: BoardStage; title: string; empty: string; items: BoardTask[]}> = BOARD_STAGE_COLUMNS.map((column) => ({
+    ...column,
+    items: [],
+  }));
   if (!data) return columns;
   const liveByTask = new Map<string, LiveRunItem>();
   const cardsByKey = new Map<string, BoardTask>();
@@ -439,7 +437,7 @@ export function boardTaskMatchesFilters(task: BoardTask, filters: Filters): bool
 
 export function boardTaskMatchesOutcome(task: BoardTask, outcome: OutcomeFilter): boolean {
   const status = task.status.toLowerCase();
-  if (outcome === "success") return ["ready", "landed", "done", "success"].some((value) => status.includes(value));
+  if (outcome === "success") return ["ready", "certified", "reviewed", "landed", "done", "success"].some((value) => status.includes(value));
   if (outcome === "failed") return status.includes("failed") || task.stage === "attention";
   if (outcome === "interrupted") return status.includes("interrupted") || status.includes("stale");
   if (outcome === "cancelled") return status.includes("cancelled");
@@ -526,6 +524,7 @@ function liveWaitingReason(item: LiveRunItem): string | null {
 
 export function boardStageForLanding(item: LandingItem, mergeAllowed: boolean): BoardStage {
   if (item.landing_state === "merged") return "landed";
+  if (item.landing_state === "reviewed") return "reviewed";
   if (item.landing_state === "ready") return mergeAllowed ? "ready" : "attention";
   if (isWaitingLandingItem(item)) return "working";
   return "attention";
@@ -533,6 +532,7 @@ export function boardStageForLanding(item: LandingItem, mergeAllowed: boolean): 
 
 export function boardStatusLabel(item: LandingItem, mergeAllowed: boolean): string {
   if (item.landing_state === "ready") return mergeAllowed ? "ready" : "blocked";
+  if (item.landing_state === "reviewed") return "certified";
   if (item.landing_state === "merged") return "landed";
   return item.queue_status || item.landing_state || "blocked";
 }
@@ -540,6 +540,7 @@ export function boardStatusLabel(item: LandingItem, mergeAllowed: boolean): stri
 export function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean, live?: LiveRunItem): string {
   if (item.landing_state === "ready" && !mergeAllowed) return "Repository cleanup required before landing.";
   if (item.landing_state === "ready") return `${changeLine(item)} changed; ${proofLine(item)} recorded. Review, then land.`;
+  if (item.landing_state === "reviewed") return "Certification complete; no merge action needed.";
   if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";
   if (item.queue_status === "queued") return "Waiting for the queue runner.";
   if (item.queue_status === "initializing") return "Child process started; waiting for Otto session readiness.";
@@ -645,19 +646,40 @@ export function statusTone(
   if (["paused", "interrupted", "stale", "blocked"].some((value) => lower.includes(value))) {
     return "warning";
   }
+  if (lower.includes("certified") || lower.includes("reviewed")) {
+    return "success";
+  }
   // Stage-based fallback for empty/odd statuses.
   if (stage === "ready") return "info";
   if (stage === "attention") return "danger";
   if (stage === "working") return "neutral";
+  if (stage === "reviewed") return "success";
   if (stage === "landed") return "success";
   return "neutral";
 }
 
 export function compareBoardTasks(left: BoardTask, right: BoardTask): number {
-  const stageOrder: Record<BoardStage, number> = {attention: 0, ready: 1, working: 2, landed: 3};
-  const byStage = stageOrder[left.stage] - stageOrder[right.stage];
+  const byStage = BOARD_STAGE_ORDER.indexOf(left.stage) - BOARD_STAGE_ORDER.indexOf(right.stage);
   if (byStage) return byStage;
   return left.title.localeCompare(right.title);
+}
+
+export function boardTaskStageLabel(task: Pick<BoardTask, "stage" | "active" | "status">): string {
+  switch (task.stage) {
+    case "working":   return task.active ? "Running" : "Queued";
+    case "attention": return "Needs action";
+    case "ready":     return "Ready";
+    case "reviewed":  return "Certified";
+    case "landed":    return "Landed";
+    default:          return task.status;
+  }
+}
+
+export function boardTaskStageTitle(task: Pick<BoardTask, "stage" | "active" | "status">): string {
+  const label = boardTaskStageLabel(task);
+  if (task.stage === "ready") return "Ready to land";
+  if (task.stage === "reviewed") return "Certification complete";
+  return label;
 }
 
 export function taskBoardSubtitle(data: StateResponse | null, filters: Filters = defaultFilters): string {
@@ -1501,6 +1523,7 @@ export function isRepositoryBlockedPacket(packet: RunDetail["review_packet"]): b
 export function runEventText(item: LiveRunItem, landingByTask: Map<string, LandingItem>): string {
   const landingItem = item.queue_task_id ? landingByTask.get(item.queue_task_id) : undefined;
   if (landingItem?.landing_state === "ready") return "Ready for review";
+  if (landingItem?.landing_state === "reviewed") return "Certification complete";
   if (landingItem?.landing_state === "merged") return "Landed";
   if (landingItem && isWaitingLandingItem(landingItem)) return landingItem.queue_status === "queued" ? "Queued" : "In progress";
   if (String(item.last_event || "").toLowerCase() === "legacy queue mode") return "Queue task";
@@ -1509,6 +1532,7 @@ export function runEventText(item: LiveRunItem, landingByTask: Map<string, Landi
 
 export function landingStateText(item: LandingItem): string {
   if (item.landing_state === "ready") return "Ready to land";
+  if (item.landing_state === "reviewed") return "Certified";
   if (item.landing_state === "merged") return "Landed";
   if (isWaitingLandingItem(item)) return item.queue_status === "queued" ? "Queued" : "In progress";
   return item.label || "Needs action";
@@ -1516,6 +1540,7 @@ export function landingStateText(item: LandingItem): string {
 
 export function diagnosticLandingAction(item: LandingItem): string {
   if (item.landing_state === "ready") return `${changeLine(item)} changed; review evidence before landing.`;
+  if (item.landing_state === "reviewed") return "Certification complete; no merge action needed.";
   if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";
   if (item.queue_status === "queued") return "Start the queue runner to process queued tasks.";
   if (item.queue_status === "failed") return "Open review packet and requeue or remove.";

@@ -64,7 +64,7 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
 
     state = _client(repo).get("/api/state").json()
 
-    assert state["landing"]["counts"] == {"ready": 1, "merged": 1, "blocked": 0, "total": 2}
+    assert state["landing"]["counts"] == {"ready": 1, "merged": 1, "blocked": 0, "reviewed": 0, "total": 2}
     by_id = {item["task_id"]: item for item in state["landing"]["items"]}
     assert by_id["ready-task"]["landing_state"] == "ready"
     assert by_id["ready-task"]["label"] == "Ready to land"
@@ -667,7 +667,7 @@ def test_web_resolve_release_cleans_superseded_failed_tasks(tmp_path: Path, monk
     monkeypatch.setattr(
         "otto.mission_control.service.MissionControlService.landing_status",
         lambda self: {
-            "counts": {"ready": 0, "merged": 1, "blocked": 1, "total": 2},
+            "counts": {"ready": 0, "merged": 1, "blocked": 1, "reviewed": 0, "total": 2},
             "items": [
                 {
                     "task_id": "old-task",

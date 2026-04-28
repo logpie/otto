@@ -1583,6 +1583,10 @@ def _story_is_web_ui(story: dict[str, Any]) -> bool:
     methodology = _normalize_methodology(
         str(story.get("methodology") or story.get("interaction_method") or "")
     )
+    if methodology in {"http-request", "api-request"} and not any(
+        token in surface for token in ("dom", "browser", "page", "screenshot", "video", "localstorage")
+    ):
+        return False
     if any(token in surface for token in ("dom", "browser", "page", "screenshot", "video", "localstorage")):
         return True
     if methodology in {"live-ui-events", "visual-only", "javascript-eval", "browser"}:

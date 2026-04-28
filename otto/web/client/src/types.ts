@@ -232,6 +232,7 @@ export interface LandingCounts {
   ready: number;
   merged: number;
   blocked: number;
+  reviewed: number;
   total: number;
 }
 

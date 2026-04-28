@@ -70,12 +70,21 @@ COMMAND_LINE_RE = re.compile(
     re.MULTILINE,
 )
 PRODUCT_HANDOFF_KINDS = {"web", "api", "cli", "desktop", "library", "service", "worker", "pipeline", "unknown"}
+LANDING_COUNT_KEYS = ("ready", "merged", "blocked", "reviewed")
 
 
 class MissionControlServiceError(ValueError):
     def __init__(self, message: str, *, status_code: int = 400) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class LandingClassification:
+    state: str
+    label: str
+    count_key: str
+    counts_for_collision: bool = False
 
 
 @dataclass(slots=True)
@@ -778,32 +787,31 @@ class MissionControlService:
 
         items: list[dict[str, Any]] = []
         ready_tasks: list[Any] = []
-        counts = {"ready": 0, "merged": 0, "blocked": 0, "total": 0}
+        counts = _empty_landing_counts()
         for task in tasks:
             raw_state = task_states.get(task.id) if isinstance(task_states, dict) else None
             queue_status = _queue_display_status(raw_state if isinstance(raw_state, dict) else None, state)
             branch = str(task.branch or "").strip()
+            certification_only = _is_certification_only_task(task)
             merge_info = merged_by_branch.get(branch)
-            diff = (
-                _merged_task_diff(self.project_dir, merge_info)
-                if merge_info is not None
-                else {"files": [], "error": None}
-                if queue_status in {"queued", "starting", "initializing", "running", "terminating"}
-                else _branch_diff(self.project_dir, branch, target)
+            diff = _landing_task_diff(
+                self.project_dir,
+                target=target,
+                branch=branch,
+                queue_status=queue_status,
+                merge_info=merge_info,
+                certification_only=certification_only,
             )
-            if merge_info is not None:
-                landing_state = "merged"
-                label = "Landed"
-                counts["merged"] += 1
-            elif queue_status == "done" and branch and diff["error"] is None:
-                landing_state = "ready"
-                label = "Ready to land"
-                counts["ready"] += 1
+            classification = _classify_landing_task(
+                queue_status=queue_status,
+                branch=branch,
+                diff=diff,
+                merge_info=merge_info,
+                certification_only=certification_only,
+            )
+            counts[classification.count_key] += 1
+            if classification.counts_for_collision:
                 ready_tasks.append(task)
-            else:
-                landing_state = "blocked"
-                label = "Review blocked" if queue_status == "done" and diff["error"] else _blocked_landing_label(queue_status, branch)
-                counts["blocked"] += 1
 
             counts["total"] += 1
             item = {
@@ -814,8 +822,8 @@ class MissionControlService:
                 "summary": task.resolved_intent or _task_intent(task.command_argv),
                 "build_config": run_config_from_argv(self.project_dir, task.command_argv),
                 "queue_status": queue_status,
-                "landing_state": landing_state,
-                "label": label,
+                "landing_state": classification.state,
+                "label": classification.label,
                 "merge_id": merge_info.get("merge_id") if merge_info else None,
                 "merge_status": merge_info.get("status") if merge_info else None,
                 "merge_run_status": merge_info.get("merge_run_status") if merge_info else None,
@@ -1334,6 +1342,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
     merge_info = _detail_merge_info(project_dir, detail)
     merged = merge_info is not None
     in_progress = display_status in REVIEW_IN_PROGRESS_STATUSES
+    certification_only = _is_certification_only_run(record)
     diff = _merged_task_diff(project_dir, merge_info) if merged else (
         {"files": [], "error": None}
         if in_progress
@@ -1355,10 +1364,18 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
         merge_preflight=merge_preflight,
         failure=failure,
         spec_review_pending=spec_review_pending,
+        certification_only=certification_only,
     )
     next_action = (
         {"label": "No action", "action_key": None, "enabled": False, "reason": f"Already merged into {target}."}
         if merged
+        else {
+            "label": "No merge action",
+            "action_key": None,
+            "enabled": False,
+            "reason": "Certification-only runs produce proof and do not land code.",
+        }
+        if certification_only and display_status == "done"
         else _suggested_next_action(display_status, detail.legal_actions, detail.overlay)
     )
     if not merged and next_action.get("action_key") == "m" and readiness.get("state") != "ready":
@@ -1389,6 +1406,7 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
             readiness=readiness,
             failure=failure,
             spec_review_pending=spec_review_pending,
+            certification_only=certification_only,
         ),
         "next_action": next_action,
         "certification": certification,
@@ -1520,6 +1538,24 @@ def _review_target(project_dir: Path, record: Any) -> str:
     return _merge_target(project_dir)
 
 
+def _is_certification_only_run(record: Any) -> bool:
+    """True when a run's primary purpose is proof, not code production."""
+    return _record_command_family(record) == "certify"
+
+
+def _queue_task_command_family(task: Any) -> str:
+    argv = getattr(task, "command_argv", None)
+    if isinstance(argv, list) and argv:
+        first = str(argv[0] or "").strip().lower()
+        if first in {"build", "improve", "certify", "cert", "merge", "land"}:
+            return "certify" if first == "cert" else "merge" if first == "land" else first
+    return ""
+
+
+def _is_certification_only_task(task: Any) -> bool:
+    return _queue_task_command_family(task) == "certify"
+
+
 def _merge_review_checks(
     *,
     display_status: str,
@@ -1615,6 +1651,7 @@ def _review_readiness(
     merge_preflight: dict[str, Any],
     failure: dict[str, Any] | None = None,
     spec_review_pending: bool = False,
+    certification_only: bool = False,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     if merged:
@@ -1654,6 +1691,14 @@ def _review_readiness(
             "next_step": "Open the spec artifact, then approve it or request changes.",
         }
     if display_status == "done":
+        if certification_only:
+            return {
+                "state": "reviewed",
+                "label": "Certification complete",
+                "tone": "success",
+                "blockers": blockers,
+                "next_step": "Review the proof packet; no merge action is needed.",
+            }
         if not branch:
             blockers.append("No source branch was recorded for this task.")
         if diff_error:
@@ -1707,6 +1752,7 @@ def _review_checks(
     readiness: dict[str, Any],
     failure: dict[str, Any] | None = None,
     spec_review_pending: bool = False,
+    certification_only: bool = False,
 ) -> list[dict[str, Any]]:
     changed_files = list(diff.get("files") or [])
     diff_error = _optional_str(diff.get("error"))
@@ -1725,6 +1771,8 @@ def _review_checks(
         checks.append(_review_check("run", "Spec review", "pending", "Build is paused until the generated spec is approved or regenerated."))
     elif merged:
         checks.append(_review_check("run", "Run finished", "pass", f"Already landed in {target}."))
+    elif certification_only and display_status == "done":
+        checks.append(_review_check("run", "Certification finished", "pass", "Proof completed; no code landing is expected."))
     elif display_status == "done":
         checks.append(_review_check("run", "Run finished", "pass", "Task completed and is ready for human review."))
     elif display_status in REVIEW_IN_PROGRESS_STATUSES:
@@ -1768,16 +1816,27 @@ def _review_checks(
     elif incomplete_terminal:
         checks.append(_review_check("changes", "Changed files", "pending", "Final changed-file review is unavailable because the run did not finish."))
     elif diff_error:
-        checks.append(_review_check("changes", "Changed files", "fail", diff_error))
+        status = "info" if certification_only else "fail"
+        detail = (
+            "No code diff is required for certification-only runs."
+            if certification_only
+            else diff_error
+        )
+        checks.append(_review_check("changes", "Changed files", status, detail))
     elif changed_files:
         detail = (
             f"{len(changed_files)} file{'' if len(changed_files) == 1 else 's'} landed into {target}."
             if merged
             else f"{len(changed_files)} file{'' if len(changed_files) == 1 else 's'} changed on {branch}."
         )
-        checks.append(_review_check("changes", "Changed files", "pass", detail))
+        status = "warn" if certification_only else "pass"
+        if certification_only:
+            detail = f"{detail} Certification-only runs normally should not change code."
+        checks.append(_review_check("changes", "Changed files", status, detail))
     elif merged:
         checks.append(_review_check("changes", "Changed files", "info", "No unlanded diff remains."))
+    elif certification_only:
+        checks.append(_review_check("changes", "Changed files", "pass", "No code changes expected for a certification-only run."))
     else:
         checks.append(_review_check("changes", "Changed files", "warn", "No changed files were detected. Confirm the task produced the expected artifact."))
 
@@ -1830,6 +1889,8 @@ def _review_checks(
         checks.append(_review_check("landing", "Landing action", "pass", f"Safe to land into {target}."))
     elif readiness["state"] == "merged":
         checks.append(_review_check("landing", "Landing action", "pass", "Task is already landed."))
+    elif readiness["state"] == "reviewed":
+        checks.append(_review_check("landing", "Merge action", "pass", "No merge action is needed for certification-only proof."))
     elif readiness["state"] == "in_progress":
         checks.append(_review_check("landing", "Landing action", "pending", "Landing is disabled until the task completes."))
     elif incomplete_terminal:
@@ -1846,7 +1907,12 @@ def _review_check(key: str, label: str, status: str, detail: str) -> dict[str, s
 
 
 def _is_review_evidence_artifact(item: dict[str, Any]) -> bool:
-    return str(item.get("kind") or "").lower() != "directory"
+    if str(item.get("kind") or "").lower() == "directory":
+        return False
+    label = str(item.get("label") or "").strip().lower()
+    if not item.get("exists") and label in {"intent", "checkpoint"}:
+        return False
+    return True
 
 
 def _spec_review_pending(record: Any) -> bool:
@@ -1883,6 +1949,8 @@ def _review_packet_headline(
         if any(item.startswith("Repository has local changes") for item in blockers):
             return "Repository cleanup required before landing"
         return "Review blocked before landing"
+    if readiness.get("state") == "reviewed" and display_status == "done":
+        return "Certification complete"
     return _review_headline(record, display_status)
 
 
@@ -2290,21 +2358,30 @@ def _is_non_product_change_path(path: str) -> bool:
 
 
 def _record_command_family(record: Any) -> str:
+    source = getattr(record, "source", {}) if isinstance(getattr(record, "source", {}), dict) else {}
+    argv = source.get("argv") if isinstance(source, dict) else None
+    if isinstance(argv, list) and argv:
+        first = str(argv[0] or "").strip().lower()
+        if first in {"build", "improve", "certify", "cert", "merge", "land"}:
+            return "certify" if first == "cert" else "merge" if first == "land" else first
+    command = str(getattr(record, "command", "") or "").strip().lower()
+    first_command = command.split(None, 1)[0] if command else ""
+    if first_command in {"build", "improve", "certify", "cert", "merge", "land"}:
+        return "certify" if first_command == "cert" else "merge" if first_command == "land" else first_command
     candidates = [
-        getattr(record, "command", None),
         getattr(record, "run_type", None),
         getattr(record, "domain", None),
     ]
     intent = getattr(record, "intent", {}) if isinstance(getattr(record, "intent", {}), dict) else {}
     candidates.append(intent.get("command"))
-    text = " ".join(str(item or "").lower() for item in candidates)
-    if "cert" in text:
+    text = " ".join(str(item or "").strip().lower() for item in candidates)
+    if any(token in {"certify", "cert"} for token in text.split()):
         return "certify"
-    if "merge" in text or "land" in text:
+    if any(token in {"merge", "land"} for token in text.split()):
         return "merge"
-    if "improve" in text:
+    if "improve" in text.split():
         return "improve"
-    if "build" in text or "queue" in text:
+    if any(token in {"build", "queue"} for token in text.split()):
         return "build"
     return ""
 
@@ -4165,6 +4242,49 @@ def _task_run_id(raw_state: Any) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _empty_landing_counts() -> dict[str, int]:
+    return {**{key: 0 for key in LANDING_COUNT_KEYS}, "total": 0}
+
+
+def _landing_task_diff(
+    project_dir: Path,
+    *,
+    target: str,
+    branch: str,
+    queue_status: str,
+    merge_info: dict[str, Any] | None,
+    certification_only: bool,
+) -> dict[str, Any]:
+    if merge_info is not None:
+        return _merged_task_diff(project_dir, merge_info)
+    if certification_only or queue_status in REVIEW_IN_PROGRESS_STATUSES:
+        return {"files": [], "error": None}
+    return _branch_diff(project_dir, branch, target)
+
+
+def _classify_landing_task(
+    *,
+    queue_status: str,
+    branch: str,
+    diff: dict[str, Any],
+    merge_info: dict[str, Any] | None,
+    certification_only: bool,
+) -> LandingClassification:
+    if merge_info is not None:
+        return LandingClassification(state="merged", label="Landed", count_key="merged")
+    if queue_status == "done" and certification_only:
+        return LandingClassification(state="reviewed", label="Certified", count_key="reviewed")
+    if queue_status == "done" and branch and diff.get("error") is None:
+        return LandingClassification(
+            state="ready",
+            label="Ready to land",
+            count_key="ready",
+            counts_for_collision=True,
+        )
+    label = "Review blocked" if queue_status == "done" and diff.get("error") else _blocked_landing_label(queue_status, branch)
+    return LandingClassification(state="blocked", label=label, count_key="blocked")
 
 
 def _task_intent(argv: Any) -> str | None:
