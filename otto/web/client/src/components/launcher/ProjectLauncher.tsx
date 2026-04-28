@@ -1,4 +1,4 @@
-import {FormEvent, useEffect, useRef, useState} from "react";
+import {FormEvent, useEffect, useMemo, useRef, useState} from "react";
 import {ApiError, friendlyApiMessage} from "../../api";
 import {errorMessage, watcherSummary} from "../../utils/missionControl";
 import {BrandMark} from "../BrandMark";
@@ -70,12 +70,26 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
   onSelect: (path: string) => Promise<void>;
   onRefresh: () => void;
 }) {
-  void refreshStatus;
   const [name, setName] = useState("");
+  const [projectQuery, setProjectQuery] = useState("");
   const [status, setStatus] = useState("");
   const [statusKind, setStatusKind] = useState<"info" | "error">("info");
   const [pending, setPending] = useState(false);
   const projects = projectsState.projects || [];
+  const normalizedProjectQuery = projectQuery.trim().toLowerCase();
+  const filteredProjects = useMemo(() => {
+    if (!normalizedProjectQuery) return projects;
+    return projects.filter((project) => {
+      const haystack = [
+        project.name,
+        project.path,
+        project.branch,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(normalizedProjectQuery);
+    });
+  }, [normalizedProjectQuery, projects]);
+  const showProjectSearch = projects.length > 8;
+  const refreshing = refreshPending || refreshStatus === "refreshing";
   const nameInputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (projects.length === 0) {
@@ -142,6 +156,9 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
         >
           {refreshPending ? <Spinner /> : "↻"}
         </button>
+        <span className="launcher-hero-refresh-status" aria-live="polite">
+          {refreshing ? "Refreshing projects…" : null}
+        </span>
       </header>
 
       <LauncherExplainer />
@@ -150,17 +167,41 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
         <div className="launcher-section">
           <div className="launcher-section-head">
             <h2>Open a project</h2>
-            <span className="muted">{projects.length} {projects.length === 1 ? "project" : "projects"}</span>
+            <span className="muted">
+              {filteredProjects.length === projects.length
+                ? `${projects.length} ${projects.length === 1 ? "project" : "projects"}`
+                : `${filteredProjects.length} of ${projects.length}`}
+            </span>
           </div>
+          {showProjectSearch ? (
+            <div className="launcher-project-search">
+              <input
+                type="search"
+                value={projectQuery}
+                data-testid="launcher-project-search"
+                aria-label="Search projects"
+                placeholder="Search projects"
+                onChange={(event) => setProjectQuery(event.target.value)}
+              />
+            </div>
+          ) : null}
           <div className="project-list">
-            {projects.map((project) => (
-              <button className="project-row" type="button" key={project.path} disabled={pending} onClick={() => void openProject(project)}>
+            {filteredProjects.map((project) => (
+              <button
+                className="project-row"
+                type="button"
+                key={project.path}
+                disabled={pending}
+                data-testid={`launcher-project-${launcherProjectTestId(project)}`}
+                aria-label={project.name || project.path}
+                onClick={() => void openProject(project)}
+              >
                 <span className="project-row-mark" aria-hidden="true">
                   {(project.name || "?").charAt(0).toUpperCase()}
                 </span>
                 <span className="project-row-main">
                   <strong>{project.name}</strong>
-                  <code title={project.path}>{project.path}</code>
+                  <code title={project.path}>{projectDisplayPath(project, projectsState.projects_root)}</code>
                 </span>
                 <span className="project-row-meta">
                   <span className="project-row-branch" title="Branch">{project.branch || "-"}</span>
@@ -169,6 +210,11 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
                 <span className="project-row-arrow" aria-hidden="true">→</span>
               </button>
             ))}
+            {filteredProjects.length === 0 ? (
+              <div className="launcher-project-empty" data-testid="launcher-project-search-empty">
+                No projects match "{projectQuery.trim()}".
+              </div>
+            ) : null}
           </div>
         </div>
       )}
@@ -206,6 +252,25 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
       </div>
     </section>
   );
+}
+
+function projectDisplayPath(project: ManagedProjectInfo, root: string): string {
+  const path = project.path || "";
+  if (!path) return "";
+  const normalizedRoot = root.replace(/\/+$/, "");
+  if (normalizedRoot && path === normalizedRoot) return ".";
+  if (normalizedRoot && path.startsWith(`${normalizedRoot}/`)) {
+    const relative = path.slice(normalizedRoot.length + 1);
+    return relative === project.name ? "managed worktree" : `./${relative}`;
+  }
+  return path;
+}
+
+function launcherProjectTestId(project: ManagedProjectInfo): string {
+  return String(project.name || project.path || "project")
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    || "project";
 }
 
 export function launcherErrorMessage(error: unknown, context: {projectName?: string; projectPath?: string}): string {

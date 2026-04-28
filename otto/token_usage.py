@@ -48,10 +48,71 @@ def format_token_spend(
     kept as machine-readable metadata elsewhere, but it is not comparable
     across Claude/Codex runs and should not be shown as the spend unit.
     """
-    tokens = token_total(normalize_token_usage(token_usage or {}))
-    if tokens:
-        return f"{format_compact_token_count(tokens)} tokens"
+    summary = token_spend_summary(token_usage)
+    if summary["total"]:
+        if summary["cached"]:
+            hit = summary.get("cache_hit_rate")
+            hit_text = f" · {format_cache_hit_rate(hit)} hit" if hit is not None else ""
+            return (
+                f"{format_compact_token_count(summary['fresh'])} fresh + "
+                f"{format_compact_token_count(summary['cached'])} cached"
+                f"{hit_text}"
+            )
+        return f"{format_compact_token_count(summary['total'])} tokens"
     return "..." if pending else "-"
+
+
+def token_spend_summary(token_usage: dict[str, int] | None) -> dict[str, int | float | None]:
+    """Return provider-neutral fresh/cache token spend components.
+
+    Providers report cache differently:
+
+    * Anthropic/Claude reports cache creation/read as additive token classes.
+    * Codex/OpenAI-style ``cached_input_tokens`` is a subset of input tokens.
+
+    This summary treats cache-read and cached-input-subset as "cached", while
+    cache creation, uncached input, output, and reasoning are "fresh". The
+    resulting ``fresh + cached`` equals the normalized total whenever the run
+    has component-level usage data.
+    """
+    usage = normalize_token_usage(token_usage or {})
+    total = token_total(usage)
+    input_tokens = int(usage.get("input_tokens", 0) or 0)
+    cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
+    cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+    cached_total = int(usage.get("cached_input_tokens", 0) or 0)
+    output = int(usage.get("output_tokens", 0) or 0)
+    reasoning = int(usage.get("reasoning_tokens", 0) or 0)
+
+    # With explicit additive cache fields, cached_input_tokens is normalized to
+    # include them. Any remaining cached_input_tokens are legacy subset-style
+    # cached input from Codex/OpenAI logs aggregated into the same total.
+    legacy_cached_subset = max(cached_total - cache_creation - cache_read, 0)
+    legacy_cached_subset = min(legacy_cached_subset, input_tokens)
+
+    cached = cache_read + legacy_cached_subset
+    fresh = max(input_tokens - legacy_cached_subset, 0) + cache_creation + output + reasoning
+    if total and fresh + cached < total:
+        fresh += total - fresh - cached
+    cache_input_denominator = input_tokens + cache_creation + cache_read
+    hit_rate = (cached / cache_input_denominator) if cached and cache_input_denominator else None
+    return {
+        "total": total,
+        "fresh": fresh,
+        "cached": cached,
+        "cache_hit_rate": hit_rate,
+    }
+
+
+def format_cache_hit_rate(value: float | None) -> str:
+    if value is None:
+        return "-"
+    percentage = max(0, min(100, value * 100))
+    if 0 < percentage < 1:
+        return "<1%"
+    if 99 < percentage < 100:
+        return ">99%"
+    return f"{int(Decimal(str(percentage)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))}%"
 
 
 def normalize_token_usage(mapping: Any) -> dict[str, int]:

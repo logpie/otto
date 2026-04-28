@@ -7,7 +7,7 @@ from otto import paths
 from otto.mission_control.model import _token_usage_from_summary_paths
 from otto.pipeline import _write_session_summary
 from otto.queue.runner import _token_usage_from_summary
-from otto.token_usage import format_token_spend
+from otto.token_usage import format_token_spend, token_spend_summary
 from tests._helpers import init_repo
 
 
@@ -226,6 +226,34 @@ def test_claude_result_usage_overrides_inflated_phase_end_tokens(tmp_path: Path)
 
 def test_token_spend_uses_half_up_compact_rounding() -> None:
     assert format_token_spend({"total_tokens": 3_050}) == "3.1K tokens"
+
+
+def test_token_spend_separates_claude_cache_read_from_fresh_tokens() -> None:
+    usage = {
+        "input_tokens": 40,
+        "cache_creation_input_tokens": 66_155,
+        "cache_read_input_tokens": 1_816_849,
+        "output_tokens": 9_796,
+    }
+
+    summary = token_spend_summary(usage)
+    assert summary["total"] == 1_892_840
+    assert summary["fresh"] == 75_991
+    assert summary["cached"] == 1_816_849
+    assert round(float(summary["cache_hit_rate"] or 0), 3) == 0.965
+    assert format_token_spend(usage) == "76K fresh + 1.8M cached · 96% hit"
+
+
+def test_token_spend_handles_cached_input_as_provider_subset() -> None:
+    usage = {"input_tokens": 1_000, "cached_input_tokens": 800, "output_tokens": 50}
+
+    assert token_spend_summary(usage) == {
+        "total": 1_050,
+        "fresh": 250,
+        "cached": 800,
+        "cache_hit_rate": 0.8,
+    }
+    assert format_token_spend(usage) == "250 fresh + 800 cached · 80% hit"
 
 
 def test_write_session_summary_phase_messages_replace_stale_breakdown_tokens(tmp_path: Path) -> None:

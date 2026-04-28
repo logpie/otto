@@ -515,6 +515,96 @@ def test_launcher_empty_state_has_actionable_cta(mc_backend: Any, page: Any, dis
     assert "Create your first" in text, f"expected actionable CTA copy; got {text!r}"
 
 
+def test_launcher_many_projects_are_searchable_and_compact(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """A 50-project launcher should expose search and not bury names under temp paths."""
+
+    projects = [
+        {
+            "path": f"/tmp/managed/proj-{idx:03d}",
+            "name": f"proj-{idx:03d}",
+            "branch": "main",
+            "dirty": False,
+            "head_sha": "abc1234",
+        }
+        for idx in range(50)
+    ]
+    payload = {
+        "launcher_enabled": True,
+        "projects_root": "/tmp/managed",
+        "current": None,
+        "projects": projects,
+    }
+    _install_projects_route(page, payload)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    _wait_launcher(page)
+    disable_animations(page)
+
+    search = page.get_by_test_id("launcher-project-search")
+    search.wait_for(state="visible", timeout=5_000)
+    search.fill("proj-001")
+
+    row = page.get_by_role("button", name="proj-001")
+    row.wait_for(state="visible", timeout=2_000)
+    assert page.get_by_role("button", name="proj-049").count() == 0
+    assert "/tmp/managed" not in (row.text_content() or "")
+
+
+def test_project_switch_button_returns_to_launcher(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """The current-project control should be an obvious route back to the launcher."""
+
+    projects = [
+        {
+            "path": f"/tmp/managed/proj-{idx:03d}",
+            "name": f"proj-{idx:03d}",
+            "branch": "main",
+            "dirty": False,
+            "head_sha": "abc1234",
+        }
+        for idx in range(3)
+    ]
+    current = projects[2]
+    project_payload = {
+        "launcher_enabled": True,
+        "projects_root": "/tmp/managed",
+        "current": current,
+        "projects": projects,
+    }
+    launcher_payload = {**project_payload, "current": None}
+    state_payload = _state_idle_first_run()
+    state_payload["project"] = {
+        **state_payload["project"],
+        "path": current["path"],
+        "name": current["name"],
+        "branch": current["branch"],
+    }
+
+    _install_projects_route(page, project_payload)
+    _install_state_route(page, state_payload)
+    page.route(
+        "**/api/projects/clear",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"ok": True, "current": None, "projects": projects}),
+        ),
+    )
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    switcher = page.get_by_test_id("switch-project-button")
+    assert "Projects" in (switcher.text_content() or "")
+    switcher.click()
+    _wait_launcher(page)
+    page.get_by_role("button", name="proj-001").wait_for(state="visible", timeout=2_000)
+
+
 # --------------------------------------------------------------------------- #
 # IMPORTANT #6 — first-run CTA "Start first build"
 # --------------------------------------------------------------------------- #
@@ -557,7 +647,7 @@ def test_first_run_cta_reverts_after_first_run(mc_backend: Any, page: Any, disab
 def test_empty_task_board_with_history_mentions_history_not_first_run(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """A project with past runs but no active tasks should not look like a brand-new project."""
+    """A project with past runs but no active tasks should show its run history."""
 
     payload = _state_with_one_history_run()
     _install_projects_route(page)
@@ -567,13 +657,14 @@ def test_empty_task_board_with_history_mentions_history_not_first_run(
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
-    empty = page.get_by_test_id("task-board-empty")
-    empty.wait_for(state="visible", timeout=5_000)
-    text = empty.text_content() or ""
-    assert "No active tasks" in text, f"expected active-task empty state; got {text!r}"
-    assert "Health > Run History" in text, f"expected pointer to history; got {text!r}"
-    assert "Queue your first job" not in text, f"history project must not show first-run copy; got {text!r}"
-    assert (page.get_by_test_id("task-board-empty-queue-job").text_content() or "").strip() == "Queue new job"
+    row = page.get_by_test_id("task-card-task-1")
+    row.wait_for(state="visible", timeout=5_000)
+    text = row.text_content() or ""
+    assert "task-1" in text, f"expected historical task row; got {text!r}"
+    assert "First build done" in text, f"expected historical summary; got {text!r}"
+    assert "Landed" in text, f"successful historical run should be grouped as landed; got {text!r}"
+    assert page.get_by_test_id("task-board-empty").count() == 0
+    assert "Queue your first job" not in (page.locator("body").text_content() or "")
 
 
 # --------------------------------------------------------------------------- #

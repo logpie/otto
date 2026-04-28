@@ -161,10 +161,10 @@ def test_web_state_detail_logs_and_artifact_content(tmp_path: Path) -> None:
     assert row["provider"] == "codex"
     assert row["model"] == "gpt-5.4"
     assert row["reasoning_effort"] == "medium"
-    assert row["cost_display"] == "1.3K tokens"
+    assert row["cost_display"] == "290 fresh + 1K cached · 81% hit"
     assert row["token_usage"]["cached_input_tokens"] == 1000
     assert state["project_stats"]["total_tokens"] == 1290
-    assert state["project_stats"]["token_display"] == "1.3K tokens"
+    assert state["project_stats"]["token_display"] == "290 fresh + 1K cached · 81% hit"
     assert row["progress"] == "STORY_RESULT: web PASS"
 
     detail = client.get("/api/runs/build-web").json()
@@ -297,7 +297,7 @@ def test_web_usage_recovers_authoritative_phase_result_tokens(tmp_path: Path) ->
     detail = client.get(f"/api/runs/{run_id}").json()
 
     history_row = next(item for item in state["history"]["items"] if item["run_id"] == run_id)
-    assert history_row["cost_display"] == "3.1K tokens"
+    assert history_row["cost_display"] == "1.1K fresh + 2K cached · 66% hit"
     assert history_row["token_usage"]["total_tokens"] == 3050
     assert detail["phase_timeline"][0]["token_usage"]["total_tokens"] == 3050
 
@@ -371,7 +371,7 @@ def test_web_state_marks_abandoned_live_runs_stale_not_active(tmp_path: Path) ->
     assert row["display_status"] == "stale"
     assert row["active"] is False
     assert row["elapsed_display"] == "-"
-    assert row["cost_display"] == "1.3K tokens"
+    assert row["cost_display"] == "290 fresh + 1K cached · 81% hit"
     assert row["last_event"] == "heartbeat stalled and writer identity is gone"
 
     detail = client.get("/api/runs/stale-web").json()

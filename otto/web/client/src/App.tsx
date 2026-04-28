@@ -72,7 +72,6 @@ import type {
 import {
   actionConfirmationBody,
   actionToastSeverity,
-  applyOptimisticRunStates,
   canMerge,
   canResolveRelease,
   canShowDiff,
@@ -191,13 +190,6 @@ export function App() {
   const watcherInFlight = useInFlight();
   const refreshInFlight = useInFlight();
   const mergeAllInFlight = useInFlight();
-  // mc-audit microinteractions I4: optimistic UI for high-latency actions.
-  // When the operator confirms a cancel, we immediately overlay
-  // display_status="cancelling" on the affected row so the card flips state
-  // within ~16ms instead of waiting for the next /api/state poll (up to
-  // refresh_interval_s seconds). On POST failure, we drop the overlay so
-  // the row reverts to its server-provided state.
-  const [optimisticRunStates, setOptimisticRunStates] = useState<Record<string, "cancelling">>({});
   const selectedRunIdRef = useRef<string | null>(initialRoute.selectedRunId);
   const viewModeRef = useRef<ViewMode>(initialRoute.viewMode);
   // History pagination state. We keep refs alongside the state so the
@@ -423,43 +415,6 @@ export function App() {
     setSelectedQueuedTask(task);
   }, [resetRunResources, setInspectorOpen]);
 
-  // mc-audit microinteractions I4: drop optimistic "cancelling" overlays
-  // once the server reflects a terminal/cancelled state for that run, so
-  // the data stops being shadowed after the refresh confirms the action.
-  useEffect(() => {
-    if (!data) return;
-    setOptimisticRunStates((prev) => {
-      const keys = Object.keys(prev);
-      if (!keys.length) return prev;
-      const liveById = new Map((data.live.items || []).map((item) => [item.run_id, item]));
-      let changed = false;
-      const next = {...prev};
-      for (const runId of keys) {
-        const live = liveById.get(runId);
-        // No live row for this id (server already removed it) → drop.
-        if (!live) {
-          delete next[runId];
-          changed = true;
-          continue;
-        }
-        // Server has caught up to a terminal/cancelled status → drop overlay.
-        const status = (live.display_status || "").toLowerCase();
-        if (
-          status === "cancelled" ||
-          status === "cancelling" ||
-          status === "terminating" ||
-          status === "failed" ||
-          status === "done" ||
-          status === "success"
-        ) {
-          delete next[runId];
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [data]);
-
   // Auto-promote selectedQueuedTask -> selectedRunId once the watcher picks
   // up the task and a real run materializes. Without this, the user stays
   // on the "waiting for watcher" placeholder even after the run is live.
@@ -581,12 +536,18 @@ export function App() {
         return;
       }
       setRefreshStatus("error");
-      // Codex error-empty-states #1: track consecutive failures so the
-      // sticky banner appears at the threshold. The banner is the durable
-      // connection-lost surface; transient toasts also stay so existing
-      // user-initiated refresh flows behave the same way.
-      setStateFailureStreak((prev) => prev + 1);
-      showToast(errorMessage(error), "error");
+      // Track consecutive failures so the durable banner owns outages.
+      // Background polling must not emit one toast per failed tick; that was
+      // the X1 failure mode. Manual refreshes still surface the immediate
+      // error because the user explicitly asked for feedback.
+      const message = errorMessage(error);
+      setStateFailureStreak((prev) => {
+        const next = prev + 1;
+        if (showStatus || next === CONNECTION_LOST_THRESHOLD) {
+          showToast(message, "error");
+        }
+        return next;
+      });
     }
   }, [filters, historyPage, historyPageSize, loadProjects, refreshDetail, resetRunResources, selectedRunId, showToast, currentRouteState]);
 
@@ -613,7 +574,7 @@ export function App() {
     crossTabPublishRef.current = crossTab.publish;
   }, [crossTab.publish]);
 
-  useMissionStatePolling(refresh, data);
+  useMissionStatePolling(refresh, data, stateFailureStreak >= CONNECTION_LOST_THRESHOLD);
 
   // Heavy-user paper-cut #3: browser Notification when a long run finishes
   // while the tab is hidden. We track the previous live-run set; any run
@@ -806,14 +767,6 @@ export function App() {
       // codex-destructive-action-safety #6). Do NOT catch + showToast here —
       // that would silently close the dialog on 4xx/5xx.
       onConfirm: async () => {
-        // mc-audit microinteractions I4: optimistic transition for cancel.
-        // Set BEFORE the POST so the row visibly flips to "cancelling" the
-        // moment the confirm dialog closes. Cleared in the catch on failure
-        // (toast surfaces the revert) and naturally superseded by the next
-        // refresh on success.
-        if (isCancel) {
-          setOptimisticRunStates((prev) => ({...prev, [runId]: "cancelling"}));
-        }
         try {
           if (isMerge) {
             requestPayload.verification_policy = runVerificationPolicyRef.current;
@@ -829,19 +782,6 @@ export function App() {
           crossTabPublishRef.current?.("queue.action", {runId});
           if (result.refresh !== false) await refresh(true);
         } catch (err) {
-          if (isCancel) {
-            // Roll back the optimistic flip so the row returns to the
-            // server-provided status. Toast already surfaced via
-            // executeConfirmedAction's confirmError path; add a warning
-            // so the user knows the row reverted.
-            setOptimisticRunStates((prev) => {
-              if (!(runId in prev)) return prev;
-              const next = {...prev};
-              delete next[runId];
-              return next;
-            });
-            showToast("Cancel reverted.", "warning");
-          }
           throw err;
         }
       },
@@ -1346,9 +1286,9 @@ export function App() {
         Skip to main content
       </a>
       {connectionBanner}
-      <InertEffect active={sidebarInert} selector=".topbar" />
-      <InertEffect active={mainContentInert} selector=".main-shell-content" />
-      <InertEffect active={inspectorInert} selector="[data-mc-inspector]" />
+      <InertEffect active={sidebarInert} selector=".topbar" ariaHidden={modalOpen} />
+      <InertEffect active={mainContentInert} selector=".main-shell-content" ariaHidden={modalOpen} />
+      <InertEffect active={inspectorInert} selector="[data-mc-inspector]" ariaHidden={modalOpen} />
       <LiveRegion message={liveAnnouncement} />
       <TopBar
         data={data}
@@ -1462,7 +1402,7 @@ export function App() {
               <div className="diagnostics-grid health-grid">
                 <SystemHealth data={data} />
                 <DiagnosticsSummary data={data} onSelect={selectRun} />
-                <LiveRuns items={applyOptimisticRunStates(data?.live.items || [], optimisticRunStates)} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
+                <LiveRuns items={data?.live.items || []} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
                 <EventTimeline events={data?.events} />
                 <History
                   items={data?.history.items || []}

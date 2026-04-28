@@ -188,7 +188,11 @@ def _wait_for_banner(page: Any, *, present: bool, timeout_s: float) -> None:
 def test_banner_appears_after_3_consecutive_failures(
     mc_backend: Any, page: Any
 ) -> None:
-    """Banner must show within ~5s once /api/state has failed 3 times."""
+    """Banner must show within ~5s once /api/state has failed 3 times.
+
+    Once visible, background polling backs off to the banner's 5s reconnect
+    cadence instead of busy-looping and generating many duplicate findings.
+    """
 
     controller = StateRouteController()
     controller.install(page)
@@ -212,6 +216,12 @@ def test_banner_appears_after_3_consecutive_failures(
     )
     assert page.locator("[data-testid=connection-lost-retry-button]").count() == 1, (
         "banner must include a manual retry button"
+    )
+    count_at_banner = controller.fail_count
+    page.wait_for_timeout(3_000)
+    assert controller.fail_count <= count_at_banner + 1, (
+        "polling should back off while the lost-connection banner is visible; "
+        f"fail_count moved from {count_at_banner} to {controller.fail_count}"
     )
 
 

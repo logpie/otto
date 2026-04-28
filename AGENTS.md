@@ -34,3 +34,4 @@ Keep commits scoped and describe the user-visible behavior fixed or added. Inclu
 ## Agent-Specific Instructions
 
 Web Mission Control is the primary product surface. Do not revive deprecated TUI work except where needed to keep existing CLI/queue behavior correct. For `$code-health`, use parallel subagents and multiple rounds unless explicitly told otherwise.
+Before non-trivial Otto work, read `/Users/yuxuan/work/cc-autonomous/codex-learnings.md` for project-specific Codex pitfalls and token-accounting rules.

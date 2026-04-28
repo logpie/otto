@@ -1,7 +1,7 @@
 import {Spinner} from "../Spinner";
 import {FocusMetric, OverviewMetric, ProjectStatCard} from "../MicroComponents";
 import type {StateResponse} from "../../types";
-import {formatDuration, storyTotalsFromLanding, tokenBreakdownLine} from "../../utils/format";
+import {formatDuration, formatTokenSpend, storyTotalsFromLanding, tokenBreakdownLine} from "../../utils/format";
 import {activeRunSummary, canMerge, canResolveRelease, canStartWatcher, missionFocus, workflowHealth} from "../../utils/missionControl";
 import type {ResultBannerState} from "../../uiTypes";
 
@@ -73,7 +73,7 @@ export function ProjectOverview({data}: {data: StateResponse | null}) {
         />
         <ProjectStatCard
           label="Tokens"
-          value={stats?.token_display || "-"}
+          value={formatTokenSpend(stats?.token_usage) || stats?.token_display || "-"}
           detail={tokenBreakdownLine(stats?.token_usage)}
           tone={stats?.total_tokens ? "info" : "neutral"}
         />

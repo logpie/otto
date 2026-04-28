@@ -1,26 +1,41 @@
 import {useEffect} from "react";
 
 /**
- * Toggle the `inert` attribute on every element matching `selector`.
+ * Toggle `inert` + `aria-hidden` on every element matching `selector`.
  */
-export function InertEffect({active, selector}: {active: boolean; selector: string}) {
+export function InertEffect({active, selector, ariaHidden = false}: {active: boolean; selector: string; ariaHidden?: boolean}) {
   useEffect(() => {
     if (typeof document === "undefined") return;
     const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector));
     if (!nodes.length) return;
-    const previous = nodes.map((node) => node.hasAttribute("inert"));
+    const previous = nodes.map((node) => ({
+      inert: node.hasAttribute("inert"),
+      ariaHidden: node.getAttribute("aria-hidden"),
+    }));
     if (active) {
-      for (const node of nodes) node.setAttribute("inert", "");
+      for (const node of nodes) {
+        node.setAttribute("inert", "");
+        if (ariaHidden) node.setAttribute("aria-hidden", "true");
+      }
     } else {
-      for (const node of nodes) node.removeAttribute("inert");
+      for (const node of nodes) {
+        node.removeAttribute("inert");
+        node.removeAttribute("aria-hidden");
+      }
     }
     return () => {
       nodes.forEach((node, idx) => {
-        if (previous[idx]) node.setAttribute("inert", "");
+        const prev = previous[idx];
+        if (prev?.inert) node.setAttribute("inert", "");
         else node.removeAttribute("inert");
+        if (prev?.ariaHidden === null || prev?.ariaHidden === undefined) {
+          node.removeAttribute("aria-hidden");
+        } else {
+          node.setAttribute("aria-hidden", prev.ariaHidden);
+        }
       });
     };
-  }, [active, selector]);
+  }, [active, selector, ariaHidden]);
   return null;
 }
 

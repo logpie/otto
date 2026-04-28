@@ -53,8 +53,60 @@ export function tokenTotal(tokenUsage?: TokenUsage): number {
   return Math.max(explicit, derived);
 }
 
+export interface TokenSpendSummary {
+  total: number;
+  fresh: number;
+  cached: number;
+  cacheHitRate: number | null;
+}
+
+export function tokenSpendSummary(tokenUsage?: TokenUsage): TokenSpendSummary {
+  const total = tokenTotal(tokenUsage);
+  if (!tokenUsage) return {total, fresh: 0, cached: 0, cacheHitRate: null};
+  const input = Number(tokenUsage.input_tokens || 0);
+  const cacheCreation = Number(tokenUsage.cache_creation_input_tokens || 0);
+  const cacheRead = Number(tokenUsage.cache_read_input_tokens || 0);
+  const cachedTotal = Number(tokenUsage.cached_input_tokens || 0);
+  const output = Number(tokenUsage.output_tokens || 0);
+  const reasoning = Number(tokenUsage.reasoning_tokens || 0);
+  const legacyCachedSubset = Math.min(Math.max(cachedTotal - cacheCreation - cacheRead, 0), input);
+  const cached = cacheRead + legacyCachedSubset;
+  let fresh = Math.max(input - legacyCachedSubset, 0) + cacheCreation + output + reasoning;
+  if (total > 0 && fresh + cached < total) fresh += total - fresh - cached;
+  const denominator = input + cacheCreation + cacheRead;
+  const cacheHitRate = cached > 0 && denominator > 0 ? cached / denominator : null;
+  return {total, fresh, cached, cacheHitRate};
+}
+
+export function formatCacheHitRate(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "-";
+  const percentage = Math.max(0, Math.min(100, value * 100));
+  if (percentage > 0 && percentage < 1) return "<1%";
+  if (percentage > 99 && percentage < 100) return ">99%";
+  return `${Math.round(percentage)}%`;
+}
+
+export function formatTokenSpend(tokenUsage?: TokenUsage): string {
+  const summary = tokenSpendSummary(tokenUsage);
+  if (!summary.total) return "";
+  if (summary.cached) {
+    const hit = summary.cacheHitRate !== null ? ` · ${formatCacheHitRate(summary.cacheHitRate)} hit` : "";
+    return `${formatCompactNumber(summary.fresh)} fresh + ${formatCompactNumber(summary.cached)} cached${hit}`;
+  }
+  return `${formatCompactNumber(summary.total)} tokens`;
+}
+
 export function tokenBreakdownLine(tokenUsage?: TokenUsage): string {
   if (!tokenUsage) return "No token usage recorded";
+  const summary = tokenSpendSummary(tokenUsage);
+  if (summary.cached) {
+    return [
+      `${formatCompactNumber(summary.total)} total`,
+      `${formatCompactNumber(summary.fresh)} fresh`,
+      `${formatCompactNumber(summary.cached)} cached`,
+      summary.cacheHitRate !== null ? `${formatCacheHitRate(summary.cacheHitRate)} cache hit` : "",
+    ].filter(Boolean).join(" · ");
+  }
   const input = Number(tokenUsage.input_tokens || 0);
   const cacheRead = Number(tokenUsage.cache_read_input_tokens || 0);
   const cacheWrite = Number(tokenUsage.cache_creation_input_tokens || 0);
@@ -73,11 +125,10 @@ export function tokenBreakdownLine(tokenUsage?: TokenUsage): string {
 }
 
 export function usageLine(item: {token_usage?: TokenUsage; cost_usd?: number | null; cost_display?: string | null}): string {
-  const tokens = tokenTotal(item.token_usage);
+  const tokenText = formatTokenSpend(item.token_usage);
   const rawDisplay = item.cost_display && item.cost_display !== "…" ? item.cost_display : "";
   const display = rawDisplay.includes("$") || rawDisplay.toLowerCase().startsWith("reported ") ? "" : rawDisplay;
-  const tokenText = tokens ? `${formatCompactNumber(tokens)} tokens` : display;
-  return tokenText || "-";
+  return tokenText || display || "-";
 }
 
 export function storyTotalsFromLanding(items: LandingItem[]): {passed: number; tested: number} {

@@ -19,6 +19,27 @@ This pass audited provider token accounting, Mission Control runtime cleanup, an
 - Validated `queue.worktree_dir` as a relative in-project path, rejecting empty, absolute, and `..` traversal values.
 - Removed duplicate benchmark merge-cost parsing from `scripts/bench_runner.py` and `scripts/bench_synthetic_skip.py`; both now use `scripts/bench_costs.py`.
 
+## Token Accounting Memory
+
+Last updated: 2026-04-28
+
+When changing token accounting or Mission Control spend display, preserve these
+provider-specific semantics:
+
+- Claude/Anthropic usage reports `cache_creation_input_tokens` and
+  `cache_read_input_tokens` as additive token classes. Total token traffic
+  includes normal input, cache creation, cache read, output, and reasoning.
+- Codex/OpenAI-style `cached_input_tokens` is a subset of input tokens, not an
+  extra bucket to add on top of input.
+- In mixed aggregates, treat cache-read tokens plus provider-reported cached
+  input subsets as `cached`; treat uncached input, cache creation, output, and
+  reasoning as `fresh`.
+- The user-facing spend display should prefer compact token units over USD:
+  `fresh + cached · hit%`. Example from a real standard-cert run:
+  `76K fresh + 1.8M cached · 96% hit`.
+- Cache hit rate should be computed from cache-eligible input traffic, not from
+  output/reasoning tokens.
+
 ## Process Cleanup
 
 Cleaned stale orphaned processes left from older Otto and demo runs, including old queue runners, certifier child processes, and uvicorn/http demo servers. Kept the active live Mission Control portal and watcher running:

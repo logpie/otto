@@ -25,6 +25,7 @@ import type {
 } from "../../types";
 import {
   formatCompactNumber,
+  formatTokenSpend,
   formatDiffTruncationBanner,
   formatDuration,
   formatRelativeFreshness,
@@ -481,10 +482,11 @@ export function phaseProviderLine(phase: RunDetail["phase_timeline"][number]): s
 }
 
 export function phaseUsageLine(phase: RunDetail["phase_timeline"][number]): string {
+  const tokenSpend = formatTokenSpend(phase.token_usage);
   const parts = [
     typeof phase.duration_s === "number" ? formatDuration(phase.duration_s) : "",
     phase.rounds ? `${phase.rounds} round${phase.rounds === 1 ? "" : "s"}` : "",
-    tokenTotal(phase.token_usage) ? `${formatCompactNumber(tokenTotal(phase.token_usage))} tokens` : "",
+    tokenSpend,
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "No usage recorded";
 }

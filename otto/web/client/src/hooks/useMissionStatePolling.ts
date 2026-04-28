@@ -4,10 +4,11 @@ import {refreshIntervalMs} from "../utils/missionControl";
 
 const STATE_POLL_HIDDEN_MS = 30_000;
 const STATE_POLL_MIN_GAP_MS = 1000;
+const STATE_POLL_RECONNECT_MS = 5_000;
 
 type RefreshMissionState = (showStatus?: boolean, signal?: AbortSignal) => Promise<void>;
 
-export function useMissionStatePolling(refresh: RefreshMissionState, data: StateResponse | null) {
+export function useMissionStatePolling(refresh: RefreshMissionState, data: StateResponse | null, reconnecting = false) {
   const statePollTimerRef = useRef<number | null>(null);
   const statePollVisibleRef = useRef(true);
   const statePollLastAtRef = useRef<number>(0);
@@ -16,8 +17,10 @@ export function useMissionStatePolling(refresh: RefreshMissionState, data: State
   useEffect(() => {
     let cancelled = false;
 
-    const cadenceMs = (): number =>
-      statePollVisibleRef.current ? refreshIntervalMs(data) : STATE_POLL_HIDDEN_MS;
+    const cadenceMs = (): number => {
+      if (!statePollVisibleRef.current) return STATE_POLL_HIDDEN_MS;
+      return reconnecting ? STATE_POLL_RECONNECT_MS : refreshIntervalMs(data);
+    };
 
     const cancelPending = () => {
       if (statePollTimerRef.current !== null) {
@@ -98,5 +101,5 @@ export function useMissionStatePolling(refresh: RefreshMissionState, data: State
         document.removeEventListener("visibilitychange", onVisibilityChange);
       }
     };
-  }, [refresh, data?.live.refresh_interval_s]);
+  }, [refresh, data?.live.refresh_interval_s, reconnecting]);
 }

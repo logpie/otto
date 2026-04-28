@@ -48,8 +48,10 @@ export function TopBar({
             onClick={onSwitchProject}
             disabled={!projectsState?.launcher_enabled}
             data-testid="switch-project-button"
-            title={projectsState?.launcher_enabled ? "Switch project" : "Project switching disabled"}
+            aria-label={projectsState?.launcher_enabled ? "Open project launcher" : "Project switching disabled"}
+            title={projectsState?.launcher_enabled ? "Open project launcher" : "Project switching disabled"}
           >
+            {projectsState?.launcher_enabled ? <span className="topbar-project-switch">Projects</span> : null}
             <span className="topbar-project-name">{project.name || "Project"}</span>
             <span className="topbar-project-branch">{project.branch || "—"}</span>
             {project.dirty ? <span className="topbar-project-dirty" title="Local changes">●</span> : null}

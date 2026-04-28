@@ -762,7 +762,7 @@ class MissionControlModel:
             cost_display=_format_usage(reported_cost if cost_seen else None, token_usage),
             token_usage=_prune_zero_token_usage(token_usage),
             total_tokens=total_tokens,
-            token_display=f"{_format_compact_number(total_tokens)} tokens" if total_tokens else "-",
+            token_display=_format_usage(None, token_usage) if total_tokens else "-",
             stories_passed=stories_passed,
             stories_tested=stories_tested,
         )

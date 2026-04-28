@@ -355,6 +355,29 @@ def test_inspector_inert_isolates_background(mc_backend: Any, page: Any, disable
     assert not info["inspectorInert"], "inspector itself must remain interactive when only it is open"
 
 
+def test_job_dialog_hides_background_from_accessibility_tree(mc_backend: Any, page: Any, disable_animations: Any) -> None:
+    """Opening the JobDialog should remove background chrome from the a11y tree."""
+
+    _install_routes(page)
+    _hydrate(page, mc_backend.url, disable_animations=disable_animations)
+
+    page.get_by_test_id("new-job-button").click()
+    page.wait_for_selector("[data-testid=job-dialog-summary]", timeout=5_000)
+
+    info = page.evaluate(
+        """() => ({
+            topbarInert: document.querySelector('.topbar')?.hasAttribute('inert') === true,
+            topbarHidden: document.querySelector('.topbar')?.getAttribute('aria-hidden') === 'true',
+            mainInert: document.querySelector('.main-shell-content')?.hasAttribute('inert') === true,
+            mainHidden: document.querySelector('.main-shell-content')?.getAttribute('aria-hidden') === 'true',
+            dialogHidden: document.querySelector('.job-dialog')?.getAttribute('aria-hidden') === 'true',
+        })"""
+    )
+    assert info["topbarInert"] and info["topbarHidden"], info
+    assert info["mainInert"] and info["mainHidden"], info
+    assert not info["dialogHidden"], info
+
+
 def test_inspector_remains_active_when_dialog_stacks(mc_backend: Any, page: Any, disable_animations: Any) -> None:
     """When a confirm/job dialog stacks on top of the inspector, inspector + topbar + main go inert.
 

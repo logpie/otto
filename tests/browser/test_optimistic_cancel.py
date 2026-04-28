@@ -1,16 +1,14 @@
-"""Browser test for optimistic UI on the cancel action.
+"""Browser tests for cancel action state trust.
 
-Cluster: mc-audit microinteractions I4 (IMPORTANT).
+Cluster: nightly R7 cancellation trust.
 
-Problem: Every action waits a full /api/state refresh cycle (up to
-``refresh_interval_s`` seconds) before the run row's status flips. For
-cancel specifically, the operator clicks Confirm and the row keeps
-showing "running" until the next poll arrives — multi-second silence.
+Problem: the UI previously flipped a run row to ``cancelling`` before the
+server confirmed the queue task had transitioned. The nightly caught the
+trust failure: disk could still show the task running while Mission Control
+implied cancel progress.
 
-Fix: Set ``display_status = "cancelling"`` on the affected row optimistically
-the moment the cancel POST fires, so the row visibly transitions in
-~16ms. On 4xx/5xx error, drop the overlay so the row reverts to its
-server-provided status (a warning toast also surfaces).
+Fix: keep cancel state server-derived. The row remains RUNNING until a
+subsequent `/api/state` response reports a real transition.
 
 Run::
 
@@ -336,6 +334,8 @@ def _open_run_and_advanced_actions(page: Any) -> None:
     row_btn = page.get_by_test_id(f"live-row-activator-{RUN_ID}")
     row_btn.wait_for(state="visible", timeout=5_000)
     row_btn.click()
+    page.wait_for_selector("[data-testid=run-detail-panel]", timeout=5_000)
+    page.locator("details.advanced-actions").wait_for(state="visible", timeout=5_000)
     # Open advanced-actions disclosure.
     page.evaluate(
         """() => {
@@ -363,12 +363,11 @@ def _live_status_cell_text(page: Any) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def test_cancel_optimistically_flips_row_to_cancelling(
+def test_cancel_does_not_optimistically_flip_row_to_cancelling(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """Cancel POST takes 1.5s. After confirm-click, the row immediately shows
-    "cancelling" before the response returns — proving the optimistic
-    overlay is applied without waiting for a refresh cycle."""
+    """Cancel POST takes 1.5s. While it is pending, the row must still show
+    the server-provided RUNNING state rather than optimistic CANCELLING."""
 
     payload = _state(status="running")
     _install_projects_route(page)
@@ -376,8 +375,8 @@ def test_cancel_optimistically_flips_row_to_cancelling(
     _install_detail_route(page)
     _install_artifacts_route(page)
 
-    # Slow cancel handler so the test can assert the optimistic flip happens
-    # WELL BEFORE the response returns (and any refresh fires).
+    # Slow cancel handler so the test can assert the row does not change
+    # before the server has had a chance to confirm a new state.
     cancel_calls = {"count": 0}
 
     def cancel_handler(route: Any) -> None:
@@ -408,8 +407,8 @@ def test_cancel_optimistically_flips_row_to_cancelling(
     confirm_btn = page.get_by_test_id("confirm-dialog-confirm-button")
     confirm_btn.click()
 
-    # Within 500ms the row should flip to CANCELLING — that's the optimistic
-    # overlay. The cancel POST is still outstanding (the handler sleeps 1.5s).
+    page.wait_for_timeout(500)
+    assert cancel_calls["count"] == 1
     page.wait_for_function(
         """() => {
             const row = document.querySelector(
@@ -417,21 +416,18 @@ def test_cancel_optimistically_flips_row_to_cancelling(
             );
             if (!row) return false;
             const cell = row.querySelector('td');
-            return cell && (cell.textContent || '').toUpperCase().includes('CANCELLING');
+            const txt = (cell?.textContent || '').toUpperCase();
+            return txt.includes('RUNNING') && !txt.includes('CANCELLING');
         }""",
         timeout=1_000,
     )
-    # Confirm POST hasn't completed yet — proves we did not wait for refresh.
-    assert cancel_calls["count"] == 1
 
 
-def test_cancel_failure_reverts_optimistic_overlay(
+def test_cancel_failure_keeps_server_state(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """If the cancel POST returns 4xx, the optimistic overlay is dropped so
-    the row reverts to RUNNING. The confirm dialog stays open with the
-    inline error (per destructive-action-safety #6); a warning toast also
-    appears noting the revert."""
+    """If the cancel POST returns 4xx, the row remains RUNNING. The confirm
+    dialog stays open with the inline error (destructive-action-safety #6)."""
 
     payload = _state(status="running")
     _install_projects_route(page)
@@ -466,7 +462,7 @@ def test_cancel_failure_reverts_optimistic_overlay(
     err = page.locator('[data-testid=confirm-dialog-error]')
     err.wait_for(state="visible", timeout=5_000)
 
-    # The row reverts to RUNNING — the optimistic overlay is dropped.
+    # The row remains RUNNING — no optimistic overlay was applied.
     page.wait_for_function(
         """() => {
             const row = document.querySelector(

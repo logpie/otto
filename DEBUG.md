@@ -194,6 +194,46 @@ Refresh the single-agent checkpoint on non-command interrupts with status `pause
 
 Follow-up: queue resume now validates checkpoint compatibility before requeueing. A stale checkpoint is shown as not resumable, with the concrete reason surfaced to CLI, watcher logs, and Mission Control.
 
+# Mission Control Nightly Follow-Up Debug
+
+Date: 2026-04-28
+
+## Observations
+
+- Claude's follow-up review is directionally useful, but several finding IDs in the handoff are mismatched against the actual report. In the report, F62/F66/F71 are X1 network failures, not S2 history/filter findings.
+- F1 is a real modal accessibility issue: the New Job dialog had focus management fixed, but the background shell also needs to be removed from the accessibility tree while a top-level modal is open.
+- S2 is still a real current-code issue: Tasks view renders no task rows when `live` and `landing` are empty even if `/api/state.history.items` has completed runs.
+- X1 is a real current-code issue in reduced form: a sticky connection banner exists, but background polling still surfaces repeated failure feedback and does not back off to the banner's stated 5s reconnect cadence.
+- R7 cancellation trust is still a current-code issue: the UI applied an optimistic `cancelling` overlay before `/api/state` confirmed a queue transition.
+
+## Hypotheses
+
+### H1: Current regressions are mostly state mapping/polling policy, not missing data (root)
+
+- Supports: history data, connection streak state, and modal state all exist; UI interpretation is what fails.
+- Conflicts: S1 launcher latency may still involve backend project scanning, not just frontend rendering.
+- Test: add targeted browser checks for history fallback, modal aria hiding, cancel no-optimism, and reconnect backoff.
+
+### H2: The previous fixes are absent from the static bundle only
+
+- Supports: the user repeatedly hit stale-server/stale-bundle issues.
+- Conflicts: source inspection shows actual source-level gaps for S2, X1, and R7.
+- Test: run typecheck/build and browser tests against the rebuilt bundle.
+
+### H3: Nightly harness selector ambiguity is the main remaining issue
+
+- Supports: several high findings are strict locator failures (`Land`, `Diff`, `Tasks`) rather than observed wrong state.
+- Conflicts: S2/X1/R7/F1 include concrete UI state findings independent of selector ambiguity.
+- Test: skip pure locator-only findings unless they map to a real ambiguous UI affordance.
+
+## Fix
+
+- Modal inert handling now optionally sets `aria-hidden=true`; topbar/main are hidden only while a top-level modal is open, while inspector-only inert remains non-hidden.
+- Tasks view now falls back to current history-page rows when there are no live or landable rows, so completed-run projects do not look empty.
+- Connection-loss polling now backs off to 5s while the banner is visible and suppresses repeated background toasts.
+- Cancel no longer mutates row state optimistically; the row stays server-derived until `/api/state` reflects cancellation.
+- Launcher project rows now have stable test IDs and exact action labels.
+
 # Failed Elapsed Time Debug
 
 Date: 2026-04-25
@@ -489,3 +529,35 @@ The certifier can ask the provider to start a project dev server in the backgrou
 - Add certifier-side cleanup for new listening dev-server processes that belong to the certified project.
 - Make certifier prompts explicitly require cleanup of any app/server/background process started during certification.
 - Prefer bounded foreground commands, temp log redirection, and explicit server stop/port-closed verification in certification evidence.
+
+# Mission Control Nightly Follow-Up Debug
+
+Date: 2026-04-28
+
+## Observations
+
+- Claude's follow-up review was directionally useful but not exact: the S2 IDs it cited as pagination/filter bugs were actually X1 network-blackhole findings in the report. The S2 history/filter cluster is real, but the IDs are F25-F31 plus medium findings F207-F217.
+- Several high findings were already covered by current source before this pass: initial JobDialog focus, bottom-left toasts, inspector tab test IDs, stale watcher surfacing, cross-tab refresh nudges, and connection-lost banner/backoff.
+- The previous mistake was verification scope: passing typecheck plus obvious targeted checks was not enough. Each claimed root-cause cluster needs at least one targeted regression test or an explicit “not fixed / harness-only” note.
+
+## Fixes This Pass
+
+- Modal accessibility isolation: `InertEffect` now can apply `aria-hidden` as well as `inert`; top-level dialogs hide the topbar, main content, and inspector from the accessibility tree while open.
+- Cancel trust: removed optimistic cancel state from the frontend. The row stays in the server-reported state until the server confirms a transition.
+- Network degradation: repeated `/api/state` failures no longer emit toast spam, and the visible poller backs off to the reconnect cadence while the lost-connection banner is active.
+- History fallback: when there are no live/landing tasks, the Tasks board can show history rows instead of pretending there is no prior work.
+- Launcher S1 UX: added search for large project lists, compact relative project-row paths, stable row test IDs, explicit “Projects” switch affordance in the topbar, and visible refresh progress text.
+- Launcher CLS mitigation: reserve boot/hero/explainer height and align the boot placeholder with the launcher's top layout.
+
+## Verification
+
+- `npm run web:typecheck`
+- `npm run web:build`
+- `OTTO_BROWSER_SKIP_BUILD=1 OTTO_WEB_SKIP_FRESHNESS=1 .venv/bin/pytest tests/browser/test_first_run_clarity.py::test_empty_task_board_with_history_mentions_history_not_first_run tests/browser/test_first_run_clarity.py::test_launcher_many_projects_are_searchable_and_compact tests/browser/test_first_run_clarity.py::test_project_switch_button_returns_to_launcher tests/browser/test_accessibility.py::test_job_dialog_hides_background_from_accessibility_tree tests/browser/test_lost_connection_banner.py::test_banner_appears_after_3_consecutive_failures tests/browser/test_optimistic_cancel.py::test_cancel_does_not_optimistically_flip_row_to_cancelling tests/browser/test_optimistic_cancel.py::test_cancel_failure_keeps_server_state -m browser -p playwright -q`
+- `OTTO_BROWSER_SKIP_BUILD=1 OTTO_WEB_SKIP_FRESHNESS=1 .venv/bin/pytest tests/browser/test_filters_url_persistence.py tests/browser/test_history_pagination.py -m browser -p playwright -q`
+- `git diff --check`
+
+## Residual Risk
+
+- The report's 3s `/api/projects` calls are backend/IO latency; this pass improves frontend feedback and navigation, but does not make the endpoint faster.
+- CLS should be lower after reserved heights, but I did not rerun the full nightly CLS recorder. Treat this as mitigated, not proven eliminated.

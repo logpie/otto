@@ -7,6 +7,7 @@ import type {
   ArtifactRef,
   CommandBacklogItem,
   DiffResponse,
+  HistoryItem,
   LandingItem,
   LandingState,
   LiveRunItem,
@@ -425,6 +426,11 @@ export function taskBoardColumns(data: StateResponse | null, filters: Filters = 
     if (!item.queue_task_id && !item.active && !isAttentionStatus(item.display_status)) continue;
     cardsByKey.set(key, boardTaskFromLive(item));
   }
+  if (cardsByKey.size === 0) {
+    for (const item of data.history.items) {
+      cardsByKey.set(`history:${item.run_id}`, boardTaskFromHistory(item));
+    }
+  }
   for (const card of cardsByKey.values()) {
     if (!boardTaskMatchesFilters(card, filters)) continue;
     const column = columns.find((candidate) => candidate.stage === card.stage);
@@ -518,6 +524,37 @@ export function boardTaskFromLive(item: LiveRunItem): BoardTask {
     storiesTested: null,
     usageDisplay: usageLine(item) !== "-" ? usageLine(item) : null,
     durationDisplay: item.elapsed_display && item.elapsed_display !== "-" ? item.elapsed_display : null,
+  };
+}
+
+export function boardTaskFromHistory(item: HistoryItem): BoardTask {
+  const outcome = (item.terminal_outcome || item.status || "").toLowerCase();
+  const failed = outcome.includes("failed") || outcome.includes("error");
+  const interrupted = outcome.includes("interrupted") || outcome.includes("cancelled");
+  const stage: BoardStage = failed || interrupted ? "attention" : "landed";
+  const display = item.outcome_display || item.terminal_outcome || item.status || "completed";
+  const usage = usageLine(item);
+  return {
+    id: item.queue_task_id || item.run_id,
+    runId: item.run_id,
+    title: item.queue_task_id || item.summary || item.run_id,
+    summary: item.summary || item.intent || item.command || item.run_id,
+    stage,
+    status: display,
+    branch: item.branch,
+    changedFileCount: null,
+    proof: usage,
+    reason: item.intent || item.summary || item.completed_at_display || display,
+    active: false,
+    elapsedDisplay: null,
+    lastEvent: null,
+    progress: null,
+    buildConfig: null,
+    source: "history",
+    storiesPassed: null,
+    storiesTested: null,
+    usageDisplay: usage !== "-" ? usage : null,
+    durationDisplay: item.duration_display || null,
   };
 }
 
@@ -1315,30 +1352,6 @@ export function evidenceLine(packet: RunDetail["review_packet"]): string {
   if (!reviewEvidence.length) return "-";
   if (!existing) return "not attached";
   return `${existing}/${reviewEvidence.length}`;
-}
-
-/**
- * Overlay optimistic run states onto the live-run items returned by
- * /api/state. Used by mc-audit microinteractions I4 to flip a row's
- * displayed status to "cancelling" the moment the operator confirms a
- * cancel, instead of waiting for the next /api/state poll. The original
- * server item is otherwise untouched.
- */
-export function applyOptimisticRunStates(
-  items: LiveRunItem[],
-  overlays: Record<string, "cancelling">,
-): LiveRunItem[] {
-  if (!items.length || !Object.keys(overlays).length) return items;
-  return items.map((item) => {
-    const overlay = overlays[item.run_id];
-    if (!overlay) return item;
-    return {
-      ...item,
-      display_status: overlay,
-      active: true,
-      last_event: "cancelling",
-    };
-  });
 }
 
 export function canShowDiff(detail: RunDetail | null): boolean {

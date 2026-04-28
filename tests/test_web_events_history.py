@@ -180,4 +180,4 @@ def test_web_project_stats_include_claude_cache_token_fields(tmp_path: Path) -> 
     assert usage["cache_creation_input_tokens"] == 84864
     assert usage["cache_read_input_tokens"] == 2434281
     assert state["project_stats"]["total_tokens"] == 2544543
-    assert state["project_stats"]["token_display"] == "2.5M tokens"
+    assert state["project_stats"]["token_display"] == "110.3K fresh + 2.4M cached · 97% hit"
