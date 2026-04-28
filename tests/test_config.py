@@ -121,6 +121,31 @@ class TestLoadConfig:
         with pytest.raises(ConfigError, match="Unknown queue config key: queue.future_key"):
             load_config(config_path)
 
+    def test_autopilot_section_defaults_present(self, tmp_bare_git_repo):
+        cfg = load_config(tmp_bare_git_repo / "otto.yaml")
+        autopilot = cfg["autopilot"]
+        assert autopilot["mode"] == "assisted"
+        assert autopilot["max_actions_per_hour"] == 8
+        assert autopilot["max_pilot_calls_per_hour"] == 2
+        assert autopilot["allow_auto_land"] is False
+        assert autopilot["verification_policy"] == "smart"
+        assert autopilot["pilot_enabled"] is True
+
+    def test_autopilot_partial_override_preserves_other_defaults(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"autopilot": {"mode": "full", "max_actions_per_hour": 1}}))
+        cfg = load_config(config_path)
+        assert cfg["autopilot"]["mode"] == "full"
+        assert cfg["autopilot"]["max_actions_per_hour"] == 1
+        assert cfg["autopilot"]["max_pilot_calls_per_hour"] == 2
+        assert cfg["autopilot"]["allow_auto_land"] is False
+
+    def test_autopilot_section_unknown_keys_are_rejected(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"autopilot": {"future_key": "x"}}))
+        with pytest.raises(ConfigError, match="Unknown autopilot config key: autopilot.future_key"):
+            load_config(config_path)
+
     def test_queue_merge_certifier_mode_is_validated_and_normalized(self, tmp_bare_git_repo):
         config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({"queue": {"merge_certifier_mode": "THOROUGH"}}))

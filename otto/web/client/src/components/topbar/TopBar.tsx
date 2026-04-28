@@ -2,26 +2,35 @@ import {canStartWatcher, canStopWatcher, effectiveWatcherState, startWatcherTool
 import {BrandMark} from "../BrandMark";
 import {Spinner} from "../Spinner";
 import type {PillTone} from "../Pill";
-import type {ProjectsResponse, StateResponse, WatcherInfo} from "../../types";
+import type {AutopilotMode, ProjectsResponse, StateResponse, WatcherInfo} from "../../types";
 
 /**
  * Slim horizontal header — replaces the previous vertical sidebar.
  * mc-audit redesign Phase C.
  */
 export function TopBar({
-  data, project, watcher, watcherPending, projectsState, onNewJob, onSwitchProject, onStartWatcher, onStopWatcher,
+  data, project, watcher, watcherPending, autopilotPending, projectsState, onNewJob, onSwitchProject, onStartWatcher, onStopWatcher, onAutopilotMode,
 }: {
   data: StateResponse | null;
   project: StateResponse["project"] | undefined;
   watcher: WatcherInfo | undefined;
   watcherPending: boolean;
+  autopilotPending: boolean;
   projectsState: ProjectsResponse | null;
   onNewJob: () => void;
   onSwitchProject: () => void;
   onStartWatcher: () => void;
   onStopWatcher: () => void;
+  onAutopilotMode: (mode: AutopilotMode) => void;
 }) {
   const watcherState = effectiveWatcherState(watcher);
+  const autopilot = data?.autopilot;
+  const autopilotMode = autopilot?.mode || "off";
+  const autopilotAttention = (autopilot?.pending_decisions.length || 0) + (autopilot?.incidents.length || 0);
+  const autopilotTone: PillTone = autopilotMode === "off" ? "neutral" : autopilotAttention ? "warning" : "success";
+  const autopilotTitle = autopilot
+    ? `Autopilot is ${autopilotMode}. ${autopilot.next_tick_hint || "It scans queue, repo, runner, and landing state."}`
+    : "Autopilot status is loading.";
   const watcherTone: PillTone = watcherState === "running" ? "success" : watcherState === "stale" ? "warning" : "neutral";
   const startable = watcherState !== "running" && canStartWatcher(data);
   const heartbeat = watcher?.health.heartbeat_age_s;
@@ -60,6 +69,26 @@ export function TopBar({
         ) : null}
       </div>
       <div className="topbar-actions">
+        {project ? (
+          <label
+            className={`topbar-autopilot pill-tone-${autopilotTone} ${autopilotMode !== "off" ? "is-live" : ""}`}
+            title={autopilotTitle}
+          >
+            <span className={`watcher-dot tone-${autopilotTone}`} aria-hidden="true" />
+            <span className="topbar-autopilot-label">Autopilot</span>
+            <select
+              data-testid="autopilot-mode-select"
+              aria-label="Autopilot mode"
+              value={autopilotMode}
+              disabled={autopilotPending}
+              onChange={(event) => onAutopilotMode(event.target.value as AutopilotMode)}
+            >
+              <option value="off">Off</option>
+              <option value="assisted">Assisted</option>
+              <option value="full">Full</option>
+            </select>
+          </label>
+        ) : null}
         {project ? (
           <span
             className={`topbar-status pill-tone-${project.dirty ? "warning" : "success"}`}

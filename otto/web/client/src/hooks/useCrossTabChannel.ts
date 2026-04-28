@@ -31,6 +31,7 @@ export type MutationKind =
   | "watcher.start"
   | "watcher.stop"
   | "merge-all"
+  | "autopilot.action"
   | "project.change";
 
 export interface MutationMessage {

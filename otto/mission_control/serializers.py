@@ -744,6 +744,7 @@ def _project_defaults(project_dir: Path) -> dict[str, Any]:
             "queue_worktree_dir": _first_string(queue.get("worktree_dir")),
             "queue_on_watcher_restart": _first_string(queue.get("on_watcher_restart")),
             "queue_merge_certifier_mode": _first_string(queue.get("merge_certifier_mode")),
+            "autopilot": dict(config.get("autopilot") or {}),
             "config_file_exists": config_exists,
             "config_error": None,
         }
@@ -769,6 +770,7 @@ def _project_defaults(project_dir: Path) -> dict[str, Any]:
             "queue_worktree_dir": queue_defaults.get("worktree_dir"),
             "queue_on_watcher_restart": queue_defaults.get("on_watcher_restart"),
             "queue_merge_certifier_mode": queue_defaults.get("merge_certifier_mode"),
+            "autopilot": dict(DEFAULTS.get("autopilot") or {}),
             "config_file_exists": config_exists,
             "config_error": str(exc),
         }

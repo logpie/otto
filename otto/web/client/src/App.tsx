@@ -54,6 +54,7 @@ import {
 } from "./utils/format";
 import type {
   ActionResult,
+  AutopilotMode,
   ProjectMutationResponse,
   ProjectsResponse,
   StateResponse,
@@ -188,6 +189,7 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const watcherInFlight = useInFlight();
+  const autopilotInFlight = useInFlight();
   const refreshInFlight = useInFlight();
   const mergeAllInFlight = useInFlight();
   const selectedRunIdRef = useRef<string | null>(initialRoute.selectedRunId);
@@ -945,6 +947,97 @@ export function App() {
     await execute();
   }, [data, refresh, requestConfirm, showToast, watcherInFlight]);
 
+  const executeAutopilotMode = useCallback(async (mode: AutopilotMode) => {
+    await autopilotInFlight.run(async () => {
+      try {
+        const result = await api<{ok: boolean; message?: string | null; mode?: AutopilotMode; refresh?: boolean}>("/api/autopilot/mode", {
+          method: "POST",
+          body: JSON.stringify({mode}),
+        });
+        if (result.ok === false) {
+          showToast(result.message || "Autopilot mode change failed", "error");
+          return;
+        }
+        showToast(result.message || `Autopilot set to ${result.mode || mode}`);
+        crossTabPublishRef.current?.("autopilot.action");
+        if (result.refresh !== false) await refresh(true);
+      } catch (error) {
+        showToast(`Autopilot mode change failed: ${errorMessage(error)}`, "error");
+        throw error;
+      }
+    });
+  }, [autopilotInFlight, refresh, showToast]);
+
+  const setAutopilotMode = useCallback((mode: AutopilotMode) => {
+    if (mode === "full" && data?.autopilot?.mode !== "full") {
+      requestConfirm({
+        title: "Enable full Autopilot",
+        body: "Autopilot may recover stuck queue runners, request repair agents, resolve landing blockers, and land ready work within its policy budget. It will still record every action in the timeline.",
+        confirmLabel: "Enable full auto",
+        onConfirm: () => executeAutopilotMode(mode),
+      });
+      return;
+    }
+    void executeAutopilotMode(mode);
+  }, [data?.autopilot?.mode, executeAutopilotMode, requestConfirm]);
+
+  const runAutopilotTick = useCallback(async () => {
+    await autopilotInFlight.run(async () => {
+      try {
+        const result = await api<{ok: boolean; message?: string | null; refresh?: boolean}>("/api/autopilot/tick", {
+          method: "POST",
+          body: "{}",
+        });
+        showToast(result.message || "Autopilot scan complete", result.ok === false ? "error" : "information");
+        crossTabPublishRef.current?.("autopilot.action");
+        if (result.refresh !== false) await refresh(true);
+      } catch (error) {
+        showToast(`Autopilot scan failed: ${errorMessage(error)}`, "error");
+        throw error;
+      }
+    });
+  }, [autopilotInFlight, refresh, showToast]);
+
+  const approveAutopilotDecision = useCallback(async (decisionId: string) => {
+    await autopilotInFlight.run(async () => {
+      try {
+        const result = await api<{ok: boolean; message?: string | null; refresh?: boolean}>(`/api/autopilot/decisions/${encodeURIComponent(decisionId)}/approve`, {
+          method: "POST",
+          body: "{}",
+        });
+        showToast(result.message || "Autopilot recovery approved", result.ok === false ? "error" : "information");
+        crossTabPublishRef.current?.("autopilot.action");
+        if (result.refresh !== false) await refresh(true);
+      } catch (error) {
+        showToast(`Autopilot recovery failed: ${errorMessage(error)}`, "error");
+        throw error;
+      }
+    });
+  }, [autopilotInFlight, refresh, showToast]);
+
+  const emergencyStopAutopilot = useCallback(() => {
+    requestConfirm({
+      title: "Stop Autopilot",
+      body: "Turn Autopilot off and clear pending recovery approvals. Running jobs are not cancelled.",
+      confirmLabel: "Stop Autopilot",
+      tone: "danger",
+      onConfirm: () => autopilotInFlight.run(async () => {
+        try {
+          const result = await api<{ok: boolean; message?: string | null; refresh?: boolean}>("/api/autopilot/emergency-stop", {
+            method: "POST",
+            body: "{}",
+          });
+          showToast(result.message || "Autopilot stopped", result.ok === false ? "error" : "information");
+          crossTabPublishRef.current?.("autopilot.action");
+          if (result.refresh !== false) await refresh(true);
+        } catch (error) {
+          showToast(`Autopilot stop failed: ${errorMessage(error)}`, "error");
+          throw error;
+        }
+      }),
+    });
+  }, [autopilotInFlight, refresh, requestConfirm, showToast]);
+
   const project = data?.project;
   const watcher = data?.watcher;
   const landing = data?.landing;
@@ -1295,11 +1388,13 @@ export function App() {
         project={project}
         watcher={watcher}
         watcherPending={watcherInFlight.pending}
+        autopilotPending={autopilotInFlight.pending}
         projectsState={projectsState}
         onNewJob={openJobDialog}
         onSwitchProject={() => void switchProject()}
         onStartWatcher={() => void runWatcherAction("start")}
         onStopWatcher={() => void runWatcherAction("stop")}
+        onAutopilotMode={setAutopilotMode}
       />
       <main className="workspace main-shell-content" id="main-content" tabIndex={-1}>
           <Toolbar
@@ -1400,7 +1495,14 @@ export function App() {
             />
             <div className="diagnostics-workspace">
               <div className="diagnostics-grid health-grid">
-                <SystemHealth data={data} />
+                <SystemHealth
+                  data={data}
+                  autopilotPending={autopilotInFlight.pending}
+                  onAutopilotMode={setAutopilotMode}
+                  onAutopilotTick={() => void runAutopilotTick()}
+                  onAutopilotApprove={(decisionId) => void approveAutopilotDecision(decisionId)}
+                  onAutopilotEmergencyStop={emergencyStopAutopilot}
+                />
                 <DiagnosticsSummary data={data} onSelect={selectRun} />
                 <LiveRuns items={data?.live.items || []} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
                 <EventTimeline events={data?.events} />

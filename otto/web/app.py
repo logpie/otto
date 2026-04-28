@@ -329,6 +329,26 @@ def create_app(
     def events(limit: int = Query(80, ge=1, le=500)) -> dict[str, Any]:
         return _service().events(limit=limit)
 
+    @app.get("/api/autopilot")
+    def autopilot_status() -> dict[str, Any]:
+        return _service().autopilot_status()
+
+    @app.post("/api/autopilot/mode")
+    def autopilot_set_mode(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+        return _service().autopilot_set_mode(str(payload.get("mode") or "assisted"))
+
+    @app.post("/api/autopilot/tick")
+    def autopilot_tick() -> dict[str, Any]:
+        return _service().autopilot_tick()
+
+    @app.post("/api/autopilot/decisions/{decision_id}/approve")
+    def autopilot_approve(decision_id: str) -> dict[str, Any]:
+        return _service().autopilot_approve(decision_id)
+
+    @app.post("/api/autopilot/emergency-stop")
+    def autopilot_emergency_stop() -> dict[str, Any]:
+        return _service().autopilot_emergency_stop()
+
     @app.post("/api/watcher/start")
     def watcher_start(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
         return _service().start_watcher(

@@ -74,6 +74,19 @@ DEFAULTS: dict[str, Any] = {
             "otto.yaml",
         ],
     },
+
+    # Mission Control Autopilot. Assisted is intentionally the default:
+    # existing users see diagnosis and one-click recovery suggestions, while
+    # explicit Full mode grants bounded self-healing authority.
+    "autopilot": {
+        "mode": "assisted",                    # off | assisted | full
+        "max_actions_per_hour": 8,
+        "max_pilot_calls_per_hour": 2,
+        "allow_auto_land": False,              # explicit opt-in only
+        "verification_policy": "smart",        # smart | fast | full | skip
+        "pilot_enabled": True,
+        "pilot_timeout_s": 300,
+    },
 }
 
 # Kept as an alias for backward compatibility with tests and external
@@ -739,6 +752,14 @@ def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
                 logging.getLogger("otto.config").warning(
                     "Invalid queue config %r, using defaults", v,
                 )
+        elif k == "autopilot":
+            if isinstance(v, dict):
+                merged["autopilot"] = _normalize_autopilot_overrides(v, merged["autopilot"])
+            else:
+                import logging
+                logging.getLogger("otto.config").warning(
+                    "Invalid autopilot config %r, using defaults", v,
+                )
         else:
             merged[k] = v
     return merged
@@ -849,6 +870,41 @@ def _queue_value_is_valid(key: str, value: Any) -> bool:
     if key == "bookkeeping_files":
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
     return True
+
+
+def _normalize_autopilot_overrides(
+    raw_autopilot: dict[str, Any],
+    base: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate Autopilot overrides against base."""
+    from otto.verification import normalize_verification_policy
+
+    autopilot = dict(base)
+    for key, value in raw_autopilot.items():
+        if key not in base:
+            choices = ", ".join(sorted(base))
+            raise ConfigError(f"Unknown autopilot config key: autopilot.{key}. Expected one of: {choices}")
+        if key == "mode":
+            mode = str(value or "").strip().lower()
+            if mode not in {"off", "assisted", "full"}:
+                raise ConfigError("Invalid autopilot.mode: expected off, assisted, or full")
+            autopilot[key] = mode
+        elif key in {"max_actions_per_hour", "max_pilot_calls_per_hour", "pilot_timeout_s"}:
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ConfigError(f"Invalid autopilot.{key}: expected a non-negative integer")
+            autopilot[key] = value
+        elif key in {"allow_auto_land", "pilot_enabled"}:
+            if value is not None and not isinstance(value, bool):
+                raise ConfigError(f"Invalid autopilot.{key}: expected true, false, or null")
+            autopilot[key] = value
+        elif key == "verification_policy":
+            try:
+                autopilot[key] = normalize_verification_policy(str(value or "smart"))
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+        else:
+            autopilot[key] = value
+    return autopilot
 
 
 def ensure_bookkeeping_setup(project_dir: Path, config: dict[str, Any]) -> None:

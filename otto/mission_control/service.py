@@ -34,6 +34,7 @@ from otto.mission_control.actions import (
     execute_merge_recover,
     execute_queue_cleanup,
 )
+from otto.mission_control.autopilot import AutopilotController
 from otto.mission_control.events import append_event
 from otto.mission_control.events import events_status
 from otto.mission_control.model import (
@@ -137,6 +138,7 @@ class MissionControlService:
         payload["landing"] = landing
         payload["runtime"] = self.runtime_status(watcher=watcher, landing=landing)
         payload["events"] = self.events(limit=50)
+        payload["autopilot"] = self.autopilot_status(snapshot=payload)
         return payload
 
     def _emit_run_lifecycle_events(self, state: MissionControlState) -> None:
@@ -860,6 +862,31 @@ class MissionControlService:
 
     def events(self, *, limit: int = 80) -> dict[str, Any]:
         return events_status(self.project_dir, limit=limit)
+
+    def autopilot_status(self, *, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+        return AutopilotController(self.project_dir).status(snapshot or self._autopilot_snapshot())
+
+    def autopilot_set_mode(self, mode: str) -> dict[str, Any]:
+        return AutopilotController(self.project_dir).set_mode(mode)
+
+    def autopilot_tick(self) -> dict[str, Any]:
+        return AutopilotController(self.project_dir).tick(self._autopilot_snapshot(), self)
+
+    def autopilot_approve(self, decision_id: str) -> dict[str, Any]:
+        return AutopilotController(self.project_dir).approve(decision_id, self._autopilot_snapshot(), self)
+
+    def autopilot_emergency_stop(self) -> dict[str, Any]:
+        return AutopilotController(self.project_dir).emergency_stop()
+
+    def _autopilot_snapshot(self) -> dict[str, Any]:
+        state = self._state(MissionControlFilters(history_page_size=25))
+        payload = serialize_state(self.project_dir, state)
+        watcher = self.watcher_status()
+        landing = self.landing_status()
+        payload["watcher"] = watcher
+        payload["landing"] = landing
+        payload["runtime"] = self.runtime_status(watcher=watcher, landing=landing)
+        return payload
 
     def start_watcher(self, *, concurrent: int | None = None, exit_when_empty: bool = False) -> dict[str, Any]:
         status = self.watcher_status()

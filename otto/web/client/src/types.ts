@@ -6,6 +6,7 @@ export type CertificationPolicy = "" | "fast" | "standard" | "thorough" | "skip"
 export type VerificationPolicy = "smart" | "fast" | "full" | "skip";
 export type ExecutionMode = "split" | "agentic";
 export type PlanningMode = "direct" | "spec-review" | "spec-auto" | "spec-file";
+export type AutopilotMode = "off" | "assisted" | "full";
 
 export interface ProjectDefaults {
   provider: string;
@@ -27,6 +28,7 @@ export interface ProjectDefaults {
   queue_worktree_dir: string | null;
   queue_on_watcher_restart: string | null;
   queue_merge_certifier_mode: string | null;
+  autopilot?: AutopilotPolicy;
   config_file_exists: boolean;
   config_error: string | null;
 }
@@ -140,6 +142,83 @@ export interface WatcherHealth {
   started_at: string | null;
   log_path: string;
   next_action: string;
+}
+
+export interface AutopilotPolicy {
+  mode: AutopilotMode;
+  max_actions_per_hour: number;
+  max_pilot_calls_per_hour: number;
+  allow_auto_land: boolean | null;
+  verification_policy: VerificationPolicy;
+  pilot_enabled: boolean;
+  pilot_timeout_s: number;
+}
+
+export interface AutopilotIncident {
+  id: string;
+  kind: string;
+  severity: "info" | "warning" | "error" | string;
+  title: string;
+  detail: string;
+  action: string;
+  run_id: string | null;
+  task_id: string | null;
+}
+
+export interface AutopilotDecision {
+  id: string;
+  incident_id: string | null;
+  created_at: string;
+  title: string | null;
+  action: string;
+  action_label?: string;
+  reason: string | null;
+  severity: "info" | "warning" | "error" | string;
+  target: string | null;
+  run_id: string | null;
+  task_id: string | null;
+  requires_pilot: boolean;
+  status: "pending" | "approved" | "declined" | "executed" | "failed" | "skipped" | string;
+  requires_approval?: boolean;
+  rationale?: string;
+  result: Record<string, unknown> | null;
+  error: string | null;
+}
+
+export interface AutopilotEvent {
+  id: string;
+  created_at: string;
+  kind: string;
+  severity: "info" | "warning" | "error" | "success" | string;
+  message: string;
+  incident_id: string | null;
+  decision_id: string | null;
+  action: string | null;
+  details: Record<string, unknown>;
+}
+
+export interface AutopilotStatus {
+  mode: AutopilotMode;
+  enabled: boolean;
+  policy: AutopilotPolicy;
+  health: "idle" | "scanning" | "attention" | "recovering" | "blocked" | "off" | string;
+  last_tick_at: string | null;
+  next_tick_hint: string;
+  incidents: AutopilotIncident[];
+  pending_decisions: AutopilotDecision[];
+  recent_events: AutopilotEvent[];
+  budgets: {
+    actions_used_last_hour: number;
+    actions_limit_per_hour: number;
+    pilot_calls_used_last_hour: number;
+    pilot_calls_limit_per_hour: number;
+  };
+  counters: {
+    incidents_open: number;
+    decisions_pending: number;
+    actions_executed: number;
+    actions_failed: number;
+  };
 }
 
 export interface RuntimeIssue {
@@ -614,6 +693,7 @@ export interface StateResponse {
   project: ProjectInfo;
   project_stats: ProjectStats;
   watcher: WatcherInfo;
+  autopilot: AutopilotStatus;
   runtime: RuntimeStatus;
   events: EventsState;
   landing: LandingState;
