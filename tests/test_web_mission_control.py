@@ -829,7 +829,52 @@ def test_web_running_merge_detail_uses_pending_not_failure_checks(tmp_path: Path
     checks = {check["key"]: check for check in detail["review_packet"]["checks"]}
     assert checks["run"]["status"] == "pending"
     assert checks["certification"]["status"] == "pending"
+    assert checks["evidence"]["status"] == "pending"
     assert checks["landing"]["status"] == "pending"
+    assert all(check["status"] != "fail" for check in detail["review_packet"]["checks"])
+
+
+def test_web_running_task_detail_keeps_artifacts_pending(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write_run(repo, run_id="build-running", status="running")
+
+    detail = _client(repo).get("/api/runs/build-running").json()
+
+    checks = {check["key"]: check for check in detail["review_packet"]["checks"]}
+    assert checks["run"]["status"] == "pending"
+    assert checks["certification"]["status"] == "pending"
+    assert checks["changes"]["status"] == "pending"
+    assert checks["evidence"]["status"] == "pending"
+    assert "collected so far" in checks["evidence"]["detail"]
+    assert checks["landing"]["status"] == "pending"
+    assert all(check["status"] not in {"warn", "fail"} for check in detail["review_packet"]["checks"])
+
+
+def test_web_interrupted_task_detail_only_warns_on_run_state(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write_run(repo, run_id="build-interrupted", status="interrupted")
+    update_record(
+        repo,
+        "build-interrupted",
+        {
+            "terminal_outcome": "interrupted",
+            "last_event": "interrupted by watcher shutdown",
+        },
+    )
+
+    detail = _client(repo).get("/api/runs/build-interrupted").json()
+
+    checks = {check["key"]: check for check in detail["review_packet"]["checks"]}
+    assert detail["review_packet"]["readiness"]["state"] == "needs_attention"
+    assert checks["run"]["status"] == "warn"
+    assert checks["certification"]["status"] == "pending"
+    assert checks["changes"]["status"] == "pending"
+    assert checks["evidence"]["status"] == "pending"
+    assert checks["landing"]["status"] == "pending"
+    assert checks["evidence"]["detail"].startswith("2 partial artifacts available")
+    assert sum(1 for check in detail["review_packet"]["checks"] if check["status"] == "warn") == 1
     assert all(check["status"] != "fail" for check in detail["review_packet"]["checks"])
 
 

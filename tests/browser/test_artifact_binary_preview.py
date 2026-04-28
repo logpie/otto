@@ -345,13 +345,13 @@ def test_image_artifact_renders_as_img_tag(
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
-    _open_proof_drawer(page)
-    img = page.get_by_test_id("proof-evidence-image")
+    _open_artifact(page)
+    img = page.get_by_test_id("artifact-image")
     img.wait_for(state="visible", timeout=5_000)
     src = img.get_attribute("src") or ""
     assert src.endswith(f"/api/runs/{RUN_ID}/artifacts/0/raw"), src
     # MIME label is rendered alongside the image preview.
-    mime_label = page.get_by_test_id("proof-evidence-mime").text_content() or ""
+    mime_label = page.get_by_test_id("artifact-mime").text_content() or ""
     assert "image/png" in mime_label
 
 
@@ -377,12 +377,12 @@ def test_pdf_artifact_embeds_document_preview(
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
-    _open_proof_drawer(page)
-    frame = page.get_by_test_id("proof-evidence-pdf-frame")
+    _open_artifact(page)
+    frame = page.get_by_test_id("artifact-pdf-frame")
     frame.wait_for(state="visible", timeout=5_000)
     src = frame.get_attribute("src") or ""
     assert src.endswith(f"/api/runs/{RUN_ID}/artifacts/0/raw"), src
-    open_link = page.get_by_test_id("proof-evidence-pdf-frame-open")
+    open_link = page.get_by_test_id("artifact-pdf-frame-open")
     href = open_link.get_attribute("href") or ""
     assert href.endswith(f"/api/runs/{RUN_ID}/artifacts/0/raw"), href
 

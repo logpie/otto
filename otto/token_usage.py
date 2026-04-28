@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,15 @@ def empty_token_usage() -> dict[str, int]:
 def format_compact_token_count(value: int | float) -> str:
     amount = max(float(value or 0), 0)
     if amount >= 1_000_000:
-        return f"{amount / 1_000_000:.1f}".removesuffix(".0") + "M"
+        return _format_scaled_count(amount, 1_000_000) + "M"
     if amount >= 1_000:
-        return f"{amount / 1_000:.1f}".removesuffix(".0") + "K"
+        return _format_scaled_count(amount, 1_000) + "K"
     return str(int(amount))
+
+
+def _format_scaled_count(amount: float, scale: int) -> str:
+    scaled = (Decimal(str(amount)) / Decimal(scale)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return format(scaled, "f").removesuffix(".0")
 
 
 def format_token_spend(

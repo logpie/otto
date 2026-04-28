@@ -4,7 +4,7 @@ Bug W1-CRITICAL-1 (mc-audit live findings, 2026-04-26):
 
     Opening the inspector and switching to the Logs tab leaves a `<pre
     data-testid="run-log-pane">` covering the heading-row tab buttons
-    (Result / Code changes / Logs / Artifacts). Playwright reports the
+    (Review / Code changes / Logs / Artifacts). Playwright reports the
     `<pre>` "intercepts pointer events" — the user can never leave the
     Logs tab once entered.
 
@@ -38,7 +38,7 @@ CLICK_TIMEOUT_MS = 2_000
 
 # --------------------------------------------------------------------------- #
 # Fixtures — minimum payloads to make the inspector mount with all four tabs
-# selectable (Result/Code changes/Logs/Artifacts).
+# selectable (Review/Code changes/Logs/Artifacts).
 # --------------------------------------------------------------------------- #
 
 
@@ -136,7 +136,7 @@ def _live_item() -> dict[str, Any]:
         "reasoning_effort": None,
         "adapter_key": "claude",
         "version": 1,
-        "display_status": "passed",
+        "display_status": "merged",
         "active": False,
         "display_id": "tabs-test-run",
         "branch_task": "build/tabs",
@@ -159,16 +159,7 @@ def _detail_payload() -> dict[str, Any]:
         "summary_lines": [],
         "overlay": None,
         # One artifact so the Artifacts tab has content to render.
-        "artifacts": [
-            {
-                "index": 0,
-                "label": "summary.json",
-                "kind": "json",
-                "path": "/tmp/proj/otto_logs/sessions/x/summary.json",
-                "exists": True,
-                "size_bytes": 12,
-            }
-        ],
+        "artifacts": _artifact_refs(),
         "log_paths": ["/tmp/proj/otto_logs/sessions/x/build/narrative.log"],
         "selected_log_index": 0,
         "selected_log_path": "/tmp/proj/otto_logs/sessions/x/build/narrative.log",
@@ -186,11 +177,11 @@ def _review_packet_skeleton() -> dict[str, Any]:
         "status": "passed",
         "summary": "",
         "readiness": {
-            "state": "ready",
-            "label": "ready",
+            "state": "merged",
+            "label": "landed in main",
             "tone": "success",
             "blockers": [],
-            "next_step": "Review evidence.",
+            "next_step": "No merge action is needed.",
         },
         "checks": [],
         "next_action": {"label": "review", "action_key": None, "enabled": False, "reason": None},
@@ -206,6 +197,14 @@ def _review_packet_skeleton() -> dict[str, Any]:
                 "html_url": None,
                 "available": False,
             },
+            "demo_evidence": {
+                "demo_status": "strong",
+                "app_kind": "web",
+                "required": True,
+                "primary_demo": {"href": "evidence/recording.webm", "label": "recording.webm"},
+                "items": [],
+                "stories": [],
+            },
         },
         "changes": {
             "branch": "build/tabs",
@@ -218,9 +217,38 @@ def _review_packet_skeleton() -> dict[str, Any]:
             "diff_command": "git diff main...build/tabs",
             "diff_error": None,
         },
-        "evidence": [],
+        "evidence": _artifact_refs(),
         "failure": None,
     }
+
+
+def _artifact_refs() -> list[dict[str, Any]]:
+    return [
+        {
+            "index": 0,
+            "label": "summary.json",
+            "kind": "json",
+            "path": "/tmp/proj/otto_logs/sessions/x/summary.json",
+            "exists": True,
+            "size_bytes": 12,
+        },
+        {
+            "index": 1,
+            "label": "proof markdown",
+            "kind": "text",
+            "path": "/tmp/proj/otto_logs/sessions/x/certify/proof-of-work.md",
+            "exists": True,
+            "size_bytes": 128,
+        },
+        {
+            "index": 2,
+            "label": "recording.webm",
+            "kind": "video",
+            "path": "/tmp/proj/otto_logs/sessions/x/certify/evidence/recording.webm",
+            "exists": True,
+            "size_bytes": 512,
+        },
+    ]
 
 
 def _diff_payload() -> dict[str, Any]:
@@ -324,6 +352,14 @@ def _install_artifact_route(page: Any) -> None:
         f"**/api/runs/{RUN_ID}/artifact**",
         lambda route: route.fulfill(status=200, content_type="application/json", body=body),
     )
+    page.route(
+        f"**/api/runs/{RUN_ID}/artifacts",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"run_id": RUN_ID, "artifacts": _artifact_refs()}),
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -392,8 +428,8 @@ def test_inspector_tab_buttons_are_clickable_from_logs(
     tablist.get_by_role("tab", name="Logs").click(timeout=CLICK_TIMEOUT_MS)
     page.get_by_test_id("run-log-pane").wait_for(state="visible", timeout=2_000)
 
-    # Result tab.
-    tablist.get_by_role("tab", name="Result").click(timeout=CLICK_TIMEOUT_MS)
+    # Review tab.
+    tablist.get_by_role("tab", name="Review").click(timeout=CLICK_TIMEOUT_MS)
     page.get_by_test_id("proof-pane").wait_for(state="visible", timeout=2_000)
 
     # Back to Logs again so the <pre> is the *current* element on screen
@@ -406,3 +442,172 @@ def test_inspector_tab_buttons_are_clickable_from_logs(
     tablist.get_by_role("tab", name="Artifacts").click(timeout=CLICK_TIMEOUT_MS)
     # The artifact list shows one button labelled "summary.json".
     page.locator(".run-inspector .artifact-pane").wait_for(state="visible", timeout=2_000)
+
+
+def test_run_detail_overview_is_actionable_and_resizable(
+    mc_backend: Any, browser: Any, disable_animations: Any, viewport_mba: dict[str, Any]
+) -> None:
+    """Run detail overview avoids duplicate proof/artifact controls.
+
+    Regression coverage for the overview redesign:
+    - Proof means key review evidence, Artifacts means the full bundle.
+    - Generic all-pass check drawers stay out of the first screen.
+    - Stat tiles are the shortcuts; there is no extra "View all evidence" link.
+    - The first detail drawer is resizable, matching the deeper inspector.
+    """
+
+    context = browser.new_context(**viewport_mba)
+    page = context.new_page()
+    try:
+        _install_projects_route(page)
+        _install_state_route(page)
+        _install_detail_route(page)
+        _install_log_route(page)
+        _install_diff_route(page)
+        _install_artifact_route(page)
+
+        page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
+        page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+        disable_animations(page)
+
+        panel = page.get_by_test_id("run-detail-panel")
+        panel.wait_for(state="visible", timeout=5_000)
+
+        expect_visible = [
+            "review-metric-stories",
+            "review-metric-files",
+            "review-metric-proof",
+            "review-metric-artifacts",
+        ]
+        for test_id in expect_visible:
+            page.get_by_test_id(test_id).wait_for(state="visible", timeout=2_000)
+
+        assert page.get_by_test_id("review-metric-proof").text_content() == "ProofStrong"
+        assert page.get_by_test_id("review-metric-artifacts").text_content() == "Artifacts3 files"
+        assert page.get_by_text("View all evidence").count() == 0
+        assert page.locator(".review-drawer").count() == 0
+
+        page.get_by_test_id("review-metric-artifacts").click()
+        page.locator(".run-inspector .artifact-pane").wait_for(state="visible", timeout=2_000)
+        assert page.get_by_test_id("run-detail-panel").count() == 0
+
+        page.get_by_role("button", name="Close inspector").click()
+        panel.wait_for(state="visible", timeout=2_000)
+        before = panel.bounding_box()
+        assert before is not None
+        handle = page.locator(".run-panel-resize-handle")
+        handle.wait_for(state="visible", timeout=2_000)
+        box = handle.bounding_box()
+        assert box is not None
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(box["x"] - 120, box["y"] + box["height"] / 2)
+        page.mouse.up()
+        after = panel.bounding_box()
+        assert after is not None
+        assert after["width"] > before["width"] + 40
+        layout_padding = page.evaluate(
+            """() => {
+                const layout = document.querySelector('.mission-layout');
+                return layout ? Number.parseFloat(getComputedStyle(layout).paddingRight) : 0;
+            }"""
+        )
+        assert layout_padding > before["width"] + 40
+
+        page.get_by_test_id("open-diff-button").click()
+        page.locator(".run-inspector .diff-viewer").wait_for(state="visible", timeout=2_000)
+        assert page.get_by_test_id("run-detail-panel").count() == 0
+        assert page.locator(".run-drawer-backdrop").count() == 0
+    finally:
+        context.close()
+
+
+def test_run_detail_respects_laptop_workspace_after_saved_wide_resize(
+    mc_backend: Any, browser: Any, disable_animations: Any, viewport_mba: dict[str, Any]
+) -> None:
+    """A saved wide drawer must not cover the task list on MBA-sized screens."""
+
+    context = browser.new_context(**viewport_mba)
+    context.add_init_script(
+        """
+        localStorage.setItem('otto.runDetailWidth', '900');
+        localStorage.setItem('otto.inspectorWidth', '960');
+        """
+    )
+    page = context.new_page()
+    try:
+        _install_projects_route(page)
+        _install_state_route(page)
+        _install_detail_route(page)
+        _install_log_route(page)
+        _install_diff_route(page)
+        _install_artifact_route(page)
+
+        page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
+        page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+        disable_animations(page)
+
+        panel = page.get_by_test_id("run-detail-panel")
+        panel.wait_for(state="visible", timeout=5_000)
+        panel_box = panel.bounding_box()
+        task_box = page.get_by_test_id("task-board").bounding_box()
+        assert panel_box is not None
+        assert task_box is not None
+        assert task_box["x"] + task_box["width"] <= panel_box["x"]
+
+        page.get_by_test_id("open-diff-button").click()
+        page.locator(".run-inspector .diff-viewer").wait_for(state="visible", timeout=2_000)
+        inspector_box = page.get_by_test_id("run-inspector").bounding_box()
+        task_box = page.get_by_test_id("task-board").bounding_box()
+        assert inspector_box is not None
+        assert task_box is not None
+        assert task_box["x"] + task_box["width"] <= inspector_box["x"]
+        assert page.get_by_test_id("run-detail-panel").count() == 0
+    finally:
+        context.close()
+
+
+def test_run_detail_and_inspector_are_full_screen_on_iphone(
+    mc_backend: Any, browser: Any, disable_animations: Any, viewport_iphone: dict[str, Any]
+) -> None:
+    """Phone detail surfaces must not leak the underlying page or dark pane theme."""
+
+    context = browser.new_context(**viewport_iphone)
+    page = context.new_page()
+    try:
+        _install_projects_route(page)
+        _install_state_route(page)
+        _install_detail_route(page)
+        _install_log_route(page)
+        _install_diff_route(page)
+        _install_artifact_route(page)
+
+        page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
+        page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+        disable_animations(page)
+
+        viewport_width = page.evaluate("window.innerWidth")
+        viewport_height = page.evaluate("window.innerHeight")
+        panel = page.get_by_test_id("run-detail-panel")
+        panel.wait_for(state="visible", timeout=5_000)
+        panel_box = panel.bounding_box()
+        assert panel_box is not None
+        assert panel_box["x"] == 0
+        assert panel_box["y"] == 0
+        assert panel_box["width"] <= viewport_width
+        assert panel_box["height"] >= viewport_height - 1
+
+        page.get_by_test_id("open-diff-button").click()
+        page.locator(".run-inspector .diff-viewer").wait_for(state="visible", timeout=2_000)
+        inspector_box = page.get_by_test_id("run-inspector").bounding_box()
+        assert inspector_box is not None
+        assert inspector_box["x"] == 0
+        assert inspector_box["y"] == 0
+        assert inspector_box["width"] <= viewport_width
+        assert inspector_box["height"] >= viewport_height - 1
+        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        assert page.locator(".run-inspector .diff-viewer").evaluate(
+            "el => getComputedStyle(el).backgroundColor"
+        ) != "rgb(11, 16, 32)"
+    finally:
+        context.close()

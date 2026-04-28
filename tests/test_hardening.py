@@ -1682,19 +1682,20 @@ class TestProofOfWorkRendering:
             1,
             diagnosis="",
             evidence_dir=evidence_dir,
+            certifier_mode="fast",
         )
 
         html = (tmp_path / "proof-of-work.html").read_text()
         assert "Visual Evidence" in html
-        assert "Visual evidence: not collected (mode=standard)" in html
+        assert "Visual evidence: not collected (mode=fast)" in html
         assert "<h2>Diagnosis</h2>" not in html
         assert "<h2>Story Summary</h2>" in html
         assert "<h2>Coverage and Limitations</h2>" in html
         assert "provider-default" not in html
-        assert "not recorded" not in html
         assert "not present" not in html
         assert "not used (run without --spec)" in html
-        assert "$0.10" in html
+        assert "Spend" in html
+        assert "Tokens: not recorded" in html
         assert "certifier $0.1000" not in html
 
     def test_fast_mode_renders_note_when_per_run_coverage_is_missing(self, tmp_path):
@@ -1894,6 +1895,7 @@ class TestProofOfWorkRendering:
             "crud-lifecycle-failure.png",
             "crud-lifecycle.png",
             "drag-drop.png",
+            "drag-drop.webm",
         ):
             (evidence_dir / name).write_bytes(b"test")
 
@@ -1961,6 +1963,7 @@ class TestProofOfWorkRendering:
 
         assert "## Hero" in md
         assert "## Story Summary" in md
+        assert "## Intent Proof Matrix" in md
         assert "## Diagnosis" in md
         assert "## Story Details" in md
         assert "## Visual Evidence" in md
@@ -1972,7 +1975,8 @@ class TestProofOfWorkRendering:
         assert "### What this run did NOT cover" in md
         assert "Mode: standard —" in md
 
-        assert html.index("<h2>Story Summary</h2>") < html.index("<h2>Diagnosis</h2>")
+        assert html.index("<h2>Story Summary</h2>") < html.index("<h2>Intent Proof Matrix</h2>")
+        assert html.index("<h2>Intent Proof Matrix</h2>") < html.index("<h2>Diagnosis</h2>")
         assert html.index("<h2>Diagnosis</h2>") < html.index("<h2>Story Details</h2>")
         assert html.index("<h2>Story Details</h2>") < html.index("<h2>Visual Evidence</h2>")
         assert html.index("<h2>Visual Evidence</h2>") < html.index("<h2>Efficiency</h2>")
@@ -1986,6 +1990,9 @@ class TestProofOfWorkRendering:
         assert "crud-lifecycle-failure.png" in html
         assert "failure captured" in html
         assert "drag-drop.png" in html
+        assert "drag-drop.webm" in html
+        assert "story screenshot" in html
+        assert "general walkthrough only" not in html
         assert "All stories verified via live-ui-events." in html
         assert "Clicked Add card, typed a title, and pressed Enter to submit" in html
         assert "Did not resize the window to test responsive layout" in html
@@ -1996,6 +2003,8 @@ class TestProofOfWorkRendering:
 
         assert "coverage_observed" in report
         assert "coverage_gaps" in report
+        assert report["proof_coverage"][0]["visual_status"] == "2 story screenshots"
+        assert report["proof_coverage"][1]["visual_status"] == "1 story video"
         assert "tested" not in report["coverage"]
         assert "untested" not in report["coverage"]
         assert "escaped_bug_classes" not in report["coverage"]
@@ -2148,9 +2157,9 @@ class TestProofOfWorkRendering:
             "output_tokens": 789,
             "total_tokens": 124245,
         }
-        assert "- Cost: not reported by provider" in md
         assert "- Tokens: 123,456 input (120,000 cached), 789 output" in md
-        assert "Cost: not reported by provider; Tokens:" in html
+        assert "<span class='meta-label'>Spend</span>" in html
+        assert "Tokens: 123,456 input (120,000 cached), 789 output" in html
 
     def test_certifier_prompts_require_failure_evidence(self):
         standard = (Path(__file__).resolve().parents[1] / "otto" / "prompts" / "certifier.md").read_text()

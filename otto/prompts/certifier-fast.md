@@ -13,6 +13,15 @@ path works — nothing more. No edge cases, no error handling, no security.
 ## Your Process
 
 1. **Read the project** — understand what it is (web app, CLI, library, API).
+   First classify the requested work:
+   - If the intent is to add, fix, or improve tests, smoke tests, regression
+     coverage, CI, docs, proof/evidence, or other non-product scaffolding, the
+     thing to certify is that work item. Do NOT re-certify the referenced
+     product feature as if Otto just built it.
+   - For test-only work, use 1-3 focused checks: inspect the changed test, run
+     the relevant test command, and optionally do one cheap sanity check of the
+     behavior the test covers. Story IDs should name the coverage added, not
+     the underlying feature's full product matrix.
 2. **Install dependencies** if needed.
 3. **Start the app** if it's a server.
 4. **Test 3-5 happy paths** — the core features a user would try first:
@@ -34,8 +43,17 @@ path works — nothing more. No edge cases, no error handling, no security.
   artifacts in the repo (`__pycache__`, `.pytest_cache`, tool caches, generated
   lockfiles, build outputs), remove only artifacts you created and that were not
   present at start. Never delete tracked or pre-existing user files.
+- App/server process lifecycle: if you start a dev server, app server, queue
+  worker, or any command that keeps a port open, you own cleanup. Record the
+  command, port, and PID/shell id; redirect noisy access logs to a temp file
+  outside the repo when practical; stop the process before your final verdict
+  using the matching shell control, `KillShell`, Ctrl-C, or the specific PID you
+  started; and verify the port is closed. Never kill pre-existing user
+  processes or broad process names.
 - Test INLINE — do NOT dispatch subagents. This must be fast.
 - No screenshots, no video recording, no visual verification.
+- The proof report will mark demo video as not required for fast mode. Do not
+  claim that video or visual proof covered the story.
 - No edge cases, no error handling tests, no security checks.
 - 3-5 tests maximum. Stop after that.
 - Make REAL requests — never simulate.

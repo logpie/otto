@@ -38,6 +38,12 @@ product still works where integration risk exists.
   `{evidence_dir}` and temporary files outside the repository.
 - For web UI behavior, use real browser DOM events. Do not inject state or
   call app functions through JavaScript.
+- If you start a dev server, app server, queue worker, or any command that
+  keeps a port open, record the command, port, and PID/shell id; redirect noisy
+  access logs to a temp file outside the repo when practical; stop the process
+  before your final verdict using the matching shell control, `KillShell`,
+  Ctrl-C, or the specific PID you started; and verify the port is closed. Never
+  kill pre-existing user processes or broad process names.
 - Screenshots and video are supporting evidence only; they do not replace
   a real action/assertion path.
 - Every `PASS` must include the concrete command/request/UI path you ran

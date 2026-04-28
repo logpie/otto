@@ -1,7 +1,7 @@
 import {useState} from "react";
 
 /**
- * Onboarding card explaining the build/verify/merge loop and rough cost.
+ * Onboarding card explaining the build/verify/merge loop and rough spend.
  * Dismissed via localStorage so returning users don't see it again.
  * mc-audit redesign §7 W7.1.
  */
@@ -21,7 +21,7 @@ export function LauncherExplainer() {
         <strong>How Otto works.</strong>
         <p>
           Queue a job → Otto runs it in an isolated git worktree → review the result and merge.
-          A small feature typically takes <strong>5–15 min</strong> and uses <strong>~$0.50–$2</strong> in tokens.
+          A small feature typically takes <strong>5–15 min</strong>; use the run detail panel to track token spend.
         </p>
       </div>
       <button type="button" className="launcher-explainer-dismiss" onClick={onDismiss} aria-label="Hide explainer">×</button>

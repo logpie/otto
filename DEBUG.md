@@ -445,3 +445,47 @@ Date: 2026-04-26
 - `npm run web:build`
 - `git diff --check`
 - Restarted the live web server and verified `/api/state` for `acme-expense-portal`: `ready=0`, `merged=4`, `blocked=0`, `merge_blocked=false`, no runtime issues, project dirty=false.
+
+# Certifier Background Server Leak
+
+Date: 2026-04-28
+
+## Observations
+
+- A real Otto certification run for `/Users/yuxuan/otto-projects/acme-expense-portal` produced Claude SDK task output files of 18 GB and 9.2 GB under `/private/tmp/claude-501/.../962b6740-6591-481a-ab8d-b205a6c0d513/tasks/`.
+- The session id matched the Otto certifier run `2026-04-28-064529-400050`.
+- The leaked process was an orphan Flask dev server on port 5199 with PPID 1:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.venv/bin/python .venv/bin/flask --app expense_portal.app run --port 5199`.
+- The huge `.output` files were no longer open by the time they were inspected.
+- Killing that one Flask process and removing the two temp output files reduced the task directory from about 27 GB to 12 KB.
+- A follow-up scan found no remaining Claude SDK `.output` files over 100 MB.
+
+## Hypotheses
+
+### H1: Certifier agents can leave background project dev servers running (ROOT HYPOTHESIS)
+
+- Supports: the orphaned process was a Flask dev server launched from the certified project; it outlived the SDK session and wrote access logs into Claude SDK task output.
+- Conflicts: none.
+- Test: snapshot listening processes before certification, run cleanup after the agent returns, and assert new project-scoped dev servers are terminated.
+
+### H2: The proof-video prompt encouraged excessive endpoint polling
+
+- Supports: the leaked output was dominated by Flask access logs from PDF endpoint checks.
+- Conflicts: endpoint checks are legitimate; the disk growth required a background process to survive and keep writing.
+- Test: add explicit prompt requirements to stop any app/server process started for certification and redirect noisy logs outside the SDK transcript.
+
+### H3: Otto cannot prevent SDK `.output` growth directly
+
+- Supports: the files live in Claude SDK temp task storage outside Otto's report/log directories.
+- Conflicts: Otto can still reduce the risk by preventing orphaned background servers and instructing agents not to stream access logs into SDK-managed output.
+- Test: add certifier-side cleanup independent of SDK internals.
+
+## Root Cause
+
+The certifier can ask the provider to start a project dev server in the background, but Otto did not enforce cleanup after the agent call. If the provider leaves that shell alive, framework access logs can continue streaming into Claude SDK temp `.output` files outside Otto's own artifact retention controls.
+
+## Fix
+
+- Add certifier-side cleanup for new listening dev-server processes that belong to the certified project.
+- Make certifier prompts explicitly require cleanup of any app/server/background process started during certification.
+- Prefer bounded foreground commands, temp log redirection, and explicit server stop/port-closed verification in certification evidence.

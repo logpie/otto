@@ -535,7 +535,7 @@ class TestNarrativeFormatter:
 
         content = path.read_text()
         assert "SUCCESS" in content
-        assert "$1.23" in content
+        assert "$1.23" not in content
         # Terminal marker carries a duration suffix: "in 0:00" etc.
         assert re.search(r" in \d+:\d{2}", content)
 
@@ -552,8 +552,8 @@ class TestNarrativeFormatter:
         f.close()
 
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
-        assert "RUN SUMMARY: build=1:00, certify=0:40 (2 rounds), total=$1.23 1:40" in lines[0]
-        assert "SUCCESS $1.23 in 1:40" in lines[1]
+        assert "RUN SUMMARY: build=1:00, certify=0:40 (2 rounds), total=1:40" in lines[0]
+        assert "SUCCESS in 1:40" in lines[1]
 
     def test_finalize_with_phase_costs_emits_cost_annotated_summary(self, tmp_path):
         path = tmp_path / "narrative.log"
@@ -571,10 +571,10 @@ class TestNarrativeFormatter:
 
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
         assert (
-            "RUN SUMMARY: build=$0.49 2:40, certify=$0.41 1:51 (2 rounds), "
-            "total=$0.98 4:31"
+            "RUN SUMMARY: build=2:40, certify=1:51 (2 rounds), "
+            "total=4:31"
         ) in lines[0]
-        assert "SUCCESS $0.98 in 4:31" in lines[1]
+        assert "SUCCESS in 4:31" in lines[1]
 
     def test_finalize_without_phase_costs_omits_cost_annotations(self, tmp_path):
         path = tmp_path / "narrative.log"
@@ -591,7 +591,7 @@ class TestNarrativeFormatter:
         f.close()
 
         summary = _strip_ts(path.read_text().splitlines()[0])
-        assert "RUN SUMMARY: build=2:40, certify=1:51 (2 rounds), total=$0.98 4:31" in summary
+        assert "RUN SUMMARY: build=2:40, certify=1:51 (2 rounds), total=4:31" in summary
         assert "build=$" not in summary
         assert "certify=$" not in summary
 
@@ -616,8 +616,8 @@ class TestNarrativeFormatter:
 
         summary = _strip_ts(path.read_text().splitlines()[0])
         assert (
-            "RUN SUMMARY: build=~$0.49 2:40, certify=~$0.41 1:51 (2 rounds), "
-            "total=$0.98 4:31"
+            "RUN SUMMARY: build=2:40, certify=1:51 (2 rounds), "
+            "total=4:31"
         ) in summary
 
     def test_finalize_reassigns_non_certify_time_from_synthetic_transcript(
@@ -683,7 +683,7 @@ class TestNarrativeFormatter:
         f.close()
 
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
-        assert "RUN SUMMARY: build=0:44, certify=0:40 (2 rounds), total=$1.00 1:24" in lines[-2]
+        assert "RUN SUMMARY: build=0:44, certify=0:40 (2 rounds), total=1:24" in lines[-2]
 
     def test_normalize_phase_breakdown_sums_to_total(self):
         normalized = normalize_phase_breakdown(
@@ -712,7 +712,7 @@ class TestNarrativeFormatter:
         f.close()
 
         summary = _strip_ts(path.read_text().splitlines()[0])
-        assert "RUN SUMMARY: build=1:05, total=$0.55 1:05" in summary
+        assert "RUN SUMMARY: build=1:05, total=1:05" in summary
         assert "certify=" not in summary
 
     def test_finalize_standalone_certify_shape(self, tmp_path):
@@ -728,8 +728,8 @@ class TestNarrativeFormatter:
 
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
         assert lines[0] == "\u2014 CERTIFY complete \u2014"
-        assert "RUN SUMMARY: certify=0:15 (1 round), total=$0.08 0:15" in lines[1]
-        assert "SUCCESS $0.08 in 0:15" in lines[2]
+        assert "RUN SUMMARY: certify=0:15 (1 round), total=0:15" in lines[1]
+        assert "SUCCESS in 0:15" in lines[2]
 
     def test_write_result_without_certify_omits_certify_summary(self, tmp_path):
         path = tmp_path / "narrative.log"

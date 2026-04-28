@@ -155,7 +155,7 @@ def _state() -> dict[str, Any]:
 
 def _detail_no_branch() -> dict[str, Any]:
     """Detail with NO branch + no diff_error — canShowDiff returns false
-    so the Diff tab is disabled inside the inspector. Other tabs (Result,
+    so the Diff tab is disabled inside the inspector. Other tabs (Review,
     Logs, Artifacts) remain enabled."""
 
     return {

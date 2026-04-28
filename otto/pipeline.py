@@ -1235,7 +1235,11 @@ async def build_agentic_v3(
 
         # Write PoW report
         try:
-            from otto.certifier import _build_pow_report_data, _write_pow_report
+            from otto.certifier import (
+                _append_demo_evidence_gate_diagnosis,
+                _build_pow_report_data,
+                _write_pow_report,
+            )
             # NB: `session_id` here is the SDK session, not the otto session_id
             # (that's `build_id` in this function scope).
             report_dir = paths.certify_dir(project_dir, build_id)
@@ -1270,6 +1274,10 @@ async def build_agentic_v3(
                 metric_met=parsed.metric_met,
                 round_timings=round_timings,
             )
+            evidence_gate = pow_data.get("evidence_gate") if isinstance(pow_data, dict) else None
+            if passed and isinstance(evidence_gate, dict) and evidence_gate.get("blocks_pass"):
+                passed = False
+                overall_diagnosis = _append_demo_evidence_gate_diagnosis(overall_diagnosis, evidence_gate)
             _write_pow_report(report_dir, pow_data)
         except Exception as exc:
             logger.warning("Failed to write PoW: %s", exc)
@@ -1677,14 +1685,18 @@ def _write_split_proof_report(
     certify_duration_s: float,
     certifier_cost_usd: float,
     total_cost_usd: float,
-) -> None:
+) -> tuple[bool, str]:
     """Write the run-level split-mode proof report after all rounds finish."""
     if not story_results and not certify_rounds:
-        return
+        return passed, diagnosis
     try:
         from otto import paths as _paths
         from otto.agent import make_agent_options
-        from otto.certifier import _build_pow_report_data, _write_pow_report
+        from otto.certifier import (
+            _append_demo_evidence_gate_diagnosis,
+            _build_pow_report_data,
+            _write_pow_report,
+        )
 
         report_dir = _paths.certify_dir(project_dir, run_id)
         report_dir.mkdir(parents=True, exist_ok=True)
@@ -1713,9 +1725,14 @@ def _write_split_proof_report(
             stories_tested=tested,
             stories_passed=passed_count,
         )
+        evidence_gate = pow_data.get("evidence_gate") if isinstance(pow_data, dict) else None
+        if passed and isinstance(evidence_gate, dict) and evidence_gate.get("blocks_pass"):
+            passed = False
+            diagnosis = _append_demo_evidence_gate_diagnosis(diagnosis, evidence_gate)
         _write_pow_report(report_dir, pow_data)
     except Exception as exc:
         logger.warning("Failed to write split proof report: %s", exc)
+    return passed, diagnosis
 
 
 async def run_certify_fix_loop(
@@ -2406,7 +2423,7 @@ async def run_certify_fix_loop(
             if fix_phase_cost > 0.0:
                 fix_entry["cost_usd"] = _round_cost(fix_phase_cost)
             split_breakdown["fix"] = fix_entry
-        _write_split_proof_report(
+        passed, last_diagnosis_text = _write_split_proof_report(
             project_dir=project_dir,
             run_id=build_id,
             intent=intent,

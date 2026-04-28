@@ -89,7 +89,15 @@ def _write_empty_queue_state(repo: Path) -> None:
     write_queue_state(repo, {"schema_version": 1, "watcher": None, "tasks": {}})
 
 
-def _write_run(repo: Path, *, run_id: str = "build-web", outside_artifact: str | None = None) -> None:
+def _write_run(
+    repo: Path,
+    *,
+    run_id: str = "build-web",
+    outside_artifact: str | None = None,
+    branch: str = "main",
+    intent_summary: str = "build the web surface",
+    status: str = "running",
+) -> None:
     primary_log = paths.build_dir(repo, run_id) / "narrative.log"
     primary_log.parent.mkdir(parents=True, exist_ok=True)
     primary_log.write_text("BUILD starting\nSTORY_RESULT: web PASS\n", encoding="utf-8")
@@ -103,7 +111,7 @@ def _write_run(repo: Path, *, run_id: str = "build-web", outside_artifact: str |
         run_type="build",
         command="build",
         display_name="build web",
-        status="running",
+        status=status,
         cwd=repo,
         source={
             "argv": ["build", "web"],
@@ -111,8 +119,8 @@ def _write_run(repo: Path, *, run_id: str = "build-web", outside_artifact: str |
             "model": "gpt-5.4",
             "reasoning_effort": "medium",
         },
-        git={"branch": "main", "worktree": None},
-        intent={"summary": "build the web surface"},
+        git={"branch": branch, "worktree": None},
+        intent={"summary": intent_summary},
         artifacts={
             "summary_path": outside_artifact or str(summary_path),
             "primary_log_path": str(primary_log),

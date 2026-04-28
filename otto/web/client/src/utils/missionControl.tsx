@@ -919,7 +919,7 @@ export function useDocumentTitle({viewMode, selectedRunId, selectedDetail, inspe
       const truncated = intent.length > 60 ? `${intent.slice(0, 57)}...` : intent;
       prefix = truncated;
       if (inspectorOpen) {
-        const tabLabel = {try: "Try product", proof: "Result", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
+        const tabLabel = {try: "Product demo", proof: "Proof", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
         prefix = `${truncated} - ${tabLabel}`;
       }
     }
@@ -942,7 +942,7 @@ export function useLiveAnnouncement({viewMode, selectedRunId, inspectorOpen, ins
     if (selectedRunId) {
       parts.push(`run ${selectedRunId}`);
       if (inspectorOpen) {
-        const tabLabel = {try: "Try product", proof: "Result", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
+        const tabLabel = {try: "Product demo", proof: "Proof", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
         parts.push(`${tabLabel} tab`);
       }
     }
@@ -1268,17 +1268,6 @@ export function evidenceLine(packet: RunDetail["review_packet"]): string {
   return `${existing}/${reviewEvidence.length}`;
 }
 
-export function preferredProofArtifact(artifacts: ArtifactRef[]): ArtifactRef | null {
-  const existing = artifacts.filter(isReadableArtifact);
-  if (!existing.length) return null;
-  const preferredLabels = ["proof markdown", "proof json", "summary", "queue manifest", "manifest", "primary log", "intent"];
-  for (const label of preferredLabels) {
-    const match = existing.find((artifact) => artifact.label.toLowerCase() === label);
-    if (match) return match;
-  }
-  return existing[0] || null;
-}
-
 /**
  * Overlay optimistic run states onto the live-run items returned by
  * /api/state. Used by mc-audit microinteractions I4 to flip a row's
@@ -1318,7 +1307,12 @@ export function canTryProduct(detail: RunDetail | null): boolean {
   if (["queued", "waiting", "pending", "starting", "initializing", "running", "terminating"].some((value) => status.includes(value))) {
     return false;
   }
-  return Boolean(packet.product_handoff);
+  return packet.product_handoff?.preview_available === true;
+}
+
+export function productActionLabel(detail: RunDetail | null): string {
+  const label = detail?.review_packet?.product_handoff?.preview_label;
+  return label && label.trim() ? label : "Preview product";
 }
 
 /**

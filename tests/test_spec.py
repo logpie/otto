@@ -519,6 +519,9 @@ class TestStandaloneCertifierPrompt:
             assert "Do NOT invent unsupported flags like" in rendered
             assert "--ref e1" in rendered
             assert "Visual evidence must show states reached by real UI interactions" in rendered
+            assert "<story_id>" in rendered
+            assert "A generic walkthrough" in rendered
+            assert "90 seconds" in rendered
             assert "evidence is `javascript-eval`, not `live-ui-events`" in rendered
 
 

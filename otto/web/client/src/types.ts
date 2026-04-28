@@ -447,6 +447,43 @@ export interface CertificationRound {
   subagent_errors: string[];
 }
 
+export interface DemoEvidenceItem {
+  name: string;
+  kind: string;
+  href: string;
+  caption: string;
+}
+
+export interface DemoEvidenceStory {
+  id: string;
+  title: string;
+  status: string;
+  needs_visual: boolean;
+  needs_file_validation: boolean;
+  has_text_evidence: boolean;
+  has_file_validation: boolean;
+  proof_level: string;
+  visual_items: DemoEvidenceItem[];
+}
+
+export interface DemoEvidence {
+  schema_version: number;
+  app_kind: string;
+  demo_required: boolean;
+  demo_status: "strong" | "partial" | "missing" | "not_applicable" | "unknown" | string;
+  demo_reason: string | null;
+  primary_demo: DemoEvidenceItem | null;
+  stories: DemoEvidenceStory[];
+  counts: Record<string, number | string | boolean | null>;
+}
+
+export interface EvidenceGate {
+  schema_version: number;
+  status: "pass" | "warn" | "fail" | "not_applicable" | "unknown" | string;
+  blocks_pass: boolean;
+  reason: string;
+}
+
 export interface ProofReportInfo {
   json_path: string | null;
   html_path: string | null;
@@ -509,6 +546,8 @@ export interface ReviewPacket {
     // can render round tabs with verdict + counts + diagnosis instead
     // of pretending every certification was a single round.
     rounds: CertificationRound[];
+    demo_evidence: DemoEvidence;
+    evidence_gate: EvidenceGate;
     proof_report: ProofReportInfo;
   };
   changes: {
@@ -554,6 +593,9 @@ export interface ProductHandoff {
   source_path: string | null;
   root: string;
   summary: string;
+  preview_available: boolean;
+  preview_label: string;
+  preview_reason: string;
   task_summary: string;
   task_status: string | null;
   task_branch: string | null;

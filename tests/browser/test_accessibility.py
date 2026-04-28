@@ -225,6 +225,28 @@ def _detail_for_run() -> dict[str, Any]:
                 "diff_error": None,
             },
             "evidence": [],
+            "product_handoff": {
+                "kind": "web",
+                "label": "Web app",
+                "source": "artifact",
+                "source_path": None,
+                "root": "/tmp/proj/.worktrees/feature-x",
+                "summary": "Preview the built app.",
+                "preview_available": True,
+                "preview_label": "Preview product",
+                "preview_reason": "A product launch command was provided by the run.",
+                "task_summary": "Build a thing",
+                "task_status": "completed",
+                "task_branch": "feature/x",
+                "task_changed_files": ["src/foo.py"],
+                "task_flows": [],
+                "urls": [],
+                "launch": [{"label": "Start app", "command": "npm run dev"}],
+                "reset": [],
+                "try_flows": [],
+                "sample_data": [],
+                "notes": [],
+            },
         },
         "landing_state": None,
         "merge_info": None,
@@ -539,6 +561,35 @@ def test_inspector_tablist_arrow_navigation(mc_backend: Any, page: Any, disable_
     # End → last enabled tab (artifacts).
     page.keyboard.press("End")
     page.wait_for_function("() => document.querySelector('.detail-tabs [aria-selected=true]')?.getAttribute('data-tab-id') === 'artifacts'", timeout=2_000)
+
+
+def test_inspector_hides_product_preview_without_launch_metadata(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """A fallback product handoff is metadata, not a runnable preview."""
+
+    detail = _detail_for_run()
+    detail["review_packet"]["product_handoff"] = {
+        **detail["review_packet"]["product_handoff"],
+        "preview_available": False,
+        "preview_reason": "No product URL or concrete launch command was recorded for this run.",
+        "launch": [],
+        "urls": [],
+    }
+    _install_routes(page, detail=detail)
+    _hydrate(page, mc_backend.url, disable_animations=disable_animations)
+    page.get_by_test_id("diagnostics-tab").click()
+    page.wait_for_selector("[data-testid^='history-row-activator-']")
+    page.locator("[data-testid^='history-row-activator-']").first.click()
+    page.wait_for_selector("[data-testid=run-detail-panel]", timeout=5_000)
+
+    assert page.get_by_test_id("open-try-product-button").count() == 0
+    page.get_by_test_id("open-proof-button").click()
+    page.wait_for_selector("[data-testid=run-inspector]", timeout=5_000)
+    tab_ids = page.evaluate(
+        """() => Array.from(document.querySelectorAll('.detail-tabs [role=tab]')).map((tab) => tab.getAttribute('data-tab-id'))"""
+    )
+    assert tab_ids == ["proof", "diff", "logs", "artifacts"]
 
 
 # --------------------------------------------------------------------------- #

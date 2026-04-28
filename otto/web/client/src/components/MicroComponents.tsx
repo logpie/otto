@@ -71,8 +71,32 @@ export function HealthCard({title, status, detail, next, tone}: {
   );
 }
 
-export function ReviewMetric({label, value}: {label: string; value: string}) {
-  return <div><span>{label}</span><strong>{value}</strong></div>;
+export function ReviewMetric({label, value, onClick, disabled = false, title, testId}: {
+  label: string;
+  value: string;
+  onClick?: (() => void) | undefined;
+  disabled?: boolean;
+  title?: string;
+  testId?: string;
+}) {
+  const content = (
+    <>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </>
+  );
+  if (!onClick) return <div title={title} data-testid={testId}>{content}</div>;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      data-testid={testId}
+    >
+      {content}
+    </button>
+  );
 }
 
 export function ReviewDrawer({title, meta, defaultOpen = false, children}: {

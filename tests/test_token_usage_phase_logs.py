@@ -7,6 +7,7 @@ from otto import paths
 from otto.mission_control.model import _token_usage_from_summary_paths
 from otto.pipeline import _write_session_summary
 from otto.queue.runner import _token_usage_from_summary
+from otto.token_usage import format_token_spend
 from tests._helpers import init_repo
 
 
@@ -221,6 +222,10 @@ def test_claude_result_usage_overrides_inflated_phase_end_tokens(tmp_path: Path)
         "output_tokens": 30,
         "total_tokens": 3_050,
     }
+
+
+def test_token_spend_uses_half_up_compact_rounding() -> None:
+    assert format_token_spend({"total_tokens": 3_050}) == "3.1K tokens"
 
 
 def test_write_session_summary_phase_messages_replace_stale_breakdown_tokens(tmp_path: Path) -> None:

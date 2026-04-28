@@ -46,7 +46,6 @@ import {
   detailStatusLabel,
   diffDisabledReason,
   domainLabel,
-  evidenceLine,
   flagsLine,
   formatArtifactContent,
   formatReviewText,
@@ -55,8 +54,8 @@ import {
   isRepositoryBlockedPacket,
   isReviewEvidenceArtifact,
   limitLine,
-  preferredProofArtifact,
   productKindHint,
+  productActionLabel,
   projectConfigLine,
   providerLine,
   renderDiffText,
@@ -93,6 +92,51 @@ export function RunDetailPanel({detail, logState, landing, inspectorOpen, queued
   onStartWatcher?: () => void;
   onClose?: () => void;
 }) {
+  const panelRef = useRef<HTMLElement | null>(null);
+  const [panelWidth, setPanelWidth] = useState<number>(() => {
+    if (typeof window === "undefined") return 560;
+    const saved = Number(window.localStorage.getItem("otto.runDetailWidth"));
+    const maxWidth = Math.min(Math.max(420, window.innerWidth - 520), Math.max(440, window.innerWidth - 48));
+    if (Number.isFinite(saved) && saved > 0) {
+      return Math.min(Math.max(saved, 420), maxWidth);
+    }
+    return Math.min(560, maxWidth);
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("otto.runDetailWidth", String(Math.round(panelWidth)));
+    document.documentElement.style.setProperty("--run-detail-width", `${Math.round(panelWidth)}px`);
+    return () => {
+      document.documentElement.style.removeProperty("--run-detail-width");
+    };
+  }, [panelWidth]);
+  const startPanelResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (typeof window === "undefined") return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const startX = event.clientX;
+    const startWidth = panelRef.current?.getBoundingClientRect().width || panelWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "ew-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (moveEvent: PointerEvent) => {
+      const maxWidth = Math.min(Math.max(420, window.innerWidth - 520), Math.max(440, window.innerWidth - 48));
+      const next = startWidth + startX - moveEvent.clientX;
+      setPanelWidth(Math.min(Math.max(next, 420), maxWidth));
+    };
+    const onUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }, [panelWidth]);
+  const panelStyle = {"--run-detail-width": `${Math.round(panelWidth)}px`} as CSSProperties;
   // Drawer-mode: only render when a task is selected. Replaces the inline
   // right-rail Review Packet that used to show "Already merged into main"
   // permanently. mc-audit redesign Phase C.
@@ -104,19 +148,32 @@ export function RunDetailPanel({detail, logState, landing, inspectorOpen, queued
       && !watcherRunning
       && onStartWatcher,
   );
-  const hideDuplicateProvisionalPlan = Boolean(
-    queuedRunWaiting
-      && detail?.verification_plan
-      && [
-        detail.verification_plan.scope,
-        detail.verification_plan.verification_level,
-        detail.verification_plan.risk_level,
-      ].some((value) => String(value || "").toLowerCase() === "provisional"),
-  );
+  const hideDuplicateProvisionalPlan = isLowValueVerificationPlan(detail, queuedRunWaiting);
   return (
     <>
       <div className="run-drawer-backdrop" onClick={onClose} aria-hidden="true" />
-      <aside className="detail run-drawer" aria-labelledby="detailHeading" data-testid="run-detail-panel">
+      <aside ref={panelRef} className="detail run-drawer" style={panelStyle} aria-labelledby="detailHeading" data-testid="run-detail-panel">
+        <div
+          className="run-panel-resize-handle"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize run detail panel"
+          title="Drag to resize panel"
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            const step = event.shiftKey ? 80 : 24;
+            setPanelWidth((current) => {
+              const maxWidth = typeof window === "undefined"
+                ? 1000
+                : Math.min(Math.max(420, window.innerWidth - 520), Math.max(440, window.innerWidth - 48));
+              const next = event.key === "ArrowLeft" ? current + step : current - step;
+              return Math.min(Math.max(next, 420), maxWidth);
+            });
+          }}
+          onPointerDown={startPanelResize}
+        />
         <div className="panel-heading run-drawer-heading">
           <div>
             <h2 id="detailHeading">{detail || loadingRunId ? "Run detail" : "Queued task"}</h2>
@@ -130,7 +187,14 @@ export function RunDetailPanel({detail, logState, landing, inspectorOpen, queued
         <>
           <div className="detail-scroll">
             <RecoveryActionBar actions={detail.legal_actions || []} status={detail.display_status} onRunAction={onRunAction} />
-            <ReviewPacket packet={detail.review_packet} onRunAction={onRunAction} onLoadArtifact={onLoadArtifact} onShowArtifacts={onShowArtifacts} />
+            <ReviewPacket
+              packet={detail.review_packet}
+              detail={detail}
+              onRunAction={onRunAction}
+              onShowProof={onShowProof}
+              onShowDiff={onShowDiff}
+              onShowArtifacts={onShowArtifacts}
+            />
             {detail.active && <LiveLogPreview logState={logState} onShowLogs={onShowLogs} />}
             {!hideDuplicateProvisionalPlan && <VerificationPlanPanel plan={detail.verification_plan} />}
             {queuedRunWaiting && (
@@ -173,13 +237,13 @@ export function RunDetailPanel({detail, logState, landing, inspectorOpen, queued
               causes Playwright (and any script-driven click) to resolve them
               as visible while the actual click is intercepted by the
               overlay — see mc-audit W13-CRITICAL-1. The inspector ships its
-              own tablist (Result / Code changes / Logs / Artifacts) so
+              own tablist (Review / Code changes / Logs / Artifacts) so
               hiding these shortcuts while the inspector is open is the
               correct UX too. */}
           {!inspectorOpen && (
             <div className="detail-inspector-actions" role="group" aria-label="Evidence shortcuts">
-              {tryProductAvailable && <button className="primary" type="button" data-testid="open-try-product-button" onClick={onShowTryProduct}>Try product</button>}
-              <button type="button" data-testid="open-proof-button" onClick={onShowProof}>Review result</button>
+              {tryProductAvailable && <button className="primary" type="button" data-testid="open-try-product-button" onClick={onShowTryProduct}>{productActionLabel(detail)}</button>}
+              <button type="button" data-testid="open-proof-button" onClick={onShowProof}>Proof</button>
               <button type="button" data-testid="open-diff-button" disabled={!canShowDiff(detail)} title={canShowDiff(detail) ? "" : diffDisabledReason(detail)} onClick={onShowDiff}>Code changes</button>
               <button type="button" data-testid="open-logs-button" onClick={onShowLogs}>Logs</button>
               <button type="button" data-testid="open-artifacts-button" onClick={onShowArtifacts}>Artifacts</button>
@@ -327,6 +391,24 @@ function isPendingCheckStatus(status: string | null | undefined): boolean {
   return ["pending", "running"].includes(String(status || "").toLowerCase());
 }
 
+function isLowValueVerificationPlan(detail: RunDetail | null, queuedRunWaiting: boolean): boolean {
+  const plan = detail?.verification_plan;
+  if (!plan) return false;
+  const provisional = [
+    plan.scope,
+    plan.verification_level,
+    plan.risk_level,
+  ].some((value) => String(value || "").toLowerCase() === "provisional");
+  if (queuedRunWaiting && provisional) return true;
+  const planChecks = plan.checks || [];
+  const reviewChecks = detail?.review_packet?.checks || [];
+  if (!planChecks.length || !reviewChecks.length) return false;
+  const fromReviewPacket = planChecks.every((check) => String(check.source || "").toLowerCase() === "review-packet");
+  if (!fromReviewPacket) return false;
+  const sameKeys = new Set(reviewChecks.map((check) => check.key));
+  return planChecks.every((check) => sameKeys.has(check.id));
+}
+
 function verificationPolicyLabel(policy: string | null | undefined): string {
   switch (String(policy || "").toLowerCase()) {
     case "fast":
@@ -407,21 +489,18 @@ export function phaseUsageLine(phase: RunDetail["phase_timeline"][number]): stri
   return parts.length ? parts.join(" · ") : "No usage recorded";
 }
 
-export function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactContent, proofArtifactIndex, proofContent, diffContent, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadProofArtifact, onLoadArtifact, onRefreshDiff, onBackToArtifacts, onClose}: {
+export function RunInspector({detail, mode, logState, selectedArtifactIndex, artifactContent, diffContent, onShowTryProduct, onShowProof, onShowLogs, onShowDiff, onShowArtifacts, onLoadArtifact, onRefreshDiff, onBackToArtifacts, onClose}: {
   detail: RunDetail;
   mode: InspectorMode;
   logState: LogState;
   selectedArtifactIndex: number | null;
   artifactContent: ArtifactContentResponse | null;
-  proofArtifactIndex: number | null;
-  proofContent: ArtifactContentResponse | null;
   diffContent: DiffResponse | null;
   onShowTryProduct: () => void;
   onShowProof: () => void;
   onShowLogs: () => void;
   onShowDiff: () => void;
   onShowArtifacts: () => void;
-  onLoadProofArtifact: (index: number) => void;
   onLoadArtifact: (index: number) => void;
   onRefreshDiff: () => void;
   onBackToArtifacts: () => void;
@@ -431,10 +510,11 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
   const [inspectorWidth, setInspectorWidth] = useState<number>(() => {
     if (typeof window === "undefined") return 960;
     const saved = Number(window.localStorage.getItem("otto.inspectorWidth"));
+    const maxWidth = Math.min(Math.max(560, window.innerWidth - 520), Math.max(560, window.innerWidth - 48));
     if (Number.isFinite(saved) && saved > 0) {
-      return Math.min(Math.max(saved, 520), Math.max(560, window.innerWidth - 48));
+      return Math.min(Math.max(saved, 520), maxWidth);
     }
-    return 960;
+    return Math.min(960, maxWidth);
   });
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -445,10 +525,15 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
     };
   }, [inspectorWidth]);
   const activeMode: InspectorMode = mode;
+  const tryProductAvailable = canTryProduct(detail);
+  const effectiveMode: InspectorMode = activeMode === "try" && !tryProductAvailable ? "proof" : activeMode;
   // WAI-ARIA tablist pattern: roving tabindex + arrow keys + Home/End. Tabs
   // that are disabled (Code changes, when diff isn't available) skip in
   // arrow rotation. mc-audit a11y A11Y-03, K-04.
-  const tabModes = useMemo<InspectorMode[]>(() => ["try", "proof", "diff", "logs", "artifacts"], []);
+  const tabModes = useMemo<InspectorMode[]>(
+    () => tryProductAvailable ? ["try", "proof", "diff", "logs", "artifacts"] : ["proof", "diff", "logs", "artifacts"],
+    [tryProductAvailable],
+  );
   const tabHandlers: Record<InspectorMode, () => void> = {
     try: onShowTryProduct,
     proof: onShowProof,
@@ -457,8 +542,8 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
     artifacts: onShowArtifacts,
   };
   const tabLabels: Record<InspectorMode, string> = {
-    try: "Try product",
-    proof: "Result",
+    try: "Product demo",
+    proof: "Proof",
     diff: "Code changes",
     logs: "Logs",
     artifacts: "Artifacts",
@@ -475,7 +560,7 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
         ? event.target.getAttribute("data-tab-id")
         : ""
     ) as InspectorMode | "";
-    const currentMode = focusedMode && enabled.includes(focusedMode) ? focusedMode : activeMode;
+    const currentMode = focusedMode && enabled.includes(focusedMode) ? focusedMode : effectiveMode;
     const currentIndex = enabled.indexOf(currentMode);
     let nextIndex = 0;
     if (key === "Home") nextIndex = 0;
@@ -498,7 +583,7 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
     document.body.style.cursor = "ew-resize";
     document.body.style.userSelect = "none";
     const onMove = (moveEvent: PointerEvent) => {
-      const maxWidth = Math.max(560, window.innerWidth - 48);
+      const maxWidth = Math.min(Math.max(560, window.innerWidth - 520), Math.max(560, window.innerWidth - 48));
       const next = startWidth + startX - moveEvent.clientX;
       setInspectorWidth(Math.min(Math.max(next, 520), maxWidth));
     };
@@ -538,7 +623,9 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
           event.preventDefault();
           const step = event.shiftKey ? 80 : 24;
           setInspectorWidth((current) => {
-            const maxWidth = typeof window === "undefined" ? 1400 : Math.max(560, window.innerWidth - 48);
+            const maxWidth = typeof window === "undefined"
+              ? 1400
+              : Math.min(Math.max(560, window.innerWidth - 520), Math.max(560, window.innerWidth - 48));
             const next = event.key === "ArrowLeft" ? current + step : current - step;
             return Math.min(Math.max(next, 520), maxWidth);
           });
@@ -552,7 +639,7 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
         </div>
         <div className="detail-tabs" role="tablist" aria-label="Evidence view" onKeyDown={onTabKeyDown}>
           {tabModes.map((m) => {
-            const isSelected = activeMode === m;
+            const isSelected = effectiveMode === m;
             const isDisabled = tabDisabled(m);
             return (
               <button
@@ -580,15 +667,15 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
         className="run-inspector-body"
         id="run-inspector-panel"
         role="tabpanel"
-        aria-labelledby={`run-inspector-tab-${activeMode}`}
+        aria-labelledby={`run-inspector-tab-${effectiveMode}`}
       >
-        {activeMode === "try" ? (
+        {effectiveMode === "try" ? (
           <ProductHandoffPane detail={detail} />
-        ) : activeMode === "proof" ? (
-          <ProofPane detail={detail} proofArtifactIndex={proofArtifactIndex} proofContent={proofContent} onShowDiff={onShowDiff} onLoadProofArtifact={onLoadProofArtifact} />
-        ) : activeMode === "diff" ? (
+        ) : effectiveMode === "proof" ? (
+          <ProofPane detail={detail} onShowDiff={onShowDiff} onShowArtifacts={onShowArtifacts} />
+        ) : effectiveMode === "diff" ? (
           <DiffPane diff={diffContent} onRefresh={onRefreshDiff} />
-        ) : activeMode === "logs" ? (
+        ) : effectiveMode === "logs" ? (
           <LogPane logState={logState} runActive={detail.active} onRetry={onShowLogs} />
         ) : (
           <ArtifactPane
@@ -612,13 +699,70 @@ export function ProductHandoffPane({detail}: {detail: RunDetail}) {
   const hasSamples = handoff.sample_data.length > 0;
   const hasUrls = handoff.urls.length > 0;
   const hasTaskContext = Boolean(handoff.task_summary || handoff.task_flows.length || handoff.task_changed_files.length);
+  const demo = detail.review_packet.certification.demo_evidence;
+  const primaryDemo = demo?.primary_demo || null;
+  const primaryDemoUrl = primaryDemo?.href ? proofAssetUrl(detail.run_id, primaryDemo.href) : "";
+  const fallbackVideo = productDemoVideoArtifact(detail.artifacts);
+  const screenshots = productScreenshotArtifacts(detail.artifacts).slice(0, 4);
+  const proofReportUrl = detail.review_packet.certification.proof_report?.html_url || "";
+  const certificationMode = detail.build_config?.certifier_mode || detail.certifier_mode || "unknown";
+  const primaryIsVideo = Boolean(primaryDemo && isDemoVideo(primaryDemo));
+  const primaryIsImage = Boolean(primaryDemo && isDemoImage(primaryDemo));
   return (
     <div className="product-handoff-pane" data-testid="product-handoff-pane">
-      <section className="product-handoff-hero" aria-labelledby="productHandoffHeading">
+      <section className="product-demo-section" aria-labelledby="productDemoHeading">
         <div>
           <span>{handoff.label}</span>
-          <h3 id="productHandoffHeading">Try product</h3>
+          <h3 id="productDemoHeading">Product demo</h3>
+          <p>
+            {primaryDemo
+              ? demo?.demo_reason || "Task-specific proof media is available. Review it before reproducing the flow yourself."
+              : fallbackVideo
+                ? "A recorded proof clip is available. Use it to see the feature before reproducing it yourself."
+                : demoUnavailableCopy(handoff, certificationMode, demo?.demo_reason || "")}
+          </p>
+        </div>
+        {primaryDemo && primaryIsVideo ? (
+          <video controls data-testid="product-demo-video" className="product-demo-video">
+            <source src={primaryDemoUrl} type={demoVideoMimeType(primaryDemo)} />
+          </video>
+        ) : primaryDemo && primaryIsImage ? (
+          <div className="product-demo-screenshots" aria-label="Visual proof screenshots">
+            <a href={primaryDemoUrl} target="_blank" rel="noreferrer">
+              <img src={primaryDemoUrl} alt={primaryDemo.name || "primary proof"} />
+              <span>{primaryDemo.name || "primary proof"}</span>
+            </a>
+          </div>
+        ) : fallbackVideo ? (
+          <video controls data-testid="product-demo-video" className="product-demo-video">
+            <source src={artifactRawUrl(detail.run_id, fallbackVideo.index)} type={videoMimeType(fallbackVideo)} />
+          </video>
+        ) : screenshots.length ? (
+          <div className="product-demo-screenshots" aria-label="Visual proof screenshots">
+            {screenshots.map((artifact) => (
+              <a href={artifactRawUrl(detail.run_id, artifact.index)} target="_blank" rel="noreferrer" key={artifact.index}>
+                <img src={artifactRawUrl(detail.run_id, artifact.index)} alt={artifact.label} />
+                <span>{artifact.label}</span>
+              </a>
+            ))}
+          </div>
+        ) : (
+          <div className="product-demo-empty" data-testid="product-demo-empty">
+            <strong>No demo media recorded</strong>
+            <span>{demo?.demo_reason || "That is expected for fast certification, CLI/API/library work, and test-only runs. The commands and proof report remain the audit trail."}</span>
+          </div>
+        )}
+        <div className="product-demo-actions">
+          {proofReportUrl ? <a href={proofReportUrl} target="_blank" rel="noreferrer">Open proof report</a> : null}
+        </div>
+      </section>
+
+      <section className="product-handoff-hero" aria-labelledby="productHandoffHeading">
+        <div>
+          <span>Try it yourself</span>
+          <h3 id="productHandoffHeading">{handoff.preview_label || "Preview product"}</h3>
           <p>{handoff.summary || productKindHint(handoff.kind)}</p>
+          {handoff.preview_reason ? <p className="handoff-preview-reason">{handoff.preview_reason}</p> : null}
         </div>
         <dl>
           <dt>Root</dt>
@@ -679,24 +823,26 @@ export function ProductHandoffPane({detail}: {detail: RunDetail}) {
         )}
       </section>
 
-      <section className="product-handoff-section" aria-labelledby="productFlowsHeading">
-        <div className="handoff-section-heading">
-          <h3 id="productFlowsHeading">General journeys</h3>
-          <span>{handoff.try_flows.length} flow{handoff.try_flows.length === 1 ? "" : "s"}</span>
-        </div>
-        <div className="handoff-flow-list">
-          {handoff.try_flows.map((flow, index) => (
-            <article className="handoff-flow" key={`${flow.title}-${index}`}>
-              <strong>{flow.title}</strong>
-              {flow.steps.length ? (
-                <ol>
-                  {flow.steps.map((step) => <li key={step}>{step}</li>)}
-                </ol>
-              ) : null}
-            </article>
-          ))}
-        </div>
-      </section>
+      {handoff.try_flows.length ? (
+        <section className="product-handoff-section" aria-labelledby="productFlowsHeading">
+          <div className="handoff-section-heading">
+            <h3 id="productFlowsHeading">Additional checks</h3>
+            <span>{handoff.try_flows.length} flow{handoff.try_flows.length === 1 ? "" : "s"}</span>
+          </div>
+          <div className="handoff-flow-list">
+            {handoff.try_flows.map((flow, index) => (
+              <article className="handoff-flow" key={`${flow.title}-${index}`}>
+                <strong>{flow.title}</strong>
+                {flow.steps.length ? (
+                  <ol>
+                    {flow.steps.map((step) => <li key={step}>{step}</li>)}
+                  </ol>
+                ) : null}
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {hasSamples && (
         <section className="product-handoff-section" aria-labelledby="productSampleHeading">
@@ -734,6 +880,66 @@ export function ProductHandoffPane({detail}: {detail: RunDetail}) {
   );
 }
 
+function productDemoVideoArtifact(artifacts: ArtifactRef[]): ArtifactRef | null {
+  const videos = artifacts.filter((artifact) => {
+    const text = `${artifact.label} ${artifact.path}`.toLowerCase();
+    return artifact.exists && (artifact.kind.toLowerCase() === "video" || /\.(webm|mp4|mov|m4v)$/i.test(text));
+  });
+  return videos.find((artifact) => /demo|recording|walkthrough|proof/.test(`${artifact.label} ${artifact.path}`.toLowerCase())) || videos[0] || null;
+}
+
+function productScreenshotArtifacts(artifacts: ArtifactRef[]): ArtifactRef[] {
+  return artifacts.filter((artifact) => {
+    const text = `${artifact.label} ${artifact.path}`.toLowerCase();
+    return artifact.exists && (artifact.kind.toLowerCase() === "image" || /\.(png|jpe?g|gif|webp)$/i.test(text));
+  });
+}
+
+function artifactRawUrl(runId: string, index: number): string {
+  return `/api/runs/${encodeURIComponent(runId)}/artifacts/${index}/raw`;
+}
+
+function videoMimeType(artifact: ArtifactRef): string {
+  const text = `${artifact.label} ${artifact.path}`.toLowerCase();
+  if (text.endsWith(".mp4") || text.endsWith(".m4v")) return "video/mp4";
+  if (text.endsWith(".mov")) return "video/quicktime";
+  return "video/webm";
+}
+
+function proofAssetUrl(runId: string, href: string): string {
+  return `/api/runs/${encodeURIComponent(runId)}/proof-assets/${encodeURIComponent(href)}`;
+}
+
+function isDemoVideo(item: {kind?: string; name?: string} | null): boolean {
+  const text = `${item?.kind || ""} ${item?.name || ""}`.toLowerCase();
+  return text.includes("video") || /\.(webm|mp4|mov|m4v)$/i.test(text);
+}
+
+function isDemoImage(item: {kind?: string; name?: string} | null): boolean {
+  const text = `${item?.kind || ""} ${item?.name || ""}`.toLowerCase();
+  return text.includes("image") || /\.(png|jpe?g|gif|webp)$/i.test(text);
+}
+
+function demoVideoMimeType(item: {name?: string}): string {
+  const name = String(item.name || "").toLowerCase();
+  if (name.endsWith(".mp4") || name.endsWith(".m4v")) return "video/mp4";
+  if (name.endsWith(".mov")) return "video/quicktime";
+  return "video/webm";
+}
+
+function demoUnavailableCopy(handoff: ProductHandoff, certificationMode: string, reason = ""): string {
+  if (reason) return reason;
+  const mode = certificationMode.toLowerCase();
+  const kind = handoff.kind.toLowerCase();
+  if (mode === "fast") {
+    return "Fast certification does not record video. Use the flows below to reproduce the smoke-tested behavior.";
+  }
+  if (/(api|cli|library|worker|pipeline|service)/.test(kind)) {
+    return "This product is best demonstrated through commands, requests, outputs, and files rather than video.";
+  }
+  return "No demo video was recorded for this run. Use the flows below to reproduce the feature and the proof report to audit what was verified.";
+}
+
 function ArtifactFrame({rawUrl, label, mime, testId}: {
   rawUrl: string;
   label: string;
@@ -768,6 +974,9 @@ export function productHandoffFor(detail: RunDetail): ProductHandoff {
     source_path: null,
     root: detail.worktree || detail.cwd || detail.project_dir || "",
     summary: "No product handoff was attached to this run.",
+    preview_available: false,
+    preview_label: "Preview product",
+    preview_reason: "No product URL or launch command was recorded for this run.",
     task_summary: detail.summary_lines?.[0] || detail.title || detail.run_id,
     task_status: detail.display_status || detail.status || null,
     task_branch: detail.branch || null,
@@ -1053,35 +1262,37 @@ export function describeLogHeader({runActive, status, lastUpdatedAt, pollInterva
   return `Final · ${displayLines.toLocaleString()} line${displayLines === 1 ? "" : "s"} · ${humanBytes(totalBytes)}`;
 }
 
-export function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff, onLoadProofArtifact}: {
+export function ProofPane({detail, onShowDiff, onShowArtifacts}: {
   detail: RunDetail;
-  proofArtifactIndex: number | null;
-  proofContent: ArtifactContentResponse | null;
   onShowDiff: () => void;
-  onLoadProofArtifact: (index: number) => void;
+  onShowArtifacts: () => void;
 }) {
   const packet = detail.review_packet;
   const changedFiles = packet.changes.files.slice(0, 10);
   const evidence = packet.evidence.filter(isReadableArtifact);
   const stories = packet.certification.stories || [];
   const rounds = packet.certification.rounds || [];
+  const demoEvidence = packet.certification.demo_evidence;
   const proofReport = packet.certification.proof_report;
   const proofChecks = packet.failure ? packet.checks.filter((check) => check.key !== "run" && check.key !== "landing") : packet.checks;
+  const visibleChecks = proofChecks.filter((check) => !["run", "landing"].includes(check.key)).slice(0, 5);
+  const keyEvidenceCount = keyReviewEvidenceArtifacts(evidence).length;
   return (
     <div className="proof-pane" data-testid="proof-pane">
       <div className="proof-summary" aria-labelledby="proofHeading">
         <div>
           <span>{packet.readiness.label}</span>
-          <h3 id="proofHeading">Proof of work</h3>
+          <h3 id="proofHeading">Review summary</h3>
           <p>{packet.headline}</p>
         </div>
         <div className="proof-metrics">
           <ReviewMetric label="Stories" value={storiesLine(packet)} />
           <ReviewMetric label="Changes" value={packet.changes.file_count ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}` : "-"} />
-          <ReviewMetric label="Evidence" value={evidenceLine(packet)} />
+          <ReviewMetric label="Demo" value={demoEvidenceLine(packet)} />
+          <ReviewMetric label="Evidence" value={reviewEvidenceLine(packet)} />
         </div>
       </div>
-      <ProofProvenance proofReport={proofReport} runId={detail.run_id} />
+      <DemoEvidenceSection detail={detail} demo={demoEvidence} />
       <div className="proof-section" aria-labelledby="proofNextHeading">
         <h3 id="proofNextHeading">Next action</h3>
         <p>{packet.readiness.next_step}</p>
@@ -1091,6 +1302,12 @@ export function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff,
           ) : (
             <span>No HTML proof report is linked for this run.</span>
           )}
+          <button type="button" data-testid="proof-open-artifacts-button" onClick={onShowArtifacts}>
+            {keyEvidenceCount ? "Open evidence artifacts" : "Open artifacts"}
+          </button>
+          {canShowDiff(detail) ? (
+            <button type="button" data-testid="proof-open-diff-button" onClick={onShowDiff}>Open code diff</button>
+          ) : null}
         </div>
       </div>
       {rounds.length > 1 && <CertificationRoundTabs rounds={rounds} />}
@@ -1102,9 +1319,9 @@ export function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff,
       )}
       <div className="proof-section" aria-labelledby="proofChecksHeading">
         <h3 id="proofChecksHeading">Verification</h3>
-        {proofChecks.length ? (
+        {visibleChecks.length ? (
           <div className="proof-checks">
-            {proofChecks.map((check) => (
+            {visibleChecks.map((check) => (
               <div className={`review-check check-${String(check.status || "").trim().toLowerCase()}`} key={check.key}>
                 <CheckStatusBadge status={check.status} />
                 <div>
@@ -1115,7 +1332,7 @@ export function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff,
             ))}
           </div>
         ) : (
-          <p>No additional checks were recorded before the task failed.</p>
+          <p>No additional verification checks were recorded for this run.</p>
         )}
       </div>
       <div className="proof-section" aria-labelledby="proofStoriesHeading">
@@ -1142,7 +1359,7 @@ export function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff,
         )}
       </div>
       <div className="proof-section" aria-labelledby="proofFilesHeading">
-        <h3 id="proofFilesHeading">Changed files</h3>
+        <h3 id="proofFilesHeading">What changed</h3>
         {changedFiles.length ? (
           <ul className="proof-files">
             {changedFiles.map((path) => <li key={path}>{path}</li>)}
@@ -1152,41 +1369,160 @@ export function ProofPane({detail, proofArtifactIndex, proofContent, onShowDiff,
           <p>No changed files reported yet.</p>
         )}
       </div>
-      <div className="proof-section" aria-labelledby="proofDiffHeading">
-        <h3 id="proofDiffHeading">Code diff</h3>
-        {packet.changes.diff_error ? (
+      {packet.changes.diff_error ? (
+        <div className="proof-section proof-failure" aria-labelledby="proofDiffIssueHeading">
+          <h3 id="proofDiffIssueHeading">Diff issue</h3>
           <p>{formatTechnicalIssue(packet.changes.diff_error)}</p>
-        ) : canShowDiff(detail) ? (
-          <>
-            <p>{packet.changes.diff_command || `Review ${packet.changes.file_count} changed file${packet.changes.file_count === 1 ? "" : "s"}.`}</p>
-            <button type="button" data-testid="proof-open-diff-button" onClick={onShowDiff}>Open code diff</button>
-          </>
-        ) : (
-          <p>No code diff is available for this run yet.</p>
-        )}
-      </div>
-      <div className="proof-section" aria-labelledby="proofArtifactsHeading">
-        <h3 id="proofArtifactsHeading">Evidence artifacts</h3>
-        {evidence.length ? (
-          <div className="proof-artifacts">
-            {evidence.map((artifact) => (
-              <button className={proofArtifactIndex === artifact.index ? "selected" : ""} key={artifact.index} type="button" onClick={() => onLoadProofArtifact(artifact.index)}>
-                <strong>{artifact.label}</strong>
-                <span>{artifact.kind}</span>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p>No readable evidence artifacts are attached.</p>
-        )}
-      </div>
-      <ProofEvidenceContent
-        runId={detail.run_id}
-        artifactIndex={proofArtifactIndex}
-        content={proofContent}
-      />
+        </div>
+      ) : null}
+      <details className="proof-section proof-provenance-details">
+        <summary>
+          <span>Proof metadata</span>
+          <strong>{proofReport?.sha256 ? proofReport.sha256.slice(0, 12) : detail.run_id}</strong>
+        </summary>
+        <ProofProvenance proofReport={proofReport} runId={detail.run_id} />
+      </details>
     </div>
   );
+}
+
+function DemoEvidenceSection({detail, demo}: {
+  detail: RunDetail;
+  demo: RunDetail["review_packet"]["certification"]["demo_evidence"];
+}) {
+  if (!demo) return null;
+  const primary = demo.primary_demo;
+  const primaryUrl = primary?.href ? proofAssetUrl(detail.run_id, primary.href) : "";
+  const visibleStories = (demo.stories || []).slice(0, 8);
+  const statusClass = demoStatusClass(demo.demo_status);
+  return (
+    <div className={`proof-section demo-evidence-section demo-${statusClass}`} aria-labelledby="demoEvidenceHeading" data-testid="demo-evidence-section">
+      <div className="demo-evidence-head">
+        <div>
+          <h3 id="demoEvidenceHeading">Demo proof</h3>
+          <p>{demo.demo_reason || "Structured demo proof was not recorded for this run."}</p>
+        </div>
+        <span className={`demo-status-pill demo-${statusClass}`}>
+          {demoStatusLabel(demo.demo_status)} · {demoKindLabel(demo.app_kind)}
+        </span>
+      </div>
+      {primary && primaryUrl ? (
+        <div className="demo-primary-preview" data-testid="demo-primary-preview">
+          <div>
+            <strong>{primary.name || "Primary proof"}</strong>
+            {primary.caption ? <span>{primary.caption}</span> : null}
+          </div>
+          {isDemoVideo(primary) ? (
+            <video controls>
+              <source src={primaryUrl} type={demoVideoMimeType(primary)} />
+            </video>
+          ) : isDemoImage(primary) ? (
+            <a href={primaryUrl} target="_blank" rel="noreferrer">
+              <img src={primaryUrl} alt={primary.name || "primary proof"} />
+            </a>
+          ) : (
+            <a href={primaryUrl} target="_blank" rel="noreferrer">Open primary proof</a>
+          )}
+        </div>
+      ) : null}
+      {visibleStories.length ? (
+        <div className="demo-story-grid" aria-label="Story proof coverage">
+          {visibleStories.map((story) => (
+            <article className="demo-story-proof" key={story.id || story.title}>
+              <strong>{story.title || story.id}</strong>
+              <span>{story.proof_level || "not recorded"}</span>
+              <small>
+                {[
+                  story.needs_visual ? "visual expected" : "",
+                  story.needs_file_validation ? "file validation expected" : "",
+                  story.has_file_validation ? "file validated" : "",
+                  story.has_text_evidence ? "notes" : "",
+                ].filter(Boolean).join(" · ") || "no extra proof metadata"}
+              </small>
+            </article>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function keyReviewEvidenceArtifacts(evidence: ArtifactRef[]): ArtifactRef[] {
+  const seen = new Set<number>();
+  return evidence.filter((artifact) => {
+    if (!isReadableArtifact(artifact)) return false;
+    if (seen.has(artifact.index)) return false;
+    const text = `${artifact.label} ${artifact.path}`.toLowerCase();
+    const isKeyArtifact = (
+      isProofReportArtifact(artifact)
+      || /proof|summary/i.test(`${artifact.label} ${artifact.path}`)
+      || ["image", "video"].includes(artifact.kind.toLowerCase())
+      || /\.(png|jpe?g|gif|webp|webm|mp4)$/i.test(text)
+    );
+    if (!isKeyArtifact) return false;
+    seen.add(artifact.index);
+    return true;
+  });
+}
+
+function reviewEvidenceLine(packet: RunDetail["review_packet"]): string {
+  if (packet.readiness.state === "in_progress") return "-";
+  if (isRepositoryBlockedPacket(packet)) return "-";
+  const readable = packet.evidence.filter(isReviewEvidenceArtifact).filter(isReadableArtifact);
+  if (!readable.length) return "not attached";
+  const keyCount = keyReviewEvidenceArtifacts(packet.evidence).length;
+  if (!keyCount) return "attached";
+  return `${keyCount} item${keyCount === 1 ? "" : "s"}`;
+}
+
+function demoEvidenceLine(packet: RunDetail["review_packet"]): string {
+  const demo = packet.certification.demo_evidence;
+  if (!demo) return "-";
+  return demoStatusLabel(demo.demo_status);
+}
+
+function demoStatusLabel(status: string | null | undefined): string {
+  switch (String(status || "").toLowerCase()) {
+    case "strong":
+      return "Strong";
+    case "partial":
+      return "Partial";
+    case "missing":
+      return "Missing";
+    case "not_applicable":
+      return "Not needed";
+    default:
+      return "Unknown";
+  }
+}
+
+function demoStatusClass(status: string | null | undefined): string {
+  const normalized = String(status || "").toLowerCase();
+  if (["strong", "partial", "missing", "not_applicable"].includes(normalized)) {
+    return normalized.replace("_", "-");
+  }
+  return "unknown";
+}
+
+function demoKindLabel(kind: string | null | undefined): string {
+  switch (String(kind || "").toLowerCase()) {
+    case "web":
+      return "Web UI";
+    case "mixed":
+      return "Web + export";
+    case "file_export":
+      return "File/export";
+    case "api":
+      return "API";
+    case "cli":
+      return "CLI";
+    case "library":
+      return "Library";
+    case "worker":
+      return "Worker";
+    default:
+      return "Unknown";
+  }
 }
 
 export function ProofProvenance({proofReport, runId}: {proofReport: ProofReportInfo; runId: string}) {
@@ -1196,7 +1532,7 @@ export function ProofProvenance({proofReport, runId}: {proofReport: ProofReportI
   const branch = proofReport.branch;
   const head = proofReport.head_sha ? proofReport.head_sha.slice(0, 7) : null;
   return (
-    <div className="proof-section proof-provenance" data-testid="proof-provenance" aria-label="Proof of work provenance">
+    <div className="proof-provenance" data-testid="proof-provenance" aria-label="Proof of work provenance">
       {mismatch && (
         <div className="proof-provenance-warning" data-testid="proof-provenance-mismatch" role="alert">
           ⚠ Proof report records run {proofReport.run_id || "unknown"}, but this view is run {runId}. The evidence below may not belong to this run.
@@ -1263,61 +1599,6 @@ export function CertificationRoundTabs({rounds}: {rounds: CertificationRound[]})
             </div>
           )}
         </div>
-      )}
-    </div>
-  );
-}
-
-export function ProofEvidenceContent({runId, artifactIndex, content}: {
-  runId: string;
-  artifactIndex: number | null;
-  content: ArtifactContentResponse | null;
-}) {
-  const previewable = content ? content.previewable !== false : true;
-  const mime = content?.mime_type || "";
-  const sizeBytes = content?.size_bytes ?? 0;
-  const artifactIsLog = isLogArtifact(content?.artifact || null);
-  const proofContentText = content?.content || "";
-  const compact = compactLongText(artifactIsLog ? proofContentText : formatArtifactContent(proofContentText), 20000);
-  const rawUrl = artifactIndex != null ? `/api/runs/${encodeURIComponent(runId)}/artifacts/${artifactIndex}/raw` : null;
-  const artifactLabel = content?.artifact.label || "artifact";
-  const renderHtml = Boolean(rawUrl && previewable && mime.toLowerCase().includes("html"));
-  const renderPdf = Boolean(rawUrl && mime.toLowerCase() === "application/pdf");
-  return (
-    <div className="proof-section proof-content" aria-labelledby="proofContentHeading">
-      <div className="proof-content-heading">
-        <div>
-          <h3 id="proofContentHeading">Evidence content</h3>
-          <p>{content?.artifact.label || "Loading selected evidence artifact"}</p>
-          {mime && <small data-testid="proof-evidence-mime">{mime}{sizeBytes > 0 ? ` · ${humanBytes(sizeBytes)}` : ""}</small>}
-        </div>
-        {(content?.truncated || compact.truncated) && previewable ? <span>truncated</span> : null}
-      </div>
-      {!content ? (
-        <pre className={artifactIsLog ? "log-content" : ""} tabIndex={0} aria-label="Selected evidence content">Loading evidence content...</pre>
-      ) : renderHtml && rawUrl ? (
-        <ArtifactFrame rawUrl={rawUrl} label={artifactLabel} mime={mime} testId="proof-evidence-html-frame" />
-      ) : !previewable ? (
-        renderPdf && rawUrl ? (
-          <ArtifactFrame rawUrl={rawUrl} label={artifactLabel} mime={mime} testId="proof-evidence-pdf-frame" />
-        ) : rawUrl && mime.startsWith("image/") ? (
-          <a href={rawUrl} target="_blank" rel="noreferrer">
-            <img src={rawUrl} alt={content.artifact.label} data-testid="proof-evidence-image" className="proof-evidence-image" />
-          </a>
-        ) : rawUrl && mime.startsWith("video/") ? (
-          <video controls data-testid="proof-evidence-video" className="proof-evidence-video">
-            <source src={rawUrl} type={mime} />
-          </video>
-        ) : (
-          <div className="proof-evidence-binary" data-testid="proof-evidence-no-preview">
-            <p>No text preview for {mime || "this artifact"}.</p>
-            {rawUrl && <a href={rawUrl} target="_blank" rel="noreferrer" download data-testid="proof-evidence-download">Download artifact</a>}
-          </div>
-        )
-      ) : (
-        <pre className={artifactIsLog ? "log-content" : ""} tabIndex={0} aria-label="Selected evidence content">
-          {compact.text ? (artifactIsLog ? renderLogText(compact.text) : compact.text) : "(empty)"}
-        </pre>
       )}
     </div>
   );
@@ -1436,31 +1717,31 @@ export function DiffPane({diff, onRefresh}: {diff: DiffResponse | null; onRefres
   );
 }
 
-export function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifacts}: {
+export function ReviewPacket({packet, detail, onRunAction, onShowProof, onShowDiff, onShowArtifacts}: {
   packet: RunDetail["review_packet"];
+  detail: RunDetail;
   onRunAction: (action: string, label?: string) => void;
-  onLoadArtifact: (index: number) => void;
+  onShowProof: () => void;
+  onShowDiff: () => void;
   onShowArtifacts: () => void;
 }) {
   const action = packet.next_action;
   const blockers = packet.readiness.blockers || [];
   const inProgress = packet.readiness.state === "in_progress";
-  const reviewEvidence = packet.evidence.filter(isReviewEvidenceArtifact);
-  const artifactCount = reviewEvidence.length;
+  const artifactCount = packet.evidence.filter(isReadableArtifact).length;
   const showActionButton = Boolean(action.action_key);
   const hasFailure = Boolean(packet.failure);
   const attentionChecks = packet.checks.filter((check) => isAttentionCheckStatus(check.status));
   const pendingChecks = packet.checks.filter((check) => isPendingCheckStatus(check.status));
-  const drawerChecks = attentionChecks.length ? attentionChecks : packet.checks;
+  const drawerChecks = attentionChecks.length ? attentionChecks : pendingChecks;
   const checksDefaultOpen = hasFailure || attentionChecks.length > 0;
   const checkSummary = attentionChecks.length
     ? `${attentionChecks.length} need review`
     : pendingChecks.length
       ? `${pendingChecks.length} pending`
     : `${packet.checks.length} recorded`;
-  const filesSummary = packet.changes.file_count
-    ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}`
-    : `${packet.changes.files.length} file${packet.changes.files.length === 1 ? "" : "s"}`;
+  const showNextStep = packet.readiness.state !== "merged" || showActionButton || hasFailure || blockers.length > 0;
+  const canOpenDiff = canShowDiff(detail);
   return (
     <div className={`review-packet review-${packet.readiness.tone || "info"}`}>
       <div className="review-head">
@@ -1483,20 +1764,36 @@ export function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifac
         )}
       </div>
       {packet.failure && <FailureSummary failure={packet.failure} />}
-      <div className="review-next-step">
-        <strong>Next</strong>
-        <span>{packet.readiness.next_step}</span>
-      </div>
+      {showNextStep && (
+        <div className="review-next-step">
+          <strong>Next</strong>
+          <span>{packet.readiness.next_step}</span>
+        </div>
+      )}
       {!hasFailure && blockers.length > 0 && (
         <ul className="review-blockers" aria-label="Review blockers">
           {blockers.map((blocker) => <li key={blocker}>{formatReviewText(blocker)}</li>)}
         </ul>
       )}
       <div className={`review-grid ${packet.readiness.state === "merged" || inProgress ? "review-grid-wide" : ""}`}>
-        <ReviewMetric label="Stories" value={storiesLine(packet)} />
-        <ReviewMetric label="Changes" value={packet.changes.file_count ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}` : "-"} />
-        <ReviewMetric label="Evidence" value={evidenceLine(packet)} />
-        {(packet.readiness.state === "merged" || inProgress) && <ReviewMetric label="Artifacts" value={artifactCount ? `${artifactCount} file${artifactCount === 1 ? "" : "s"}` : "-"} />}
+        <ReviewMetric label="Stories" value={storiesLine(packet)} onClick={onShowProof} title="Open review result" testId="review-metric-stories" />
+        <ReviewMetric
+          label="Files"
+          value={packet.changes.file_count ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}` : "-"}
+          onClick={canOpenDiff ? onShowDiff : undefined}
+          title={canOpenDiff ? "Open code changes" : diffDisabledReason(detail)}
+          testId="review-metric-files"
+        />
+        <ReviewMetric label="Proof" value={demoEvidenceLine(packet)} onClick={onShowProof} title="Open proof" testId="review-metric-proof" />
+        {(packet.readiness.state === "merged" || inProgress) && (
+          <ReviewMetric
+            label="Artifacts"
+            value={artifactCount ? `${artifactCount} file${artifactCount === 1 ? "" : "s"}` : "-"}
+            onClick={artifactCount ? onShowArtifacts : undefined}
+            title={artifactCount ? "Open artifact bundle" : "No artifacts are attached"}
+            testId="review-metric-artifacts"
+          />
+        )}
       </div>
       {drawerChecks.length > 0 && (
         <ReviewDrawer title="Checks" meta={checkSummary} defaultOpen={checksDefaultOpen}>
@@ -1519,25 +1816,6 @@ export function ReviewPacket({packet, onRunAction, onLoadArtifact, onShowArtifac
           <strong>Recovery</strong>
           <span>Run git status --short, then commit, stash, or revert local project changes before landing.</span>
         </div>
-      )}
-      {packet.changes.files.length > 0 && (
-        <ReviewDrawer title="Changed files" meta={filesSummary}>
-          <ul className="review-files" aria-label="Changed files">
-            {packet.changes.files.map((path) => <li key={path}>{path}</li>)}
-            {packet.changes.truncated && <li>more files not shown</li>}
-          </ul>
-          {packet.changes.diff_command && packet.readiness.state === "ready" && <code title={packet.changes.diff_command}>{packet.changes.diff_command}</code>}
-        </ReviewDrawer>
-      )}
-      {/* Evidence drawer dropped — same data is covered by the Evidence stat
-          tile above + the "View all evidence" button below.
-          mc-audit redesign §3b W4.6. evidenceSummary stays in scope so the
-          stat-tile-vs-drawer comparison can be re-derived if we ever need
-          a "Recent evidence" preview. */}
-      {(packet.evidence.length > 0 && !inProgress) && (
-        <button className="review-inline-action" type="button" data-testid="review-more-artifacts-button" onClick={onShowArtifacts}>
-          View all evidence
-        </button>
       )}
     </div>
   );
@@ -1642,7 +1920,7 @@ export function ActionBar({actions, mergeBlocked, onRunAction}: {actions: Action
   const visible = actions.filter((action) => !["o", "e", "m", "M"].includes(action.key));
   if (!visible.length) return <div className="advanced-actions empty" aria-hidden="true" />;
   return (
-    <details className="advanced-actions" open>
+    <details className="advanced-actions">
       <summary>Advanced run actions</summary>
       <div className="action-bar" role="group" aria-label="Advanced run actions">
         {visible.map((action) => {
@@ -1807,9 +2085,9 @@ type ArtifactGroup = {
 
 function artifactGroups(artifacts: ArtifactRef[]): ArtifactGroup[] {
   const groups: ArtifactGroup[] = [
-    {key: "review", title: "Review first", defaultOpen: true, items: []},
-    {key: "visual", title: "Visual evidence", defaultOpen: true, items: []},
-    {key: "logs", title: "Logs", defaultOpen: true, items: []},
+    {key: "review", title: "Proof packet", defaultOpen: true, items: []},
+    {key: "visual", title: "Screenshots and media", defaultOpen: true, items: []},
+    {key: "logs", title: "Logs", defaultOpen: false, items: []},
     {key: "internals", title: "Run internals", defaultOpen: false, items: []},
   ];
   const byKey = new Map(groups.map((group) => [group.key, group]));

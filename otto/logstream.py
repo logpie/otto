@@ -46,6 +46,7 @@ from otto.token_usage import (
     TOKEN_USAGE_KEYS,
     add_token_usage,
     empty_token_usage,
+    format_token_spend,
     normalize_token_usage,
     token_total,
 )
@@ -676,11 +677,9 @@ class NarrativeFormatter:
             if not phase_data:
                 continue
             segment = f"{phase}="
-            cost_usd = phase_data.get("cost_usd")
-            if isinstance(cost_usd, int | float):
-                if phase_data.get("estimated") is True:
-                    segment += "~"
-                segment += f"${float(cost_usd):.2f} "
+            phase_spend = format_token_spend(phase_data)
+            if phase_spend != "-":
+                segment += f"{phase_spend} "
             segment += _format_elapsed_seconds(float(phase_data.get("duration_s", 0.0)))
             rounds = phase_data.get("rounds")
             if phase == "certify" and isinstance(rounds, int):
@@ -688,16 +687,10 @@ class NarrativeFormatter:
             parts.append(segment)
 
         total_segment = "total="
-        if isinstance(total_cost_usd, int | float):
-            if float(total_cost_usd) > 0:
-                total_segment += f"${float(total_cost_usd):.2f} "
-            else:
-                tokens = _total_token_usage(breakdown)
-                if tokens["input_tokens"] or tokens["output_tokens"]:
-                    total_segment += (
-                        f"{_format_compact_tokens(tokens['input_tokens'])} in/"
-                        f"{_format_compact_tokens(tokens['output_tokens'])} out "
-                    )
+        tokens = _total_token_usage(breakdown)
+        total_spend = format_token_spend(tokens)
+        if total_spend != "-":
+            total_segment += f"{total_spend} "
         total_segment += _format_elapsed_seconds(total_elapsed)
         parts.append(total_segment)
         return (
@@ -1132,9 +1125,11 @@ class NarrativeFormatter:
             self._write_phase_complete()
         self._write_terminal_event(self._summary_line(total_elapsed, breakdown, message.total_cost_usd))
         status = "ERROR" if message.is_error else message.subtype.upper()
-        cost = f" ${message.total_cost_usd:.2f}" if message.total_cost_usd else ""
+        usage = _total_token_usage(breakdown) if breakdown else normalize_token_usage(message.usage or {})
+        spend = format_token_spend(usage)
+        spend_text = f" {spend}" if spend != "-" else ""
         duration = f" in {self._elapsed_fmt()}"
-        self._write_terminal_event(f"{ts} \u2501\u2501\u2501 {status}{cost}{duration}")
+        self._write_terminal_event(f"{ts} \u2501\u2501\u2501 {status}{spend_text}{duration}")
         return {"recovered_tool_errors": self._recovered_tool_errors}
 
     def close(self) -> None:

@@ -13,6 +13,21 @@ for real users by testing it thoroughly.
 ## Your Process
 
 1. **Read the project** — understand what it is, what framework, what files exist.
+   First classify the requested work:
+   - If the intent is to add, fix, or improve tests, smoke tests, regression
+     coverage, CI, docs, proof/evidence, or other non-product scaffolding, the
+     thing to certify is that work item. Do NOT re-certify the referenced
+     product feature as if Otto just built it.
+   - If the operator explicitly asks to certify an existing feature, product
+     flow, or user-visible behavior, that is product certification. Do NOT
+     downgrade it to test-only work merely because test files or smoke tests
+     exist in the repo.
+   - For test-only work, verify the changed test/coverage is present, targeted
+     at the requested behavior, and passes through the relevant test command.
+     A single cheap product sanity check is optional when it helps validate the
+     test, but do not expand into a full feature matrix.
+   - Story IDs for test-only work should describe the coverage change, such as
+     `pdf-export-smoke-test-added`, not every underlying product behavior.
    Product-type interaction matrix:
    - Web app: use `agent-browser` as described below; verify real browser interactions, screenshots, and key page states.
    - REST API: use `curl` or `httpx`; verify status codes, response bodies, and auth behavior.
@@ -72,17 +87,50 @@ for real users by testing it thoroughly.
 
 7. **Collect results** — read each subagent's response.
 
-8. **Visual verification**:
-   For web apps with HTML pages, do a visual walkthrough yourself using agent-browser:
-     agent-browser record start {evidence_dir}/recording.webm http://localhost:PORT
-     agent-browser screenshot {evidence_dir}/homepage.png
-     agent-browser open http://localhost:PORT/other-page
-     agent-browser screenshot {evidence_dir}/other-page.png
-     (visit each key page, take a screenshot of each)
-     agent-browser record stop
-     agent-browser close
-   This captures video of the entire walkthrough plus per-page screenshots.
-   Do NOT skip this step for web apps — the screenshots and video are evidence.
+8. **Visual proof for user-facing products**:
+   For web apps with HTML pages, capture concise visual evidence that the
+   intent works. This is certification evidence, not a polished product demo.
+   It is not a generic homepage tour. The recording/screenshots must cover the
+   same core stories you are certifying.
+
+   Preferred pattern:
+     agent-browser --session visual open http://localhost:PORT
+     agent-browser --session visual snapshot -i
+     (explore enough to find stable element refs)
+     agent-browser --session visual record start {evidence_dir}/recording.webm
+     (perform the actual user actions for the highest-value stories using click/fill/type/press refs)
+     agent-browser --session visual screenshot {evidence_dir}/<story_id>.png
+     (repeat only for distinct states that prove a story)
+     agent-browser --session visual record stop
+     agent-browser --session visual close
+
+   If one story needs a separate clip, save it as
+   `{evidence_dir}/<story_id>.webm`. Name screenshots and clips after the
+   `story_id` whenever possible so the proof report can attach evidence to
+   each story. A file named only `recording.webm` is treated as contextual
+   walkthrough evidence; it is not story-mapped video proof unless the report
+   also includes story-specific screenshots or clips.
+
+   Keep visual proof efficient: start recording after setup/auth when possible,
+   stop as soon as the evidence is decisive, avoid long idle footage, and keep
+   the total video budget under about 90 seconds unless the task explicitly
+   requires longer interaction. If the task changes or asks you to certify a
+   web UI flow that creates a file (PDF/CSV/export/download), record the
+   browser interaction that triggers the download. The video should visibly
+   include the user action that requests the export and the resulting browser
+   state that a user would see. Also attach file validation evidence:
+   suggested filename/path, byte size, MIME/content type when available, and
+   parsed or rendered content assertions. Such a web export/download story may
+   not be marked PASS from pytest/source review alone in standard mode; if you
+   cannot exercise it through a browser event path, mark it FAIL or WARN as
+   appropriate and state why. CLI, API, library, pure
+   file, and worker stories do not need video when command/request/file
+   evidence proves the claim.
+   If a story is certified through HTTP/CLI/source review only, say so in
+   `COVERAGE_GAPS` rather than implying the video proved it.
+   A generic walkthrough is useful context but does not prove every story by
+   itself.
+
    Visual evidence must show states reached by real UI interactions or already
    verified story sessions. Do NOT use JavaScript mutation to create visual
    states for screenshots or recordings.
@@ -106,8 +154,15 @@ for real users by testing it thoroughly.
 - Make REAL requests (curl for HTTP, run commands for CLI, write test scripts for libraries)
 - Test the ACTUAL product, never simulate or assume
 - Products can be hybrid (API + CLI + UI) — test ALL surfaces you find
+- App/server process lifecycle: if you start a dev server, app server, queue
+  worker, or any command that keeps a port open, you own cleanup. Record the
+  command, port, and PID/shell id; redirect noisy access logs to a temp file
+  outside the repo when practical; stop the process before your final verdict
+  using the matching shell control, `KillShell`, Ctrl-C, or the specific PID you
+  started; and verify the port is closed. Never kill pre-existing user
+  processes or broad process names.
 - When running build tools, package managers, or other long-running commands, wait for completion rather than backgrounding or killing them
-- Never use `kill`, `pkill`, `killall`, or signal commands on build processes unless the command has been unresponsive for more than 10 minutes
+- Never use `kill`, `pkill`, `killall`, or signal commands on build processes unless the command has been unresponsive for more than 10 minutes. The app/server cleanup rule above is the narrow exception for processes you started yourself.
 - If a command appears slow, check its output or artifacts before assuming it is hung
 - Run build/test commands at most once — do not retry or start a duplicate unless the first has definitively failed
 - For each failure: report WHAT is wrong and WHERE (symptom + evidence). Do NOT suggest fixes.

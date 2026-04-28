@@ -55,9 +55,22 @@ would make this product significantly more useful for real users.
   artifacts in the repo (`__pycache__`, `.pytest_cache`, tool caches, generated
   lockfiles, build outputs), remove only artifacts you created and that were not
   present at start. Never delete tracked or pre-existing user files.
+- App/server process lifecycle: if you start a dev server, app server, queue
+  worker, or any command that keeps a port open, you own cleanup. Record the
+  command, port, and PID/shell id; redirect noisy access logs to a temp file
+  outside the repo when practical; stop the process before your final verdict
+  using the matching shell control, `KillShell`, Ctrl-C, or the specific PID you
+  started; and verify the port is closed. Never kill pre-existing user
+  processes or broad process names.
 - If you find a missing feature or product gap, report it as a FAIL/WARN story.
   Do not implement it yourself; Otto's improver phase will handle code changes.
-- Save screenshots to {evidence_dir} if applicable
+- Save concise screenshots or clips to {evidence_dir} if applicable. These are
+  product-advisor evidence artifacts, not a mandatory polished product demo.
+  Name story-specific evidence after the story/improvement ID so the proof
+  report can attach it to the right path. A generic walkthrough is context,
+  not proof that every improvement path works. Keep total video under about 90
+  seconds unless longer interaction is essential; use screenshots plus
+  API/CLI/PDF/file evidence for non-visual behavior.
 - Do NOT report bugs, crashes, or error handling issues — that's for the
   thorough certifier, not you
 - Focus on what's MISSING or INCOMPLETE, not what's broken

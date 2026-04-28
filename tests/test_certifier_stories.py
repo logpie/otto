@@ -7,8 +7,11 @@ Validates:
 
 from __future__ import annotations
 
+import signal
+import subprocess
 from pathlib import Path
 
+import otto.certifier as certifier_module
 import pytest
 
 from otto.certifier import (
@@ -133,6 +136,79 @@ def test_all_certifier_modes_are_read_only(tmp_path: Path, mode: str):
     assert "Never delete tracked or pre-existing user files" in out
 
 
+@pytest.mark.parametrize("mode", ["standard", "fast", "thorough", "hillclimb", "target"])
+def test_all_certifier_modes_require_server_cleanup(tmp_path: Path, mode: str):
+    out = _render_certifier_prompt(
+        mode=mode,
+        intent="test web product",
+        evidence_dir=tmp_path,
+        target="latency < 100ms" if mode == "target" else None,
+        focus="review product usability" if mode == "hillclimb" else None,
+    )
+    assert "App/server process lifecycle" in out
+    assert "you own cleanup" in out
+    assert "verify the port is closed" in out
+    assert "Never kill pre-existing user" in out and "processes" in out
+
+
+def test_certifier_cleanup_terminates_new_project_dev_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    project_server_pid = 200
+    other_server_pid = 300
+    alive = {project_server_pid}
+    kill_calls: list[tuple[int, int]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[:4] == ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=f"p100\np{project_server_pid}\np{other_server_pid}\n",
+                stderr="",
+            )
+        if args[:3] == ["ps", "-o", "command="]:
+            pid = int(args[-1])
+            command = {
+                project_server_pid: f"{project_dir}/.venv/bin/python .venv/bin/flask --app app run --port 5199",
+                other_server_pid: "/tmp/other/.venv/bin/python -m http.server 8000",
+            }[pid]
+            return subprocess.CompletedProcess(args, 0, stdout=f"{command}\n", stderr="")
+        if args[:2] == ["lsof", "-a"] and "-d" in args and "cwd" in args:
+            pid = int(args[args.index("-p") + 1])
+            cwd = {
+                project_server_pid: project_dir,
+                other_server_pid: Path("/tmp/other"),
+            }[pid]
+            return subprocess.CompletedProcess(args, 0, stdout=f"p{pid}\nn{cwd}\n", stderr="")
+        raise AssertionError(f"unexpected command: {args}")
+
+    def fake_kill(pid: int, sig: int) -> None:
+        if sig == 0:
+            if pid not in alive:
+                raise ProcessLookupError
+            return
+        kill_calls.append((pid, sig))
+        if pid == project_server_pid and sig == signal.SIGTERM:
+            alive.discard(pid)
+            return
+        raise AssertionError(f"unexpected kill: pid={pid} sig={sig}")
+
+    monkeypatch.setattr(certifier_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(certifier_module.os, "kill", fake_kill)
+
+    cleaned = certifier_module._cleanup_certifier_background_servers(project_dir, {100})
+
+    assert cleaned == [
+        {
+            "pid": project_server_pid,
+            "command": f"{project_dir}/.venv/bin/python .venv/bin/flask --app app run --port 5199",
+            "cwd": str(project_dir),
+        }
+    ]
+    assert kill_calls == [(project_server_pid, signal.SIGTERM)]
+
+
 @pytest.mark.parametrize("mode", ["standard", "thorough"])
 def test_bug_certifier_modes_require_reproducible_failures(tmp_path: Path, mode: str):
     """Bug certifiers should not turn hypothetical or coverage-only gaps into fake bugs."""
@@ -145,6 +221,50 @@ def test_bug_certifier_modes_require_reproducible_failures(tmp_path: Path, mode:
     assert "WARN" in out
     assert "missing regression tests" in out or "weak coverage" in out
     assert "already" in out and "PASS" in out
+
+
+@pytest.mark.parametrize("mode", ["fast", "standard", "thorough"])
+def test_certifier_scopes_test_only_intents_to_test_coverage(tmp_path: Path, mode: str):
+    """Adding tests should not cause the certifier to re-certify the feature matrix."""
+    out = _render_certifier_prompt(
+        mode=mode,
+        intent="Add a PDF export smoke test.",
+        evidence_dir=tmp_path,
+    )
+    assert "test-only work" in out
+    assert "Do NOT re-certify the referenced" in out
+    assert "relevant test command" in out
+    assert (
+        "full feature matrix" in out
+        or "full product bug hunt" in out
+        or "full product matrix" in out
+    )
+
+
+@pytest.mark.parametrize("mode", ["standard", "thorough"])
+def test_product_certification_prompt_does_not_downgrade_existing_feature_to_test_only(tmp_path: Path, mode: str):
+    out = _render_certifier_prompt(
+        mode=mode,
+        intent="Certify the existing PDF export feature as a user-visible product flow.",
+        evidence_dir=tmp_path,
+    )
+    assert "If the operator explicitly asks to certify an existing feature" in out
+    assert "Do NOT" in out and "downgrade it to test-only work" in out
+
+
+@pytest.mark.parametrize("mode", ["standard", "thorough"])
+def test_certifier_prompt_uses_documented_agent_browser_recording_workflow(tmp_path: Path, mode: str):
+    out = _render_certifier_prompt(
+        mode=mode,
+        intent="Certify a web app download flow.",
+        evidence_dir=tmp_path,
+    )
+    assert "agent-browser --session visual open http://localhost:PORT" in out
+    assert "agent-browser --session visual record start" in out
+    assert "recording.webm http://localhost:PORT" not in out
+    assert "recording.webm" in out
+    assert "contextual" in out and "walkthrough evidence" in out
+    assert "story-mapped video" in out and "proof" in out
 
 
 def test_hillclimb_defaults_to_agent_browser_for_web_products(tmp_path: Path):
@@ -415,6 +535,152 @@ def test_pow_rendering_distinguishes_all_story_verdicts(tmp_path: Path):
     assert "✗ FAIL" in html
     assert "– SKIPPED" in html
     assert "⚠ FLAG_FOR_HUMAN" in html
+
+
+def test_pow_demo_evidence_marks_story_specific_web_video_strong(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "save-filter.webm").write_bytes(b"video")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "save-filter",
+                "summary": "saved filter appears after clicking Save view",
+                "claim": "User can save a dashboard filter from the browser UI.",
+                "observed_steps": ["opened dashboard", "clicked Save view"],
+                "observed_result": "saved filter appeared",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": "Browser UI showed the saved view.",
+                "verdict": "PASS",
+                "passed": True,
+            }
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        evidence_dir=evidence_dir,
+    )
+
+    demo = report["demo_evidence"]
+    assert demo["app_kind"] == "web"
+    assert demo["demo_required"] is True
+    assert demo["demo_status"] == "strong"
+    assert demo["primary_demo"]["name"] == "save-filter.webm"
+    assert demo["stories"][0]["proof_level"] == "story video"
+    html = (tmp_path / "proof-of-work.html").read_text()
+    assert "Demo Proof" in html
+    assert "save-filter.webm" in html
+
+
+def test_pow_demo_evidence_marks_generic_recording_plus_screenshot_partial(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "recording.webm").write_bytes(b"video")
+    (evidence_dir / "pdf-export-ui-link.png").write_bytes(b"image")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "pdf-export-ui-link",
+                "summary": "PDF export button downloads from the dashboard",
+                "claim": "User can click the dashboard export control and download a PDF.",
+                "observed_steps": ["opened dashboard", "clicked Export PDF"],
+                "observed_result": "browser requested a PDF and saved a file",
+                "surface": "DOM / screenshot",
+                "methodology": "live-ui-events",
+                "evidence": "Browser UI showed the export control and file validation confirmed application/pdf.",
+                "verdict": "PASS",
+                "passed": True,
+            }
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        evidence_dir=evidence_dir,
+        intent="Certify the existing PDF export feature as a user-visible product flow.",
+    )
+
+    demo = report["demo_evidence"]
+    assert demo["demo_required"] is True
+    assert demo["demo_status"] == "partial"
+    assert "generic walkthrough" in demo["demo_reason"]
+    assert demo["counts"]["generic_recordings"] == 1
+    assert demo["counts"]["story_screenshots"] == 1
+    assert demo["counts"]["story_videos"] == 0
+    assert report["outcome"] == "passed"
+    assert report["verdict_label"] == "PASS with warnings"
+    assert report["evidence_gate"]["status"] == "warn"
+
+
+def test_pow_demo_evidence_marks_fast_mode_video_not_required(tmp_path: Path):
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "pdf-smoke-test-added",
+                "summary": "PDF smoke test was added and passes",
+                "claim": "A smoke test covers PDF export.",
+                "observed_result": "pytest passed",
+                "surface": "source-level",
+                "methodology": "source-review",
+                "evidence": "pytest tests/test_pdf.py passed",
+                "verdict": "PASS",
+                "passed": True,
+            }
+        ],
+        "passed",
+        8.0,
+        0.0,
+        1,
+        1,
+        certifier_mode="fast",
+    )
+
+    demo = report["demo_evidence"]
+    assert demo["demo_required"] is False
+    assert demo["demo_status"] == "not_applicable"
+    assert "Fast certification" in demo["demo_reason"]
+
+
+def test_pow_required_demo_missing_blocks_passing_report(tmp_path: Path):
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "pdf-export-download",
+                "summary": "PDF export can be downloaded from the dashboard",
+                "claim": "User can click the dashboard export control and download a PDF.",
+                "observed_steps": ["reviewed pytest coverage only"],
+                "observed_result": "pytest passed",
+                "surface": "source-level",
+                "methodology": "source-review",
+                "evidence": "tests/test_pdf_export.py passed",
+                "verdict": "PASS",
+                "passed": True,
+            }
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        intent="Certify the existing PDF export feature as a user-visible product flow.",
+    )
+
+    assert report["agent_outcome"] == "passed"
+    assert report["outcome"] == "failed"
+    assert report["verdict_label"] == "FAIL"
+    assert report["demo_evidence"]["demo_required"] is True
+    assert report["demo_evidence"]["demo_status"] == "missing"
+    assert report["evidence_gate"]["blocks_pass"] is True
+    assert "Required demo proof gate failed" in report["diagnosis"]
+    assert "FAIL" in (tmp_path / "proof-of-work.md").read_text()
 
 
 # ---------- prompt placeholder support ----------

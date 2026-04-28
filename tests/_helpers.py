@@ -79,6 +79,8 @@ def write_test_pow_report(
     coverage_observed: list[str] | None = None,
     coverage_gaps: list[str] | None = None,
     coverage_emitted: bool | None = None,
+    certifier_mode: str = "standard",
+    intent: str = "",
 ) -> dict[str, Any]:
     """Build and write a proof-of-work report with the current report pipeline."""
     from otto.certifier import _build_pow_report_data, _write_pow_report
@@ -91,7 +93,7 @@ def write_test_pow_report(
         run_id="ad-hoc-report",
         session_id="",
         pipeline_mode="agentic_v3",
-        certifier_mode="standard",
+        certifier_mode=certifier_mode,
         outcome=outcome,
         story_results=story_results,
         diagnosis=diagnosis,
@@ -112,7 +114,7 @@ def write_test_pow_report(
         duration_s=duration,
         certifier_cost_usd=float(certifier_cost if certifier_cost is not None else cost),
         total_cost_usd=float(cost),
-        intent="",
+        intent=intent,
         options=options,
         evidence_dir=evidence_dir,
         stories_tested=total,

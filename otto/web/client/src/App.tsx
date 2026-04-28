@@ -76,6 +76,7 @@ import {
   canMerge,
   canResolveRelease,
   canShowDiff,
+  canTryProduct,
   dedupeLiveAgainstHistory,
   detailWasRemoved,
   errorMessage,
@@ -267,8 +268,6 @@ export function App() {
     inspectorMode,
     selectedArtifactIndex,
     artifactContent,
-    proofArtifactIndex,
-    proofContent,
     diffContent,
     setInspectorOpen,
     setInspectorMode,
@@ -277,7 +276,6 @@ export function App() {
     resetRunResources,
     refreshDetail,
     loadArtifact,
-    loadProofArtifact,
     loadDiff,
     showLogs,
     showArtifacts,
@@ -665,7 +663,7 @@ export function App() {
       }
       // mc-audit redesign Phase D: navigation shortcuts.
       // j/k: move selection down/up through visible task rows.
-      // o: open inspector for selected row (default = Result tab).
+      // o: open inspector for selected row (default = Review tab).
       // Esc: close drawer / inspector if open.
       // ?: show shortcut overlay (handled separately below).
       if ((event.key === "j" || event.key === "k") && noMods && !anyModalOpen && !inputBlocked) {
@@ -713,7 +711,9 @@ export function App() {
       // Loading for logs/diff is handled by separate effects keyed on
       // inspectorMode/inspectorOpen — we just flip the mode here.
       if (inspectorOpen && noMods && !inputBlocked && /^[1-5]$/.test(event.key)) {
-        const tabModes: InspectorMode[] = ["try", "proof", "diff", "logs", "artifacts"];
+        const tabModes: InspectorMode[] = canTryProduct(detail)
+          ? ["try", "proof", "diff", "logs", "artifacts"]
+          : ["proof", "diff", "logs", "artifacts"];
         const mode = tabModes[Number(event.key) - 1];
         if (mode) {
           event.preventDefault();
@@ -1418,33 +1418,35 @@ export function App() {
                   <RecentActivity events={data?.events} history={data?.history.items || []} selectedRunId={selectedRunId} onSelect={selectRun} />
                 </div>
               </details>
-              <RunDetailPanel
-                detail={detail}
-                logState={logState}
-                landing={landing}
-                inspectorOpen={inspectorOpen}
-                queuedTask={selectedQueuedTask}
-                loadingRunId={selectedRunId && !detail ? selectedRunId : null}
-                watcherRunning={data?.watcher.health.state === "running"}
-                onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
-                onShowTryProduct={showTryProduct}
-                onShowProof={showProof}
-                onShowLogs={showLogs}
-                onShowDiff={showDiff}
-                onShowArtifacts={showArtifacts}
-                onLoadArtifact={(index) => void loadArtifact(index)}
-                onStartWatcher={() => void runWatcherAction("start")}
-                onClose={() => {
-                  setSelectedRunId(null);
-                  setSelectedQueuedTask(null);
-                  selectedRunIdRef.current = null;
-                  // Drop ?run= from the URL so a reload doesn't re-open
-                  // the drawer. mc-audit redesign Phase C.
-                  const route = readRouteState();
-                  route.selectedRunId = null;
-                  writeRouteState(route, "replace");
-                }}
-              />
+              {!inspectorOpen && (
+                <RunDetailPanel
+                  detail={detail}
+                  logState={logState}
+                  landing={landing}
+                  inspectorOpen={inspectorOpen}
+                  queuedTask={selectedQueuedTask}
+                  loadingRunId={selectedRunId && !detail ? selectedRunId : null}
+                  watcherRunning={data?.watcher.health.state === "running"}
+                  onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
+                  onShowTryProduct={showTryProduct}
+                  onShowProof={showProof}
+                  onShowLogs={showLogs}
+                  onShowDiff={showDiff}
+                  onShowArtifacts={showArtifacts}
+                  onLoadArtifact={(index) => void loadArtifact(index)}
+                  onStartWatcher={() => void runWatcherAction("start")}
+                  onClose={() => {
+                    setSelectedRunId(null);
+                    setSelectedQueuedTask(null);
+                    selectedRunIdRef.current = null;
+                    // Drop ?run= from the URL so a reload doesn't re-open
+                    // the drawer. mc-audit redesign Phase C.
+                    const route = readRouteState();
+                    route.selectedRunId = null;
+                    writeRouteState(route, "replace");
+                  }}
+                />
+              )}
             </div>
           </section>
         ) : (
@@ -1479,33 +1481,35 @@ export function App() {
                   onCycleSort={cycleHistorySort}
                 />
               </div>
-              <RunDetailPanel
-                detail={detail}
-                logState={logState}
-                landing={landing}
-                inspectorOpen={inspectorOpen}
-                queuedTask={selectedQueuedTask}
-                loadingRunId={selectedRunId && !detail ? selectedRunId : null}
-                watcherRunning={data?.watcher.health.state === "running"}
-                onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
-                onShowTryProduct={showTryProduct}
-                onShowProof={showProof}
-                onShowLogs={showLogs}
-                onShowDiff={showDiff}
-                onShowArtifacts={showArtifacts}
-                onLoadArtifact={(index) => void loadArtifact(index)}
-                onStartWatcher={() => void runWatcherAction("start")}
-                onClose={() => {
-                  setSelectedRunId(null);
-                  setSelectedQueuedTask(null);
-                  selectedRunIdRef.current = null;
-                  // Drop ?run= from the URL so a reload doesn't re-open
-                  // the drawer. mc-audit redesign Phase C.
-                  const route = readRouteState();
-                  route.selectedRunId = null;
-                  writeRouteState(route, "replace");
-                }}
-              />
+              {!inspectorOpen && (
+                <RunDetailPanel
+                  detail={detail}
+                  logState={logState}
+                  landing={landing}
+                  inspectorOpen={inspectorOpen}
+                  queuedTask={selectedQueuedTask}
+                  loadingRunId={selectedRunId && !detail ? selectedRunId : null}
+                  watcherRunning={data?.watcher.health.state === "running"}
+                  onRunAction={(action, label) => detail && void runActionForRun(detail.run_id, action, actionConfirmationBody(action, label), label)}
+                  onShowTryProduct={showTryProduct}
+                  onShowProof={showProof}
+                  onShowLogs={showLogs}
+                  onShowDiff={showDiff}
+                  onShowArtifacts={showArtifacts}
+                  onLoadArtifact={(index) => void loadArtifact(index)}
+                  onStartWatcher={() => void runWatcherAction("start")}
+                  onClose={() => {
+                    setSelectedRunId(null);
+                    setSelectedQueuedTask(null);
+                    selectedRunIdRef.current = null;
+                    // Drop ?run= from the URL so a reload doesn't re-open
+                    // the drawer. mc-audit redesign Phase C.
+                    const route = readRouteState();
+                    route.selectedRunId = null;
+                    writeRouteState(route, "replace");
+                  }}
+                />
+              )}
             </div>
           </section>
         )}
@@ -1521,15 +1525,12 @@ export function App() {
           logState={logState}
           selectedArtifactIndex={selectedArtifactIndex}
           artifactContent={artifactContent}
-          proofArtifactIndex={proofArtifactIndex}
-          proofContent={proofContent}
           diffContent={diffContent}
           onShowLogs={showLogs}
           onShowTryProduct={showTryProduct}
           onShowProof={showProof}
           onShowDiff={showDiff}
           onShowArtifacts={showArtifacts}
-          onLoadProofArtifact={(index) => void loadProofArtifact(index)}
           onLoadArtifact={(index) => void loadArtifact(index)}
           onRefreshDiff={() => void loadDiff()}
           onBackToArtifacts={() => {

@@ -28,7 +28,7 @@ Fix (defense in depth):
 
     1.  ``RunDetailPanel`` no longer renders ``.detail-inspector-actions``
         when the inspector is open. The inspector ships its own tablist
-        (Result / Code changes / Logs / Artifacts) so the shortcuts are
+        (Review / Code changes / Logs / Artifacts) so the shortcuts are
         redundant once the inspector is on screen.
 
     2.  ``[inert]`` containers (`.main-shell-content`, `.sidebar`,
@@ -456,7 +456,7 @@ def test_inspector_tabs_clickable_after_reload(
     tablist.get_by_role("tab", name="Code changes").click(timeout=CLICK_TIMEOUT_MS)
     page.get_by_test_id("diff-pane").wait_for(state="visible", timeout=2_000)
 
-    tablist.get_by_role("tab", name="Result").click(timeout=CLICK_TIMEOUT_MS)
+    tablist.get_by_role("tab", name="Review").click(timeout=CLICK_TIMEOUT_MS)
     page.get_by_test_id("proof-pane").wait_for(state="visible", timeout=2_000)
 
     tablist.get_by_role("tab", name="Logs").click(timeout=CLICK_TIMEOUT_MS)

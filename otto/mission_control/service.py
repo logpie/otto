@@ -1531,34 +1531,72 @@ def _merge_review_checks(
     checks: list[dict[str, Any]] = []
     terminal_success = readiness["state"] == "merged"
     in_progress = display_status in REVIEW_IN_PROGRESS_STATUSES
+    incomplete_terminal = display_status in {"interrupted", "cancelled", "stale"}
     if terminal_success:
         checks.append(_review_check("run", "Landing run", "pass", f"Landing completed into {target}."))
     elif in_progress:
         checks.append(_review_check("run", "Landing run", "pending", "Landing is still in flight."))
+    elif incomplete_terminal:
+        detail = "; ".join(str(item) for item in readiness.get("blockers", []) if item) or f"Landing status is {display_status}."
+        checks.append(_review_check("run", "Landing run", "warn", detail))
     else:
         checks.append(_review_check("run", "Landing run", "fail", f"Landing status is {display_status or 'unknown'}."))
 
     stories_tested = _int_or_none(certification.get("stories_tested"))
     stories_passed = _int_or_none(certification.get("stories_passed"))
+    evidence_gate = certification.get("evidence_gate") if isinstance(certification.get("evidence_gate"), dict) else {}
+    evidence_gate_reason = _optional_str(evidence_gate.get("reason")) if isinstance(evidence_gate, dict) else None
+    certification_passed = bool(certification.get("passed"))
     if stories_tested and stories_passed is not None and stories_passed >= stories_tested:
-        checks.append(_review_check("certification", "Post-landing certification", "pass", f"{stories_passed}/{stories_tested} stories passed."))
+        if certification_passed:
+            checks.append(_review_check("certification", "Post-landing certification", "pass", f"{stories_passed}/{stories_tested} stories passed."))
+        else:
+            detail = f"{stories_passed}/{stories_tested} stories passed, but certification proof is incomplete."
+            if evidence_gate_reason:
+                detail = f"{detail} {evidence_gate_reason}"
+            checks.append(_review_check("certification", "Post-landing certification", "fail", detail))
     elif stories_tested and stories_passed is not None:
         checks.append(_review_check("certification", "Post-landing certification", "fail", f"{stories_passed}/{stories_tested} stories passed."))
     elif in_progress:
         checks.append(_review_check("certification", "Post-landing certification", "pending", "Certification results appear after the landing run finishes."))
+    elif incomplete_terminal:
+        checks.append(_review_check("certification", "Post-landing certification", "pending", "Certification did not finish because the landing run stopped."))
     else:
         checks.append(_review_check("certification", "Post-landing certification", "info", "No post-landing story count was recorded."))
 
     existing_evidence = [item for item in evidence if _is_review_evidence_artifact(item) and item.get("exists")]
-    if existing_evidence:
-        checks.append(_review_check("evidence", "Evidence", "pass", f"{len(existing_evidence)} artifact{'' if len(existing_evidence) == 1 else 's'} available."))
+    if in_progress:
+        if existing_evidence:
+            checks.append(_review_check(
+                "evidence",
+                "Artifacts",
+                "pending",
+                f"{len(existing_evidence)} file{'' if len(existing_evidence) == 1 else 's'} collected so far; final artifacts are pending.",
+            ))
+        else:
+            checks.append(_review_check("evidence", "Artifacts", "pending", "Artifacts are available after the landing run writes them."))
+    elif incomplete_terminal:
+        if existing_evidence:
+            checks.append(_review_check(
+                "evidence",
+                "Artifacts",
+                "pending",
+                f"{len(existing_evidence)} partial artifact{'' if len(existing_evidence) == 1 else 's'} available; final artifacts were not completed.",
+            ))
+        else:
+            checks.append(_review_check("evidence", "Artifacts", "pending", "No final artifacts are available because the landing run did not finish."))
+    elif existing_evidence:
+        checks.append(_review_check("evidence", "Artifacts", "pass", f"{len(existing_evidence)} file{'' if len(existing_evidence) == 1 else 's'} attached."))
     else:
-        checks.append(_review_check("evidence", "Evidence", "warn", "No readable landing artifacts are attached."))
+        checks.append(_review_check("evidence", "Artifacts", "warn", "No readable landing artifacts are attached."))
 
     if terminal_success:
         checks.append(_review_check("landing", "Landing state", "pass", "No further landing action is needed."))
     elif in_progress:
         detail = "; ".join(str(item) for item in readiness.get("blockers", []) if item) or "Landing is still in progress."
+        checks.append(_review_check("landing", "Landing state", "pending", detail))
+    elif incomplete_terminal:
+        detail = "; ".join(str(item) for item in readiness.get("blockers", []) if item) or "Inspect merge logs and recover the landing run."
         checks.append(_review_check("landing", "Landing state", "pending", detail))
     else:
         detail = "; ".join(str(item) for item in readiness.get("blockers", []) if item) or "Landing is not complete."
@@ -1677,6 +1715,10 @@ def _review_checks(
     missing_evidence = [item for item in review_evidence if not item.get("exists")]
     stories_tested = _int_or_none(certification.get("stories_tested"))
     stories_passed = _int_or_none(certification.get("stories_passed"))
+    evidence_gate = certification.get("evidence_gate") if isinstance(certification.get("evidence_gate"), dict) else {}
+    evidence_gate_reason = _optional_str(evidence_gate.get("reason")) if isinstance(evidence_gate, dict) else None
+    certification_passed = bool(certification.get("passed"))
+    incomplete_terminal = display_status in {"interrupted", "cancelled", "stale"}
 
     checks: list[dict[str, Any]] = []
     if spec_review_pending:
@@ -1693,6 +1735,9 @@ def _review_checks(
             else "Task is still in flight."
         )
         checks.append(_review_check("run", run_label, "pending", run_detail))
+    elif incomplete_terminal:
+        reason = (_optional_str(failure.get("reason")) if failure is not None else None) or f"Run status is {display_status}."
+        checks.append(_review_check("run", "Run interrupted", "warn", reason))
     else:
         reason = (_optional_str(failure.get("reason")) if failure is not None else None) or f"Run status is {display_status or 'unknown'}."
         checks.append(_review_check("run", "Run finished", "fail", reason))
@@ -1701,8 +1746,16 @@ def _review_checks(
         checks.append(_review_check("certification", "Certification", "pending", "Certification starts after spec approval and build execution."))
     elif display_status in REVIEW_IN_PROGRESS_STATUSES:
         checks.append(_review_check("certification", "Certification", "pending", "Certification is pending until the task finishes."))
+    elif incomplete_terminal:
+        checks.append(_review_check("certification", "Certification", "pending", "Certification did not finish because the run was interrupted."))
     elif stories_tested and stories_passed is not None and stories_passed >= stories_tested:
-        checks.append(_review_check("certification", "Certification", "pass", f"{stories_passed}/{stories_tested} stories passed."))
+        if certification_passed:
+            checks.append(_review_check("certification", "Certification", "pass", f"{stories_passed}/{stories_tested} stories passed."))
+        else:
+            detail = f"{stories_passed}/{stories_tested} stories passed, but certification proof is incomplete."
+            if evidence_gate_reason:
+                detail = f"{detail} {evidence_gate_reason}"
+            checks.append(_review_check("certification", "Certification", "fail", detail))
     elif stories_tested and stories_passed is not None:
         checks.append(_review_check("certification", "Certification", "fail", f"{stories_passed}/{stories_tested} stories passed."))
     else:
@@ -1712,6 +1765,8 @@ def _review_checks(
         checks.append(_review_check("changes", "Changed files", "pending", "No product changes should be present before spec approval."))
     elif display_status in REVIEW_IN_PROGRESS_STATUSES:
         checks.append(_review_check("changes", "Changed files", "pending", "Changed files are available after the task creates its branch."))
+    elif incomplete_terminal:
+        checks.append(_review_check("changes", "Changed files", "pending", "Final changed-file review is unavailable because the run did not finish."))
     elif diff_error:
         checks.append(_review_check("changes", "Changed files", "fail", diff_error))
     elif changed_files:
@@ -1730,15 +1785,33 @@ def _review_checks(
         checks.append(_review_check("evidence", "Spec artifact", "pass", f"{len(existing_evidence)} artifact{'' if len(existing_evidence) == 1 else 's'} available."))
     elif spec_review_pending:
         checks.append(_review_check("evidence", "Spec artifact", "warn", "Spec review is pending but no readable spec artifact is attached."))
-    elif display_status in REVIEW_IN_PROGRESS_STATUSES and not existing_evidence:
-        checks.append(_review_check("evidence", "Evidence", "pending", "Evidence is available after the task writes artifacts."))
+    elif display_status in REVIEW_IN_PROGRESS_STATUSES:
+        if existing_evidence:
+            checks.append(_review_check(
+                "evidence",
+                "Artifacts",
+                "pending",
+                f"{len(existing_evidence)} file{'' if len(existing_evidence) == 1 else 's'} collected so far; final artifacts are pending.",
+            ))
+        else:
+            checks.append(_review_check("evidence", "Artifacts", "pending", "Artifacts are available after the task writes them."))
+    elif incomplete_terminal:
+        if existing_evidence:
+            checks.append(_review_check(
+                "evidence",
+                "Artifacts",
+                "pending",
+                f"{len(existing_evidence)} partial artifact{'' if len(existing_evidence) == 1 else 's'} available; final artifacts were not completed.",
+            ))
+        else:
+            checks.append(_review_check("evidence", "Artifacts", "pending", "No final artifacts are available because the run did not finish."))
     elif existing_evidence and not missing_evidence:
-        checks.append(_review_check("evidence", "Evidence", "pass", f"{len(existing_evidence)} artifact{'' if len(existing_evidence) == 1 else 's'} available."))
+        checks.append(_review_check("evidence", "Artifacts", "pass", f"{len(existing_evidence)} file{'' if len(existing_evidence) == 1 else 's'} attached."))
     elif existing_evidence:
         checks.append(
             _review_check(
                 "evidence",
-                "Evidence",
+                "Artifacts",
                 "warn",
                 f"{len(existing_evidence)} available, {len(missing_evidence)} missing.",
             )
@@ -1747,7 +1820,7 @@ def _review_checks(
         checks.append(
             _review_check(
                 "evidence",
-                "Evidence",
+                "Artifacts",
                 "warn",
                 "No readable artifacts are attached; use stories and changed files as proof before landing.",
             )
@@ -1759,6 +1832,8 @@ def _review_checks(
         checks.append(_review_check("landing", "Landing action", "pass", "Task is already landed."))
     elif readiness["state"] == "in_progress":
         checks.append(_review_check("landing", "Landing action", "pending", "Landing is disabled until the task completes."))
+    elif incomplete_terminal:
+        checks.append(_review_check("landing", "Landing action", "pending", "Resume or requeue the run before landing."))
     else:
         detail = (_optional_str(failure.get("reason")) if failure is not None else None) or "; ".join(str(item) for item in readiness.get("blockers", []) if item) or "Landing is disabled."
         checks.append(_review_check("landing", "Landing action", "fail", detail))
@@ -2033,6 +2108,14 @@ def _normalize_product_handoff(
     if not urls:
         urls = _urls_from_text(json.dumps(data, default=str))
     task_context = _task_handoff_context(record, certification=certification, changed_files=changed_files, kind=kind)
+    preview = _product_preview_metadata(
+        record,
+        kind=kind,
+        source=source,
+        launch=launch,
+        urls=urls,
+        changed_files=changed_files,
+    )
     return {
         "kind": kind,
         "label": _product_kind_label(kind),
@@ -2040,6 +2123,7 @@ def _normalize_product_handoff(
         "source_path": str(source_path) if source_path is not None else None,
         "root": str(root),
         "summary": _optional_str(data.get("summary") or data.get("description")) or _fallback_product_summary(root),
+        **preview,
         **task_context,
         "urls": urls[:8],
         "launch": launch[:8],
@@ -2060,6 +2144,16 @@ def _detected_product_handoff(
     readme = _read_text(root / "README.md")
     kind = _detect_product_kind(root, readme)
     task_context = _task_handoff_context(record, certification=certification, changed_files=changed_files, kind=kind)
+    launch = _detect_launch_commands(root, kind, readme)[:8]
+    urls = _urls_from_text(readme)[:8]
+    preview = _product_preview_metadata(
+        record,
+        kind=kind,
+        source="detected" if kind != "unknown" else "fallback",
+        launch=launch,
+        urls=urls,
+        changed_files=changed_files,
+    )
     return {
         "kind": kind,
         "label": _product_kind_label(kind),
@@ -2067,9 +2161,10 @@ def _detected_product_handoff(
         "source_path": str(root / "README.md") if (root / "README.md").exists() else None,
         "root": str(root),
         "summary": _fallback_product_summary(root, readme=readme),
+        **preview,
         **task_context,
-        "urls": _urls_from_text(readme)[:8],
-        "launch": _detect_launch_commands(root, kind, readme)[:8],
+        "urls": urls,
+        "launch": launch,
         "reset": _detect_reset_commands(root, readme)[:6],
         "try_flows": _fallback_try_flows(kind, readme=readme)[:12],
         "sample_data": _sample_data_from_readme(readme)[:12],
@@ -2094,6 +2189,132 @@ def _task_handoff_context(
         "task_changed_files": [str(path) for path in changed_files[:12]],
         "task_flows": _task_try_flows(summary, certification=certification, kind=kind)[:8],
     }
+
+
+def _product_preview_metadata(
+    record: Any,
+    *,
+    kind: str,
+    source: str,
+    launch: list[dict[str, str]],
+    urls: list[str],
+    changed_files: list[str],
+) -> dict[str, Any]:
+    """Describe whether Mission Control can offer a real product preview.
+
+    A product handoff is always useful as metadata, but the UI should only
+    show a primary "preview/open" action when Otto has something executable:
+    a URL or a concrete launch command. Fallback README guesses without either
+    should stay under review metadata, not become a misleading button.
+    """
+    concrete_launch = [
+        entry for entry in launch
+        if not _is_placeholder_launch_command(entry.get("command", ""))
+    ]
+    available = bool(urls or concrete_launch)
+    suppression_reason = _product_preview_suppression_reason(
+        record,
+        changed_files=changed_files,
+        source=source,
+    )
+    if available and suppression_reason:
+        available = False
+    family = _record_command_family(record)
+    if family == "certify":
+        label = "Open tested product"
+    elif family == "merge":
+        label = "Open landed product"
+    elif kind in {"api", "cli", "library"}:
+        label = "Run product"
+    else:
+        label = "Preview product"
+    if suppression_reason:
+        reason = suppression_reason
+    elif available:
+        if urls:
+            reason = "A product URL was recorded."
+        elif source == "artifact":
+            reason = "A product launch command was provided by the run."
+        else:
+            reason = "A launch command was detected from project files."
+    else:
+        reason = "No product URL or concrete launch command was recorded for this run."
+    return {
+        "preview_available": available,
+        "preview_label": label,
+        "preview_reason": reason,
+    }
+
+
+def _product_preview_suppression_reason(record: Any, *, changed_files: list[str], source: str) -> str:
+    """Return why a product preview should not be a primary action.
+
+    README detection says "this repository can launch a product"; it does not
+    mean every run produced something useful to try. Test-only smoke tasks and
+    certification runs should lead users to proof/results instead.
+    """
+    if source == "artifact":
+        return ""
+    family = _record_command_family(record)
+    if family == "certify":
+        return "This certification run produced proof, not a product preview. Review the result instead."
+    paths = [str(path).strip() for path in changed_files if str(path).strip()]
+    if paths and all(_is_non_product_change_path(path) for path in paths):
+        return "This run changed only tests, docs, or support files. Review the result instead."
+    summary = _task_summary(record).lower()
+    verification_markers = (
+        "smoke test",
+        "test-only",
+        "add test",
+        "add tests",
+        "test coverage",
+        "certification",
+        "verify ",
+        "verification",
+    )
+    if not paths and any(marker in summary for marker in verification_markers):
+        return "This run is verification-focused. Review the result instead."
+    return ""
+
+
+def _is_non_product_change_path(path: str) -> bool:
+    normalized = path.strip().replace("\\", "/").lower()
+    name = normalized.rsplit("/", 1)[-1]
+    if normalized.startswith(("tests/", "test/", "docs/", ".github/", "scripts/")):
+        return True
+    if name.startswith("test_") or name.endswith(("_test.py", ".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx")):
+        return True
+    if name in {"readme.md", "conftest.py", "pytest.ini", "mypy.ini", "ruff.toml"}:
+        return True
+    return False
+
+
+def _record_command_family(record: Any) -> str:
+    candidates = [
+        getattr(record, "command", None),
+        getattr(record, "run_type", None),
+        getattr(record, "domain", None),
+    ]
+    intent = getattr(record, "intent", {}) if isinstance(getattr(record, "intent", {}), dict) else {}
+    candidates.append(intent.get("command"))
+    text = " ".join(str(item or "").lower() for item in candidates)
+    if "cert" in text:
+        return "certify"
+    if "merge" in text or "land" in text:
+        return "merge"
+    if "improve" in text:
+        return "improve"
+    if "build" in text or "queue" in text:
+        return "build"
+    return ""
+
+
+def _is_placeholder_launch_command(command: str) -> bool:
+    text = str(command or "").strip().lower()
+    if not text:
+        return True
+    placeholders = ("<module>", "<package>", "${port}", "$port")
+    return any(token in text for token in placeholders)
 
 
 def _task_summary(record: Any) -> str:
@@ -2507,6 +2728,15 @@ def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
         stories_tested = len(stories)
     if stories and stories_passed is None:
         stories_passed = sum(1 for story in stories if story.get("status") in {"pass", "warn"})
+    proof_outcome = _optional_str(proof_json.get("outcome")) if isinstance(proof_json, dict) else None
+    evidence_gate = _certification_evidence_gate(proof_json)
+    story_counts_pass = (
+        stories_passed is not None
+        and stories_tested is not None
+        and stories_tested > 0
+        and stories_passed >= stories_tested
+    )
+    proof_packet_pass = proof_outcome != "failed" and not bool(evidence_gate.get("blocks_pass"))
     # Cluster-evidence-trustworthiness #4: Mission Control had been
     # flattening the certification down to final stories + counts, hiding
     # earlier rounds and their per-round evidence. The proof-of-work JSON
@@ -2519,16 +2749,99 @@ def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
     return {
         "stories_passed": stories_passed,
         "stories_tested": stories_tested,
-        "passed": (
-            stories_passed is not None
-            and stories_tested is not None
-            and stories_tested > 0
-            and stories_passed >= stories_tested
-        ),
+        "passed": story_counts_pass and proof_packet_pass,
         "summary_path": _optional_str(getattr(record, "artifacts", {}).get("summary_path")),
         "stories": stories,
+        "demo_evidence": _certification_demo_evidence(proof_json),
+        "evidence_gate": evidence_gate,
         "proof_report": proof_report,
         "rounds": rounds,
+    }
+
+
+def _certification_evidence_gate(proof_json: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(proof_json, dict):
+        return {"schema_version": 1, "status": "not_applicable", "blocks_pass": False, "reason": ""}
+    raw = proof_json.get("evidence_gate")
+    if not isinstance(raw, dict):
+        return {"schema_version": 1, "status": "not_applicable", "blocks_pass": False, "reason": ""}
+    return {
+        "schema_version": _int_or_none(raw.get("schema_version")) or 1,
+        "status": _optional_str(raw.get("status")) or "unknown",
+        "blocks_pass": bool(raw.get("blocks_pass")),
+        "reason": _optional_str(raw.get("reason")) or "",
+    }
+
+
+def _certification_demo_evidence(proof_json: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(proof_json, dict):
+        return {
+            "schema_version": 1,
+            "app_kind": "unknown",
+            "demo_required": False,
+            "demo_status": "not_applicable",
+            "demo_reason": "No structured proof metadata is available for this legacy run.",
+            "primary_demo": None,
+            "stories": [],
+            "counts": {},
+        }
+    raw = proof_json.get("demo_evidence")
+    if not isinstance(raw, dict):
+        return {
+            "schema_version": 1,
+            "app_kind": "unknown",
+            "demo_required": False,
+            "demo_status": "not_applicable",
+            "demo_reason": "This proof report was generated before structured demo evidence was recorded.",
+            "primary_demo": None,
+            "stories": [],
+            "counts": {},
+        }
+    primary = raw.get("primary_demo") if isinstance(raw.get("primary_demo"), dict) else None
+    stories: list[dict[str, Any]] = []
+    for item in raw.get("stories") or []:
+        if not isinstance(item, dict):
+            continue
+        stories.append(
+            {
+                "id": _optional_str(item.get("id")),
+                "title": _optional_str(item.get("title")),
+                "status": _optional_str(item.get("status")),
+                "needs_visual": bool(item.get("needs_visual")),
+                "needs_file_validation": bool(item.get("needs_file_validation")),
+                "has_text_evidence": bool(item.get("has_text_evidence")),
+                "has_file_validation": bool(item.get("has_file_validation")),
+                "proof_level": _optional_str(item.get("proof_level")),
+                "visual_items": [
+                    {
+                        "name": _optional_str(visual.get("name")),
+                        "kind": _optional_str(visual.get("kind")),
+                        "href": _optional_str(visual.get("href")),
+                        "caption": _optional_str(visual.get("caption")),
+                    }
+                    for visual in (item.get("visual_items") or [])
+                    if isinstance(visual, dict)
+                ],
+            }
+        )
+    return {
+        "schema_version": _int_or_none(raw.get("schema_version")) or 1,
+        "app_kind": _optional_str(raw.get("app_kind")) or "unknown",
+        "demo_required": bool(raw.get("demo_required")),
+        "demo_status": _optional_str(raw.get("demo_status")) or "unknown",
+        "demo_reason": _optional_str(raw.get("demo_reason")),
+        "primary_demo": (
+            {
+                "name": _optional_str(primary.get("name")),
+                "kind": _optional_str(primary.get("kind")),
+                "href": _optional_str(primary.get("href")),
+                "caption": _optional_str(primary.get("caption")),
+            }
+            if primary
+            else None
+        ),
+        "stories": stories[:100],
+        "counts": raw.get("counts") if isinstance(raw.get("counts"), dict) else {},
     }
 
 

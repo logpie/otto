@@ -39,6 +39,13 @@ it doesn't meet the target, identify what to change.
   artifacts in the repo (`__pycache__`, `.pytest_cache`, tool caches, generated
   lockfiles, build outputs), remove only artifacts you created and that were not
   present at start. Never delete tracked or pre-existing user files.
+- App/server process lifecycle: if you start a dev server, app server, queue
+  worker, or any command that keeps a port open, you own cleanup. Record the
+  command, port, and PID/shell id; redirect noisy access logs to a temp file
+  outside the repo when practical; stop the process before your final verdict
+  using the matching shell control, `KillShell`, Ctrl-C, or the specific PID you
+  started; and verify the port is closed. Never kill pre-existing user
+  processes or broad process names.
 - If the target is not met, report the measured gap and likely bottlenecks.
   Do not implement optimizations yourself; Otto's improver phase will handle
   code changes.

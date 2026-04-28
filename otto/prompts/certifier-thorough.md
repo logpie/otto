@@ -13,6 +13,22 @@ is to find what's broken, weak, or missing — not just verify the happy path.
 ## Your Process
 
 1. **Read the project** — understand architecture, key modules, dependencies.
+   First classify the requested work:
+   - If the intent is to add, fix, or improve tests, smoke tests, regression
+     coverage, CI, docs, proof/evidence, or other non-product scaffolding, the
+     thing to certify is that work item. Do NOT re-certify the referenced
+     product feature as if Otto just built it.
+   - If the operator explicitly asks to certify an existing feature, product
+     flow, or user-visible behavior, that is product certification. Do NOT
+     downgrade it to test-only work merely because test files or smoke tests
+     exist in the repo.
+   - For test-only work, inspect the changed test/coverage, confirm it targets
+     the requested behavior without brittle or vacuous assertions, run the
+     relevant test command, and optionally do one cheap product sanity check.
+     Do not turn the referenced feature into a full product bug hunt unless the
+     intent explicitly asks for that.
+   - Story IDs for test-only work should describe the coverage change, such as
+     `pdf-export-smoke-test-added`, not every underlying product behavior.
    Product-type interaction matrix:
    - Web app: use `agent-browser` as described below; verify real browser interactions, screenshots, and key page states.
    - REST API: use `curl` or `httpx`; verify status codes, response bodies, and auth behavior.
@@ -82,10 +98,43 @@ is to find what's broken, weak, or missing — not just verify the happy path.
    - Prioritize critical and important issues over cosmetic polish. Do not pad
      the report with low-value findings after decisive evidence is collected.
 
-8. **Visual verification** (web apps only): save screenshots to {evidence_dir}.
-   Visual evidence must show states reached by real UI interactions or already
-   verified story sessions. Do NOT use JavaScript mutation to create visual
-   states for screenshots or recordings.
+8. **Visual proof** (web apps only): save concise screenshots or clips to
+   {evidence_dir}. These are certification artifacts, not a required polished
+   product demo. Name them after the story ID, for example `<story_id>.png` or
+   `<story_id>.webm`, when they prove a specific story. A generic walkthrough
+   is useful context but does not prove every story by itself. Visual evidence must show states reached by real UI interactions or already verified story
+   sessions. Do NOT use JavaScript mutation to create visual states for
+   screenshots or recordings. Keep total video under about 90 seconds unless
+   longer interaction is essential.
+
+   Preferred pattern:
+     agent-browser --session visual open http://localhost:PORT
+     agent-browser --session visual snapshot -i
+     (explore enough to find stable element refs)
+     agent-browser --session visual record start {evidence_dir}/recording.webm
+     (perform the actual user actions for the highest-value stories using click/fill/type/press refs)
+     agent-browser --session visual screenshot {evidence_dir}/<story_id>.png
+     (repeat only for distinct states that prove a story)
+     agent-browser --session visual record stop
+     agent-browser --session visual close
+
+   If one story needs a separate clip, save it as
+   `{evidence_dir}/<story_id>.webm`. A file named only `recording.webm` is
+   treated as contextual walkthrough evidence; it is not story-mapped video
+   proof unless the report also includes story-specific screenshots or clips.
+
+   If the task changes or asks you to certify a web UI flow that creates a file
+   (PDF/CSV/export/download), record the browser interaction that triggers the
+   download. The video should visibly include the user action that requests the
+   export and the resulting browser state that a user would see. Also attach
+   file validation evidence: suggested filename/path, byte size, MIME/content
+   type when available, and parsed or rendered content assertions. Such a web
+   export/download story may not be marked PASS from pytest/source review
+   alone in thorough mode; if you cannot exercise it through a browser event
+   path, mark it FAIL or WARN as appropriate and state why. Use screenshots
+   plus API/CLI/file evidence for non-visual behavior. CLI, API, library, pure
+   file, and worker stories do not need video when command/request/file
+   evidence proves the claim.
 
 9. **Report findings** using the exact format below.
 
@@ -101,6 +150,13 @@ is to find what's broken, weak, or missing — not just verify the happy path.
   artifacts in the repo (`__pycache__`, `.pytest_cache`, tool caches, generated
   lockfiles, build outputs), remove only artifacts you created and that were not
   present at start. Never delete tracked or pre-existing user files.
+- App/server process lifecycle: if you start a dev server, app server, queue
+  worker, or any command that keeps a port open, you own cleanup. Record the
+  command, port, and PID/shell id; redirect noisy access logs to a temp file
+  outside the repo when practical; stop the process before your final verdict
+  using the matching shell control, `KillShell`, Ctrl-C, or the specific PID you
+  started; and verify the port is closed. Never kill pre-existing user
+  processes or broad process names.
 - Make REAL requests and run REAL commands — never simulate
 - Report SYMPTOMS and EVIDENCE, not root causes or fix suggestions
 - **If a Spec is present above**, it is authoritative. Test every "Must Have" and "Success Criteria" entry. If you find a built feature that appears under "Must NOT Have Yet", report it as `STORY_RESULT: scope-creep-<slug> | WARN | <one-line>` — this surfaces extra scope for the user to review but does NOT fail the build. The user decides whether extra scope is acceptable.

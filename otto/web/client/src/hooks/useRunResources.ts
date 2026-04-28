@@ -15,7 +15,7 @@ import type {ArtifactContentResponse, DiffResponse, LogsResponse, RunDetail} fro
 import type {InspectorMode, ToastState} from "../uiTypes";
 import type {RouteState} from "../routeState";
 import {writeRouteState} from "../routeState";
-import {detailWasRemoved, errorMessage, preferredProofArtifact} from "../utils/missionControl";
+import {detailWasRemoved, errorMessage} from "../utils/missionControl";
 
 type ShowToast = (message: string, severity?: ToastState["severity"]) => void;
 
@@ -40,8 +40,6 @@ export function useRunResources({
   const [inspectorMode, setInspectorMode] = useState<InspectorMode>("proof");
   const [selectedArtifactIndex, setSelectedArtifactIndex] = useState<number | null>(null);
   const [artifactContent, setArtifactContent] = useState<ArtifactContentResponse | null>(null);
-  const [proofArtifactIndex, setProofArtifactIndex] = useState<number | null>(null);
-  const [proofContent, setProofContent] = useState<ArtifactContentResponse | null>(null);
   const [diffContent, setDiffContent] = useState<DiffResponse | null>(null);
   const [logVisibilityTick, setLogVisibilityTick] = useState(0);
 
@@ -56,9 +54,7 @@ export function useRunResources({
     logTextRef.current = "";
     setLogState(initialLogState);
     setArtifactContent(null);
-    setProofContent(null);
     setDiffContent(null);
-    setProofArtifactIndex(null);
     setSelectedArtifactIndex(null);
     if (options.resetMode !== false) setInspectorMode("proof");
     if (options.closeInspector) setInspectorOpen(false);
@@ -229,21 +225,6 @@ export function useRunResources({
     }
   }, [selectedRunIdRef, showToast]);
 
-  const loadProofArtifact = useCallback(async (index: number) => {
-    const runId = selectedRunIdRef.current;
-    if (!runId) return;
-    setProofArtifactIndex(index);
-    setProofContent(null);
-    try {
-      const content = await api<ArtifactContentResponse>(`/api/runs/${encodeURIComponent(runId)}/artifacts/${index}/content`);
-      if (selectedRunIdRef.current !== runId) return;
-      setProofContent(content);
-    } catch (error) {
-      if (detailWasRemoved(error) || selectedRunIdRef.current !== runId) return;
-      showToast(errorMessage(error), "error");
-    }
-  }, [selectedRunIdRef, showToast]);
-
   const loadDiff = useCallback(async () => {
     const runId = selectedRunIdRef.current;
     if (!runId) return;
@@ -290,21 +271,6 @@ export function useRunResources({
     setInspectorMode("try");
   }, []);
 
-  useEffect(() => {
-    if (!detail || !inspectorOpen || inspectorMode !== "proof") return;
-    const artifact = preferredProofArtifact(detail.artifacts);
-    if (!artifact) return;
-    if (proofArtifactIndex === artifact.index && proofContent) return;
-    void loadProofArtifact(artifact.index);
-  }, [detail, inspectorMode, inspectorOpen, loadProofArtifact, proofArtifactIndex, proofContent]);
-
-  const proofReport = detail?.review_packet?.certification?.proof_report;
-  const proofIdentity = `${detail?.run_id || ""}|${detail?.version ?? ""}|${proofReport?.sha256 || ""}|${proofReport?.file_mtime || ""}`;
-  useEffect(() => {
-    setProofContent(null);
-    setProofArtifactIndex(null);
-  }, [proofIdentity]);
-
   return {
     detail,
     logState,
@@ -312,8 +278,6 @@ export function useRunResources({
     inspectorMode,
     selectedArtifactIndex,
     artifactContent,
-    proofArtifactIndex,
-    proofContent,
     diffContent,
     setInspectorOpen,
     setInspectorMode,
@@ -322,7 +286,6 @@ export function useRunResources({
     resetRunResources,
     refreshDetail,
     loadArtifact,
-    loadProofArtifact,
     loadDiff,
     showLogs,
     showArtifacts,

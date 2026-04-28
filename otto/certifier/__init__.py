@@ -14,6 +14,7 @@ import html
 import json
 import logging
 import os
+import signal
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -566,6 +567,175 @@ def _safe_git(project_dir: Path, *args: str) -> str:
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
+
+
+_DEV_SERVER_COMMAND_MARKERS = (
+    "flask",
+    "uvicorn",
+    "hypercorn",
+    "daphne",
+    "fastapi",
+    "manage.py runserver",
+    "django",
+    "python -m http.server",
+    "http-server",
+    "vite",
+    "next dev",
+    "nuxt dev",
+    "astro dev",
+    "svelte-kit",
+    "npm run dev",
+    "pnpm dev",
+    "yarn dev",
+    "bun run dev",
+    "rails server",
+    "bin/rails s",
+    "mix phx.server",
+    "phoenix.server",
+)
+
+
+def _listening_process_pids() -> set[int] | None:
+    """Return PIDs that currently own listening TCP sockets.
+
+    This is intentionally best-effort. Process cleanup is a guardrail around
+    provider-run certification, not a hard dependency for certifier execution.
+    """
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fp"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        if not line.startswith("p"):
+            continue
+        try:
+            pids.add(int(line[1:]))
+        except ValueError:
+            continue
+    return pids
+
+
+def _process_command(pid: int) -> str:
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _process_cwd(pid: int) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("n") and len(line) > 1:
+            return Path(line[1:])
+    return None
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _looks_like_project_dev_server(command: str) -> bool:
+    lowered = f" {command.lower()} "
+    return any(marker in lowered for marker in _DEV_SERVER_COMMAND_MARKERS)
+
+
+def _process_belongs_to_project(project_dir: Path, command: str, cwd: Path | None) -> bool:
+    try:
+        project_root = project_dir.resolve()
+    except OSError:
+        project_root = project_dir
+    if str(project_root) in command:
+        return True
+    return cwd is not None and _path_is_relative_to(cwd, project_root)
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_process(pid: int) -> bool:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    for _ in range(30):
+        if not _process_exists(pid):
+            return True
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return not _process_exists(pid)
+
+
+def _cleanup_certifier_background_servers(
+    project_dir: Path,
+    baseline_listening_pids: set[int] | None,
+) -> list[dict[str, str | int]]:
+    """Terminate new project-scoped dev servers left behind by provider tools."""
+    cleaned: list[dict[str, str | int]] = []
+    if baseline_listening_pids is None:
+        return cleaned
+    current_pids = _listening_process_pids()
+    if current_pids is None:
+        return cleaned
+    for pid in sorted(current_pids - baseline_listening_pids):
+        command = _process_command(pid)
+        cwd = _process_cwd(pid)
+        if not command:
+            continue
+        if not _looks_like_project_dev_server(command):
+            continue
+        if not _process_belongs_to_project(project_dir, command, cwd):
+            continue
+        if _terminate_process(pid):
+            cleaned.append({
+                "pid": pid,
+                "command": command,
+                "cwd": str(cwd) if cwd is not None else "",
+            })
+    return cleaned
 
 
 def _project_name(project_dir: Path) -> str:
@@ -1260,47 +1430,48 @@ def _visual_evidence(
     screenshots = sorted(evidence_root.glob("*.png")) if evidence_root.exists() else []
     recordings = sorted(evidence_root.glob("*.webm")) if evidence_root.exists() else []
     images = [
-        {"name": path.name, "path": str(path), "href": _relative_href(base_dir, path)}
+        {"name": path.name, "path": str(path), "href": _relative_href(base_dir, path), "kind": "image"}
         for path in screenshots
     ]
     videos = [
-        {"name": path.name, "path": str(path), "href": _relative_href(base_dir, path)}
+        {"name": path.name, "path": str(path), "href": _relative_href(base_dir, path), "kind": "video"}
         for path in recordings
     ]
-    recording = next((item for item in videos if item["name"] == "recording.webm"), videos[0] if videos else None)
+    visual_items = images + videos
+    recording = next((item for item in videos if item["name"] == "recording.webm"), None)
     assigned: dict[str, str] = {}
-    for image in images:
+    for item in visual_items:
         forced_story = next(
             (
                 str(story.get("story_id") or "")
                 for story in stories
-                if Path(str(story.get("failure_evidence") or "").strip()).name.lower() == image["name"].lower()
+                if Path(str(story.get("failure_evidence") or "").strip()).name.lower() == item["name"].lower()
             ),
             "",
         )
         if forced_story:
-            assigned[image["name"]] = forced_story
+            assigned[item["name"]] = forced_story
             continue
         best_story_id = ""
         best_score = 0
         for story in stories:
-            score = _visual_match_story(image["name"], story)
+            score = _visual_match_story(item["name"], story)
             if score > best_score:
                 best_score = score
                 best_story_id = str(story.get("story_id") or "")
         if best_story_id and best_score > 0:
-            assigned[image["name"]] = best_story_id
+            assigned[item["name"]] = best_story_id
 
     buckets: list[dict[str, Any]] = []
     for story in stories:
         bucket_items = []
-        for image in images:
-            if assigned.get(image["name"]) != story.get("story_id"):
+        for item in visual_items:
+            if assigned.get(item["name"]) != story.get("story_id"):
                 continue
             bucket_items.append(
                 {
-                    **image,
-                    "caption": _visual_caption(image, story),
+                    **item,
+                    "caption": _visual_caption(item, story),
                 }
             )
         if bucket_items:
@@ -1314,11 +1485,11 @@ def _visual_evidence(
 
     unassigned = [
         {
-            **image,
-            "caption": _visual_caption(image, None),
+            **item,
+            "caption": _visual_caption(item, None),
         }
-        for image in images
-        if image["name"] not in assigned
+        for item in visual_items
+        if item["name"] not in assigned and item["name"] != "recording.webm"
     ]
     non_visual_product = not images and not videos and not any(
         _story_looks_visual(story) for story in stories
@@ -1347,6 +1518,373 @@ def _visual_evidence(
         "evidence_dir": str(evidence_root),
         "evidence_dir_href": _relative_href(base_dir, evidence_root) if evidence_root.exists() else "",
     }
+
+
+def _story_proof_rows(stories: list[dict[str, Any]], visual: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return per-story proof coverage rows for the report.
+
+    This does not decide pass/fail; it makes evidence quality visible. A
+    generic full-walkthrough video is useful context, but story-specific
+    screenshots or clips are stronger proof that each intent path was touched.
+    """
+    by_story: dict[str, list[dict[str, Any]]] = {}
+    for bucket in visual.get("buckets", []) or []:
+        story_id = str(bucket.get("story_id") or "")
+        if not story_id:
+            continue
+        by_story.setdefault(story_id, []).extend(
+            item for item in bucket.get("items", []) or [] if isinstance(item, dict)
+        )
+    has_general_recording = bool(visual.get("recording"))
+    rows: list[dict[str, Any]] = []
+    for story in stories:
+        story_id = str(story.get("story_id") or "")
+        items = by_story.get(story_id, [])
+        image_count = sum(1 for item in items if str(item.get("kind") or "") == "image")
+        video_count = sum(1 for item in items if str(item.get("kind") or "") == "video")
+        if video_count:
+            visual_status = f"{video_count} story video{'' if video_count == 1 else 's'}"
+        elif image_count:
+            visual_status = f"{image_count} story screenshot{'' if image_count == 1 else 's'}"
+        elif has_general_recording:
+            visual_status = "general walkthrough only"
+        else:
+            visual_status = "none"
+        rows.append(
+            {
+                "story_id": story_id,
+                "status": story.get("status") or "",
+                "claim": story.get("claim") or story.get("summary") or story_id,
+                "methodology": story.get("methodology") or story.get("interaction_method") or "",
+                "surface": story.get("surface_display") or story.get("surface") or "",
+                "text_evidence": bool(story.get("has_evidence") or story.get("evidence")),
+                "visual_status": visual_status,
+            }
+        )
+    return rows
+
+
+def _story_visual_items_by_id(visual: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    by_story: dict[str, list[dict[str, Any]]] = {}
+    for bucket in visual.get("buckets", []) or []:
+        if not isinstance(bucket, dict):
+            continue
+        story_id = str(bucket.get("story_id") or "").strip()
+        if not story_id:
+            continue
+        items = [item for item in bucket.get("items", []) or [] if isinstance(item, dict)]
+        if items:
+            by_story.setdefault(story_id, []).extend(items)
+    return by_story
+
+
+def _story_is_web_ui(story: dict[str, Any]) -> bool:
+    surface = str(story.get("surface") or story.get("surface_display") or "").lower()
+    methodology = _normalize_methodology(
+        str(story.get("methodology") or story.get("interaction_method") or "")
+    )
+    if any(token in surface for token in ("dom", "browser", "page", "screenshot", "video", "localstorage")):
+        return True
+    if methodology in {"live-ui-events", "visual-only", "javascript-eval", "browser"}:
+        return True
+    return _story_claims_ui_behavior(story)
+
+
+def _story_is_file_or_download(story: dict[str, Any]) -> bool:
+    corpus = _story_corpus(story)
+    return any(
+        token in corpus
+        for token in (
+            "download",
+            "export",
+            "pdf",
+            "csv",
+            "xlsx",
+            "file",
+            "filename",
+            "mime",
+            "content-type",
+            "bytes",
+            "attachment",
+        )
+    )
+
+
+def _report_looks_test_only(intent: str, stories: list[dict[str, Any]]) -> bool:
+    corpus = " ".join(
+        [
+            intent,
+            " ".join(str(story.get("story_id") or "") for story in stories),
+            " ".join(str(story.get("claim") or "") for story in stories),
+        ]
+    ).lower()
+    indicators = (
+        "smoke test",
+        "regression test",
+        "test-only",
+        "add test",
+        "add tests",
+        "test coverage",
+        "ci ",
+        "docs",
+        "documentation",
+        "proof/evidence",
+        "certification",
+    )
+    product_indicators = ("build", "feature", "ui", "button", "page", "workflow", "portal")
+    if not any(indicator in corpus for indicator in indicators):
+        return False
+    return not any(indicator in corpus for indicator in product_indicators)
+
+
+def _demo_app_kind(intent: str, stories: list[dict[str, Any]]) -> str:
+    corpus = " ".join([intent, *(_story_corpus(story) for story in stories)]).lower()
+    has_web = any(_story_is_web_ui(story) for story in stories) or any(
+        token in corpus
+        for token in ("web app", "browser", "dashboard", "page", "button", "form", "modal", "download")
+    )
+    has_file = any(_story_is_file_or_download(story) for story in stories)
+    has_cli = any(token in corpus for token in (" cli", "command", "stdout", "stderr", "exit code"))
+    has_library = any(token in corpus for token in ("library", "import ", "public api"))
+    has_worker = any(token in corpus for token in ("queue", "worker", "pipeline", "batch"))
+    has_api = any(token in corpus for token in ("rest api", "http ", "endpoint", "curl", "json response"))
+    if has_web and has_file:
+        return "mixed"
+    if has_web:
+        return "web"
+    if has_file:
+        return "file_export"
+    if has_cli:
+        return "cli"
+    if has_library:
+        return "library"
+    if has_worker:
+        return "worker"
+    if has_api:
+        return "api"
+    return "unknown"
+
+
+def _primary_demo_item(visual: dict[str, Any]) -> dict[str, Any] | None:
+    bucket_items = [
+        item
+        for bucket in visual.get("buckets", []) or []
+        if isinstance(bucket, dict)
+        for item in bucket.get("items", []) or []
+        if isinstance(item, dict)
+    ]
+    for item in bucket_items:
+        if str(item.get("kind") or "").lower() == "video":
+            return item
+    if visual.get("recording"):
+        return visual["recording"]
+    for item in bucket_items:
+        if str(item.get("kind") or "").lower() == "image":
+            return item
+    for item in visual.get("unassigned", []) or []:
+        if isinstance(item, dict):
+            return item
+    return None
+
+
+def _demo_item_payload(item: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not item:
+        return None
+    return {
+        "name": item.get("name") or "",
+        "kind": item.get("kind") or "",
+        "href": item.get("href") or "",
+        "caption": item.get("caption") or "",
+    }
+
+
+def _demo_evidence(
+    *,
+    intent: str,
+    certifier_mode: str,
+    stories: list[dict[str, Any]],
+    visual: dict[str, Any],
+    artifacts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize whether the proof packet demonstrates the task intent.
+
+    This is deliberately higher level than the raw artifact list. It gives
+    Mission Control a stable contract for "what should a human look at first?"
+    and prevents generic recordings or file counts from masquerading as proof.
+    """
+    app_kind = _demo_app_kind(intent, stories)
+    test_only = _report_looks_test_only(intent, stories)
+    mode = str(certifier_mode or "").strip().lower()
+    visual_required = app_kind in {"web", "mixed"} and mode != "fast" and not test_only
+    file_required = app_kind in {"mixed", "file_export"} and not test_only
+    by_story = _story_visual_items_by_id(visual)
+    general_recording = bool(visual.get("recording"))
+    story_rows: list[dict[str, Any]] = []
+    missing_visual = 0
+    generic_only = 0
+    missing_file = 0
+    visual_story_count = 0
+    story_video_count = 0
+    story_image_count = 0
+    for story in stories:
+        story_id = str(story.get("story_id") or "").strip()
+        items = by_story.get(story_id, [])
+        visual_items = [_demo_item_payload(item) for item in items]
+        visual_items = [item for item in visual_items if item is not None]
+        video_count = sum(1 for item in visual_items if item.get("kind") == "video")
+        image_count = sum(1 for item in visual_items if item.get("kind") == "image")
+        story_video_count += video_count
+        story_image_count += image_count
+        story_needs_visual = visual_required and _story_is_web_ui(story)
+        story_needs_file = file_required and _story_is_file_or_download(story)
+        if story_needs_visual:
+            visual_story_count += 1
+        evidence_text = str(story.get("evidence") or "").lower()
+        file_proof = bool(
+            story_needs_file
+            and any(token in evidence_text for token in ("pdf", "csv", "download", "filename", "content-type", "bytes", "pdftotext", "mime"))
+        )
+        if story_needs_visual and not visual_items:
+            if general_recording:
+                generic_only += 1
+            else:
+                missing_visual += 1
+        if story_needs_file and not file_proof:
+            missing_file += 1
+        if video_count:
+            proof_level = "story video"
+        elif image_count:
+            proof_level = "story screenshot"
+        elif story_needs_visual and general_recording:
+            proof_level = "generic recording only"
+        elif file_proof:
+            proof_level = "file validation"
+        elif story.get("has_evidence"):
+            proof_level = "text evidence"
+        else:
+            proof_level = "not recorded"
+        story_rows.append(
+            {
+                "id": story_id,
+                "title": story.get("claim") or story.get("summary") or story_id,
+                "status": story.get("status") or "",
+                "needs_visual": story_needs_visual,
+                "needs_file_validation": story_needs_file,
+                "visual_items": visual_items,
+                "has_text_evidence": bool(story.get("has_evidence")),
+                "has_file_validation": file_proof,
+                "proof_level": proof_level,
+            }
+        )
+
+    if mode == "fast":
+        demo_required = False
+        demo_status = "not_applicable"
+        reason = "Fast certification records command/request evidence only; video is intentionally skipped."
+    elif test_only:
+        demo_required = False
+        demo_status = "not_applicable"
+        reason = "This run certifies tests, docs, or support work rather than a new product interaction."
+    elif not visual_required and not file_required:
+        demo_required = False
+        demo_status = "not_applicable"
+        reason = "This product surface is better proven with command, API, or source evidence than video."
+    else:
+        demo_required = True
+        if visual_required and missing_visual and not general_recording:
+            demo_status = "missing"
+            reason = "User-facing stories need browser proof, but no matching video or screenshot was recorded."
+        elif (visual_required and (missing_visual or generic_only)) or (file_required and missing_file):
+            demo_status = "partial"
+            pieces = []
+            if generic_only:
+                pieces.append("some stories only have a generic walkthrough")
+            if missing_visual:
+                pieces.append("some visual stories lack story-specific media")
+            if missing_file:
+                pieces.append("some file/export stories lack file validation details")
+            reason = "; ".join(pieces) or "Proof is incomplete."
+        elif visual_required and visual_story_count and story_video_count == 0:
+            demo_status = "partial"
+            if general_recording:
+                reason = (
+                    "Browser video is a generic walkthrough; story-specific visual proof "
+                    "is screenshots only."
+                )
+            else:
+                reason = "Visual stories have screenshots but no video walkthrough."
+        elif visual_required and not (story_video_count or story_image_count or general_recording):
+            demo_status = "missing"
+            reason = "No browser visual proof was recorded."
+        else:
+            demo_status = "strong"
+            reason = "Proof maps the task stories to concrete evidence."
+
+    raw_count = sum(1 for artifact in artifacts if artifact.get("present"))
+    review_count = sum(1 for artifact in artifacts if artifact.get("present") and artifact.get("label") not in {"session"})
+    return {
+        "schema_version": 1,
+        "app_kind": app_kind,
+        "demo_required": demo_required,
+        "demo_status": demo_status,
+        "demo_reason": reason,
+        "primary_demo": _demo_item_payload(_primary_demo_item(visual)),
+        "stories": story_rows,
+        "counts": {
+            "story_videos": story_video_count,
+            "story_screenshots": story_image_count,
+            "generic_recordings": 1 if general_recording else 0,
+            "raw_artifacts": raw_count,
+            "review_artifacts": review_count,
+        },
+    }
+
+
+def _demo_evidence_gate(demo_evidence: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the certification gate implied by structured demo evidence.
+
+    The certifier agent can still emit ``VERDICT: PASS`` after only reading
+    tests or source. For standard/thorough user-facing web work, that is not a
+    complete proof packet: if a browser/product demo was required and not
+    recorded, the run should not silently land as green.
+    """
+    demo = demo_evidence if isinstance(demo_evidence, dict) else {}
+    required = bool(demo.get("demo_required"))
+    status = str(demo.get("demo_status") or "").strip().lower()
+    reason = str(demo.get("demo_reason") or "").strip()
+    if required and status == "missing":
+        return {
+            "schema_version": 1,
+            "status": "fail",
+            "blocks_pass": True,
+            "reason": reason or "Required product demo proof is missing.",
+        }
+    if required and status == "partial":
+        return {
+            "schema_version": 1,
+            "status": "warn",
+            "blocks_pass": False,
+            "reason": reason or "Product demo proof is incomplete.",
+        }
+    return {
+        "schema_version": 1,
+        "status": "pass" if required else "not_applicable",
+        "blocks_pass": False,
+        "reason": reason,
+    }
+
+
+def _append_demo_evidence_gate_diagnosis(diagnosis: str, gate: dict[str, Any]) -> str:
+    if not isinstance(gate, dict) or not gate.get("blocks_pass"):
+        return diagnosis
+    reason = str(gate.get("reason") or "Required product demo proof is missing.").strip()
+    note = f"Required demo proof gate failed: {reason}"
+    diagnosis = str(diagnosis or "").strip()
+    if not diagnosis:
+        return note
+    if note in diagnosis:
+        return diagnosis
+    return f"{diagnosis}\n\n{note}"
 
 
 def _artifacts(
@@ -1438,24 +1976,19 @@ def _cost_summary(
     certifier = round(float(certifier_cost_usd or 0.0), 2)
     total = round(float(total_cost_usd or 0.0), 2)
     token_lines = _token_usage_lines(token_usage or {})
+    spend_display = token_lines[0] if token_lines else "Tokens: not recorded"
     if certifier == total:
-        cost_line = f"Cost: ${total:.2f}"
-        display = f"Cost: ${total:.2f}"
-        if total == 0 and token_lines:
-            display = f"Cost: not reported by provider; {token_lines[0]}"
-            cost_line = "Cost: not reported by provider"
-        lines = [cost_line, *token_lines]
+        lines = [spend_display]
         return {
-            "display": display,
+            "display": spend_display,
             "lines": lines,
             "certifier_equals_total": True,
         }
     return {
-        "display": f"Cost: certifier ${certifier:.2f}, total ${total:.2f}",
+        "display": spend_display,
         "lines": [
-            f"Certifier cost: ${certifier:.2f}",
-            f"Total cost: ${total:.2f}",
-            *token_lines,
+            spend_display,
+            f"Provider-reported cost: certifier ${certifier:.2f}, total ${total:.2f}",
         ],
         "certifier_equals_total": False,
     }
@@ -1593,22 +2126,38 @@ def _build_pow_report_data(
         spec_path=str(spec_context.get("spec_path") or ""),
         evidence_dir=evidence_dir,
     )
+    demo_evidence = _demo_evidence(
+        intent=intent,
+        certifier_mode=certifier_mode,
+        stories=ordered_stories,
+        visual=visual,
+        artifacts=artifacts,
+    )
+    evidence_gate = _demo_evidence_gate(demo_evidence)
+    effective_outcome = "failed" if outcome == "passed" and evidence_gate.get("blocks_pass") else outcome
+    effective_diagnosis = _append_demo_evidence_gate_diagnosis(diagnosis, evidence_gate)
     token_usage = _token_usage_summary(log_dir / "messages.jsonl")
     cost_summary = _cost_summary(
         certifier_cost_usd,
         total_cost_usd,
         token_usage=token_usage,
     )
-    verdict_label = "PASS with warnings" if outcome == "passed" and counts["warn_count"] > 0 else ("PASS" if outcome == "passed" else "FAIL")
+    has_warnings = counts["warn_count"] > 0 or evidence_gate.get("status") == "warn"
+    verdict_label = (
+        "PASS with warnings"
+        if effective_outcome == "passed" and has_warnings
+        else ("PASS" if effective_outcome == "passed" else "FAIL")
+    )
     data = {
         "schema_version": _SCHEMA_VERSION,
         "generated_at": generated_iso,
         "generated_local": generated_local,
         "generator": _GENERATOR,
-        "outcome": outcome,
+        "outcome": effective_outcome,
+        "agent_outcome": outcome,
         "verdict_label": verdict_label,
         "one_line_interpretation": redact_text(
-            _one_line_interpretation(outcome, counts["warn_count"], certifier_mode)
+            _one_line_interpretation(effective_outcome, counts["warn_count"], certifier_mode)
         ),
         "duration_s": duration_s,
         "duration_human": _human_duration(duration_s),
@@ -1627,7 +2176,7 @@ def _build_pow_report_data(
         "warn_count": counts["warn_count"],
         "skipped_count": counts["skipped_count"],
         "flag_count": counts["flag_count"],
-        "diagnosis": redact_text(_diagnosis_text(diagnosis, outcome)),
+        "diagnosis": redact_text(_diagnosis_text(effective_diagnosis, effective_outcome)),
         "failing_story_ids": failing_story_ids,
         "warn_story_ids": warn_story_ids,
         "stories_hidden_count": hidden_story_count,
@@ -1679,9 +2228,12 @@ def _build_pow_report_data(
         "stories_ordered": ordered_stories,
         "story_methodology_summary": methodology_summary,
         "visual_evidence": visual,
+        "proof_coverage": _story_proof_rows(ordered_stories, visual),
+        "demo_evidence": demo_evidence,
+        "evidence_gate": evidence_gate,
     }
     data["next_actions"] = _next_actions(
-        outcome=outcome,
+        outcome=effective_outcome,
         artifacts=artifacts,
         has_failing_stories=any(not story.get("passed") for story in story_results),
     )
@@ -1695,6 +2247,28 @@ def _render_artifact_links_md(artifacts: list[dict[str, Any]]) -> list[str]:
         if artifact.get("present"):
             lines.append(f"- [{artifact['label']}]({artifact['href']})")
     return lines
+
+
+def _demo_status_label(status: Any) -> str:
+    return {
+        "strong": "Strong",
+        "partial": "Partial",
+        "missing": "Missing",
+        "not_applicable": "Not required",
+    }.get(str(status or "").strip().lower(), "Unknown")
+
+
+def _demo_kind_label(kind: Any) -> str:
+    return {
+        "web": "Web UI",
+        "mixed": "Web UI + file/export",
+        "file_export": "File/export",
+        "api": "API",
+        "cli": "CLI",
+        "library": "Library",
+        "worker": "Worker/service",
+        "unknown": "Unknown",
+    }.get(str(kind or "").strip().lower(), str(kind or "Unknown"))
 
 
 def _render_pow_markdown(
@@ -1752,6 +2326,38 @@ def _render_pow_markdown(
         else:
             lines.append(f"- Next: {action['label']} in the HTML report")
 
+    demo = dict(report.get("demo_evidence") or {})
+    if demo:
+        primary = demo.get("primary_demo") if isinstance(demo.get("primary_demo"), dict) else None
+        lines.extend(
+            [
+                "",
+                "## Demo Proof",
+                "",
+                f"- Status: {_demo_status_label(demo.get('demo_status'))}",
+                f"- Surface: {_demo_kind_label(demo.get('app_kind'))}",
+                f"- Required: {'yes' if demo.get('demo_required') else 'no'}",
+                f"- Reason: {demo.get('demo_reason') or 'not recorded'}",
+            ]
+        )
+        if primary and primary.get("href"):
+            lines.append(f"- Primary demo: [{primary.get('name') or primary.get('kind')}]({primary.get('href')})")
+        story_demos = [row for row in demo.get("stories", []) or [] if isinstance(row, dict)]
+        if story_demos:
+            lines.extend(
+                [
+                    "",
+                    "| Story | Proof | File validation | Text evidence |",
+                    "| --- | --- | --- | --- |",
+                ]
+            )
+            for row in story_demos:
+                lines.append(
+                    f"| {row.get('id', '')} | {row.get('proof_level', 'not recorded')} | "
+                    f"{'yes' if row.get('has_file_validation') else 'no'} | "
+                    f"{'yes' if row.get('has_text_evidence') else 'no'} |"
+                )
+
     lines.extend(
         [
             "",
@@ -1772,6 +2378,24 @@ def _render_pow_markdown(
             f"_Showing first {len(stories)} stories. "
             f"{report['stories_hidden_count']} more not shown._"
         )
+
+    proof_rows = list(report.get("proof_coverage") or [])
+    if proof_rows:
+        lines.extend(
+            [
+                "",
+                "## Intent Proof Matrix",
+                "",
+                "| Story | Status | Methodology | Visual proof | Text evidence |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for row in proof_rows:
+            lines.append(
+                f"| {row.get('story_id', '')} | {row.get('status', '')} | "
+                f"{row.get('methodology', '') or row.get('surface', '') or 'not specified'} | "
+                f"{row.get('visual_status', 'none')} | {'yes' if row.get('text_evidence') else 'no'} |"
+            )
 
     if report.get("diagnosis"):
         lines.extend(["", "## Diagnosis", "", f"- {report['diagnosis']}"])
@@ -1817,10 +2441,12 @@ def _render_pow_markdown(
         image_items = []
         for bucket in visual["buckets"]:
             for item in bucket["items"]:
-                label = f"{bucket['story_id']}: {item['name']}"
+                media = "Video" if item.get("kind") == "video" else "Image"
+                label = f"{bucket['story_id']}: {media} {item['name']}"
                 image_items.append(f"- {label} ({bucket['status']}): [{item['name']}]({item['href']})")
         for item in visual["unassigned"]:
-            image_items.append(f"- Unassigned: [{item['name']}]({item['href']})")
+            media = "Video" if item.get("kind") == "video" else "Image"
+            image_items.append(f"- Unassigned {media}: [{item['name']}]({item['href']})")
         if image_items:
             lines.extend(image_items)
         else:
@@ -1980,6 +2606,22 @@ def _render_pow_html(report: dict[str, Any]) -> str:
         parts.append("</article>")
         return parts
 
+    def render_visual_item(item: dict[str, Any]) -> list[str]:
+        caption = f" — {item['caption']}" if item.get("caption") else ""
+        href = esc(item.get("href", ""))
+        name = esc(item.get("name", ""))
+        kind = str(item.get("kind") or "").lower()
+        parts = [
+            "<div class='visual-item'>",
+            f"<a href='{href}'>{name}</a>{esc(caption)}",
+        ]
+        if kind == "video" or str(item.get("name") or "").lower().endswith(".webm"):
+            parts.append(f"<video controls><source src='{href}' type='video/webm'></video>")
+        else:
+            parts.append(f"<img src='{href}' alt='{name}'>")
+        parts.append("</div>")
+        return parts
+
     html_lines = [
         "<!DOCTYPE html>",
         "<html>",
@@ -2003,6 +2645,13 @@ def _render_pow_html(report: dict[str, Any]) -> str:
         ".meta-grid, .run-grid, .coverage-grid { display: grid; gap: 0.9rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }",
         ".card { border: 1px solid #dbe4ee; border-radius: 14px; background: white; padding: 1rem 1.1rem; margin-top: 1rem; }",
         ".card h2 { font-size: 1.1rem; margin-bottom: 0.85rem; }",
+        ".demo-proof { border-color: #99f6e4; background: #f0fdfa; }",
+        ".demo-proof-head { display: grid; gap: 0.75rem; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }",
+        ".demo-proof-status { display: inline-flex; align-items: center; border-radius: 999px; padding: 0.28rem 0.65rem; font-weight: 800; border: 1px solid #99f6e4; background: white; color: #0f766e; }",
+        ".demo-proof-status.partial, .demo-proof-status.missing { border-color: #fbbf24; color: #92400e; }",
+        ".demo-proof-status.missing { border-color: #fca5a5; color: #991b1b; }",
+        ".demo-primary { margin-top: 1rem; }",
+        ".demo-primary video, .demo-primary img { width: 100%; max-height: 520px; object-fit: contain; border-radius: 10px; border: 1px solid #cbd5e1; background: #0f172a; }",
         ".meta-label { display: block; font-size: 0.8rem; color: #475569; text-transform: uppercase; letter-spacing: 0.04em; }",
         ".meta-value { font-weight: 700; font-size: 1.05rem; }",
         ".badge { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 999px; font-size: 0.78rem; font-weight: 700; }",
@@ -2081,7 +2730,7 @@ def _render_pow_html(report: dict[str, Any]) -> str:
             f"<div><span class='meta-label'>Duration</span><span class='meta-value'>{esc(report['duration_human'])}</span></div>",
             f"<div><span class='meta-label'>Generated</span><span class='meta-value'>{esc(report['generated_local'])}</span></div>",
             f"<div><span class='meta-label'>Certifier Mode</span><span class='meta-value'>{esc(report['certifier_mode'])}</span></div>",
-            f"<div><span class='meta-label'>Cost</span><span class='meta-value'>{esc(report['cost_summary']['display'])}</span></div>",
+            f"<div><span class='meta-label'>Spend</span><span class='meta-value'>{esc(report['cost_summary']['display'])}</span></div>",
             "</div>",
             "<div class='hero-actions'>",
         ]
@@ -2095,6 +2744,59 @@ def _render_pow_html(report: dict[str, Any]) -> str:
         [
             "</div>",
             "</section>",
+        ]
+    )
+
+    demo = dict(report.get("demo_evidence") or {})
+    if demo:
+        status = str(demo.get("demo_status") or "unknown").strip().lower()
+        primary = demo.get("primary_demo") if isinstance(demo.get("primary_demo"), dict) else None
+        html_lines.extend(
+            [
+                "<section class='card demo-proof'>",
+                "<div class='demo-proof-head'>",
+                "<div>",
+                "<h2>Demo Proof</h2>",
+                f"<div>{esc(demo.get('demo_reason') or 'No demo proof note was recorded.')}</div>",
+                "</div>",
+                f"<span class='demo-proof-status {esc(status)}'>{esc(_demo_status_label(status))} · {esc(_demo_kind_label(demo.get('app_kind')))}</span>",
+                "</div>",
+            ]
+        )
+        if primary and primary.get("href"):
+            href = esc(primary.get("href") or "")
+            name = esc(primary.get("name") or "primary demo")
+            kind = str(primary.get("kind") or "").lower()
+            html_lines.extend(["<div class='demo-primary'>", f"<a href='{href}'>{name}</a>"])
+            if kind == "video" or name.lower().endswith((".webm", ".mp4", ".mov", ".m4v")):
+                mime = "video/mp4" if name.lower().endswith((".mp4", ".m4v")) else "video/webm"
+                html_lines.append(f"<video controls><source src='{href}' type='{mime}'></video>")
+            elif kind == "image" or name.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+                html_lines.append(f"<img src='{href}' alt='{name}'>")
+            html_lines.append("</div>")
+        story_demos = [row for row in demo.get("stories", []) or [] if isinstance(row, dict)]
+        if story_demos:
+            html_lines.extend(
+                [
+                    "<table class='table'>",
+                    "<thead><tr><th>Story</th><th>Proof</th><th>File validation</th><th>Text evidence</th></tr></thead>",
+                    "<tbody>",
+                ]
+            )
+            for row in story_demos:
+                html_lines.append(
+                    "<tr>"
+                    f"<td>{esc(row.get('title') or row.get('id') or '')}</td>"
+                    f"<td>{esc(row.get('proof_level') or 'not recorded')}</td>"
+                    f"<td>{'yes' if row.get('has_file_validation') else 'no'}</td>"
+                    f"<td>{'yes' if row.get('has_text_evidence') else 'no'}</td>"
+                    "</tr>"
+                )
+            html_lines.extend(["</tbody>", "</table>"])
+        html_lines.append("</section>")
+
+    html_lines.extend(
+        [
             "<section class='card'>",
             "<h2>Story Summary</h2>",
             "<table class='table'>",
@@ -2123,6 +2825,30 @@ def _render_pow_html(report: dict[str, Any]) -> str:
                 "</section>",
             ]
         )
+
+    proof_rows = list(report.get("proof_coverage") or [])
+    if proof_rows:
+        html_lines.extend(
+            [
+                "<section class='card'>",
+                "<h2>Intent Proof Matrix</h2>",
+                "<table class='table'>",
+                "<thead><tr><th>Story</th><th>Status</th><th>Methodology</th><th>Visual proof</th><th>Text evidence</th></tr></thead>",
+                "<tbody>",
+            ]
+        )
+        for row in proof_rows:
+            status = esc(row.get("status") or "")
+            html_lines.append(
+                "<tr>"
+                f"<td>{esc(row.get('story_id') or '')}</td>"
+                f"<td>{status}</td>"
+                f"<td>{esc(row.get('methodology') or row.get('surface') or 'not specified')}</td>"
+                f"<td>{esc(row.get('visual_status') or 'none')}</td>"
+                f"<td>{'yes' if row.get('text_evidence') else 'no'}</td>"
+                "</tr>"
+            )
+        html_lines.extend(["</tbody>", "</table>", "</section>"])
 
     if report.get("diagnosis"):
         html_lines.extend(
@@ -2167,28 +2893,12 @@ def _render_pow_html(report: dict[str, Any]) -> str:
                     ]
                 )
                 for item in bucket["items"]:
-                    caption = f" — {item['caption']}" if item.get("caption") else ""
-                    html_lines.extend(
-                        [
-                            "<div class='visual-item'>",
-                            f"<a href='{esc(item['href'])}'>{esc(item['name'])}</a>{esc(caption)}",
-                            f"<img src='{esc(item['href'])}' alt='{esc(item['name'])}'>",
-                            "</div>",
-                        ]
-                    )
+                    html_lines.extend(render_visual_item(item))
                 html_lines.extend(["</div>", "</div>"])
             if visual["unassigned"]:
                 html_lines.extend(["<div class='visual-group'>", "<h3>Unassigned</h3>", "<div class='visual-grid'>"])
                 for item in visual["unassigned"]:
-                    caption = f" — {item['caption']}" if item.get("caption") else ""
-                    html_lines.extend(
-                        [
-                            "<div class='visual-item'>",
-                            f"<a href='{esc(item['href'])}'>{esc(item['name'])}</a>{esc(caption)}",
-                            f"<img src='{esc(item['href'])}' alt='{esc(item['name'])}'>",
-                            "</div>",
-                        ]
-                    )
+                    html_lines.extend(render_visual_item(item))
                 html_lines.extend(["</div>", "</div>"])
         else:
             html_lines.append(f"<div class='note'>Visual evidence: {esc(visual['absence_reason'])}</div>")
@@ -2310,7 +3020,7 @@ def _render_pow_html(report: dict[str, Any]) -> str:
         )
     if run_context["duration_human"]:
         html_lines.append(f"<div><span class='meta-label'>Duration</span><div>{esc(run_context['duration_human'])}</div></div>")
-    html_lines.append("<div><span class='meta-label'>Cost</span>" + "".join(f"<div>{esc(line)}</div>" for line in report["cost_summary"]["lines"]) + "</div>")
+    html_lines.append("<div><span class='meta-label'>Spend</span>" + "".join(f"<div>{esc(line)}</div>" for line in report["cost_summary"]["lines"]) + "</div>")
     html_lines.extend(["</div>"])
     if report["show_round_timeline"]:
         open_attr = " open"
@@ -2568,6 +3278,7 @@ async def run_agentic_certifier(
         )
         publisher.__enter__()
 
+    baseline_listening_pids = _listening_process_pids()
     try:
         prompt = _render_certifier_prompt(
             mode=mode,
@@ -2678,6 +3389,12 @@ async def run_agentic_certifier(
                 metric_met=parsed.metric_met,
                 round_timings=breakdown.get("round_timings", []),
             )
+            evidence_gate = pow_data.get("evidence_gate") if isinstance(pow_data, dict) else None
+            if passed and isinstance(evidence_gate, dict) and evidence_gate.get("blocks_pass"):
+                passed = False
+                outcome = CertificationOutcome.FAILED
+                report.outcome = outcome
+                report.diagnosis = _append_demo_evidence_gate_diagnosis(report.diagnosis, evidence_gate)
             _write_pow_report(report_dir, pow_data)
         except Exception as exc:
             logger.warning("Failed to write PoW report: %s", exc)
@@ -2794,5 +3511,18 @@ async def run_agentic_certifier(
 
         return report
     finally:
+        cleaned_servers = _cleanup_certifier_background_servers(
+            project_dir,
+            baseline_listening_pids,
+        )
+        if cleaned_servers:
+            logger.warning(
+                "Cleaned up %d project dev server(s) left running after certification: %s",
+                len(cleaned_servers),
+                ", ".join(
+                    f"pid={item['pid']} cwd={item.get('cwd') or '?'}"
+                    for item in cleaned_servers
+                ),
+            )
         if publisher is not None:
             publisher.stop()
