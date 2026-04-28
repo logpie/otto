@@ -115,6 +115,23 @@ def _state_with_watcher_running() -> dict[str, Any]:
     }
 
 
+def _state_with_dead_watcher_reported_running() -> dict[str, Any]:
+    """State from a stale supervisor record: health says running, process is gone."""
+
+    payload = _state_with_watcher_running()
+    payload["watcher"]["alive"] = False
+    payload["watcher"]["watcher"] = {"pid": 12345, "started_at": "2026-04-23T10:00:00Z"}
+    payload["watcher"]["health"]["watcher_process_alive"] = False
+    payload["watcher"]["health"]["lock_process_alive"] = False
+    payload["watcher"]["health"]["heartbeat_age_s"] = 45
+    payload["watcher"]["health"]["next_action"] = "Watcher process is missing; inspect Health."
+    payload["runtime"]["supervisor"]["can_start"] = False
+    payload["runtime"]["supervisor"]["can_stop"] = False
+    payload["runtime"]["supervisor"]["matches_blocking_pid"] = False
+    payload["runtime"]["supervisor"]["stop_target_pid"] = None
+    return payload
+
+
 def _projects_payload() -> dict[str, Any]:
     return {
         "launcher_enabled": False,
@@ -182,3 +199,27 @@ def test_running_queue_control_uses_queue_language(
     assert "watcher" not in title.lower()
     assert "Git clean" in git_text
     assert "Git working tree is clean" in git_title
+
+
+def test_dead_watcher_is_surfaced_as_stale_not_running(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """If health says running but the process is dead, the topbar and focus state must say stale."""
+
+    _install_route(page, "**/api/projects", _projects_payload())
+    _install_route(page, "**/api/state*", _state_with_dead_watcher_reported_running())
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    assert page.locator('[data-testid="stop-watcher-button"]').count() == 0
+    button = page.get_by_test_id("start-watcher-button")
+    button.wait_for(state="visible", timeout=10_000)
+    text = button.text_content() or ""
+    title = button.get_attribute("title") or ""
+    aria = button.get_attribute("aria-label") or ""
+
+    assert "stale" in text.lower(), f"expected stale label; got {text!r}"
+    assert "stale" in title.lower(), f"expected stale title; got {title!r}"
+    assert "stale" in aria.lower(), f"expected stale aria label; got {aria!r}"

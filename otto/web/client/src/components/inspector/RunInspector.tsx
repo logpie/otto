@@ -646,6 +646,7 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
                 key={m}
                 id={`run-inspector-tab-${m}`}
                 data-tab-id={m}
+                data-testid={`run-inspector-tab-${m}`}
                 className={`tab ${isSelected ? "active" : ""}`}
                 type="button"
                 role="tab"

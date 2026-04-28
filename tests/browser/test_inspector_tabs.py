@@ -4,7 +4,7 @@ Bug W1-CRITICAL-1 (mc-audit live findings, 2026-04-26):
 
     Opening the inspector and switching to the Logs tab leaves a `<pre
     data-testid="run-log-pane">` covering the heading-row tab buttons
-    (Review / Code changes / Logs / Artifacts). Playwright reports the
+    (Proof / Code changes / Logs / Artifacts). Playwright reports the
     `<pre>` "intercepts pointer events" — the user can never leave the
     Logs tab once entered.
 
@@ -38,7 +38,7 @@ CLICK_TIMEOUT_MS = 2_000
 
 # --------------------------------------------------------------------------- #
 # Fixtures — minimum payloads to make the inspector mount with all four tabs
-# selectable (Review/Code changes/Logs/Artifacts).
+# selectable (Proof/Code changes/Logs/Artifacts).
 # --------------------------------------------------------------------------- #
 
 
@@ -418,6 +418,13 @@ def test_inspector_tab_buttons_are_clickable_from_logs(
     # for tab-button lookups so we don't accidentally hit row-level tabs.
     tablist = page.locator(".run-inspector .detail-tabs[role='tablist']")
     tablist.wait_for(state="visible", timeout=2_000)
+    for test_id in [
+        "run-inspector-tab-proof",
+        "run-inspector-tab-diff",
+        "run-inspector-tab-logs",
+        "run-inspector-tab-artifacts",
+    ]:
+        page.get_by_test_id(test_id).wait_for(state="visible", timeout=2_000)
 
     # Clicking Code changes from Logs is the exact failure mode in W1.
     # If the <pre> intercepts the click we time out at 2s instead of 30s.
@@ -428,8 +435,8 @@ def test_inspector_tab_buttons_are_clickable_from_logs(
     tablist.get_by_role("tab", name="Logs").click(timeout=CLICK_TIMEOUT_MS)
     page.get_by_test_id("run-log-pane").wait_for(state="visible", timeout=2_000)
 
-    # Review tab.
-    tablist.get_by_role("tab", name="Review").click(timeout=CLICK_TIMEOUT_MS)
+    # Proof tab.
+    tablist.get_by_role("tab", name="Proof").click(timeout=CLICK_TIMEOUT_MS)
     page.get_by_test_id("proof-pane").wait_for(state="visible", timeout=2_000)
 
     # Back to Logs again so the <pre> is the *current* element on screen

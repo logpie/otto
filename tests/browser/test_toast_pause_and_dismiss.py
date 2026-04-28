@@ -290,3 +290,26 @@ def test_toast_close_button_dismisses_immediately(
         "() => !document.querySelector('#toast')",
         timeout=1_500,
     )
+
+
+def test_toast_does_not_cover_topbar_actions(mc_backend: Any, page: Any) -> None:
+    """Transient errors must not block project, queue-runner, or New job controls."""
+
+    _install_projects_route(page)
+    _install_state_with_queued(page)
+    _install_watcher_start_failure(page)
+
+    _hydrate(mc_backend, page)
+    _summon_error_toast(page)
+
+    toast_box = page.locator("#toast").bounding_box()
+    actions_box = page.locator(".topbar-actions").bounding_box()
+    assert toast_box is not None and actions_box is not None
+
+    overlaps = not (
+        toast_box["x"] + toast_box["width"] <= actions_box["x"]
+        or actions_box["x"] + actions_box["width"] <= toast_box["x"]
+        or toast_box["y"] + toast_box["height"] <= actions_box["y"]
+        or actions_box["y"] + actions_box["height"] <= toast_box["y"]
+    )
+    assert not overlaps, f"toast must not overlap topbar actions; toast={toast_box!r}, actions={actions_box!r}"

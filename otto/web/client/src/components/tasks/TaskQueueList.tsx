@@ -48,6 +48,7 @@ export function TaskQueueList({
   const totalLabel = items.length === 1 ? "1 task" : `${items.length} tasks`;
   const target = data?.landing.target || "main";
   const queuedCount = Number(data?.watcher.counts.queued || 0);
+  const historyCount = Number(data?.history.total_rows || 0);
   return (
     <section className="queue-list" data-testid="task-board" aria-labelledby="taskBoardHeading">
       <header className="queue-list-head">
@@ -108,15 +109,19 @@ export function TaskQueueList({
           )}
           {emptyReason === "true-empty" && (
             <div className="queue-list-empty-hero">
-              <strong>No work queued</strong>
-              <p>Describe what you want Otto to build, certify, or improve.</p>
+              <strong>{historyCount > 0 ? "No active tasks" : "No work queued"}</strong>
+              <p>
+                {historyCount > 0
+                  ? `${historyCount} past ${historyCount === 1 ? "run is" : "runs are"} available in Health > Run History.`
+                  : "Describe what you want Otto to build, certify, or improve."}
+              </p>
               {onNewJob && (
                 <button
                   type="button"
                   className="primary"
                   data-testid="task-board-empty-queue-job"
                   onClick={onNewJob}
-                >Queue your first job</button>
+                >{historyCount > 0 ? "Queue new job" : "Queue your first job"}</button>
               )}
             </div>
           )}

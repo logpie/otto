@@ -5315,18 +5315,20 @@ tbody tr.selected {
 }
 
 #toast {
-  /* Top-right: avoids overlapping the Review Packet bottom action row that
-     lives at the bottom-right of the workspace. mc-audit redesign §6 D5. */
+  /* Bottom-left keeps transient feedback away from the top-right primary
+     controls (project switch, queue runner, New job). */
   position: fixed;
-  right: 18px;
-  top: 18px;
+  left: 18px;
+  right: auto;
+  bottom: 18px;
+  top: auto;
   max-width: min(420px, calc(100vw - 36px));
   padding: 10px 12px;
   border-radius: 8px;
   background: #111827;
   color: white;
   opacity: 0;
-  transform: translateY(-8px);
+  transform: translateY(8px);
   transition: opacity 0.16s ease, transform 0.16s ease;
   display: flex;
   align-items: flex-start;

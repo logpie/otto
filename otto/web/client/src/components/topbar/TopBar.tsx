@@ -1,4 +1,4 @@
-import {canStartWatcher, canStopWatcher, startWatcherTooltip} from "../../utils/missionControl";
+import {canStartWatcher, canStopWatcher, effectiveWatcherState, startWatcherTooltip} from "../../utils/missionControl";
 import {BrandMark} from "../BrandMark";
 import {Spinner} from "../Spinner";
 import type {PillTone} from "../Pill";
@@ -21,7 +21,7 @@ export function TopBar({
   onStartWatcher: () => void;
   onStopWatcher: () => void;
 }) {
-  const watcherState = watcher?.health.state || "stopped";
+  const watcherState = effectiveWatcherState(watcher);
   const watcherTone: PillTone = watcherState === "running" ? "success" : watcherState === "stale" ? "warning" : "neutral";
   const startable = watcherState !== "running" && canStartWatcher(data);
   const heartbeat = watcher?.health.heartbeat_age_s;
@@ -73,7 +73,13 @@ export function TopBar({
           data-testid={watcherState === "running" ? "stop-watcher-button" : "start-watcher-button"}
           disabled={watcherPending || (watcherState === "running" ? !canStopWatcher(data) : !canStartWatcher(data))}
           aria-busy={watcherPending}
-          aria-label={watcherState === "running" ? "Queue runner is running. Click to pause queue processing." : watcherActionLabel}
+          aria-label={
+            watcherState === "running"
+              ? "Queue runner is running. Click to pause queue processing."
+              : watcherState === "stale"
+              ? "Queue runner appears stale. Check Health or recover the runner."
+              : watcherActionLabel
+          }
           title={
             watcherPending
               ? watcherActionLabel

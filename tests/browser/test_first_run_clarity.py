@@ -399,6 +399,38 @@ def test_job_dialog_shows_pre_submit_summary(mc_backend: Any, page: Any, disable
     assert edit.is_visible()
 
 
+def test_job_dialog_focuses_intent_and_inerts_background(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """Opening JobDialog should focus the intent field and isolate the page behind it."""
+
+    payload = _state_idle_first_run()
+    _install_projects_route(page)
+    _install_state_route(page, payload)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    page.get_by_test_id("new-job-button").click()
+    page.get_by_test_id("job-dialog-summary").wait_for(state="visible", timeout=2_000)
+    page.wait_for_function(
+        "() => document.activeElement?.getAttribute('data-testid') === 'job-dialog-intent'",
+        timeout=2_000,
+    )
+
+    state = page.evaluate(
+        """() => ({
+            topbarInert: document.querySelector('.topbar')?.hasAttribute('inert') === true,
+            mainInert: document.querySelector('.main-shell-content')?.hasAttribute('inert') === true,
+            closeFocused: document.activeElement?.getAttribute('data-testid') === 'job-dialog-close-button',
+        })"""
+    )
+    assert state["topbarInert"], f"topbar must be inert while JobDialog is open; got {state!r}"
+    assert state["mainInert"], f"main shell must be inert while JobDialog is open; got {state!r}"
+    assert not state["closeFocused"], f"initial focus should not land on Close; got {state!r}"
+
+
 def test_job_dialog_summary_updates_on_advanced_change(mc_backend: Any, page: Any, disable_animations: Any) -> None:
     """Changing the Advanced effort dropdown updates the summary line live."""
 
@@ -520,6 +552,28 @@ def test_first_run_cta_reverts_after_first_run(mc_backend: Any, page: Any, disab
     cta.wait_for(state="visible", timeout=5_000)
     text = (cta.text_content() or "").strip()
     assert text == "New job", f"expected 'New job' once history has runs; got {text!r}"
+
+
+def test_empty_task_board_with_history_mentions_history_not_first_run(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """A project with past runs but no active tasks should not look like a brand-new project."""
+
+    payload = _state_with_one_history_run()
+    _install_projects_route(page)
+    _install_state_route(page, payload)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    empty = page.get_by_test_id("task-board-empty")
+    empty.wait_for(state="visible", timeout=5_000)
+    text = empty.text_content() or ""
+    assert "No active tasks" in text, f"expected active-task empty state; got {text!r}"
+    assert "Health > Run History" in text, f"expected pointer to history; got {text!r}"
+    assert "Queue your first job" not in text, f"history project must not show first-run copy; got {text!r}"
+    assert (page.get_by_test_id("task-board-empty-queue-job").text_content() or "").strip() == "Queue new job"
 
 
 # --------------------------------------------------------------------------- #

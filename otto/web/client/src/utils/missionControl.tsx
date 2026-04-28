@@ -227,6 +227,7 @@ export function missionFocus(data: StateResponse | null): {
   const queued = data.watcher.counts.queued || 0;
   const commandBacklog = Number(data.runtime.command_backlog.pending || 0) + Number(data.runtime.command_backlog.processing || 0);
   const target = data.landing.target || "main";
+  const watcherState = effectiveWatcherState(data.watcher);
   if (mergeRecoveryNeeded(data.landing)) {
     return {
       kicker: "Landing",
@@ -240,7 +241,20 @@ export function missionFocus(data: StateResponse | null): {
       firstRun: false,
     };
   }
-  if (commandBacklog && data.watcher.health.state !== "running") {
+  if (watcherState === "stale") {
+    return {
+      kicker: "Queue",
+      title: "Queue runner needs recovery",
+      body: "The runner heartbeat is stale or its process is gone. Check Health before starting more queued work.",
+      tone: "warning",
+      primary: "diagnostics",
+      working,
+      needsAction,
+      ready,
+      firstRun: false,
+    };
+  }
+  if (commandBacklog && watcherState !== "running") {
     return {
       kicker: "Commands",
       title: `${commandBacklog} command${commandBacklog === 1 ? "" : "s"} waiting`,
@@ -306,7 +320,7 @@ export function missionFocus(data: StateResponse | null): {
       firstRun: false,
     };
   }
-  if (queued && data.watcher.health.state !== "running") {
+  if (queued && watcherState !== "running") {
     return {
       kicker: "Queue",
       title: `${queued} queued task${queued === 1 ? "" : "s"} waiting`,
@@ -693,6 +707,9 @@ export function taskBoardSubtitle(data: StateResponse | null, filters: Filters =
       const all = taskBoardColumns(data).reduce((sum, column) => sum + column.items.length, 0);
       if (all > 0) return `No tasks match the active filters (${all} hidden).`;
     }
+    if (Number(data.history?.total_rows || 0) > 0) {
+      return "No active or landable tasks.";
+    }
     return "No work queued.";
   }
   const target = data.landing.target || "main";
@@ -809,8 +826,9 @@ export function canStartWatcher(data?: StateResponse | null): boolean {
 export function startWatcherTooltip(data?: StateResponse | null): string {
   const blocked = data?.runtime.supervisor.start_blocked_reason || "";
   if (blocked) return blocked;
-  if (data?.watcher.health.state === "running") return "Queue runner already running.";
-  if (data?.watcher.health.state === "stale") return "Stop the stale queue runner before starting another one.";
+  const state = effectiveWatcherState(data?.watcher);
+  if (state === "running") return "Queue runner already running.";
+  if (state === "stale") return "Queue runner appears stale. Stop or recover it before starting another one.";
   // Falls back to the shared next_action only when the action is actually
   // about starting (state is "stopped" or unknown).
   return data?.watcher.health.next_action || "";
@@ -824,10 +842,12 @@ export function watcherControlHint(data?: StateResponse | null): string {
   if (!data) return "Loading watcher controls.";
   const queued = Number(data.watcher.counts.queued || 0);
   const backlog = Number(data.runtime.command_backlog.pending || 0) + Number(data.runtime.command_backlog.processing || 0);
+  const state = effectiveWatcherState(data.watcher);
   if (canStartWatcher(data)) {
     const work = [queued ? `${queued} queued` : "", backlog ? `${backlog} command${backlog === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ");
     return `Start queue runner to process ${work}.`;
   }
+  if (state === "stale") return "Queue runner appears stale; use Health or the queue control to recover.";
   if (canStopWatcher(data)) return "Queue runner is active. Stop to pause the queue.";
   if (data.runtime.supervisor.start_blocked_reason) return `Start unavailable: ${data.runtime.supervisor.start_blocked_reason}`;
   if (!queued && !backlog) return "Queue a job to start.";
@@ -837,18 +857,25 @@ export function watcherControlHint(data?: StateResponse | null): string {
 export function watcherSummary(watcher?: WatcherInfo): string {
   const health = watcher?.health;
   if (!health) return "stopped";
-  // mc-audit redesign §5 W5.3: when the backend still reports "running" but
-  // the heartbeat hasn't ticked in >15s, the supervisor process may have
-  // crashed silently. Auto-flip the user-facing label to "stale" so the
-  // sidebar can't lie. Backend "stale" already works; this guard catches
-  // the gap between liveness and the next snapshot. */
-  const stale = health.heartbeat_age_s !== null && health.heartbeat_age_s !== undefined && health.heartbeat_age_s > 15;
-  if (health.state === "running" && stale) {
+  const state = effectiveWatcherState(watcher);
+  if (state === "stale") {
     return `stale pid ${health.blocking_pid || "-"} (${Math.round(health.heartbeat_age_s || 0)}s)`;
   }
-  if (health.state === "running") return `running pid ${health.blocking_pid || "-"}`;
-  if (health.state === "stale") return `stale pid ${health.blocking_pid || "-"}`;
+  if (state === "running") return `running pid ${health.blocking_pid || "-"}`;
   return "stopped";
+}
+
+export function effectiveWatcherState(watcher?: WatcherInfo | null): string {
+  const health = watcher?.health;
+  if (!health) return "stopped";
+  const state = health.state || "stopped";
+  const staleHeartbeat = health.heartbeat_age_s !== null
+    && health.heartbeat_age_s !== undefined
+    && health.heartbeat_age_s > 15;
+  if (state === "running" && (health.watcher_process_alive === false || staleHeartbeat)) {
+    return "stale";
+  }
+  return state;
 }
 
 export function commandBacklogLine(command: CommandBacklogItem): string {
@@ -905,8 +932,8 @@ export function workflowHealth(data: StateResponse | null): {
     ? "dirty"
     : "clean";
   const repositoryTone = data?.landing.merge_blocked ? "danger" : data?.project.dirty ? "warning" : "neutral";
-  const watcherLabel = data?.watcher.health.state || "stopped";
-  const watcherTone = data?.watcher.health.state === "running" ? "success" : ready || active || data?.watcher.health.state === "stale" ? "warning" : "neutral";
+  const watcherLabel = effectiveWatcherState(data?.watcher);
+  const watcherTone = watcherLabel === "running" ? "success" : ready || active || watcherLabel === "stale" ? "warning" : "neutral";
   const runtimeIssues = data?.runtime.issues.length || 0;
   const runtimeHasError = Boolean(data?.runtime.issues.some((issue) => issue.severity === "error"));
   const runtimeLabel = runtimeIssues ? `${runtimeIssues} issue${runtimeIssues === 1 ? "" : "s"}` : "healthy";

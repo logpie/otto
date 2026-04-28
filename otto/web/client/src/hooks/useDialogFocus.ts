@@ -18,8 +18,9 @@ export function useDialogFocus<T extends HTMLElement>(onCancel: () => void, disa
     if (!dialog) return;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     window.setTimeout(() => {
+      const explicitTarget = dialog.querySelector<HTMLElement>("[data-dialog-initial-focus], [autofocus]");
       const selectedTab = dialog.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]:not([disabled])');
-      const target = selectedTab || focusableDialogElements(dialog)[0] || dialog;
+      const target = explicitTarget || selectedTab || focusableDialogElements(dialog)[0] || dialog;
       target.focus();
     }, 0);
 

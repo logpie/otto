@@ -401,6 +401,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
             <textarea
               value={intent}
               data-testid="job-dialog-intent"
+              data-dialog-initial-focus="true"
               rows={4}
               autoFocus
               placeholder={intentPlaceholderMap[command]}
