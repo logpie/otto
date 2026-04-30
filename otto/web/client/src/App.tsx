@@ -190,6 +190,7 @@ export function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const watcherInFlight = useInFlight();
   const autopilotInFlight = useInFlight();
+  const fullAutopilotTickRef = useRef<{key: string; at: number} | null>(null);
   const refreshInFlight = useInFlight();
   const mergeAllInFlight = useInFlight();
   const selectedRunIdRef = useRef<string | null>(initialRoute.selectedRunId);
@@ -577,6 +578,40 @@ export function App() {
   }, [crossTab.publish]);
 
   useMissionStatePolling(refresh, data, stateFailureStreak >= CONNECTION_LOST_THRESHOLD);
+
+  useEffect(() => {
+    const autopilot = data?.autopilot;
+    if (!autopilot || autopilot.mode !== "full") return;
+    if (autopilotInFlight.pending) return;
+    if (stateFailureStreak >= CONNECTION_LOST_THRESHOLD) return;
+    const running = (autopilot.pending_decisions || []).some((decision) => decision.status === "running");
+    if (running) return;
+    const pendingIds = (autopilot.pending_decisions || [])
+      .filter((decision) => decision.status === "pending")
+      .map((decision) => decision.id);
+    const incidentIds = (autopilot.incidents || []).map((incident) => incident.id);
+    if (!pendingIds.length && !incidentIds.length) return;
+    const key = [...pendingIds, ...incidentIds].sort().join("|");
+    const now = Date.now();
+    const last = fullAutopilotTickRef.current;
+    if (last?.key === key && now - last.at < 10_000) return;
+    fullAutopilotTickRef.current = {key, at: now};
+    void autopilotInFlight.run(async () => {
+      try {
+        const result = await api<{ok: boolean; message?: string | null; refresh?: boolean}>("/api/autopilot/tick", {
+          method: "POST",
+          body: "{}",
+        });
+        if (result.ok === false) {
+          showToast(result.message || "Autopilot recovery failed", "error");
+        }
+        crossTabPublishRef.current?.("autopilot.action");
+        if (result.refresh !== false) await refreshRef.current?.(false);
+      } catch (error) {
+        showToast(`Autopilot recovery failed: ${errorMessage(error)}`, "error");
+      }
+    });
+  }, [data?.autopilot, autopilotInFlight, stateFailureStreak, showToast]);
 
   // Heavy-user paper-cut #3: browser Notification when a long run finishes
   // while the tab is hidden. We track the previous live-run set; any run
@@ -1571,26 +1606,34 @@ export function App() {
           so the inert flag on main-shell-content doesn't propagate down into
           the inspector. mc-audit a11y A11Y-01, A11Y-02. */}
       {inspectorOpen && detail && (
-        <RunInspector
-          detail={detail}
-          mode={inspectorMode}
-          logState={logState}
-          selectedArtifactIndex={selectedArtifactIndex}
-          artifactContent={artifactContent}
-          diffContent={diffContent}
-          onShowLogs={showLogs}
-          onShowTryProduct={showTryProduct}
-          onShowProof={showProof}
-          onShowDiff={showDiff}
-          onShowArtifacts={showArtifacts}
-          onLoadArtifact={(index) => void loadArtifact(index)}
-          onRefreshDiff={() => void loadDiff()}
-          onBackToArtifacts={() => {
-            setSelectedArtifactIndex(null);
-            setArtifactContent(null);
-          }}
-          onClose={() => setInspectorOpen(false)}
-        />
+        <>
+          <div
+            className="run-inspector-backdrop"
+            data-testid="run-inspector-backdrop"
+            aria-hidden="true"
+            onPointerDown={() => setInspectorOpen(false)}
+          />
+          <RunInspector
+            detail={detail}
+            mode={inspectorMode}
+            logState={logState}
+            selectedArtifactIndex={selectedArtifactIndex}
+            artifactContent={artifactContent}
+            diffContent={diffContent}
+            onShowLogs={showLogs}
+            onShowTryProduct={showTryProduct}
+            onShowProof={showProof}
+            onShowDiff={showDiff}
+            onShowArtifacts={showArtifacts}
+            onLoadArtifact={(index) => void loadArtifact(index)}
+            onRefreshDiff={() => void loadDiff()}
+            onBackToArtifacts={() => {
+              setSelectedArtifactIndex(null);
+              setArtifactContent(null);
+            }}
+            onClose={() => setInspectorOpen(false)}
+          />
+        </>
       )}
 
       {jobOpen && (

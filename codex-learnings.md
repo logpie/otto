@@ -37,6 +37,16 @@ evidence, or token accounting.
   video actually demonstrate the build intent, including non-happy paths or
   downloaded/exported artifacts where relevant, instead of a generic
   walkthrough?
+- Do not confuse standalone diagnostics with Otto dogfood. Otto's core product
+  mechanism is: queue a real user task in Mission Control, start/observe the
+  queue runner, let Otto run build -> certify -> fix or proof-repair -> review
+  packet -> land. `otto certify` is useful for debugging the certifier, but it
+  does not prove the autonomous build-cert-fix loop works.
+- For proof-gate failures, remember the product semantics: if all product
+  stories pass but demo proof is incomplete, the loop should re-enter
+  certification/proof collection with a focused proof-repair instruction. It
+  should not dispatch a code-fix agent, and it must not mark the run green
+  merely because every `story_result.passed` is true.
 
 ## Web Build And Test Order
 

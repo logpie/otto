@@ -33,3 +33,5 @@ class CertificationReport:
     subagent_errors: list[dict[str, Any]] = field(default_factory=list)
     run_id: str = ""
     token_usage: dict[str, int] = field(default_factory=dict)
+    evidence_gate: dict[str, Any] = field(default_factory=dict)
+    demo_evidence: dict[str, Any] = field(default_factory=dict)

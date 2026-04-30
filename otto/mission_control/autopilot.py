@@ -1127,7 +1127,7 @@ def _landing_attention_title(*, status: str, action: str) -> str:
             return "Requeue cancelled task"
         return "Requeue failed task"
     if action == "pilot_triage":
-        return "Ask Pilot to inspect task"
+        return "Diagnose task"
     return "Task needs review"
 
 
@@ -1138,7 +1138,7 @@ def _landing_attention_detail(item: dict[str, Any], *, status: str, action: str)
         state = status or "blocked"
         return f"{summary} was {state} before producing code changes. Requeue it to get a fresh run."
     if action == "pilot_triage":
-        return f"{summary} needs diagnosis before Otto can pick a recovery action."
+        return f"{summary} needs a quick diagnosis before Otto chooses the recovery action."
     return f"{summary} needs manual review before Otto can continue."
 
 
@@ -1354,7 +1354,7 @@ def _action_label(action: str) -> str:
         "merge_all": "Land ready work",
         "rerun_merge_verification": "Rerun merge verification",
         "resolve_release": "Resolve release issues",
-        "pilot_triage": "Ask Pilot to recover",
+        "pilot_triage": "Diagnose issue",
         "requeue": "Requeue task",
         "human_required": "Needs human review",
         "noop": "No action",

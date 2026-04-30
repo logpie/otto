@@ -92,6 +92,13 @@ for real users by testing it thoroughly.
    intent works. This is certification evidence, not a polished product demo.
    It is not a generic homepage tour. The recording/screenshots must cover the
    same core stories you are certifying.
+   Save visual artifacts ONLY under this exact evidence directory:
+   `{evidence_dir}`. Do not shorten it, reconstruct it, or use
+   `otto_logs/sessions/certify/evidence`. Before the final verdict, list this
+   exact directory and only claim screenshots/clips that actually exist there.
+   Do not emit `VERDICT: PASS` for web UI certification unless that listing
+   shows at least one `.webm` recording and story-specific screenshots/clips
+   for every browser/UI story.
 
    Preferred pattern:
      agent-browser --session visual open http://localhost:PORT
@@ -104,12 +111,25 @@ for real users by testing it thoroughly.
      agent-browser --session visual record stop
      agent-browser --session visual close
 
+   For standard/thorough web UI certification, at least one `.webm` browser
+   recording is required in addition to story-specific screenshots/clips. If
+   you cannot record video for a web UI story set, mark the relevant UI stories
+   `WARN` or `FAIL` and make the final `VERDICT: FAIL`.
+
    If one story needs a separate clip, save it as
    `{evidence_dir}/<story_id>.webm`. Name screenshots and clips after the
    `story_id` whenever possible so the proof report can attach evidence to
    each story. A file named only `recording.webm` is treated as contextual
    walkthrough evidence; it is not story-mapped video proof unless the report
    also includes story-specific screenshots or clips.
+   In standard/thorough mode, every `PASS` story whose surface is page, DOM,
+   dashboard, form, button, modal, browser navigation, or web download must
+   have story-specific visual proof named after that story. A generic
+   `recording.webm` can provide context, but it cannot carry a `PASS` for a
+   UI story by itself. If a core web UI story lacks story-specific visual
+   proof, mark it `FAIL` or `WARN` and make the final verdict `FAIL`.
+   This includes navigation and responsive-design stories; save at least one
+   `navigation...png` or `<story_id>.png` screenshot showing the checked state.
 
    Keep visual proof efficient: start recording after setup/auth when possible,
    stop as soon as the evidence is decisive, avoid long idle footage, and keep
@@ -201,7 +221,9 @@ When you fall back to scripted Playwright:
 1. State the required capability in one sentence in your `STORY_RESULT` evidence.
 2. Save the script to `evidence/<story_id>-test.mjs` so an auditor can read it.
 3. Use real event primitives (`page.click`, `page.fill`, `page.press`, `page.dragAndDrop`) — not `page.evaluate(() => ...)` bypasses.
-4. Label methodology honestly: `live-ui-events` only for real event primitives; use `javascript-eval` if you injected state or invoked app code.
+4. For web UI certification, configure Playwright video recording and save or
+   move the resulting `.webm` into the exact `{evidence_dir}`.
+5. Label methodology honestly: `live-ui-events` only for real event primitives; use `javascript-eval` if you injected state or invoked app code.
 
 Default to `agent-browser` for routine certification; it is cheaper, more auditable, and sufficient for most web-app testing.
 
@@ -261,6 +283,9 @@ For EACH story, include the key evidence:
 
 STORY_EVIDENCE_START: <story_id>
 <the key commands you (or your subagent) ran and their actual output>
+When the evidence includes a reproducible command, put the exact command on a
+line starting with `$ ` and put the observed output on following lines so
+Mission Control can render a copyable command.
 STORY_EVIDENCE_END: <story_id>
 
 Then at the very end:

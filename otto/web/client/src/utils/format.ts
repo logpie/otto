@@ -20,6 +20,18 @@ export function formatDuration(seconds: number): string {
   return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
+export function formatDateTime(value: string | null | undefined): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function formatCompactNumber(value: number): string {
   const amount = Math.max(Number(value || 0), 0);
   if (amount >= 1_000_000) return `${(amount / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;

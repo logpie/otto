@@ -2023,6 +2023,45 @@ async def run_certify_fix_loop(
         }
         max_retries = 2
 
+        def _proof_repair_focus(report: Any) -> str:
+            evidence_gate = getattr(report, "evidence_gate", {}) or {}
+            demo_evidence = getattr(report, "demo_evidence", {}) or {}
+            reason = str(evidence_gate.get("reason") or getattr(report, "diagnosis", "") or "").strip()
+            missing_visual_ids = [
+                str(story.get("id") or "").strip()
+                for story in demo_evidence.get("stories", []) or []
+                if isinstance(story, dict)
+                and story.get("needs_visual")
+                and not story.get("visual_items")
+                and str(story.get("id") or "").strip()
+            ]
+            focus_lines = [
+                "The previous certification proved the product behavior, but the proof packet failed the required demo proof gate.",
+                "Do not change product code. Re-run certification and collect the missing proof artifacts.",
+            ]
+            if reason:
+                focus_lines.append(f"Proof gate reason: {reason}")
+            if "no browser video" in reason.lower():
+                focus_lines.append(
+                    "Record one concise browser walkthrough `.webm` in the exact evidence directory for this run."
+                )
+            if missing_visual_ids:
+                focus_lines.append(
+                    "Capture story-specific screenshots or clips named after these story ids: "
+                    + ", ".join(missing_visual_ids)
+                    + "."
+                )
+            focus_lines.extend(
+                [
+                    "Before emitting the final verdict, list the exact evidence directory and verify the `.webm` plus story-specific screenshots/clips exist.",
+                    "Only emit `VERDICT: PASS` if the proof gate requirements are satisfied.",
+                ]
+            )
+            section = "## Proof Repair Focus\n" + "\n".join(focus_lines)
+            if focus:
+                return str(focus).strip() + "\n\n" + section
+            return section
+
         for round_num in range(start_round, max_rounds + 1):
             try:
                 actual_rounds = round_num
@@ -2098,17 +2137,26 @@ async def run_certify_fix_loop(
                 failing_story_ids = [s.get("story_id", "?") for s in failures]
                 diagnosis_text = str(getattr(report, "diagnosis", "") or "")
                 last_diagnosis_text = diagnosis_text
+                report_passed = getattr(getattr(report, "outcome", None), "value", "") == "passed"
+                proof_gate_blocked = (
+                    not report_passed
+                    and not failures
+                    and bool((getattr(report, "evidence_gate", {}) or {}).get("blocks_pass"))
+                )
                 if previous_attempts and previous_attempts[-1].get("round") == round_num - 1:
                     previous_attempts[-1]["still_failing_after_fix"] = list(failing_story_ids)
                     write_attempt_history(attempt_history_path, previous_attempts)
                     prior_round = round_history_by_round.get(round_num - 1)
                     if prior_round is not None:
                         prior_round["still_failing_after_fix"] = list(failing_story_ids)
-                result_str = (
-                    f"FAIL {len(stories) - len(failures)}/{len(stories)}"
-                    if failures
-                    else f"PASS {len(stories) - len(failures)}/{len(stories)}"
-                )
+                if proof_gate_blocked:
+                    result_str = f"FAIL proof gate ({len(stories)}/{len(stories)} stories passed)"
+                else:
+                    result_str = (
+                        f"FAIL {len(stories) - len(failures)}/{len(stories)}"
+                        if failures
+                        else f"PASS {len(stories) - len(failures)}/{len(stories)}"
+                    )
 
                 metric_met = report.metric_met
                 metric_value = report.metric_value
@@ -2125,7 +2173,7 @@ async def run_certify_fix_loop(
 
                 round_summary = {
                     "round": round_num,
-                    "verdict": not bool(failures),
+                    "verdict": report_passed,
                     "tested": len(stories),
                     "stories": list(stories),
                     "stories_tested": len(stories),
@@ -2179,7 +2227,7 @@ async def run_certify_fix_loop(
                             round_num,
                         )
                         break
-                elif not failures:
+                elif report_passed:
                     checkpoint_rounds.append(round_summary)
                     last_completed_round = round_num
                     _save_cp(
@@ -2199,6 +2247,25 @@ async def run_certify_fix_loop(
                     passed = consecutive_passes >= (2 if strict_mode else 1)
                     logger.info("Certify-fix loop: PASS on round %d", round_num)
                     break
+                elif proof_gate_blocked:
+                    checkpoint_rounds.append(round_summary)
+                    last_completed_round = round_num
+                    _save_cp(
+                        phase="round_complete",
+                        child_session_ids=sorted(child_session_ids_seen),
+                        last_round_failures=[],
+                        last_diagnosis=diagnosis_text,
+                    )
+                    if round_num >= max_rounds:
+                        logger.info("Certify-fix loop: proof gate blocked pass on final round")
+                        break
+                    focus = _proof_repair_focus(report)
+                    console.print(
+                        "  [yellow]\u26a0 proof gate blocked pass \u2014 "
+                        "re-running certification to collect missing evidence[/yellow]"
+                    )
+                    logger.info("Certify-fix loop: proof gate blocked pass; re-certifying for evidence")
+                    continue
                 else:
                     consecutive_passes = 0
 

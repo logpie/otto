@@ -1,6 +1,6 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import type {CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode} from "react";
-import {CommandList, ReviewDrawer, ReviewMetric} from "../MicroComponents";
+import {CommandList, CopyButton, ReviewDrawer, ReviewMetric} from "../MicroComponents";
 import {useDialogFocus} from "../../hooks/useDialogFocus";
 import {
   LOG_BUFFER_MAX_BYTES,
@@ -19,6 +19,7 @@ import type {
   CertificationRound,
   DiffResponse,
   LandingState,
+  ProductFlow,
   ProductHandoff,
   ProofReportInfo,
   RunDetail,
@@ -566,7 +567,7 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
     artifacts: onShowArtifacts,
   };
   const tabLabels: Record<InspectorMode, string> = {
-    try: "Product demo",
+    try: productTabLabel(detail),
     proof: "Proof",
     diff: "Code changes",
     logs: "Logs",
@@ -719,11 +720,12 @@ export function RunInspector({detail, mode, logState, selectedArtifactIndex, art
 
 export function ProductHandoffPane({detail}: {detail: RunDetail}) {
   const handoff = productHandoffFor(detail);
-  const hasLaunch = handoff.launch.length > 0;
+  const launchCommands = productLaunchCommands(handoff);
+  const hasLaunch = launchCommands.length > 0;
   const hasReset = handoff.reset.length > 0;
   const hasSamples = handoff.sample_data.length > 0;
   const hasUrls = handoff.urls.length > 0;
-  const hasTaskContext = Boolean(handoff.task_summary || handoff.task_flows.length || handoff.task_changed_files.length);
+  const flows = productSpecificFlows(detail, handoff);
   const demo = detail.review_packet.certification.demo_evidence;
   const primaryDemo = demo?.primary_demo || null;
   const primaryDemoUrl = primaryDemo?.href ? proofAssetUrl(detail.run_id, primaryDemo.href) : "";
@@ -733,61 +735,63 @@ export function ProductHandoffPane({detail}: {detail: RunDetail}) {
   const certificationMode = detail.build_config?.certifier_mode || detail.certifier_mode || "unknown";
   const primaryIsVideo = Boolean(primaryDemo && isDemoVideo(primaryDemo));
   const primaryIsImage = Boolean(primaryDemo && isDemoImage(primaryDemo));
+  const hasDemoMedia = Boolean(primaryDemo || fallbackVideo || screenshots.length);
+  const examples = productRunbookExamples(detail).slice(0, 6);
+  const sampleRequests = productSampleRequests(detail, handoff).slice(0, 6);
   return (
-    <div className="product-handoff-pane" data-testid="product-handoff-pane">
-      <section className="product-demo-section" aria-labelledby="productDemoHeading">
-        <div>
-          <span>{handoff.label}</span>
-          <h3 id="productDemoHeading">Product demo</h3>
-          <p>
-            {primaryDemo
-              ? demo?.demo_reason || "Task-specific proof media is available. Review it before reproducing the flow yourself."
-              : fallbackVideo
-                ? "A recorded proof clip is available. Use it to see the feature before reproducing it yourself."
-                : demoUnavailableCopy(handoff, certificationMode, demo?.demo_reason || "")}
-          </p>
-        </div>
-        {primaryDemo && primaryIsVideo ? (
-          <video controls data-testid="product-demo-video" className="product-demo-video">
-            <source src={primaryDemoUrl} type={demoVideoMimeType(primaryDemo)} />
-          </video>
-        ) : primaryDemo && primaryIsImage ? (
-          <div className="product-demo-screenshots" aria-label="Visual proof screenshots">
-            <a href={primaryDemoUrl} target="_blank" rel="noreferrer">
-              <img src={primaryDemoUrl} alt={primaryDemo.name || "primary proof"} />
-              <span>{primaryDemo.name || "primary proof"}</span>
-            </a>
+    <div className={`product-handoff-pane ${hasDemoMedia ? "has-demo-media" : "runbook-only"}`} data-testid="product-handoff-pane">
+      {hasDemoMedia && (
+        <section className="product-demo-section" aria-labelledby="productDemoHeading">
+          <div>
+            <span>Watch it work</span>
+            <h3 id="productDemoHeading">Recorded demo</h3>
+            <p>
+              {primaryDemo
+                ? demo?.demo_reason || "Task-specific proof media is available. Review it before reproducing the flow yourself."
+                : fallbackVideo
+                  ? "A recorded proof clip is available. Use it to see the feature before reproducing it yourself."
+                  : "Screenshot evidence is available. Use it as the visual reference while reproducing the flow below."}
+            </p>
           </div>
-        ) : fallbackVideo ? (
-          <video controls data-testid="product-demo-video" className="product-demo-video">
-            <source src={artifactRawUrl(detail.run_id, fallbackVideo.index)} type={videoMimeType(fallbackVideo)} />
-          </video>
-        ) : screenshots.length ? (
-          <div className="product-demo-screenshots" aria-label="Visual proof screenshots">
-            {screenshots.map((artifact) => (
-              <a href={artifactRawUrl(detail.run_id, artifact.index)} target="_blank" rel="noreferrer" key={artifact.index}>
-                <img src={artifactRawUrl(detail.run_id, artifact.index)} alt={artifact.label} />
-                <span>{artifact.label}</span>
+          {primaryDemo && primaryIsVideo ? (
+            <video controls data-testid="product-demo-video" className="product-demo-video">
+              <source src={primaryDemoUrl} type={demoVideoMimeType(primaryDemo)} />
+            </video>
+          ) : primaryDemo && primaryIsImage ? (
+            <div className="product-demo-screenshots" aria-label="Visual proof screenshots">
+              <a href={primaryDemoUrl} target="_blank" rel="noreferrer">
+                <img src={primaryDemoUrl} alt={primaryDemo.name || "primary proof"} />
+                <span>{primaryDemo.name || "primary proof"}</span>
               </a>
-            ))}
-          </div>
-        ) : (
-          <div className="product-demo-empty" data-testid="product-demo-empty">
-            <strong>No demo media recorded</strong>
-            <span>{demo?.demo_reason || "That is expected for fast certification, CLI/API/library work, and test-only runs. The commands and proof report remain the audit trail."}</span>
-          </div>
-        )}
-        <div className="product-demo-actions">
-          {proofReportUrl ? <a href={proofReportUrl} target="_blank" rel="noreferrer">Open proof report</a> : null}
-        </div>
-      </section>
-
+            </div>
+          ) : fallbackVideo ? (
+            <video controls data-testid="product-demo-video" className="product-demo-video">
+              <source src={artifactRawUrl(detail.run_id, fallbackVideo.index)} type={videoMimeType(fallbackVideo)} />
+            </video>
+          ) : (
+            <div className="product-demo-screenshots" aria-label="Visual proof screenshots">
+              {screenshots.map((artifact) => (
+                <a href={artifactRawUrl(detail.run_id, artifact.index)} target="_blank" rel="noreferrer" key={artifact.index}>
+                  <img src={artifactRawUrl(detail.run_id, artifact.index)} alt={artifact.label} />
+                  <span>{artifact.label}</span>
+                </a>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
       <section className="product-handoff-hero" aria-labelledby="productHandoffHeading">
         <div>
-          <span>Try it yourself</span>
-          <h3 id="productHandoffHeading">{handoff.preview_label || "Preview product"}</h3>
+          <span>{hasDemoMedia ? "Try it yourself" : "Runbook"}</span>
+          <h3 id="productHandoffHeading">{handoff.preview_label || "Run product"}</h3>
           <p>{handoff.summary || productKindHint(handoff.kind)}</p>
-          {handoff.preview_reason ? <p className="handoff-preview-reason">{handoff.preview_reason}</p> : null}
+          {!hasDemoMedia ? (
+            <p className="handoff-preview-reason">
+              {demoUnavailableCopy(handoff, certificationMode, demo?.demo_reason || "")}
+            </p>
+          ) : handoff.preview_reason ? (
+            <p className="handoff-preview-reason">{handoff.preview_reason}</p>
+          ) : null}
         </div>
         <dl>
           <dt>Root</dt>
@@ -797,45 +801,13 @@ export function ProductHandoffPane({detail}: {detail: RunDetail}) {
         </dl>
       </section>
 
-      {hasTaskContext && (
-        <section className="product-handoff-section handoff-task-section" aria-labelledby="productTaskHeading">
-          <div className="handoff-section-heading">
-            <h3 id="productTaskHeading">This task</h3>
-            <span>{[handoff.task_status, handoff.task_branch].filter(Boolean).join(" · ") || "task-specific"}</span>
-          </div>
-          {handoff.task_summary ? <p className="handoff-task-summary">{handoff.task_summary}</p> : null}
-          {handoff.task_flows.length ? (
-            <div className="handoff-flow-list">
-              {handoff.task_flows.map((flow, index) => (
-                <article className="handoff-flow" key={`${flow.title}-${index}`}>
-                  <strong>{flow.title}</strong>
-                  {flow.steps.length ? (
-                    <ol>
-                      {flow.steps.map((step) => <li key={step}>{step}</li>)}
-                    </ol>
-                  ) : null}
-                </article>
-              ))}
-            </div>
-          ) : null}
-          {handoff.task_changed_files.length ? (
-            <details className="handoff-files">
-              <summary>Changed files <strong>{handoff.task_changed_files.length}</strong></summary>
-              <ul>
-                {handoff.task_changed_files.map((path) => <li key={path}>{path}</li>)}
-              </ul>
-            </details>
-          ) : null}
-        </section>
-      )}
-
-      <section className="product-handoff-section" aria-labelledby="productLaunchHeading">
+      <section className="product-handoff-section product-start-section" aria-labelledby="productLaunchHeading">
         <div className="handoff-section-heading">
-          <h3 id="productLaunchHeading">Launch</h3>
-          <span>{hasLaunch ? `${handoff.launch.length} command${handoff.launch.length === 1 ? "" : "s"}` : "not declared"}</span>
+          <h3 id="productLaunchHeading">Start here</h3>
+          <span>{hasLaunch ? `${launchCommands.length} command${launchCommands.length === 1 ? "" : "s"}` : "no command"}</span>
         </div>
         {hasLaunch ? (
-          <CommandList commands={handoff.launch} />
+          <CommandList commands={launchCommands} />
         ) : (
           <p>{productKindHint(handoff.kind)}</p>
         )}
@@ -848,14 +820,64 @@ export function ProductHandoffPane({detail}: {detail: RunDetail}) {
         )}
       </section>
 
-      {handoff.try_flows.length ? (
+      {sampleRequests.length ? (
+        <section className="product-handoff-section product-request-section" aria-labelledby="productRequestsHeading">
+          <div className="handoff-section-heading">
+            <h3 id="productRequestsHeading">Sample requests</h3>
+            <span>{sampleRequests.length} command{sampleRequests.length === 1 ? "" : "s"}</span>
+          </div>
+          <div className="runbook-example-list">
+            {sampleRequests.map((request) => (
+              <article className="runbook-example" key={request.command}>
+                <div className="runbook-example-head">
+                  <strong>{request.label}</strong>
+                  <span>{request.method}</span>
+                </div>
+                <RunbookCommand command={request.command} />
+                <div className="runbook-expected">
+                  <span>Expected output</span>
+                  <samp>{request.expected}</samp>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {examples.length ? (
+        <section className="product-handoff-section product-example-section" aria-labelledby="productExamplesHeading">
+          <div className="handoff-section-heading">
+            <h3 id="productExamplesHeading">Verified examples</h3>
+            <span>{examples.length} check{examples.length === 1 ? "" : "s"}</span>
+          </div>
+          <div className="runbook-example-list">
+            {examples.map((example) => (
+              <article className="runbook-example" key={`${example.title}-${example.command || example.expected}`}>
+                <div className="runbook-example-head">
+                  <strong>{example.title}</strong>
+                  <span>{example.method}</span>
+                </div>
+                {example.command ? <RunbookCommand command={example.command} /> : null}
+                {example.expected ? (
+                  <div className="runbook-expected">
+                    <span>Expected result</span>
+                    <samp>{example.expected}</samp>
+                  </div>
+                ) : null}
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {flows.length ? (
         <section className="product-handoff-section" aria-labelledby="productFlowsHeading">
           <div className="handoff-section-heading">
-            <h3 id="productFlowsHeading">Additional checks</h3>
-            <span>{handoff.try_flows.length} flow{handoff.try_flows.length === 1 ? "" : "s"}</span>
+            <h3 id="productFlowsHeading">Try these flows</h3>
+            <span>{flows.length} flow{flows.length === 1 ? "" : "s"}</span>
           </div>
           <div className="handoff-flow-list">
-            {handoff.try_flows.map((flow, index) => (
+            {flows.map((flow, index) => (
               <article className="handoff-flow" key={`${flow.title}-${index}`}>
                 <strong>{flow.title}</strong>
                 {flow.steps.length ? (
@@ -901,6 +923,161 @@ export function ProductHandoffPane({detail}: {detail: RunDetail}) {
           ) : null}
         </section>
       )}
+
+      {(handoff.task_changed_files.length > 0 || proofReportUrl) && (
+        <section className="product-handoff-section product-audit-link-section" aria-labelledby="productAuditHeading">
+          <div className="handoff-section-heading">
+            <h3 id="productAuditHeading">Audit trail</h3>
+            <span>{handoff.task_changed_files.length ? `${handoff.task_changed_files.length} file${handoff.task_changed_files.length === 1 ? "" : "s"}` : "proof"}</span>
+          </div>
+          {proofReportUrl ? (
+            <div className="product-demo-actions">
+              <a href={proofReportUrl} target="_blank" rel="noreferrer">Open proof report</a>
+            </div>
+          ) : null}
+          {handoff.task_changed_files.length ? (
+            <details className="handoff-files">
+              <summary>Changed files <strong>{handoff.task_changed_files.length}</strong></summary>
+              <ul>
+                {handoff.task_changed_files.map((path) => <li key={path}>{path}</li>)}
+              </ul>
+            </details>
+          ) : null}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function productTabLabel(detail: RunDetail): string {
+  return productHasDemoMedia(detail) ? "Product demo" : "Runbook";
+}
+
+function productHasDemoMedia(detail: RunDetail): boolean {
+  const demo = detail.review_packet.certification.demo_evidence;
+  return Boolean(
+    demo?.primary_demo
+    || productDemoVideoArtifact(detail.artifacts)
+    || productScreenshotArtifacts(detail.artifacts).length,
+  );
+}
+
+function productRunbookExamples(detail: RunDetail): Array<{title: string; method: string; command: string; expected: string}> {
+  return (detail.review_packet.certification.stories || [])
+    .map((story) => ({
+      title: story.title || story.id || "Verified behavior",
+      method: storyMethodLine(story),
+      command: story.evidence_command || "",
+      expected: story.evidence_output || story.detail || story.evidence_excerpt || "",
+    }))
+    .filter((example) => example.command || example.expected);
+}
+
+function productLaunchCommands(handoff: ProductHandoff) {
+  return handoff.launch.map((command) => {
+    const label = command.label.trim();
+    const commandText = command.command.trim();
+    const lowerLabel = label.toLowerCase();
+    const looksLikeServer = /\b(flask|uvicorn|gunicorn|npm run dev|python3? -m\b).*(--host|--port|run|server|app)/i.test(commandText);
+    if ((lowerLabel === "try import" || lowerLabel === "try product" || lowerLabel === "launch") && looksLikeServer) {
+      return {...command, label: "Start server"};
+    }
+    return command;
+  });
+}
+
+function productSpecificFlows(detail: RunDetail, handoff: ProductHandoff): ProductFlow[] {
+  const taskTerms = new Set(
+    `${handoff.task_summary} ${handoff.summary} ${detail.title || ""} ${detail.display_name || ""} ${detail.command || ""} ${detail.branch || ""}`
+      .toLowerCase()
+      .split(/[^a-z0-9/.-]+/)
+      .filter((term) => term.length >= 5 && !GENERIC_RUNBOOK_TERMS.has(term)),
+  );
+  return handoff.try_flows.filter((flow) => {
+    const flowText = `${flow.title} ${flow.steps.join(" ")}`.toLowerCase();
+    if (!flowText.trim()) return false;
+    if (GENERIC_RUNBOOK_FLOW_PATTERNS.some((pattern) => pattern.test(flowText))) return false;
+    if (/\/[a-z0-9][a-z0-9._~/?=&%-]*/i.test(flowText)) return true;
+    for (const term of taskTerms) {
+      if (flowText.includes(term)) return true;
+    }
+    return false;
+  });
+}
+
+const GENERIC_RUNBOOK_TERMS = new Set(["public", "import", "documented", "error", "handling", "invalid", "input", "value", "function", "script", "fresh", "check", "confirm"]);
+const GENERIC_RUNBOOK_FLOW_PATTERNS = [
+  /import the public api/,
+  /create a fresh script or repl/,
+  /call the main function/,
+  /check error handling/,
+  /one invalid input/,
+  /documented error/,
+];
+
+function productSampleRequests(
+  detail: RunDetail,
+  handoff: ProductHandoff,
+): Array<{label: string; method: string; command: string; expected: string}> {
+  const baseUrl = productBaseUrl(handoff);
+  if (!baseUrl) return [];
+  const paths = extractRunbookPaths(detail, handoff);
+  const storyDetails = detail.review_packet.certification.stories || [];
+  return paths.map((path) => {
+    const url = `${baseUrl}${path}`;
+    const isApi = path.includes("/api/") || path.endsWith(".json");
+    const matchingStory = storyDetails.find((story) => {
+      const text = `${story.id || ""} ${story.title || ""} ${story.detail || ""}`.toLowerCase();
+      return text.includes(path.toLowerCase());
+    });
+    return {
+      label: isApi ? `Call ${path}` : `Open ${path}`,
+      method: isApi ? "HTTP JSON" : "HTTP",
+      command: isApi ? `curl -s '${url}' | python3 -m json.tool` : `curl -i '${url}'`,
+      expected: matchingStory?.detail || (isApi ? "JSON response with the documented fields." : "HTTP 200 with the rendered product page."),
+    };
+  });
+}
+
+function productBaseUrl(handoff: ProductHandoff): string {
+  for (const raw of handoff.urls || []) {
+    try {
+      const parsed = new URL(raw);
+      return parsed.origin;
+    } catch {
+      if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, "");
+    }
+  }
+  return "";
+}
+
+function extractRunbookPaths(detail: RunDetail, handoff: ProductHandoff): string[] {
+  const corpus = [
+    handoff.task_summary,
+    handoff.summary,
+    ...handoff.task_flows.flatMap((flow) => [flow.title, ...flow.steps]),
+    ...handoff.try_flows.flatMap((flow) => [flow.title, ...flow.steps]),
+    ...detail.review_packet.certification.stories.flatMap((story) => [story.id, story.title, story.detail]),
+  ].join("\n");
+  const seen = new Set<string>();
+  const matches = corpus.matchAll(/(^|[\s("'`])((?:\/[A-Za-z0-9][A-Za-z0-9._~/?=&%-]*)+)/g);
+  for (const match of matches) {
+    const path = (match[2] || "").replace(/[.,;:)\]'"`]+$/, "");
+    if (!path || path.startsWith("//") || path.includes("..")) continue;
+    if (/\.(md|py|ts|tsx|js|jsonl|log)$/i.test(path)) continue;
+    seen.add(path);
+  }
+  return [...seen].slice(0, 8);
+}
+
+function RunbookCommand({command}: {command: string}) {
+  return (
+    <div className="runbook-command">
+      <div className="runbook-command-head">
+        <span>Command</span>
+        <CopyButton text={command} />
+      </div>
+      <code>{command}</code>
     </div>
   );
 }
@@ -1513,46 +1690,16 @@ function ProofStoryCard({detail, story, demo, demoStory}: {
 }
 
 function ProofStoryCommand({command, output}: {command: string; output: string}) {
-  const [copied, setCopied] = useState(false);
-  const copyCommand = useCallback(() => {
-    if (!command) return;
-    const finish = () => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    };
-    if (typeof navigator !== "undefined" && navigator.clipboard) {
-      void navigator.clipboard.writeText(command).then(finish, () => copyTextFallback(command, finish));
-      return;
-    }
-    copyTextFallback(command, finish);
-  }, [command]);
   return (
     <div className="proof-story-command">
       <div className="proof-story-command-head">
         <span>Command</span>
-        <button type="button" onClick={copyCommand}>{copied ? "Copied" : "Copy"}</button>
+        <CopyButton text={command} />
       </div>
       <code>$ {command}</code>
       {output ? <samp>{output}</samp> : null}
     </div>
   );
-}
-
-function copyTextFallback(text: string, onCopied: () => void) {
-  if (typeof document === "undefined") return;
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.select();
-  try {
-    document.execCommand("copy");
-    onCopied();
-  } finally {
-    document.body.removeChild(textarea);
-  }
 }
 
 function keyReviewEvidenceArtifacts(evidence: ArtifactRef[]): ArtifactRef[] {

@@ -76,6 +76,7 @@ export interface ProjectInfo {
   branch: string | null;
   dirty: boolean;
   head_sha: string | null;
+  last_activity_at: string | null;
   defaults?: ProjectDefaults;
 }
 
@@ -350,6 +351,10 @@ export interface LandingItem {
   merge_id: string | null;
   merge_status: string | null;
   merge_run_status: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string | null;
+  queued_at: string | null;
   duration_s: number | null;
   cost_usd: number | null;
   token_usage?: TokenUsage;
@@ -391,6 +396,11 @@ export interface RunSummary {
   display_name: string;
   status: string;
   terminal_outcome: string | null;
+  started_at: string | null;
+  updated_at: string | null;
+  heartbeat_at: string | null;
+  finished_at: string | null;
+  queued_at: string | null;
   project_dir: string;
   cwd: string | null;
   queue_task_id: string | null;
@@ -431,6 +441,9 @@ export interface HistoryItem {
   command: string;
   status: string;
   terminal_outcome: string | null;
+  timestamp: string;
+  started_at: string | null;
+  finished_at: string | null;
   queue_task_id: string | null;
   merge_id: string | null;
   branch: string | null;

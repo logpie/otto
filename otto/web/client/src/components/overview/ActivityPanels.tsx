@@ -1,5 +1,5 @@
 import type {HistoryItem, LandingState, LiveRunItem, StateResponse} from "../../types";
-import {formatEventTime, usageLine} from "../../utils/format";
+import {formatEventTime, titleCase, usageLine} from "../../utils/format";
 import {runEventText} from "../../utils/missionControl";
 
 export function RecentRunsPanel({items, totalRows, selectedRunId, onSelect}: {
@@ -89,7 +89,7 @@ export function RecentActivity({events, history, selectedRunId, onSelect}: {
       <div className="activity-list">
         {recentEvents.map((event) => (
           <div className={`activity-item event-${event.severity}`} key={event.key}>
-            <span>{event.severity}</span>
+            <span>{activityLabel(event.severity)}</span>
             <strong title={event.message}>
               {event.message}
               {event.count > 1 ? <em className="activity-count" aria-label={`${event.count} occurrences`}> ×{event.count}</em> : null}
@@ -102,17 +102,49 @@ export function RecentActivity({events, history, selectedRunId, onSelect}: {
             className={`activity-item history-activity ${item.run_id === selectedRunId ? "selected" : ""}`}
             type="button"
             key={item.run_id}
+            title={historyActivityTitle(item)}
             onClick={() => onSelect(item.run_id)}
           >
-            <span>{item.outcome_display || item.status}</span>
-            <strong title={item.summary || ""}>{item.queue_task_id || item.run_id}</strong>
-            <time title="Run duration">{item.duration_display ? `${item.duration_display}` : "-"}</time>
+            <span>{activityLabel(item.outcome_display || item.terminal_outcome || item.status)}</span>
+            <strong title={item.summary || item.intent || item.queue_task_id || item.run_id}>
+              {historyActivityTitleText(item)}
+            </strong>
+            <time dateTime={historyActivityTimeIso(item)} title={historyActivityTimeTitle(item)}>
+              {formatEventTime(historyActivityTimeIso(item))}
+            </time>
           </button>
         ))}
         {!recentEvents.length && !recentHistory.length && <div className="timeline-empty">No activity yet.</div>}
       </div>
     </section>
   );
+}
+
+function activityLabel(value: string | null | undefined): string {
+  return titleCase((value || "info").toLowerCase().replace(/[_-]+/g, " "));
+}
+
+function historyActivityTitleText(item: HistoryItem): string {
+  return item.summary || item.intent || item.queue_task_id || item.run_id;
+}
+
+function historyActivityTimeIso(item: HistoryItem): string {
+  return item.finished_at || item.timestamp || item.started_at || "";
+}
+
+function historyActivityTimeTitle(item: HistoryItem): string {
+  const timestamp = historyActivityTimeIso(item);
+  const finished = timestamp ? `Finished ${formatEventTime(timestamp)}` : "No completion time recorded";
+  return item.duration_display ? `${finished}; duration ${item.duration_display}` : finished;
+}
+
+function historyActivityTitle(item: HistoryItem): string {
+  const parts = [
+    item.summary || item.intent || item.queue_task_id || item.run_id,
+    item.run_id ? `Run ${item.run_id}` : "",
+    item.duration_display ? `Duration ${item.duration_display}` : "",
+  ].filter(Boolean);
+  return parts.join(" · ");
 }
 
 export function LiveRuns({items, landing, selectedRunId, onSelect}: {

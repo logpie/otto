@@ -1078,10 +1078,18 @@ textarea:focus-visible,
 
 .project-row-meta {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-end;
   gap: 6px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.project-row-updated {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .project-row-branch {
@@ -3730,20 +3738,21 @@ tbody tr.selected {
    ============================================================================ */
 .run-drawer-backdrop {
   /* Above 1100px the drawer pushes content via padding-right, so the
-     queue is fully readable and a backdrop is unnecessary noise. Below
-     1100 we keep a subtle dim since the drawer overlays content. */
+     queue is fully readable and the backdrop stays visually transparent.
+     It still receives pointer events so clicking non-drawer space closes
+     the drawer consistently across desktop and mobile. Below 1100 we keep
+     a subtle dim since the drawer overlays content. */
   position: fixed;
   inset: 0;
   background: transparent;
   z-index: 40;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 @media (max-width: 1100px) {
   .run-drawer-backdrop {
     background: rgba(20, 28, 41, 0.12);
     animation: drawer-fade-in 0.16s ease-out;
-    pointer-events: auto;
   }
 }
 
@@ -4454,6 +4463,14 @@ tbody tr.selected {
   color: #9aa4b2;
 }
 
+.run-inspector-backdrop {
+  position: fixed;
+  inset: 57px 0 0 0;
+  z-index: 54;
+  background: transparent;
+  pointer-events: auto;
+}
+
 .run-inspector {
   /* mc-audit redesign Phase D: inspector now lives at the right side, sized
      wider than the drawer so logs/diffs have horizontal room. The queue
@@ -4663,6 +4680,12 @@ tbody tr.selected {
   color: var(--text);
 }
 
+.product-handoff-pane.runbook-only .product-example-section,
+.product-handoff-pane.has-demo-media .product-example-section,
+.product-request-section {
+  grid-column: 1 / -1;
+}
+
 .product-demo-actions {
   display: flex;
   flex-wrap: wrap;
@@ -4792,6 +4815,15 @@ tbody tr.selected {
   background: #0b1020;
 }
 
+.handoff-command-head,
+.runbook-command-head,
+.proof-story-command-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .handoff-command span {
   color: #93c5fd;
   font-size: 12px;
@@ -4804,6 +4836,23 @@ tbody tr.selected {
   overflow-wrap: anywhere;
   word-break: break-word;
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.inline-copy-button {
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.42);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.08);
+  color: #dbeafe;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.inline-copy-button:hover {
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .handoff-links {
@@ -4872,6 +4921,77 @@ tbody tr.selected {
 
 .handoff-samples strong {
   overflow-wrap: anywhere;
+}
+
+.runbook-example-list {
+  display: grid;
+  gap: 10px;
+}
+
+.runbook-example {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+}
+
+.runbook-example-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.runbook-example-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.runbook-example-head span,
+.runbook-expected > span,
+.runbook-command-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.runbook-command,
+.runbook-expected {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.runbook-command {
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  background: #0b1020;
+}
+
+.runbook-command code,
+.runbook-expected samp {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.runbook-command code {
+  color: #e5e7eb;
+}
+
+.runbook-expected {
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.runbook-expected samp {
+  color: var(--text);
 }
 
 .proof-pane {
@@ -5243,7 +5363,7 @@ tbody tr.selected {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   line-height: 1.45;
-  white-space: normal;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
@@ -6402,6 +6522,7 @@ html, body {
   }
 
   .project-row-meta {
+    align-items: flex-start;
     justify-content: start;
   }
 

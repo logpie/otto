@@ -451,6 +451,56 @@ def test_inspector_tab_buttons_are_clickable_from_logs(
     page.locator(".run-inspector .artifact-pane").wait_for(state="visible", timeout=2_000)
 
 
+def test_clicking_outside_full_inspector_returns_to_run_detail(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """The full inspector has an outside-click surface.
+
+    The right-side run detail drawer already has a backdrop on small
+    screens. The full inspector is modal and makes the page inert, so it
+    needs its own transparent backdrop behind the inspector; otherwise
+    clicking the visible non-inspector workspace does nothing.
+    """
+
+    _install_projects_route(page)
+    _install_state_route(page)
+    _install_detail_route(page)
+    _install_log_route(page)
+    _install_diff_route(page)
+    _install_artifact_route(page)
+
+    page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    _open_inspector_logs(page)
+    page.get_by_test_id("run-inspector").wait_for(state="visible", timeout=2_000)
+    page.get_by_test_id("run-inspector-backdrop").click(position={"x": 20, "y": 40}, timeout=CLICK_TIMEOUT_MS)
+    page.get_by_test_id("run-inspector").wait_for(state="detached", timeout=2_000)
+    page.get_by_test_id("run-detail-panel").wait_for(state="visible", timeout=2_000)
+
+
+def test_clicking_outside_run_detail_closes_drawer(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """The run detail drawer closes when the visible workspace is clicked."""
+
+    _install_projects_route(page)
+    _install_state_route(page)
+    _install_detail_route(page)
+    _install_log_route(page)
+    _install_diff_route(page)
+    _install_artifact_route(page)
+
+    page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    page.get_by_test_id("run-detail-panel").wait_for(state="visible", timeout=2_000)
+    page.locator(".run-drawer-backdrop").click(position={"x": 20, "y": 40}, timeout=CLICK_TIMEOUT_MS)
+    page.get_by_test_id("run-detail-panel").wait_for(state="detached", timeout=2_000)
+
+
 def test_run_detail_overview_is_actionable_and_resizable(
     mc_backend: Any, browser: Any, disable_animations: Any, viewport_mba: dict[str, Any]
 ) -> None:

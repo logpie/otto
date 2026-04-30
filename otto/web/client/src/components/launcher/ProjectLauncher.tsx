@@ -1,6 +1,7 @@
 import {FormEvent, useEffect, useMemo, useRef, useState} from "react";
 import {ApiError, friendlyApiMessage} from "../../api";
 import {errorMessage, watcherSummary} from "../../utils/missionControl";
+import {formatDateTime} from "../../utils/format";
 import {BrandMark} from "../BrandMark";
 import {Spinner} from "../Spinner";
 import {LauncherExplainer} from "./LauncherExplainer";
@@ -84,6 +85,7 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
         project.name,
         project.path,
         project.branch,
+        project.last_activity_at,
       ].filter(Boolean).join(" ").toLowerCase();
       return haystack.includes(normalizedProjectQuery);
     });
@@ -204,6 +206,9 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
                   <code title={project.path}>{projectDisplayPath(project, projectsState.projects_root)}</code>
                 </span>
                 <span className="project-row-meta">
+                  <span className="project-row-updated" title={project.last_activity_at || "Last activity unknown"}>
+                    {project.last_activity_at ? `Updated ${formatDateTime(project.last_activity_at)}` : "No recent activity"}
+                  </span>
                   <span className="project-row-branch" title="Branch">{project.branch || "-"}</span>
                   {project.dirty ? <span className="project-row-dirty" title="Local changes">●</span> : null}
                 </span>

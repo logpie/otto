@@ -863,9 +863,9 @@ def _normalize_methodology(value: str) -> str:
     return str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
 
 
-def _story_claims_ui_behavior(story: dict[str, Any]) -> bool:
+def _story_claims_ui_behavior(story: dict[str, Any], *, include_surface: bool = True) -> bool:
     surface = str(story.get("surface") or "").lower()
-    if any(token in surface for token in ("dom", "localstorage", "screenshot", "video")):
+    if include_surface and any(token in surface for token in ("dom", "localstorage", "screenshot", "video")):
         return True
     corpus = " ".join(
         [
@@ -882,6 +882,32 @@ def _story_claims_ui_behavior(story: dict[str, Any]) -> bool:
             r"keyboard|focus|blur|drag|drop|button|input|form|page|modal|ui|browser|"
             r"dashboard|link|filter|dropdown|select|card|column"
             r")\b",
+            corpus,
+        )
+    )
+
+
+def _story_claims_browser_behavior(story: dict[str, Any]) -> bool:
+    """Return true only for HTTP/API stories that actually exercised a browser UI."""
+    corpus = " ".join(
+        [
+            str(story.get("claim") or ""),
+            str(story.get("observed_result") or ""),
+            str(story.get("summary") or ""),
+            " ".join(str(step) for step in story.get("observed_steps", []) or []),
+        ]
+    ).lower()
+    if re.search(r"\b(opened|visited|navigated|clicked|typed|submitted|selected|filtered)\b", corpus):
+        return True
+    if re.search(
+        r"\b(open|visit|navigate|click|type|submit|select|filter)\s+(the\s+)?"
+        r"(page|browser|link|button|input|field|form|dropdown|menu|tab|nav|navigation|dashboard|control)\b",
+        corpus,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(browser|viewport|responsive|navigation|nav|page title|dom|button|form|modal|dropdown|link)\b",
             corpus,
         )
     )
@@ -1147,6 +1173,9 @@ def _visual_match_story(image_name: str, story: dict[str, Any]) -> int:
     failure_name = Path(str(story.get("failure_evidence") or "").strip()).name.lower()
     if failure_name and image_name.lower() == failure_name:
         return 100
+    evidence_text = str(story.get("evidence") or "")
+    if image_name != "recording.webm" and image_name in evidence_text:
+        return 95
     if story_id and (image_stem == story_id or image_stem.startswith(f"{story_id}-")):
         return 90
     token_list = _visual_name_token_list(image_name)
@@ -1154,6 +1183,11 @@ def _visual_match_story(image_name: str, story: dict[str, Any]) -> int:
         signature = "-".join(token_list)
         if story_id == signature or story_id.endswith(f"-{signature}") or f"-{signature}-" in story_id:
             return 80
+        if not image_stem[0].isdigit() and not image_stem.startswith("story-"):
+            identity_tokens = _story_identity_tokens(story)
+            identity_corpus = " ".join(sorted(identity_tokens))
+            if all(_token_matches_story(token, identity_tokens, identity_corpus) for token in token_list):
+                return 85
     tokens = set(token_list)
     if not tokens:
         return 0
@@ -1167,6 +1201,14 @@ def _visual_match_story(image_name: str, story: dict[str, Any]) -> int:
         elif _token_matches_story(token, set(), full_corpus):
             score += 1
     return score
+
+
+def _visual_match_is_story_specific(score: int) -> bool:
+    # 100: explicit failure_evidence; 95: story evidence names the exact
+    # visual artifact; 90: filename is the story_id; 80: filename is a
+    # meaningful story_id suffix, e.g. status-filter.png for
+    # dispatch-status-filter. Lower token scores are useful context only.
+    return score >= 80
 
 
 def _visual_caption(item: dict[str, Any], story: dict[str, Any] | None) -> str:
@@ -1429,6 +1471,7 @@ def _write_visual_evidence_manifests(
     session_id: str,
     round_history: list[dict[str, Any]],
     certifier_mode: str,
+    visual: dict[str, Any] | None = None,
 ) -> None:
     """Write a sibling ``<artifact>.manifest.json`` next to each visual artifact.
 
@@ -1458,6 +1501,20 @@ def _write_visual_evidence_manifests(
         return
     last_round = round_history[-1].get("round") if round_history else 1
     artifacts = sorted(root.glob("*.png")) + sorted(root.glob("*.webm"))
+    story_assignments: dict[str, tuple[str, str]] = {}
+    for bucket in (visual or {}).get("buckets", []) or []:
+        if not isinstance(bucket, dict):
+            continue
+        bucket_story_id = str(bucket.get("story_id") or "")
+        bucket_story_status = str(bucket.get("status") or "")
+        if not bucket_story_id:
+            continue
+        for item in bucket.get("items", []) or []:
+            if not isinstance(item, dict) or not bool(item.get("story_specific")):
+                continue
+            name = str(item.get("name") or "")
+            if name:
+                story_assignments[name.lower()] = (bucket_story_id, bucket_story_status)
     for artifact_path in artifacts:
         manifest_path = artifact_path.with_name(artifact_path.name + ".manifest.json")
         try:
@@ -1475,7 +1532,12 @@ def _write_visual_evidence_manifests(
             sha256 = None
         story_id = ""
         story_status = ""
+        assignment = story_assignments.get(artifact_path.name.lower())
+        if assignment is not None:
+            story_id, story_status = assignment
         for story in stories:
+            if story_id:
+                break
             failure_evidence = Path(str(story.get("failure_evidence") or "").strip()).name.lower()
             if failure_evidence and failure_evidence == artifact_path.name.lower():
                 story_id = str(story.get("story_id") or "")
@@ -1501,6 +1563,71 @@ def _write_visual_evidence_manifests(
             manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         except OSError as exc:
             logger.warning("failed to write visual-evidence manifest %s: %s", manifest_path, exc)
+
+
+def _recover_misplaced_visual_evidence(
+    *,
+    project_dir: Path,
+    evidence_dir: Path | None,
+    log_dir: Path,
+) -> None:
+    """Recover screenshots/clips saved to the legacy non-run evidence path.
+
+    Some certifier agents have reconstructed the evidence directory as
+    ``otto_logs/sessions/certify/evidence`` instead of using the exact
+    run-specific path in the prompt. If the tool transcript for this run names
+    files in that misplaced directory, copy those artifacts into the current
+    run packet so the proof report can audit them. We only recover files that
+    the current run's messages mention; stale screenshots from older runs stay
+    ignored.
+    """
+    if evidence_dir is None:
+        return
+    legacy_dir = project_dir / "otto_logs" / "sessions" / "certify" / "evidence"
+    if not legacy_dir.exists() or legacy_dir.resolve() == evidence_dir.resolve():
+        return
+    messages_path = log_dir / "messages.jsonl"
+    if not messages_path.exists():
+        return
+    try:
+        transcript = messages_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        logger.warning("failed to read certifier messages for evidence recovery: %s", exc)
+        return
+
+    mentioned_names: set[str] = set()
+    legacy_marker = "otto_logs/sessions/certify/evidence/"
+    pattern = re.compile(
+        re.escape(legacy_marker) + r"(?P<name>[^\\\"'`\s)>]+?\.(?:png|webm))",
+        flags=re.IGNORECASE,
+    )
+    for match in pattern.finditer(transcript):
+        name = Path(match.group("name")).name
+        if name:
+            mentioned_names.add(name)
+    if not mentioned_names:
+        return
+
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    recovered = 0
+    for name in sorted(mentioned_names):
+        source = legacy_dir / name
+        if not source.exists() or not source.is_file():
+            continue
+        destination = evidence_dir / name
+        try:
+            if destination.exists() and hashlib.sha256(destination.read_bytes()).hexdigest() == hashlib.sha256(source.read_bytes()).hexdigest():
+                continue
+            shutil.copy2(source, destination)
+            recovered += 1
+        except OSError as exc:
+            logger.warning("failed to recover certifier visual evidence %s: %s", source, exc)
+    if recovered:
+        logger.warning(
+            "recovered %d visual evidence artifact(s) from legacy non-run evidence directory %s",
+            recovered,
+            legacy_dir,
+        )
 
 
 def _visual_evidence(
@@ -1533,7 +1660,9 @@ def _visual_evidence(
     ]
     visual_items = images + videos
     recording = next((item for item in videos if item["name"] == "recording.webm"), None)
-    assigned: dict[str, str] = {}
+    if recording is None and videos:
+        recording = videos[0]
+    assigned: dict[str, tuple[str, int]] = {}
     for item in visual_items:
         forced_story = next(
             (
@@ -1544,7 +1673,7 @@ def _visual_evidence(
             "",
         )
         if forced_story:
-            assigned[item["name"]] = forced_story
+            assigned[item["name"]] = (forced_story, 100)
             continue
         best_story_id = ""
         best_score = 0
@@ -1553,19 +1682,22 @@ def _visual_evidence(
             if score > best_score:
                 best_score = score
                 best_story_id = str(story.get("story_id") or "")
-        if best_story_id and best_score > 0:
-            assigned[item["name"]] = best_story_id
+        if best_story_id and _visual_match_is_story_specific(best_score):
+            assigned[item["name"]] = (best_story_id, best_score)
 
     buckets: list[dict[str, Any]] = []
     for story in stories:
         bucket_items = []
         for item in visual_items:
-            if assigned.get(item["name"]) != story.get("story_id"):
+            assignment = assigned.get(item["name"])
+            if assignment is None or assignment[0] != story.get("story_id"):
                 continue
             bucket_items.append(
                 {
                     **item,
                     "caption": _visual_caption(item, story),
+                    "match_score": assignment[1],
+                    "story_specific": _visual_match_is_story_specific(assignment[1]),
                 }
             )
         if bucket_items:
@@ -1583,7 +1715,7 @@ def _visual_evidence(
             "caption": _visual_caption(item, None),
         }
         for item in visual_items
-        if item["name"] not in assigned and item["name"] != "recording.webm"
+        if item["name"] not in assigned and item["name"] != (recording or {}).get("name")
     ]
     non_visual_product = not images and not videos and not any(
         _story_looks_visual(story) for story in stories
@@ -1633,7 +1765,11 @@ def _story_proof_rows(stories: list[dict[str, Any]], visual: dict[str, Any]) -> 
     rows: list[dict[str, Any]] = []
     for story in stories:
         story_id = str(story.get("story_id") or "")
-        items = by_story.get(story_id, [])
+        items = [
+            item
+            for item in by_story.get(story_id, [])
+            if bool(item.get("story_specific", True))
+        ]
         image_count = sum(1 for item in items if str(item.get("kind") or "") == "image")
         video_count = sum(1 for item in items if str(item.get("kind") or "") == "video")
         if video_count:
@@ -1681,10 +1817,8 @@ def _story_is_web_ui(story: dict[str, Any]) -> bool:
         token in surface for token in ("dom", "browser", "page", "screenshot", "video", "localstorage")
     ):
         return False
-    if methodology in {"http-request", "api-request", "source-review"} and not any(
-        token in surface for token in ("dom", "browser", "page", "screenshot", "video", "localstorage")
-    ):
-        return _story_claims_ui_behavior(story)
+    if methodology in {"http-request", "api-request", "source-review"}:
+        return _story_claims_browser_behavior(story)
     if any(token in surface for token in ("dom", "browser", "page", "screenshot", "video", "localstorage")):
         return True
     if methodology in {"live-ui-events", "visual-only", "javascript-eval", "browser"}:
@@ -1693,7 +1827,27 @@ def _story_is_web_ui(story: dict[str, Any]) -> bool:
 
 
 def _story_is_file_or_download(story: dict[str, Any]) -> bool:
-    corpus = _story_corpus(story)
+    corpus = " ".join(
+        [
+            str(story.get("story_id") or ""),
+            str(story.get("claim") or ""),
+            str(story.get("observed_result") or ""),
+            str(story.get("summary") or ""),
+            " ".join(str(step) for step in story.get("observed_steps", []) or []),
+        ]
+    ).lower()
+    if "file" in corpus and not any(
+        phrase in corpus
+        for phrase in (
+            "file export",
+            "export file",
+            "download file",
+            "downloaded file",
+            "attached file",
+            "generated file",
+        )
+    ):
+        corpus = re.sub(r"\bfile\b", "", corpus)
     return any(
         token in corpus
         for token in (
@@ -1702,7 +1856,6 @@ def _story_is_file_or_download(story: dict[str, Any]) -> bool:
             "pdf",
             "csv",
             "xlsx",
-            "file",
             "filename",
             "mime",
             "content-type",
@@ -1831,7 +1984,11 @@ def _demo_evidence(
     story_image_count = 0
     for story in stories:
         story_id = str(story.get("story_id") or "").strip()
-        items = by_story.get(story_id, [])
+        items = [
+            item
+            for item in by_story.get(story_id, [])
+            if bool(item.get("story_specific", True))
+        ]
         visual_items = [_demo_item_payload(item) for item in items]
         visual_items = [item for item in visual_items if item is not None]
         video_count = sum(1 for item in visual_items if item.get("kind") == "video")
@@ -1859,7 +2016,7 @@ def _demo_evidence(
         elif image_count:
             proof_level = "story screenshot"
         elif story_needs_visual and general_recording:
-            proof_level = "generic recording only"
+            proof_level = "generic walkthrough only"
         elif file_proof:
             proof_level = "file validation"
         elif story.get("has_evidence"):
@@ -1894,31 +2051,24 @@ def _demo_evidence(
         reason = "This product surface is better proven with command, API, or source evidence than video."
     else:
         demo_required = True
-        if visual_required and missing_visual and not (story_video_count or story_image_count or general_recording):
-            demo_status = "missing"
-            reason = "User-facing stories need browser proof, but no matching video or screenshot was recorded."
-        elif (visual_required and (missing_visual or generic_only)) or (file_required and missing_file):
-            demo_status = "partial"
-            pieces = []
-            if generic_only:
-                pieces.append("some stories only have a generic walkthrough")
-            if missing_visual:
-                pieces.append("some visual stories lack story-specific media")
-            if missing_file:
-                pieces.append("some file/export stories lack file validation details")
-            reason = "; ".join(pieces) or "Proof is incomplete."
-        elif visual_required and visual_story_count and story_video_count == 0:
-            demo_status = "partial"
-            if general_recording:
-                reason = (
-                    "Browser video is a generic walkthrough; story-specific visual proof "
-                    "is screenshots only."
-                )
+        incomplete_reasons = []
+        if visual_required and missing_visual:
+            if not (story_video_count or story_image_count or general_recording):
+                incomplete_reasons.append("no browser visual proof was recorded")
             else:
-                reason = "Visual stories have screenshots but no video walkthrough."
-        elif visual_required and not (story_video_count or story_image_count or general_recording):
+                incomplete_reasons.append("some visual stories lack story-specific media")
+        if visual_required and generic_only:
+            incomplete_reasons.append("some stories only have a generic walkthrough")
+        if visual_required and visual_story_count and story_video_count == 0 and not general_recording:
+            incomplete_reasons.append("no browser video walkthrough was recorded")
+        if file_required and missing_file:
+            incomplete_reasons.append("some file/export stories lack file validation details")
+        if visual_required and not (story_video_count or story_image_count or general_recording):
             demo_status = "missing"
             reason = "No browser visual proof was recorded."
+        elif incomplete_reasons:
+            demo_status = "partial"
+            reason = "; ".join(dict.fromkeys(incomplete_reasons))
         else:
             demo_status = "strong"
             reason = "Proof maps the task stories to concrete evidence."
@@ -1965,8 +2115,8 @@ def _demo_evidence_gate(demo_evidence: dict[str, Any] | None) -> dict[str, Any]:
     if required and status == "partial":
         return {
             "schema_version": 1,
-            "status": "warn",
-            "blocks_pass": False,
+            "status": "fail",
+            "blocks_pass": True,
             "reason": reason or "Product demo proof is incomplete.",
         }
     return {
@@ -2176,6 +2326,11 @@ def _build_pow_report_data(
     session_dir = paths.session_dir(project_dir, run_id)
     spec_context = _load_spec_context(project_dir, run_id)
     methodology_summary = _methodology_summary(visible_stories)
+    _recover_misplaced_visual_evidence(
+        project_dir=project_dir,
+        evidence_dir=evidence_dir,
+        log_dir=log_dir,
+    )
     visual = _visual_evidence(report_dir, evidence_dir, certifier_mode, ordered_stories)
     coverage_observed = [
         str(item).strip() for item in (coverage_observed or []) if str(item).strip()
@@ -2219,6 +2374,7 @@ def _build_pow_report_data(
             session_id=session_id,
             round_history=round_history,
             certifier_mode=certifier_mode,
+            visual=visual,
         )
     except Exception as exc:  # pragma: no cover — defensive, never block report
         logger.warning("visual-evidence manifest write failed: %s", exc)
@@ -3499,6 +3655,11 @@ async def run_agentic_certifier(
                 round_timings=breakdown.get("round_timings", []),
             )
             evidence_gate = pow_data.get("evidence_gate") if isinstance(pow_data, dict) else None
+            if isinstance(evidence_gate, dict):
+                report.evidence_gate = evidence_gate
+            demo_evidence = pow_data.get("demo_evidence") if isinstance(pow_data, dict) else None
+            if isinstance(demo_evidence, dict):
+                report.demo_evidence = demo_evidence
             if passed and isinstance(evidence_gate, dict) and evidence_gate.get("blocks_pass"):
                 passed = False
                 outcome = CertificationOutcome.FAILED

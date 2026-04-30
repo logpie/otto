@@ -193,7 +193,7 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
   const visibleEvent = liveEventLabel(task);
   const waitingReason = task.stage === "working" && !task.active ? task.reason : null;
   const queuedAge = waitingInQueue && task.elapsedDisplay ? `queued for ${task.elapsedDisplay}` : null;
-  const meta = [task.branch, queuedAge, visibleEvent || waitingReason, task.usageDisplay].filter((part): part is string => Boolean(part && part.trim()));
+  const meta = [task.timestampDisplay, task.branch, queuedAge, visibleEvent || waitingReason, task.usageDisplay].filter((part): part is string => Boolean(part && part.trim()));
   const onClick = () => {
     if (task.runId) onSelect(task.runId);
     else if (onSelectQueued) onSelectQueued(task);

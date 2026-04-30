@@ -858,6 +858,10 @@ class MissionControlService:
                 "merge_id": merge_info.get("merge_id") if merge_info else None,
                 "merge_status": merge_info.get("status") if merge_info else None,
                 "merge_run_status": merge_info.get("merge_run_status") if merge_info else None,
+                "started_at": _optional_from_mapping(raw_state, "started_at"),
+                "finished_at": _optional_from_mapping(raw_state, "finished_at"),
+                "updated_at": _optional_from_mapping(raw_state, "updated_at"),
+                "queued_at": _optional_from_mapping(raw_state, "queued_at", "created_at"),
                 "duration_s": _number_from_mapping(raw_state, "duration_s"),
                 "cost_usd": _number_from_mapping(raw_state, "cost_usd"),
                 "token_usage": _token_usage_from_mapping(raw_state) if isinstance(raw_state, dict) else {},
@@ -3216,13 +3220,12 @@ def _story_evidence_command_output(story: dict[str, Any]) -> tuple[str, str]:
         if not line.startswith("$ "):
             continue
         command = line[2:]
-        output = ""
+        output_lines: list[str] = []
         for candidate in lines[index + 1:]:
             if candidate.startswith("$ "):
                 break
-            output = candidate
-            break
-        return command, output
+            output_lines.append(candidate)
+        return command, "\n".join(output_lines).strip()
     return "", ""
 
 
@@ -4577,6 +4580,16 @@ def _number_from_mapping(raw_state: Any, key: str) -> int | float | None:
         return None
     value = raw_state.get(key)
     return value if isinstance(value, (int, float)) else None
+
+
+def _optional_from_mapping(raw_state: Any, *keys: str) -> str | None:
+    if not isinstance(raw_state, dict):
+        return None
+    for key in keys:
+        value = _optional_str(raw_state.get(key))
+        if value is not None:
+            return value
+    return None
 
 
 def _int_or_none(value: Any) -> int | None:

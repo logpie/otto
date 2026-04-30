@@ -520,6 +520,80 @@ class TestHistoryWrites:
         checkpoint = json.loads(paths.session_checkpoint(tmp_git_repo, "run-improve-1").read_text())
         assert checkpoint["prompt_mode"] == "improve"
 
+    @pytest.mark.asyncio
+    async def test_certify_fix_loop_repairs_proof_gate_without_code_fix(self, tmp_git_repo):
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        proof_gate_report = CertificationReport(
+            outcome=CertificationOutcome.FAILED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[
+                {
+                    "story_id": "navigation-responsive",
+                    "passed": True,
+                    "summary": "Navigation works",
+                    "verdict": "PASS",
+                }
+            ],
+            diagnosis="Required demo proof gate failed: some visual stories lack story-specific media; no browser video walkthrough was recorded",
+            evidence_gate={
+                "blocks_pass": True,
+                "reason": "some visual stories lack story-specific media; no browser video walkthrough was recorded",
+                "status": "fail",
+            },
+            demo_evidence={
+                "stories": [
+                    {
+                        "id": "navigation-responsive",
+                        "needs_visual": True,
+                        "visual_items": [],
+                    }
+                ]
+            },
+        )
+        repaired_report = CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[
+                {
+                    "story_id": "navigation-responsive",
+                    "passed": True,
+                    "summary": "Navigation works with proof",
+                    "verdict": "PASS",
+                }
+            ],
+        )
+        calls: list[dict[str, object]] = []
+
+        async def fake_certifier(*args, **kwargs):
+            calls.append(dict(kwargs))
+            return proof_gate_report if len(calls) == 1 else repaired_report
+
+        async def unexpected_code_fix(*_args, **_kwargs):
+            raise AssertionError("proof-gate repair must re-certify, not run the code-fix agent")
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=unexpected_code_fix):
+            result = await run_certify_fix_loop(
+                "certify nav proof",
+                tmp_git_repo,
+                {"max_rounds": 2},
+                certifier_mode="standard",
+                skip_initial_build=True,
+                command="improve.feature",
+                session_id="run-proof-gate-repair",
+            )
+
+        assert result.passed is True
+        assert len(calls) == 2
+        assert calls[0].get("focus") in (None, "")
+        assert "Proof Repair Focus" in str(calls[1].get("focus"))
+        assert "navigation-responsive" in str(calls[1].get("focus"))
+        assert "Record one concise browser walkthrough" in str(calls[1].get("focus"))
+
 
 class TestImproveCLIHardening:
     """The improve CLI should treat infra and build failures as failures."""

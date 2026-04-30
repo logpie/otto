@@ -30,6 +30,7 @@ import {BOARD_STAGE_COLUMNS, BOARD_STAGE_ORDER, defaultFilters} from "../uiTypes
 import {
   capitalize,
   formatCompactNumber,
+  formatDateTime,
   formatDuration,
   formatTechnicalIssue,
   refreshLabel,
@@ -492,6 +493,11 @@ export function boardTaskFromLanding(item: LandingItem, runId: string | null, me
     storiesTested: item.stories_tested,
     usageDisplay: usageLine(item) !== "-" ? usageLine(item) : null,
     durationDisplay: typeof item.duration_s === "number" ? formatDuration(item.duration_s) : null,
+    timestampDisplay: taskTimestampLine(
+      active ? "Started" : stage === "landed" || stage === "reviewed" ? "Finished" : item.queue_status === "queued" ? "Queued" : "Updated",
+      live?.started_at || item.started_at || item.finished_at || item.updated_at || item.queued_at,
+    ),
+    timestampTitle: live?.started_at || item.started_at || item.finished_at || item.updated_at || item.queued_at || null,
   };
 }
 
@@ -525,6 +531,8 @@ export function boardTaskFromLive(item: LiveRunItem): BoardTask {
     storiesTested: null,
     usageDisplay: usageLine(item) !== "-" ? usageLine(item) : null,
     durationDisplay: item.elapsed_display && item.elapsed_display !== "-" ? item.elapsed_display : null,
+    timestampDisplay: taskTimestampLine(item.active ? "Started" : "Updated", item.started_at || item.updated_at || item.heartbeat_at),
+    timestampTitle: item.started_at || item.updated_at || item.heartbeat_at || null,
   };
 }
 
@@ -556,7 +564,14 @@ export function boardTaskFromHistory(item: HistoryItem): BoardTask {
     storiesTested: null,
     usageDisplay: usage !== "-" ? usage : null,
     durationDisplay: item.duration_display || null,
+    timestampDisplay: taskTimestampLine("Finished", item.finished_at || item.timestamp || item.started_at),
+    timestampTitle: item.finished_at || item.timestamp || item.started_at || null,
   };
+}
+
+function taskTimestampLine(label: string, value: string | null | undefined): string | null {
+  const formatted = formatDateTime(value);
+  return formatted === "-" ? null : `${label} ${formatted}`;
 }
 
 export function userFacingLiveLastEvent(item: LiveRunItem): string | null {
@@ -1010,7 +1025,7 @@ export function useDocumentTitle({viewMode, selectedRunId, selectedDetail, inspe
       const truncated = intent.length > 60 ? `${intent.slice(0, 57)}...` : intent;
       prefix = truncated;
       if (inspectorOpen) {
-        const tabLabel = {try: "Product demo", proof: "Proof", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
+        const tabLabel = {try: "Runbook", proof: "Proof", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
         prefix = `${truncated} - ${tabLabel}`;
       }
     }
@@ -1033,7 +1048,7 @@ export function useLiveAnnouncement({viewMode, selectedRunId, inspectorOpen, ins
     if (selectedRunId) {
       parts.push(`run ${selectedRunId}`);
       if (inspectorOpen) {
-        const tabLabel = {try: "Product demo", proof: "Proof", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
+        const tabLabel = {try: "Runbook", proof: "Proof", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
         parts.push(`${tabLabel} tab`);
       }
     }

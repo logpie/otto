@@ -2384,6 +2384,13 @@ def _certify_locked(
     outcome = report.outcome.value
     if outcome == "passed":
         console.print(f"  [success bold]PASSED[/success bold] \u2014 {passed_count}/{len(story_results)} stories")
+    elif story_results and passed_count == len(story_results):
+        console.print(
+            f"  [red bold]FAILED[/red bold] \u2014 proof gate blocked pass "
+            f"({passed_count}/{len(story_results)} stories passed)"
+        )
+        if report.diagnosis:
+            console.print(f"  [red]{rich_escape(str(report.diagnosis).splitlines()[-1])}[/red]")
     else:
         console.print(f"  [red bold]FAILED[/red bold] \u2014 {passed_count}/{len(story_results)} stories")
 

@@ -66,6 +66,8 @@ export interface BoardTask {
   elapsedDisplay: string | null;
   lastEvent: string | null;
   progress: string | null;
+  timestampDisplay?: string | null;
+  timestampTitle?: string | null;
   buildConfig: RunBuildConfig | null;
   source: "landing" | "live" | "history";
   storiesPassed?: number | null;

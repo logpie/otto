@@ -1,3 +1,4 @@
+import {useCallback, useState} from "react";
 import type {ReactNode} from "react";
 
 /**
@@ -121,10 +122,51 @@ export function CommandList({commands}: {commands: Array<{label: string; command
     <div className="handoff-command-list">
       {commands.map((command, index) => (
         <div className="handoff-command" key={`${command.command}-${index}`}>
-          <span>{command.label}</span>
+          <div className="handoff-command-head">
+            <span>{command.label}</span>
+            <CopyButton text={command.command} />
+          </div>
           <code>{command.command}</code>
         </div>
       ))}
     </div>
   );
+}
+
+export function CopyButton({text, label = "Copy"}: {text: string; label?: string}) {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(() => {
+    if (!text) return;
+    const finish = () => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    };
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      void navigator.clipboard.writeText(text).then(finish, () => copyTextFallback(text, finish));
+      return;
+    }
+    copyTextFallback(text, finish);
+  }, [text]);
+  return (
+    <button type="button" className="inline-copy-button" onClick={copy}>
+      {copied ? "Copied" : label}
+    </button>
+  );
+}
+
+function copyTextFallback(text: string, onCopied: () => void) {
+  if (typeof document === "undefined") return;
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand("copy");
+    onCopied();
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }

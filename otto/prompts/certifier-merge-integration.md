@@ -41,6 +41,8 @@ product still works where integration risk exists.
 - For a standard or thorough merge certification that checks web UI behavior,
   record concise browser proof under `{evidence_dir}`. This is not a full
   product demo and should stay focused on integration risk:
+  - Save visual artifacts ONLY under this exact evidence directory. Do not
+    shorten it, reconstruct it, or use `otto_logs/sessions/certify/evidence`.
   - Start one short walkthrough recording after the app is ready:
     `agent-browser --session merge-visual record start {evidence_dir}/recording.webm`
   - Exercise the highest-risk merged UI path with real clicks/fills/keypresses.
@@ -48,6 +50,16 @@ product still works where integration risk exists.
     `agent-browser --session merge-visual screenshot {evidence_dir}/<story_id>.png`
   - Stop the recording before the verdict:
     `agent-browser --session merge-visual record stop`
+  At least one `.webm` browser recording is required for web UI merge
+  certification. If you fall back to scripted Playwright, enable video
+  recording and save or move the `.webm` into the exact `{evidence_dir}`.
+  A generic `recording.webm` is context only. In standard/thorough mode, every
+  `PASS` story whose surface is page, DOM, dashboard, form, button, modal,
+  browser navigation, or web download must have story-specific visual proof
+  named after that story. If a core web UI story lacks story-specific visual
+  proof, mark it `FAIL` or `WARN` and make the final verdict `FAIL`. This
+  includes navigation and responsive-design stories; save at least one
+  `navigation...png` or `<story_id>.png` screenshot showing the checked state.
   HTTP/CLI/file evidence is still sufficient for API, CLI, library, worker,
   and pure export-validation stories.
 - For any story whose user surface is a page, DOM, dashboard, filter, link,
@@ -59,9 +71,10 @@ product still works where integration risk exists.
   the walkthrough recording. If you cannot produce browser proof for a web UI
   story in standard/thorough mode, report it as `WARN` or `FAIL` and explain
   the blocker instead of emitting a green `PASS`.
-- Before the final `VERDICT`, list the files in `{evidence_dir}` and confirm
-  that at least one `.webm` recording or story-named `.png` screenshot exists
-  when any checked story uses a web UI surface.
+- Before the final `VERDICT`, list the files in the exact `{evidence_dir}` and confirm
+  that at least one `.webm` recording and story-named screenshots/clips exist
+  for every browser/UI story. Do not emit `VERDICT: PASS` for web UI
+  certification unless that listing proves the visual evidence exists.
 - If you start a dev server, app server, queue worker, or any command that
   keeps a port open, record the command, port, and PID/shell id; redirect noisy
   access logs to a temp file outside the repo when practical; stop the process
@@ -82,6 +95,9 @@ For each story {story_evidence_scope}:
 
 STORY_EVIDENCE_START: <story_id>
 <commands, requests, UI steps, outputs, or the concrete scope reason>
+When the evidence includes a reproducible command, put the exact command on a
+line starting with `$ ` and put the observed output on following lines so
+Mission Control can render a copyable command.
 STORY_EVIDENCE_END: <story_id>
 
 Then:

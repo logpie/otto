@@ -156,6 +156,43 @@ def test_autopilot_panel_shows_living_loop_and_approval(
     assert approve_posts == 1
 
 
+def test_full_autopilot_checks_recoverable_work_without_manual_scan(
+    mc_backend: Any,
+    page: Any,
+    disable_animations: Any,
+) -> None:
+    state = _state_payload()
+    autopilot = _autopilot_payload()
+    autopilot["mode"] = "full"
+    autopilot["policy"] = {**autopilot["policy"], "mode": "full"}
+    state["autopilot"] = autopilot
+    _install_projects_route(page, _projects_payload())
+    _install_state_route(page, state)
+
+    tick_posts = 0
+
+    def tick_handler(route: Any) -> None:
+        nonlocal tick_posts
+        tick_posts += 1
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"ok": True, "message": "Autopilot executed 1 recovery action.", "refresh": True}),
+        )
+
+    page.route("**/api/autopilot/tick", tick_handler)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    page.get_by_test_id("diagnostics-tab").click()
+    page.get_by_test_id("autopilot-panel").wait_for(state="visible", timeout=5_000)
+    page.wait_for_timeout(500)
+
+    assert tick_posts == 1
+
+
 def test_autopilot_panel_collapses_pilot_triage_duplicates(
     mc_backend: Any,
     page: Any,
@@ -169,7 +206,7 @@ def test_autopilot_panel_collapses_pilot_triage_duplicates(
         "created_at": "2026-04-25T12:00:00Z",
         "title": "Run interrupted",
         "action": "pilot_triage",
-        "action_label": "Ask Pilot to recover",
+        "action_label": "Diagnose issue",
         "reason": "certify-existing: read-only certification was interrupted.",
         "severity": "warning",
         "target": "run-1",
@@ -241,7 +278,7 @@ def test_autopilot_panel_collapses_pilot_triage_duplicates(
     content = panel.text_content()
     assert content is not None
     assert content.count("Run interrupted") == 1
-    assert "Ask Pilot" in content
+    assert "Diagnose issue" in content
     assert "Approve recovery" not in content
     assert "Pilot triage completed" not in content
     assert "Pilot triage requested" not in content
@@ -258,10 +295,10 @@ def test_autopilot_pilot_running_state_disables_repeat_click(
         **autopilot["pending_decisions"][0],
         "id": "decision-pilot-running",
         "incident_id": "incident-interrupted",
-        "title": "Ask Pilot to inspect task",
+        "title": "Diagnose task",
         "action": "pilot_triage",
-        "action_label": "Ask Pilot to recover",
-        "reason": "Task needs diagnosis before Otto can pick a recovery action.",
+        "action_label": "Diagnose issue",
+        "reason": "Task needs diagnosis before Otto chooses a recovery action.",
         "status": "running",
         "run_id": "run-1",
         "task_id": "certify-existing",
@@ -271,8 +308,8 @@ def test_autopilot_pilot_running_state_disables_repeat_click(
         "id": "incident-interrupted",
         "kind": "landing_failed",
         "severity": "warning",
-        "title": "Ask Pilot to inspect task",
-        "detail": "Task needs diagnosis before Otto can pick a recovery action.",
+        "title": "Diagnose task",
+        "detail": "Task needs diagnosis before Otto chooses a recovery action.",
         "action": "pilot_triage",
         "run_id": "run-1",
         "task_id": "certify-existing",

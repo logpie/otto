@@ -7,6 +7,7 @@ Validates:
 
 from __future__ import annotations
 
+import json
 import signal
 import subprocess
 from pathlib import Path
@@ -301,6 +302,10 @@ def test_certifier_prompt_uses_documented_agent_browser_recording_workflow(tmp_p
     assert "recording.webm" in out
     assert "contextual" in out and "walkthrough evidence" in out
     assert "story-mapped video" in out and "proof" in out
+    assert f"`{tmp_path}`" in out
+    assert "Do not shorten it, reconstruct it" in out
+    assert "otto_logs/sessions/certify/evidence" in out
+    assert "at least one `.webm` browser" in out
 
 
 def test_hillclimb_defaults_to_agent_browser_for_web_products(tmp_path: Path):
@@ -397,6 +402,8 @@ def test_merge_context_uses_merge_specific_certifier_prompt(tmp_path: Path):
     assert "not browser proof" in out
     assert "list the files" in out
     assert "{evidence_dir}" not in out
+    assert "otto_logs/sessions/certify/evidence" in out
+    assert "At least one `.webm` browser recording is required" in out
     assert str(tmp_path / "recording.webm") in out
 
 
@@ -618,10 +625,10 @@ def test_pow_demo_evidence_marks_story_specific_web_video_strong(tmp_path: Path)
     assert "save-filter.webm" in html
 
 
-def test_pow_demo_evidence_marks_generic_recording_plus_screenshot_partial(tmp_path: Path):
+def test_pow_demo_evidence_accepts_walkthrough_video_plus_story_screenshot(tmp_path: Path):
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
-    (evidence_dir / "recording.webm").write_bytes(b"video")
+    (evidence_dir / "page@abc123.webm").write_bytes(b"video")
     (evidence_dir / "pdf-export-ui-link.png").write_bytes(b"image")
     report = write_test_pow_report(
         tmp_path,
@@ -650,14 +657,16 @@ def test_pow_demo_evidence_marks_generic_recording_plus_screenshot_partial(tmp_p
 
     demo = report["demo_evidence"]
     assert demo["demo_required"] is True
-    assert demo["demo_status"] == "partial"
-    assert "generic walkthrough" in demo["demo_reason"]
+    assert demo["demo_status"] == "strong"
+    assert demo["primary_demo"]["name"] == "page@abc123.webm"
     assert demo["counts"]["generic_recordings"] == 1
     assert demo["counts"]["story_screenshots"] == 1
     assert demo["counts"]["story_videos"] == 0
+    assert report["agent_outcome"] == "passed"
     assert report["outcome"] == "passed"
-    assert report["verdict_label"] == "PASS with warnings"
-    assert report["evidence_gate"]["status"] == "warn"
+    assert report["verdict_label"] == "PASS"
+    assert report["evidence_gate"]["status"] == "pass"
+    assert report["evidence_gate"]["blocks_pass"] is False
 
 
 def test_pow_demo_evidence_assigns_story_number_screenshot_by_meaning(tmp_path: Path):
@@ -705,8 +714,106 @@ def test_pow_demo_evidence_assigns_story_number_screenshot_by_meaning(tmp_path: 
     assert dispatch_story["visual_items"][0]["name"] == "story-3-status-filter.png"
     assert audit_story["visual_items"] == []
     assert demo["demo_status"] == "partial"
-    assert report["outcome"] == "passed"
-    assert report["evidence_gate"]["status"] == "warn"
+    assert report["agent_outcome"] == "passed"
+    assert report["outcome"] == "failed"
+    assert report["evidence_gate"]["status"] == "fail"
+    assert report["evidence_gate"]["blocks_pass"] is True
+
+
+def test_pow_demo_evidence_does_not_credit_broad_screenshot_as_story_specific(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "02-dispatch-board.png").write_bytes(b"image")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "dispatch-kanban-columns",
+                "summary": "Kanban board renders status columns",
+                "claim": "Dispatch board shows kanban columns.",
+                "observed_result": "Dispatch page loaded.",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": "Browser page displayed a dispatch board.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        evidence_dir=evidence_dir,
+        intent="Certify the integrated web app after merging dispatch branches.",
+    )
+
+    story = report["demo_evidence"]["stories"][0]
+    assert story["visual_items"] == []
+    assert story["proof_level"] == "text evidence"
+    assert report["demo_evidence"]["demo_status"] == "missing"
+    assert report["outcome"] == "failed"
+    assert report["evidence_gate"]["blocks_pass"] is True
+
+
+def test_pow_demo_evidence_recovers_misplaced_referenced_visual_artifact(tmp_path: Path):
+    evidence_dir = tmp_path / "run" / "certify" / "evidence"
+    legacy_dir = tmp_path / "otto_logs" / "sessions" / "certify" / "evidence"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "dashboard-main.png").write_bytes(b"image")
+    (tmp_path / "messages.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "blocks": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {
+                            "command": (
+                                "page.screenshot({ path: '"
+                                + str(legacy_dir / "dashboard-main.png")
+                                + "' });"
+                            )
+                        },
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "dashboard-view",
+                "summary": "Dashboard displays dispatch metrics",
+                "claim": "Dashboard displays dispatch metrics.",
+                "observed_result": "Dashboard metrics loaded.",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": "Visual evidence: dashboard-main.png shows dashboard metrics.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        evidence_dir=evidence_dir,
+        intent="Certify the dashboard web UI.",
+    )
+
+    assert (evidence_dir / "dashboard-main.png").exists()
+    story = report["demo_evidence"]["stories"][0]
+    assert story["visual_items"][0]["name"] == "dashboard-main.png"
+    assert story["proof_level"] == "story screenshot"
+    assert report["demo_evidence"]["demo_status"] == "partial"
+    assert report["outcome"] == "failed"
 
 
 def test_pow_demo_evidence_does_not_treat_cli_words_as_ui(tmp_path: Path):
@@ -737,6 +844,64 @@ def test_pow_demo_evidence_does_not_treat_cli_words_as_ui(tmp_path: Path):
     assert story["needs_visual"] is False
     assert story["proof_level"] == "text evidence"
     assert report["outcome"] == "passed"
+
+
+def test_file_validation_detection_ignores_generic_file_and_audit_export_words():
+    assert not certifier_module._story_is_file_or_download(
+        {
+            "story_id": "audit-timeline",
+            "claim": "Audit timeline displays events with complete information.",
+            "summary": "Audit timeline page fully functional",
+            "evidence": "Metric card shows Exports: 2.",
+        }
+    )
+    assert not certifier_module._story_is_file_or_download(
+        {
+            "story_id": "notes-persistence",
+            "claim": "Notes form saves and persists to append-only file.",
+            "summary": "Notes persistence fully operational.",
+        }
+    )
+    assert certifier_module._story_is_file_or_download(
+        {
+            "story_id": "csv-export",
+            "claim": "CSV export endpoint with headers and filters.",
+            "summary": "CSV export endpoint fully functional.",
+        }
+    )
+
+
+def test_http_api_and_csv_stories_do_not_require_browser_visuals():
+    assert not certifier_module._story_is_web_ui(
+        {
+            "story_id": "api-responses",
+            "claim": "JSON API endpoints return valid structured data.",
+            "observed_steps": ["requested /api/work-orders", "parsed JSON"],
+            "observed_result": "HTTP 200 with valid JSON and required fields.",
+            "surface": "HTTP / screenshot",
+            "methodology": "http-request",
+        }
+    )
+    assert not certifier_module._story_is_web_ui(
+        {
+            "story_id": "csv-export",
+            "claim": "CSV export endpoint returns valid CSV data.",
+            "observed_steps": ["requested /api/work-orders.csv", "counted rows"],
+            "observed_result": "HTTP 200 with text/csv and all 12 columns.",
+            "surface": "HTTP / screenshot",
+            "methodology": "http-request",
+        }
+    )
+    assert certifier_module._story_is_web_ui(
+        {
+            "story_id": "navigation-responsive",
+            "claim": "Navigation menu works across all pages with responsive design support.",
+            "observed_steps": ["tested page title updates on each nav action"],
+            "observed_result": "All navigation links functional.",
+            "surface": "HTTP / DOM / screenshot",
+            "methodology": "live-ui-events",
+        }
+    )
 
 
 def test_pow_demo_evidence_does_not_require_video_for_http_file_story(tmp_path: Path):
@@ -790,6 +955,56 @@ def test_pow_demo_evidence_does_not_require_video_for_http_file_story(tmp_path: 
     assert alias_story["proof_level"] == "file validation"
     assert demo["demo_status"] == "strong"
     assert report["verdict_label"] == "PASS"
+
+
+def test_pow_generic_recording_does_not_cover_unvisualized_ui_story(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "recording.webm").write_bytes(b"video")
+    (evidence_dir / "dashboard.png").write_bytes(b"png")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "dashboard",
+                "summary": "Dashboard loads",
+                "claim": "Dashboard loads in the browser.",
+                "observed_steps": ["opened dashboard"],
+                "observed_result": "Dashboard rendered.",
+                "surface": "DOM / screenshot",
+                "methodology": "live-ui-events",
+                "evidence": "dashboard.png",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "navigation-responsive",
+                "summary": "Navigation works across pages",
+                "claim": "Navigation links update page titles across the app.",
+                "observed_steps": ["clicked nav links"],
+                "observed_result": "Page titles updated.",
+                "surface": "DOM / screenshot",
+                "methodology": "live-ui-events",
+                "evidence": "Generic walkthrough only.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        2,
+        2,
+        evidence_dir=evidence_dir,
+        intent="Certify the web app navigation and dashboard.",
+    )
+
+    nav = next(story for story in report["demo_evidence"]["stories"] if story["id"] == "navigation-responsive")
+    assert nav["needs_visual"] is True
+    assert nav["proof_level"] == "generic walkthrough only"
+    assert report["demo_evidence"]["demo_status"] == "partial"
+    assert report["outcome"] == "failed"
+    assert report["evidence_gate"]["blocks_pass"] is True
 
 
 def test_pow_demo_evidence_marks_fast_mode_video_not_required(tmp_path: Path):

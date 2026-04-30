@@ -171,7 +171,7 @@ function AutopilotPanel({
             {modeLabel}
           </span>
           <button type="button" onClick={onTick} disabled={pending || !onTick} data-testid="autopilot-scan-button">
-            {pending ? "Scanning..." : "Scan now"}
+            {pending ? "Checking..." : "Check now"}
           </button>
           <button type="button" className="danger quiet" onClick={onEmergencyStop} disabled={pending || mode === "off" || !onEmergencyStop}>
             Turn off
@@ -261,7 +261,7 @@ function AutopilotIncidentCard({incident}: {incident: AutopilotIncident}) {
     <article className={`autopilot-card severity-${incident.severity}`}>
       <strong>{incident.title}</strong>
       <p>{incident.detail}</p>
-      <small>{incident.action === "human_required" ? "Needs manual review" : "Scan for a recovery action"}</small>
+      <small>{incident.action === "human_required" ? "Needs manual review" : "Check now to choose a recovery action"}</small>
     </article>
   );
 }
@@ -305,7 +305,7 @@ function pilotPlanText(event: AutopilotEvent, key: "reason" | "required_verifica
 }
 
 function decisionButtonLabel(decision: AutopilotDecision): string {
-  if (decision.action === "pilot_triage") return "Ask Pilot";
+  if (decision.action === "pilot_triage") return "Diagnose issue";
   if ((decision.plan_steps || []).length > 1) return "Approve plan";
   if (decision.action === "start_watcher") return "Start queue runner";
   if (decision.action === "stop_watcher") return "Stop queue runner";
@@ -322,7 +322,7 @@ function decisionExplanation(decision: AutopilotDecision): string {
     return "Autopilot will not run this automatically.";
   }
   if (decision.action === "pilot_triage" && decision.status === "running") return "Pilot is checking run state and choosing the smallest safe next step.";
-  if (decision.action === "pilot_triage") return "Starts a lightweight Pilot diagnosis. Results appear here after refresh.";
+  if (decision.action === "pilot_triage") return "Runs a quick diagnosis and replaces this with the specific recovery action.";
   if (decision.action === "start_watcher") return "Starts queue processing for queued tasks.";
   if (decision.action === "requeue") return "Creates a fresh queued run from the original task definition.";
   return decision.action_label || decision.action;
@@ -343,7 +343,7 @@ function autopilotStatusText(mode: AutopilotMode | string, decisionCount: number
   if (decisionCount > 0) {
     return mode === "assisted"
       ? `${decisionCount} proposed action${decisionCount === 1 ? "" : "s"} waiting for approval.`
-      : `${decisionCount} recovery action${decisionCount === 1 ? "" : "s"} waiting.`;
+      : `${decisionCount} recovery action${decisionCount === 1 ? "" : "s"} will run automatically.`;
   }
   if (blockedCount > 0) return `${blockedCount} issue${blockedCount === 1 ? " was" : "s were"} already checked.`;
   if (incidentCount > 0) return `${incidentCount} issue${incidentCount === 1 ? " needs" : "s need"} attention.`;

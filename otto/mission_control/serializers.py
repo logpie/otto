@@ -52,8 +52,33 @@ def serialize_project(project_dir: Path) -> dict[str, Any]:
         "branch": _git_output(project_dir, ["branch", "--show-current"]) or None,
         "dirty": _project_is_user_dirty(project_dir),
         "head_sha": _git_output(project_dir, ["rev-parse", "--short", "HEAD"]) or None,
+        "last_activity_at": _project_last_activity_at(project_dir),
         "defaults": _project_defaults(project_dir),
     }
+
+
+def _project_last_activity_at(project_dir: Path) -> str | None:
+    candidates: list[datetime] = []
+    git_last = _parse_iso_datetime(_git_output(project_dir, ["log", "-1", "--format=%cI"]) or None)
+    if git_last is not None:
+        candidates.append(git_last)
+    for relative in (
+        "otto.yaml",
+        "README.md",
+        "pyproject.toml",
+        "package.json",
+        ".git/HEAD",
+        "otto_logs",
+    ):
+        candidate = project_dir / relative
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+        candidates.append(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
+    if not candidates:
+        return None
+    return _format_utc(max(candidates))
 
 
 def _project_is_user_dirty(project_dir: Path) -> bool:
@@ -160,6 +185,9 @@ def serialize_history_item(item: HistoryItem) -> dict[str, Any]:
         "command": row.command,
         "status": row.status,
         "terminal_outcome": row.terminal_outcome,
+        "timestamp": row.timestamp,
+        "started_at": row.started_at,
+        "finished_at": row.finished_at,
         "queue_task_id": row.queue_task_id,
         "merge_id": row.merge_id,
         "branch": row.branch,
@@ -324,6 +352,7 @@ def _is_effectively_active(status: str | None, overlay: StaleOverlay | None) -> 
 
 def _record_summary(record: RunRecord) -> dict[str, Any]:
     argv = record.source.get("argv")
+    timing = record.timing if isinstance(record.timing, dict) else {}
     run_config = run_config_from_argv(
         Path(record.project_dir),
         argv,
@@ -338,6 +367,11 @@ def _record_summary(record: RunRecord) -> dict[str, Any]:
         "display_name": record.display_name,
         "status": record.status,
         "terminal_outcome": record.terminal_outcome,
+        "started_at": _first_string(timing.get("started_at")),
+        "updated_at": _first_string(timing.get("updated_at")),
+        "heartbeat_at": _first_string(timing.get("heartbeat_at")),
+        "finished_at": _first_string(timing.get("finished_at")),
+        "queued_at": _first_string(timing.get("queued_at"), timing.get("created_at")),
         "project_dir": record.project_dir,
         "cwd": record.cwd,
         "queue_task_id": _first_string(record.identity.get("queue_task_id")),
@@ -530,6 +564,24 @@ def _first_float(*values: Any) -> float | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_utc(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _argv_option(argv: Any, *names: str) -> str | None:
