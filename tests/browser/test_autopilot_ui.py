@@ -40,6 +40,12 @@ def _autopilot_payload() -> dict[str, Any]:
             "pilot_enabled": True,
             "pilot_timeout_s": 300,
         },
+        "pilot_agent": {
+            "agent_type": "diagnostic",
+            "provider": "claude",
+            "model": "provider default",
+            "reasoning_effort": "low",
+        },
         "budgets": {
             "actions_used_last_hour": 0,
             "actions_limit_per_hour": 8,
@@ -136,8 +142,10 @@ def test_autopilot_panel_shows_living_loop_and_approval(
     panel.wait_for(state="visible", timeout=5_000)
 
     assert "Autopilot" in panel.text_content()
-    assert "Observe" in panel.text_content()
+    assert "Recommended action" in panel.text_content()
     assert "Queued work is waiting" in panel.text_content()
+    assert "Start queue runner" in panel.text_content()
+    assert "Pilot diagnostic · claude · provider default · low" in panel.text_content()
     assert page.get_by_test_id("autopilot-mode-select").input_value() == "assisted"
 
     page.get_by_test_id("autopilot-scan-button").click()
@@ -146,3 +154,266 @@ def test_autopilot_panel_shows_living_loop_and_approval(
     page.wait_for_timeout(200)
     assert tick_posts == 1
     assert approve_posts == 1
+
+
+def test_autopilot_panel_collapses_pilot_triage_duplicates(
+    mc_backend: Any,
+    page: Any,
+    disable_animations: Any,
+) -> None:
+    state = _state_payload()
+    autopilot = _autopilot_payload()
+    interrupted_decision = {
+        "id": "decision-pilot",
+        "incident_id": "incident-interrupted",
+        "created_at": "2026-04-25T12:00:00Z",
+        "title": "Run interrupted",
+        "action": "pilot_triage",
+        "action_label": "Ask Pilot to recover",
+        "reason": "certify-existing: read-only certification was interrupted.",
+        "severity": "warning",
+        "target": "run-1",
+        "run_id": "run-1",
+        "task_id": "certify-existing",
+        "requires_pilot": True,
+        "status": "pending",
+        "result": None,
+        "error": None,
+    }
+    autopilot["incidents"] = [{
+        "id": "incident-interrupted",
+        "kind": "run_interrupted",
+        "severity": "warning",
+        "title": "Run interrupted",
+        "detail": "certify-existing was interrupted.",
+        "action": "pilot_triage",
+        "run_id": "run-1",
+        "task_id": "certify-existing",
+    }]
+    autopilot["pending_decisions"] = [interrupted_decision]
+    autopilot["recent_events"] = [
+        {
+            "id": "event-noop",
+            "created_at": "2026-04-25T12:00:03Z",
+            "kind": "pilot.noop",
+            "severity": "info",
+            "message": "Pilot recommended no action",
+            "incident_id": "incident-interrupted",
+            "decision_id": "decision-pilot",
+            "action": "pilot_triage",
+            "details": {"pilot_plan": {"reason": "No code changes were produced.", "required_verification": "Requeue the cert if it gates release."}},
+        },
+        {
+            "id": "event-completed",
+            "created_at": "2026-04-25T12:00:02Z",
+            "kind": "pilot.completed",
+            "severity": "info",
+            "message": "Pilot triage completed",
+            "incident_id": "incident-interrupted",
+            "decision_id": "decision-pilot",
+            "action": "pilot_triage",
+            "details": {},
+        },
+        {
+            "id": "event-requested",
+            "created_at": "2026-04-25T12:00:01Z",
+            "kind": "pilot.requested",
+            "severity": "info",
+            "message": "Pilot triage requested",
+            "incident_id": "incident-interrupted",
+            "decision_id": "decision-pilot",
+            "action": "pilot_triage",
+            "details": {},
+        },
+    ]
+    state["autopilot"] = autopilot
+    _install_projects_route(page, _projects_payload())
+    _install_state_route(page, state)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    page.get_by_test_id("diagnostics-tab").click()
+    panel = page.get_by_test_id("autopilot-panel")
+    panel.wait_for(state="visible", timeout=5_000)
+
+    content = panel.text_content()
+    assert content is not None
+    assert content.count("Run interrupted") == 1
+    assert "Ask Pilot" in content
+    assert "Approve recovery" not in content
+    assert "Pilot triage completed" not in content
+    assert "Pilot triage requested" not in content
+
+
+def test_autopilot_pilot_running_state_disables_repeat_click(
+    mc_backend: Any,
+    page: Any,
+    disable_animations: Any,
+) -> None:
+    state = _state_payload()
+    autopilot = _autopilot_payload()
+    autopilot["pending_decisions"][0] = {
+        **autopilot["pending_decisions"][0],
+        "id": "decision-pilot-running",
+        "incident_id": "incident-interrupted",
+        "title": "Ask Pilot to inspect task",
+        "action": "pilot_triage",
+        "action_label": "Ask Pilot to recover",
+        "reason": "Task needs diagnosis before Otto can pick a recovery action.",
+        "status": "running",
+        "run_id": "run-1",
+        "task_id": "certify-existing",
+        "requires_pilot": True,
+    }
+    autopilot["incidents"] = [{
+        "id": "incident-interrupted",
+        "kind": "landing_failed",
+        "severity": "warning",
+        "title": "Ask Pilot to inspect task",
+        "detail": "Task needs diagnosis before Otto can pick a recovery action.",
+        "action": "pilot_triage",
+        "run_id": "run-1",
+        "task_id": "certify-existing",
+    }]
+    state["autopilot"] = autopilot
+    _install_projects_route(page, _projects_payload())
+    _install_state_route(page, state)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    page.get_by_test_id("diagnostics-tab").click()
+    panel = page.get_by_test_id("autopilot-panel")
+    panel.wait_for(state="visible", timeout=5_000)
+
+    assert "Pilot is diagnosing the selected recovery." in panel.text_content()
+    button = page.get_by_test_id("autopilot-approve-button")
+    assert button.text_content() == "Diagnosing..."
+    assert button.is_disabled()
+
+
+def test_idle_autopilot_does_not_compete_with_manual_attention(
+    mc_backend: Any,
+    page: Any,
+    disable_animations: Any,
+) -> None:
+    state = _state_payload()
+    autopilot = _autopilot_payload()
+    autopilot["health"] = "idle"
+    autopilot["incidents"] = []
+    autopilot["pending_decisions"] = []
+    autopilot["recent_events"] = [{
+        "id": "event-noop",
+        "created_at": "2026-04-25T12:00:03Z",
+        "kind": "pilot.noop",
+        "severity": "info",
+        "message": "Pilot recommended no action",
+        "incident_id": None,
+        "decision_id": "decision-pilot",
+        "action": "pilot_triage",
+        "details": {},
+    }]
+    state["autopilot"] = autopilot
+    state["runtime"]["status"] = "warning"
+    state["runtime"]["issues"] = [{
+        "key": "task-needs-attention",
+        "severity": "warning",
+        "label": "Tasks need attention",
+        "detail": "One task needs review.",
+        "next_action": "Open the affected run and use the review packet next action.",
+    }]
+    _install_projects_route(page, _projects_payload())
+    _install_state_route(page, state)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    page.get_by_test_id("diagnostics-tab").click()
+    page.get_by_role("heading", name="Manual attention").wait_for(state="visible", timeout=5_000)
+
+    assert page.get_by_test_id("autopilot-panel").count() == 0
+    body_text = page.evaluate("() => document.body.textContent")
+    assert "No action pending" not in body_text
+    assert "No automatic recovery recommended" not in body_text
+
+
+def test_autopilot_requeue_proposal_replaces_manual_task_warning(
+    mc_backend: Any,
+    page: Any,
+    disable_animations: Any,
+) -> None:
+    state = _state_payload()
+    autopilot = _autopilot_payload()
+    autopilot["incidents"] = [{
+        "id": "incident-requeue",
+        "kind": "landing_interrupted",
+        "severity": "warning",
+        "title": "Requeue interrupted task",
+        "detail": "Certify the existing app loads is interrupted and produced no code changes. Requeue it to get a fresh run.",
+        "action": "requeue",
+        "run_id": "run-interrupted",
+        "task_id": "certify-existing",
+    }]
+    autopilot["pending_decisions"] = [{
+        "id": "decision-requeue",
+        "incident_id": "incident-requeue",
+        "created_at": "2026-04-25T12:00:00Z",
+        "title": "Recover interrupted task",
+        "action": "requeue",
+        "action_label": "Recover task",
+        "reason": "Certify the existing app loads is interrupted and produced no code changes. Requeue it to get a fresh run. Otto will also start the queue runner so the retry actually begins.",
+        "severity": "warning",
+        "target": "run-interrupted",
+        "run_id": "run-interrupted",
+        "task_id": "certify-existing",
+        "requires_pilot": False,
+        "status": "pending",
+        "includes_actions": ["requeue", "start_watcher"],
+        "chain_actions": ["start_watcher"],
+        "plan_steps": [
+            {"action": "requeue", "label": "Requeue interrupted task", "status": "pending", "detail": "Create a fresh queued run from the original task definition."},
+            {"action": "start_watcher", "label": "Start queue runner", "status": "pending", "detail": "Start queue processing so the retry does not sit paused."},
+            {"action": "watch_retry", "label": "Watch retry", "status": "pending", "detail": "Refresh state and replace the old attempt once the retry completes."},
+        ],
+        "result": None,
+        "error": None,
+    }]
+    state["autopilot"] = autopilot
+    state["runtime"]["status"] = "warning"
+    state["runtime"]["issues"] = [
+        {
+            "key": "queued-work-paused",
+            "severity": "warning",
+            "label": "Queued work is paused",
+            "detail": "1 queued task will not start while the queue runner is stopped.",
+            "next_action": "Start the queue runner when queued work should run.",
+        },
+        {
+            "key": "task-needs-attention",
+            "severity": "warning",
+            "label": "Tasks need attention",
+            "detail": "One task needs review.",
+            "next_action": "Open the affected run and use the review packet next action.",
+        },
+    ]
+    _install_projects_route(page, _projects_payload())
+    _install_state_route(page, state)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    page.get_by_test_id("diagnostics-tab").click()
+    panel = page.get_by_test_id("autopilot-panel")
+    panel.wait_for(state="visible", timeout=5_000)
+
+    assert "Ask first" in panel.text_content()
+    assert "Recover interrupted task" in panel.text_content()
+    assert "Requeue interrupted task" in panel.text_content()
+    assert "Start queue runner" in panel.text_content()
+    assert "Approve plan" in panel.text_content()
+    assert page.get_by_role("heading", name="Manual attention").count() == 0

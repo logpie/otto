@@ -25,8 +25,8 @@ from otto.config import (
     ConfigError,
     _normalize_intent,
     agent_effort,
-    agent_model,
     agent_provider,
+    effective_agent_model,
     load_config,
     require_git,
     resolve_project_dir,
@@ -691,12 +691,16 @@ def _print_config_banner(
     config: dict,
     cli_sources: dict[str, str],
     config_path: Path,
+    *,
+    primary_agent_type: str | None = None,
 ) -> None:
     """Print the resolved configuration with concise source labeling."""
     from rich.table import Table
 
     yaml_raw = _load_yaml_raw(config_path)
-    model_value = config.get("model") or _runtime_model_name(str(config.get("provider") or ""))
+    model_value = effective_agent_model(config, primary_agent_type) or _runtime_model_name(
+        str(config.get("provider") or "")
+    )
 
     rows: list[tuple[str, Any, str]] = [
         ("Execution", "split" if config.get("split_mode") else "agentic", "split_mode"),
@@ -749,12 +753,10 @@ def _print_config_banner(
 
     for key, label, resolver in (
         ("provider", "Agent providers", agent_provider),
-        ("model", "Agent models", agent_model),
+        ("model", "Agent models", effective_agent_model),
         ("effort", "Agent efforts", agent_effort),
     ):
         global_value = resolver(config)
-        if key == "model" and not global_value:
-            global_value = _runtime_model_name(agent_provider(config))
         entries: list[str] = []
         raw_agent_types = config.get("_agent_types_for_banner")
         agent_types = (
@@ -766,8 +768,6 @@ def _print_config_banner(
         agent_labels = raw_agent_labels if isinstance(raw_agent_labels, dict) else {}
         for agent_type in agent_types:
             value = resolver(config, agent_type)
-            if key == "model" and not value:
-                value = _runtime_model_name(agent_provider(config, agent_type))
             if value == global_value:
                 continue
             source = _agent_setting_source(
@@ -1950,7 +1950,7 @@ def _build_locked(
     if not run_id:
         run_id = _new_run_id(project_dir)
 
-    _print_config_banner(console, config, sources, config_path)
+    _print_config_banner(console, config, sources, config_path, primary_agent_type="build")
     _print_startup_context(console, project_dir, run_id)
     if debug_unredacted:
         console.print("  [bold red]UNREDACTED LOGS — do not share[/bold red]")
@@ -2275,7 +2275,7 @@ def _certify_locked(
     except ConfigError as exc:
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(2)
-    _print_config_banner(console, config, sources, config_path)
+    _print_config_banner(console, config, sources, config_path, primary_agent_type="certifier")
 
     # Resolve intent: argument > intent.md > README.md
     if not intent:

@@ -1000,6 +1000,7 @@ async def run_merge(
         branches_in_order=list(branches),
         outcomes=[],
     )
+    state.note = f"Preparing to merge {len(branches)} branch(es) into {options.target}."
     write_state(project_dir, state)
     publisher = publisher_for(
         "merge",
@@ -1184,6 +1185,18 @@ def _merged_from_labels(branches: list[str], queue_lookup: dict[str, str]) -> li
     return [queue_lookup.get(branch, branch) for branch in branches]
 
 
+def _queue_lookup_for_branches(project_dir: Path, branches: list[str]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    try:
+        from otto.queue.schema import load_queue
+        for task in load_queue(project_dir):
+            if task.branch in branches and task.id:
+                lookup[str(task.branch)] = str(task.id)
+    except (OSError, ValueError) as exc:
+        logger.debug("merge verification rerun: skipping queue.yml lookup: %s", exc)
+    return lookup
+
+
 def _proof_of_work_html_from_manifest(manifest: dict[str, Any]) -> str | None:
     pow_path = manifest.get("proof_of_work_path")
     if not pow_path:
@@ -1213,6 +1226,126 @@ def _resolve_source_pow_paths(
             record["path"] = pow_html
         records.append(record)
     return records
+
+
+async def rerun_post_merge_verification(
+    *,
+    project_dir: Path,
+    config: dict[str, Any],
+    merge_id: str,
+    verification_policy: VerificationPolicy | None = "smart",
+    budget: Any | None = None,
+) -> MergeRunResult:
+    """Rerun only the post-merge certifier for an already-landed merge.
+
+    This is intentionally narrower than `otto merge --all`: it does not touch
+    branch refs or attempt another git merge. It is for cases where the code
+    already landed but the integrated proof packet failed or was incomplete.
+    """
+
+    from otto.config import repo_preflight_issues
+
+    state = load_state(project_dir, merge_id)
+    if not state.branches_in_order:
+        return MergeRunResult(
+            success=False,
+            merge_id=merge_id,
+            state=state,
+            note="merge verification cannot be rerun because the merge state has no branches",
+        )
+    target = state.target or str(config.get("default_branch", "main"))
+    current_branch = git_ops.current_branch(project_dir)
+    if current_branch != target:
+        return MergeRunResult(
+            success=False,
+            merge_id=merge_id,
+            state=state,
+            note=f"merge verification must run on {target!r}; currently on {current_branch!r}",
+        )
+    if git_ops.merge_in_progress(project_dir):
+        return MergeRunResult(
+            success=False,
+            merge_id=merge_id,
+            state=state,
+            note="merge verification cannot run while git has an in-progress merge",
+        )
+
+    preflight = repo_preflight_issues(project_dir)
+    problems = [
+        *preflight["blocking"],
+        *preflight["dirty"],
+        *preflight.get("untracked", []),
+    ]
+    if problems:
+        return MergeRunResult(
+            success=False,
+            merge_id=merge_id,
+            state=state,
+            note=(
+                "working tree must be clean before rerunning merge verification "
+                f"({'; '.join(problems)})"
+            ),
+        )
+
+    policy = normalize_verification_policy(verification_policy, default="smart")
+    options = MergeOptions(
+        target=target,
+        verification_policy=policy,
+        full_verify=policy == "full",
+        no_certify=False,
+        fast=False,
+    )
+    queue_lookup = _queue_lookup_for_branches(project_dir, state.branches_in_order)
+    state.status = "running"
+    state.terminal_outcome = None
+    state.finished_at = None
+    state.cert_passed = None
+    state.note = f"Rerunning post-merge certification ({policy}) for {len(state.branches_in_order)} branch(es)."
+    write_state(project_dir, state)
+
+    try:
+        result = await _run_post_merge_verification(
+            project_dir=project_dir,
+            config=config,
+            options=options,
+            state=state,
+            merge_id=merge_id,
+            branches=list(state.branches_in_order),
+            queue_lookup=queue_lookup,
+            target_head_before=state.target_head_before,
+            budget=budget,
+        )
+    except Exception as exc:
+        logger.exception("merge verification rerun failed")
+        _persist_merge_terminal_state(
+            project_dir,
+            state,
+            status="failed",
+            note=f"merge verification rerun failed: {exc}",
+        )
+        _append_merge_history(project_dir, state)
+        return MergeRunResult(success=False, merge_id=merge_id, state=state, note=state.note or str(exc))
+    except BaseException as exc:
+        status = "interrupted" if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)) else "failed"
+        logger.exception("merge verification rerun aborted")
+        _persist_merge_terminal_state(
+            project_dir,
+            state,
+            status=status,
+            note=f"merge verification rerun aborted: {exc}",
+        )
+        _append_merge_history(project_dir, state)
+        raise
+
+    final_status = "done" if result.success else "failed"
+    _persist_merge_terminal_state(
+        project_dir,
+        result.state,
+        status=final_status,
+        note=result.note or ("merge verification passed" if result.success else "merge verification failed"),
+    )
+    _append_merge_history(project_dir, result.state)
+    return result
 
 
 def _annotate_merge_cert_summary(
@@ -1401,6 +1534,11 @@ async def _run_post_merge_verification(
     from otto.certifier import run_agentic_certifier
     intent = resolve_intent(project_dir) or "(no intent.md found)"
     cert_task: asyncio.Task[Any] | None = None
+    state.note = (
+        f"Running post-merge certification ({options.verification_policy}) "
+        f"for {len(branches)} branch(es)."
+    )
+    write_state(project_dir, state)
     try:
         cert_task = asyncio.create_task(run_agentic_certifier(
             intent=intent,
@@ -1659,9 +1797,18 @@ async def _run_consolidated_agentic_merge(
         return result
 
     # Phase 3: ONE agent call to resolve all accumulated markers
+    conflicted_branch_count = len(
+        [outcome for outcome in state.outcomes if outcome.status == "merged_with_markers"]
+    )
+    state.note = (
+        "Resolving merge conflicts with the merge agent: "
+        f"{len(accumulated_conflict_files)} file(s) across "
+        f"{conflicted_branch_count} conflicted branch(es)."
+    )
+    write_state(project_dir, state)
     logger.info(
         "merge %s: invoking agent on %d files across %d branches",
-        merge_id, len(accumulated_conflict_files), len(branches),
+        merge_id, len(accumulated_conflict_files), conflicted_branch_count,
     )
     if _drain_merge_cancel_commands(project_dir, merge_id, state):
         return _cancelled_merge_result(

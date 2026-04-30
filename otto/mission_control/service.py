@@ -32,6 +32,7 @@ from otto.mission_control.actions import (
     execute_merge_abort,
     execute_merge_all,
     execute_merge_recover,
+    execute_merge_verify,
     execute_queue_cleanup,
 )
 from otto.mission_control.autopilot import AutopilotController
@@ -240,14 +241,16 @@ class MissionControlService:
 
     def detail(self, run_id: str, filters: MissionControlFilters | None = None) -> dict[str, Any]:
         detail = self._detail_view(run_id, filters)
+        landing = self.landing_status()
+        landing_item = _landing_item_for_detail(landing, detail)
         payload = serialize_detail(detail)
-        review_packet = _review_packet(self.project_dir, detail)
+        review_packet = _review_packet(self.project_dir, detail, landing_item=landing_item)
         payload["review_packet"] = review_packet
         payload["verification_plan"] = _verification_plan_for_detail(detail) or _verification_plan_from_review_packet(
             detail,
             review_packet,
         )
-        _apply_landing_context(self.project_dir, payload, detail)
+        _apply_landing_context(self.project_dir, payload, detail, landing_item=landing_item)
         return payload
 
     def logs(
@@ -655,6 +658,32 @@ class MissionControlService:
         )
         return payload
 
+    def rerun_merge_verification(
+        self,
+        merge_id: str,
+        *,
+        verification_policy: str | None = "smart",
+    ) -> dict[str, Any]:
+        payload = serialize_action_result(
+            execute_merge_verify(
+                self.project_dir,
+                merge_id,
+                verification_policy=verification_policy,
+                post_result=lambda item: self._record_async_action_result(
+                    kind="merge.verify.completed",
+                    result=item,
+                    details={"action": "merge-verify", "merge_id": merge_id, "verification_policy": verification_policy or "smart"},
+                ),
+            )
+        )
+        self._record_event(
+            kind="merge.verify",
+            severity=_event_severity(payload),
+            message=payload.get("message") or "merge verification rerun requested",
+            details={"ok": payload.get("ok"), "merge_id": merge_id, "verification_policy": verification_policy or "smart"},
+        )
+        return payload
+
     def resolve_release_issues(self) -> dict[str, Any]:
         landing = self.landing_status()
         recovery_needed = _landing_recovery_needed(landing)
@@ -840,6 +869,7 @@ class MissionControlService:
             item["diff_error"] = diff["error"]
             items.append(item)
 
+        _annotate_superseded_landing_items(items, counts)
         return {
             "target": target,
             "items": items,
@@ -1359,7 +1389,7 @@ def filters_from_params(
     )
 
 
-def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
+def _review_packet(project_dir: Path, detail: DetailView, *, landing_item: dict[str, Any] | None = None) -> dict[str, Any]:
     record = detail.record
     display_status = "stale" if detail.overlay is not None and detail.overlay.level == "stale" else record.status
     target = _review_target(project_dir, record)
@@ -1380,6 +1410,17 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
     evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
     merge_preflight = _merge_preflight(project_dir)
     failure = _failure_summary(project_dir, record, detail.overlay)
+    if landing_item and landing_item.get("superseded"):
+        return _superseded_review_packet(
+            project_dir,
+            record,
+            display_status=display_status,
+            target=target,
+            certification=certification,
+            evidence=evidence,
+            failure=failure,
+            landing_item=landing_item,
+        )
     spec_review_pending = _spec_review_pending(record)
     readiness = _review_readiness(
         display_status=display_status,
@@ -1460,6 +1501,79 @@ def _review_packet(project_dir: Path, detail: DetailView) -> dict[str, Any]:
             merged=merged,
             certification=certification,
             changed_files=changed_files,
+        ),
+    }
+
+
+def _superseded_review_packet(
+    project_dir: Path,
+    record: Any,
+    *,
+    display_status: str,
+    target: str,
+    certification: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    failure: dict[str, Any] | None,
+    landing_item: dict[str, Any],
+) -> dict[str, Any]:
+    superseded_by = landing_item.get("superseded_by") if isinstance(landing_item.get("superseded_by"), dict) else {}
+    retry_run_id = _optional_str(superseded_by.get("run_id"))
+    retry_task_id = _optional_str(superseded_by.get("task_id"))
+    retry_label = retry_task_id or retry_run_id or "a later retry"
+    retry_queue_status = _optional_str(superseded_by.get("queue_status"))
+    retry_landing_state = _optional_str(superseded_by.get("landing_state"))
+    retry_done = retry_landing_state in {"merged", "reviewed"} or retry_queue_status == "done"
+    retry_status_label = "Retry completed" if retry_done else "Retry in progress"
+    retry_next_step = (
+        f"{retry_label} completed this task. No action is needed on this older attempt."
+        if retry_done
+        else f"{retry_label} is the current retry. Watch that attempt instead of recovering this older one."
+    )
+    original_reason = (
+        _optional_str(failure.get("reason")) if failure is not None else None
+    ) or f"Original attempt ended as {display_status or 'interrupted'}."
+    summary = _optional_str(record.intent.get("summary")) or record.display_name or record.run_id
+    return {
+        "headline": "Retried by a later run",
+        "status": "superseded",
+        "summary": summary,
+        "readiness": {
+            "state": "superseded",
+            "label": "Retried",
+            "tone": "info",
+            "blockers": [],
+            "next_step": retry_next_step,
+        },
+        "checks": [
+            _review_check("retry", retry_status_label, "pass" if retry_done else "info", retry_next_step),
+            _review_check("original", "Original attempt", "info", original_reason),
+        ],
+        "next_action": {
+            "label": "No action",
+            "action_key": None,
+            "enabled": False,
+            "reason": "A later retry is the current retry for this task.",
+        },
+        "certification": certification,
+        "changes": {
+            "branch": None,
+            "target": target,
+            "merged": False,
+            "merge_id": None,
+            "file_count": 0,
+            "files": [],
+            "truncated": False,
+            "diff_command": None,
+            "diff_error": None,
+        },
+        "evidence": evidence,
+        "failure": None,
+        "product_handoff": _product_handoff(
+            project_dir,
+            record,
+            merged=False,
+            certification=certification,
+            changed_files=[],
         ),
     }
 
@@ -2052,7 +2166,24 @@ def _review_action_label(key: str, label: str) -> str:
     return "Land selected" if key == "m" else label
 
 
-def _apply_landing_context(project_dir: Path, payload: dict[str, Any], detail: DetailView) -> None:
+def _apply_landing_context(
+    project_dir: Path,
+    payload: dict[str, Any],
+    detail: DetailView,
+    *,
+    landing_item: dict[str, Any] | None = None,
+) -> None:
+    if landing_item and landing_item.get("superseded"):
+        payload["landing_state"] = "superseded"
+        payload["superseded"] = True
+        payload["superseded_by"] = landing_item.get("superseded_by")
+        payload["display_status"] = "superseded"
+        payload["legal_actions"] = [
+            action
+            for action in payload.get("legal_actions", [])
+            if isinstance(action, dict) and action.get("key") == "x"
+        ]
+        return
     merge_info = _detail_merge_info(project_dir, detail)
     if merge_info is None:
         payload["landing_state"] = None
@@ -2065,6 +2196,23 @@ def _apply_landing_context(project_dir: Path, payload: dict[str, Any], detail: D
             action["enabled"] = False
             action["reason"] = f"Already merged into {target}."
             action["preview"] = f"Already merged into {target}."
+
+
+def _landing_item_for_detail(landing: dict[str, Any], detail: DetailView) -> dict[str, Any] | None:
+    items = landing.get("items") if isinstance(landing.get("items"), list) else []
+    run_id = _optional_str(detail.run_id)
+    task_id = _optional_str(detail.record.identity.get("queue_task_id"))
+    branch = _optional_str(detail.record.git.get("branch"))
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if run_id and _optional_str(item.get("run_id")) == run_id:
+            return item
+        if task_id and _optional_str(item.get("task_id")) == task_id:
+            return item
+        if branch and _optional_str(item.get("branch")) == branch:
+            return item
+    return None
 
 
 def _detail_merge_info(project_dir: Path, detail: DetailView) -> dict[str, Any] | None:
@@ -3028,9 +3176,89 @@ def _certification_stories(source: dict[str, Any] | None) -> list[dict[str, Any]
                 "methodology": _first_nonempty(raw.get("methodology"), raw.get("interaction_method")),
                 "surface": _first_nonempty(raw.get("surface"), raw.get("surface_display")),
                 "detail": detail,
+                "evidence_excerpt": _story_evidence_excerpt(raw),
+                "evidence_command": _story_evidence_command(raw),
+                "evidence_output": _story_evidence_output(raw),
             }
         )
     return stories[:100]
+
+
+def _story_evidence_excerpt(story: dict[str, Any]) -> str:
+    command, output = _story_evidence_command_output(story)
+    if command and output:
+        return _truncate_story_evidence(f"{_compact_evidence_command(command)} -> {output}", 180)
+    if command:
+        return _truncate_story_evidence(_compact_evidence_command(command), 180)
+    raw = _first_nonempty(story.get("evidence"), story.get("failure_evidence"))
+    if not raw:
+        return ""
+    lines = _story_evidence_lines(raw)
+    return _truncate_story_evidence(lines[0] if lines else str(raw), 180)
+
+
+def _story_evidence_command(story: dict[str, Any]) -> str:
+    command, _ = _story_evidence_command_output(story)
+    return command
+
+
+def _story_evidence_output(story: dict[str, Any]) -> str:
+    _, output = _story_evidence_command_output(story)
+    return output
+
+
+def _story_evidence_command_output(story: dict[str, Any]) -> tuple[str, str]:
+    raw = _first_nonempty(story.get("evidence"), story.get("failure_evidence"))
+    if not raw:
+        return "", ""
+    lines = _story_evidence_lines(raw)
+    for index, line in enumerate(lines):
+        if not line.startswith("$ "):
+            continue
+        command = line[2:]
+        output = ""
+        for candidate in lines[index + 1:]:
+            if candidate.startswith("$ "):
+                break
+            output = candidate
+            break
+        return command, output
+    return "", ""
+
+
+def _story_evidence_lines(raw: str) -> list[str]:
+    lines = []
+    for line in str(raw).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("```") or stripped == "text":
+            continue
+        lines.append(stripped)
+    return lines
+
+
+def _truncate_story_evidence(value: str, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _compact_evidence_command(command: str) -> str:
+    import re
+
+    path_match = re.search(r"https?://(?:127\.0\.0\.1|localhost):\d+([^\s\"']*)", command)
+    path = path_match.group(1) if path_match else ""
+    if path == "":
+        path = "/" if path_match else ""
+    if command.lstrip().startswith("curl") and path:
+        if "grep -c" in command and "<tr" in command:
+            return f"curl GET {path} | count rows"
+        if "grep -o" in command:
+            return f"curl GET {path} | inspect content"
+        return f"curl GET {path}"
+    if path:
+        command = re.sub(r"https?://(?:127\.0\.0\.1|localhost):\d+([^\s\"']*)", path, command)
+    return command
 
 
 def _story_status(story: dict[str, Any]) -> str:
@@ -4392,16 +4620,8 @@ def _landing_recovery_needed(landing: dict[str, Any]) -> bool:
 
 def _superseded_failed_task_ids(landing: dict[str, Any]) -> list[str]:
     items = landing.get("items") if isinstance(landing.get("items"), list) else []
-    landed_signatures = {
-        _summary_signature(item.get("summary"))
-        for item in items
-        if isinstance(item, dict) and str(item.get("landing_state") or "") == "merged"
-    }
-    landed_signatures.discard("")
-    if not landed_signatures:
-        return []
     out: list[str] = []
-    for item in items:
+    for index, item in enumerate(items):
         if not isinstance(item, dict):
             continue
         status = str(item.get("queue_status") or "")
@@ -4409,11 +4629,107 @@ def _superseded_failed_task_ids(landing: dict[str, Any]) -> list[str]:
             continue
         if str(item.get("landing_state") or "") != "blocked":
             continue
-        signature = _summary_signature(item.get("summary"))
         task_id = _optional_str(item.get("task_id"))
-        if signature and task_id and signature in landed_signatures:
+        if task_id and _later_resolved_landing_item(items, index, item):
             out.append(task_id)
     return out
+
+
+def _annotate_superseded_landing_items(items: list[dict[str, Any]], counts: dict[str, int]) -> None:
+    for index, item in enumerate(items):
+        status = str(item.get("queue_status") or "")
+        if status not in {"failed", "interrupted", "cancelled", "stale"}:
+            continue
+        if str(item.get("landing_state") or "") != "blocked":
+            continue
+        replacement = _later_replacement_landing_item(items, index, item)
+        if not replacement:
+            continue
+        replacement_status = str(replacement.get("queue_status") or "")
+        item["superseded"] = True
+        item["superseded_by"] = {
+            "task_id": replacement.get("task_id"),
+            "run_id": replacement.get("run_id"),
+            "landing_state": replacement.get("landing_state"),
+            "queue_status": replacement_status,
+        }
+        item["label"] = "Retry in progress" if replacement_status in REVIEW_IN_PROGRESS_STATUSES else "Superseded by retry"
+        counts["blocked"] = max(0, int(counts.get("blocked") or 0) - 1)
+
+
+def _later_replacement_landing_item(items: list[Any], item_index: int, item: dict[str, Any]) -> dict[str, Any] | None:
+    signature = _summary_signature(item.get("summary"))
+    if not signature:
+        return None
+    best: tuple[tuple[str, int], dict[str, Any]] | None = None
+    for candidate_index, candidate in enumerate(items):
+        if not isinstance(candidate, dict):
+            continue
+        if candidate is item:
+            continue
+        if _summary_signature(candidate.get("summary")) != signature:
+            continue
+        if _optional_str(candidate.get("task_id")) == _optional_str(item.get("task_id")):
+            continue
+        if str(candidate.get("queue_status") or "") == "removed":
+            continue
+        if not _landing_item_is_later(candidate, candidate_index, item, item_index):
+            continue
+        key = _landing_item_order_key(candidate, candidate_index)
+        if best is None or key > best[0]:
+            best = (key, candidate)
+    return best[1] if best else None
+
+
+def _later_resolved_landing_item(items: list[Any], item_index: int, item: dict[str, Any]) -> dict[str, Any] | None:
+    signature = _summary_signature(item.get("summary"))
+    if not signature:
+        return None
+    best: tuple[tuple[str, int], dict[str, Any]] | None = None
+    for candidate_index, candidate in enumerate(items):
+        if not isinstance(candidate, dict):
+            continue
+        if candidate is item:
+            continue
+        if str(candidate.get("landing_state") or "") not in {"merged", "reviewed"}:
+            continue
+        if _summary_signature(candidate.get("summary")) != signature:
+            continue
+        if _optional_str(candidate.get("task_id")) == _optional_str(item.get("task_id")):
+            continue
+        if not _landing_item_is_later(candidate, candidate_index, item, item_index):
+            continue
+        key = _landing_item_order_key(candidate, candidate_index)
+        if best is None or key > best[0]:
+            best = (key, candidate)
+    return best[1] if best else None
+
+
+def _landing_item_is_later(
+    candidate: dict[str, Any],
+    candidate_index: int,
+    item: dict[str, Any],
+    item_index: int,
+) -> bool:
+    candidate_run_key = _run_id_time_key(candidate.get("run_id"))
+    item_run_key = _run_id_time_key(item.get("run_id"))
+    if candidate_run_key and item_run_key and candidate_run_key != item_run_key:
+        return candidate_run_key > item_run_key
+    return candidate_index > item_index
+
+
+def _landing_item_order_key(item: dict[str, Any], index: int) -> tuple[str, int]:
+    return (_run_id_time_key(item.get("run_id")) or "", index)
+
+
+def _run_id_time_key(value: Any) -> str | None:
+    text = _optional_str(value)
+    if not text:
+        return None
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})-(\d{6})-", text)
+    if not match:
+        return None
+    return f"{match.group(1)}T{match.group(2)}"
 
 
 def _blocked_attention_task_ids(landing: dict[str, Any]) -> list[str]:
@@ -4421,6 +4737,8 @@ def _blocked_attention_task_ids(landing: dict[str, Any]) -> list[str]:
     out: list[str] = []
     for item in items:
         if not isinstance(item, dict):
+            continue
+        if item.get("superseded"):
             continue
         status = str(item.get("queue_status") or "")
         task_id = _optional_str(item.get("task_id"))

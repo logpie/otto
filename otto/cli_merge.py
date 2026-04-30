@@ -285,3 +285,64 @@ def register_merge_command(main: click.Group) -> None:
             console.print(f"  {rich_escape(result.note)}")
 
         sys.exit(0 if result.success else 1)
+
+    @main.command("merge-verify", context_settings=CONTEXT_SETTINGS)
+    @click.argument("merge_id")
+    @click.option(
+        "--verify",
+        "verification_policy",
+        type=click.Choice(["smart", "full"]),
+        default="smart",
+        show_default=True,
+        help="Verification policy for the rerun.",
+    )
+    def merge_verify(merge_id: str, verification_policy: str) -> None:
+        """Rerun post-merge certification for an already-landed merge."""
+        from otto.budget import RunBudget
+        from otto.config import ConfigError, load_config, resolve_project_dir
+        from otto.merge.orchestrator import (
+            MergeAlreadyRunning,
+            merge_lock,
+            rerun_post_merge_verification,
+        )
+
+        try:
+            project_dir = resolve_project_dir(Path.cwd())
+            config = load_config(project_dir / "otto.yaml")
+        except (ConfigError, ValueError) as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
+
+        _install_merge_logging(project_dir)
+        budget = RunBudget.start_from(config)
+        console.print(
+            f"  [bold]Rerunning merge verification[/bold] "
+            f"[info]{rich_escape(merge_id)}[/info] ([info]{verification_policy}[/info])"
+        )
+        try:
+            from otto.cli import _signal_interrupt_guard
+
+            with _signal_interrupt_guard():
+                with merge_lock(project_dir):
+                    result = asyncio.run(
+                        rerun_post_merge_verification(
+                            project_dir=project_dir,
+                            config=config,
+                            merge_id=merge_id,
+                            verification_policy=verification_policy,
+                            budget=budget,
+                        )
+                    )
+        except MergeAlreadyRunning as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(1)
+        except Exception as exc:
+            logger.exception("merge verification rerun failed")
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(1)
+
+        if result.success:
+            console.print(f"  [success]Verification passed[/success] {rich_escape(result.note)}")
+        else:
+            error_console.print(f"[error]{rich_escape(result.note or 'verification failed')}[/error]")
+            sys.exit(1)

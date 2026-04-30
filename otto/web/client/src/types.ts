@@ -181,6 +181,14 @@ export interface AutopilotDecision {
   status: "pending" | "approved" | "declined" | "executed" | "failed" | "skipped" | string;
   requires_approval?: boolean;
   rationale?: string;
+  includes_actions?: string[];
+  chain_actions?: string[];
+  plan_steps?: Array<{
+    action: string;
+    label: string;
+    status?: string;
+    detail?: string;
+  }>;
   result: Record<string, unknown> | null;
   error: string | null;
 }
@@ -201,10 +209,17 @@ export interface AutopilotStatus {
   mode: AutopilotMode;
   enabled: boolean;
   policy: AutopilotPolicy;
+  pilot_agent?: {
+    agent_type: string;
+    provider: string;
+    model: string;
+    reasoning_effort: string;
+  };
   health: "idle" | "scanning" | "attention" | "recovering" | "blocked" | "off" | string;
   last_tick_at: string | null;
   next_tick_hint: string;
   incidents: AutopilotIncident[];
+  decisions?: AutopilotDecision[];
   pending_decisions: AutopilotDecision[];
   recent_events: AutopilotEvent[];
   budgets: {
@@ -343,6 +358,12 @@ export interface LandingItem {
   changed_file_count: number;
   changed_files: string[];
   diff_error: string | null;
+  superseded?: boolean;
+  superseded_by?: {
+    task_id?: string | null;
+    run_id?: string | null;
+    landing_state?: string | null;
+  } | null;
 }
 
 export interface LandingState {
@@ -503,6 +524,12 @@ export interface RunDetail extends RunSummary {
   verification_plan: VerificationPlan | null;
   phase_timeline: PhaseTimelineItem[];
   landing_state: string | null;
+  superseded?: boolean;
+  superseded_by?: {
+    task_id?: string | null;
+    run_id?: string | null;
+    landing_state?: string | null;
+  } | null;
   merge_info?: Record<string, unknown> | null;
   record: Record<string, unknown>;
 }
@@ -621,6 +648,9 @@ export interface ReviewPacket {
       methodology: string;
       surface: string;
       detail: string;
+      evidence_excerpt: string;
+      evidence_command: string;
+      evidence_output: string;
     }>;
     // Cluster-evidence-trustworthiness #4: per-round history so the UI
     // can render round tabs with verdict + counts + diagnosis instead

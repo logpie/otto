@@ -415,6 +415,7 @@ export function taskBoardColumns(data: StateResponse | null, filters: Filters = 
     if (item.queue_task_id) liveByTask.set(item.queue_task_id, item);
   }
   for (const item of data.landing.items) {
+    if (item.superseded) continue;
     const live = liveByTask.get(item.task_id);
     const runId = item.run_id || live?.run_id || null;
     const card = boardTaskFromLanding(item, runId, !data.landing.merge_blocked, live);
@@ -574,6 +575,7 @@ function liveWaitingReason(item: LiveRunItem): string | null {
 }
 
 export function boardStageForLanding(item: LandingItem, mergeAllowed: boolean): BoardStage {
+  if (item.superseded) return "reviewed";
   if (item.landing_state === "merged") return "landed";
   if (item.landing_state === "reviewed") return "reviewed";
   if (item.landing_state === "ready") return mergeAllowed ? "ready" : "attention";
@@ -582,6 +584,7 @@ export function boardStageForLanding(item: LandingItem, mergeAllowed: boolean): 
 }
 
 export function boardStatusLabel(item: LandingItem, mergeAllowed: boolean): string {
+  if (item.superseded) return "retried";
   if (item.landing_state === "ready") return mergeAllowed ? "ready" : "blocked";
   if (item.landing_state === "reviewed") return "certified";
   if (item.landing_state === "merged") return "landed";
@@ -589,6 +592,7 @@ export function boardStatusLabel(item: LandingItem, mergeAllowed: boolean): stri
 }
 
 export function boardReasonForLanding(item: LandingItem, mergeAllowed: boolean, live?: LiveRunItem): string {
+  if (item.superseded) return "A later retry completed this task; no action needed for this attempt.";
   if (item.landing_state === "ready" && !mergeAllowed) return "Repository cleanup required before landing.";
   if (item.landing_state === "ready") return `${changeLine(item)} changed; ${proofLine(item)} recorded. Review, then land.`;
   if (item.landing_state === "reviewed") return "Certification complete; no merge action needed.";
@@ -959,6 +963,7 @@ export function workflowHealth(data: StateResponse | null): {
     if (isAttentionStatus(item.display_status)) attentionKeys.add(item.queue_task_id || item.run_id);
   }
   for (const item of data?.landing.items || []) {
+    if (item.superseded) continue;
     if (isAttentionStatus(item.queue_status)) attentionKeys.add(item.task_id);
   }
   const needsAttention = attentionKeys.size;
@@ -1136,17 +1141,19 @@ export function releaseResolutionConfirmation(data: StateResponse | null): strin
 
 export function supersededFailedTaskIds(landing?: LandingState): string[] {
   if (!landing) return [];
-  const landed = new Set(
+  const resolved = new Set(
     landing.items
-      .filter((item) => item.landing_state === "merged")
+      .filter((item) => item.landing_state === "merged" || item.landing_state === "reviewed")
       .map((item) => summarySignature(item.summary))
       .filter(Boolean),
   );
-  if (!landed.size) return [];
+  if (!resolved.size) {
+    return landing.items.filter((item) => Boolean(item.superseded)).map((item) => item.task_id);
+  }
   return landing.items
     .filter((item) => ["failed", "interrupted", "cancelled", "stale"].includes(item.queue_status))
     .filter((item) => item.landing_state === "blocked")
-    .filter((item) => landed.has(summarySignature(item.summary)))
+    .filter((item) => item.superseded || resolved.has(summarySignature(item.summary)))
     .map((item) => item.task_id);
 }
 
@@ -1289,6 +1296,7 @@ export function shortPath(path: string | null | undefined): string {
 }
 
 export function detailStatusLabel(detail: RunDetail): string {
+  if (detail.superseded || detail.review_packet.readiness.state === "superseded") return "retried";
   const readiness = detail.review_packet.readiness.state;
   if (readiness === "blocked" || readiness === "merged") return readiness;
   return detail.display_status || "-";
@@ -1356,6 +1364,7 @@ export function evidenceLine(packet: RunDetail["review_packet"]): string {
 
 export function canShowDiff(detail: RunDetail | null): boolean {
   if (!detail) return false;
+  if (detail.superseded) return false;
   const packet = detail.review_packet;
   if (!packet.changes.branch || packet.changes.diff_error) return false;
   return packet.readiness.state !== "in_progress";
@@ -1363,6 +1372,7 @@ export function canShowDiff(detail: RunDetail | null): boolean {
 
 export function canTryProduct(detail: RunDetail | null): boolean {
   if (!detail) return false;
+  if (detail.superseded) return false;
   const packet = detail.review_packet;
   const status = String(detail.display_status || detail.status || "").toLowerCase();
   if (packet.readiness.state === "in_progress") return false;
@@ -1571,6 +1581,7 @@ export function runEventText(item: LiveRunItem, landingByTask: Map<string, Landi
 }
 
 export function landingStateText(item: LandingItem): string {
+  if (item.superseded) return "Retried";
   if (item.landing_state === "ready") return "Ready to land";
   if (item.landing_state === "reviewed") return "Certified";
   if (item.landing_state === "merged") return "Landed";
@@ -1579,6 +1590,7 @@ export function landingStateText(item: LandingItem): string {
 }
 
 export function diagnosticLandingAction(item: LandingItem): string {
+  if (item.superseded) return "A later retry completed this task; no action needed.";
   if (item.landing_state === "ready") return `${changeLine(item)} changed; review evidence before landing.`;
   if (item.landing_state === "reviewed") return "Certification complete; no merge action needed.";
   if (item.landing_state === "merged") return item.merge_id ? `Landed by ${item.merge_id}.` : "Already landed.";

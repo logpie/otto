@@ -489,7 +489,7 @@ def test_run_detail_overview_is_actionable_and_resizable(
         for test_id in expect_visible:
             page.get_by_test_id(test_id).wait_for(state="visible", timeout=2_000)
 
-        assert page.get_by_test_id("review-metric-proof").text_content() == "ProofStrong"
+        assert page.get_by_test_id("review-metric-proof").text_content() == "Evidence3 items"
         assert page.get_by_test_id("review-metric-artifacts").text_content() == "Artifacts3 files"
         assert page.get_by_text("View all evidence").count() == 0
         assert page.locator(".review-drawer").count() == 0

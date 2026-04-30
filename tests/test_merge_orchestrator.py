@@ -30,6 +30,7 @@ from otto.merge.orchestrator import (
     _run_post_merge_verification,
     _graduate_merged_task_sessions,
     merge_lock,
+    rerun_post_merge_verification,
     run_merge,
 )
 from otto.merge import git_ops
@@ -930,6 +931,46 @@ def test_post_merge_verification_writes_merged_from_to_summary(
     assert summary["merged_from"] == ["add", "feature/random"]
     assert summary["merge_verification_plan"]["target"] == "main"
     assert summary["merge_verification_plan"]["changed_files"] == ["app/csv.py"]
+
+
+def test_rerun_post_merge_verification_marks_failed_on_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = MergeState(
+        merge_id="merge-rerun-system-exit",
+        started_at="2026-04-20T00:00:00Z",
+        target="main",
+        target_head_before="old-head",
+        branches_in_order=["build/a-2026-04-29"],
+        outcomes=[orchestrator_module.BranchOutcome(branch="build/a-2026-04-29", status="merged")],
+    )
+    orchestrator_module.write_state(tmp_path, state)
+    monkeypatch.setattr("otto.merge.orchestrator.git_ops.current_branch", lambda project_dir: "main")
+    monkeypatch.setattr(
+        "otto.config.repo_preflight_issues",
+        lambda project_dir: {"blocking": [], "dirty": [], "dirty_files": [], "untracked": []},
+    )
+
+    async def _abort(**kwargs):
+        raise SystemExit("provider process exited")
+
+    monkeypatch.setattr("otto.merge.orchestrator._run_post_merge_verification", _abort)
+
+    with pytest.raises(SystemExit):
+        asyncio.run(
+            rerun_post_merge_verification(
+                project_dir=tmp_path,
+                config={"default_branch": "main"},
+                merge_id="merge-rerun-system-exit",
+                verification_policy="smart",
+            )
+        )
+
+    updated = load_state(tmp_path, "merge-rerun-system-exit")
+    assert updated.status == "failed"
+    assert updated.terminal_outcome == "failure"
+    assert "merge verification rerun aborted" in (updated.note or "")
 
 
 def test_post_merge_verification_blocks_human_flag_even_if_certifier_verdict_passes(

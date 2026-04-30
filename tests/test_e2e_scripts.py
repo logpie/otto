@@ -62,6 +62,36 @@ def test_e2e_runner_direct_real_scenario_requires_opt_in(monkeypatch) -> None:
     assert guard_calls == ["real E2E scenario(s)"]
 
 
+def test_autopilot_real_e2e_refuses_without_opt_in(monkeypatch, tmp_path: Path) -> None:
+    script = _load_script("tests._e2e_autopilot_real_guard_script", SCRIPTS_DIR / "e2e_autopilot_real.py")
+    monkeypatch.delenv("OTTO_ALLOW_REAL_COST", raising=False)
+    project = tmp_path / "project"
+    project.mkdir()
+
+    assert script.main(["--project", str(project)]) == 2
+
+
+def test_autopilot_real_e2e_cleanup_removes_synthetic_audit_rows(tmp_path: Path) -> None:
+    script = _load_script("tests._e2e_autopilot_real_cleanup_script", SCRIPTS_DIR / "e2e_autopilot_real.py")
+    path = tmp_path / "otto_logs" / "mission-control" / "autopilot-events.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join([
+            json.dumps({"kind": "pilot.completed", "details": {"decision": {"id": "keep", "run_id": "real-run"}}}),
+            json.dumps({"kind": "pilot.completed", "details": {"decision": {"id": "drop-by-id", "run_id": "real-run"}}}),
+            json.dumps({"kind": "pilot.completed", "details": {"decision": {"id": "other", "run_id": "autopilot-e2e-run"}}}),
+            json.dumps({"kind": "decision.executed", "message": "synthetic requeue", "details": {"decision": {"id": "other"}}}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    script._cleanup_synthetic_events(tmp_path, {"drop-by-id"})
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["details"]["decision"]["id"] == "keep"
+
+
 def test_benchmark_merge_cost_parser_dedupes_repeated_outcome_notes(tmp_path: Path) -> None:
     bench_costs = _load_script("tests._bench_costs_script", SCRIPTS_DIR / "bench_costs.py")
     state_dir = tmp_path / "otto_logs" / "merge" / "merge-1"

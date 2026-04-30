@@ -6,8 +6,9 @@ import sys
 from pathlib import Path
 
 from click.testing import CliRunner
+from rich.console import Console
 
-from otto.cli import main
+from otto.cli import _print_config_banner, main
 from tests._helpers import init_repo
 
 
@@ -34,6 +35,26 @@ def test_python_module_cli_merge_help_exits_zero() -> None:
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_config_banner_uses_effective_provider_safe_default(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "otto.yaml"
+    config_path.write_text("provider: claude\n", encoding="utf-8")
+    config = {
+        "provider": "claude",
+        "certifier_mode": "fast",
+        "run_budget_seconds": 300,
+        "max_certify_rounds": 2,
+        "max_turns_per_call": 50,
+    }
+    monkeypatch.setattr("otto.cli._runtime_model_name", lambda _provider: "claude-opus-4-7")
+    console = Console(record=True, width=120)
+
+    _print_config_banner(console, config, {}, config_path, primary_agent_type="build")
+
+    output = console.export_text()
+    assert "sonnet" in output
+    assert "claude-opus-4-7" not in output
 
 
 def test_dashboard_alias_opens_web_from_nested_directory(tmp_path: Path, monkeypatch) -> None:

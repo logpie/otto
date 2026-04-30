@@ -194,6 +194,31 @@ def execute_merge_recover(
     )
 
 
+def execute_merge_verify(
+    project_dir: Path,
+    merge_id: str,
+    *,
+    verification_policy: str | None = "smart",
+    post_result: Callable[[ActionResult], None] | None = None,
+) -> ActionResult:
+    merge_id = str(merge_id or "").strip()
+    if not merge_id:
+        return _warning_result("Verification unavailable", "Merge id is missing.")
+    try:
+        policy = normalize_verification_policy(verification_policy, default="smart")
+    except ValueError as exc:
+        return _error_result("Verification failed", str(exc))
+    if policy not in {"smart", "full"}:
+        return _error_result("Verification failed", "Merge verification reruns support smart or full verification.")
+    return _launch_process(
+        _otto_cli_argv("merge-verify", merge_id, "--verify", policy),
+        cwd=Path(project_dir),
+        description=f"rerun merge verification ({policy})",
+        post_result=post_result,
+        settle_timeout_s=2.0,
+    )
+
+
 def execute_queue_cleanup(
     project_dir: Path,
     task_ids: list[str],

@@ -327,22 +327,13 @@ def _switch_to_diagnostics(page: Any) -> None:
     )
 
 
-def _open_run_and_advanced_actions(page: Any) -> None:
-    """Select the run row, open the inspector implicitly, then expand the
-    advanced-actions disclosure to surface the Cancel button."""
+def _open_run_detail(page: Any) -> None:
+    """Select the run row and open the inspector."""
 
     row_btn = page.get_by_test_id(f"live-row-activator-{RUN_ID}")
     row_btn.wait_for(state="visible", timeout=5_000)
     row_btn.click()
     page.wait_for_selector("[data-testid=run-detail-panel]", timeout=5_000)
-    page.locator("details.advanced-actions").wait_for(state="visible", timeout=5_000)
-    # Open advanced-actions disclosure.
-    page.evaluate(
-        """() => {
-            const det = document.querySelector('details.advanced-actions');
-            if (det) det.open = true;
-        }"""
-    )
 
 
 def _live_status_cell_text(page: Any) -> str:
@@ -397,9 +388,9 @@ def test_cancel_does_not_optimistically_flip_row_to_cancelling(
     initial = _live_status_cell_text(page)
     assert "RUNNING" in initial.upper(), f"expected initial RUNNING status, got {initial!r}"
 
-    _open_run_and_advanced_actions(page)
+    _open_run_detail(page)
 
-    cancel_btn = page.get_by_test_id("advanced-action-cancel")
+    cancel_btn = page.get_by_test_id("review-next-action-button")
     cancel_btn.wait_for(state="visible", timeout=5_000)
     cancel_btn.click()
 
@@ -421,6 +412,27 @@ def test_cancel_does_not_optimistically_flip_row_to_cancelling(
         }""",
         timeout=1_000,
     )
+
+
+def test_running_review_cancel_uses_danger_style(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    payload = _state(status="running")
+    _install_projects_route(page)
+    _install_state_route(page, payload)
+    _install_detail_route(page)
+    _install_artifacts_route(page)
+
+    _hydrate(mc_backend, page, disable_animations)
+    _switch_to_diagnostics(page)
+
+    row_btn = page.get_by_test_id(f"live-row-activator-{RUN_ID}")
+    row_btn.wait_for(state="visible", timeout=5_000)
+    row_btn.click()
+    button = page.get_by_test_id("review-next-action-button")
+    button.wait_for(state="visible", timeout=5_000)
+
+    assert "danger-button" in (button.get_attribute("class") or "")
 
 
 def test_cancel_failure_keeps_server_state(
@@ -450,9 +462,9 @@ def test_cancel_failure_keeps_server_state(
 
     _hydrate(mc_backend, page, disable_animations)
     _switch_to_diagnostics(page)
-    _open_run_and_advanced_actions(page)
+    _open_run_detail(page)
 
-    cancel_btn = page.get_by_test_id("advanced-action-cancel")
+    cancel_btn = page.get_by_test_id("review-next-action-button")
     cancel_btn.wait_for(state="visible", timeout=5_000)
     cancel_btn.click()
     page.wait_for_selector(".confirm-dialog", timeout=5_000)

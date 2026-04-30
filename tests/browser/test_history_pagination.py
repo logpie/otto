@@ -230,14 +230,20 @@ class _StateRouter:
 
 
 def _hydrate(page: Any, mc_backend: Any, disable_animations: Any) -> None:
-    page.goto(mc_backend.url, wait_until="networkidle")
+    page.goto(mc_backend.url, wait_until="domcontentloaded")
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
 
 
 def _open_diagnostics(page: Any) -> None:
     """Switch to the Diagnostics view where the History panel renders."""
-    page.get_by_test_id("diagnostics-tab").click()
+    diagnostics_tab = page.get_by_test_id("diagnostics-tab")
+    if diagnostics_tab.get_attribute("aria-pressed") != "true":
+        diagnostics_tab.click()
+    advanced = page.get_by_test_id("advanced-diagnostics")
+    advanced.wait_for(state="visible", timeout=5_000)
+    if advanced.get_attribute("open") is None:
+        advanced.locator("summary").click()
     page.locator("[data-testid=history-pagination]").wait_for(state="visible", timeout=5_000)
 
 
@@ -409,9 +415,10 @@ def test_history_deep_link_loads_correct_page(
     _install_projects_route(page)
     router.install(page)
 
-    page.goto(f"{mc_backend.url}?view=diagnostics&hp=3", wait_until="networkidle")
+    page.goto(f"{mc_backend.url}?view=diagnostics&hp=3", wait_until="domcontentloaded")
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
+    _open_diagnostics(page)
 
     page.locator("[data-testid=history-pagination]").wait_for(state="visible", timeout=5_000)
     page.wait_for_function(
@@ -431,9 +438,10 @@ def test_history_invalid_deep_link_recovers(
     _install_projects_route(page)
     router.install(page)
 
-    page.goto(f"{mc_backend.url}?view=diagnostics&hp=99", wait_until="networkidle")
+    page.goto(f"{mc_backend.url}?view=diagnostics&hp=99", wait_until="domcontentloaded")
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
+    _open_diagnostics(page)
 
     page.locator("[data-testid=history-out-of-range]").wait_for(state="visible", timeout=5_000)
     text = page.get_by_test_id("history-out-of-range").text_content() or ""
@@ -455,9 +463,10 @@ def test_history_filter_resets_page(
     _install_projects_route(page)
     router.install(page)
 
-    page.goto(f"{mc_backend.url}?view=diagnostics&hp=3", wait_until="networkidle")
+    page.goto(f"{mc_backend.url}?view=diagnostics&hp=3", wait_until="domcontentloaded")
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
     disable_animations(page)
+    _open_diagnostics(page)
 
     page.locator("[data-testid=history-pagination]").wait_for(state="visible", timeout=5_000)
     page.wait_for_function(
@@ -465,7 +474,9 @@ def test_history_filter_resets_page(
         timeout=5_000,
     )
 
+    page.get_by_test_id("tasks-tab").click()
     page.get_by_test_id("filter-type-select").select_option("build")
+    _open_diagnostics(page)
     page.wait_for_function(
         "() => document.querySelector('[data-testid=history-pagination-status]')?.textContent?.includes('Page 1')",
         timeout=5_000,

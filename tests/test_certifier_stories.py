@@ -155,8 +155,9 @@ def test_certifier_cleanup_terminates_new_project_dev_server(monkeypatch: pytest
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     project_server_pid = 200
+    custom_project_server_pid = 250
     other_server_pid = 300
-    alive = {project_server_pid}
+    alive = {project_server_pid, custom_project_server_pid}
     kill_calls: list[tuple[int, int]] = []
 
     def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -164,13 +165,14 @@ def test_certifier_cleanup_terminates_new_project_dev_server(monkeypatch: pytest
             return subprocess.CompletedProcess(
                 args,
                 0,
-                stdout=f"p100\np{project_server_pid}\np{other_server_pid}\n",
+                stdout=f"p100\np{project_server_pid}\np{custom_project_server_pid}\np{other_server_pid}\n",
                 stderr="",
             )
         if args[:3] == ["ps", "-o", "command="]:
             pid = int(args[-1])
             command = {
                 project_server_pid: f"{project_dir}/.venv/bin/python .venv/bin/flask --app app run --port 5199",
+                custom_project_server_pid: "python3 -m fieldops.server --host 127.0.0.1 --port 5107",
                 other_server_pid: "/tmp/other/.venv/bin/python -m http.server 8000",
             }[pid]
             return subprocess.CompletedProcess(args, 0, stdout=f"{command}\n", stderr="")
@@ -178,6 +180,7 @@ def test_certifier_cleanup_terminates_new_project_dev_server(monkeypatch: pytest
             pid = int(args[args.index("-p") + 1])
             cwd = {
                 project_server_pid: project_dir,
+                custom_project_server_pid: project_dir,
                 other_server_pid: Path("/tmp/other"),
             }[pid]
             return subprocess.CompletedProcess(args, 0, stdout=f"p{pid}\nn{cwd}\n", stderr="")
@@ -189,7 +192,7 @@ def test_certifier_cleanup_terminates_new_project_dev_server(monkeypatch: pytest
                 raise ProcessLookupError
             return
         kill_calls.append((pid, sig))
-        if pid == project_server_pid and sig == signal.SIGTERM:
+        if pid in {project_server_pid, custom_project_server_pid} and sig == signal.SIGTERM:
             alive.discard(pid)
             return
         raise AssertionError(f"unexpected kill: pid={pid} sig={sig}")
@@ -204,9 +207,42 @@ def test_certifier_cleanup_terminates_new_project_dev_server(monkeypatch: pytest
             "pid": project_server_pid,
             "command": f"{project_dir}/.venv/bin/python .venv/bin/flask --app app run --port 5199",
             "cwd": str(project_dir),
+        },
+        {
+            "pid": custom_project_server_pid,
+            "command": "python3 -m fieldops.server --host 127.0.0.1 --port 5107",
+            "cwd": str(project_dir),
         }
     ]
-    assert kill_calls == [(project_server_pid, signal.SIGTERM)]
+    assert kill_calls == [
+        (project_server_pid, signal.SIGTERM),
+        (custom_project_server_pid, signal.SIGTERM),
+    ]
+
+
+def test_certifier_cleanup_removes_only_new_untracked_runtime_files(tmp_path: Path):
+    project_dir = tmp_path
+    subprocess.run(["git", "init"], cwd=project_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_dir, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, check=True)
+    (project_dir / "app.py").write_text("print('ok')\n")
+    subprocess.run(["git", "add", "app.py"], cwd=project_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=project_dir, check=True, capture_output=True, text=True)
+
+    (project_dir / "preexisting.log").write_text("keep\n")
+    (project_dir / "runtime.db").write_text("remove\n")
+    (project_dir / "runtime-dir").mkdir()
+    (project_dir / "runtime-dir" / "state.json").write_text("{}\n")
+
+    cleaned = certifier_module._cleanup_certifier_untracked_delta(
+        project_dir,
+        {"preexisting.log"},
+    )
+
+    assert set(cleaned) == {"runtime.db", "runtime-dir/"}
+    assert (project_dir / "preexisting.log").exists()
+    assert not (project_dir / "runtime.db").exists()
+    assert not (project_dir / "runtime-dir").exists()
 
 
 @pytest.mark.parametrize("mode", ["standard", "thorough"])
@@ -356,6 +392,12 @@ def test_merge_context_uses_merge_specific_certifier_prompt(tmp_path: Path):
     assert "Risk level: `clean_disjoint`" in out
     assert "A prior task's proof-of-work can justify `SKIPPED`" in out
     assert "If any story is `FLAG_FOR_HUMAN`, the final `VERDICT` must be `FAIL`" in out
+    assert "agent-browser --session merge-visual record start" in out
+    assert "HTML inspection alone is" in out
+    assert "not browser proof" in out
+    assert "list the files" in out
+    assert "{evidence_dir}" not in out
+    assert str(tmp_path / "recording.webm") in out
 
 
 def test_merge_context_with_full_verify_suppresses_skip_but_keeps_flag(tmp_path: Path):
@@ -616,6 +658,85 @@ def test_pow_demo_evidence_marks_generic_recording_plus_screenshot_partial(tmp_p
     assert report["outcome"] == "passed"
     assert report["verdict_label"] == "PASS with warnings"
     assert report["evidence_gate"]["status"] == "warn"
+
+
+def test_pow_demo_evidence_assigns_story_number_screenshot_by_meaning(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "story-3-status-filter.png").write_bytes(b"image")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "audit-timeline-feature",
+                "summary": "Audit timeline displays events and filters",
+                "claim": "Audit timeline shows 3 status changes and a technician filter.",
+                "observed_result": "Audit page loaded.",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": "Browser page displayed timeline events.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "dispatch-status-filter",
+                "summary": "Status filter limits Kanban columns",
+                "claim": "Status filter limits the dispatch board columns.",
+                "observed_result": "Only blocked work orders were visible.",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": "Browser page showed the filtered dispatch board.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        2,
+        2,
+        evidence_dir=evidence_dir,
+        intent="Certify the integrated web app after merging dispatch and audit branches.",
+    )
+
+    demo = report["demo_evidence"]
+    dispatch_story = next(story for story in demo["stories"] if story["id"] == "dispatch-status-filter")
+    audit_story = next(story for story in demo["stories"] if story["id"] == "audit-timeline-feature")
+    assert dispatch_story["visual_items"][0]["name"] == "story-3-status-filter.png"
+    assert audit_story["visual_items"] == []
+    assert demo["demo_status"] == "partial"
+    assert report["outcome"] == "passed"
+    assert report["evidence_gate"]["status"] == "warn"
+
+
+def test_pow_demo_evidence_does_not_treat_cli_words_as_ui(tmp_path: Path):
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "cli-report-basic",
+                "summary": "CLI report displays all required metrics",
+                "claim": "CLI report displays all required metrics.",
+                "observed_result": "Report displays status breakdown and technician summary.",
+                "surface": "CLI",
+                "methodology": "cli-execution",
+                "evidence": "python3 -m fieldops.report printed the required totals.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        intent="Certify the integrated web app with CLI reporting.",
+    )
+
+    story = report["demo_evidence"]["stories"][0]
+    assert story["needs_visual"] is False
+    assert story["proof_level"] == "text evidence"
+    assert report["outcome"] == "passed"
 
 
 def test_pow_demo_evidence_does_not_require_video_for_http_file_story(tmp_path: Path):

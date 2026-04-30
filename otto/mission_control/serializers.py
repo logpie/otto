@@ -10,8 +10,8 @@ from typing import Any
 
 from otto.config import DEFAULTS
 from otto.config import agent_effort
-from otto.config import agent_model
 from otto.config import agent_provider
+from otto.config import effective_agent_model
 from otto.config import get_max_rounds
 from otto.config import get_max_turns_per_call
 from otto.config import get_run_budget
@@ -726,7 +726,7 @@ def _project_defaults(project_dir: Path) -> dict[str, Any]:
         queue = config.get("queue") if isinstance(config.get("queue"), dict) else {}
         return {
             "provider": agent_provider(config),
-            "model": agent_model(config),
+            "model": effective_agent_model(config),
             "reasoning_effort": agent_effort(config),
             "certifier_mode": resolve_certifier_mode(config),
             "skip_product_qa": bool(config.get("skip_product_qa")),
@@ -824,11 +824,11 @@ def _agents_with_overrides(
         cli_overrides["agents"] = phase_overrides
         config["_cli_overrides"] = cli_overrides
     return {
-        name: {
-            "provider": agent_provider(config, name),
-            "model": agent_model(config, name),
-            "reasoning_effort": agent_effort(config, name),
-        }
+            name: {
+                "provider": agent_provider(config, name),
+                "model": effective_agent_model(config, name),
+                "reasoning_effort": agent_effort(config, name),
+            }
         for name in ("build", "certifier", "spec", "fix")
     }
 

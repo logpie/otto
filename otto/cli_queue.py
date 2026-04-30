@@ -254,13 +254,15 @@ def _task_status(project_dir: Path, task_id: str) -> str:
     return task_display_status(ts)
 
 
-def _resume_status(project_dir: Path, task) -> tuple[str, str | None]:
+def _resume_status(project_dir: Path, task, task_state: dict | None = None) -> tuple[str, str | None]:
     checkpoint_path = checkpoint_path_for_task(project_dir, task)
     if not task.resumable:
         return "n/a", None
+    if task_display_status(task_state or {}) not in RESUMABLE_QUEUE_STATUSES:
+        return "n/a", str(checkpoint_path) if checkpoint_path is not None else None
     if checkpoint_path is None:
         return "no checkpoint", None
-    reason = task_resume_block_reason(project_dir, task, {"status": INTERRUPTED_STATUS})
+    reason = task_resume_block_reason(project_dir, task, task_state)
     if reason is not None:
         return reason, str(checkpoint_path)
     return "ready", str(checkpoint_path)
@@ -482,9 +484,15 @@ def register_queue_commands(main: click.Group) -> None:
     )
     @click.argument("intent", required=False)
     @click.option("--after", multiple=True, help="Task ID(s) this depends on")
+    @click.option(
+        "--allow-unmerged-after",
+        is_flag=True,
+        help="Allow dependency scheduling without post-merge certification semantics",
+    )
     @click.option("--as", "explicit_as", default=None, help="Explicit task ID")
     @click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
     def queue_certify(intent: str | None, after: tuple[str, ...],
+                      allow_unmerged_after: bool,
                       explicit_as: str | None, extra_args: tuple[str, ...]) -> None:
         """Enqueue an `otto certify` run.
 
@@ -498,6 +506,16 @@ def register_queue_commands(main: click.Group) -> None:
         """
         from otto.config import ConfigError, resolve_intent_for_enqueue
 
+        if after and not allow_unmerged_after:
+            error_console.print(
+                "[error]"
+                "`otto queue certify --after` waits for tasks but does not merge their branches. "
+                "Use `otto merge --all --verify smart` after builds finish for post-merge "
+                "certification. If you intentionally want an independent certify run after "
+                "other tasks, pass `--allow-unmerged-after`."
+                "[/error]"
+            )
+            sys.exit(2)
         try:
             resolved = resolve_intent_for_enqueue(_project_dir(), explicit=intent)
         except (ConfigError, ValueError) as exc:
@@ -551,7 +569,7 @@ def register_queue_commands(main: click.Group) -> None:
                 continue
             any_shown = True
             mode = t.command_argv[0] if t.command_argv else "?"
-            resume_status, _resume_path = _resume_status(project_dir, t)
+            resume_status, _resume_path = _resume_status(project_dir, t, ts)
             cost = ts.get("cost_usd")
             cost_s = f"${cost:.2f}" if isinstance(cost, (int, float)) else "—"
             dur = ts.get("duration_s")
@@ -608,7 +626,7 @@ def register_queue_commands(main: click.Group) -> None:
         if task.worktree:
             console.print(f"  [dim]Worktree:[/dim] {task.worktree}")
         console.print(f"  [dim]Resumable:[/dim] {task.resumable}")
-        resume_status, checkpoint_path = _resume_status(project_dir, task)
+        resume_status, checkpoint_path = _resume_status(project_dir, task, ts)
         console.print(f"  [dim]Resume status:[/dim] {_color_resume_status(display_status, resume_status)}")
         if checkpoint_path:
             console.print(f"  [dim]Checkpoint:[/dim] {checkpoint_path}")

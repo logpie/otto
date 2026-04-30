@@ -38,6 +38,30 @@ product still works where integration risk exists.
   `{evidence_dir}` and temporary files outside the repository.
 - For web UI behavior, use real browser DOM events. Do not inject state or
   call app functions through JavaScript.
+- For a standard or thorough merge certification that checks web UI behavior,
+  record concise browser proof under `{evidence_dir}`. This is not a full
+  product demo and should stay focused on integration risk:
+  - Start one short walkthrough recording after the app is ready:
+    `agent-browser --session merge-visual record start {evidence_dir}/recording.webm`
+  - Exercise the highest-risk merged UI path with real clicks/fills/keypresses.
+  - Save story-named screenshots for distinct checked states when practical:
+    `agent-browser --session merge-visual screenshot {evidence_dir}/<story_id>.png`
+  - Stop the recording before the verdict:
+    `agent-browser --session merge-visual record stop`
+  HTTP/CLI/file evidence is still sufficient for API, CLI, library, worker,
+  and pure export-validation stories.
+- For any story whose user surface is a page, DOM, dashboard, filter, link,
+  form, button, modal, or other browser UI, `curl`/HTML inspection alone is
+  not browser proof. Do not report that story as `PASS` with
+  `methodology=http-request` unless the story is explicitly API-only. Use
+  `agent-browser open`, `snapshot -i`, real `click`/`fill`/`select`/`press`
+  commands where interaction is involved, and save a story-named screenshot or
+  the walkthrough recording. If you cannot produce browser proof for a web UI
+  story in standard/thorough mode, report it as `WARN` or `FAIL` and explain
+  the blocker instead of emitting a green `PASS`.
+- Before the final `VERDICT`, list the files in `{evidence_dir}` and confirm
+  that at least one `.webm` recording or story-named `.png` screenshot exists
+  when any checked story uses a web UI surface.
 - If you start a dev server, app server, queue worker, or any command that
   keeps a port open, record the command, port, and PID/shell id; redirect noisy
   access logs to a temp file outside the repo when practical; stop the process
@@ -45,7 +69,8 @@ product still works where integration risk exists.
   Ctrl-C, or the specific PID you started; and verify the port is closed. Never
   kill pre-existing user processes or broad process names.
 - Screenshots and video are supporting evidence only; they do not replace
-  a real action/assertion path.
+  a real action/assertion path. For web UI stories, they are also part of the
+  proof packet that shows the merge was exercised in a browser.
 - Every `PASS` must include the concrete command/request/UI path you ran
   against the merged product.
 

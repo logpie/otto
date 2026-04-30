@@ -149,7 +149,7 @@ export function RunDetailPanel({detail, logState, landing, inspectorOpen, queued
       && !watcherRunning
       && onStartWatcher,
   );
-  const hideDuplicateProvisionalPlan = isLowValueVerificationPlan(detail, queuedRunWaiting);
+  const showVerificationPlan = shouldShowVerificationPlan(detail, queuedRunWaiting);
   return (
     <>
       <div className="run-drawer-backdrop" onClick={onClose} aria-hidden="true" />
@@ -197,7 +197,7 @@ export function RunDetailPanel({detail, logState, landing, inspectorOpen, queued
               onShowArtifacts={onShowArtifacts}
             />
             {detail.active && <LiveLogPreview logState={logState} onShowLogs={onShowLogs} />}
-            {!hideDuplicateProvisionalPlan && <VerificationPlanPanel plan={detail.verification_plan} />}
+            {showVerificationPlan && <VerificationPlanPanel plan={detail.verification_plan} />}
             {queuedRunWaiting && (
               <div className="review-note recovery-note queued-start-note">
                 <strong>Queue runner stopped</strong>
@@ -231,7 +231,12 @@ export function RunDetailPanel({detail, logState, landing, inspectorOpen, queued
                 </dl>
               </div>
             </details>
-            <ActionBar actions={detail.legal_actions || []} mergeBlocked={Boolean(landing?.merge_blocked)} onRunAction={onRunAction} />
+            <ActionBar
+              actions={detail.legal_actions || []}
+              mergeBlocked={Boolean(landing?.merge_blocked)}
+              primaryActionKey={detail.review_packet.next_action.action_key}
+              onRunAction={onRunAction}
+            />
           </div>
           {/* When the inspector is open, the fixed-position inspector overlay
               covers this row of shortcut buttons. Leaving them in the DOM
@@ -408,6 +413,23 @@ function isLowValueVerificationPlan(detail: RunDetail | null, queuedRunWaiting: 
   if (!fromReviewPacket) return false;
   const sameKeys = new Set(reviewChecks.map((check) => check.key));
   return planChecks.every((check) => sameKeys.has(check.id));
+}
+
+function shouldShowVerificationPlan(detail: RunDetail | null, queuedRunWaiting: boolean): boolean {
+  const plan = detail?.verification_plan;
+  if (!detail || !plan) return false;
+  if (isLowValueVerificationPlan(detail, queuedRunWaiting)) return false;
+  const checks = plan.checks || [];
+  const hasAttention = checks.some((check) => isAttentionCheckStatus(check.status));
+  const hasPending = checks.some((check) => isPendingCheckStatus(check.status));
+  if (hasAttention || hasPending || detail.active || queuedRunWaiting) return true;
+  const readiness = String(detail.review_packet?.readiness?.state || "").toLowerCase();
+  const completed = ["reviewed", "merged", "done"].includes(readiness)
+    || ["done", "landed", "merged"].includes(String(detail.display_status || detail.status || "").toLowerCase());
+  if (completed && (detail.review_packet?.certification?.stories || []).length > 0) {
+    return false;
+  }
+  return checks.length > 0;
 }
 
 function verificationPolicyLabel(policy: string | null | undefined): string {
@@ -1278,7 +1300,11 @@ export function ProofPane({detail, onShowDiff, onShowArtifacts}: {
   const demoEvidence = packet.certification.demo_evidence;
   const proofReport = packet.certification.proof_report;
   const proofChecks = packet.failure ? packet.checks.filter((check) => check.key !== "run" && check.key !== "landing") : packet.checks;
-  const visibleChecks = proofChecks.filter((check) => !["run", "landing"].includes(check.key)).slice(0, 5);
+  const visibleChecks = proofChecks.filter((check) => {
+    if (["run", "landing"].includes(check.key)) return false;
+    if (isAttentionCheckStatus(check.status)) return true;
+    return packet.readiness.state === "in_progress" && String(check.status || "").toLowerCase() !== "pass";
+  }).slice(0, 5);
   const keyEvidenceCount = keyReviewEvidenceArtifacts(evidence).length;
   const showNextAction = packet.readiness.state !== "reviewed" && (
     packet.readiness.state !== "merged"
@@ -1299,14 +1325,14 @@ export function ProofPane({detail, onShowDiff, onShowArtifacts}: {
         </div>
         <div className="proof-metrics">
           <ReviewMetric label="Stories" value={storiesLine(packet)} />
-          <ReviewMetric label="Demo" value={demoEvidenceLine(packet)} />
           <ReviewMetric label="Evidence" value={reviewEvidenceLine(packet)} />
+          <ReviewMetric label="Video" value={demoEvidenceLine(packet)} />
           {packet.changes.file_count ? (
             <ReviewMetric label="Files" value={`${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}`} />
           ) : null}
         </div>
+        {demoEvidence ? <p className="proof-demo-note">{demoEvidenceSummary(demoEvidence)}</p> : null}
       </div>
-      <DemoEvidenceSection detail={detail} demo={demoEvidence} />
       {showNextAction ? (
         <div className="proof-section" aria-labelledby="proofNextHeading">
         <h3 id="proofNextHeading">Next action</h3>
@@ -1334,32 +1360,29 @@ export function ProofPane({detail, onShowDiff, onShowArtifacts}: {
         </div>
       )}
       <div className="proof-section" aria-labelledby="proofStoriesHeading">
-        <h3 id="proofStoriesHeading">Stories tested</h3>
+        <h3 id="proofStoriesHeading">Certified stories</h3>
+        {stories.length ? <p>Each story is paired with the evidence the certifier recorded.</p> : null}
         {stories.length ? (
           <div className="proof-stories" data-testid="proof-story-list">
             {stories.map((story) => (
-              <article className={`proof-story story-${storyStatusClass(story.status)}`} key={story.id || story.title}>
-                <span>
-                  <span className="status-icon" aria-hidden="true">{storyStatusIcon(story.status)}</span>
-                  {" "}
-                  {storyStatusLabel(story.status)}
-                </span>
-                <div>
-                  <strong>{story.title || story.id}</strong>
-                  {story.detail ? <p>{formatReviewText(story.detail)}</p> : null}
-                  <small>{[story.id, story.methodology, story.surface].filter(Boolean).join(" · ")}</small>
-                </div>
-              </article>
+              <ProofStoryCard
+                key={story.id || story.title}
+                detail={detail}
+                story={story}
+                demo={demoEvidence}
+                demoStory={findDemoStory(story, demoEvidence)}
+              />
             ))}
           </div>
         ) : (
           <p>No per-story certification details were recorded. Open the HTML report or summary artifact if available.</p>
         )}
       </div>
+      <DemoEvidenceSection detail={detail} demo={demoEvidence} />
       {visibleChecks.length ? (
         <details className="proof-section proof-checks-details" open={verificationDefaultOpen}>
           <summary>
-            <span>Verification checks</span>
+            <span>Checks needing attention</span>
             <strong>{visibleChecks.length}</strong>
           </summary>
           <div className="proof-checks">
@@ -1412,58 +1435,124 @@ function DemoEvidenceSection({detail, demo}: {
   if (!demo) return null;
   const primary = demo.primary_demo;
   const primaryUrl = primary?.href ? proofAssetUrl(detail.run_id, primary.href) : "";
-  const visibleStories = (demo.stories || []).slice(0, 8);
+  if (!primary || !primaryUrl) return null;
   const statusClass = demoStatusClass(demo.demo_status);
   return (
     <div className={`proof-section demo-evidence-section demo-${statusClass}`} aria-labelledby="demoEvidenceHeading" data-testid="demo-evidence-section">
       <div className="demo-evidence-head">
         <div>
-          <h3 id="demoEvidenceHeading">Demo proof</h3>
+          <h3 id="demoEvidenceHeading">Recorded demo</h3>
           <p>{demo.demo_reason || "Structured demo proof was not recorded for this run."}</p>
         </div>
         <span className={`demo-status-pill demo-${statusClass}`}>
           {demoStatusLabel(demo.demo_status)} · {demoKindLabel(demo.app_kind)}
         </span>
       </div>
-      {primary && primaryUrl ? (
-        <div className="demo-primary-preview" data-testid="demo-primary-preview">
-          <div>
-            <strong>{primary.name || "Primary proof"}</strong>
-            {primary.caption ? <span>{primary.caption}</span> : null}
-          </div>
-          {isDemoVideo(primary) ? (
-            <video controls>
-              <source src={primaryUrl} type={demoVideoMimeType(primary)} />
-            </video>
-          ) : isDemoImage(primary) ? (
-            <a href={primaryUrl} target="_blank" rel="noreferrer">
-              <img src={primaryUrl} alt={primary.name || "primary proof"} />
-            </a>
-          ) : (
-            <a href={primaryUrl} target="_blank" rel="noreferrer">Open primary proof</a>
-          )}
+      <div className="demo-primary-preview" data-testid="demo-primary-preview">
+        <div>
+          <strong>{primary.name || "Primary proof"}</strong>
+          {primary.caption ? <span>{primary.caption}</span> : null}
         </div>
-      ) : null}
-      {visibleStories.length ? (
-        <div className="demo-story-grid" aria-label="Story proof coverage">
-          {visibleStories.map((story) => (
-            <article className="demo-story-proof" key={story.id || story.title}>
-              <strong>{story.title || story.id}</strong>
-              <span>{story.proof_level || "not recorded"}</span>
-              <small>
-                {[
-                  story.needs_visual ? "visual expected" : "",
-                  story.needs_file_validation ? "file validation expected" : "",
-                  story.has_file_validation ? "file validated" : "",
-                  story.has_text_evidence ? "notes" : "",
-                ].filter(Boolean).join(" · ") || "no extra proof metadata"}
-              </small>
-            </article>
-          ))}
-        </div>
-      ) : null}
+        {isDemoVideo(primary) ? (
+          <video controls>
+            <source src={primaryUrl} type={demoVideoMimeType(primary)} />
+          </video>
+        ) : isDemoImage(primary) ? (
+          <a href={primaryUrl} target="_blank" rel="noreferrer">
+            <img src={primaryUrl} alt={primary.name || "primary proof"} />
+          </a>
+        ) : (
+          <a href={primaryUrl} target="_blank" rel="noreferrer">Open primary proof</a>
+        )}
+      </div>
     </div>
   );
+}
+
+function ProofStoryCard({detail, story, demo, demoStory}: {
+  detail: RunDetail;
+  story: RunDetail["review_packet"]["certification"]["stories"][number];
+  demo: RunDetail["review_packet"]["certification"]["demo_evidence"];
+  demoStory: RunDetail["review_packet"]["certification"]["demo_evidence"]["stories"][number] | undefined;
+}) {
+  const visualItems = demoStory?.visual_items || [];
+  return (
+    <article className={`proof-story story-${storyStatusClass(story.status)}`}>
+      <header className="proof-story-header">
+        <span className="proof-story-status">
+          <span className="status-icon" aria-hidden="true">{storyStatusIcon(story.status)}</span>
+          {" "}
+          {storyStatusLabel(story.status)}
+        </span>
+        <div>
+          <strong>{story.title || story.id}</strong>
+          {story.detail ? <p>{formatReviewText(story.detail)}</p> : null}
+          {story.evidence_command ? (
+            <ProofStoryCommand command={story.evidence_command} output={story.evidence_output} />
+          ) : story.evidence_excerpt ? (
+            <code className="proof-story-evidence-line">{story.evidence_excerpt}</code>
+          ) : (
+            <small className="proof-story-meta">{storyVerificationLine(story, demoStory, demo)}</small>
+          )}
+        </div>
+      </header>
+      {visualItems.length ? (
+        <div className="proof-story-media">
+          {visualItems.map((item, index) => {
+            const url = item.href ? proofAssetUrl(detail.run_id, item.href) : "";
+            return url ? (
+              <a key={`${item.href}-${index}`} href={url} target="_blank" rel="noreferrer">
+                {item.name || item.caption || `Evidence ${index + 1}`}
+              </a>
+            ) : null;
+          })}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function ProofStoryCommand({command, output}: {command: string; output: string}) {
+  const [copied, setCopied] = useState(false);
+  const copyCommand = useCallback(() => {
+    if (!command) return;
+    const finish = () => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    };
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      void navigator.clipboard.writeText(command).then(finish, () => copyTextFallback(command, finish));
+      return;
+    }
+    copyTextFallback(command, finish);
+  }, [command]);
+  return (
+    <div className="proof-story-command">
+      <div className="proof-story-command-head">
+        <span>Command</span>
+        <button type="button" onClick={copyCommand}>{copied ? "Copied" : "Copy"}</button>
+      </div>
+      <code>$ {command}</code>
+      {output ? <samp>{output}</samp> : null}
+    </div>
+  );
+}
+
+function copyTextFallback(text: string, onCopied: () => void) {
+  if (typeof document === "undefined") return;
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand("copy");
+    onCopied();
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }
 
 function keyReviewEvidenceArtifacts(evidence: ArtifactRef[]): ArtifactRef[] {
@@ -1501,6 +1590,140 @@ function demoEvidenceLine(packet: RunDetail["review_packet"]): string {
   return demoStatusLabel(demo.demo_status);
 }
 
+function demoEvidenceSummary(demo: RunDetail["review_packet"]["certification"]["demo_evidence"]): string {
+  const status = String(demo.demo_status || "").toLowerCase();
+  if (status === "not_applicable" && !demo.demo_required) {
+    const reason = String(demo.demo_reason || "").toLowerCase();
+    if (reason.includes("fast certification")) {
+      return "Fast certification skipped video; the story cards below show the request or command evidence instead.";
+    }
+    return demo.demo_reason || "Video was skipped for this certification mode; review the story evidence below.";
+  }
+  if (demo.primary_demo) {
+    return demo.demo_reason || "Recorded demo media is attached to this proof.";
+  }
+  if (status === "missing") {
+    return demo.demo_reason || "Video proof was expected but not recorded.";
+  }
+  return demo.demo_reason || "Review the story evidence below.";
+}
+
+function findDemoStory(
+  story: RunDetail["review_packet"]["certification"]["stories"][number],
+  demo: RunDetail["review_packet"]["certification"]["demo_evidence"],
+): RunDetail["review_packet"]["certification"]["demo_evidence"]["stories"][number] | undefined {
+  if (!demo) return undefined;
+  const storyId = String(story.id || "").toLowerCase();
+  const storyTitle = String(story.title || "").toLowerCase();
+  return (demo.stories || []).find((candidate) => {
+    const candidateId = String(candidate.id || "").toLowerCase();
+    const candidateTitle = String(candidate.title || "").toLowerCase();
+    return Boolean(
+      (storyId && candidateId === storyId)
+      || (storyTitle && candidateTitle === storyTitle)
+      || (storyId && candidateTitle === storyId)
+      || (storyTitle && candidateId === storyTitle),
+    );
+  });
+}
+
+function storyEvidenceLine(
+  story: RunDetail["review_packet"]["certification"]["stories"][number],
+  demoStory: RunDetail["review_packet"]["certification"]["demo_evidence"]["stories"][number] | undefined,
+  demo: RunDetail["review_packet"]["certification"]["demo_evidence"],
+): string {
+  const proofLevel = String(demoStory?.proof_level || "").trim();
+  if (proofLevel) return readableProofLevel(proofLevel, story);
+  const parts = [
+    demoStory?.has_text_evidence ? inferredTextEvidenceLabel(story) : "",
+    demoStory?.has_file_validation ? "file/content validation" : "",
+    (demoStory?.visual_items || []).length ? "visual proof" : "",
+  ].filter(Boolean);
+  if (parts.length) return parts.join(" + ");
+  if (String(demo?.demo_status || "").toLowerCase() === "not_applicable") {
+    return inferredTextEvidenceLabel(story);
+  }
+  if (story.detail) return "observed result recorded";
+  return "evidence recorded";
+}
+
+function storyVerificationLine(
+  story: RunDetail["review_packet"]["certification"]["stories"][number],
+  demoStory: RunDetail["review_packet"]["certification"]["demo_evidence"]["stories"][number] | undefined,
+  demo: RunDetail["review_packet"]["certification"]["demo_evidence"],
+): string {
+  const evidence = storyEvidenceLine(story, demoStory, demo);
+  const method = storyMethodLine(story);
+  const normalizedEvidence = evidence.toLowerCase();
+  const normalizedMethod = method.toLowerCase();
+  if (normalizedEvidence.includes("video") || normalizedEvidence.includes("screenshot")) {
+    return `Visual proof: ${evidence}`;
+  }
+  if (normalizedEvidence.includes("file/content")) {
+    return "Verified by file/content validation";
+  }
+  if (normalizedEvidence.includes("command")) {
+    return "Verified by command output";
+  }
+  if (normalizedEvidence.includes("api response")) {
+    return "Verified by API response";
+  }
+  if (normalizedEvidence.includes("browser")) {
+    return "Verified in browser";
+  }
+  if (normalizedEvidence.includes("http") || normalizedMethod.includes("http")) {
+    return "Verified by HTTP request";
+  }
+  if (method !== "recorded check") {
+    return `Verified by ${method}`;
+  }
+  return evidence;
+}
+
+function readableProofLevel(
+  proofLevel: string,
+  story: RunDetail["review_packet"]["certification"]["stories"][number],
+): string {
+  switch (proofLevel.toLowerCase()) {
+    case "story video":
+      return "story video";
+    case "story screenshot":
+      return "story screenshot";
+    case "generic recording only":
+      return "walkthrough video";
+    case "file validation":
+      return "file/content validation";
+    case "text evidence":
+      return inferredTextEvidenceLabel(story);
+    case "not recorded":
+      return "not recorded";
+    default:
+      return proofLevel;
+  }
+}
+
+function inferredTextEvidenceLabel(story: RunDetail["review_packet"]["certification"]["stories"][number]): string {
+  const haystack = `${story.methodology || ""} ${story.surface || ""}`.toLowerCase();
+  if (haystack.includes("http")) return "HTTP request evidence";
+  if (haystack.includes("api")) return "API response evidence";
+  if (haystack.includes("command") || haystack.includes("cli")) return "command output";
+  if (haystack.includes("browser") || haystack.includes("web")) return "browser observation";
+  return "recorded evidence";
+}
+
+function storyMethodLine(story: RunDetail["review_packet"]["certification"]["stories"][number]): string {
+  const methodology = String(story.methodology || "").trim();
+  const surface = String(story.surface || "").trim();
+  const haystack = `${methodology} ${surface}`.toLowerCase();
+  if (haystack.includes("http")) return "HTTP request";
+  if (haystack.includes("api")) return "API request";
+  if (haystack.includes("browser") || haystack.includes("web")) return "browser";
+  if (haystack.includes("cli") || haystack.includes("command")) return "command";
+  const parts = [surface, methodology].filter(Boolean);
+  if (!parts.length) return "recorded check";
+  return parts.map((part) => part.replace(/-/g, " ")).join(" · ");
+}
+
 function demoStatusLabel(status: string | null | undefined): string {
   switch (String(status || "").toLowerCase()) {
     case "strong":
@@ -1510,7 +1733,7 @@ function demoStatusLabel(status: string | null | undefined): string {
     case "missing":
       return "Missing";
     case "not_applicable":
-      return "Not needed";
+      return "Skipped";
     default:
       return "Unknown";
   }
@@ -1762,17 +1985,18 @@ export function ReviewPacket({packet, detail, onRunAction, onShowProof, onShowDi
     : `${packet.checks.length} recorded`;
   const showNextStep = packet.readiness.state !== "merged" || showActionButton || hasFailure || blockers.length > 0;
   const canOpenDiff = canShowDiff(detail);
+  const outcomeTitle = reviewOutcomeTitle(packet, detail);
+  const nextStepText = reviewNextStepText(packet);
   return (
     <div className={`review-packet review-${packet.readiness.tone || "info"}`}>
       <div className="review-head">
-        <div>
-          <span className="review-kicker">{packet.readiness.label}</span>
-          <strong>{packet.headline}</strong>
-          <span title={packet.summary}>{packet.summary}</span>
+        <div className="review-head-main">
+          <span className="review-kicker">Outcome</span>
+          <strong>{outcomeTitle}</strong>
         </div>
         {showActionButton && (
           <button
-            className={action.enabled ? "primary" : ""}
+            className={action.enabled ? reviewNextActionButtonClass(action) : ""}
             type="button"
             data-testid="review-next-action-button"
             disabled={!action.enabled || !action.action_key}
@@ -1783,11 +2007,15 @@ export function ReviewPacket({packet, detail, onRunAction, onShowProof, onShowDi
           </button>
         )}
       </div>
+      <div className="review-intent" title={packet.summary}>
+        <span>Intent</span>
+        <p>{packet.summary}</p>
+      </div>
       {packet.failure && <FailureSummary failure={packet.failure} />}
       {showNextStep && (
         <div className="review-next-step">
           <strong>Next</strong>
-          <span>{packet.readiness.next_step}</span>
+          <span>{nextStepText}</span>
         </div>
       )}
       {!hasFailure && blockers.length > 0 && (
@@ -1798,13 +2026,13 @@ export function ReviewPacket({packet, detail, onRunAction, onShowProof, onShowDi
       <div className={`review-grid ${packet.readiness.state === "merged" || inProgress ? "review-grid-wide" : ""}`}>
         <ReviewMetric label="Stories" value={storiesLine(packet)} onClick={onShowProof} title="Open review result" testId="review-metric-stories" />
         <ReviewMetric
-          label="Files"
+          label="Changes"
           value={packet.changes.file_count ? `${packet.changes.file_count} file${packet.changes.file_count === 1 ? "" : "s"}` : "-"}
           onClick={canOpenDiff ? onShowDiff : undefined}
           title={canOpenDiff ? "Open code changes" : diffDisabledReason(detail)}
           testId="review-metric-files"
         />
-        <ReviewMetric label="Proof" value={demoEvidenceLine(packet)} onClick={onShowProof} title="Open proof" testId="review-metric-proof" />
+        <ReviewMetric label="Evidence" value={reviewEvidenceLine(packet)} onClick={onShowProof} title="Open proof" testId="review-metric-proof" />
         {(packet.readiness.state === "merged" || inProgress) && (
           <ReviewMetric
             label="Artifacts"
@@ -1839,6 +2067,28 @@ export function ReviewPacket({packet, detail, onRunAction, onShowProof, onShowDi
       )}
     </div>
   );
+}
+
+function reviewOutcomeTitle(packet: RunDetail["review_packet"], detail: RunDetail): string {
+  const state = String(packet.readiness.state || "").toLowerCase();
+  const headline = String(packet.headline || "").trim();
+  const label = String(packet.readiness.label || "").trim();
+  if (state === "reviewed") return "Certified";
+  if (state === "merged") return "Landed";
+  if (state === "ready") return "Ready to land";
+  if (state === "superseded") return "Retried";
+  if (state === "in_progress") return headline || "In progress";
+  if (state === "blocked") return headline || label || "Needs action";
+  if (headline && headline.toLowerCase() !== label.toLowerCase()) return headline;
+  return label || headline || detailStatusLabel(detail);
+}
+
+function reviewNextStepText(packet: RunDetail["review_packet"]): string {
+  const state = String(packet.readiness.state || "").toLowerCase();
+  if (state === "reviewed" && !packet.changes.file_count) {
+    return "No merge action is needed.";
+  }
+  return packet.readiness.next_step;
 }
 
 export function FailureSummary({failure, showExcerpt = false}: {
@@ -1936,13 +2186,25 @@ export function pickRecoveryActions(actions: ActionState[], status: string | nul
   return result;
 }
 
-export function ActionBar({actions, mergeBlocked, onRunAction}: {actions: ActionState[]; mergeBlocked: boolean; onRunAction: (action: string, label?: string) => void}) {
-  const visible = actions.filter((action) => !["o", "e", "m", "M"].includes(action.key));
+export function ActionBar({actions, mergeBlocked, primaryActionKey, onRunAction}: {
+  actions: ActionState[];
+  mergeBlocked: boolean;
+  primaryActionKey?: string | null;
+  onRunAction: (action: string, label?: string) => void;
+}) {
+  const primaryActionName = primaryActionKey ? actionName(primaryActionKey) : "";
+  const visible = actions.filter((action) => {
+    if (["o", "e", "m", "M"].includes(action.key)) return false;
+    const name = actionName(action.key);
+    if (primaryActionName && name === primaryActionName) return false;
+    if (action.key === "m" && mergeBlocked) return false;
+    return action.enabled;
+  });
   if (!visible.length) return <div className="advanced-actions empty" aria-hidden="true" />;
   return (
     <details className="advanced-actions">
-      <summary>Advanced run actions</summary>
-      <div className="action-bar" role="group" aria-label="Advanced run actions">
+      <summary>More actions</summary>
+      <div className="action-bar" role="group" aria-label="More run actions">
         {visible.map((action) => {
           const name = actionName(action.key);
           const disabled = !action.enabled || (action.key === "m" && mergeBlocked);
@@ -1968,9 +2230,18 @@ export function ActionBar({actions, mergeBlocked, onRunAction}: {actions: Action
 
 function actionButtonClass(action: ActionState, primary = false): string {
   const normalized = `${actionName(action.key)} ${action.label}`.toLowerCase();
-  if (normalized.includes("cancel") || normalized.includes("remove")) return "danger-button";
+  if (isDangerousRunAction(normalized)) return "danger-button";
   if (primary) return "primary";
   return "";
+}
+
+function reviewNextActionButtonClass(action: RunDetail["review_packet"]["next_action"]): string {
+  const normalized = `${actionName(action.action_key || "")} ${action.label}`.toLowerCase();
+  return isDangerousRunAction(normalized) ? "danger-button" : "primary";
+}
+
+function isDangerousRunAction(value: string): boolean {
+  return value.includes("cancel") || value.includes("remove") || value.includes("cleanup");
 }
 
 export function ArtifactPane({artifacts, selectedArtifactIndex, artifactContent, onLoadArtifact, onBack, runId}: {

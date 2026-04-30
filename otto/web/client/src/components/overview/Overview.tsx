@@ -5,24 +5,29 @@ import {formatDuration, formatTokenSpend, storyTotalsFromLanding, tokenBreakdown
 import {activeRunSummary, canMerge, canResolveRelease, canStartWatcher, missionFocus, workflowHealth} from "../../utils/missionControl";
 import type {ResultBannerState} from "../../uiTypes";
 
-export function OperationalOverview({data, lastError, resultBanner, onDismissError, onDismissResult}: {
+export function OperationalOverview({data, lastError, resultBanner, onDismissError, onDismissResult, showSystemMetrics = true}: {
   data: StateResponse | null;
   lastError: string | null;
   resultBanner: ResultBannerState | null;
   onDismissError: () => void;
   onDismissResult: () => void;
+  showSystemMetrics?: boolean;
 }) {
   const health = workflowHealth(data);
   return (
     <div className="overview" role="region" aria-labelledby="missionOverviewHeading">
       <h2 id="missionOverviewHeading" className="sr-only">Mission overview</h2>
-      <div className="overview-strip">
+      <div className={`overview-strip ${showSystemMetrics ? "" : "overview-strip-work"}`}>
         <OverviewMetric label="Active" value={String(health.active)} tone={health.active ? "info" : "neutral"} />
         <OverviewMetric label="Needs attention" value={String(health.needsAttention)} tone={health.needsAttention ? "danger" : "neutral"} />
         <OverviewMetric label="Ready" value={String(health.ready)} tone={health.ready ? "success" : "neutral"} />
-        <OverviewMetric label="Repository" value={health.repositoryLabel} tone={health.repositoryTone} />
-        <OverviewMetric label="Watcher" value={health.watcherLabel} tone={health.watcherTone} />
-        <OverviewMetric label="Runtime" value={health.runtimeLabel} tone={health.runtimeTone} />
+        {showSystemMetrics ? (
+          <>
+            <OverviewMetric label="Repository" value={health.repositoryLabel} tone={health.repositoryTone} />
+            <OverviewMetric label="Watcher" value={health.watcherLabel} tone={health.watcherTone} />
+            <OverviewMetric label="Runtime" value={health.runtimeLabel} tone={health.runtimeTone} />
+          </>
+        ) : null}
       </div>
       {lastError && (
         <div className="status-banner error">
@@ -38,7 +43,6 @@ export function OperationalOverview({data, lastError, resultBanner, onDismissErr
           <button type="button" onClick={onDismissResult}>Dismiss</button>
         </div>
       )}
-      {data?.runtime.issues.length ? <RuntimeWarnings data={data} /> : null}
     </div>
   );
 }

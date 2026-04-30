@@ -150,8 +150,8 @@ def make_agent_options(
     from otto.testing import _subprocess_env
     from otto.config import (
         agent_effort,
-        agent_model,
         agent_provider,
+        effective_agent_model,
         get_max_rounds,
         get_max_turns_per_call,
     )
@@ -172,7 +172,7 @@ def make_agent_options(
     if opts.debug_unredacted is None:
         opts.debug_unredacted = bool(cfg.get("debug_unredacted"))
     opts.provider = agent_provider(cfg, agent_type)
-    model = agent_model(cfg, agent_type)
+    model = effective_agent_model(cfg, agent_type)
     if model:
         opts.model = str(model)
     effort = agent_effort(cfg, agent_type)

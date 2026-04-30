@@ -18,6 +18,7 @@ from otto.mission_control.actions import (
     execute_merge_abort,
     execute_merge_all,
     execute_merge_recover,
+    execute_merge_verify,
     execute_queue_cleanup,
 )
 
@@ -577,6 +578,17 @@ def test_merge_recover_aborts_then_launches_agentic_merge(tmp_path: Path, monkey
     assert result.ok is True
     assert abort_calls == [str(tmp_path)]
     assert _FakePopen.calls[-1]["argv"][-4:] == ["merge", "--verify", "smart", "--all"]
+    assert _FakePopen.calls[-1]["cwd"] == str(tmp_path)
+
+
+def test_merge_verify_shells_out_for_existing_merge(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
+    _FakePopen.calls.clear()
+
+    result = execute_merge_verify(tmp_path, "merge-123", verification_policy="full")
+
+    assert result.ok is True
+    assert _FakePopen.calls[-1]["argv"][-4:] == ["merge-verify", "merge-123", "--verify", "full"]
     assert _FakePopen.calls[-1]["cwd"] == str(tmp_path)
 
 

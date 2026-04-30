@@ -97,6 +97,37 @@ Landed queue tasks used source-branch diff logic even after merge. Once a branch
 - Cleaned failed queue history no longer advertises cleanup as an enabled next action when the queue item has already been removed.
 - Regression tests cover landed diff after source branch deletion and cleaned failed queue history.
 
+# Autopilot Retry State Debug
+
+Date: 2026-04-29
+
+## Observations
+
+- Health showed `Active 1` and `Needs attention 1` for the same certification intent after the user approved Autopilot recovery.
+- Autopilot displayed a requeue-style action for `certify-the-existing-app-loads-and-the-8b463c-3-2` while that retry was already `running`.
+- `/api/state` showed the running retry with `queue_status=running`, `landing_state=blocked`, and an active Autopilot pending decision on the same run.
+
+## Hypotheses
+
+### H1: In-flight landing items are being treated as recovery incidents (root)
+
+- Supports: Autopilot scanned landing items by `landing_state=blocked` and did not skip `queue_status=running`.
+- Conflicts: none.
+- Test: feed Autopilot a running blocked landing item and assert it creates no incidents or pending decisions.
+
+### H2: Older interrupted attempts remain visible while a later retry is active (root)
+
+- Supports: the old interrupted attempt still counted as attention until a later retry completed successfully.
+- Conflicts: cleanup should not delete old attempts while a retry is still running.
+- Test: seed an interrupted attempt plus a later running retry; assert the old attempt is marked superseded for display, but cleanup still only considers later resolved retries.
+
+## Fix
+
+- Autopilot now ignores queued/running/terminating landing items in its recovery scan.
+- Mission Control now marks older failed/interrupted attempts as superseded when a later retry exists, including when the retry is still running.
+- Cleanup remains conservative: it only removes old failed queue records after a later retry reaches a resolved state.
+- The review packet for an old attempt now says whether the retry is complete or still current.
+
 # Mission Control Navigation Debug
 
 Date: 2026-04-25
@@ -561,3 +592,91 @@ Date: 2026-04-28
 
 - The report's 3s `/api/projects` calls are backend/IO latency; this pass improves frontend feedback and navigation, but does not make the endpoint faster.
 - CLS should be lower after reserved heights, but I did not rerun the full nightly CLS recorder. Treat this as mitigated, not proven eliminated.
+
+# Metro Field Ops Dogfood Rerun
+
+Date: 2026-04-29
+
+## Observations
+
+- Created a fresh real project at `/Users/yuxuan/otto-projects/metro-field-ops-rerun-20260429-154109` from the Metro Field Ops baseline, then queued five real LLM tasks: dispatch board, technician schedule, detail notes, CSV/CLI exports, and audit timeline.
+- The queue runner completed all five tasks with real provider calls. The SDK subprocesses used Claude `sonnet` for build and `haiku` for certifier even though the CLI banner displayed the configured Claude runtime default.
+- `otto queue ls` showed stale checkpoint warnings on running tasks, which was a display bug: resume diagnostics should only appear for resumable terminal/interrupted states.
+- `otto merge --all --verify smart --cleanup-on-success` hit real multi-branch conflicts, invoked the consolidated merge agent, resolved `fieldops/app.py`, `fieldops/server.py`, `fieldops/store.py`, adjusted `tests/test_exports.py`, landed all five branches, and left the product tests passing (`88 tests OK`).
+- The merge then failed post-merge certification solely because the standard web proof gate required browser demo evidence and the merge-specific certifier prompt did not require agent-browser video/screenshots. The certifier story results were otherwise 19/19 pass.
+- Mission Control/Autopilot reported idle after this failed merge because the failure only appeared as a historical merge row and `AutopilotController._classify` scanned live runs, landing rows, runner state, and blockers, but not failed merge history.
+
+## Hypotheses
+
+### H1: Merge-specific certification prompt omitted required browser proof (confirmed)
+
+- Supports: `proof-of-work.json` had all stories passing but `demo_evidence.demo_status=missing`; the standard certifier prompt requires agent-browser evidence, while the merge-specific prompt treated screenshots/video as optional support.
+- Conflicts: none.
+- Test: assert the merge-specific prompt includes explicit agent-browser recording and evidence-dir paths.
+
+### H2: Product integration failed after merge (rejected)
+
+- Supports: merge terminal outcome was failure.
+- Conflicts: product tests passed and the merge certifier reported all 19 stories pass; the report failed only at the demo-proof gate.
+- Test: rerun project tests and inspect proof JSON outcome split.
+
+### H3: Autopilot could already recover the failed merge (rejected)
+
+- Supports: the failed merge exists in Mission Control history.
+- Conflicts: `/api/state` showed `autopilot.health=idle`, no incidents, and no pending decisions because history merge failures were not classified.
+- Test: feed the real project state into `MissionControlService(...).state()` and inspect `autopilot.incidents`.
+
+## Fix
+
+- Display effective provider-safe defaults in CLI/web model summaries instead of the raw runtime default when an agent type has a safer implicit model.
+- Suppress queue resume checkpoint diagnostics for non-resumable running/done states.
+- Update the merge-specific certifier prompt to require agent-browser visual proof for standard/thorough web UI merge certification.
+- Add `otto merge-verify <merge-id>` and Mission Control `rerun_merge_verification` plumbing so Otto can rerun post-merge certification without attempting another git merge.
+- Teach Autopilot to classify a failed historical merge whose branches landed but post-merge certification failed, and propose/execute “Rerun merge verification” instead of reporting idle.
+
+## Rerun Recovery Follow-Up
+
+### Observations
+
+- Approving Autopilot's real `rerun_merge_verification` action launched `otto merge-verify merge-1777503465-98520-7b05b1f7 --verify smart`.
+- The new certifier session `2026-04-29-232210-dd4034` stopped after about 25s. It ran tests, started `python3 -m fieldops.server --host 127.0.0.1 --port 5107`, curled `/`, and emitted no certifier markers or proof report.
+- No `otto merge-verify` process remained, but the merge state file still said `status=running`, `cert_passed=null`, and retained the old `cert_run_id`.
+- Mission Control's live merge record still showed the older failed merge, so live state and merge state diverged.
+- The project server PID 47646 was orphaned with PPID 1, cwd inside the dogfood project, and still listening on 127.0.0.1:5107. The certifier cleanup guard missed it because the command was a custom `python -m fieldops.server`, not one of the hard-coded framework command markers.
+
+### Hypotheses
+
+#### H1: Custom project server cleanup is too narrow
+
+- Supports: PID 47646 was a new listening process with cwd under the certified project, but `_looks_like_project_dev_server()` did not match `python3 -m fieldops.server`.
+- Conflicts: none.
+- Experiment: verify `lsof -a -p 47646 -d cwd -Fn` points at the dogfood project and `lsof -iTCP:5107` shows a listening socket. Confirmed.
+
+#### H2: `merge-verify` can leave merge state running if the certifier exits without structured output
+
+- Supports: session messages contain a phase end but no proof report or summary, state stayed running, and the process exited.
+- Conflicts: the current rerun wrapper catches `Exception` around `_run_post_merge_verification`, so an ordinary `MalformedCertifierOutputError` should mark failed.
+- Experiment: rerun foreground after tightening cleanup to capture the exact CLI exit path and state transition.
+
+#### H3: Mission Control needs to classify stale running merge verification as recoverable
+
+- Supports: the live merge record and state file disagree, and there is no live writer/process. Autopilot should not go idle in this condition.
+- Conflicts: if a real merge-verify process is active, Autopilot should not offer duplicate reruns.
+- Experiment: create a stale running merge state with no live writer and assert Autopilot proposes a rerun/repair instead of idle.
+
+## Final Rerun Result
+
+### Observations
+
+- The first real Autopilot recovery approval correctly detected the failed post-merge verification and launched `otto merge-verify merge-1777503465-98520-7b05b1f7 --verify smart`, but that retry exposed Otto bugs instead of completing: a custom project server leaked, merge state stayed `running`, and no proof report was emitted.
+- A later certifier run `2026-04-29-233811-3f4bc3` produced browser screenshots and passed all 19 stories, but the proof gate still failed because screenshot filenames did not map cleanly to story ids and the gate treated partial story-specific visuals as fully missing.
+- A subsequent run `2026-04-29-235113-1bc9b6` correctly failed because the certifier used HTTP/text evidence only for browser UI stories. This was a real quality failure, not a gate bug.
+- After tightening cleanup, merge-state terminalization, stale merge detection, visual-proof matching, and merge-specific certifier instructions, a real `otto merge-verify merge-1777503465-98520-7b05b1f7 --verify smart` rerun produced session `2026-04-30-000125-011d12`.
+- The final rerun passed with merge state `status=done`, `cert_passed=true`, and 19/19 certified stories. Evidence included one browser recording, six story screenshots, CLI evidence, HTTP evidence, file/export validation, and 88 passing product tests.
+- No project dev server remained listening on the tested port after the final rerun. Mission Control reported Autopilot `idle` with no incidents or pending decisions for the project.
+
+### Conclusion
+
+- The complex multitask dogfood project was built, conflict-merged, tested, and post-merge certified successfully.
+- Autopilot can detect and dispatch recovery for a failed post-merge verification on a real project. It should not be described as able to repair Otto's own internal bugs by itself; the first real recovery attempt found those bugs, and this pass fixed them in Otto.
+- For future dogfood loops, treat "provider run succeeded" and "certification passed" as separate outcomes. A green provider completion banner can still hide a failed proof gate, so CLI/UI wording should avoid implying product success before the verifier outcome is known.

@@ -90,6 +90,39 @@ def _json_fingerprint(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _task_success_requires_clean_worktree(manifest: dict[str, Any]) -> bool:
+    command = str(manifest.get("command") or "").strip().lower()
+    return command in {"build", "improve", "certify"}
+
+
+def _dirty_successful_worktree_reason(worktree: Path) -> str | None:
+    if not worktree.exists() or not (worktree / ".git").exists():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"could not verify successful task worktree cleanliness: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        return f"could not verify successful task worktree cleanliness: {detail or 'git status failed'}"
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    preview = ", ".join(line[3:] if len(line) > 3 else line for line in lines[:6])
+    if len(lines) > 6:
+        preview += f", +{len(lines) - 6} more"
+    return (
+        "successful task left uncommitted worktree changes; "
+        f"branch cannot be safely merged until these are committed or discarded: {preview}"
+    )
+
+
 @dataclass
 class RunnerConfig:
     """Knobs for the watcher; mostly comes from otto.yaml `queue:` section."""
@@ -1825,6 +1858,16 @@ class Runner:
         if manifest_exit_status != "success":
             _mark_failed(ts, f"manifest exit_status={manifest_exit_status}")
             return
+        if _task_success_requires_clean_worktree(manifest):
+            task = next(
+                (candidate for candidate in self._load_queue_or_empty(context="finalize manifest") if candidate.id == task_id),
+                None,
+            )
+            if task is not None and task.worktree:
+                dirty_reason = _dirty_successful_worktree_reason(self.project_dir / task.worktree)
+                if dirty_reason:
+                    _mark_failed(ts, dirty_reason)
+                    return
 
         ts["status"] = "done"
         ts["duration_s"] = _terminal_duration_s(ts)

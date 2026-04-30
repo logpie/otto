@@ -14,7 +14,9 @@ import html
 import json
 import logging
 import os
+import re
 import signal
+import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -725,9 +727,13 @@ def _cleanup_certifier_background_servers(
         cwd = _process_cwd(pid)
         if not command:
             continue
-        if not _looks_like_project_dev_server(command):
-            continue
         if not _process_belongs_to_project(project_dir, command, cwd):
+            continue
+        # A certifier can run arbitrary project entrypoints, e.g.
+        # `python -m fieldops.server`, that do not match our framework marker
+        # list. If the listener is new and project-scoped, it belongs to this
+        # certification attempt and should not survive it.
+        if not _looks_like_project_dev_server(command) and cwd is None:
             continue
         if _terminate_process(pid):
             cleaned.append({
@@ -735,6 +741,46 @@ def _cleanup_certifier_background_servers(
                 "command": command,
                 "cwd": str(cwd) if cwd is not None else "",
             })
+    return cleaned
+
+
+def _cleanup_certifier_untracked_delta(
+    project_dir: Path,
+    baseline_untracked_files: set[str],
+) -> list[str]:
+    """Remove untracked files created during certification.
+
+    Certifiers can start the product and exercise write paths. Those runtime
+    artifacts are evidence side effects, not project changes, so clean only
+    files that were untracked after the certifier ran and were not already
+    untracked before it started.
+    """
+    from otto.merge import git_ops
+
+    try:
+        current = set(git_ops.untracked_files(project_dir))
+    except Exception:
+        return []
+    created = sorted(
+        current - baseline_untracked_files,
+        key=lambda item: (len(Path(item).parts), item),
+        reverse=True,
+    )
+    cleaned: list[str] = []
+    for rel in created:
+        path = project_dir / rel
+        if not _path_is_relative_to(path, project_dir):
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            continue
+        cleaned.append(rel)
     return cleaned
 
 
@@ -829,24 +875,16 @@ def _story_claims_ui_behavior(story: dict[str, Any]) -> bool:
             " ".join(str(step) for step in story.get("observed_steps", []) or []),
         ]
     ).lower()
-    ui_terms = (
-        "click",
-        "type",
-        "press",
-        "submit",
-        "keyboard",
-        "focus",
-        "blur",
-        "drag",
-        "drop",
-        "button",
-        "input",
-        "form",
-        "page",
-        "modal",
-        "ui",
+    return bool(
+        re.search(
+            r"\b("
+            r"click|clicked|clicking|type|typed|typing|press|pressed|submit|submitted|"
+            r"keyboard|focus|blur|drag|drop|button|input|form|page|modal|ui|browser|"
+            r"dashboard|link|filter|dropdown|select|card|column"
+            r")\b",
+            corpus,
+        )
     )
-    return any(term in corpus for term in ui_terms)
 
 
 def _story_methodology_caveat(story: dict[str, Any]) -> str:
@@ -1054,9 +1092,53 @@ def _story_corpus(story: dict[str, Any]) -> str:
 
 
 def _visual_name_tokens(name: str) -> set[str]:
+    return set(_visual_name_token_list(name))
+
+
+def _visual_name_token_list(name: str) -> list[str]:
     stem = Path(name).stem.lower()
-    tokens = {token for token in stem.replace("_", "-").split("-") if token}
-    return tokens - {"failure", "bug", "error", "screenshot", "screen", "capture", "image", "img", "state"}
+    stop_words = {
+        "failure",
+        "bug",
+        "error",
+        "screenshot",
+        "screen",
+        "capture",
+        "image",
+        "img",
+        "state",
+        "story",
+    }
+    return [
+        token
+        for token in stem.replace("_", "-").split("-")
+        if token and token not in stop_words and not token.isdigit()
+    ]
+
+
+def _story_identity_tokens(story: dict[str, Any]) -> set[str]:
+    text = " ".join(
+        [
+            str(story.get("story_id") or ""),
+            str(story.get("claim") or ""),
+            str(story.get("summary") or ""),
+        ]
+    ).lower()
+    tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", text)
+        if token and not token.isdigit()
+    }
+    return tokens - {"story", "stories", "test", "tests", "works", "working"}
+
+
+def _token_matches_story(token: str, story_tokens: set[str], corpus: str) -> bool:
+    if token in story_tokens or token in corpus:
+        return True
+    if len(token) >= 4:
+        singular = token[:-1] if token.endswith("s") else f"{token}s"
+        return singular in story_tokens or singular in corpus
+    return False
 
 
 def _visual_match_story(image_name: str, story: dict[str, Any]) -> int:
@@ -1067,11 +1149,23 @@ def _visual_match_story(image_name: str, story: dict[str, Any]) -> int:
         return 100
     if story_id and (image_stem == story_id or image_stem.startswith(f"{story_id}-")):
         return 90
-    tokens = _visual_name_tokens(image_name)
+    token_list = _visual_name_token_list(image_name)
+    if story_id and len(token_list) >= 2:
+        signature = "-".join(token_list)
+        if story_id == signature or story_id.endswith(f"-{signature}") or f"-{signature}-" in story_id:
+            return 80
+    tokens = set(token_list)
     if not tokens:
         return 0
-    corpus = _story_corpus(story)
-    score = sum(1 for token in tokens if token in corpus)
+    identity_tokens = _story_identity_tokens(story)
+    identity_corpus = " ".join(sorted(identity_tokens))
+    full_corpus = _story_corpus(story)
+    score = 0
+    for token in tokens:
+        if _token_matches_story(token, identity_tokens, identity_corpus):
+            score += 6
+        elif _token_matches_story(token, set(), full_corpus):
+            score += 1
     return score
 
 
@@ -1583,10 +1677,14 @@ def _story_is_web_ui(story: dict[str, Any]) -> bool:
     methodology = _normalize_methodology(
         str(story.get("methodology") or story.get("interaction_method") or "")
     )
-    if methodology in {"http-request", "api-request"} and not any(
+    if methodology in {"cli-execution"} and not any(
         token in surface for token in ("dom", "browser", "page", "screenshot", "video", "localstorage")
     ):
         return False
+    if methodology in {"http-request", "api-request", "source-review"} and not any(
+        token in surface for token in ("dom", "browser", "page", "screenshot", "video", "localstorage")
+    ):
+        return _story_claims_ui_behavior(story)
     if any(token in surface for token in ("dom", "browser", "page", "screenshot", "video", "localstorage")):
         return True
     if methodology in {"live-ui-events", "visual-only", "javascript-eval", "browser"}:
@@ -1719,7 +1817,8 @@ def _demo_evidence(
     app_kind = _demo_app_kind(intent, stories)
     test_only = _report_looks_test_only(intent, stories)
     mode = str(certifier_mode or "").strip().lower()
-    visual_required = app_kind in {"web", "mixed"} and mode != "fast" and not test_only
+    has_visual_story = any(_story_is_web_ui(story) for story in stories)
+    visual_required = app_kind in {"web", "mixed"} and mode != "fast" and not test_only and has_visual_story
     file_required = app_kind in {"mixed", "file_export"} and not test_only
     by_story = _story_visual_items_by_id(visual)
     general_recording = bool(visual.get("recording"))
@@ -1795,7 +1894,7 @@ def _demo_evidence(
         reason = "This product surface is better proven with command, API, or source evidence than video."
     else:
         demo_required = True
-        if visual_required and missing_visual and not general_recording:
+        if visual_required and missing_visual and not (story_video_count or story_image_count or general_recording):
             demo_status = "missing"
             reason = "User-facing stories need browser proof, but no matching video or screenshot was recorded."
         elif (visual_required and (missing_visual or generic_only)) or (file_required and missing_file):
@@ -3282,6 +3381,12 @@ async def run_agentic_certifier(
         )
         publisher.__enter__()
 
+    from otto.merge import git_ops
+
+    try:
+        baseline_untracked_files = set(git_ops.untracked_files(project_dir))
+    except Exception:
+        baseline_untracked_files = set()
     baseline_listening_pids = _listening_process_pids()
     try:
         prompt = _render_certifier_prompt(
@@ -3527,6 +3632,16 @@ async def run_agentic_certifier(
                     f"pid={item['pid']} cwd={item.get('cwd') or '?'}"
                     for item in cleaned_servers
                 ),
+            )
+        cleaned_untracked = _cleanup_certifier_untracked_delta(
+            project_dir,
+            baseline_untracked_files,
+        )
+        if cleaned_untracked:
+            logger.warning(
+                "Cleaned up %d untracked runtime artifact(s) created during certification: %s",
+                len(cleaned_untracked),
+                ", ".join(cleaned_untracked[:8]),
             )
         if publisher is not None:
             publisher.stop()

@@ -28,7 +28,7 @@ const CANCELLABLE_TASK_STATUSES = new Set([
  * mc-audit redesign Phase C, refactored Phase G.
  */
 export function TaskQueueList({
-  data, filters, selectedRunId, selectedQueuedTaskId, onSelect, onSelectQueued, onLandReady, onCancelRun, onClearFilters, onNewJob,
+  data, filters, selectedRunId, selectedQueuedTaskId, onSelect, onSelectQueued, onLandReady, onCancelRun, onStartWatcher, onClearFilters, onNewJob,
 }: {
   data: StateResponse | null;
   filters: Filters;
@@ -38,6 +38,7 @@ export function TaskQueueList({
   onSelectQueued?: (task: BoardTask) => void;
   onLandReady?: () => void;
   onCancelRun?: (runId: string, taskTitle: string) => void;
+  onStartWatcher?: () => void;
   onClearFilters?: () => void;
   onNewJob?: () => void;
 }) {
@@ -81,8 +82,16 @@ export function TaskQueueList({
         <div className="queue-start-banner" data-testid="queue-start-banner" role="status">
           <div>
             <strong>{queuedCount === 1 ? "1 queued task is waiting" : `${queuedCount} queued tasks are waiting`}</strong>
-            <span>Queued tasks are not running yet. Use the top-right queue runner control to start processing.</span>
+            <span>Queued tasks are not running yet.</span>
           </div>
+          {onStartWatcher ? (
+            <button
+              type="button"
+              className="primary"
+              data-testid="task-board-start-queue-runner"
+              onClick={onStartWatcher}
+            >Start queue runner</button>
+          ) : null}
         </div>
       ) : null}
       {emptyReason && emptyReason !== "has-tasks" ? (
@@ -176,6 +185,7 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
     : "—";
   const files = typeof task.changedFileCount === "number" ? `${task.changedFileCount}` : "—";
   const statusLower = String(task.status || "").toLowerCase();
+  const stopLabel = taskActionLabel(statusLower);
   const waitingInQueue = task.stage === "working"
     && !task.active
     && ["queued", "waiting", "pending"].some((value) => statusLower.includes(value));
@@ -239,15 +249,21 @@ function TaskRow({task, selected, onSelect, onSelectQueued, onCancelRun}: {
             type="button"
             className="queue-list-row-cancel"
             data-testid={`task-card-cancel-${task.id.replace(/[^a-zA-Z0-9_-]+/g, "-")}`}
-            aria-label={`Cancel task ${task.title}`}
-            title={`Cancel task ${task.title}`}
+            aria-label={`${stopLabel} ${task.title}`}
+            title={`${stopLabel} ${task.title}`}
             onClick={(event) => {
               event.stopPropagation();
               if (task.runId && onCancelRun) onCancelRun(task.runId, task.title);
             }}
-          >Cancel</button>
+          >{stopLabel}</button>
         )}
       </span>
     </div>
   );
+}
+
+function taskActionLabel(status: string): string {
+  if (status === "queued") return "Remove from queue";
+  if (status === "starting" || status === "initializing" || status === "running") return "Stop run";
+  return "Cancel";
 }

@@ -12,7 +12,7 @@ import {Toolbar} from "./components/toolbar/Toolbar";
 import {ProjectLauncher} from "./components/launcher/ProjectLauncher";
 import {OperationalOverview, ProjectOverview} from "./components/overview/Overview";
 import {RecentActivity, LiveRuns} from "./components/overview/ActivityPanels";
-import {SystemHealth, DiagnosticsSummary} from "./components/health/SystemHealth";
+import {SystemHealth} from "./components/health/SystemHealth";
 import {History} from "./components/history/History";
 import {RunDetailPanel, RunInspector} from "./components/inspector/RunInspector";
 import {JobDialog, collectPriorRunOptions} from "./components/new-job/JobDialog";
@@ -1017,9 +1017,9 @@ export function App() {
 
   const emergencyStopAutopilot = useCallback(() => {
     requestConfirm({
-      title: "Stop Autopilot",
-      body: "Turn Autopilot off and clear pending recovery approvals. Running jobs are not cancelled.",
-      confirmLabel: "Stop Autopilot",
+      title: "Turn off Autopilot",
+      body: "Disable Autopilot and clear pending recovery approvals. Running jobs are not cancelled.",
+      confirmLabel: "Turn off Autopilot",
       tone: "danger",
       onConfirm: () => autopilotInFlight.run(async () => {
         try {
@@ -1027,11 +1027,11 @@ export function App() {
             method: "POST",
             body: "{}",
           });
-          showToast(result.message || "Autopilot stopped", result.ok === false ? "error" : "information");
+          showToast(result.message || "Autopilot turned off", result.ok === false ? "error" : "information");
           crossTabPublishRef.current?.("autopilot.action");
           if (result.refresh !== false) await refresh(true);
         } catch (error) {
-          showToast(`Autopilot stop failed: ${errorMessage(error)}`, "error");
+          showToast(`Autopilot turn-off failed: ${errorMessage(error)}`, "error");
           throw error;
         }
       }),
@@ -1443,6 +1443,7 @@ export function App() {
                   actionConfirmationBody("cancel", `Cancel ${taskTitle}`),
                   "Cancel",
                 )}
+                onStartWatcher={() => void runWatcherAction("start")}
                 onClearFilters={() => updateFilters(defaultFilters)}
                 onNewJob={openJobDialog}
               />
@@ -1486,42 +1487,51 @@ export function App() {
           </section>
         ) : (
           <section className="diagnostics-layout" aria-label="Mission Control diagnostics">
-            <OperationalOverview
-              data={data}
-              lastError={lastError}
-              resultBanner={resultBanner}
-              onDismissError={() => setLastError(null)}
-              onDismissResult={() => setResultBanner(null)}
-            />
+                <OperationalOverview
+                  data={data}
+                  lastError={lastError}
+                  resultBanner={resultBanner}
+                  onDismissError={() => setLastError(null)}
+                  onDismissResult={() => setResultBanner(null)}
+                  showSystemMetrics={false}
+                />
             <div className="diagnostics-workspace">
               <div className="diagnostics-grid health-grid">
                 <SystemHealth
                   data={data}
                   autopilotPending={autopilotInFlight.pending}
-                  onAutopilotMode={setAutopilotMode}
                   onAutopilotTick={() => void runAutopilotTick()}
                   onAutopilotApprove={(decisionId) => void approveAutopilotDecision(decisionId)}
                   onAutopilotEmergencyStop={emergencyStopAutopilot}
                 />
-                <DiagnosticsSummary data={data} onSelect={selectRun} />
-                <LiveRuns items={data?.live.items || []} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
-                <EventTimeline events={data?.events} />
-                <History
-                  items={data?.history.items || []}
-                  totalRows={data?.history.total_rows || 0}
-                  page={data?.history.page != null ? data.history.page + 1 : historyPage}
-                  totalPages={data?.history.total_pages || 1}
-                  pageSize={data?.history.page_size || historyPageSize}
-                  requestedPage={historyPage}
-                  loaded={data != null}
-                  selectedRunId={selectedRunId}
-                  sortColumn={historySort}
-                  sortDir={historySortDir}
-                  onSelect={selectRun}
-                  onChangePage={changeHistoryPage}
-                  onChangePageSize={changeHistoryPageSize}
-                  onCycleSort={cycleHistorySort}
-                />
+                {(data?.live.items.length || 0) > 0 && (
+                  <LiveRuns items={data?.live.items || []} landing={landing} selectedRunId={selectedRunId} onSelect={selectRun} />
+                )}
+                <details className="panel diagnostics-advanced" data-testid="advanced-diagnostics">
+                  <summary>
+                    <span>Activity and history</span>
+                    <small>{data?.history.total_rows || 0} runs · {data?.events.total_count || 0} events</small>
+                  </summary>
+                  <div className="diagnostics-advanced-body">
+                    <EventTimeline events={data?.events} />
+                    <History
+                      items={data?.history.items || []}
+                      totalRows={data?.history.total_rows || 0}
+                      page={data?.history.page != null ? data.history.page + 1 : historyPage}
+                      totalPages={data?.history.total_pages || 1}
+                      pageSize={data?.history.page_size || historyPageSize}
+                      requestedPage={historyPage}
+                      loaded={data != null}
+                      selectedRunId={selectedRunId}
+                      sortColumn={historySort}
+                      sortDir={historySortDir}
+                      onSelect={selectRun}
+                      onChangePage={changeHistoryPage}
+                      onChangePageSize={changeHistoryPageSize}
+                      onCycleSort={cycleHistorySort}
+                    />
+                  </div>
+                </details>
               </div>
               {!inspectorOpen && (
                 <RunDetailPanel

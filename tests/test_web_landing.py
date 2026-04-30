@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 from otto import paths
@@ -83,6 +85,141 @@ def test_web_state_exposes_landing_queue_status(tmp_path: Path) -> None:
     assert detail["review_packet"]["next_action"]["enabled"] is False
     assert actions["m"]["enabled"] is False
     assert actions["m"]["reason"] == "Already merged into main."
+
+
+def test_landing_status_marks_interrupted_retry_as_superseded(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    intent = "Certify the existing app loads and the main list renders. Do not change code."
+    _append_queue_task(repo, "certify-existing", command_argv=["certify", intent], resolved_intent=intent)
+    _append_queue_task(repo, "certify-existing-2", command_argv=["certify", intent], resolved_intent=intent)
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "certify-existing": {
+                    "status": "interrupted",
+                    "attempt_run_id": "run-interrupted",
+                },
+                "certify-existing-2": {
+                    "status": "done",
+                    "attempt_run_id": "run-retry",
+                    "stories_passed": 1,
+                    "stories_tested": 1,
+                },
+            },
+        },
+    )
+
+    state = _client(repo).get("/api/state").json()
+
+    by_id = {item["task_id"]: item for item in state["landing"]["items"]}
+    assert by_id["certify-existing"]["superseded"] is True
+    assert by_id["certify-existing"]["label"] == "Superseded by retry"
+    assert by_id["certify-existing"]["superseded_by"]["task_id"] == "certify-existing-2"
+    assert by_id["certify-existing-2"]["landing_state"] == "reviewed"
+    assert state["landing"]["counts"]["blocked"] == 0
+    assert state["landing"]["counts"]["reviewed"] == 1
+    assert all(issue["label"] != "Tasks need attention" for issue in state["runtime"]["issues"])
+
+    detail = _client(repo).get("/api/runs/run-interrupted").json()
+    actions = {action["key"]: action for action in detail["legal_actions"]}
+    assert detail["display_status"] == "superseded"
+    assert detail["landing_state"] == "superseded"
+    assert detail["superseded"] is True
+    assert detail["superseded_by"]["task_id"] == "certify-existing-2"
+    assert set(actions) <= {"x"}
+    assert detail["review_packet"]["headline"] == "Retried by a later run"
+    assert detail["review_packet"]["readiness"]["state"] == "superseded"
+    assert detail["review_packet"]["failure"] is None
+    assert detail["review_packet"]["next_action"]["enabled"] is False
+
+
+def test_landing_status_suppresses_interrupted_attempt_while_later_retry_runs(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    intent = "Certify the existing app loads and the main list renders. Do not change code."
+    _append_queue_task(repo, "certify-existing-3", command_argv=["certify", intent], resolved_intent=intent)
+    _append_queue_task(repo, "certify-existing-3-2", command_argv=["certify", intent], resolved_intent=intent)
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": {"pid": os.getpid(), "started_at": now, "heartbeat": now},
+            "tasks": {
+                "certify-existing-3": {
+                    "status": "interrupted",
+                    "attempt_run_id": "2026-04-29-165952-fb0174",
+                },
+                "certify-existing-3-2": {
+                    "status": "running",
+                    "attempt_run_id": "2026-04-29-191531-813a12",
+                },
+            },
+        },
+    )
+
+    state = _client(repo).get("/api/state").json()
+
+    by_id = {item["task_id"]: item for item in state["landing"]["items"]}
+    assert by_id["certify-existing-3"]["superseded"] is True
+    assert by_id["certify-existing-3"]["label"] == "Retry in progress"
+    assert by_id["certify-existing-3"]["superseded_by"]["task_id"] == "certify-existing-3-2"
+    assert by_id["certify-existing-3"]["superseded_by"]["queue_status"] == "running"
+    assert by_id["certify-existing-3-2"]["landing_state"] == "blocked"
+    assert by_id["certify-existing-3-2"]["queue_status"] == "running"
+    assert state["landing"]["counts"]["blocked"] == 1
+    assert all(issue["label"] != "Tasks need attention" for issue in state["runtime"]["issues"])
+
+    detail = _client(repo).get("/api/runs/2026-04-29-165952-fb0174").json()
+    assert detail["display_status"] == "superseded"
+    assert detail["review_packet"]["checks"][0]["label"] == "Retry in progress"
+    assert "current retry" in detail["review_packet"]["next_action"]["reason"]
+
+
+def test_landing_status_does_not_supersede_newer_interrupted_retry(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    intent = "Certify the existing app loads and the main list renders. Do not change code."
+    _append_queue_task(repo, "certify-existing-2", command_argv=["certify", intent], resolved_intent=intent)
+    _append_queue_task(repo, "certify-existing-3", command_argv=["certify", intent], resolved_intent=intent)
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "certify-existing-2": {
+                    "status": "done",
+                    "attempt_run_id": "2026-04-29-072525-e2b801",
+                    "stories_passed": 1,
+                    "stories_tested": 1,
+                },
+                "certify-existing-3": {
+                    "status": "interrupted",
+                    "attempt_run_id": "2026-04-29-165952-fb0174",
+                },
+            },
+        },
+    )
+
+    state = _client(repo).get("/api/state").json()
+
+    by_id = {item["task_id"]: item for item in state["landing"]["items"]}
+    assert by_id["certify-existing-2"]["landing_state"] == "reviewed"
+    assert by_id["certify-existing-3"]["landing_state"] == "blocked"
+    assert by_id["certify-existing-3"].get("superseded") is not True
+    assert state["landing"]["counts"]["blocked"] == 1
+    assert any(issue["label"] == "Tasks need attention" for issue in state["runtime"]["issues"])
+
+    detail = _client(repo).get("/api/runs/2026-04-29-165952-fb0174").json()
+    assert detail["display_status"] == "interrupted"
+    assert detail.get("superseded") is not True
+    assert detail["review_packet"]["status"] == "interrupted"
+
 
 def test_web_landed_task_uses_merge_state_diff_after_source_branch_deleted(tmp_path: Path) -> None:
     repo = tmp_path / "repo"

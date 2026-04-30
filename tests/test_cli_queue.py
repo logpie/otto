@@ -298,6 +298,32 @@ def test_queue_build_after_rejects_unknown(tmp_path: Path):
     assert "unknown task" in out
 
 
+def test_queue_certify_after_requires_explicit_unmerged_opt_in(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "first"], cwd=repo)
+
+    code, out, _ = _run(["queue", "certify", "integration", "--after", "first"], cwd=repo)
+
+    assert code == 2
+    assert "does not merge their branches" in out
+    assert "otto merge --all --verify smart" in out
+
+
+def test_queue_certify_after_can_be_explicitly_independent(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "first"], cwd=repo)
+
+    code, out, _ = _run(
+        ["queue", "certify", "integration", "--after", "first", "--allow-unmerged-after"],
+        cwd=repo,
+    )
+
+    assert code == 0, out
+    tasks = load_queue(repo)
+    assert tasks[1].command_argv[0] == "certify"
+    assert tasks[1].after == ["first"]
+
+
 def test_queue_build_rejects_unknown_target_flag(tmp_path: Path):
     repo = init_repo(tmp_path)
     code, out, _ = _run(["queue", "build", "test", "--bogus-flag"], cwd=repo)
@@ -405,6 +431,32 @@ def test_queue_show_reports_resume_checkpoint_for_interrupted_task(tmp_path: Pat
     assert "Resume status:" in out
     assert "ready" in out
     assert str(checkpoint_path).replace("\n", "") in "".join(out.split())
+
+
+def test_queue_ls_hides_resume_checkpoint_diagnostics_for_running_task(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv export"], cwd=repo)
+    session_id = "2026-04-22-010203-abc123"
+    worktree = repo / ".worktrees" / "csv-export"
+    paths.ensure_session_scaffold(worktree, session_id)
+    paths.session_checkpoint(worktree, session_id).write_text(
+        json.dumps({
+            "status": "in_progress",
+            "updated_at": "2026-04-22T01:02:03Z",
+            "git_sha": "stale-sha",
+        })
+    )
+    _write_watcher_state(
+        repo,
+        watcher={"pid": 123, "started_at": "2026-04-22T01:02:03Z", "heartbeat_at": _fresh_iso_now()},
+        tasks={"csv-export": {"status": "running"}},
+    )
+
+    code, out, _ = _run(["queue", "ls"], cwd=repo)
+
+    assert code == 0
+    assert "running" in out
+    assert "checkpoint is stale" not in out
 
 
 def test_queue_show_reports_proof_of_work_html_path(tmp_path: Path):

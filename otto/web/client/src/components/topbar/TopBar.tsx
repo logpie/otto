@@ -26,10 +26,14 @@ export function TopBar({
   const watcherState = effectiveWatcherState(watcher);
   const autopilot = data?.autopilot;
   const autopilotMode = autopilot?.mode || "off";
-  const autopilotAttention = (autopilot?.pending_decisions.length || 0) + (autopilot?.incidents.length || 0);
-  const autopilotTone: PillTone = autopilotMode === "off" ? "neutral" : autopilotAttention ? "warning" : "success";
+  const autopilotModeLabel = formatAutopilotMode(autopilotMode);
+  const autopilotTone: PillTone = autopilotMode === "full" ? "info" : "neutral";
+  const autopilotWillStartQueue = Boolean(
+    autopilot?.pending_decisions.some((decision) => decisionIncludesAction(decision, "start_watcher")) ||
+    (autopilot?.decisions || []).some((decision) => decisionIncludesAction(decision, "start_watcher")),
+  );
   const autopilotTitle = autopilot
-    ? `Autopilot is ${autopilotMode}. ${autopilot.next_tick_hint || "It scans queue, repo, runner, and landing state."}`
+    ? `Autopilot is ${autopilotModeLabel}. ${autopilot.next_tick_hint || "It scans queue, repo, runner, and landing state."}`
     : "Autopilot status is loading.";
   const watcherTone: PillTone = watcherState === "running" ? "success" : watcherState === "stale" ? "warning" : "neutral";
   const startable = watcherState !== "running" && canStartWatcher(data);
@@ -71,7 +75,7 @@ export function TopBar({
       <div className="topbar-actions">
         {project ? (
           <label
-            className={`topbar-autopilot pill-tone-${autopilotTone} ${autopilotMode !== "off" ? "is-live" : ""}`}
+            className={`topbar-autopilot pill-tone-${autopilotTone}`}
             title={autopilotTitle}
           >
             <span className={`watcher-dot tone-${autopilotTone}`} aria-hidden="true" />
@@ -84,8 +88,8 @@ export function TopBar({
               onChange={(event) => onAutopilotMode(event.target.value as AutopilotMode)}
             >
               <option value="off">Off</option>
-              <option value="assisted">Assisted</option>
-              <option value="full">Full</option>
+              <option value="assisted">Ask first</option>
+              <option value="full">Auto</option>
             </select>
           </label>
         ) : null}
@@ -116,6 +120,8 @@ export function TopBar({
               ? watcherActionLabel
               : watcherState === "running"
               ? `Pause queue processing. Running tasks may continue until they reach a stop point.${heartbeatTitle}`
+              : autopilotWillStartQueue
+              ? "Start the queue runner now, or approve the Autopilot recovery action from Health."
               : startWatcherTooltip(data) || "Start the queue runner to process queued jobs."
           }
           onClick={watcherState === "running" ? onStopWatcher : onStartWatcher}
@@ -132,4 +138,14 @@ export function TopBar({
       </div>
     </header>
   );
+}
+
+function formatAutopilotMode(mode: AutopilotMode | string): string {
+  if (mode === "assisted") return "Ask first";
+  if (mode === "full") return "Auto";
+  return "Off";
+}
+
+function decisionIncludesAction(decision: NonNullable<StateResponse["autopilot"]>["pending_decisions"][number], action: string): boolean {
+  return decision.action === action || (decision.includes_actions || []).includes(action) || (decision.chain_actions || []).includes(action);
 }

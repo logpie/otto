@@ -72,7 +72,9 @@ def runtime_status(
     supervisor = _supervisor_status(project_dir, health, watcher_state)
     counts = watcher.get("counts") if isinstance(watcher.get("counts"), dict) else {}
     queued_count = int(counts.get("queued") or 0)
-    attention_count = sum(int(counts.get(status) or 0) for status in ("failed", "interrupted", "stale"))
+    attention_count = _landing_attention_count(landing)
+    if attention_count is None:
+        attention_count = sum(int(counts.get(status) or 0) for status in ("failed", "interrupted", "stale"))
     pending_commands = int(commands_file.get("line_count") or 0)
     processing_commands = int(processing_file.get("line_count") or 0)
     malformed_commands = int(commands_file.get("malformed_count") or 0) + int(processing_file.get("malformed_count") or 0)
@@ -132,7 +134,7 @@ def runtime_status(
             _runtime_issue(
                 "warning",
                 "Tasks need attention",
-                f"{attention_count} task{'' if attention_count == 1 else 's'} failed, stalled, or were interrupted.",
+                f"{attention_count} task{'' if attention_count == 1 else 's'} failed, stalled, or interrupted.",
                 "Open the affected run and use the review packet next action.",
             )
         )
@@ -192,7 +194,9 @@ def watcher_health(project_dir: Path, state: dict[str, Any], *, probe_lock: bool
     lock_process_alive = _pid_alive(lock_pid)
     heartbeat_age_s = _heartbeat_age_s(watcher.get("heartbeat"))
     running = watcher_alive(state)
-    blocking_pid = watcher_pid if running else lock_pid if lock_process_alive else None
+    heartbeat_stale = heartbeat_age_s is not None and heartbeat_age_s >= 10.0
+    stale_watcher_pid = watcher_pid if heartbeat_stale and watcher_process_alive else None
+    blocking_pid = watcher_pid if running else lock_pid if lock_process_alive else stale_watcher_pid
     if running:
         health_state = "running"
         next_action = "Stop queue runner to pause queue dispatch."
@@ -224,6 +228,20 @@ def _runtime_issue(severity: str, label: str, detail: str, next_action: str) -> 
         "detail": detail,
         "next_action": next_action,
     }
+
+
+def _landing_attention_count(landing: dict[str, Any]) -> int | None:
+    items = landing.get("items") if isinstance(landing, dict) else None
+    if not isinstance(items, list):
+        return None
+    count = 0
+    for item in items:
+        if not isinstance(item, dict) or item.get("superseded"):
+            continue
+        status = str(item.get("queue_status") or "").lower()
+        if status in {"failed", "interrupted", "cancelled", "stale"}:
+            count += 1
+    return count
 
 
 def _landing_recovery_needed(blockers: list[Any]) -> bool:

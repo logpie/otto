@@ -97,6 +97,18 @@ SUPPORTED_PROVIDERS = {"claude", "codex"}
 PUBLIC_CERTIFIER_MODES = ("fast", "standard", "thorough")
 INTERNAL_CERTIFIER_MODES = ("hillclimb", "target")
 SUPPORTED_CERTIFIER_MODES = PUBLIC_CERTIFIER_MODES + INTERNAL_CERTIFIER_MODES
+PROVIDER_AGENT_MODEL_DEFAULTS: dict[str, dict[str, str]] = {
+    # Claude's SDK/provider default can drift to a very expensive model. Otto
+    # keeps explicit safe defaults while still letting otto.yaml or CLI flags
+    # override them per phase.
+    "claude": {
+        "_default": "sonnet",
+        "build": "sonnet",
+        "fix": "sonnet",
+        "certifier": "haiku",
+        "spec": "haiku",
+    },
+}
 _REPO_STATE_MARKERS: tuple[tuple[str, str], ...] = (
     ("MERGE_HEAD", "merge in progress"),
     ("rebase-merge", "rebase in progress"),
@@ -274,6 +286,30 @@ def agent_model(config: dict[str, Any], agent_type: str | None = None) -> str | 
         if per_agent.get("model"):
             return str(per_agent["model"])
     return config.get("model") or None
+
+
+def provider_default_model(provider: str | None, agent_type: str | None = None) -> str | None:
+    """Return Otto's provider-safe default model, if it defines one."""
+    normalized = normalize_provider(provider, default=None) if provider else None
+    if not normalized:
+        return None
+    defaults = PROVIDER_AGENT_MODEL_DEFAULTS.get(normalized)
+    if not defaults:
+        return None
+    return defaults.get(str(agent_type or "")) or defaults.get("_default")
+
+
+def effective_agent_model(config: dict[str, Any], agent_type: str | None = None) -> str | None:
+    """Return explicit model override, else Otto's provider-safe default.
+
+    ``agent_model`` intentionally preserves the raw config meaning of
+    ``None = provider default``. Agent execution should use this helper so
+    provider defaults do not silently drift under Otto.
+    """
+    explicit = agent_model(config, agent_type)
+    if explicit:
+        return explicit
+    return provider_default_model(agent_provider(config, agent_type), agent_type)
 
 
 def agent_effort(config: dict[str, Any], agent_type: str | None = None) -> str | None:
