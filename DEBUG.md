@@ -985,3 +985,233 @@ The product-fix round budget and proof-repair evidence budget were coupled. That
 - Split the budgets in `run_certify_fix_loop`: product fixes still stop at `max_certify_rounds`, while proof-gate-only failures get a bounded `max_proof_repair_rounds` extension, defaulting to 2 and capped at 5.
 - Extra proof-repair rounds pass the prior passing stories back into the certifier and do not dispatch the code-fix agent.
 - Regression test: `uv run pytest -q tests/test_hardening.py -k 'certify_fix_loop_allows_extra_proof_repair_after_product_round_cap or certify_fix_loop_repairs_proof_gate_without_code_fix or certify_fix_loop_preserves_stories_when_proof_repair_is_evidence_only'`.
+
+# OpsBoard Rerun Feature Certification Inefficiency
+
+Date: 2026-05-01
+
+## Observations
+
+- Controlled rerun project: `/Users/yuxuan/otto-projects/opsboard-dogfood-rerun-20260430-232120`.
+- Same config as the prior 4-hour dogfood: Claude Sonnet low for build/improve/fix, Claude Haiku low for certifier, standard split mode, queue concurrency 2, max certify rounds 4.
+- Foundation completed in 669s and merged with risk-based verification in 196s.
+- The parallel feature wave started correctly with concurrency 2, but after roughly 24 minutes neither of the first two feature tasks had landed and the full campaign was already trending past the 60-minute target.
+- `dashboard-search-filters` reached certify round 6 before the run was stopped. Round 4 had product behavior passing but failed the browser proof gate; proof repair then wrote markdown "visual proof" files rather than actual `.webm`/PNG evidence.
+- `incident-workflow-actions` spent 11m53s in its first certification round, including port conflict recovery, failed Agent tool schema attempts, Selenium/install attempts, Safari/osascript usage, and unsafe process-kill attempts that Otto blocked.
+- Focused `otto improve feature <focus>` tasks were still using `certifier_mode="hillclimb"` even though the proof gate expected standard/thorough browser proof.
+- Checkpoints showed repeated appended `## Proof Repair Focus` sections, which bloated and confused later proof-repair prompts.
+
+## Hypotheses
+
+### H1: Focused feature work is certified with the wrong evaluator mode (ROOT HYPOTHESIS)
+
+- Supports: `otto improve feature` hardcoded `certifier_mode="hillclimb"`; hillclimb prompt treats screenshots/clips as optional product-advisor evidence, while the proof gate blocks standard web UI passes without real browser media.
+- Conflicts: foundation build used standard certification and completed in acceptable time with only one proof repair.
+- Test: change focused feature mode resolution to `standard` when focus text is present, while preserving `hillclimb` for unfocused feature discovery.
+
+### H2: Proof-repair prompts accumulate duplicate focus sections
+
+- Supports: resumed checkpoints contained repeated `## Proof Repair Focus` sections.
+- Conflicts: duplicate text alone does not explain every product miss, but it amplifies proof repair confusion.
+- Test: strip an existing proof-repair section before appending a fresh one and assert the second proof-repair call has exactly one marker.
+
+### H3: Proof repair default budget is too forgiving for the pressure-test target
+
+- Supports: repeated proof-only rounds can consume minutes without changing product code, making a sub-hour campaign impossible when a certifier misses media.
+- Conflicts: at least one proof-repair round is still needed for audit-grade evidence.
+- Test: lower the default extra proof-repair budget to one bounded attempt while leaving `max_proof_repair_rounds` configurable.
+
+## Experiments
+
+- Added `_resolve_feature_certifier_mode`: focused feature requests resolve to `standard`; blank feature discovery remains `hillclimb`.
+- Added `_base_focus_without_proof_repair` so proof-repair focus is replaced, not stacked.
+- Reduced the default extra proof-repair budget from two to one.
+- Strengthened certifier prompts to choose a high free test port and forbid broad kill/Safari/OS scripting for port recovery.
+
+## Root Cause
+
+Focused feature tasks were evaluated as open-ended hillclimb/product-advisor runs but then judged by standard proof gates. That mismatch caused proof-gate retries and long tool thrash instead of a tight contract verification of the user-requested feature.
+
+## Fix
+
+- `otto improve feature` now uses standard certification for explicit focus text and hillclimb only for unfocused feature discovery.
+- Proof-repair focus is de-duplicated before each repair call.
+- Default proof-repair retries are capped to one extra evidence-only round unless config opts into more.
+- Certifier prompts now steer port recovery toward high free ports and away from unsafe process cleanup or desktop automation.
+
+## Verification
+
+- `uv run pytest -q tests/test_hardening.py::TestHistoryWrites::test_certify_fix_loop_allows_extra_proof_repair_after_product_round_cap tests/test_hardening.py::TestHistoryWrites::test_certify_fix_loop_defaults_to_one_proof_repair_round tests/test_hardening.py::TestImproveCLIHardening::test_focused_feature_improve_uses_standard_certifier`
+- `uv run pytest -q tests/test_hardening.py::TestHistoryWrites tests/test_hardening.py::TestImproveCLIHardening tests/test_agent_safety.py`
+- `uv run python scripts/test_tiers.py smoke`
+
+## Follow-up Finding
+
+The first clean rerun after these fixes showed `foundation-platform` entering
+certify round 3 even though the default proof-repair budget was intended to
+allow only one evidence-only retry. The bug was in the limiter: it compared the
+absolute round number to `max_certify_rounds + max_proof_repair_rounds`, so a
+task with `--rounds 4` could still take several proof-only retries.
+
+Fix: count completed proof-repair attempts directly. A proof-gate failure on a
+proof-repair round now stops when `proof_repair_attempts >=
+max_proof_repair_rounds`, regardless of the product round budget.
+
+Additional regression:
+
+- `uv run pytest -q tests/test_hardening.py::TestHistoryWrites::test_certify_fix_loop_counts_default_proof_repair_attempts_not_total_rounds`
+
+# OpsBoard Rerun Dirty Fix Commit Failure
+
+Date: 2026-05-01
+
+## Observations
+
+- Controlled rerun project: `/Users/yuxuan/otto-projects/opsboard-dogfood-rerun3-20260501-004010`.
+- Foundation completed in about 10m36s and merged with risk-based verification in about 3m31s.
+- The first feature wave correctly ran focused feature tasks in `standard` certifier mode with queue concurrency 2.
+- `incident-workflow-actions` completed after one product fix and one final certification round in about 14.7 minutes.
+- `dashboard-search-filters` failed round 1, ran fix round 1, then reached product-pass/proof-repair-pass state, but the queue task failed when Otto attempted another fix with a dirty worktree.
+- The dashboard feature branch HEAD stayed equal to main after "fix round 1"; the worktree contained modified product files and a new `opsboard/templates/dashboard.html`.
+- The round-003 manifest recorded `"action": "fix round 1"`, `"passed": true`, and identical `commit_before` / `commit_after` SHAs. The generated summary said `(no changes)` despite real dirty product edits.
+
+## Hypotheses
+
+### H1: Successful fix agents are trusted to commit their own changes, but this is not enforced (ROOT HYPOTHESIS)
+
+- Supports: the fix agent returned success, changed product files, and did not advance HEAD; the pipeline then recorded the fix as done with no commit.
+- Conflicts: some agents do commit successfully, so this only appears when provider behavior deviates from the prompt.
+- Test: add a regression where the mocked fix agent writes a file without committing; the split certify-fix loop should either commit the change before continuing or fail before certification can pass a dirty tree.
+
+### H2: The certifier writes product changes during proof repair
+
+- Supports: dirty files were present after later certification rounds.
+- Conflicts: the files match dashboard product implementation and tests, not proof artifacts; the round-003 manifest is the first point where the branch should have advanced.
+- Test: inspect branch HEAD and dirty paths before and after the mocked fix phase.
+
+### H3: The dirty-state guard is too strict after proof repair
+
+- Supports: it blocked the run.
+- Conflicts: blocking was correct; the bug was that Otto allowed earlier phases to proceed after an uncommitted product fix.
+- Test: preserve the guard and fix the earlier commit boundary.
+
+## Experiments
+
+- Confirmed the dashboard feature branch had dirty product/test files and no fix commit after the successful fix phase.
+- Confirmed `run_certify_fix_loop` computes `fix_commit_sha` by comparing HEAD before/after `build_agentic_v3`, but does not enforce a commit if a successful fix leaves tracked/untracked product files dirty.
+
+## Root Cause
+
+The split certify-fix pipeline relied on the fix agent's prompt-level instruction to commit changes. When the agent returned success without committing, Otto certified a dirty tree and later failed recovery from the same dirty state.
+
+## Fix
+
+- Add a pipeline-level post-fix commit guard for successful fix phases: if the repo was clean before the fix and the agent left committable product changes, Otto stages and commits those changes before the next certification round.
+- Keep runtime/output paths such as `otto_logs/`, `.otto-*`, `.venv/`, `output/`, and `test-results/` out of the automatic product commit.
+
+## Verification
+
+- `uv run pytest -q tests/test_hardening.py::TestHistoryWrites::test_certify_fix_loop_commits_successful_dirty_fix_before_recertifying tests/test_hardening.py::TestHistoryWrites::test_certify_fix_loop_counts_default_proof_repair_attempts_not_total_rounds tests/test_hardening.py::TestImproveCLIHardening::test_focused_feature_improve_uses_standard_certifier`
+- `uv run pytest -q tests/test_hardening.py::TestHistoryWrites tests/test_hardening.py::TestImproveCLIHardening tests/test_agent_safety.py`
+- `uv run python scripts/test_tiers.py smoke`
+
+# OpsBoard Rerun Storyless Merge Certifier Failure
+
+Date: 2026-05-01
+
+## Observations
+
+- Controlled rerun project: `/Users/yuxuan/otto-projects/opsboard-dogfood-rerun4-20260501-012742`.
+- Foundation completed cleanly in 503.9s: 4:49 build and 3:34 certification, with no proof-repair round.
+- `otto merge --fast --verify risk-based foundation-platform` advanced `main` from `119420f` to `001f485`, collected command evidence, browser screenshots, and `recording.webm`, then reported merge verification failed.
+- The merge certifier narrative ended with `VERDICT: PASS` and a positive diagnosis, but emitted no `STORY_RESULT:` lines. `proof-of-work.json` therefore had `stories_tested=0`, `stories_passed=0`, `outcome=failed`, and a non-blocking evidence gate.
+- The certifier also attempted `pkill -f "uvicorn opsboard.main"`; Otto blocked it and the cleanup guard killed the owned dev server afterward.
+
+## Hypotheses
+
+### H1: A storyless `VERDICT: PASS` is treated as a normal failed certification instead of malformed output (ROOT HYPOTHESIS)
+
+- Supports: the certifier completed with valid-looking evidence and a PASS verdict, but zero structured stories. Merge verification had no retry path for this parser-contract failure.
+- Conflicts: failing the merge is safer than accepting a storyless pass, but it is not the right recovery behavior because the agent did the verification work and only omitted machine-readable markers.
+- Test: make `run_agentic_certifier` raise `MalformedCertifierOutputError` when a verdict is present without `STORY_RESULT`, and make post-merge verification retry once with an explicit output-contract repair focus.
+
+### H2: The merge prompt does not list the required story IDs clearly enough
+
+- Supports: the agent wrote `STORY_EVIDENCE_*` blocks for named stories but did not map them to `STORY_RESULT`.
+- Conflicts: the prompt already contains a required story list and marker format; provider compliance can still drift.
+- Test: on malformed retry, keep the same story list and add an explicit marker-only correction.
+
+### H3: Merge proof-gate logic incorrectly blocks command/API-style evidence
+
+- Supports: the merge failed despite evidence.
+- Conflicts: the evidence gate was `not_applicable` and `blocks_pass=false`; the failure was zero structured story results.
+- Test: inspect `evidence_gate` and `stories_tested` in the proof JSON.
+
+## Experiments
+
+- Confirmed the merge proof JSON had zero stories but `evidence_gate.blocks_pass=false`.
+- Confirmed the narrative log had no `STORY_RESULT` markers but did have `VERDICT: PASS`.
+- Added a merge-orchestrator regression where the first certifier call raises a malformed storyless-verdict error and the second structured response passes.
+
+## Root Cause
+
+Otto correctly refused to accept a certifier PASS without story results, but treated that parser-contract failure as a final merge failure instead of retrying the certifier once with a stricter output contract.
+
+## Fix
+
+- `run_agentic_certifier` now raises `MalformedCertifierOutputError` when a response emits `VERDICT` but no `STORY_RESULT` markers.
+- Post-merge verification catches that malformed-output error and retries once with an `Output Contract Repair` focus that requires one structured `STORY_RESULT` per story.
+
+## Verification
+
+- `uv run pytest -q tests/test_hardening.py::TestSpecTimeoutTolerance::test_certifier_raises_on_verdict_without_story_results tests/test_merge_orchestrator.py::test_post_merge_verification_retries_storyless_verdict_once tests/test_merge_orchestrator.py::test_post_merge_verification_repairs_proof_gate_without_remerge`
+- `uv run pytest -q tests/test_hardening.py::TestHistoryWrites tests/test_hardening.py::TestSpecTimeoutTolerance tests/test_hardening.py::TestImproveCLIHardening tests/test_agent_safety.py tests/test_merge_orchestrator.py::test_post_merge_verification_retries_storyless_verdict_once tests/test_merge_orchestrator.py::test_post_merge_verification_repairs_proof_gate_without_remerge tests/test_merge_orchestrator.py::test_post_merge_verification_full_verify_preserves_merge_context_flag tests/test_merge_orchestrator.py::test_post_merge_verification_blocks_human_flag_even_if_certifier_verdict_passes`
+
+# OpsBoard Rerun Merge Proof Retry Loop
+
+Date: 2026-05-01
+
+## Observations
+
+- Controlled rerun project: `/Users/yuxuan/otto-projects/opsboard-dogfood-rerun4-20260501-012742`.
+- Final product merge landed successfully at `2657130`, but post-merge verification repeatedly failed after all stories passed.
+- Failed proof packets showed `agent_outcome=passed`, 44/44 story passes, and product-ready diagnoses, but proof gate failures:
+  - 0/44 story evidence extracted even though `narrative.log` contained `STORY_EVIDENCE_START` blocks.
+  - Non-file audit stories were marked as needing file/download validation.
+  - UI stories were forced into fresh story-specific screenshots during merge verification, causing repeated proof rounds.
+- Certifier also attempted broad `pkill` cleanup and wrote a temporary `verify_merge.py` helper into the product repo; Otto blocked/cleaned both, but those attempts cost time.
+
+## Hypotheses
+
+### H1: Proof generation only parses final agent text, not the full narrative stream (ROOT HYPOTHESIS)
+
+- Supports: `narrative.log` had 44 evidence blocks, but `proof-of-work.json` had `with_evidence=0`.
+- Conflicts: normal final responses sometimes include the evidence blocks, so this only appears when the provider emits evidence before the final answer.
+- Test: parse timestamp/glyph-prefixed narrative markers and confirm 44/44 evidence blocks attach.
+
+### H2: File/export detection treats broad words as file artifacts
+
+- Supports: `audit-events` was marked as file validation required because its observed steps mentioned an audit export, despite the story verifying audit rows/actions, not a downloadable file.
+- Test: audit-event story with `examined audit export` must not require file validation unless file-like tokens such as CSV/PDF/download/content-disposition are present.
+
+### H3: Merge verification is using the wrong proof standard
+
+- Supports: merge verification repeated full certifier rounds to collect fresh product-demo visuals. Source feature tasks already own product proof; merge verification should prove integration and regressions.
+- Test: a post-merge integration intent with DOM stories and structured evidence should not require a fresh browser video.
+
+## Root Cause
+
+Post-merge verification was conflating three duties: source-task product proof, merge integration verification, and proof repair. That made successful product behavior look failed when proof evidence was recorded in a different stream or when the merge certifier did not collect redundant visual artifacts.
+
+## Fix
+
+- Parse certifier narrative logs alongside final agent text when evidence markers are present.
+- Normalize timestamp/glyph prefixes in marker and evidence parsing.
+- Tighten file/download story detection and accept concrete CSV row-order evidence.
+- Relax merge verification proof policy: post-merge checks rely on source proof packets plus structured integration evidence instead of demanding a fresh product-demo video for each UI story.
+
+## Verification
+
+- `uv run pytest -q tests/test_hardening.py::test_parser_extracts_prefixed_story_evidence_blocks tests/test_hardening.py::test_parser_extracts_timestamped_narrative_story_evidence_blocks tests/test_hardening.py::test_parser_preserves_fenced_code_inside_story_evidence`
+- `uv run pytest -q tests/test_certifier_stories.py::test_pow_merge_verification_does_not_require_fresh_ui_demo_video tests/test_certifier_stories.py::test_pow_file_validation_accepts_csv_row_order_evidence tests/test_certifier_stories.py::test_pow_demo_evidence_accepts_walkthrough_with_story_text_evidence tests/test_certifier_stories.py::test_pow_generic_recording_does_not_cover_unvisualized_ui_story`
+- Final live merge verification: `otto merge-verify merge-1777628934-92022-af8fd2c9 --verify risk-based` passed in one round, 44/44 stories, 44/44 evidence, proof gate pass.

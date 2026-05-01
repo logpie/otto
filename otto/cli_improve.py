@@ -215,6 +215,18 @@ def _resolve_improve_certifier_mode(
     )
 
 
+def _resolve_feature_certifier_mode(focus: str | None) -> str:
+    """Pick the evaluator mode for `otto improve feature`.
+
+    Unfocused feature improvement is product discovery, so hillclimb is the
+    right evaluator. A focused feature request is different: the user has
+    already specified the feature, so Otto should verify that request like a
+    normal product contract instead of asking a product advisor to invent or
+    re-rank improvements.
+    """
+    return "standard" if str(focus or "").strip() else "hillclimb"
+
+
 def _run_improve(
     project_dir: Path,
     intent: str,
@@ -1009,7 +1021,7 @@ def register_improve_commands(main: click.Group) -> None:
             intent=intent,
             rounds=rounds,
             focus=focus,
-            certifier_mode="hillclimb",
+            certifier_mode=_resolve_feature_certifier_mode(focus),
             command_label="Feature improvement",
             subcommand="feature",
             split=split,

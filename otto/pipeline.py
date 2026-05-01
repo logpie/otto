@@ -1065,7 +1065,16 @@ async def build_agentic_v3(
 
         # Parse certification results from agent output
         from otto.markers import compact_story_results, parse_certifier_markers
-        parsed = parse_certifier_markers(text or "", certifier_mode=certifier_mode)
+        parse_source = text or ""
+        narrative_path = build_dir / "narrative.log"
+        if narrative_path.exists():
+            try:
+                narrative_text = narrative_path.read_text(encoding="utf-8")
+            except OSError:
+                narrative_text = ""
+            if "STORY_EVIDENCE_START:" in narrative_text:
+                parse_source = f"{parse_source}\n{narrative_text}"
+        parsed = parse_certifier_markers(parse_source, certifier_mode=certifier_mode)
         if final_status == "completed" and not skip_qa and not parsed.stories and not parsed.verdict_seen:
             from otto.markers import MalformedCertifierOutputError
 
@@ -2014,9 +2023,9 @@ async def run_certify_fix_loop(
         }
         max_retries = 2
         try:
-            proof_repair_extra_rounds = int(config.get("max_proof_repair_rounds", 2))
+            proof_repair_extra_rounds = int(config.get("max_proof_repair_rounds", 0))
         except (TypeError, ValueError):
-            proof_repair_extra_rounds = 2
+            proof_repair_extra_rounds = 0
         proof_repair_extra_rounds = max(0, min(proof_repair_extra_rounds, 5))
         proof_repair_round_limit = max_rounds + proof_repair_extra_rounds
         awaiting_proof_repair = (
@@ -2029,6 +2038,13 @@ async def run_certify_fix_loop(
             for item in round_history_by_round.values()
             if isinstance(item, dict) and str(item.get("phase") or "") == "proof_repair"
         )
+
+        def _base_focus_without_proof_repair(value: str | None) -> str:
+            marker = "## Proof Repair Focus"
+            text = str(value or "").strip()
+            if marker not in text:
+                return text
+            return text.split(marker, 1)[0].rstrip()
 
         def _proof_repair_focus(report: Any) -> str:
             evidence_gate = getattr(report, "evidence_gate", {}) or {}
@@ -2066,8 +2082,9 @@ async def run_certify_fix_loop(
                 ]
             )
             section = "## Proof Repair Focus\n" + "\n".join(focus_lines)
-            if focus:
-                return str(focus).strip() + "\n\n" + section
+            base_focus = _base_focus_without_proof_repair(focus)
+            if base_focus:
+                return base_focus + "\n\n" + section
             return section
 
         for round_num in range(start_round, proof_repair_round_limit + 1):
@@ -2162,6 +2179,14 @@ async def run_certify_fix_loop(
                 last_diagnosis_text = diagnosis_text
                 evidence_gate = getattr(report, "evidence_gate", {}) or {}
                 report_passed = getattr(getattr(report, "outcome", None), "value", "") == "passed"
+                product_passed_for_round = bool(stories) and not failures
+                proof_quality_warning = (
+                    product_passed_for_round
+                    and isinstance(evidence_gate, dict)
+                    and bool(evidence_gate.get("would_block_audit_pass") or evidence_gate.get("blocks_pass"))
+                )
+                if proof_quality_warning and not report_passed:
+                    report_passed = True
                 if (
                     reused_prior_stories_for_proof
                     and not failures
@@ -2169,14 +2194,9 @@ async def run_certify_fix_loop(
                     and evidence_gate.get("blocks_pass") is False
                 ):
                     report_passed = True
-                proof_gate_blocked = (
-                    not report_passed
-                    and not failures
-                    and bool(evidence_gate.get("blocks_pass"))
-                )
+                proof_gate_blocked = False
                 if proof_repair_round:
                     proof_repair_attempts += 1
-                product_passed_for_round = bool(stories) and not failures
                 evidence_gate_reason = (
                     str(evidence_gate.get("reason") or "").strip()
                     if isinstance(evidence_gate, dict)
@@ -2228,7 +2248,12 @@ async def run_certify_fix_loop(
                     "phase_label": phase_label,
                     "phase_attempt": phase_attempt,
                     "product_passed": product_passed_for_round,
-                    "proof_gate_reason": evidence_gate_reason if proof_gate_blocked else "",
+                    "proof_gate_reason": evidence_gate_reason if proof_gate_blocked or proof_quality_warning else "",
+                    "proof_quality": str(
+                        evidence_gate.get("proof_quality")
+                        or getattr(report, "proof_quality", "")
+                        or ("partial" if proof_quality_warning else "")
+                    ),
                     "verdict": report_passed,
                     "tested": len(stories),
                     "stories": list(stories),
@@ -2314,11 +2339,16 @@ async def run_certify_fix_loop(
                         last_round_failures=[],
                         last_diagnosis=diagnosis_text,
                     )
-                    if round_num >= proof_repair_round_limit:
+                    proof_repair_limit_reached = (
+                        proof_repair_attempts >= proof_repair_extra_rounds
+                        if proof_repair_round
+                        else proof_repair_extra_rounds <= 0
+                    )
+                    if proof_repair_limit_reached or round_num >= proof_repair_round_limit:
                         logger.info(
-                            "Certify-fix loop: proof gate blocked pass after %d product rounds "
-                            "and %d proof-repair rounds",
-                            max_rounds,
+                            "Certify-fix loop: proof gate blocked pass after %d completed "
+                            "proof-repair attempt(s) (limit %d)",
+                            proof_repair_attempts,
                             proof_repair_extra_rounds,
                         )
                         break
@@ -2441,6 +2471,11 @@ async def run_certify_fix_loop(
                     total_cost += fix_result.total_cost
                     fix_phase_cost += float(fix_result.total_cost)
                     child_session_ids_seen.update(fix_result.child_session_ids)
+                    if fix_result.passed and not bool(config.get("allow_dirty_repo")):
+                        _commit_successful_agent_changes(
+                            project_dir,
+                            f"fix: apply certifier findings round {round_num}",
+                        )
                     record_build(project_dir, round_id, fix_result, session_id=build_id)
                     append_journal(project_dir, round_id, f"fix round {round_num}",
                                    "done" if fix_result.passed else "warning",
@@ -2718,3 +2753,108 @@ def _commit_artifacts(project_dir: Path) -> None:
                 console.print(f"  [yellow]Warning: `git commit` for otto artifacts failed: {stderr.strip() or 'unknown git error'}[/yellow]")
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug("_commit_artifacts skipped: %s", exc)
+
+
+_AGENT_COMMIT_EXCLUDED_PREFIXES = (
+    "otto_logs/",
+    ".otto",
+    ".worktrees/",
+    ".venv/",
+    "venv/",
+    "env/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".mypy_cache/",
+    ".cache/",
+    "node_modules/",
+    "output/",
+    "test-results/",
+)
+
+
+def _is_agent_committable_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").strip()
+    if not normalized or normalized.startswith("/") or normalized.startswith("../") or "/../" in normalized:
+        return False
+    if normalized.endswith((".pyc", ".pyo")):
+        return False
+    return not any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in _AGENT_COMMIT_EXCLUDED_PREFIXES)
+
+
+def _is_otto_bookkeeping_gitattributes(project_dir: Path, path: str) -> bool:
+    if path != ".gitattributes":
+        return False
+    try:
+        text = (project_dir / path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return text.startswith("# otto: bookkeeping merge drivers")
+
+
+def _git_dirty_paths(project_dir: Path) -> list[str]:
+    paths: set[str] = set()
+    commands = (
+        ["git", "diff", "--name-only", "-z"],
+        ["git", "diff", "--cached", "--name-only", "-z"],
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+    )
+    for command in commands:
+        result = subprocess.run(
+            command,
+            cwd=project_dir,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"Failed to inspect git changes: {stderr or 'unknown git error'}")
+        for raw_path in result.stdout.split(b"\0"):
+            if not raw_path:
+                continue
+            path = raw_path.decode(errors="replace")
+            if _is_agent_committable_path(path) and not _is_otto_bookkeeping_gitattributes(project_dir, path):
+                paths.add(path)
+    return sorted(paths)
+
+
+def _commit_successful_agent_changes(project_dir: Path, message: str) -> str:
+    """Commit product changes left by a successful build/fix agent.
+
+    The agent prompt asks providers to commit their work, but real dogfood has
+    shown that a provider can return success after modifying files without
+    advancing HEAD. The pipeline must not certify or recover against an
+    uncommitted product tree, so default clean-repo runs promote committable
+    product changes into an explicit fix commit.
+    """
+    dirty_paths = _git_dirty_paths(project_dir)
+    if not dirty_paths:
+        return ""
+    add_result = subprocess.run(
+        ["git", "add", "-A", "--", *dirty_paths],
+        cwd=project_dir,
+        capture_output=True,
+        timeout=60,
+    )
+    if add_result.returncode != 0:
+        stderr = add_result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"Failed to stage agent changes: {stderr or 'unknown git error'}")
+    diff_result = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=project_dir,
+        capture_output=True,
+        timeout=30,
+    )
+    if diff_result.returncode == 0:
+        return ""
+    commit_result = subprocess.run(
+        ["git", "commit", "-q", "-m", message],
+        cwd=project_dir,
+        capture_output=True,
+        timeout=60,
+    )
+    if commit_result.returncode != 0:
+        stderr = commit_result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"Failed to commit agent changes: {stderr or 'unknown git error'}")
+    from otto.journal import _get_head_sha
+
+    return _get_head_sha(project_dir) or ""

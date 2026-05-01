@@ -64,6 +64,10 @@ would make this product significantly more useful for real users.
   using the matching shell control, `KillShell`, Ctrl-C, or the specific PID you
   started; and verify the port is closed. Never kill pre-existing user
   processes or broad process names.
+- Prefer a high, free test port that you allocate yourself over the app's
+  default port. If the default port is busy, choose another port and set the
+  app's PORT/FLASK_PORT/etc. Do not run `lsof | xargs kill`, `pkill`, `killall`,
+  Safari automation, or OS-level app scripting to recover from a busy port.
 - If you find a missing feature or product gap, report it as a FAIL/WARN story.
   Do not implement it yourself; Otto's improver phase will handle code changes.
 - Save concise screenshots or clips to {evidence_dir} if applicable. These are

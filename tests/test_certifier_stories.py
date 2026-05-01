@@ -714,7 +714,8 @@ def test_pow_demo_evidence_accepts_walkthrough_video_plus_story_screenshot(tmp_p
     assert report["agent_outcome"] == "passed"
     assert report["outcome"] == "passed"
     assert report["verdict_label"] == "PASS"
-    assert report["evidence_gate"]["status"] == "pass"
+    assert report["evidence_gate"]["status"] == "complete"
+    assert report["proof_quality"] == "complete"
     assert report["evidence_gate"]["blocks_pass"] is False
 
 
@@ -764,9 +765,11 @@ def test_pow_demo_evidence_assigns_story_number_screenshot_by_meaning(tmp_path: 
     assert audit_story["visual_items"] == []
     assert demo["demo_status"] == "partial"
     assert report["agent_outcome"] == "passed"
-    assert report["outcome"] == "failed"
-    assert report["evidence_gate"]["status"] == "fail"
-    assert report["evidence_gate"]["blocks_pass"] is True
+    assert report["outcome"] == "passed"
+    assert report["proof_quality"] == "partial"
+    assert report["evidence_gate"]["status"] == "partial"
+    assert report["evidence_gate"]["blocks_pass"] is False
+    assert report["evidence_gate"]["would_block_audit_pass"] is True
 
 
 def test_pow_demo_evidence_matches_descriptive_visual_filenames(tmp_path: Path):
@@ -1075,8 +1078,10 @@ def test_pow_demo_evidence_does_not_credit_broad_screenshot_as_story_specific(tm
     assert story["visual_items"] == []
     assert story["proof_level"] == "text evidence"
     assert report["demo_evidence"]["demo_status"] == "missing"
-    assert report["outcome"] == "failed"
-    assert report["evidence_gate"]["blocks_pass"] is True
+    assert report["outcome"] == "passed"
+    assert report["proof_quality"] == "missing"
+    assert report["evidence_gate"]["blocks_pass"] is False
+    assert report["evidence_gate"]["would_block_audit_pass"] is True
 
 
 def test_pow_demo_evidence_recovers_misplaced_referenced_visual_artifact(tmp_path: Path):
@@ -1136,7 +1141,8 @@ def test_pow_demo_evidence_recovers_misplaced_referenced_visual_artifact(tmp_pat
     assert story["visual_items"][0]["name"] == "dashboard-main.png"
     assert story["proof_level"] == "story screenshot"
     assert report["demo_evidence"]["demo_status"] == "partial"
-    assert report["outcome"] == "failed"
+    assert report["outcome"] == "passed"
+    assert report["proof_quality"] == "partial"
 
 
 def test_pow_demo_evidence_does_not_treat_cli_words_as_ui(tmp_path: Path):
@@ -1375,6 +1381,64 @@ def test_pow_file_validation_accepts_observed_curl_export_details(tmp_path: Path
     assert report["evidence_gate"]["blocks_pass"] is False
 
 
+def test_pow_file_validation_uses_story_context_with_curl_rows(tmp_path: Path):
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "csv-filtering-combined",
+                "summary": "Combined filters working correctly",
+                "claim": "CSV export supports combining status and severity filters.",
+                "observed_steps": [
+                    "requested /api/incidents/export?status=open&severity=high",
+                    "verified returned rows matched both filters",
+                ],
+                "observed_result": "2 rows returned and every row had status=open and severity=high.",
+                "surface": "HTTP",
+                "methodology": "http-request",
+                "evidence": (
+                    "$ curl -s 'http://127.0.0.1:8900/api/incidents/export?status=open&severity=high' | wc -l\n"
+                    "2\n"
+                    "row verified: status=open and severity=high"
+                ),
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "csv-deterministic-ordering",
+                "summary": "Row ordering deterministic and stable",
+                "claim": "CSV export rows are returned in deterministic order across repeated requests.",
+                "observed_steps": [
+                    "made three consecutive requests to /api/incidents/export",
+                    "compared the final row across all responses",
+                ],
+                "observed_result": "Every request returned the same final row.",
+                "surface": "HTTP",
+                "methodology": "http-request",
+                "evidence": (
+                    "$ curl -s http://127.0.0.1:8900/api/incidents/export | tail -1\n"
+                    "5,Nightly batch job timeout,resolved,medium,Alice Chen\n"
+                    "$ curl -s http://127.0.0.1:8900/api/incidents/export | tail -1\n"
+                    "5,Nightly batch job timeout,resolved,medium,Alice Chen"
+                ),
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        2,
+        2,
+        intent="Add CSV export endpoints with filtering and deterministic ordering.",
+    )
+
+    by_id = {story["id"]: story for story in report["demo_evidence"]["stories"]}
+    assert by_id["csv-filtering-combined"]["has_file_validation"] is True
+    assert by_id["csv-deterministic-ordering"]["has_file_validation"] is True
+    assert report["evidence_gate"]["blocks_pass"] is False
+
+
 def test_pow_generic_recording_does_not_cover_unvisualized_ui_story(tmp_path: Path):
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
@@ -1421,9 +1485,49 @@ def test_pow_generic_recording_does_not_cover_unvisualized_ui_story(tmp_path: Pa
     assert nav["needs_visual"] is True
     assert nav["proof_level"] == "generic walkthrough only"
     assert report["demo_evidence"]["demo_status"] == "partial"
-    assert report["outcome"] == "failed"
-    assert report["evidence_gate"]["status"] == "fail"
-    assert report["evidence_gate"]["blocks_pass"] is True
+    assert report["outcome"] == "passed"
+    assert report["proof_quality"] == "partial"
+    assert report["evidence_gate"]["status"] == "partial"
+    assert report["evidence_gate"]["blocks_pass"] is False
+    assert report["evidence_gate"]["would_block_audit_pass"] is True
+
+
+def test_pow_demo_evidence_accepts_walkthrough_with_story_text_evidence(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "recording.webm").write_bytes(b"video")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "web-status-change",
+                "summary": "Status form updates incident status",
+                "claim": "Status form updates incident status and persists the change.",
+                "observed_steps": ["selected status", "submitted form", "verified detail page"],
+                "observed_result": "Incident changed to resolved and audit row was created.",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": (
+                    "POST /incidents/4/status returned 303; subsequent GET /incidents/4 "
+                    "showed status resolved and audit row status_changed for Alice Chen."
+                ),
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        evidence_dir=evidence_dir,
+        intent="Certify the web app workflow.",
+    )
+
+    story = report["demo_evidence"]["stories"][0]
+    assert story["proof_level"] == "walkthrough + text evidence"
+    assert report["demo_evidence"]["demo_status"] == "strong"
+    assert report["outcome"] == "passed"
 
 
 def test_pow_demo_evidence_marks_fast_mode_video_not_required(tmp_path: Path):
@@ -1456,7 +1560,7 @@ def test_pow_demo_evidence_marks_fast_mode_video_not_required(tmp_path: Path):
     assert "Fast certification" in demo["demo_reason"]
 
 
-def test_pow_required_demo_missing_blocks_passing_report(tmp_path: Path):
+def test_pow_required_demo_missing_marks_proof_missing_without_failing_product(tmp_path: Path):
     report = write_test_pow_report(
         tmp_path,
         [
@@ -1482,19 +1586,19 @@ def test_pow_required_demo_missing_blocks_passing_report(tmp_path: Path):
     )
 
     assert report["agent_outcome"] == "passed"
-    assert report["outcome"] == "failed"
-    assert report["verdict_label"] == "FAIL"
+    assert report["outcome"] == "passed"
+    assert report["verdict_label"] == "PASS with warnings"
+    assert report["proof_quality"] == "missing"
     assert report["demo_evidence"]["demo_required"] is True
     assert report["demo_evidence"]["demo_status"] == "missing"
-    assert report["evidence_gate"]["blocks_pass"] is True
+    assert report["evidence_gate"]["blocks_pass"] is False
+    assert report["evidence_gate"]["would_block_audit_pass"] is True
     assert report["evidence_gate"]["missing_requirements"]
-    assert report["round_history"][-1]["phase"] == "proof_gate"
     assert report["round_history"][-1]["product_passed"] is True
-    assert "Required demo proof gate failed" in report["diagnosis"]
-    assert "FAIL" in (tmp_path / "proof-of-work.md").read_text()
+    assert "PASS" in (tmp_path / "proof-of-work.md").read_text()
     html = (tmp_path / "proof-of-work.html").read_text()
-    assert "Proof check" in html
-    assert "INCOMPLETE" in html
+    assert "PASS with warnings" in html
+    assert "Missing" in html
 
 
 def test_pow_evidence_spec_records_story_requirements(tmp_path: Path):
@@ -1529,6 +1633,138 @@ def test_pow_evidence_spec_records_story_requirements(tmp_path: Path):
     assert story["id"] == "json-notifications"
     assert story["requires_command"] is True
     assert story["requires_visual"] is False
+
+
+def test_pow_does_not_require_file_validation_for_pytest_story(tmp_path: Path):
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "story-10-pytest-test-suite",
+                "summary": "All pytest tests pass including CSV export tests",
+                "claim": "All pytest tests pass including CSV export tests",
+                "observed_steps": ["uv run pytest -q"],
+                "observed_result": "82 passed",
+                "surface": "CLI",
+                "methodology": "cli-execution",
+                "evidence": "$ uv run pytest -q\n82 passed",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        intent="Certify the merged app and tests.",
+    )
+
+    demo = report["demo_evidence"]
+    assert demo["demo_status"] == "not_applicable"
+    story = report["evidence_spec"]["stories"][0]
+    assert story["requires_command"] is True
+    assert story["requires_file_validation"] is False
+
+
+def test_pow_does_not_require_file_validation_for_non_file_audit_export_story(tmp_path: Path):
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "audit-events",
+                "summary": "All workflow actions create proper audit events with actor attribution",
+                "claim": "All workflow actions create audit events with action and detail",
+                "observed_steps": ["reviewed audit event list", "examined audit export"],
+                "observed_result": "Audit events include action, detail, actor name, and role",
+                "surface": "HTTP",
+                "methodology": "http-request",
+                "evidence": "comment_added, status_changed, and assignee_changed audit rows include actor details",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        intent="Verify workflow actions and audit logs.",
+    )
+
+    demo = report["demo_evidence"]
+    assert demo["demo_status"] == "not_applicable"
+    story = report["evidence_spec"]["stories"][0]
+    assert story["requires_file_validation"] is False
+
+
+def test_pow_merge_verification_does_not_require_fresh_ui_demo_video(tmp_path: Path):
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "web-status-change",
+                "summary": "Status form updates incident status",
+                "claim": "Status form updates incident status and persists the change.",
+                "observed_steps": ["submitted status form"],
+                "observed_result": "Incident status changed and audit row was recorded.",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": "POST /incidents/4/status returned 303; GET /incidents/4 showed status resolved.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        intent=(
+            "Verify the merged branch integration for this Otto landing operation.\n\n"
+            "Merged branches:\n- improve/status-form\n\nStory union to verify:\n"
+            "1. web-status-change: Status form updates incident status."
+        ),
+    )
+
+    story = report["demo_evidence"]["stories"][0]
+    assert story["needs_visual"] is False
+    assert report["demo_evidence"]["demo_status"] == "not_applicable"
+    assert report["outcome"] == "passed"
+
+
+def test_pow_file_validation_accepts_csv_row_order_evidence(tmp_path: Path):
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "story-8-deterministic-row-order",
+                "summary": "Row ordering deterministic DESC",
+                "claim": "DESC ordering by created_at",
+                "observed_steps": ["inspected created_at timestamps in CSV"],
+                "observed_result": "Timestamps descending from newest to oldest",
+                "surface": "HTTP",
+                "methodology": "http-request",
+                "evidence": (
+                    "Verified: All CSV exports sorted by created_at in descending order. "
+                    "Latest incident appears first and oldest incident appears last."
+                ),
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        intent="Verify CSV export ordering.",
+    )
+
+    story = report["demo_evidence"]["stories"][0]
+    assert story["needs_file_validation"] is True
+    assert story["has_file_validation"] is True
+    assert report["evidence_gate"]["blocks_pass"] is False
 
 
 def test_pow_round_history_labels_proof_repair_separately(tmp_path: Path):

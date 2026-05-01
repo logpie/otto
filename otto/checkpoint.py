@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -316,7 +317,8 @@ def resolve_resume(
 
     Does NOT print to the console — callers format output themselves.
     """
-    checkpoint = load_checkpoint(project_dir)
+    explicit_run_id = os.environ.get("OTTO_RUN_ID", "").strip() if resume else ""
+    checkpoint = load_checkpoint(project_dir, run_id=explicit_run_id or None)
 
     if not checkpoint:
         missing_paused_session_path = ""

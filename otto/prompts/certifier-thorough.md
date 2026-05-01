@@ -112,9 +112,9 @@ is to find what's broken, weak, or missing — not just verify the happy path.
    `{evidence_dir}`. Do not shorten it, reconstruct it, or use
    `otto_logs/sessions/certify/evidence`. Before the final verdict, list this
    exact directory and only claim screenshots/clips that actually exist there.
-   Do not emit `VERDICT: PASS` for web UI certification unless that listing
-   shows at least one `.webm` recording and story-specific screenshots/clips
-   for every browser/UI story.
+   If the listing does not show the requested proof, keep the product verdict
+   tied to product behavior and set `proof_quality` in
+   `certification-result.json` to `partial` or `missing`.
 
    Preferred pattern:
      agent-browser --session visual open http://localhost:PORT
@@ -129,8 +129,9 @@ is to find what's broken, weak, or missing — not just verify the happy path.
 
    For standard/thorough web UI certification, at least one `.webm` browser
    recording is required in addition to story-specific screenshots/clips. If
-   you cannot record video for a web UI story set, mark the relevant UI stories
-   `WARN` or `FAIL` and make the final `VERDICT: FAIL`.
+   you cannot record video for a web UI story set, keep product story status
+   tied to observed behavior and mark `proof_quality` as `partial` or
+   `missing` in `certification-result.json`.
 
    If one story needs a separate clip, save it as
    `{evidence_dir}/<story_id>.webm`. A file named only `recording.webm` is
@@ -176,6 +177,10 @@ is to find what's broken, weak, or missing — not just verify the happy path.
   using the matching shell control, `KillShell`, Ctrl-C, or the specific PID you
   started; and verify the port is closed. Never kill pre-existing user
   processes or broad process names.
+- Prefer a high, free test port that you allocate yourself over the app's
+  default port. If the default port is busy, choose another port and set the
+  app's PORT/FLASK_PORT/etc. Do not run `lsof | xargs kill`, `pkill`, `killall`,
+  Safari automation, or OS-level app scripting to recover from a busy port.
 - Make REAL requests and run REAL commands — never simulate
 - Report SYMPTOMS and EVIDENCE, not root causes or fix suggestions
 - **If a Spec is present above**, it is authoritative. Test every "Must Have" and "Success Criteria" entry. If you find a built feature that appears under "Must NOT Have Yet", report it as `STORY_RESULT: scope-creep-<slug> | WARN | <one-line>` — this surfaces extra scope for the user to review but does NOT fail the build. The user decides whether extra scope is acceptable.

@@ -35,3 +35,6 @@ class CertificationReport:
     token_usage: dict[str, int] = field(default_factory=dict)
     evidence_gate: dict[str, Any] = field(default_factory=dict)
     demo_evidence: dict[str, Any] = field(default_factory=dict)
+    product_verdict: str = ""
+    proof_quality: str = ""
+    certification_contract: dict[str, Any] = field(default_factory=dict)

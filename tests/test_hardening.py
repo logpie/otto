@@ -484,6 +484,113 @@ class TestHistoryWrites:
         assert entry["certifier_cost_usd"] == pytest.approx(0.42)
 
     @pytest.mark.asyncio
+    async def test_certifier_accepts_schema_result_without_legacy_story_markers(self, tmp_git_repo):
+        from otto import paths
+        from otto.certifier import run_agentic_certifier
+        from otto.certifier.contracts import REQUIREMENTS_FILENAME, RESULT_FILENAME
+        from otto.certifier.report import CertificationOutcome
+
+        async def mock_run(*args, **kwargs):
+            report_dir = kwargs["log_dir"]
+            (report_dir / RESULT_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product_verdict": "pass",
+                        "proof_quality": "complete",
+                        "stories": [
+                            {
+                                "story_id": "smoke",
+                                "status": "pass",
+                                "claim": "Smoke endpoint responds",
+                                "observed_steps": ["GET /health"],
+                                "observed_result": "HTTP 200 OK",
+                                "surface": "HTTP",
+                                "methodology": "http-request",
+                                "summary": "Smoke endpoint passed",
+                                "evidence": [
+                                    {
+                                        "type": "http",
+                                        "command": "curl -sSf http://localhost:5000/health",
+                                        "output": "OK",
+                                        "assertions": ["HTTP 200"],
+                                    }
+                                ],
+                            }
+                        ],
+                        "coverage_observed": ["health endpoint checked"],
+                        "coverage_gaps": [],
+                        "diagnosis": "structured result accepted",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return ("VERDICT: PASS\nDIAGNOSIS: this text has no story markers\n", 0.12, "agent-session-1", {})
+
+        with patch("otto.agent.run_agent_with_timeout", side_effect=mock_run):
+            report = await run_agentic_certifier(
+                "test structured certification",
+                tmp_git_repo,
+                {},
+                session_id="run-schema-certify",
+            )
+
+        report_dir = paths.certify_dir(tmp_git_repo, "run-schema-certify")
+        assert (report_dir / REQUIREMENTS_FILENAME).exists()
+        requirements = json.loads((report_dir / REQUIREMENTS_FILENAME).read_text(encoding="utf-8"))
+        assert requirements["stories"][0]["id"] == "smoke"
+        assert requirements["stories"][0]["requires_command"] is True
+        assert requirements["stories"][0]["requires_visual"] is False
+        assert report.outcome == CertificationOutcome.PASSED
+        assert report.story_results == [
+            {
+                "story_id": "smoke",
+                "verdict": "PASS",
+                "passed": True,
+                "summary": "Smoke endpoint passed",
+                "claim": "Smoke endpoint responds",
+                "observed_result": "HTTP 200 OK",
+                "observed_steps": ["GET /health"],
+                "surface": "HTTP",
+                "methodology": "http-request",
+                "interaction_method": "http-request",
+                "evidence": "$ curl -sSf http://localhost:5000/health\nOK\n- HTTP 200",
+            }
+        ]
+        assert report.certification_contract["product_verdict"] == "pass"
+        assert report.certification_contract["stories"][0]["evidence"][0]["command"].startswith("curl")
+
+    @pytest.mark.asyncio
+    async def test_certifier_rejects_invalid_schema_result(self, tmp_git_repo):
+        from otto.certifier import run_agentic_certifier
+        from otto.certifier.contracts import RESULT_FILENAME
+        from otto.markers import MalformedCertifierOutputError
+
+        async def mock_run(*args, **kwargs):
+            report_dir = kwargs["log_dir"]
+            (report_dir / RESULT_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product_verdict": "pass",
+                        "proof_quality": "complete",
+                        "stories": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return ("VERDICT: PASS\n", 0.12, "agent-session-1", {})
+
+        with patch("otto.agent.run_agent_with_timeout", side_effect=mock_run):
+            with pytest.raises(MalformedCertifierOutputError, match="certification-result.json is invalid"):
+                await run_agentic_certifier(
+                    "test invalid structured certification",
+                    tmp_git_repo,
+                    {},
+                    session_id="run-schema-invalid",
+                )
+
+    @pytest.mark.asyncio
     async def test_split_improve_appends_history_entry(self, tmp_git_repo):
         from otto import paths
         from otto.certifier.report import CertificationOutcome, CertificationReport
@@ -521,12 +628,12 @@ class TestHistoryWrites:
         assert checkpoint["prompt_mode"] == "improve"
 
     @pytest.mark.asyncio
-    async def test_certify_fix_loop_repairs_proof_gate_without_code_fix(self, tmp_git_repo):
+    async def test_certify_fix_loop_accepts_product_pass_with_incomplete_proof_without_code_fix(self, tmp_git_repo):
         from otto.certifier.report import CertificationOutcome, CertificationReport
         from otto.pipeline import run_certify_fix_loop
 
         proof_gate_report = CertificationReport(
-            outcome=CertificationOutcome.FAILED,
+            outcome=CertificationOutcome.PASSED,
             cost_usd=0.1,
             duration_s=1.0,
             story_results=[
@@ -537,11 +644,13 @@ class TestHistoryWrites:
                     "verdict": "PASS",
                 }
             ],
-            diagnosis="Required demo proof gate failed: some visual stories lack story-specific media; no browser video walkthrough was recorded",
+            diagnosis="Product behavior passed. Proof packet is missing story-specific media.",
             evidence_gate={
-                "blocks_pass": True,
+                "blocks_pass": False,
+                "would_block_audit_pass": True,
                 "reason": "some visual stories lack story-specific media; no browser video walkthrough was recorded",
-                "status": "fail",
+                "status": "partial",
+                "proof_quality": "partial",
             },
             demo_evidence={
                 "stories": [
@@ -552,28 +661,17 @@ class TestHistoryWrites:
                     }
                 ]
             },
-        )
-        repaired_report = CertificationReport(
-            outcome=CertificationOutcome.PASSED,
-            cost_usd=0.1,
-            duration_s=1.0,
-            story_results=[
-                {
-                    "story_id": "navigation-responsive",
-                    "passed": True,
-                    "summary": "Navigation works with proof",
-                    "verdict": "PASS",
-                }
-            ],
+            product_verdict="pass",
+            proof_quality="partial",
         )
         calls: list[dict[str, object]] = []
 
         async def fake_certifier(*args, **kwargs):
             calls.append(dict(kwargs))
-            return proof_gate_report if len(calls) == 1 else repaired_report
+            return proof_gate_report
 
         async def unexpected_code_fix(*_args, **_kwargs):
-            raise AssertionError("proof-gate repair must re-certify, not run the code-fix agent")
+            raise AssertionError("proof-quality gaps must not run the code-fix agent")
 
         with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier), \
              patch("otto.pipeline.build_agentic_v3", side_effect=unexpected_code_fix):
@@ -588,17 +686,11 @@ class TestHistoryWrites:
             )
 
         assert result.passed is True
-        assert len(calls) == 2
+        assert len(calls) == 1
         assert calls[0].get("focus") in (None, "")
-        assert "Proof Repair Focus" in str(calls[1].get("focus"))
-        assert "Do not create helper scripts or reports in the product repository" in str(calls[1].get("focus"))
-        assert "navigation-responsive" in str(calls[1].get("focus"))
-        assert "Record one concise browser walkthrough" in str(calls[1].get("focus"))
-        assert calls[1].get("stories")
 
     @pytest.mark.asyncio
-    async def test_certify_fix_loop_preserves_stories_when_proof_repair_is_evidence_only(self, tmp_git_repo):
-        from otto import paths
+    async def test_certify_fix_loop_preserves_stories_when_proof_is_incomplete(self, tmp_git_repo):
         from otto.certifier.report import CertificationOutcome, CertificationReport
         from otto.pipeline import run_certify_fix_loop
 
@@ -611,15 +703,17 @@ class TestHistoryWrites:
             "methodology": "live-ui-events",
         }
         proof_gate_report = CertificationReport(
-            outcome=CertificationOutcome.FAILED,
+            outcome=CertificationOutcome.PASSED,
             cost_usd=0.1,
             duration_s=1.0,
             story_results=[first_story],
-            diagnosis="Required demo proof gate failed: no browser video walkthrough was recorded",
+            diagnosis="Product behavior passed. Proof packet is missing a browser walkthrough.",
             evidence_gate={
-                "blocks_pass": True,
+                "blocks_pass": False,
+                "would_block_audit_pass": True,
                 "reason": "no browser video walkthrough was recorded",
-                "status": "fail",
+                "status": "missing",
+                "proof_quality": "missing",
             },
             demo_evidence={
                 "stories": [
@@ -630,28 +724,17 @@ class TestHistoryWrites:
                     }
                 ]
             },
-        )
-        repaired_report = CertificationReport(
-            outcome=CertificationOutcome.FAILED,
-            cost_usd=0.1,
-            duration_s=1.0,
-            story_results=[],
-            diagnosis="Proof media collected",
-            evidence_gate={"blocks_pass": False, "status": "pass", "reason": ""},
+            product_verdict="pass",
+            proof_quality="missing",
         )
         calls: list[dict[str, object]] = []
 
         async def fake_certifier(*args, **kwargs):
             calls.append(dict(kwargs))
-            if len(calls) == 2:
-                evidence_dir = paths.certify_dir(tmp_git_repo, str(kwargs["session_id"])) / "evidence"
-                evidence_dir.mkdir(parents=True, exist_ok=True)
-                (evidence_dir / "recording.webm").write_bytes(b"video")
-                (evidence_dir / "navigation-responsive.png").write_bytes(b"image")
-            return proof_gate_report if len(calls) == 1 else repaired_report
+            return proof_gate_report
 
         async def unexpected_code_fix(*_args, **_kwargs):
-            raise AssertionError("proof-only repair must not run the code-fix agent")
+            raise AssertionError("proof-quality gaps must not run the code-fix agent")
 
         with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier), \
              patch("otto.pipeline.build_agentic_v3", side_effect=unexpected_code_fix):
@@ -665,9 +748,6 @@ class TestHistoryWrites:
                 session_id="run-proof-gate-evidence-only",
             )
 
-        pow_data = json.loads(
-            (paths.certify_dir(tmp_git_repo, "run-proof-gate-evidence-only") / "proof-of-work.json").read_text()
-        )
         assert result.passed is True
         assert result.journeys == [
             {
@@ -677,13 +757,10 @@ class TestHistoryWrites:
                 "story_id": "navigation-responsive",
             }
         ]
-        assert calls[1].get("stories") == [first_story]
-        assert pow_data["outcome"] == "passed"
-        assert [story["story_id"] for story in pow_data["stories"]] == ["navigation-responsive"]
+        assert len(calls) == 1
 
     @pytest.mark.asyncio
-    async def test_certify_fix_loop_allows_extra_proof_repair_after_product_round_cap(self, tmp_git_repo):
-        from otto import paths
+    async def test_certify_fix_loop_does_not_run_proof_repair_even_when_configured(self, tmp_git_repo):
         from otto.certifier.report import CertificationOutcome, CertificationReport
         from otto.pipeline import run_certify_fix_loop
 
@@ -700,11 +777,13 @@ class TestHistoryWrites:
             cost_usd=0.1,
             duration_s=1.0,
             story_results=[story],
-            diagnosis="Required demo proof gate failed: no browser video walkthrough was recorded",
+            diagnosis="Product behavior passed. Proof packet is missing a browser walkthrough.",
             evidence_gate={
                 "blocks_pass": True,
+                "would_block_audit_pass": True,
                 "reason": "no browser video walkthrough was recorded",
-                "status": "fail",
+                "status": "missing",
+                "proof_quality": "missing",
             },
             demo_evidence={
                 "stories": [
@@ -715,27 +794,17 @@ class TestHistoryWrites:
                     }
                 ]
             },
-        )
-        repaired_report = CertificationReport(
-            outcome=CertificationOutcome.PASSED,
-            cost_usd=0.1,
-            duration_s=1.0,
-            story_results=[{**story, "summary": "Navigation works with video proof"}],
-            evidence_gate={"blocks_pass": False, "status": "pass", "reason": ""},
+            product_verdict="pass",
+            proof_quality="missing",
         )
         calls: list[dict[str, object]] = []
 
         async def fake_certifier(*args, **kwargs):
             calls.append(dict(kwargs))
-            if len(calls) == 3:
-                evidence_dir = paths.certify_dir(tmp_git_repo, str(kwargs["session_id"])) / "evidence"
-                evidence_dir.mkdir(parents=True, exist_ok=True)
-                (evidence_dir / "recording.webm").write_bytes(b"video")
-                (evidence_dir / "navigation-responsive.png").write_bytes(b"image")
-            return proof_gate_report if len(calls) < 3 else repaired_report
+            return proof_gate_report
 
         async def unexpected_code_fix(*_args, **_kwargs):
-            raise AssertionError("extra proof-repair rounds must not run the code-fix agent")
+            raise AssertionError("proof-quality gaps must not run the code-fix agent")
 
         with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier), \
              patch("otto.pipeline.build_agentic_v3", side_effect=unexpected_code_fix):
@@ -750,12 +819,8 @@ class TestHistoryWrites:
             )
 
         assert result.passed is True
-        assert len(calls) == 3
+        assert len(calls) == 1
         assert calls[0].get("focus") in (None, "")
-        assert "Proof Repair Focus" in str(calls[1].get("focus"))
-        assert "Proof Repair Focus" in str(calls[2].get("focus"))
-        assert calls[1].get("stories") == [story]
-        assert calls[2].get("stories") == [story]
 
     @pytest.mark.asyncio
     async def test_certify_fix_loop_seeds_proof_repair_stories_from_resume_rounds(self, tmp_git_repo):
@@ -814,9 +879,214 @@ class TestHistoryWrites:
         assert result.passed is True
         assert calls[0].get("stories") == [first_story]
 
+    @pytest.mark.asyncio
+    async def test_certify_fix_loop_defaults_to_no_proof_repair_round(self, tmp_git_repo):
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        story = {
+            "story_id": "navigation-responsive",
+            "passed": True,
+            "summary": "Navigation works",
+            "verdict": "PASS",
+            "surface": "DOM",
+            "methodology": "live-ui-events",
+        }
+        proof_gate_report = CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[story],
+            diagnosis="Product behavior passed. Proof packet is missing a browser walkthrough.",
+            evidence_gate={
+                "blocks_pass": False,
+                "would_block_audit_pass": True,
+                "reason": "no browser video walkthrough was recorded",
+                "status": "missing",
+                "proof_quality": "missing",
+            },
+            demo_evidence={
+                "stories": [
+                    {
+                        "id": "navigation-responsive",
+                        "needs_visual": True,
+                        "visual_items": [],
+                    }
+                ]
+            },
+            product_verdict="pass",
+            proof_quality="missing",
+        )
+        calls: list[dict[str, object]] = []
+
+        async def fake_certifier(*args, **kwargs):
+            calls.append(dict(kwargs))
+            return proof_gate_report
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier):
+            result = await run_certify_fix_loop(
+                "certify nav proof",
+                tmp_git_repo,
+                {"max_certify_rounds": 1},
+                certifier_mode="standard",
+                skip_initial_build=True,
+                command="improve.feature",
+                session_id="run-proof-gate-default-limit",
+            )
+
+        assert result.passed is True
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_certify_fix_loop_ignores_product_round_budget_for_proof_quality_gaps(self, tmp_git_repo):
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        story = {
+            "story_id": "navigation-responsive",
+            "passed": True,
+            "summary": "Navigation works",
+            "verdict": "PASS",
+            "surface": "DOM",
+            "methodology": "live-ui-events",
+        }
+        proof_gate_report = CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[story],
+            diagnosis="Product behavior passed. Proof packet is missing a browser walkthrough.",
+            evidence_gate={
+                "blocks_pass": False,
+                "would_block_audit_pass": True,
+                "reason": "no browser video walkthrough was recorded",
+                "status": "missing",
+                "proof_quality": "missing",
+            },
+            demo_evidence={
+                "stories": [
+                    {
+                        "id": "navigation-responsive",
+                        "needs_visual": True,
+                        "visual_items": [],
+                    }
+                ]
+            },
+            product_verdict="pass",
+            proof_quality="missing",
+        )
+        calls: list[dict[str, object]] = []
+
+        async def fake_certifier(*args, **kwargs):
+            calls.append(dict(kwargs))
+            return proof_gate_report
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier):
+            result = await run_certify_fix_loop(
+                "certify nav proof",
+                tmp_git_repo,
+                {"max_certify_rounds": 4},
+                certifier_mode="standard",
+                skip_initial_build=True,
+                command="improve.feature",
+                session_id="run-proof-gate-default-four-product-rounds",
+            )
+
+        assert result.passed is True
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_certify_fix_loop_commits_successful_dirty_fix_before_recertifying(self, tmp_git_repo):
+        from otto import paths
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        failed_report = CertificationReport(
+            outcome=CertificationOutcome.FAILED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[
+                {
+                    "story_id": "dashboard-filter",
+                    "passed": False,
+                    "summary": "Dashboard filter missing",
+                    "verdict": "FAIL",
+                    "evidence": "The filter input is absent.",
+                }
+            ],
+            diagnosis="Dashboard filter is missing",
+        )
+        passed_report = CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[
+                {
+                    "story_id": "dashboard-filter",
+                    "passed": True,
+                    "summary": "Dashboard filter works",
+                    "verdict": "PASS",
+                    "surface": "Web UI",
+                    "methodology": "live-ui-events",
+                }
+            ],
+            evidence_gate={"blocks_pass": False, "status": "pass", "reason": ""},
+        )
+        certifier_calls = 0
+
+        async def fake_certifier(*args, **kwargs):
+            nonlocal certifier_calls
+            certifier_calls += 1
+            if certifier_calls == 2:
+                evidence_dir = paths.certify_dir(tmp_git_repo, str(kwargs["session_id"])) / "evidence"
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                (evidence_dir / "recording.webm").write_bytes(b"video")
+                (evidence_dir / "dashboard-filter.png").write_bytes(b"image")
+            return failed_report if certifier_calls == 1 else passed_report
+
+        async def fake_dirty_fix(*_args, **_kwargs):
+            (tmp_git_repo / "app.py").write_text("fixed dashboard filter\n")
+            return BuildResult(passed=True, build_id="fix-agent", rounds=1, total_cost=0.05)
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=fake_dirty_fix):
+            result = await run_certify_fix_loop(
+                "add dashboard filters",
+                tmp_git_repo,
+                {"max_certify_rounds": 2},
+                certifier_mode="standard",
+                skip_initial_build=True,
+                command="improve.feature",
+                session_id="run-dirty-fix-autocommit",
+            )
+
+        assert result.passed is True
+        assert certifier_calls == 2
+        assert subprocess.run(
+            ["git", "status", "--short", "--", "app.py"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout == ""
+        assert subprocess.run(
+            ["git", "log", "-1", "--pretty=%s"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip() == "fix: apply certifier findings round 1"
+
 
 class TestImproveCLIHardening:
     """The improve CLI should treat infra and build failures as failures."""
+
+    def test_focused_feature_improve_uses_standard_certifier(self):
+        from otto.cli_improve import _resolve_feature_certifier_mode
+
+        assert _resolve_feature_certifier_mode("add search filters") == "standard"
+        assert _resolve_feature_certifier_mode("  ") == "hillclimb"
+        assert _resolve_feature_certifier_mode(None) == "hillclimb"
 
     def test_signal_interrupt_guard_maps_sigterm_to_keyboard_interrupt(self):
         import signal
@@ -1401,6 +1671,49 @@ def test_parser_accepts_structured_story_result_fields():
     assert "200 OK" in story["evidence"]
 
 
+def test_parser_extracts_prefixed_story_evidence_blocks():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "▸ STORY_EVIDENCE_START: smoke\n"
+        "▸ $ curl -i http://localhost:8000/health\n"
+        "▸ HTTP/1.1 200 OK\n"
+        "▸ STORY_EVIDENCE_END: smoke\n"
+        "✦ STORIES_TESTED: 1\n"
+        "✦ STORIES_PASSED: 1\n"
+        "✦ STORY_RESULT: smoke | PASS | claim=Health endpoint responds | observed_steps=GET /health | observed_result=Returned 200 OK | surface=HTTP | methodology=http-request | summary=Health check passed\n"
+        "✦ VERDICT: PASS\n"
+        "✦ DIAGNOSIS: null\n"
+    )
+
+    assert len(parsed.stories) == 1
+    assert parsed.stories[0]["evidence"] == (
+        "$ curl -i http://localhost:8000/health\nHTTP/1.1 200 OK"
+    )
+
+
+def test_parser_extracts_timestamped_narrative_story_evidence_blocks():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "[+5:39] ▸ STORY_EVIDENCE_START: csv-export\n"
+        "[+5:39] ▸ $ curl -s http://localhost:8000/export.csv -o /tmp/export.csv\n"
+        "[+5:39] ▸ text/csv; 5 data rows\n"
+        "[+5:39] ▸ STORY_EVIDENCE_END: csv-export\n"
+        "[+5:39] ✦ STORIES_TESTED: 1\n"
+        "[+5:39] ✦ STORIES_PASSED: 1\n"
+        "[+5:39] ✦ STORY_RESULT: csv-export | PASS | claim=CSV export works | observed_steps=GET /export.csv | observed_result=Returned text/csv | surface=HTTP | methodology=http-request | summary=CSV export passed\n"
+        "[+5:39] ✦ VERDICT: PASS\n"
+        "[+5:39] ✦ DIAGNOSIS: null\n"
+    )
+
+    assert len(parsed.stories) == 1
+    assert parsed.stories[0]["evidence"] == (
+        "$ curl -s http://localhost:8000/export.csv -o /tmp/export.csv\n"
+        "text/csv; 5 data rows"
+    )
+
+
 def test_parser_preserves_fenced_code_inside_story_evidence():
     from otto.markers import parse_certifier_markers
 
@@ -1952,6 +2265,29 @@ class TestSpecTimeoutTolerance:
 
         with patch("otto.agent.run_agent_query", side_effect=mock_query):
             with pytest.raises(MalformedCertifierOutputError, match="no structured output"):
+                await run_agentic_certifier("test", tmp_git_repo, config={})
+
+    @pytest.mark.asyncio
+    async def test_certifier_raises_on_verdict_without_story_results(self, tmp_git_repo):
+        from otto.certifier import run_agentic_certifier
+        from otto.markers import MalformedCertifierOutputError
+
+        async def mock_query(prompt, options, **kwargs):
+            return (
+                "STORIES_TESTED: 0\n"
+                "STORIES_PASSED: 0\n"
+                "COVERAGE_OBSERVED:\n"
+                "- Exercised commands but forgot structured story results\n"
+                "COVERAGE_GAPS:\n"
+                "- None reported\n"
+                "VERDICT: PASS\n"
+                "DIAGNOSIS: null\n",
+                0.1,
+                MagicMock(),
+            )
+
+        with patch("otto.agent.run_agent_query", side_effect=mock_query):
+            with pytest.raises(MalformedCertifierOutputError, match="no STORY_RESULT markers"):
                 await run_agentic_certifier("test", tmp_git_repo, config={})
 
 
@@ -3029,6 +3365,27 @@ class TestResolveResume:
         assert state.prior_command == "build"
         assert not state.command_mismatch
         assert len(state.rounds) == 2
+
+    def test_resume_uses_queue_attempt_run_id_for_completed_failed_checkpoint(self, tmp_path, monkeypatch):
+        """Queue resume can continue a failed task whose checkpoint was marked completed."""
+        from otto.checkpoint import resolve_resume, write_checkpoint
+        write_checkpoint(
+            tmp_path,
+            run_id="r1",
+            command="improve.feature",
+            current_round=3,
+            total_cost=1.23,
+            rounds=[{"round": 1}, {"round": 2}, {"round": 3}],
+            status="completed",
+        )
+        monkeypatch.setenv("OTTO_RUN_ID", "r1")
+
+        state = resolve_resume(tmp_path, resume=True, expected_command="improve.feature")
+
+        assert state.resumed
+        assert state.run_id == "r1"
+        assert state.start_round == 4
+        assert state.total_cost == 1.23
 
     def test_resume_command_mismatch(self, tmp_path):
         """Checkpoint is from `improve`, user runs `build --resume` → mismatch flag set."""

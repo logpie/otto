@@ -605,8 +605,10 @@ export interface DemoEvidence {
 
 export interface EvidenceGate {
   schema_version: number;
-  status: "pass" | "warn" | "fail" | "not_applicable" | "unknown" | string;
+  status: "complete" | "partial" | "missing" | "not_applicable" | "unknown" | string;
+  proof_quality?: "complete" | "partial" | "missing" | "invalid" | "not_required" | string;
   blocks_pass: boolean;
+  would_block_audit_pass?: boolean;
   reason: string;
   missing_requirements: string[];
 }
@@ -660,6 +662,8 @@ export interface ReviewPacket {
     stories_passed: number | null;
     stories_tested: number | null;
     passed: boolean;
+    product_outcome?: string;
+    proof_quality?: "complete" | "partial" | "missing" | "invalid" | "not_required" | string;
     summary_path: string | null;
     stories: Array<{
       id: string;

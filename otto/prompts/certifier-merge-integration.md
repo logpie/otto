@@ -59,7 +59,8 @@ product still works where integration risk exists.
   `PASS` story whose surface is page, DOM, dashboard, form, button, modal,
   browser navigation, or web download must have story-specific visual proof
   named after that story. If a core web UI story lacks story-specific visual
-  proof, mark it `FAIL` or `WARN` and make the final verdict `FAIL`. This
+  proof, keep product status tied to observed behavior and mark
+  `proof_quality` as `partial` or `missing` in `certification-result.json`. This
   includes navigation and responsive-design stories; save at least one
   `navigation...png` or `<story_id>.png` screenshot showing the checked state.
   HTTP/CLI/file evidence is still sufficient for API, CLI, library, worker,
@@ -73,10 +74,9 @@ product still works where integration risk exists.
   the walkthrough recording. If you cannot produce browser proof for a web UI
   story in standard/thorough mode, report it as `WARN` or `FAIL` and explain
   the blocker instead of emitting a green `PASS`.
-- Before the final `VERDICT`, list the files in the exact `{evidence_dir}` and confirm
-  that at least one `.webm` recording and story-named screenshots/clips exist
-  for every browser/UI story. Do not emit `VERDICT: PASS` for web UI
-  certification unless that listing proves the visual evidence exists.
+- Before the final `VERDICT`, list the files in the exact `{evidence_dir}` and
+  confirm what proof exists. Missing visual proof is a proof-quality issue, not
+  a product failure, unless the product behavior itself could not be exercised.
 - If you start a dev server, app server, queue worker, or any command that
   keeps a port open, record the command, port, and PID/shell id; redirect noisy
   access logs to a temp file outside the repo when practical; stop the process

@@ -142,7 +142,34 @@ def worktree_path_for_task(project_dir: Path, task: QueueTask) -> Path | None:
     return project_dir / task.worktree
 
 
-def checkpoint_path_for_task(project_dir: Path, task: QueueTask) -> Path | None:
+def _queue_manifest_checkpoint_path(project_dir: Path, task: QueueTask) -> Path | None:
+    try:
+        manifest_path = paths.queue_manifest_path(project_dir, task.id)
+    except ValueError:
+        return None
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    raw_checkpoint = str(manifest.get("checkpoint_path") or "").strip()
+    if not raw_checkpoint:
+        return None
+    checkpoint_path = Path(raw_checkpoint).expanduser()
+    if checkpoint_path.exists():
+        return checkpoint_path
+    return None
+
+
+def checkpoint_path_for_task(
+    project_dir: Path,
+    task: QueueTask,
+    *,
+    include_completed: bool = False,
+) -> Path | None:
     """Return the best active checkpoint path for a queued task, if any."""
     worktree_dir = worktree_path_for_task(project_dir, task)
     if worktree_dir is None:
@@ -164,7 +191,11 @@ def checkpoint_path_for_task(project_dir: Path, task: QueueTask) -> Path | None:
                 data = json.loads(checkpoint_path.read_text())
             except (OSError, json.JSONDecodeError, TypeError, ValueError):
                 data = {}
-            if data.get("status") not in {"in_progress", "paused"}:
+            if data.get("status") not in (
+                {"in_progress", "paused", "completed"}
+                if include_completed
+                else {"in_progress", "paused"}
+            ):
                 continue
             updated_at = data.get("updated_at")
             timestamp = 0.0
@@ -184,6 +215,11 @@ def checkpoint_path_for_task(project_dir: Path, task: QueueTask) -> Path | None:
         if best is not None:
             return best[1]
 
+    if include_completed:
+        checkpoint_path = _queue_manifest_checkpoint_path(project_dir, task)
+        if checkpoint_path is not None:
+            return checkpoint_path
+
     legacy_checkpoint = paths.legacy_checkpoint(worktree_dir)
     if legacy_checkpoint.exists():
         return legacy_checkpoint
@@ -193,7 +229,7 @@ def checkpoint_path_for_task(project_dir: Path, task: QueueTask) -> Path | None:
 def task_resume_available(project_dir: Path, task: QueueTask) -> bool:
     if not task.resumable:
         return False
-    return checkpoint_path_for_task(project_dir, task) is not None
+    return checkpoint_path_for_task(project_dir, task, include_completed=True) is not None
 
 
 def task_resume_block_reason(project_dir: Path, task: QueueTask, task_state: dict | None) -> str | None:
@@ -203,7 +239,7 @@ def task_resume_block_reason(project_dir: Path, task: QueueTask, task_state: dic
     status = task_display_status(task_state)
     if status not in RESUMABLE_QUEUE_STATUSES:
         return f"task status is {status}"
-    checkpoint_path = checkpoint_path_for_task(project_dir, task)
+    checkpoint_path = checkpoint_path_for_task(project_dir, task, include_completed=True)
     if checkpoint_path is None:
         return "checkpoint missing"
     worktree_dir = worktree_path_for_task(project_dir, task)

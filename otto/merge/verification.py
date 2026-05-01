@@ -303,7 +303,7 @@ def _story_plans(
 ) -> list[MergeStoryPlan]:
     if not stories:
         return []
-    if verification_level in {"full", "targeted"}:
+    if verification_level == "full":
         return [
             MergeStoryPlan(
                 story_id=_story_id(story, index),
@@ -327,7 +327,21 @@ def _story_plans(
         if source not in known_branches:
             plans.append(MergeStoryPlan(story_id, source, "CHECK", "source branch could not be mapped"))
         elif first_story_by_branch.get(source) == story_id:
-            plans.append(MergeStoryPlan(story_id, source, "CHECK", "representative story for this branch"))
+            reason = (
+                "representative story for this branch"
+                if verification_level == "selective"
+                else "targeted merge verification representative for this branch"
+            )
+            plans.append(MergeStoryPlan(story_id, source, "CHECK", reason))
+        elif verification_level == "targeted":
+            plans.append(
+                MergeStoryPlan(
+                    story_id,
+                    source,
+                    "SKIP_ALLOWED",
+                    "targeted merge verification reuses source proof for non-representative story",
+                )
+            )
         elif allow_skip:
             plans.append(MergeStoryPlan(story_id, source, "SKIP_ALLOWED", "clean disjoint merge; prior branch cert remains background evidence"))
         else:

@@ -1500,6 +1500,26 @@ def _merge_proof_repair_focus(report: Any, *, existing_focus: str | None = None)
     return section
 
 
+def _merge_output_contract_focus(error: Exception, *, existing_focus: str | None = None) -> str:
+    marker = "## Output Contract Repair"
+    base_focus = str(existing_focus or "").strip()
+    if marker in base_focus:
+        base_focus = base_focus.split(marker, 1)[0].rstrip()
+    section = "\n".join(
+        [
+            marker,
+            "The previous post-merge certifier response was unusable for Mission Control because it omitted structured story results.",
+            f"Parser error: {error}",
+            "Re-run the same verification. For every story in the required story list, emit exactly one line:",
+            "`STORY_RESULT: <story_id> | <PASS or FAIL or WARN or SKIPPED or FLAG_FOR_HUMAN> | claim=<...> | observed_steps=<...> | observed_result=<...> | surface=<...> | methodology=<...> | summary=<...>`",
+            "Then emit `VERDICT: PASS` only if every required story has a structured PASS/WARN/SKIPPED result and no human flag.",
+        ]
+    )
+    if base_focus:
+        return f"{base_focus}\n\n{section}"
+    return section
+
+
 def _merge_certifier_intent(*, branches: list[str], stories: list[dict[str, Any]]) -> str:
     """Build a bounded intent for post-merge certification.
 
@@ -1708,6 +1728,7 @@ async def _run_post_merge_verification(
     }
 
     from otto.certifier import run_agentic_certifier
+    from otto.markers import MalformedCertifierOutputError
     intent = _merge_certifier_intent(branches=branches, stories=deduped)
     cert_task: asyncio.Task[Any] | None = None
     state.note = (
@@ -1718,7 +1739,7 @@ async def _run_post_merge_verification(
     proof_repair_rounds = int(
         ((config.get("queue") if isinstance(config.get("queue"), dict) else {}) or {}).get(
             "merge_proof_repair_rounds",
-            1,
+            0,
         )
         or 0
     )
@@ -1727,34 +1748,48 @@ async def _run_post_merge_verification(
     focus: str | None = None
     try:
         for attempt in range(max(0, proof_repair_rounds) + 1):
-            cert_task = asyncio.create_task(run_agentic_certifier(
-                intent=intent,
-                project_dir=project_dir,
-                config=config,
-                mode=str((config.get("queue") or {}).get("merge_certifier_mode", "standard")),
-                budget=budget,
-                stories=deduped,
-                merge_context=merge_context,
-                focus=focus,
-                round_num=attempt + 1,
-            ))
-            while True:
-                done, _ = await asyncio.wait({cert_task}, timeout=0.2)
-                if cert_task in done:
-                    cert_report = await cert_task
+            malformed_retries = 1
+            for malformed_attempt in range(malformed_retries + 1):
+                cert_task = asyncio.create_task(run_agentic_certifier(
+                    intent=intent,
+                    project_dir=project_dir,
+                    config=config,
+                    mode=str((config.get("queue") or {}).get("merge_certifier_mode", "standard")),
+                    budget=budget,
+                    stories=deduped,
+                    merge_context=merge_context,
+                    focus=focus,
+                    round_num=attempt + 1,
+                ))
+                try:
+                    while True:
+                        done, _ = await asyncio.wait({cert_task}, timeout=0.2)
+                        if cert_task in done:
+                            cert_report = await cert_task
+                            break
+                        if _drain_merge_cancel_commands(project_dir, merge_id, state):
+                            cert_task.cancel()
+                            try:
+                                await cert_task
+                            except asyncio.CancelledError:
+                                pass
+                            return _cancelled_merge_result(
+                                project_dir,
+                                state=state,
+                                merge_id=merge_id,
+                                note="merge cancelled during post-merge verification",
+                            )
                     break
-                if _drain_merge_cancel_commands(project_dir, merge_id, state):
-                    cert_task.cancel()
-                    try:
-                        await cert_task
-                    except asyncio.CancelledError:
-                        pass
-                    return _cancelled_merge_result(
-                        project_dir,
-                        state=state,
-                        merge_id=merge_id,
-                        note="merge cancelled during post-merge verification",
+                except MalformedCertifierOutputError as exc:
+                    if malformed_attempt >= malformed_retries:
+                        raise
+                    focus = _merge_output_contract_focus(exc, existing_focus=focus)
+                    state.note = (
+                        "Post-merge certification omitted structured story results. "
+                        "Retrying once with a stricter output contract."
                     )
+                    write_state(project_dir, state)
+                    continue
             if cert_report.story_results:
                 last_story_results = list(cert_report.story_results)
             elif last_story_results and not bool(getattr(cert_report, "evidence_gate", {}).get("blocks_pass")):
@@ -1810,14 +1845,26 @@ async def _run_post_merge_verification(
         str(story.get("verdict") or "").strip().upper() == "FLAG_FOR_HUMAN"
         for story in cert_report.story_results
     )
-    cert_passed = cert_report.outcome == CertificationOutcome.PASSED and not flagged_for_human
     evidence_gate = getattr(cert_report, "evidence_gate", {}) or {}
+    proof_quality_warning = (
+        isinstance(evidence_gate, dict)
+        and bool(evidence_gate.get("would_block_audit_pass") or evidence_gate.get("blocks_pass"))
+        and bool(cert_report.story_results)
+        and not any(
+            str(story.get("verdict") or "").strip().upper() == "FAIL"
+            for story in cert_report.story_results
+        )
+    )
+    cert_passed = (
+        cert_report.outcome == CertificationOutcome.PASSED
+        or proof_quality_warning
+    ) and not flagged_for_human
     evidence_gate_reason = (
         str(evidence_gate.get("reason") or "").strip()
-        if isinstance(evidence_gate, dict) and evidence_gate.get("blocks_pass")
+        if isinstance(evidence_gate, dict) and proof_quality_warning
         else ""
     )
-    proof_gate_note = f"; proof gate: {evidence_gate_reason}" if evidence_gate_reason else ""
+    proof_gate_note = f"; proof warning: {evidence_gate_reason}" if evidence_gate_reason else ""
     state.cert_passed = cert_passed
     state.cert_run_id = cert_report.run_id
     write_state(project_dir, state)

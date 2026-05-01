@@ -516,7 +516,7 @@ function proofTrailItem(detail: RunDetail, onShowProof: () => void): AutonomyTra
       mediaCount ? `${mediaCount} media item${mediaCount === 1 ? "" : "s"}` : "No media recorded",
       gateReason && gateReason !== "not applicable" ? gateReason : "",
     ].filter(Boolean).join(" · "),
-    tone: status === "pass" || status === "strong" || status === "not_applicable"
+    tone: status === "pass" || status === "complete" || status === "strong" || status === "not_applicable"
       ? "done"
       : status === "warn" || status === "partial"
         ? "attention"
@@ -1881,7 +1881,7 @@ export function ProofPane({detail, onShowDiff, onShowArtifacts}: {
         </div>
       )}
       <DemoEvidenceSection detail={detail} demo={demoEvidence} />
-      {evidenceGate?.blocks_pass && evidenceGate.missing_requirements?.length ? (
+      {evidenceGate?.would_block_audit_pass && evidenceGate.missing_requirements?.length ? (
         <div className="proof-section proof-evidence-contract" aria-labelledby="proofEvidenceContractHeading">
           <h3 id="proofEvidenceContractHeading">Missing proof items</h3>
           <ul>

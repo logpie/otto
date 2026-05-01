@@ -3183,6 +3183,8 @@ def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
     if stories and stories_passed is None:
         stories_passed = sum(1 for story in stories if story.get("status") in {"pass", "warn"})
     proof_outcome = _optional_str(proof_json.get("outcome")) if isinstance(proof_json, dict) else None
+    product_outcome = _optional_str(proof_json.get("product_outcome")) if isinstance(proof_json, dict) else None
+    proof_quality = _optional_str(proof_json.get("proof_quality")) if isinstance(proof_json, dict) else None
     evidence_gate = _certification_evidence_gate(proof_json)
     story_counts_pass = (
         stories_passed is not None
@@ -3190,7 +3192,8 @@ def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
         and stories_tested > 0
         and stories_passed >= stories_tested
     )
-    proof_packet_pass = proof_outcome != "failed" and not bool(evidence_gate.get("blocks_pass"))
+    product_packet_pass = (product_outcome or proof_outcome) != "failed"
+    proof_packet_pass = product_packet_pass and not bool(evidence_gate.get("blocks_pass"))
     # Cluster-evidence-trustworthiness #4: Mission Control had been
     # flattening the certification down to final stories + counts, hiding
     # earlier rounds and their per-round evidence. The proof-of-work JSON
@@ -3204,6 +3207,8 @@ def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
         "stories_passed": stories_passed,
         "stories_tested": stories_tested,
         "passed": story_counts_pass and proof_packet_pass,
+        "product_outcome": product_outcome or proof_outcome or "",
+        "proof_quality": proof_quality or _optional_str(evidence_gate.get("proof_quality")) or "",
         "summary_path": _optional_str(getattr(record, "artifacts", {}).get("summary_path")),
         "stories": stories,
         "demo_evidence": _certification_demo_evidence(proof_json),
@@ -3222,7 +3227,9 @@ def _certification_evidence_gate(proof_json: dict[str, Any] | None) -> dict[str,
     return {
         "schema_version": _int_or_none(raw.get("schema_version")) or 1,
         "status": _optional_str(raw.get("status")) or "unknown",
+        "proof_quality": _optional_str(raw.get("proof_quality")) or "",
         "blocks_pass": bool(raw.get("blocks_pass")),
+        "would_block_audit_pass": bool(raw.get("would_block_audit_pass")),
         "reason": _optional_str(raw.get("reason")) or "",
         "missing_requirements": [
             str(item) for item in (raw.get("missing_requirements") or []) if str(item)

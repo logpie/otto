@@ -1026,7 +1026,7 @@ def test_rerun_post_merge_verification_marks_failed_on_base_exception(
     assert "merge verification rerun aborted" in (updated.note or "")
 
 
-def test_post_merge_verification_repairs_proof_gate_without_remerge(
+def test_post_merge_verification_accepts_product_pass_with_proof_warning_without_remerge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1052,34 +1052,6 @@ def test_post_merge_verification_repairs_proof_gate_without_remerge(
 
     async def fake_run_agentic_certifier(**kwargs):
         calls.append(dict(kwargs))
-        if len(calls) == 1:
-            return CertificationReport(
-                outcome=CertificationOutcome.FAILED,
-                story_results=[
-                    {
-                        "story_id": "story-a",
-                        "verdict": "PASS",
-                        "passed": True,
-                        "summary": "story passed",
-                    }
-                ],
-                diagnosis="Required demo proof gate failed: no browser video walkthrough was recorded",
-                evidence_gate={
-                    "blocks_pass": True,
-                    "reason": "no browser video walkthrough was recorded",
-                    "status": "fail",
-                },
-                demo_evidence={
-                    "stories": [
-                        {
-                            "id": "story-a",
-                            "needs_visual": True,
-                            "visual_items": [],
-                        }
-                    ]
-                },
-                run_id="cert-proof-gap",
-            )
         return CertificationReport(
             outcome=CertificationOutcome.PASSED,
             story_results=[
@@ -1087,11 +1059,29 @@ def test_post_merge_verification_repairs_proof_gate_without_remerge(
                     "story_id": "story-a",
                     "verdict": "PASS",
                     "passed": True,
-                    "summary": "story passed with proof",
+                    "summary": "story passed",
                 }
             ],
-            evidence_gate={"blocks_pass": False, "status": "pass", "reason": ""},
-            run_id="cert-repaired",
+            diagnosis="Product behavior passed. Proof packet is missing a browser walkthrough.",
+            evidence_gate={
+                "blocks_pass": False,
+                "would_block_audit_pass": True,
+                "reason": "no browser video walkthrough was recorded",
+                "status": "missing",
+                "proof_quality": "missing",
+            },
+            demo_evidence={
+                "stories": [
+                    {
+                        "id": "story-a",
+                        "needs_visual": True,
+                        "visual_items": [],
+                    }
+                ]
+            },
+            product_verdict="pass",
+            proof_quality="missing",
+            run_id="cert-proof-gap",
         )
 
     monkeypatch.setattr("otto.certifier.run_agentic_certifier", fake_run_agentic_certifier)
@@ -1117,16 +1107,85 @@ def test_post_merge_verification_repairs_proof_gate_without_remerge(
 
     assert result.success is True
     assert result.cert_passed is True
-    assert result.state.cert_run_id == "cert-repaired"
-    assert len(calls) == 2
+    assert result.state.cert_run_id == "cert-proof-gap"
+    assert len(calls) == 1
     assert "Verify the merged branch integration" in str(calls[0].get("intent"))
     assert "story-a" in str(calls[0].get("intent"))
     assert len(str(calls[0].get("intent"))) < 8192
     assert calls[0].get("focus") in (None, "")
-    assert "Proof Repair Focus" in str(calls[1].get("focus"))
-    assert "Do not create helper scripts or reports in the product repository" in str(calls[1].get("focus"))
-    assert "story-a" in str(calls[1].get("focus"))
-    assert calls[1].get("round_num") == 2
+    assert calls[0].get("round_num") == 1
+
+
+def test_post_merge_verification_retries_storyless_verdict_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from otto.markers import MalformedCertifierOutputError
+
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.collect_stories_from_branches",
+        lambda **kwargs: [{"story_id": "story-a", "summary": "summary"}],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.dedupe_stories",
+        lambda stories: (stories, []),
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.changed_files_between",
+        lambda *args, **kwargs: ["app/ui.py"],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.head_sha",
+        lambda *args, **kwargs: "new-head",
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_run_agentic_certifier(**kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            raise MalformedCertifierOutputError(
+                "Certifier emitted a VERDICT but no STORY_RESULT markers — see narrative.log"
+            )
+        return CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            story_results=[
+                {
+                    "story_id": "story-a",
+                    "verdict": "PASS",
+                    "passed": True,
+                    "summary": "story passed",
+                }
+            ],
+            run_id="cert-structured",
+        )
+
+    monkeypatch.setattr("otto.certifier.run_agentic_certifier", fake_run_agentic_certifier)
+
+    state = MergeState(
+        merge_id="merge-test",
+        started_at="2026-04-20T00:00:00Z",
+        target="main",
+        target_head_before="old-head",
+    )
+    result = asyncio.run(
+        _run_post_merge_verification(
+            project_dir=tmp_path,
+            config=_config_no_bookkeeping(),
+            options=MergeOptions(target="main"),
+            state=state,
+            merge_id="merge-test",
+            branches=["feature/random"],
+            queue_lookup={},
+            target_head_before="old-head",
+        )
+    )
+
+    assert result.success is True
+    assert len(calls) == 2
+    assert calls[0].get("focus") in (None, "")
+    assert "Output Contract Repair" in str(calls[1].get("focus"))
+    assert "STORY_RESULT" in str(calls[1].get("focus"))
 
 
 def test_post_merge_verification_blocks_human_flag_even_if_certifier_verdict_passes(

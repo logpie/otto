@@ -1172,6 +1172,48 @@ def test_queue_resume_explicit_failed_task_with_checkpoint(tmp_path: Path):
     assert cmds[0]["id"] == "labels"
 
 
+def test_queue_resume_failed_task_uses_completed_manifest_checkpoint(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "labels"], cwd=repo)
+    session_id = "2026-04-22-010203-abc123"
+    worktree = repo / ".worktrees" / "labels"
+    paths.ensure_session_scaffold(worktree, session_id)
+    checkpoint_path = paths.session_checkpoint(worktree, session_id)
+    checkpoint_path.write_text(
+        json.dumps({"status": "completed", "updated_at": "2026-04-22T01:02:03Z"}),
+        encoding="utf-8",
+    )
+    queue_manifest = paths.queue_manifest_path(repo, "labels")
+    queue_manifest.parent.mkdir(parents=True, exist_ok=True)
+    queue_manifest.write_text(
+        json.dumps({
+            "queue_task_id": "labels",
+            "run_id": session_id,
+            "checkpoint_path": str(checkpoint_path),
+            "exit_status": "failure",
+        }),
+        encoding="utf-8",
+    )
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={
+            "labels": {
+                "status": "failed",
+                "failure_reason": "proof gate blocked after completed checkpoint",
+            }
+        },
+    )
+
+    code, out, _ = _run(["queue", "resume", "labels"], cwd=repo)
+
+    assert code == 0
+    assert "Marked labels to resume" in out
+    cmds = _read_queue_commands(repo)
+    assert cmds[-1]["cmd"] == "resume"
+    assert cmds[-1]["id"] == "labels"
+
+
 def test_queue_resume_explicit_failed_task_rejects_stale_checkpoint(tmp_path: Path):
     repo = init_repo(tmp_path)
     _run(["queue", "build", "labels"], cwd=repo)

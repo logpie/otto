@@ -30,17 +30,24 @@ def _normalize_marker_line(line: str) -> str:
     stripped = line.strip()
     if not stripped:
         return stripped
+    stripped = re.sub(r"^\[\+\d+(?::\d{2})?(?::\d{2})?\]\s*", "", stripped)
     emphasized_name = re.match(r"^\*\*([A-Z][A-Z0-9_ ]*)\*\*:\s*(.*)$", stripped)
     if emphasized_name:
         return f"{emphasized_name.group(1)}: {emphasized_name.group(2).strip()}"
     if stripped.startswith("**") and stripped.endswith("**"):
         stripped = stripped[2:-2].strip()
     stripped = re.sub(
-        r"^[\s>•✦✓✔✅❌⚠\-\u2013\u2014]+(?=[A-Z][A-Z0-9_ ]*(?:\*\*)?:)",
+        r"^[\s>•✦▸▹▶✓✔✅❌⚠\-\u2013\u2014]+(?=[A-Z][A-Z0-9_ ]*(?:\*\*)?:)",
         "",
         stripped,
     )
     return stripped.strip("*_` ")
+
+
+def _normalize_evidence_line(line: str) -> str:
+    """Strip transcript-only glyph prefixes from evidence block payloads."""
+    stripped = re.sub(r"^\s*\[\+\d+(?::\d{2})?(?::\d{2})?\]\s*", "", line.rstrip())
+    return re.sub(r"^\s*[>•✦▸▹▶]\s?", "", stripped)
 
 
 @dataclass
@@ -262,13 +269,15 @@ def _extract_evidence(text: str) -> dict[str, str]:
     for line in text.splitlines():
         stripped = line.strip()
 
+        normalized = _normalize_marker_line(stripped)
+
         if current_id is not None:
-            if stripped.startswith("STORY_EVIDENCE_END:"):
+            if normalized.startswith("STORY_EVIDENCE_END:"):
                 evidence[current_id] = "\n".join(lines)
                 current_id = None
                 lines = []
             else:
-                lines.append(line)
+                lines.append(_normalize_evidence_line(line))
             continue
 
         if line.startswith("    ") or line.startswith("\t"):
@@ -302,8 +311,8 @@ def _extract_evidence(text: str) -> dict[str, str]:
         if fence_char:
             continue
 
-        if stripped.startswith("STORY_EVIDENCE_START:"):
-            current_id = stripped.split(":", 1)[1].strip()
+        if normalized.startswith("STORY_EVIDENCE_START:"):
+            current_id = normalized.split(":", 1)[1].strip()
             lines = []
     return evidence
 

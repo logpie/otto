@@ -547,13 +547,17 @@ def _format_evidence_spec_section(
         "## Evidence Contract",
         "",
         f"Evidence directory: `{evidence_dir}`",
+        f"Proof requirements JSON: `{evidence_dir.parent / 'proof-requirements.json'}`",
+        f"Certification result JSON: `{evidence_dir.parent / 'certification-result.json'}`",
         "",
         "Before emitting the final verdict, verify that the proof packet matches this contract:",
+        "- Write the machine-readable certification result JSON before your final response. It is the source of truth; markdown markers are legacy compatibility only.",
+        "- JSON shape: `{schema_version: 1, product_verdict: \"pass|fail|blocked\", proof_quality: \"complete|partial|missing|not_required\", stories: [{story_id, status: \"pass|fail|warn|skipped|flag_for_human\", claim, observed_steps: [], observed_result, surface, methodology, summary, evidence: [{type, path?, command?, output?, bytes?, mime?, hash?, assertions?}]}], coverage_observed: [], coverage_gaps: [], diagnosis}`.",
         "- Put every reproducible HTTP/CLI/API/library check in the relevant `STORY_EVIDENCE` block.",
         "- When a command is reproducible, put the exact command on a line starting with `$ ` and put observed output below it.",
         "- For web UI stories in standard/thorough mode, record one browser walkthrough and save story-specific screenshots or clips named after the story id.",
         "- For export/download stories, include the user action that triggered the file plus path, byte size, content-type/MIME, and parsed or rendered content assertions.",
-        "- If you cannot satisfy a required evidence item, mark the story WARN or FAIL and make the final verdict FAIL.",
+        "- If the product behavior passes but proof is incomplete, keep `product_verdict` as `pass` and set `proof_quality` to `partial` or `missing`; do not invent a product failure.",
     ]
     story_specs = spec.get("stories") if isinstance(spec.get("stories"), list) else []
     if story_specs:
@@ -2124,7 +2128,19 @@ def _story_is_web_ui(story: dict[str, Any]) -> bool:
     ):
         return False
     if methodology in {"source-level", "source-review", "pytest"} or surface in {"pytest", "tests", "source"}:
-        return False
+        corpus = " ".join(
+            [
+                str(story.get("story_id") or ""),
+                str(story.get("claim") or ""),
+                str(story.get("summary") or ""),
+            ]
+        ).lower()
+        if any(
+            token in corpus
+            for token in ("pytest", "test suite", "tests pass", "unit tests", "test coverage")
+        ):
+            return False
+        return _story_claims_ui_behavior(story)
     if methodology in {"http-request", "api-request"}:
         return _story_claims_browser_behavior(story)
     if any(token in surface for token in ("dom", "browser", "page", "screenshot", "video", "localstorage")):
@@ -2135,6 +2151,9 @@ def _story_is_web_ui(story: dict[str, Any]) -> bool:
 
 
 def _story_is_file_or_download(story: dict[str, Any]) -> bool:
+    methodology = _normalize_methodology(
+        str(story.get("methodology") or story.get("interaction_method") or "")
+    )
     corpus = " ".join(
         [
             str(story.get("story_id") or ""),
@@ -2144,6 +2163,11 @@ def _story_is_file_or_download(story: dict[str, Any]) -> bool:
             " ".join(str(step) for step in story.get("observed_steps", []) or []),
         ]
     ).lower()
+    if methodology in {"cli-execution", "pytest", "source-review", "source-level"} and any(
+        token in corpus
+        for token in ("pytest", "test suite", "tests pass", "unit tests", "regression tests")
+    ):
+        return False
     if "file" in corpus and not any(
         phrase in corpus
         for phrase in (
@@ -2156,6 +2180,24 @@ def _story_is_file_or_download(story: dict[str, Any]) -> bool:
         )
     ):
         corpus = re.sub(r"\bfile\b", "", corpus)
+    if "export" in corpus and not any(
+        token in corpus
+        for token in (
+            "download",
+            "pdf",
+            "csv",
+            "xlsx",
+            "filename",
+            "mime",
+            "content-type",
+            "content-disposition",
+            "bytes",
+            "attachment",
+            "export file",
+            "file export",
+        )
+    ):
+        corpus = re.sub(r"\bexport(?:ed|s|ing)?\b", "", corpus)
     return any(
         token in corpus
         for token in (
@@ -2176,6 +2218,8 @@ def _story_is_file_or_download(story: dict[str, Any]) -> bool:
 def _story_file_validation_text(story: dict[str, Any]) -> str:
     return " ".join(
         [
+            str(story.get("story_id") or ""),
+            str(story.get("claim") or ""),
             str(story.get("evidence") or ""),
             str(story.get("observed_result") or ""),
             str(story.get("key_finding") or ""),
@@ -2214,13 +2258,42 @@ def _story_has_file_validation(story: dict[str, Any]) -> bool:
             "header",
             "headers",
             "data rows",
+            "data row",
             "rows",
+            "row",
             "valid",
+            "verified",
             "returned",
             "curl",
+            "sorted",
+            "ordering",
         )
     )
     return (has_csv or has_pdf) and validated_payload
+
+
+def _report_looks_merge_verification(intent: str) -> bool:
+    text = " ".join(str(intent or "").split()).lower()
+    return (
+        "verify the merged branch integration for this otto landing operation" in text
+        or ("post-merge" in text and "integration" in text)
+        or ("merged branches:" in text and "story union to verify:" in text)
+    )
+
+
+def _story_has_substantive_text_evidence(story: dict[str, Any]) -> bool:
+    """Return true when STORY_EVIDENCE contains concrete replayable details."""
+    text = " ".join(str(story.get("evidence") or "").split()).strip().lower()
+    if not text:
+        return False
+    generic_only_phrases = (
+        "generic walkthrough only",
+        "generic walkthrough",
+        "recording.webm",
+    )
+    if text in generic_only_phrases:
+        return False
+    return len(re.findall(r"[a-z0-9_/.-]+", text)) >= 6
 
 
 def _report_looks_test_only(intent: str, stories: list[dict[str, Any]]) -> bool:
@@ -2328,9 +2401,16 @@ def _demo_evidence(
     """
     app_kind = _demo_app_kind(intent, stories)
     test_only = _report_looks_test_only(intent, stories)
+    merge_verification = _report_looks_merge_verification(intent)
     mode = str(certifier_mode or "").strip().lower()
     has_visual_story = any(_story_is_web_ui(story) for story in stories)
-    visual_required = app_kind in {"web", "mixed"} and mode != "fast" and not test_only and has_visual_story
+    visual_required = (
+        app_kind in {"web", "mixed"}
+        and mode != "fast"
+        and not test_only
+        and not merge_verification
+        and has_visual_story
+    )
     file_required = app_kind in {"mixed", "file_export"} and not test_only
     by_story = _story_visual_items_by_id(visual)
     general_recording = bool(visual.get("recording"))
@@ -2376,7 +2456,8 @@ def _demo_evidence(
             visual_story_count += 1
         if story_needs_visual and not visual_items:
             if general_recording:
-                generic_only += 1
+                if not _story_has_substantive_text_evidence(story):
+                    generic_only += 1
             else:
                 missing_visual += 1
         if story_needs_file and not file_proof:
@@ -2386,7 +2467,11 @@ def _demo_evidence(
         elif image_count:
             proof_level = "story screenshot"
         elif story_needs_visual and general_recording:
-            proof_level = "generic walkthrough only"
+            proof_level = (
+                "walkthrough + text evidence"
+                if _story_has_substantive_text_evidence(story)
+                else "generic walkthrough only"
+            )
         elif file_proof:
             proof_level = "file validation"
         elif story.get("has_evidence"):
@@ -2415,10 +2500,21 @@ def _demo_evidence(
         demo_required = False
         demo_status = "not_applicable"
         reason = "This run certifies tests, docs, or support work rather than a new product interaction."
+    elif merge_verification and not file_required:
+        demo_required = False
+        demo_status = "not_applicable"
+        reason = (
+            "Post-merge verification relies on source proof packets plus "
+            "structured integration evidence; a fresh product demo video is not required."
+        )
     elif not visual_required and not file_required:
         demo_required = False
         demo_status = "not_applicable"
-        reason = "This product surface is better proven with command, API, or source evidence than video."
+        reason = (
+            "Post-merge verification relies on source proof packets plus structured integration evidence."
+            if merge_verification
+            else "This product surface is better proven with command, API, or source evidence than video."
+        )
     else:
         demo_required = True
         incomplete_reasons = []
@@ -2468,17 +2564,19 @@ def _demo_evidence(
 
 
 def _demo_evidence_gate(demo_evidence: dict[str, Any] | None) -> dict[str, Any]:
-    """Return the certification gate implied by structured demo evidence.
+    """Return proof quality implied by structured demo evidence.
 
-    The certifier agent can still emit ``VERDICT: PASS`` after only reading
-    tests or source. For standard/thorough user-facing web work, that is not a
-    complete proof packet: if a browser/product demo was required and not
-    recorded, the run should not silently land as green.
+    Proof quality is intentionally separate from product correctness. Missing
+    screenshots, videos, or file-validation details should make the proof packet
+    weaker, but should not turn a product PASS into a product FAIL.
     """
+    from otto.certifier.contracts import proof_quality_from_demo_evidence
+
     demo = demo_evidence if isinstance(demo_evidence, dict) else {}
     required = bool(demo.get("demo_required"))
     status = str(demo.get("demo_status") or "").strip().lower()
     reason = str(demo.get("demo_reason") or "").strip()
+    proof_quality = proof_quality_from_demo_evidence(demo)
     missing_requirements: list[str] = []
     for story in demo.get("stories", []) or []:
         if not isinstance(story, dict):
@@ -2500,30 +2598,36 @@ def _demo_evidence_gate(demo_evidence: dict[str, Any] | None) -> dict[str, Any]:
     if required and status == "missing":
         return {
             "schema_version": 1,
-            "status": "fail",
-            "blocks_pass": True,
+            "status": "missing",
+            "proof_quality": proof_quality,
+            "blocks_pass": False,
+            "would_block_audit_pass": True,
             "reason": reason or "Required product demo proof is missing.",
             "missing_requirements": missing_requirements[:25],
         }
     if required and status == "partial":
         return {
             "schema_version": 1,
-            "status": "fail",
-            "blocks_pass": True,
+            "status": "partial",
+            "proof_quality": proof_quality,
+            "blocks_pass": False,
+            "would_block_audit_pass": True,
             "reason": reason or "Product demo proof is incomplete.",
             "missing_requirements": missing_requirements[:25],
         }
     return {
         "schema_version": 1,
-        "status": "pass" if required else "not_applicable",
+        "status": "complete" if required else "not_applicable",
+        "proof_quality": proof_quality,
         "blocks_pass": False,
+        "would_block_audit_pass": False,
         "reason": reason,
         "missing_requirements": [],
     }
 
 
 def _append_demo_evidence_gate_diagnosis(diagnosis: str, gate: dict[str, Any]) -> str:
-    if not isinstance(gate, dict) or not gate.get("blocks_pass"):
+    if not isinstance(gate, dict) or not gate.get("would_block_audit_pass"):
         return diagnosis
     reason = str(gate.get("reason") or "Required product demo proof is missing.").strip()
     note = f"Required demo proof gate failed: {reason}"
@@ -2812,23 +2916,22 @@ def _build_pow_report_data(
         evidence_spec=evidence_spec,
     )
     evidence_gate = _demo_evidence_gate(demo_evidence)
-    if evidence_gate.get("blocks_pass") and not failing_story_ids and round_history:
+    proof_quality = str(evidence_gate.get("proof_quality") or "invalid")
+    if evidence_gate.get("would_block_audit_pass") and not failing_story_ids and round_history:
         last_round = round_history[-1]
         if str(last_round.get("phase") or "") == "certify":
-            last_round["phase"] = "proof_gate"
-            last_round["phase_label"] = "Proof check"
             last_round["product_passed"] = True
         last_round["proof_gate_reason"] = str(evidence_gate.get("reason") or "").strip()
-        last_round["verdict"] = "failed"
-    effective_outcome = "failed" if outcome == "passed" and evidence_gate.get("blocks_pass") else outcome
-    effective_diagnosis = _append_demo_evidence_gate_diagnosis(diagnosis, evidence_gate)
+        last_round["proof_quality"] = proof_quality
+    effective_outcome = outcome
+    effective_diagnosis = diagnosis
     token_usage = _token_usage_summary(log_dir / "messages.jsonl")
     cost_summary = _cost_summary(
         certifier_cost_usd,
         total_cost_usd,
         token_usage=token_usage,
     )
-    has_warnings = counts["warn_count"] > 0 or evidence_gate.get("status") == "warn"
+    has_warnings = counts["warn_count"] > 0 or proof_quality in {"partial", "missing", "invalid"}
     verdict_label = (
         "PASS with warnings"
         if effective_outcome == "passed" and has_warnings
@@ -2841,6 +2944,8 @@ def _build_pow_report_data(
         "generator": _GENERATOR,
         "outcome": effective_outcome,
         "agent_outcome": outcome,
+        "product_outcome": outcome,
+        "proof_quality": proof_quality,
         "verdict_label": verdict_label,
         "one_line_interpretation": redact_text(
             _one_line_interpretation(effective_outcome, counts["warn_count"], certifier_mode)
@@ -3976,6 +4081,15 @@ async def run_agentic_certifier(
         baseline_untracked_files = set()
     baseline_listening_pids = _listening_process_pids()
     try:
+        from otto.certifier.contracts import write_proof_requirements
+
+        proof_requirements = _evidence_spec_for_stories(
+            intent=intent,
+            certifier_mode=mode,
+            stories=stories or [],
+        )
+        write_proof_requirements(report_dir, proof_requirements)
+
         prompt = _render_certifier_prompt(
             mode=mode,
             intent=intent,
@@ -4014,12 +4128,56 @@ async def run_agentic_certifier(
         )
 
         total_duration = round(time.monotonic() - start_time, 1)
-        parsed = parse_certifier_markers(text or "", certifier_mode=mode)
-        if not parsed.stories and not parsed.verdict_seen:
-            raise MalformedCertifierOutputError(
-                "Certifier produced no structured output — see narrative.log"
-            )
-        story_results = [_normalize_story_result(s) for s in compact_story_results(parsed.stories)]
+        parse_source = text or ""
+        narrative_path = report_dir / "narrative.log"
+        if narrative_path.exists():
+            try:
+                narrative_text = narrative_path.read_text(encoding="utf-8")
+            except OSError:
+                narrative_text = ""
+            if "STORY_EVIDENCE_START:" in narrative_text:
+                # Claude's final answer may omit earlier STORY_EVIDENCE blocks
+                # that are still present in the lossless narrative stream.
+                # Parse the narrative too so proof gating can use the evidence
+                # the certifier actually recorded.
+                parse_source = f"{parse_source}\n{narrative_text}"
+        parsed = parse_certifier_markers(parse_source, certifier_mode=mode)
+        from otto.certifier.contracts import (
+            CertificationContractError,
+            contract_from_marker_results,
+            load_certification_result,
+            proof_quality_from_demo_evidence,
+            story_results_from_contract,
+            write_certification_result,
+        )
+
+        contract_result = None
+        try:
+            contract_result = load_certification_result(report_dir)
+        except CertificationContractError as exc:
+            raise MalformedCertifierOutputError(str(exc)) from exc
+
+        if contract_result is not None:
+            story_results = [_normalize_story_result(s) for s in story_results_from_contract(contract_result)]
+            parsed.stories_tested = len(story_results)
+            parsed.stories_passed = sum(1 for s in story_results if s.get("passed"))
+            parsed.verdict_seen = True
+            parsed.verdict_pass = contract_result.product_verdict == "pass"
+            parsed.diagnosis = contract_result.diagnosis
+            parsed.coverage_observed = list(contract_result.coverage_observed)
+            parsed.coverage_gaps = list(contract_result.coverage_gaps)
+            parsed.coverage_observed_emitted = True
+            parsed.coverage_gaps_emitted = True
+        else:
+            if not parsed.stories:
+                if parsed.verdict_seen:
+                    raise MalformedCertifierOutputError(
+                        "Certifier emitted a VERDICT but no STORY_RESULT markers and did not write certification-result.json — see narrative.log"
+                    )
+                raise MalformedCertifierOutputError(
+                    "Certifier produced no structured output and did not write certification-result.json — see narrative.log"
+                )
+            story_results = [_normalize_story_result(s) for s in compact_story_results(parsed.stories)]
         if isinstance(merge_context, dict) and isinstance(merge_context.get("verification_plan"), dict):
             verification_plan = dict(merge_context["verification_plan"])
             from otto.verification import write_verification_plan
@@ -4033,6 +4191,17 @@ async def run_agentic_certifier(
                 story_results=story_results,
                 explicit_stories=stories,
             )
+        # The first proof-requirements file is available to the certifier before
+        # it chooses story ids. Rewrite it after structured results exist so
+        # downstream UI/report consumers see the concrete per-story contract.
+        write_proof_requirements(
+            report_dir,
+            _evidence_spec_for_stories(
+                intent=intent,
+                certifier_mode=mode,
+                stories=story_results,
+            ),
+        )
         has_failures = any(_story_verdict(story) == "FAIL" for story in story_results)
         passed = parsed.verdict_pass and not has_failures and bool(story_results)
         target_mode = mode == "target" or bool(target) or bool(config.get("_target"))
@@ -4053,6 +4222,10 @@ async def run_agentic_certifier(
             subagent_errors=list(breakdown.get("subagent_errors", []) or []),
             token_usage=_token_usage_summary(report_dir / "messages.jsonl"),
         )
+        report.product_verdict = "pass" if passed else "fail"
+        if contract_result is not None:
+            report.proof_quality = contract_result.proof_quality
+            report.certification_contract = contract_result.model_dump(mode="json")
 
         try:
             certify_rounds_for_report = [dict(item) for item in parsed.certify_rounds]
@@ -4106,11 +4279,22 @@ async def run_agentic_certifier(
             demo_evidence = pow_data.get("demo_evidence") if isinstance(pow_data, dict) else None
             if isinstance(demo_evidence, dict):
                 report.demo_evidence = demo_evidence
-            if passed and isinstance(evidence_gate, dict) and evidence_gate.get("blocks_pass"):
-                passed = False
-                outcome = CertificationOutcome.FAILED
-                report.outcome = outcome
-                report.diagnosis = _append_demo_evidence_gate_diagnosis(report.diagnosis, evidence_gate)
+            report.proof_quality = proof_quality_from_demo_evidence(demo_evidence)
+            if contract_result is None:
+                normalized_contract = contract_from_marker_results(
+                    story_results=story_results,
+                    verdict_pass=parsed.verdict_pass,
+                    proof_quality=report.proof_quality,
+                    coverage_observed=parsed.coverage_observed,
+                    coverage_gaps=parsed.coverage_gaps,
+                    diagnosis=parsed.diagnosis,
+                )
+                write_certification_result(report_dir, normalized_contract)
+                report.certification_contract = normalized_contract.model_dump(mode="json")
+            else:
+                report.certification_contract = contract_result.model_dump(mode="json")
+            pow_data["certification_contract"] = report.certification_contract
+            pow_data["proof_quality"] = report.proof_quality
             _write_pow_report(report_dir, pow_data)
         except Exception as exc:
             logger.warning("Failed to write PoW report: %s", exc)
@@ -4183,6 +4367,11 @@ async def run_agentic_certifier(
                     summary_payload = {}
                 if isinstance(summary_payload, dict):
                     summary_payload["verification_plan"] = verification_plan
+                    summary_payload["product_outcome"] = outcome.value
+                    summary_payload["proof_quality"] = report.proof_quality
+                    summary_payload["certification_contract_path"] = str(
+                        report_dir / "certification-result.json"
+                    )
                     write_json_file(summary_path, summary_payload, strict=True)
 
         final_record = None

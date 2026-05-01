@@ -98,9 +98,9 @@ for real users by testing it thoroughly.
    `{evidence_dir}`. Do not shorten it, reconstruct it, or use
    `otto_logs/sessions/certify/evidence`. Before the final verdict, list this
    exact directory and only claim screenshots/clips that actually exist there.
-   Do not emit `VERDICT: PASS` for web UI certification unless that listing
-   shows at least one `.webm` recording and story-specific screenshots/clips
-   for every browser/UI story.
+   If the listing does not show the requested proof, keep the product verdict
+   tied to product behavior and set `proof_quality` in
+   `certification-result.json` to `partial` or `missing`.
 
    Preferred pattern:
      agent-browser --session visual open http://localhost:PORT
@@ -115,8 +115,9 @@ for real users by testing it thoroughly.
 
    For standard/thorough web UI certification, at least one `.webm` browser
    recording is required in addition to story-specific screenshots/clips. If
-   you cannot record video for a web UI story set, mark the relevant UI stories
-   `WARN` or `FAIL` and make the final `VERDICT: FAIL`.
+   you cannot record video for a web UI story set, keep product story status
+   tied to observed behavior and mark `proof_quality` as `partial` or
+   `missing` in `certification-result.json`.
 
    If one story needs a separate clip, save it as
    `{evidence_dir}/<story_id>.webm`. Name screenshots and clips after the
@@ -129,7 +130,8 @@ for real users by testing it thoroughly.
    have story-specific visual proof named after that story. A generic
    `recording.webm` can provide context, but it cannot carry a `PASS` for a
    UI story by itself. If a core web UI story lacks story-specific visual
-   proof, mark it `FAIL` or `WARN` and make the final verdict `FAIL`.
+   proof, keep its product status tied to observed behavior and record the
+   proof gap in `proof_quality` and `COVERAGE_GAPS`.
    This includes navigation and responsive-design stories; save at least one
    `navigation...png` or `<story_id>.png` screenshot showing the checked state.
 
@@ -183,6 +185,10 @@ for real users by testing it thoroughly.
   using the matching shell control, `KillShell`, Ctrl-C, or the specific PID you
   started; and verify the port is closed. Never kill pre-existing user
   processes or broad process names.
+- Prefer a high, free test port that you allocate yourself over the app's
+  default port. If the default port is busy, choose another port and set the
+  app's PORT/FLASK_PORT/etc. Do not run `lsof | xargs kill`, `pkill`, `killall`,
+  Safari automation, or OS-level app scripting to recover from a busy port.
 - When running build tools, package managers, or other long-running commands, wait for completion rather than backgrounding or killing them
 - Never use `kill`, `pkill`, `killall`, or signal commands on build processes unless the command has been unresponsive for more than 10 minutes. The app/server cleanup rule above is the narrow exception for processes you started yourself.
 - If a command appears slow, check its output or artifacts before assuming it is hung

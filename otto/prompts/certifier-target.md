@@ -48,6 +48,10 @@ it doesn't meet the target, identify what to change.
   using the matching shell control, `KillShell`, Ctrl-C, or the specific PID you
   started; and verify the port is closed. Never kill pre-existing user
   processes or broad process names.
+- Prefer a high, free test port that you allocate yourself over the app's
+  default port. If the default port is busy, choose another port and set the
+  app's PORT/FLASK_PORT/etc. Do not run `lsof | xargs kill`, `pkill`, `killall`,
+  Safari automation, or OS-level app scripting to recover from a busy port.
 - If the target is not met, report the measured gap and likely bottlenecks.
   Do not implement optimizations yourself; Otto's improver phase will handle
   code changes.

@@ -52,6 +52,10 @@ path works — nothing more. No edge cases, no error handling, no security.
   using the matching shell control, `KillShell`, Ctrl-C, or the specific PID you
   started; and verify the port is closed. Never kill pre-existing user
   processes or broad process names.
+- Prefer a high, free test port that you allocate yourself over the app's
+  default port. If the default port is busy, choose another port and set the
+  app's PORT/FLASK_PORT/etc. Do not run `lsof | xargs kill`, `pkill`, `killall`,
+  Safari automation, or OS-level app scripting to recover from a busy port.
 - Test INLINE — do NOT dispatch subagents. This must be fast.
 - No screenshots, no video recording, no visual verification.
 - The proof report will mark demo video as not required for fast mode. Do not

@@ -255,10 +255,15 @@ def _task_status(project_dir: Path, task_id: str) -> str:
 
 
 def _resume_status(project_dir: Path, task, task_state: dict | None = None) -> tuple[str, str | None]:
-    checkpoint_path = checkpoint_path_for_task(project_dir, task)
     if not task.resumable:
         return "n/a", None
-    if task_display_status(task_state or {}) not in RESUMABLE_QUEUE_STATUSES:
+    status = task_display_status(task_state or {})
+    checkpoint_path = checkpoint_path_for_task(
+        project_dir,
+        task,
+        include_completed=status in RESUMABLE_QUEUE_STATUSES,
+    )
+    if status not in RESUMABLE_QUEUE_STATUSES:
         return "n/a", str(checkpoint_path) if checkpoint_path is not None else None
     if checkpoint_path is None:
         return "no checkpoint", None
