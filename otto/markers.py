@@ -20,6 +20,29 @@ _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\s*$")
 _ALL_CAPS_MARKER_RE = re.compile(r"^[A-Z][A-Z0-9_ ]*:\s*.*$")
 
 
+def _normalize_marker_line(line: str) -> str:
+    """Normalize common Markdown decoration around structured markers.
+
+    Certifier prompts ask for plain markers, but providers sometimes wrap final
+    report markers in bullets, symbols, or bold text. Keep the accepted marker
+    vocabulary strict while tolerating presentation-only decoration.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return stripped
+    emphasized_name = re.match(r"^\*\*([A-Z][A-Z0-9_ ]*)\*\*:\s*(.*)$", stripped)
+    if emphasized_name:
+        return f"{emphasized_name.group(1)}: {emphasized_name.group(2).strip()}"
+    if stripped.startswith("**") and stripped.endswith("**"):
+        stripped = stripped[2:-2].strip()
+    stripped = re.sub(
+        r"^[\s>•✦✓✔✅❌⚠\-\u2013\u2014]+(?=[A-Z][A-Z0-9_ ]*(?:\*\*)?:)",
+        "",
+        stripped,
+    )
+    return stripped.strip("*_` ")
+
+
 @dataclass
 class ParsedMarkers:
     """Parsed results from certifier agent text output."""
@@ -302,7 +325,7 @@ def _parse_verdict_from_end(text: str) -> tuple[bool, str]:
     diagnosis = ""
     found_verdict = False
     for line in reversed(list(_iter_marker_lines(text))):
-        stripped = line.strip()
+        stripped = _normalize_marker_line(line)
         verdict_match = _VERDICT_RE.match(stripped)
         if verdict_match and not found_verdict:
             verdict_pass = verdict_match.group(1) == "PASS"
@@ -395,21 +418,23 @@ def parse_certifier_markers(text: str, *, certifier_mode: str | None = None) -> 
     active_coverage_block: str | None = None
 
     for line in _iter_marker_lines(text):
-        stripped = line.strip()
+        raw_stripped = line.strip()
 
         if active_coverage_block is not None:
-            if not stripped:
+            if not raw_stripped:
                 active_coverage_block = None
                 continue
-            if _ALL_CAPS_MARKER_RE.match(stripped):
+            if _ALL_CAPS_MARKER_RE.match(_normalize_marker_line(raw_stripped)):
                 active_coverage_block = None
-            elif stripped.startswith("- "):
+            elif raw_stripped.startswith("- "):
                 current_round.setdefault(active_coverage_block, []).append(
-                    stripped[2:].strip()
+                    raw_stripped[2:].strip()
                 )
                 continue
             else:
                 continue
+
+        stripped = _normalize_marker_line(raw_stripped)
 
         if stripped.startswith("CERTIFY_ROUND:"):
             should_append_current = (
@@ -554,27 +579,28 @@ def parse_certifier_markers(text: str, *, certifier_mode: str | None = None) -> 
     elif len(certify_rounds) == 0:
         # Fallback: no CERTIFY_ROUND markers — scan flat output
         result.verdict_pass, result.diagnosis = _parse_verdict_from_end(text)
-        result.verdict_seen = any(_VERDICT_RE.match(line.strip()) for line in _iter_marker_lines(text))
+        result.verdict_seen = any(_VERDICT_RE.match(_normalize_marker_line(line)) for line in _iter_marker_lines(text))
 
         # Extract stories from flat output (dedup by story_id)
         flat_stories: list[dict[str, Any]] = []
         active_coverage_block = None
         for line in _iter_marker_lines(text):
-            stripped = line.strip()
+            raw_stripped = line.strip()
             if active_coverage_block is not None:
-                if not stripped:
+                if not raw_stripped:
                     active_coverage_block = None
                     continue
-                if _ALL_CAPS_MARKER_RE.match(stripped):
+                if _ALL_CAPS_MARKER_RE.match(_normalize_marker_line(raw_stripped)):
                     active_coverage_block = None
-                elif stripped.startswith("- "):
+                elif raw_stripped.startswith("- "):
                     if active_coverage_block == "coverage_observed":
-                        result.coverage_observed.append(stripped[2:].strip())
+                        result.coverage_observed.append(raw_stripped[2:].strip())
                     else:
-                        result.coverage_gaps.append(stripped[2:].strip())
+                        result.coverage_gaps.append(raw_stripped[2:].strip())
                     continue
                 else:
                     continue
+            stripped = _normalize_marker_line(raw_stripped)
             if stripped.startswith("STORIES_TESTED:"):
                 try:
                     result.stories_tested = int(stripped.split(":", 1)[1].strip())

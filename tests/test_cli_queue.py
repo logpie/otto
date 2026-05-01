@@ -184,6 +184,18 @@ def test_queue_improve_bugs(tmp_path: Path):
     assert tasks[0].resolved_intent == "error handling"
 
 
+def test_queue_improve_explicit_focus_avoids_oversized_readme(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "README.md").write_text("x" * 9000, encoding="utf-8")
+
+    code, out, _ = _run(["queue", "improve", "feature", "small footer polish"], cwd=repo)
+
+    assert code == 0, out
+    tasks = load_queue(repo)
+    assert tasks[0].focus == "small footer polish"
+    assert tasks[0].resolved_intent == "small footer polish"
+
+
 def test_queue_improve_target_focus_not_set(tmp_path: Path):
     """For target subcommand, the arg goes to `target` not `focus`."""
     repo = init_repo(tmp_path)

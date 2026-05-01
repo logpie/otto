@@ -567,6 +567,32 @@ def test_explicit_fail_still_counts_as_failure():
     assert has_failures
 
 
+def test_parse_certifier_markers_accepts_markdown_decorated_final_markers():
+    """Provider reports can decorate markers even when the semantic verdict is clear."""
+    from otto.markers import parse_certifier_markers
+
+    text = (
+        "✦ STORIES_TESTED: 1\n"
+        "✦ STORIES_PASSED: 1\n"
+        "✦ STORY_RESULT: ESCALATION_NOTE_FOOTER | PASS | visual proof captured\n"
+        "COVERAGE_OBSERVED:\n"
+        "- screenshot and curl evidence were captured\n"
+        "COVERAGE_GAPS:\n"
+        "- none\n"
+        "**VERDICT: PASS**\n"
+        "**DIAGNOSIS**: Escalation footer is visible after merge.\n"
+    )
+
+    parsed = parse_certifier_markers(text, certifier_mode="standard")
+
+    assert parsed.verdict_seen is True
+    assert parsed.verdict_pass is True
+    assert parsed.stories_tested == 1
+    assert parsed.stories_passed == 1
+    assert parsed.stories[0]["story_id"] == "ESCALATION_NOTE_FOOTER"
+    assert parsed.diagnosis == "Escalation footer is visible after merge."
+
+
 def test_pow_rendering_distinguishes_all_story_verdicts(tmp_path: Path):
     story_results = [
         {"story_id": "story-pass", "summary": "pass summary", "verdict": "PASS", "passed": True},

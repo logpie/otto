@@ -799,13 +799,29 @@ def _run_improve_locked(
     sys.exit(0 if result.passed else 1)
 
 
-def _require_intent(project_dir: Path) -> str:
+def _require_intent(
+    project_dir: Path,
+    *,
+    fallback: str | None = None,
+    fallback_label: str = "argument",
+) -> str:
     """Resolve intent or exit with error. Normalizes whitespace so multiline
     intent files don't leak embedded line-wraps into resolved_intent."""
-    from otto.config import _normalize_intent, resolve_intent
+    from otto.config import ConfigError, _normalize_intent, resolve_intent
 
-    intent = _normalize_intent(resolve_intent(project_dir) or "")
+    fallback_intent = _normalize_intent(fallback or "")
+    try:
+        intent = _normalize_intent(resolve_intent(project_dir) or "")
+    except ConfigError as exc:
+        if fallback_intent:
+            console.print(f"  [dim]Intent from {fallback_label}[/dim]")
+            return fallback_intent
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
     if not intent:
+        if fallback_intent:
+            console.print(f"  [dim]Intent from {fallback_label}[/dim]")
+            return fallback_intent
         error_console.print(
             "[error]No product description found. Create intent.md[/error]"
         )
@@ -890,7 +906,7 @@ def register_improve_commands(main: click.Group) -> None:
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
-        intent = _require_intent(project_dir)
+        intent = _require_intent(project_dir, fallback=focus, fallback_label="focus")
         _run_improve(
             project_dir=project_dir,
             intent=intent,
@@ -987,7 +1003,7 @@ def register_improve_commands(main: click.Group) -> None:
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
-        intent = _require_intent(project_dir)
+        intent = _require_intent(project_dir, fallback=focus, fallback_label="focus")
         _run_improve(
             project_dir=project_dir,
             intent=intent,
@@ -1133,7 +1149,7 @@ def register_improve_commands(main: click.Group) -> None:
             )
             sys.exit(2)
 
-        intent = _require_intent(project_dir)
+        intent = _require_intent(project_dir, fallback=goal, fallback_label="goal")
         _run_improve(
             project_dir=project_dir,
             intent=intent,

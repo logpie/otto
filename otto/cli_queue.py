@@ -448,7 +448,7 @@ def register_queue_commands(main: click.Group) -> None:
             error_console.print("[error]Missing argument 'GOAL' for `otto queue improve target`.[/error]")
             sys.exit(2)
         try:
-            snapshot_intent = resolve_intent_for_enqueue(_project_dir())
+            snapshot_intent = resolve_intent_for_enqueue(_project_dir(), explicit=focus_or_goal)
         except (ConfigError, ValueError) as exc:
             error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
             sys.exit(2)
