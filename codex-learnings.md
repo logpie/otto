@@ -42,11 +42,32 @@ evidence, or token accounting.
   queue runner, let Otto run build -> certify -> fix or proof-repair -> review
   packet -> land. `otto certify` is useful for debugging the certifier, but it
   does not prove the autonomous build-cert-fix loop works.
-- For proof-gate failures, remember the product semantics: if all product
-  stories pass but demo proof is incomplete, the loop should re-enter
-  certification/proof collection with a focused proof-repair instruction. It
-  should not dispatch a code-fix agent, and it must not mark the run green
-  merely because every `story_result.passed` is true.
+- For proof-quality gaps, remember the product semantics: product correctness
+  and proof completeness are separate. If all product stories pass but demo
+  proof is incomplete, the run may be product-green with `proof_quality`
+  partial/missing. Do not dispatch a code-fix agent, and do not run a hidden
+  proof-repair loop by default; surface the proof gap as audit quality.
+- Post-merge verification follows the same rule: a merged branch can have
+  correct code but an incomplete proof packet. Use `otto merge-verify <merge-id>
+  --verify smart|full` to rerun verification for an already-advanced target;
+  do not retry `otto merge --all` and assume the core loop is broken just
+  because no unmerged branches remain.
+- Mission Control landing must not project a queue task as `LANDED` from a
+  failed merge state. A transactional merge may stage/advance code before
+  verifier completion; if verification fails, Otto should roll back or require
+  `otto merge-verify <merge-id>` to turn that exact merge state green before
+  showing the queue task as landed.
+- Claude SDK hook callbacks are fragile on Otto's one-shot string `query()`
+  path: stdin can close while long-running tool use still needs callbacks,
+  producing repeated `Stream closed` hook errors. For core safety policy, prefer
+  `can_use_tool` permission callbacks through `ClaudeSDKClient` interactive
+  mode, and verify with a real safe/deny SDK smoke before trusting a dogfood
+  rerun.
+- Prompt-only process lifecycle policy is not enough. Certifiers have attempted
+  `killall`, `pkill`, and malformed `kill` cleanup during proof repair. Otto
+  must enforce broad-process-kill blocking in provider permissions, and
+  dogfood verification should confirm Mission Control and the queue runner stay
+  alive afterward.
 
 ## Web Build And Test Order
 
