@@ -1216,6 +1216,31 @@ class MissionControlService:
             raise
         except Exception:  # pragma: no cover — defensive; fall through to history
             pass
+        # The web dialog also offers ready-to-land queue items as prior-run
+        # candidates. Those can exist before the live registry/history writer
+        # has a durable row, so resolve them through the same landing view the
+        # UI uses to build the dropdown.
+        try:
+            for item in self.landing_status().get("items", []):
+                if not isinstance(item, dict):
+                    continue
+                item_run_id = str(item.get("run_id") or "").strip()
+                if item_run_id != run_id:
+                    continue
+                if str(item.get("landing_state") or "").strip() != "ready":
+                    raise MissionControlServiceError(
+                        f"prior run {run_id!r} is not ready to improve", status_code=400
+                    )
+                branch = str(item.get("branch") or "").strip()
+                if branch:
+                    return branch
+                raise MissionControlServiceError(
+                    f"prior run {run_id!r} has no recorded branch", status_code=400
+                )
+        except MissionControlServiceError:
+            raise
+        except Exception:  # pragma: no cover — defensive; fall through to history
+            pass
         # History fallback — completed runs that have aged out of the live
         # registry still appear in cross-sessions/history.jsonl.
         try:
@@ -1235,7 +1260,7 @@ class MissionControlService:
         except Exception:  # pragma: no cover — defensive
             pass
         raise MissionControlServiceError(
-            f"prior run {run_id!r} not found in live or history records", status_code=404
+            f"prior run {run_id!r} not found in live, landable queue, or history records", status_code=404
         )
 
     def _state(self, filters: MissionControlFilters | None) -> MissionControlState:

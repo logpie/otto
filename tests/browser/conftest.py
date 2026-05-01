@@ -4,9 +4,9 @@ Fixture catalog (one-line each — full docs on each function below):
 
 - ``build_bundle``        — session-scoped: ensures the SPA bundle is built once
 - ``mc_backend``          — function-scoped: spins up FastAPI on an atomic free port
-- ``monkeypatch_watcher_subprocess`` — replaces ``subprocess.Popen`` in the
-  watcher-launch path with a fake; tests asserting watcher behavior must
-  request this fixture explicitly so real ``otto queue run`` never spawns
+- ``monkeypatch_watcher_subprocess`` — autouse replacement for
+  ``subprocess.Popen`` in the watcher-launch path so browser tests never
+  spawn a real ``otto queue run``
 - ``frozen_clock``        — pins wall clock to ``2026-04-25T12:00:00Z`` UTC
 - ``disable_animations``  — function-scoped helper: ``apply(page)`` injects CSS
 - ``mc_page``             — convenience: ``mc_backend`` + ``page`` navigated and hydrated
@@ -164,13 +164,13 @@ class _FakeWatcherProc:
         self.returncode = -9
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def monkeypatch_watcher_subprocess(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[_FakeWatcherProc]]:
     """Replace ``subprocess.Popen`` in ``otto.mission_control.service`` with a fake.
 
-    Watcher tests must use this fixture so real ``otto queue run`` subprocesses
-    never spawn during the suite. The returned dict has key ``spawned``: a list
-    of ``_FakeWatcherProc`` instances appended in order, useful for assertions:
+    Browser tests should never start a real ``otto queue run`` subprocess.
+    The returned dict has key ``spawned``: a list of ``_FakeWatcherProc``
+    instances appended in order, useful for assertions:
 
         def test_watcher_start(mc_backend, monkeypatch_watcher_subprocess):
             ...
@@ -184,17 +184,30 @@ def monkeypatch_watcher_subprocess(monkeypatch: pytest.MonkeyPatch) -> dict[str,
     spawned: list[_FakeWatcherProc] = []
     registry = {"spawned": spawned}
 
+    import otto.mission_control.service as svc
+
+    original_popen = svc.subprocess.Popen
+
+    def is_watcher_queue_run(argv: object) -> bool:
+        if not isinstance(argv, (list, tuple)):
+            return False
+        parts = [str(part) for part in argv]
+        return any(parts[idx] == "queue" and parts[idx + 1] == "run" for idx in range(len(parts) - 1))
+
     def fake_popen(argv: list[str], **kwargs: Any) -> _FakeWatcherProc:
         proc = _FakeWatcherProc(argv, **kwargs)
         spawned.append(proc)
         return proc
 
-    # Patch the binding inside the watcher module rather than subprocess globally:
-    # otto.mission_control.service imports `subprocess` at module scope and uses
-    # `subprocess.Popen`. We patch the attribute on that module's `subprocess`.
-    import otto.mission_control.service as svc
+    def guarded_popen(argv: object, *args: Any, **kwargs: Any) -> Any:
+        if is_watcher_queue_run(argv):
+            return fake_popen([str(part) for part in argv], **kwargs)
+        return original_popen(argv, *args, **kwargs)
 
-    monkeypatch.setattr(svc.subprocess, "Popen", fake_popen)
+    # `svc.subprocess` is the shared subprocess module object, so this guard
+    # must delegate non-watcher calls such as git init/config/commit. The fake
+    # is intentionally scoped to the Mission Control queue-runner launch argv.
+    monkeypatch.setattr(svc.subprocess, "Popen", guarded_popen)
     return registry
 
 

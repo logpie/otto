@@ -261,9 +261,17 @@ class TestV3PipelinePass:
     @pytest.mark.asyncio
     async def test_pipeline_writes_all_artifacts_on_pass(self, tmp_git_repo):
         intent = "bookmark manager with tags"
+        run_id = "test-pass-run"
+        from otto import paths as _paths
+
+        evidence_dir = _paths.certify_dir(tmp_git_repo, run_id) / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        for story_id in ("first-experience", "crud-lifecycle", "search", "persistence", "edge-cases"):
+            (evidence_dir / f"{story_id}.webm").write_bytes(b"fake browser proof")
+
         with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
             result = await build_agentic_v3(
-                intent, tmp_git_repo, {"test_command": "true"},
+                intent, tmp_git_repo, {"test_command": "true"}, run_id=run_id,
             )
 
         # --- BuildResult ---
@@ -274,8 +282,6 @@ class TestV3PipelinePass:
         # build_id in the new layout is the unified session_id
         # (<date>-<HHMMSS>-<6hex>). Just check it's non-empty.
         assert result.build_id
-
-        from otto import paths as _paths
 
         # --- Per-build session logs (Phase 6 layout) ---
         build_dir = _paths.build_dir(tmp_git_repo, result.build_id)
@@ -307,7 +313,11 @@ class TestV3PipelinePass:
         assert summary["stories_passed"] == 5
         assert summary["stories_tested"] == 5
         assert summary["runtime_path"].endswith("runtime.json")
-        assert summary["breakdown"]["build"]["duration_s"] >= 0
+        build_breakdown = summary["breakdown"]["build"]
+        assert build_breakdown["duration_s"] == pytest.approx(
+            summary["duration_s"],
+            abs=0.001,
+        )
         assert summary["breakdown"].get("certify", {}).get("rounds", 0) == 0
         runtime = json.loads((_paths.session_dir(tmp_git_repo, result.build_id) / "runtime.json").read_text())
         assert runtime["otto_version"]
@@ -693,11 +703,12 @@ async def test_agent_mode_summary_includes_estimated_phase_costs_when_usage_is_l
     summary = json.loads(_paths.session_summary(tmp_git_repo, result.build_id).read_text())
     build_entry = summary["breakdown"]["build"]
     certify_entry = summary["breakdown"]["certify"]
-    assert build_entry["cost_usd"] >= 0
+    assert build_entry["cost_usd"] == pytest.approx(0.2917, abs=0.0001)
     assert build_entry["estimated"] is True
-    assert certify_entry["cost_usd"] >= 0
+    assert certify_entry["cost_usd"] == pytest.approx(0.2083, abs=0.0001)
     assert certify_entry["estimated"] is True
     assert certify_entry["rounds"] == 1
+    assert build_entry["cost_usd"] + certify_entry["cost_usd"] == pytest.approx(result.total_cost, abs=0.0002)
 
 
 @pytest.mark.asyncio
@@ -906,7 +917,7 @@ class TestV3EdgeCases:
             return AGENT_OUTPUT_PASS, 0.50, MagicMock(session_id="s2")
 
         with patch("otto.agent.run_agent_query", side_effect=capture_query):
-            result = await build_agentic_v3("test", tmp_git_repo, {"memory": True})
+            result = await build_agentic_v3("test", tmp_git_repo, {"memory": True}, certifier_mode="fast")
 
         assert result.passed is True
         assert "Previous Certification History" in captured_prompts[0]

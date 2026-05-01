@@ -3073,9 +3073,29 @@ class TestCheckpointRegression:
     def test_load_checkpoint_handles_file_removed_between_checks(self, tmp_path):
         """Concurrent checkpoint deletion should be treated as no checkpoint."""
         from otto.checkpoint import load_checkpoint
+        from otto.paths import session_checkpoint
 
-        with patch("pathlib.Path.read_text", side_effect=FileNotFoundError):
-            assert load_checkpoint(tmp_path) is None
+        run_id = "race-run"
+        checkpoint_path = session_checkpoint(tmp_path, run_id)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_text(
+            '{"status": "in_progress", "run_id": "race-run"}',
+            encoding="utf-8",
+        )
+        assert checkpoint_path.exists()
+
+        original_read_text = Path.read_text
+        read_attempts: list[Path] = []
+
+        def flaky_read_text(path: Path, *args, **kwargs):
+            read_attempts.append(path)
+            if path == checkpoint_path:
+                raise FileNotFoundError(checkpoint_path)
+            return original_read_text(path, *args, **kwargs)
+
+        with patch("pathlib.Path.read_text", new=flaky_read_text):
+            assert load_checkpoint(tmp_path, run_id=run_id) is None
+        assert checkpoint_path in read_attempts
 
     @pytest.mark.asyncio
     async def test_agent_interrupt_refreshes_paused_checkpoint_fingerprint(self, tmp_git_repo):

@@ -254,35 +254,15 @@ def _write_runtime_artifact(project_dir: Path, session_id: str) -> str:
 
 
 def _current_branch_name(project_dir: Path) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError:
-        return None
-    if result.returncode != 0:
-        return None
-    branch = result.stdout.strip()
-    return branch or None
+    from otto.merge.git_ops import try_current_branch
+
+    return try_current_branch(project_dir)
 
 
 def _current_head_sha(project_dir: Path) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError:
-        return None
-    if result.returncode != 0:
-        return None
-    sha = result.stdout.strip()
-    return sha or None
+    from otto.merge.git_ops import try_head_sha
+
+    return try_head_sha(project_dir)
 
 
 def _history_story_counts(stories: list[dict[str, Any]]) -> tuple[int, int, int]:
@@ -1275,7 +1255,7 @@ async def build_agentic_v3(
                 round_timings=round_timings,
             )
             evidence_gate = pow_data.get("evidence_gate") if isinstance(pow_data, dict) else None
-            if passed and isinstance(evidence_gate, dict) and evidence_gate.get("blocks_pass"):
+            if passed and not skip_qa and isinstance(evidence_gate, dict) and evidence_gate.get("blocks_pass"):
                 passed = False
                 overall_diagnosis = _append_demo_evidence_gate_diagnosis(overall_diagnosis, evidence_gate)
             _write_pow_report(report_dir, pow_data)

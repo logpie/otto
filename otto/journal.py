@@ -268,10 +268,6 @@ def _collect_traps(project_dir: Path, current_round_id: str, session_id: str | N
 
 
 def _get_head_sha(project_dir: Path) -> str:
-    try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(project_dir), capture_output=True, text=True,
-        ).stdout.strip()
-    except Exception:
-        return ""
+    from otto.merge.git_ops import try_head_sha
+
+    return try_head_sha(project_dir) or ""

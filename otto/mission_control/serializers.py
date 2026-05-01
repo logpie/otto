@@ -45,13 +45,16 @@ from otto.token_usage import token_usage_from_mapping as _shared_token_usage_fro
 # untracked paths the same way. ``_OTTO_OWNED_DIRTY_PATTERNS`` stays
 # importable here for back-compat with tests that referenced the symbol.
 def serialize_project(project_dir: Path) -> dict[str, Any]:
+    from otto.merge.git_ops import try_current_branch, try_head_sha
+
     project_dir = Path(project_dir).resolve(strict=False)
+    head_sha = try_head_sha(project_dir)
     return {
         "path": str(project_dir),
         "name": project_dir.name,
-        "branch": _git_output(project_dir, ["branch", "--show-current"]) or None,
+        "branch": try_current_branch(project_dir),
         "dirty": _project_is_user_dirty(project_dir),
-        "head_sha": _git_output(project_dir, ["rev-parse", "--short", "HEAD"]) or None,
+        "head_sha": head_sha[:7] if head_sha else None,
         "last_activity_at": _project_last_activity_at(project_dir),
         "defaults": _project_defaults(project_dir),
     }

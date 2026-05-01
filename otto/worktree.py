@@ -67,14 +67,10 @@ def add_worktree(
     if worktree_path.exists():
         # Maybe it's already a worktree we can reuse?
         if (worktree_path / ".git").exists():
-            result = subprocess.run(
-                ["git", "branch", "--show-current"],
-                cwd=worktree_path,
-                capture_output=True,
-                text=True,
-            )
-            current = result.stdout.strip()
-            if result.returncode != 0:
+            from otto.merge.git_ops import try_current_branch
+
+            current = try_current_branch(worktree_path)
+            if current is None:
                 raise RuntimeError(
                     f"failed to inspect existing worktree at {worktree_path}"
                 )

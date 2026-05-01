@@ -301,14 +301,14 @@ def scenario_ready_land(ctx: ScenarioContext) -> None:
     start_server(ctx, repo)
     open_app(ctx)
 
-    wait_text("Ready To Land")
+    wait_text("1 task on main")
     browser("find", "testid", "task-card-saved-views", "click")
-    wait_text("Ready for review")
+    wait_text("Ready to land")
     wait_text("Review evidence and land the task.")
     browser("find", "testid", "open-proof-button", "click")
-    wait_text("Stories tested")
-    wait_text("saved-views-create")
-    wait_text("Open HTML proof report")
+    wait_text("Certified stories")
+    wait_text("saved-views can be created by the user.")
+    wait_text("Open full HTML report")
     assert_proof_report_link()
     browser("find", "testid", "proof-open-diff-button", "click")
     wait_text("Code diff")
@@ -328,7 +328,8 @@ def scenario_ready_land(ctx: ScenarioContext) -> None:
     assert item["landing_state"] == "merged"
     assert item["run_id"] == "run-saved-views"
     browser("find", "testid", "task-card-saved-views", "click")
-    wait_text("Already merged into main")
+    wait_text("Outcome")
+    wait_text("Landed")
     packet = api_json(ctx, "api/runs/run-saved-views")["review_packet"]
     assert packet["readiness"]["state"] == "merged"
     assert packet["next_action"]["enabled"] is False
@@ -340,7 +341,7 @@ def scenario_ready_land(ctx: ScenarioContext) -> None:
     wait_snapshot_contains("saved_views.txt")
     wait_snapshot_contains("+saved-views")
     browser("find", "testid", "close-inspector-button", "click")
-    assert_page_lacks("Ready for review")
+    assert_page_lacks("Ready to land")
     assert_page_lacks("No changed files were detected")
     screenshot(ctx, "ready-land.png")
 
@@ -382,7 +383,7 @@ def scenario_multi_state(ctx: ScenarioContext) -> None:
 
     wait_text("Needs Action")
     wait_text("Queued / Running")
-    wait_text("Ready To Land")
+    wait_text("Ready to land")
     wait_text("Landed")
     state = api_json(ctx, "api/state")
     by_task = {item["task_id"]: item for item in state["landing"]["items"]}
@@ -397,7 +398,7 @@ def scenario_multi_state(ctx: ScenarioContext) -> None:
     queued_run = next(item for item in state["live"]["items"] if item["queue_task_id"] == "queued-search")["run_id"]
     assert api_json(ctx, f"api/runs/{queued_run}")["review_packet"]["readiness"]["state"] == "in_progress"
     browser("find", "testid", "task-card-ready-dashboard", "click")
-    wait_text("Ready for review")
+    wait_text("Ready to land")
     ready_packet = api_json(ctx, "api/runs/run-ready-dashboard")["review_packet"]
     assert ready_packet["next_action"]["action_key"] == "m"
     assert ready_packet["next_action"]["enabled"] is True
@@ -437,8 +438,7 @@ def scenario_command_backlog(ctx: ScenarioContext) -> None:
     start_server(ctx, repo)
     open_app(ctx)
 
-    wait_text("Commands are waiting")
-    wait_text("Start watcher")
+    wait_text("Start queue runner")
     browser("find", "testid", "diagnostics-tab", "click")
     wait_text("Command Backlog")
     wait_text("cmd-retry-1")
@@ -471,7 +471,7 @@ def scenario_watcher_stop_ui(ctx: ScenarioContext) -> None:
     start_server(ctx, repo)
     open_app(ctx)
 
-    wait_text("Commands are waiting")
+    wait_text("Start queue runner")
     browser("find", "testid", "start-watcher-button", "click")
     wait_for_api_state(
         ctx,
@@ -480,24 +480,24 @@ def scenario_watcher_stop_ui(ctx: ScenarioContext) -> None:
         timeout_s=20,
     )
     browser("find", "testid", "stop-watcher-button", "click")
-    wait_text("Stop watcher")
+    wait_text("Stop queue runner")
     assert_modal_focus()
     browser("find", "role", "button", "click", "--name", "Cancel")
     assert_no_dialog()
     wait_for_api_state(ctx, lambda state: state["watcher"]["health"]["state"] == "running", "watcher remains running after cancel", timeout_s=10)
 
     browser("find", "testid", "stop-watcher-button", "click")
-    wait_text("Stop watcher")
-    browser("find", "role", "button", "click", "--name", "Stop watcher")
+    wait_text("Stop queue runner")
+    browser("find", "role", "button", "click", "--name", "Stop queue runner")
     wait_for_api_state(ctx, lambda state: state["watcher"]["health"]["state"] != "running", "watcher stopped from UI", timeout_s=20)
     browser("reload")
-    wait_text("watcher stop requested")
+    wait_text("Queue idle")
     screenshot(ctx, "watcher-stop-ui.png")
 
 
 def scenario_job_submit_matrix(ctx: ScenarioContext) -> None:
     repo = init_repo(ctx.run_root / "job-submit-matrix")
-    seed_queued_task(repo, "base-task")
+    seed_ready_task(repo, task_id="base-task", filename="base_task.txt")
     start_server(ctx, repo)
     open_app(ctx)
 
@@ -511,7 +511,7 @@ def scenario_job_submit_matrix(ctx: ScenarioContext) -> None:
         model="gpt-5.4",
         effort="high",
     )
-    wait_text("queued improve-saved-views")
+    wait_for_landing_task(ctx, "improve-saved-views")
 
     queue_job_from_dialog(
         command="certify",
@@ -521,7 +521,7 @@ def scenario_job_submit_matrix(ctx: ScenarioContext) -> None:
         effort="medium",
         certification="standard",
     )
-    wait_text("queued certify-checkout")
+    wait_for_landing_task(ctx, "certify-checkout")
 
     queue_job_from_dialog(
         command="build",
@@ -529,7 +529,7 @@ def scenario_job_submit_matrix(ctx: ScenarioContext) -> None:
         intent="Add an import preview screen.",
         certification="skip",
     )
-    wait_text("queued build-without-cert")
+    wait_for_landing_task(ctx, "build-without-cert")
 
     tasks = {task.id: task for task in load_queue(repo)}
     improve = tasks["improve-saved-views"]
@@ -543,9 +543,14 @@ def scenario_job_submit_matrix(ctx: ScenarioContext) -> None:
     assert certify.command_argv[:2] == ["certify", "Certify the checkout workflow against the product spec."], certify
     assert certify.resumable is False
     assert_cli_args(certify.command_argv, {"--provider": "claude", "--effort": "medium"}, flags=["--standard"])
-    assert build.command_argv == ["build", "Add an import preview screen.", "--no-qa"], build
+    assert build.command_argv == ["build", "Add an import preview screen.", "--split", "--no-qa"], build
     state = api_json(ctx, "api/state")
-    assert state["watcher"]["counts"]["queued"] == 4
+    landing = state["landing"]
+    assert isinstance(landing, dict)
+    items = landing["items"]
+    assert isinstance(items, list)
+    task_ids = {item.get("task_id") for item in items if isinstance(item, dict)}
+    assert {"base-task", "improve-saved-views", "certify-checkout", "build-without-cert"} <= task_ids
     screenshot(ctx, "job-submit-matrix.png")
 
 
@@ -556,12 +561,13 @@ def scenario_bulk_land(ctx: ScenarioContext) -> None:
     start_server(ctx, repo)
     open_app(ctx)
 
-    wait_text("2 tasks ready to land")
-    browser("find", "role", "button", "click", "--name", "Land all ready")
+    wait_text("2 tasks on main")
+    browser("find", "testid", "mission-land-ready-button", "click")
     wait_text("Land ready tasks")
     wait_text("saved-views")
     wait_text("audit-log")
     assert_modal_focus()
+    browser("find", "testid", "confirm-dialog-ack-checkbox", "click")
     browser("find", "role", "button", "click", "--name", "Land 2 tasks")
     wait_for_api_state(ctx, lambda state: state["landing"]["counts"]["merged"] >= 2, "bulk tasks landed", timeout_s=30)
     assert_git_file(repo, "main", "saved_views.txt", "saved-views")
@@ -581,7 +587,7 @@ def scenario_control_tour(ctx: ScenarioContext) -> None:
     start_server(ctx, repo)
     open_app(ctx)
 
-    wait_text("1 task ready to land")
+    wait_text("1 task on main")
     browser("find", "role", "button", "click", "--name", "Refresh")
     assert_no_horizontal_overflow()
 
@@ -600,32 +606,31 @@ def scenario_control_tour(ctx: ScenarioContext) -> None:
     browser("find", "role", "button", "click", "--name", "Clear filters")
 
     browser("find", "testid", "new-job-button", "click")
-    wait_text("New queue job")
+    wait_text("New job")
     assert_modal_focus()
     assert_submit_disabled("Queue job")
-    browser("select", "[data-testid='job-command-select']", "improve")
-    wait_text("Improve mode")
-    browser("select", "[data-testid='job-improve-mode-select']", "feature")
-    browser("find", "label", "Intent / focus", "fill", "Add saved dashboard views with named filters.")
-    browser("find", "text", "Advanced options", "click")
+    browser("find", "testid", "job-command-improve", "click")
+    browser("find", "testid", "job-improve-mode-feature", "click")
+    browser("find", "testid", "job-dialog-intent", "fill", "Add saved dashboard views with named filters.")
+    browser("find", "testid", "job-dialog-summary-edit", "click")
     browser("find", "label", "Task id", "fill", "saved-dashboard-views")
     browser("find", "label", "After", "fill", "ready-dashboard")
     browser("select", "[data-testid='job-provider-select']", "codex")
     browser("select", "[data-testid='job-effort-select']", "high")
-    browser("find", "label", "Model", "fill", "gpt-5.4")
+    browser("find", "label", "Default model", "fill", "gpt-5.4")
     wait_text("Evaluation policy")
     assert_submit_enabled("Queue job")
     browser("find", "role", "button", "click", "--name", "Close")
-    assert_page_lacks("New queue job")
+    assert_page_lacks("New job")
 
-    browser("find", "role", "button", "click", "--name", "Land all ready")
+    browser("find", "testid", "mission-land-ready-button", "click")
     wait_text("Land ready tasks")
     assert_modal_focus()
     browser("find", "role", "button", "click", "--name", "Cancel")
     assert_no_dialog()
 
     browser("find", "testid", "task-card-ready-dashboard", "click")
-    wait_text("Ready for review")
+    wait_text("Ready to land")
     browser("find", "testid", "open-proof-button", "click")
     wait_text("Proof of work")
     assert_no_horizontal_overflow()
@@ -1122,6 +1127,20 @@ def landing_item(state: dict[str, object], task_id: str) -> dict[str, object]:
     raise AssertionError(f"landing item {task_id!r} not found")
 
 
+def wait_for_landing_task(ctx: ScenarioContext, task_id: str, timeout_s: float = 20) -> None:
+    def has_task(state: dict[str, object]) -> bool:
+        landing = state.get("landing")
+        items = landing.get("items", []) if isinstance(landing, dict) else []
+        return any(isinstance(item, dict) and item.get("task_id") == task_id for item in items)
+
+    wait_for_api_state(
+        ctx,
+        has_task,
+        f"landing task {task_id}",
+        timeout_s=timeout_s,
+    )
+
+
 def queue_job_from_dialog(
     *,
     command: str,
@@ -1135,15 +1154,15 @@ def queue_job_from_dialog(
     certification: str = "",
 ) -> None:
     browser("find", "testid", "new-job-button", "click")
-    wait_text("New queue job")
+    wait_text("New job")
     assert_modal_focus()
-    browser("select", "[data-testid='job-command-select']", command)
+    if command != "build":
+        browser("find", "testid", f"job-command-{command}", "click")
     if command == "improve":
-        wait_text("Improve mode")
-        browser("select", "[data-testid='job-improve-mode-select']", subcommand)
-    browser("find", "label", "Intent / focus", "fill", intent)
+        browser("find", "testid", f"job-improve-mode-{subcommand}", "click")
+    browser("find", "testid", "job-dialog-intent", "fill", intent)
     if task_id or after or provider or effort or model or certification:
-        browser("find", "text", "Advanced options", "click")
+        browser("find", "testid", "job-dialog-summary-edit", "click")
         if task_id:
             browser("find", "label", "Task id", "fill", task_id)
         if after:
@@ -1153,7 +1172,7 @@ def queue_job_from_dialog(
         if effort:
             browser("select", "[data-testid='job-effort-select']", effort)
         if model:
-            browser("find", "label", "Model", "fill", model)
+            browser("find", "label", "Default model", "fill", model)
         if certification:
             browser("select", "[data-testid='job-certification-select']", certification)
     assert_submit_enabled("Queue job")
@@ -1359,9 +1378,11 @@ def assert_modal_focus() -> None:
         """(() => {
           const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
           const active = document.activeElement;
-          const mainHidden = document.querySelector('main')?.getAttribute('aria-hidden') === 'true';
-          const sideHidden = document.querySelector('aside.sidebar')?.getAttribute('aria-hidden') === 'true';
-          return Boolean(dialog && active && dialog.contains(active) && mainHidden && sideHidden);
+          const topbar = document.querySelector('.topbar');
+          const main = document.querySelector('.main-shell-content');
+          const topbarHidden = topbar?.hasAttribute('inert') === true && topbar?.getAttribute('aria-hidden') === 'true';
+          const mainHidden = main?.hasAttribute('inert') === true && main?.getAttribute('aria-hidden') === 'true';
+          return Boolean(dialog && active && dialog.contains(active) && topbarHidden && mainHidden);
         })()"""
     )
     if not result.endswith("true"):

@@ -88,7 +88,9 @@ def _git(project_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 def current_branch(project_dir: Path) -> str:
     """Return current branch name. Empty string if detached HEAD or no commits."""
-    return _git(project_dir, "branch", "--show-current").stdout.strip()
+    from otto.merge.git_ops import try_current_branch
+
+    return try_current_branch(project_dir) or ""
 
 
 def repo_has_commits(project_dir: Path) -> bool:
@@ -97,7 +99,9 @@ def repo_has_commits(project_dir: Path) -> bool:
     Greenfield repos (`git init` with no commits) have no HEAD, so
     auto-branching is a no-op until the first commit lands.
     """
-    return _git(project_dir, "rev-parse", "--verify", "HEAD").returncode == 0
+    from otto.merge.git_ops import try_head_sha
+
+    return try_head_sha(project_dir) is not None
 
 
 def should_auto_branch(current: str, default_branch: str) -> bool:

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -67,14 +66,10 @@ def _record_run_impl(
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Collect git info for citations
-    head_sha = ""
-    try:
-        head_sha = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=str(project_dir), capture_output=True, text=True,
-        ).stdout.strip()
-    except Exception:
-        pass
+    from otto.merge.git_ops import try_head_sha
+
+    head = try_head_sha(project_dir)
+    head_sha = head[:7] if head else ""
 
     findings = []
     for s in stories:

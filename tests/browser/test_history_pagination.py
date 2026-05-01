@@ -485,6 +485,87 @@ def test_history_filter_resets_page(
     assert "hp=3" not in page.url, f"expected hp=3 cleared from URL after filter change, got {page.url}"
 
 
+def test_history_outcome_filter_survives_reload(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """Outcome filters are URL state, so reload must not reset Failed to All."""
+
+    router = _StateRouter(history_total=100)
+    _install_projects_route(page)
+    router.install(page)
+
+    _hydrate(page, mc_backend, disable_animations)
+
+    with page.expect_response(lambda response: "/api/state" in response.url and "outcome=failed" in response.url):
+        page.get_by_test_id("filter-outcome-select").select_option("failed")
+
+    assert "fo=failed" in page.url, f"expected failed outcome persisted in URL, got {page.url}"
+
+    with page.expect_response(lambda response: "/api/state" in response.url and "outcome=failed" in response.url):
+        page.reload(wait_until="domcontentloaded")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+
+    value = page.get_by_test_id("filter-outcome-select").evaluate("(node) => node.value")
+    assert value == "failed"
+    assert any(query.get("outcome") == ["failed"] for query in router.queries), router.queries[-5:]
+
+
+def test_task_empty_state_uses_history_context_after_clear_filters(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """Clear filters should restore the history-backed task list, not drop it."""
+
+    payload = _build_state_payload(
+        100,
+        history_page_zero_based=0,
+        history_page_size=25,
+    )
+
+    _install_projects_route(page)
+
+    def state_handler(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
+
+    page.route("**/api/state*", state_handler)
+    _hydrate(page, mc_backend, disable_animations)
+
+    page.get_by_test_id("filter-outcome-select").select_option("failed")
+    page.get_by_test_id("task-board-empty-clear-filters").wait_for(state="visible", timeout=5_000)
+    page.get_by_test_id("task-board-empty-clear-filters").click()
+
+    page.locator("text=task-0001").first.wait_for(state="visible", timeout=5_000)
+    assert page.locator('[data-testid="task-board-empty"]').count() == 0
+
+
+def test_empty_task_board_with_history_uses_returning_user_copy(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """A project with history but no active page items should not show first-run copy."""
+
+    payload = _build_state_payload(
+        100,
+        history_page_zero_based=0,
+        history_page_size=25,
+    )
+    payload["history"]["items"] = []
+
+    _install_projects_route(page)
+
+    def state_handler(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
+
+    page.route("**/api/state*", state_handler)
+    _hydrate(page, mc_backend, disable_animations)
+
+    empty = page.get_by_test_id("task-board-empty")
+    empty.wait_for(state="visible", timeout=5_000)
+    text = empty.text_content() or ""
+    assert "No active tasks" in text, text
+    assert "100 past runs" in text, text
+    assert "Queue new job" in text, text
+    assert "Queue your first job" not in text, text
+
+
 def test_history_back_button_returns_to_previous_page(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:

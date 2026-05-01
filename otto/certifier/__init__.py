@@ -556,6 +556,15 @@ def _human_int(value: int | float) -> str:
 
 
 def _safe_git(project_dir: Path, *args: str) -> str:
+    if args == ("branch", "--show-current"):
+        from otto.merge.git_ops import try_current_branch
+
+        return try_current_branch(project_dir) or ""
+    if args == ("rev-parse", "--short", "HEAD"):
+        from otto.merge.git_ops import try_head_sha
+
+        sha = try_head_sha(project_dir)
+        return sha[:7] if sha else ""
     try:
         result = subprocess.run(
             ["git", *args],

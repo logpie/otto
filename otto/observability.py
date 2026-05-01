@@ -135,7 +135,14 @@ def dirty_worktree_files(project_dir: Path, *, limit: int = 20) -> list[str]:
 
 def gather_runtime_metadata(project_dir: Path) -> dict[str, Any]:
     """Capture the execution environment for session forensics."""
+    from otto.merge.git_ops import try_current_branch, try_head_sha
+
     def _git(args: list[str]) -> str:
+        if args == ["branch", "--show-current"]:
+            return try_current_branch(project_dir) or ""
+        if args == ["rev-parse", "--short", "HEAD"]:
+            sha = try_head_sha(project_dir)
+            return sha[:7] if sha else ""
         try:
             result = subprocess.run(
                 ["git", *args],

@@ -1081,24 +1081,9 @@ class NarrativeFormatter:
             return self._git_context_label_cache
         label = "current branch"
         if self._project_dir is not None:
-            for cmd in (
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                ["git", "branch", "--show-current"],
-            ):
-                try:
-                    result = subprocess.run(
-                        cmd,
-                        cwd=self._project_dir,
-                        capture_output=True,
-                        text=True,
-                        timeout=2,
-                    )
-                except (OSError, subprocess.SubprocessError):
-                    continue
-                branch = result.stdout.strip()
-                if result.returncode == 0 and branch:
-                    label = branch
-                    break
+            from otto.merge.git_ops import try_current_branch
+
+            label = try_current_branch(self._project_dir) or label
         self._git_context_label_cache = label
         return label
 

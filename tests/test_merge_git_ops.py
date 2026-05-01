@@ -33,6 +33,19 @@ def test_current_branch_returns_main(tmp_path: Path):
     assert git_ops.current_branch(repo) == "main"
 
 
+def test_try_head_and_branch_return_none_outside_git(tmp_path: Path):
+    assert git_ops.try_head_sha(tmp_path) is None
+    assert git_ops.try_current_branch(tmp_path) is None
+
+
+def test_try_head_and_branch_return_values(tmp_path: Path):
+    repo = init_repo(tmp_path, commit_content="baseline\n", commit_msg="initial")
+    assert git_ops.try_current_branch(repo) == "main"
+    sha = git_ops.try_head_sha(repo)
+    assert sha is not None
+    assert len(sha) == 40
+
+
 def test_branch_exists(tmp_path: Path):
     repo = init_repo(tmp_path, commit_content="baseline\n", commit_msg="initial")
     assert git_ops.branch_exists(repo, "main") is True

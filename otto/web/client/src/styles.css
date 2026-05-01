@@ -3746,12 +3746,13 @@ tbody tr.selected {
   inset: 0;
   background: transparent;
   z-index: 40;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 @media (max-width: 1100px) {
   .run-drawer-backdrop {
     background: rgba(20, 28, 41, 0.12);
+    pointer-events: auto;
     animation: drawer-fade-in 0.16s ease-out;
   }
 }
@@ -6279,6 +6280,18 @@ tbody tr.selected {
 .confirm-dialog .confirm-dialog-cancel.cancel-emphasis:hover:not(:disabled) {
   background: #f1f5f9;
   border-color: #0f172a;
+}
+
+.confirm-dialog .confirm-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.confirm-dialog .confirm-ack input {
+  flex: 0 0 auto;
+  margin-top: 2px;
 }
 
 .field-grid {

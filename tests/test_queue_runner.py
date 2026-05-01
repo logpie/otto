@@ -450,6 +450,37 @@ def test_finalize_success_manifest_fails_when_worktree_is_dirty(tmp_path: Path) 
     assert "feature.py" in ts["failure_reason"]
 
 
+def test_finalize_success_manifest_ignores_otto_runtime_artifacts(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    (repo / ".worktrees").mkdir()
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/t1", ".worktrees/t1", "main"],
+        cwd=repo,
+        check=True,
+    )
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    runtime_dir = _paths.logs_dir(repo / ".worktrees" / "t1")
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / "checkpoint.json").write_text("{}", encoding="utf-8")
+    _write_queue_manifest(repo, "t1", exit_status="success")
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume"), otto_bin="/bin/true")
+    ts = {
+        "status": "running",
+        "started_at": "2026-04-19T00:00:00Z",
+        "child": {"pid": 123456, "pgid": 123456},
+    }
+
+    runner._finalize_task_from_manifest(ts, "t1", exit_code=0)
+
+    assert ts["status"] == "done"
+    assert ts["failure_reason"] is None
+
+
 def _spawn_orphan_child(*, cwd: Path, command: str) -> dict[str, Any]:
     script = """
 import json

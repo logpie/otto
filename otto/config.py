@@ -1397,10 +1397,9 @@ def require_git() -> None:
 
 def checkpoint_fingerprint(project_dir: Path) -> dict[str, str]:
     """Capture a lightweight resume fingerprint for the current workspace."""
-    try:
-        git_sha = _run_git(project_dir, "rev-parse", "HEAD").stdout.strip()
-    except ConfigError:
-        git_sha = ""
+    from otto.merge.git_ops import try_head_sha
+
+    git_sha = try_head_sha(project_dir) or ""
 
     try:
         git_status = _run_git(

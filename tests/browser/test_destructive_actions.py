@@ -656,11 +656,15 @@ def test_watcher_stop_shows_counts(mc_backend: Any, page: Any, disable_animation
     running_text = page.get_by_test_id("confirm-watcher-stop-running").text_content() or ""
     queued_text = page.get_by_test_id("confirm-watcher-stop-queued").text_content() or ""
     backlog_text = page.get_by_test_id("confirm-watcher-stop-backlog").text_content() or ""
+    ack_text = page.get_by_test_id("confirm-dialog-ack").text_content() or ""
+    confirm = page.get_by_test_id("confirm-dialog-confirm-button")
 
     assert "4321" in pid_text, pid_text
     assert "2 running" in running_text, running_text
     assert "3 queued" in queued_text, queued_text
     assert "1 pending" in backlog_text, backlog_text
+    assert "running tasks may be interrupted" in ack_text, ack_text
+    assert confirm.is_disabled(), "non-empty watcher stop must require explicit acknowledgement"
 
 
 # ---------------------------------------------------------------------------

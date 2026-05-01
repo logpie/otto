@@ -144,7 +144,7 @@ def test_improve_writes_build_journal_on_fail(
         )
 
     # Result code is 1 on fail but the journal must still exist.
-    assert result.exit_code in (0, 1), result.output
+    assert result.exit_code == 1, result.output
 
     sessions_root = paths.sessions_root(tmp_git_repo)
     journal_paths = list(sessions_root.glob("*/improve/build-journal.md"))

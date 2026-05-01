@@ -122,7 +122,7 @@ def test_pipeline_improve_mode_scaffolds_improve_dir_not_only_build(
 
     # Patch the agent invocation to abort after scaffolding completes.
     with patch("otto.agent.run_agent_with_timeout", new=boom):
-        try:
+        with pytest.raises(RuntimeError, match="short-circuit after scaffold"):
             asyncio.run(build_agentic_v3(
                 "improve me",
                 tmp_git_repo,
@@ -132,9 +132,6 @@ def test_pipeline_improve_mode_scaffolds_improve_dir_not_only_build(
                 command="improve",
                 manage_checkpoint=True,
             ))
-        except Exception:
-            # We expect either RuntimeError or a wrapped pipeline error.
-            pass
 
     # Scaffold for improve mode → improve/ dir exists.
     improve_path = paths.improve_dir(tmp_git_repo, sess_id)
@@ -145,9 +142,9 @@ def test_pipeline_improve_mode_scaffolds_improve_dir_not_only_build(
 
     # Checkpoint, if present, tags phase=improve (not build).
     cp_path = paths.session_checkpoint(tmp_git_repo, sess_id)
-    if cp_path.exists():
-        cp = json.loads(cp_path.read_text())
-        assert cp.get("phase") == "improve", (
-            f"checkpoint phase should be 'improve' for an improve run, got "
-            f"{cp.get('phase')!r}"
-        )
+    assert cp_path.exists(), "improve short-circuit should leave a resumable checkpoint"
+    cp = json.loads(cp_path.read_text())
+    assert cp.get("phase") == "improve", (
+        f"checkpoint phase should be 'improve' for an improve run, got "
+        f"{cp.get('phase')!r}"
+    )

@@ -43,7 +43,7 @@ from pathlib import Path
 import pytest
 
 from otto.queue.enqueue import enqueue_task
-from otto.queue.schema import load_queue
+from otto.queue.schema import QueueTask, append_task, load_queue, write_state
 from otto.worktree import add_worktree
 from tests._helpers import init_repo
 
@@ -297,6 +297,64 @@ def test_mc_enqueue_improve_with_prior_run_id_resolves_branch(tmp_path: Path) ->
     assert queue[0].base_ref == "build/greet-2026-04-25", (
         f"service did not snapshot base_ref from history; got task={queue[0]!r}"
     )
+
+
+def test_mc_enqueue_improve_with_prior_run_id_resolves_ready_landing_branch(tmp_path: Path) -> None:
+    """A ready landing item offered by the web dialog must resolve server-side too."""
+    from otto.mission_control.service import MissionControlService
+
+    repo = init_repo(tmp_path)
+    (repo / "intent.md").write_text("# greet\n", encoding="utf-8")
+
+    prior_run_id = "run-base-task"
+    prior_branch = "build/base-task"
+    _commit_file_on_branch(
+        repo,
+        branch=prior_branch,
+        file_path="base_task.txt",
+        content="base\n",
+        message="feat: add base task",
+    )
+    append_task(
+        repo,
+        QueueTask(
+            id="base-task",
+            command_argv=["build", "Build base task"],
+            added_at="2026-04-25T12:00:00Z",
+            resolved_intent="Build base task",
+            branch=prior_branch,
+            worktree=".worktrees/base-task",
+        ),
+    )
+    write_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "base-task": {
+                    "status": "done",
+                    "attempt_run_id": prior_run_id,
+                    "finished_at": "2026-04-25T12:00:30Z",
+                }
+            },
+        },
+    )
+
+    svc = MissionControlService(repo)
+    response = svc.enqueue(
+        "improve",
+        {
+            "subcommand": "feature",
+            "focus": "extend saved views",
+            "prior_run_id": prior_run_id,
+            "task_id": "improve-base-task",
+        },
+    )
+    assert response["ok"] is True
+    queue = load_queue(repo)
+    improve = next(task for task in queue if task.id == "improve-base-task")
+    assert improve.base_ref == prior_branch
 
 
 def test_mc_enqueue_improve_without_prior_run_id_leaves_base_ref_unset(tmp_path: Path) -> None:

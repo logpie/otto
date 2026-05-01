@@ -296,8 +296,8 @@ def _install_projects_route(page: Any) -> None:
     )
 
 
-def _install_state_route(page: Any) -> None:
-    payload = _state_payload()
+def _install_state_route(page: Any, payload: dict[str, Any] | None = None) -> None:
+    payload = payload or _state_payload()
     page.route(
         "**/api/state*",
         lambda route: route.fulfill(
@@ -480,13 +480,18 @@ def test_clicking_outside_full_inspector_returns_to_run_detail(
     page.get_by_test_id("run-detail-panel").wait_for(state="visible", timeout=2_000)
 
 
-def test_clicking_outside_run_detail_closes_drawer(
+def test_desktop_run_detail_does_not_block_task_list_clicks(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """The run detail drawer closes when the visible workspace is clicked."""
+    """Desktop run detail leaves the padded task list clickable."""
 
+    page.set_viewport_size({"width": 1440, "height": 900})
     _install_projects_route(page)
-    _install_state_route(page)
+    payload = _state_payload()
+    payload["live"]["items"][0]["active"] = True
+    payload["live"]["items"][0]["display_status"] = "running"
+    payload["live"]["items"][0]["status"] = "running"
+    _install_state_route(page, payload)
     _install_detail_route(page)
     _install_log_route(page)
     _install_diff_route(page)
@@ -497,8 +502,36 @@ def test_clicking_outside_run_detail_closes_drawer(
     disable_animations(page)
 
     page.get_by_test_id("run-detail-panel").wait_for(state="visible", timeout=2_000)
-    page.locator(".run-drawer-backdrop").click(position={"x": 20, "y": 40}, timeout=CLICK_TIMEOUT_MS)
-    page.get_by_test_id("run-detail-panel").wait_for(state="detached", timeout=2_000)
+    assert page.locator(".run-drawer-backdrop").evaluate("el => getComputedStyle(el).pointerEvents") == "none"
+    page.get_by_test_id(f"task-card-{RUN_ID}").click(timeout=CLICK_TIMEOUT_MS)
+    page.get_by_test_id("run-detail-panel").wait_for(state="visible", timeout=2_000)
+
+
+def test_overlay_run_detail_backdrop_closes_drawer(
+    mc_backend: Any, browser: Any, disable_animations: Any
+) -> None:
+    """Overlay-sized run detail still has a clickable outside-close backdrop."""
+
+    context = browser.new_context(viewport={"width": 900, "height": 800}, device_scale_factor=2)
+    page = context.new_page()
+    try:
+        _install_projects_route(page)
+        _install_state_route(page)
+        _install_detail_route(page)
+        _install_log_route(page)
+        _install_diff_route(page)
+        _install_artifact_route(page)
+
+        page.goto(f"{mc_backend.url}?view=tasks&run={RUN_ID}", wait_until="networkidle")
+        page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+        disable_animations(page)
+
+        page.get_by_test_id("run-detail-panel").wait_for(state="visible", timeout=2_000)
+        assert page.locator(".run-drawer-backdrop").evaluate("el => getComputedStyle(el).pointerEvents") == "auto"
+        page.locator(".run-drawer-backdrop").click(position={"x": 20, "y": 40}, timeout=CLICK_TIMEOUT_MS)
+        page.get_by_test_id("run-detail-panel").wait_for(state="detached", timeout=2_000)
+    finally:
+        context.close()
 
 
 def test_run_detail_overview_is_actionable_and_resizable(

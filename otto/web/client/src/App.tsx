@@ -973,7 +973,7 @@ export function App() {
         // For a non-empty workload, require explicit ack to avoid an Enter
         // keystroke from the previous dialog interrupting running tasks.
         requireCheckbox: stopInfo.requireAck
-          ? {label: "Stop queue runner"}
+          ? {label: "I understand running tasks may be interrupted."}
           : undefined,
         onConfirm: () => execute(),
       });

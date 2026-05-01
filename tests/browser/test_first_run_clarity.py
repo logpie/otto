@@ -399,6 +399,39 @@ def test_job_dialog_shows_pre_submit_summary(mc_backend: Any, page: Any, disable
     assert edit.is_visible()
 
 
+def test_certify_certification_select_updates_summary(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """Switching certify to thorough must persist in the select and summary."""
+
+    payload = _state_idle_first_run()
+    _install_projects_route(page)
+    _install_state_route(page, payload)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    page.get_by_test_id("new-job-button").click()
+    _switch_command(page, "certify")
+    page.get_by_test_id("job-dialog-intent").fill("certify the current branch")
+    page.get_by_test_id("job-dialog-summary-edit").click()
+
+    certification = page.get_by_test_id("job-certification-select")
+    certification.wait_for(state="visible", timeout=2_000)
+    assert certification.evaluate("(node) => node.value") == ""
+
+    certification.select_option("thorough")
+    assert certification.evaluate("(node) => node.value") == "thorough"
+    page.wait_for_function(
+        "() => (document.querySelector('[data-testid=job-dialog-summary-text]')?.textContent || '').includes('verification=thorough')",
+        timeout=2_000,
+    )
+    summary = page.get_by_test_id("job-dialog-summary-text").text_content() or ""
+    assert "verification=thorough" in summary, summary
+    assert "Inherit: fast" not in summary, summary
+
+
 def test_job_dialog_focuses_intent_and_inerts_background(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:

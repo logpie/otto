@@ -305,7 +305,6 @@ class TestReviewSpecRegenerationCap:
         monkeypatch.setattr("otto.spec._is_tty", lambda: True)
         monkeypatch.setattr("builtins.input", lambda _prompt="": next(it))
         monkeypatch.setattr("otto.spec.run_spec_agent", fake_run_spec_agent)
-        monkeypatch.setattr("otto.spec.write_checkpoint", lambda *args, **kwargs: None, raising=False)
         monkeypatch.setattr("otto.checkpoint.write_checkpoint", lambda *args, **kwargs: None)
         monkeypatch.setattr("otto.checkpoint.clear_checkpoint", lambda *args, **kwargs: None)
 

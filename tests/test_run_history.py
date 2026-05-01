@@ -5,6 +5,8 @@ import multiprocessing as mp
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from otto import paths
 from otto.history import append_history_entry
 from otto.merge.orchestrator import _append_merge_history
@@ -41,12 +43,8 @@ def test_append_history_snapshot_sets_dedupe_key(tmp_path: Path) -> None:
 
 
 def test_append_history_snapshot_is_strict_by_default(tmp_path: Path) -> None:
-    try:
+    with pytest.raises(ValueError, match="run_id"):
         append_history_snapshot(tmp_path, {"status": "done"}, strict=True)
-    except ValueError as exc:
-        assert "run_id" in str(exc)
-    else:
-        raise AssertionError("expected strict append to reject missing run_id")
 
 
 def test_history_reader_skips_malformed_lines(tmp_path: Path) -> None:

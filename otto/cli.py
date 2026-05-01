@@ -152,8 +152,11 @@ def _version_callback(ctx: click.Context, _param: click.Parameter, value: bool) 
         except (OSError, _sp.SubprocessError):
             return ""
 
-    commit = _git(["rev-parse", "--short", "HEAD"]) or "unknown"
-    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]) or "unknown"
+    from otto.merge.git_ops import try_current_branch, try_head_sha
+
+    head = try_head_sha(tree)
+    commit = (head[:7] if head else "") or "unknown"
+    branch = try_current_branch(tree) or "unknown"
     dirty = " (dirty)" if _git(["status", "--porcelain"]) else ""
     try:
         from importlib.metadata import version as _pkg_version

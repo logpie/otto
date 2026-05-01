@@ -82,6 +82,7 @@ from otto.runs.registry import (
     write_record,
 )
 from otto.runs.schema import TERMINAL_STATUSES
+from otto.setup_gitignore import is_otto_owned_path
 
 logger = logging.getLogger("otto.queue.runner")
 
@@ -111,7 +112,11 @@ def _dirty_successful_worktree_reason(worktree: Path) -> str | None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         return f"could not verify successful task worktree cleanliness: {detail or 'git status failed'}"
-    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    lines = [
+        line
+        for line in (result.stdout or "").splitlines()
+        if line.strip() and not is_otto_owned_path(_porcelain_path(line))
+    ]
     if not lines:
         return None
     preview = ", ".join(line[3:] if len(line) > 3 else line for line in lines[:6])
@@ -121,6 +126,14 @@ def _dirty_successful_worktree_reason(worktree: Path) -> str | None:
         "successful task left uncommitted worktree changes; "
         f"branch cannot be safely merged until these are committed or discarded: {preview}"
     )
+
+
+def _porcelain_path(line: str) -> str:
+    path = line[3:] if len(line) > 3 else line
+    path = path.strip()
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1].strip()
+    return path.strip('"')
 
 
 @dataclass

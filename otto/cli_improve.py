@@ -160,13 +160,11 @@ def _exit_for_lock_busy(exc) -> None:
 
 def _create_improve_branch(project_dir: Path) -> str:
     """Create an improvement branch and switch to it. Returns branch name."""
+    from otto.merge.git_ops import try_current_branch
+
     branch = f"improve/{time.strftime('%Y-%m-%d')}-{secrets.token_hex(3)}"
     # Check if already on an improve branch
-    result = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=project_dir, capture_output=True, text=True,
-    )
-    current = result.stdout.strip()
+    current = try_current_branch(project_dir) or ""
     if current.startswith("improve/"):
         return current  # already on an improve branch
 
@@ -184,10 +182,7 @@ def _create_improve_branch(project_dir: Path) -> str:
         )
         sys.exit(1)
 
-    current_branch = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=project_dir, capture_output=True, text=True,
-    ).stdout.strip()
+    current_branch = try_current_branch(project_dir) or ""
     if current_branch != branch:
         error_console.print(
             "[error]Failed to switch to improvement branch. "

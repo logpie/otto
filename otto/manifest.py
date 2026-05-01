@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -97,18 +96,9 @@ def _queue_task_id_from_env() -> str | None:
 
 def current_head_sha(project_dir: Path) -> str | None:
     """Return the current HEAD SHA, or None if not a git repo / no commits."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except FileNotFoundError:
-        pass
-    return None
+    from otto.merge.git_ops import try_head_sha
+
+    return try_head_sha(project_dir)
 
 
 def write_manifest(

@@ -41,6 +41,15 @@ def head_sha(project_dir: Path) -> str:
     return r.stdout.strip()
 
 
+def try_head_sha(project_dir: Path) -> str | None:
+    """Return HEAD SHA, or None when git/HEAD is unavailable."""
+    try:
+        sha = head_sha(project_dir)
+    except (FileNotFoundError, RuntimeError):
+        return None
+    return sha or None
+
+
 def head_parents(project_dir: Path, ref: str = "HEAD") -> list[str]:
     """Return parent SHAs of `ref` (1 for normal commit, 2 for merge commit, etc.)."""
     r = run_git(project_dir, "rev-list", "--parents", "-n", "1", ref)
@@ -55,6 +64,15 @@ def current_branch(project_dir: Path) -> str:
     if not r.ok:
         raise RuntimeError(f"git branch --show-current failed: {r.stderr.strip()}")
     return r.stdout.strip()
+
+
+def try_current_branch(project_dir: Path) -> str | None:
+    """Return current branch, or None for detached/non-git/git-missing cases."""
+    try:
+        branch = current_branch(project_dir)
+    except (FileNotFoundError, RuntimeError):
+        return None
+    return branch or None
 
 
 def branch_exists(project_dir: Path, branch: str) -> bool:
