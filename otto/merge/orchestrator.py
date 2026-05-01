@@ -736,6 +736,59 @@ def _mark_transactional_staging_rolled_back(state: MergeState, reason: str) -> N
         outcome.note = reason
 
 
+def _rollback_transactional_target_after_failed_verification(
+    *,
+    project_dir: Path,
+    state: MergeState,
+    target_head_before: str,
+) -> str:
+    """Restore the target after a staged fast-forward fails certification."""
+    target = str(state.target or "").strip() or "HEAD"
+    try:
+        current_branch = git_ops.current_branch(project_dir)
+        current_head = git_ops.head_sha(project_dir)
+    except Exception as exc:
+        return f"target rollback skipped because git state could not be read: {exc}"
+
+    if current_branch != target:
+        return (
+            f"target rollback skipped because current branch is {current_branch!r}, "
+            f"not {target!r}"
+        )
+    if current_head == target_head_before:
+        _mark_transactional_staging_rolled_back(
+            state,
+            "transactional staging discarded because post-merge verification failed",
+        )
+        write_state(project_dir, state)
+        return f"target {target} already remained at {_short_sha(target_head_before)}"
+
+    tracked_changes = [
+        entry for entry in git_ops.status_porcelain_entries(project_dir)
+        if not entry.startswith("?? ")
+    ]
+    if tracked_changes:
+        preview = ", ".join(tracked_changes[:4])
+        if len(tracked_changes) > 4:
+            preview += f", ... (+{len(tracked_changes) - 4} more)"
+        return (
+            "target rollback skipped because verification left tracked working-tree "
+            f"changes ({preview})"
+        )
+
+    reset = git_ops.run_git(project_dir, "reset", "--hard", target_head_before)
+    if not reset.ok:
+        detail = (reset.stderr or reset.stdout or f"git reset exited {reset.returncode}").strip()
+        return f"target rollback failed: {detail}"
+
+    _mark_transactional_staging_rolled_back(
+        state,
+        "transactional target rolled back because post-merge verification failed",
+    )
+    write_state(project_dir, state)
+    return f"target {target} rolled back to {_short_sha(target_head_before)}"
+
+
 def _run_transactional_fast_merge(
     *,
     project_dir: Path,
@@ -800,7 +853,11 @@ def _run_transactional_fast_merge(
                     merge_id=merge_id,
                     note=f"merge cancelled while staging {branch}",
                 )
-            result = git_ops.merge_no_ff(staging_path, branch)
+            result = git_ops.merge_no_ff(
+                staging_path,
+                branch,
+                message=f"Merge branch '{branch}' into {options.target}",
+            )
             if result.ok:
                 state.outcomes.append(BranchOutcome(
                     branch=branch,
@@ -1051,6 +1108,15 @@ async def run_merge(
                     target_head_before=target_head_before,
                     budget=budget,
                 )
+                if not result.success:
+                    rollback_note = _rollback_transactional_target_after_failed_verification(
+                        project_dir=project_dir,
+                        state=result.state,
+                        target_head_before=target_head_before,
+                    )
+                    result.note = f"{result.note}; {rollback_note}" if result.note else rollback_note
+                    result.state.note = result.note
+                    write_state(project_dir, result.state)
                 if result.success and options.cleanup_on_success:
                     _graduate_merged_task_sessions(project_dir, queue_lookup)
         else:
@@ -1375,6 +1441,117 @@ def _annotate_merge_cert_summary(
     _atomic_write_json(summary_path, summary)
 
 
+def _merge_cert_needs_proof_repair(report: Any) -> bool:
+    """True when code behavior passed but post-merge proof media is incomplete."""
+    evidence_gate = getattr(report, "evidence_gate", {}) or {}
+    if not isinstance(evidence_gate, dict) or not evidence_gate.get("blocks_pass"):
+        return False
+    stories = list(getattr(report, "story_results", []) or [])
+    if not stories:
+        return False
+    if any(not bool(story.get("passed")) for story in stories):
+        return False
+    return not any(
+        str(story.get("verdict") or "").strip().upper() == "FLAG_FOR_HUMAN"
+        for story in stories
+    )
+
+
+def _merge_proof_repair_focus(report: Any, *, existing_focus: str | None = None) -> str:
+    evidence_gate = getattr(report, "evidence_gate", {}) or {}
+    demo_evidence = getattr(report, "demo_evidence", {}) or {}
+    reason = ""
+    if isinstance(evidence_gate, dict):
+        reason = str(evidence_gate.get("reason") or "").strip()
+    if not reason:
+        reason = str(getattr(report, "diagnosis", "") or "").strip()
+    missing_visual_ids = [
+        str(story.get("id") or "").strip()
+        for story in demo_evidence.get("stories", []) or []
+        if isinstance(story, dict)
+        and story.get("needs_visual")
+        and not story.get("visual_items")
+        and str(story.get("id") or "").strip()
+    ]
+    lines = [
+        "The merged code passed the product verification stories, but the proof packet failed Otto's required demo proof gate.",
+        "Do not change product code. Re-run post-merge certification and collect missing proof artifacts only.",
+        "Do not create helper scripts or reports in the product repository. Put temporary scripts under `/tmp`; put persistent proof artifacts only under the exact evidence directory for this run.",
+    ]
+    if reason:
+        lines.append(f"Proof gate reason: {reason}")
+    if "no browser video" in reason.lower():
+        lines.append("Record one concise browser walkthrough `.webm` in the exact evidence directory for this run.")
+    if missing_visual_ids:
+        lines.append(
+            "Capture story-specific screenshots or clips named after these story ids: "
+            + ", ".join(missing_visual_ids)
+            + "."
+        )
+    lines.extend(
+        [
+            "Before emitting the final verdict, list the exact evidence directory and verify the `.webm` plus story-specific screenshots/clips exist.",
+            "Only emit `VERDICT: PASS` if the proof gate requirements are satisfied.",
+        ]
+    )
+    section = "## Proof Repair Focus\n" + "\n".join(lines)
+    if existing_focus:
+        return f"{existing_focus.strip()}\n\n{section}"
+    return section
+
+
+def _merge_certifier_intent(*, branches: list[str], stories: list[dict[str, Any]]) -> str:
+    """Build a bounded intent for post-merge certification.
+
+    Post-merge verification is about integration risk for the branches being
+    landed. Reading the product README as the intent is both too broad and
+    unsafe for generated projects whose README can exceed Otto's normal task
+    intent limit. The merge certifier already receives a deterministic story
+    union and merge context, so this compact intent keeps the scope stable.
+    """
+    from otto.config import MAX_INTENT_CHARS
+
+    lines = [
+        "Verify the merged branch integration for this Otto landing operation.",
+        "",
+        "Merged branches:",
+    ]
+    lines.extend(f"- {branch}" for branch in branches)
+    if stories:
+        lines.extend(["", "Story union to verify:"])
+        for index, story in enumerate(stories[:80], start=1):
+            story_id = _truncate_merge_intent_field(
+                story.get("story_id") or story.get("name") or f"story-{index}",
+                96,
+            )
+            summary = _truncate_merge_intent_field(
+                story.get("claim")
+                or story.get("summary")
+                or story.get("observed_result")
+                or "",
+                220,
+            )
+            source = _truncate_merge_intent_field(story.get("source_branch") or "", 96)
+            suffix = f" ({source})" if source else ""
+            if summary:
+                lines.append(f"{index}. {story_id}{suffix}: {summary}")
+            else:
+                lines.append(f"{index}. {story_id}{suffix}")
+        if len(stories) > 80:
+            lines.append(f"... {len(stories) - 80} more stories omitted from the compact merge intent.")
+    text = "\n".join(lines).strip()
+    if len(text) <= MAX_INTENT_CHARS:
+        return text
+    return text[: MAX_INTENT_CHARS - 45].rstrip() + "\n\n[merge intent truncated]"
+
+
+def _truncate_merge_intent_field(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
 def _graduate_merged_task_sessions(
     project_dir: Path, queue_lookup: dict[str, str],
 ) -> None:
@@ -1530,42 +1707,68 @@ async def _run_post_merge_verification(
         "plan_text": format_merge_verification_plan(plan),
     }
 
-    from otto.config import resolve_intent
     from otto.certifier import run_agentic_certifier
-    intent = resolve_intent(project_dir) or "(no intent.md found)"
+    intent = _merge_certifier_intent(branches=branches, stories=deduped)
     cert_task: asyncio.Task[Any] | None = None
     state.note = (
         f"Running post-merge certification ({options.verification_policy}) "
         f"for {len(branches)} branch(es)."
     )
     write_state(project_dir, state)
+    proof_repair_rounds = int(
+        ((config.get("queue") if isinstance(config.get("queue"), dict) else {}) or {}).get(
+            "merge_proof_repair_rounds",
+            1,
+        )
+        or 0
+    )
+    cert_report = None
+    last_story_results: list[dict[str, Any]] = []
+    focus: str | None = None
     try:
-        cert_task = asyncio.create_task(run_agentic_certifier(
-            intent=intent,
-            project_dir=project_dir,
-            config=config,
-            mode=str((config.get("queue") or {}).get("merge_certifier_mode", "standard")),
-            budget=budget,
-            stories=deduped,
-            merge_context=merge_context,
-        ))
-        while True:
-            done, _ = await asyncio.wait({cert_task}, timeout=0.2)
-            if cert_task in done:
-                cert_report = await cert_task
+        for attempt in range(max(0, proof_repair_rounds) + 1):
+            cert_task = asyncio.create_task(run_agentic_certifier(
+                intent=intent,
+                project_dir=project_dir,
+                config=config,
+                mode=str((config.get("queue") or {}).get("merge_certifier_mode", "standard")),
+                budget=budget,
+                stories=deduped,
+                merge_context=merge_context,
+                focus=focus,
+                round_num=attempt + 1,
+            ))
+            while True:
+                done, _ = await asyncio.wait({cert_task}, timeout=0.2)
+                if cert_task in done:
+                    cert_report = await cert_task
+                    break
+                if _drain_merge_cancel_commands(project_dir, merge_id, state):
+                    cert_task.cancel()
+                    try:
+                        await cert_task
+                    except asyncio.CancelledError:
+                        pass
+                    return _cancelled_merge_result(
+                        project_dir,
+                        state=state,
+                        merge_id=merge_id,
+                        note="merge cancelled during post-merge verification",
+                    )
+            if cert_report.story_results:
+                last_story_results = list(cert_report.story_results)
+            elif last_story_results and not bool(getattr(cert_report, "evidence_gate", {}).get("blocks_pass")):
+                cert_report.story_results = [dict(story) for story in last_story_results]
+            if not _merge_cert_needs_proof_repair(cert_report):
                 break
-            if _drain_merge_cancel_commands(project_dir, merge_id, state):
-                cert_task.cancel()
-                try:
-                    await cert_task
-                except asyncio.CancelledError:
-                    pass
-                return _cancelled_merge_result(
-                    project_dir,
-                    state=state,
-                    merge_id=merge_id,
-                    note="merge cancelled during post-merge verification",
-                )
+            if attempt >= max(0, proof_repair_rounds):
+                break
+            focus = _merge_proof_repair_focus(cert_report, existing_focus=focus)
+            state.note = (
+                "Post-merge certification passed the product checks, but the proof packet "
+                "needs more evidence. Rerunning certification to collect proof only."
+            )
+            write_state(project_dir, state)
     except asyncio.CancelledError:
         if cert_task is not None and not cert_task.done():
             cert_task.cancel()
@@ -1583,6 +1786,16 @@ async def _run_post_merge_verification(
             cert_passed=False,
             note=f"certifier failed: {exc}",
         )
+    if cert_report is None:
+        state.cert_passed = False
+        write_state(project_dir, state)
+        return MergeRunResult(
+            success=False,
+            merge_id=merge_id,
+            state=state,
+            cert_passed=False,
+            note="certifier did not produce a report",
+        )
 
     if _drain_merge_cancel_commands(project_dir, merge_id, state):
         return _cancelled_merge_result(
@@ -1598,6 +1811,13 @@ async def _run_post_merge_verification(
         for story in cert_report.story_results
     )
     cert_passed = cert_report.outcome == CertificationOutcome.PASSED and not flagged_for_human
+    evidence_gate = getattr(cert_report, "evidence_gate", {}) or {}
+    evidence_gate_reason = (
+        str(evidence_gate.get("reason") or "").strip()
+        if isinstance(evidence_gate, dict) and evidence_gate.get("blocks_pass")
+        else ""
+    )
+    proof_gate_note = f"; proof gate: {evidence_gate_reason}" if evidence_gate_reason else ""
     state.cert_passed = cert_passed
     state.cert_run_id = cert_report.run_id
     write_state(project_dir, state)
@@ -1619,7 +1839,8 @@ async def _run_post_merge_verification(
         note=(
             f"cert {'PASSED' if cert_passed else 'FAILED'} "
             f"({cert_report.outcome.value}"
-            f"{'; human review required' if flagged_for_human else ''}); see "
+            f"{'; human review required' if flagged_for_human else ''}"
+            f"{proof_gate_note}); see "
             f"{paths.certify_dir(project_dir, cert_report.run_id).relative_to(project_dir) / 'proof-of-work.html'}"
         ),
     )

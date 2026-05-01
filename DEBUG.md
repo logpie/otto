@@ -680,3 +680,308 @@ Date: 2026-04-29
 - The complex multitask dogfood project was built, conflict-merged, tested, and post-merge certified successfully.
 - Autopilot can detect and dispatch recovery for a failed post-merge verification on a real project. It should not be described as able to repair Otto's own internal bugs by itself; the first real recovery attempt found those bugs, and this pass fixed them in Otto.
 - For future dogfood loops, treat "provider run succeeded" and "certification passed" as separate outcomes. A green provider completion banner can still hide a failed proof gate, so CLI/UI wording should avoid implying product success before the verifier outcome is known.
+
+# Incident Command Center Dogfood Proof-Repair Failure
+
+Date: 2026-04-30
+
+## Observations
+
+- Created a fresh real greenfield project at `/Users/yuxuan/otto-projects/incident-command-center-dogfood-20260429-221052` and queued real Otto tasks through the queue runner.
+- The first scaffold task built and certified correctly, but the queue marked it failed because successful generated artifacts (`.coverage`, `incident_command_center.egg-info/`) were not ignored. This is a separate generated-artifact hygiene bug and already has a focused fix in progress.
+- The second `operator-actions` task built successfully and committed branch `build/operator-actions-2026-04-29` with 76 product tests passing.
+- Certification round 1 proved the product behavior with 23/23 stories passing, then correctly blocked the run on the required demo proof gate because visual/video evidence was incomplete.
+- Certification round 2 followed the proof-repair focus and created browser media artifacts, including `certify/evidence/recording.webm` and story screenshots.
+- Round 2 then returned no structured story results. The final `certify/proof-of-work.json` has `stories=[]`, `passed_count=0`, `failed_count=0`, and `outcome=failed`.
+- The same final proof JSON reports `evidence_gate.blocks_pass=false`, while `round_history[0]` preserves the prior 23 passing stories. This means the final media repair no longer blocked the proof gate, but Otto discarded the prior product-story verdict.
+- `otto.pipeline.run_certify_fix_loop` currently assigns `last_stories = report.story_results` before checking for empty stories. It immediately breaks with `FAIL (no stories)` when a proof-repair round returns no stories, so final report generation receives an empty story list.
+
+## Hypotheses
+
+### H1: Proof-repair rounds overwrite the previous passing story set (ROOT HYPOTHESIS)
+
+- Supports: the final proof JSON has no stories, but `round_history[0]` has 23 passing stories and `evidence_gate.blocks_pass=false`; pipeline code sets `last_stories = stories` before the empty-story guard.
+- Conflicts: none yet.
+- Test: add a split-loop regression where round 1 has all stories passing plus `evidence_gate.blocks_pass=true`, and round 2 returns `outcome=PASSED`, no stories, and `evidence_gate.blocks_pass=false`; the run should pass and preserve the round-1 stories.
+
+### H2: The certifier proof-repair prompt is under-specified because it does not require re-emitting story markers
+
+- Supports: round 2 collected evidence but emitted no stories; the proof-repair focus asks for media and a final verdict, not explicitly to repeat the previous `STORY_RESULT` markers.
+- Conflicts: even if the prompt is tightened, proof-only repair should still be robust to an agent that emits only proof artifacts and a pass verdict.
+- Test: inspect `run_certify_fix_loop` behavior with an intentionally story-empty repaired report; if preserving prior stories fixes the run, prompt tightening is optional rather than root.
+
+### H3: Proof report generation is the only broken layer
+
+- Supports: final `evidence_gate.blocks_pass=false` indicates report construction can detect repaired evidence.
+- Conflicts: the queue failed before final report semantics alone; pipeline broke early on `no stories returned` and `BuildResult.passed` became false.
+- Test: assert `run_certify_fix_loop` result itself is false before report rendering in the story-empty repair scenario.
+
+### H4: The proof gate still failed despite `blocks_pass=false`
+
+- Supports: final diagnosis text still contains stale "Required demo proof gate failed" wording from round 1.
+- Conflicts: JSON `evidence_gate.blocks_pass=false/status=not_applicable`, and the observed failure path logged `no stories returned`.
+- Test: in the regression, make round 2 `evidence_gate.blocks_pass=false` and diagnosis neutral; if it still fails, the issue is story handling, not stale diagnosis text.
+
+## Experiments
+
+### E1: Story-empty proof-repair round after passing product stories
+
+- Setup: ran a minimal in-memory split-loop reproduction with two fake certifier reports. Round 1 returned one passing story plus `evidence_gate.blocks_pass=true`. Round 2 returned `CertificationOutcome.PASSED`, `story_results=[]`, and `evidence_gate.blocks_pass=false`. The code-fix agent was patched to raise if called.
+- Result: reproduced the failure without provider calls. Output: `Certify-fix loop round 2: no stories returned` and `{'passed': False, 'tasks_passed': 0, 'tasks_failed': 0, 'journeys': []}`.
+- Conclusion: H1 is confirmed. The loop discards the prior passing story set before final pass/report generation. H2 may still be improved later, but the core bug is pipeline state handling.
+
+## Root Cause
+
+The split certify/fix loop treats every certifier round as a complete product verdict. A proof-repair round can be evidence-only, so when it returns no stories after a prior all-passing proof-gated round, the loop overwrites `last_stories` with `[]`, records `FAIL (no stories)`, and fails the task even if the repaired evidence gate no longer blocks the pass.
+
+## Fix
+
+- When a proof gate blocks an otherwise all-passing round, the next certifier call now receives the previous passing stories as explicit required stories.
+- If that proof-repair round still returns no stories but reports a non-blocking evidence gate, the loop preserves the prior passing story set for final reporting and does not dispatch a code-fix agent.
+- If an evidence-only proof repair returns no stories and no conclusive evidence gate, the loop stops as an inconclusive proof failure instead of launching a meaningless code-fix round with no failed stories.
+- Split-loop resume now seeds `last_stories` from checkpoint rounds and treats a resumed `Proof Repair Focus` as a proof-repair round, so interrupted proof repair does not lose the already-proven story contract.
+- Added a regression where round 1 passes behavior but fails proof, round 2 writes media and returns no stories, and the run must pass with the original story retained in `proof-of-work.json`.
+- Added a resume-shaped regression where the previous passing story set comes only from `resume_rounds`.
+
+## Verification
+
+- `uv run pytest -q tests/test_hardening.py::TestHistoryWrites::test_certify_fix_loop_repairs_proof_gate_without_code_fix tests/test_hardening.py::TestHistoryWrites::test_certify_fix_loop_preserves_stories_when_proof_repair_is_evidence_only`
+- `uv run pytest -q tests/test_hardening.py::TestHistoryWrites tests/test_v3_pipeline.py::test_split_loop_writes_aggregate_pow_round_history tests/test_setup_gitignore.py tests/test_dirty_target_no_otto_files.py`
+- `uv run ruff check otto/pipeline.py otto/setup_gitignore.py otto/web/app.py tests/test_hardening.py tests/test_setup_gitignore.py tests/test_dirty_target_no_otto_files.py`
+
+# Incident Command Center Analytics Dogfood Findings
+
+Date: 2026-04-30
+
+## Observations
+
+- Queued a third real greenfield slice, `analytics-reporting`, against `/Users/yuxuan/otto-projects/incident-command-center-dogfood-20260429-221052`.
+- The build committed `build/analytics-reporting-2026-04-29` and entered certify. Round 1 passed all stories, then correctly entered proof repair because browser/demo evidence was not strong enough.
+- The queue runner was interrupted during proof repair. The task became `interrupted`, but `otto queue ls` reported `checkpoint is stale: worktree status changed`.
+- The only worktree change was an untracked runtime SQLite file, `icc.db`, created by the app during browser certification. The certifier cleanup normally removes this file, but an immediate watcher shutdown can kill the child before `finally` cleanup executes.
+- After adding a generated-artifact classifier, the same interrupted task reported `RESUME ready` without manually deleting `icc.db`, and `otto queue resume analytics-reporting` resumed from the proof-repair checkpoint.
+- The resumed run completed 14/14 stories but still failed the proof gate. The evidence directory contained story-specific screenshots and command evidence, but the proof matcher left `story-013-drill-down-to-details` on generic walkthrough and demanded visual proof for `story-014-csv-content-disposition` despite concrete HTTP CSV/header validation.
+
+## Root Causes
+
+- Resume fingerprinting compared raw `git status --porcelain --untracked-files=all`, so common generated artifacts that were not yet in an older project `.gitignore` made a valid checkpoint look stale.
+- Mission Control dirty preflight and merge preflight filtered Otto-owned paths but not common generated artifacts such as `.coverage`, `*.egg-info/`, Flask `instance/`, and local SQLite DBs.
+- Visual proof matching treated connector words like `from` as meaningful filename tokens, so `incident-detail-from-analytics.png` did not map to an analytics drill-down story.
+- Demo proof treated any story that mentioned browser download behavior as visual-only, even when the story was an HTTP/file validation story with concrete `Content-Type`, `Content-Disposition`, filename, and CSV evidence.
+
+## Fix
+
+- Added local database/runtime patterns (`*.db`, `*.sqlite`, `*.sqlite3`, `instance/`) to Otto-managed common `.gitignore` entries.
+- Added `is_common_build_artifact_path()` and used it in Mission Control dirty checks, merge preflight, and resume checkpoint fingerprinting.
+- Switched dirty/preflight untracked inspection to `--untracked-files=all` so nested generated files under otherwise untracked parent directories can be classified correctly.
+- Tightened visual filename tokenization so descriptive screenshots like `incident-detail-from-analytics.png` can map to the intended story.
+- Allowed concrete file/download validation to satisfy proof for HTTP/API export stories, while still requiring visual proof for explicitly browser/DOM/live-UI download stories.
+
+## Verification
+
+- Existing analytics evidence recomputed with the fixed proof gate as `outcome=passed`, `evidence_gate.blocks_pass=false`, and `demo_status=strong`.
+- `otto queue resume analytics-reporting` resumed the interrupted task after the generated-artifact fix without deleting `icc.db`.
+- `uv run pytest -q` in the analytics dogfood worktree passed with `151 passed`.
+- `otto merge --allow-any-branch build/analytics-reporting-2026-04-29 --verify smart` merged the branch successfully.
+- `uv run pytest -q` on dogfood `main` passed with `151 passed`.
+
+# Mission Control Landed-Run Proof Artifact Regression
+
+Date: 2026-04-30
+
+## Observations
+
+- In Mission Control for `incident-command-center-dogfood-20260429-221052`, queue rows such as `operator-actions` and `analytics-reporting` show `LANDED`, but the proof tab also shows a prominent `What failed` section.
+- Live run detail for `2026-04-30-062552-6ba62d` has `status=failed` and `review_packet.status=merged`; `review_packet.failure` still contains the stale queue failure (`exit_code=1`) even though landing context shows the branch has been merged.
+- Generic artifacts for that run point at deleted `.worktrees/analytics-reporting/...` paths after queue cleanup, while durable proof files exist under root `otto_logs/sessions/2026-04-30-062552-6ba62d/...`.
+- The full HTML proof report rewrites `evidence/recording.webm` to `/api/runs/<id>/proof-assets/evidence%2Frecording.webm`, but that route returns 403 because asset-root validation trusts the stale worktree `session_dir` from the run record.
+
+## Hypotheses
+
+### H1: Merged queue records need a final-state failure mask (ROOT HYPOTHESIS)
+
+- Supports: `_review_packet` computes `merged=True` but still passes `_failure_summary(...)` through to the client.
+- Conflicts: the historical queue run did fail, so the information should remain available somewhere less prominent.
+- Test: create a failed queue run with a landing item that marks the branch merged; detail packet should have merged readiness and no top-level failure.
+
+### H2: Proof asset validation uses stale session_dir after cleanup
+
+- Supports: proof HTML lives under root `otto_logs/sessions/<run>/certify`, but `_proof_report_asset_root` returns the deleted worktree `session_dir`.
+- Conflicts: existing tests pass when `session_dir` and proof HTML live under the same tree.
+- Test: create a record whose stale `session_dir` is deleted but whose root proof report and evidence files exist; `/proof-assets/evidence%2F...` should return bytes.
+
+### H3: Queue artifact enumeration never falls back to durable root session artifacts
+
+- Supports: `/api/runs/<id>` lists only queue manifest plus missing worktree artifacts, while root session proof/log files exist.
+- Conflicts: live queue records before cleanup should still prefer worktree artifacts.
+- Test: create a queue record with stale worktree artifact paths and root session artifacts; artifacts endpoint should include root proof report, certifier log, and media evidence.
+
+## Experiments
+
+- Manual curl confirmed H1: `review_packet.readiness.state` is `merged`, but `review_packet.failure.reason` is still `Process exited with exit_code=1...`.
+- Manual curl confirmed H2: `/api/runs/2026-04-30-062552-6ba62d/proof-assets/evidence%2Frecording.webm` returned 403 with `proof-report asset path is outside the session`.
+- Manual artifact listing confirmed H3: root `otto_logs/sessions/.../certify/evidence/*.png` and `recording.webm` exist, but the artifact payload only exposes deleted `.worktrees/...` paths plus queue manifests.
+
+## Root Cause
+
+Mission Control was treating a queue run's original failed execution record as the canonical detail source even after landing context proved the branch was merged, and artifact/proof asset lookup trusted stale worktree paths after cleanup instead of rehydrating durable root session artifacts.
+
+## Fix
+
+- Suppressed stale top-level failure summaries in review packets once merge state proves the queue branch landed.
+- Added durable root-session fallback for queue artifacts and logs when the original queue worktree session directory has been cleaned up.
+- Made proof-report asset routing derive its asset root from the durable proof report location when the recorded `session_dir` is stale, so embedded videos and screenshots keep working after cleanup.
+- Projected merged queue history rows from merge state before rendering Mission Control history/task cards, so a run no longer appears as both `LANDED` and `FAILURE`.
+
+## Verification
+
+- Live `analytics-reporting` run now reports `failure=null`, readiness `merged`, 60 artifacts, durable build/certify logs, and `LANDED` in `/api/state`.
+- Live proof assets return `200 video/webm` for `evidence/recording.webm` and `200 image/png` for story screenshots.
+- Live full HTML proof report returns `200 text/html` and rewrites embedded asset links to `/api/runs/<id>/proof-assets/...`.
+- `uv run pytest -q tests/test_mission_control_model.py::test_history_projects_landed_queue_attempts_from_merge_state tests/test_web_review_packet.py::test_web_merged_failed_queue_run_suppresses_stale_failure_and_uses_durable_artifacts`
+- `uv run pytest -q tests/test_mission_control_model.py tests/test_web_review_packet.py tests/test_mission_control_adapters.py tests/test_web_mission_control.py`
+
+# Microfeed Dogfood Certifier Process Kill
+
+Date: 2026-04-30
+
+## Observations
+
+- A real queued `core-platform` dogfood run built a Microfeed web app, failed cert round 1 on missing social controls, ran fix round 1, and passed cert round 2 functionally.
+- The proof gate requested a proof-repair certification round. During that round the certifier ran `killall python3` while trying to restart the app server.
+- `killall python3` killed Mission Control on port 9000 and the queue runner. The queue directory contained `ready.json`, but that file is a queue-child/session-readiness marker, not proof that the task is land-ready or safe to mark complete.
+- The certifier prompt already said not to use `kill`, `pkill`, or `killall` broadly, so prompt-only policy was insufficient.
+
+## Hypotheses
+
+### H1: Certifier shell safety is prompt-only and needs provider-enforced permissions (ROOT HYPOTHESIS)
+
+- Supports: the agent violated explicit lifecycle instructions and executed `killall python3`.
+- Conflicts: the first attempted SDK hook shape installed but then failed during a real long-running certifier call because the string-prompt `query()` path can close stdin while Claude still needs hook callbacks.
+- Test: install a provider permission callback through the interactive SDK client and verify with a real Claude smoke that safe Bash is allowed while `killall` is denied without a stream error.
+
+### H2: Queue runner should ignore SIGTERM after a ready marker exists (rejected)
+
+- Supports: `ready.json` predated `SIGTERM` by about two minutes, but watcher history still recorded failure.
+- Conflicts: `ready.json` means the child has initialized its session; it does not mean build/certify completed. The watcher was correct to mark the task interrupted when the child died mid-certification.
+- Test: clarify UI/CLI wording around queue-child readiness so it cannot be confused with merge-ready task state.
+
+### H3: Proof repair certifier does too much process orchestration
+
+- Supports: proof repair should collect missing evidence, but it restarted servers, killed processes, and dispatched subagents.
+- Conflicts: the current product prompt asks certifier to start the app when needed.
+- Test: later constrain proof-repair focus to reuse/own only its run-scoped app process and fail safely if startup is ambiguous.
+
+## Experiments
+
+- Confirmed from `certify/narrative.log` that proof repair ran `killall python3`; immediately afterward Mission Control was unreachable and `watcher.log` recorded SIGTERM shutdown.
+- Confirmed there were orphaned Microfeed app/provider processes after the queue runner exited, then stopped only dogfood-scoped processes.
+
+## Root Cause
+
+Otto relied on certifier prompt text to prevent dangerous process cleanup, but provider Bash tools were still allowed to run broad process-kill commands in bypass mode.
+
+## Fix
+
+- Added a default Claude SDK `can_use_tool` Bash permission callback for Otto agent sessions.
+- Agent calls that need provider callbacks now use the interactive `ClaudeSDKClient` path so the control stream stays open for the whole response.
+- The permission callback blocks `killall`, `pkill`, malformed `kill`, and `kill` commands that do not target explicit numeric PIDs.
+- Kept the hook guard shape available for explicit future use, but it is no longer the default safety mechanism.
+- Added focused regression tests for unsafe command detection, explicit PID allowance, default permission-callback installation, and SDK option propagation.
+
+## Follow-up Proof Gate Finding
+
+- After the process-kill guard, the resumed Microfeed run reached `14/14` passing stories but still exited nonzero because the proof gate treated two quality issues as hard failures:
+  - CSV/file validation was present in `observed_steps` and `observed_result`, but the gate only trusted the optional `evidence` field.
+  - `partial` proof quality, such as generic walkthrough coverage for some UI stories, blocked pass instead of surfacing as a warning.
+- Fix: file/download validation now considers observed steps/results. The temporary downgrade of `partial` demo proof to a warning was reverted; audit-grade proof requires story-specific visual/video evidence for UI stories.
+- Fix: descriptive screenshot names now match story identity using observed steps/results too, so artifacts like `crud-posts-created.png` and `engagement-likes-reposts.png` are assigned to the right story instead of staying unassigned.
+- Verification: replaying the Microfeed proof packet under the patched gate correctly blocks incomplete proof packets instead of silently accepting generic walkthrough coverage.
+
+# Microfeed Dogfood Merge Proof Gate Regression
+
+Date: 2026-04-30
+
+## Observations
+
+- A rerun of the Microfeed core-platform queue task completed the core autonomous build/certify path: the build produced commit `a40522e`, project tests passed, and certification reported 22/22 passing stories.
+- The certifier attempted process cleanup during proof repair; prompt-only safeguards were insufficient, and the first hook-based implementation proved unreliable in the real SDK stream.
+- `otto merge --all --verify smart` advanced `main` and merged the build branch, but post-merge verification failed on the stricter demo proof gate.
+- The terminal stream printed a provider-level `SUCCESS` line before the proof gate converted the certifier result to failed, which looked contradictory next to `Merge incomplete`.
+- Re-running `otto merge --all --verify smart` after the partial merge had no branches left to merge, so the obvious command was not the correct recovery path.
+
+## Root Cause
+
+Post-merge verification did not share the build/certify loop's proof-repair behavior. A proof-only failure immediately ended the merge as incomplete even when all product stories passed. The live certifier stream also used provider process success as if it were the final certification verdict, even though Otto applies proof-gate policy after the provider returns. The first process-safety hook implementation also used the SDK string-query path, which produced repeated `Stream closed` hook callback failures during a long proof-repair run.
+
+## Fix
+
+- Restored audit-grade proof semantics: `partial` demo proof now blocks pass again instead of being downgraded to a warning.
+- Added one post-merge proof-repair recertification pass when all stories pass but the proof gate blocks on missing story-specific media.
+- Changed standalone certifier stream completion from `SUCCESS` to `AGENT COMPLETE`, leaving final pass/fail wording to the certifier or merge command after proof-gate evaluation.
+- Added `otto merge-verify <merge-id> --verify <policy>` guidance when a merge is incomplete because post-merge certification failed.
+- Replaced the default hook guard with an interactive SDK permission callback so proof repair cannot kill unrelated processes and does not trip the SDK hook stream bug.
+
+## Verification
+
+- Replayed the Microfeed queue proof packet: it now fails the proof gate with missing story-specific screenshots for `edit-post`, `reply-post`, `repost-post`, and `unfollow-user`, which is the intended stricter quality bar.
+- Replayed the Microfeed post-merge proof packet: it now fails the proof gate with missing story-specific media for `home-timeline`, not broken asset links.
+- Checked both generated HTML proof reports for local asset links: 28/28 and 24/24 refs exist.
+- Real Claude SDK smoke allowed safe Bash: `echo otto-safe-smoke`.
+- Real Claude SDK smoke denied `killall __otto_nonexistent_process_name_abcdef__` through Otto's permission callback.
+- `otto merge-verify merge-1777544920-57163-25fc921f --verify smart` completed successfully after two cert rounds, including post-merge proof repair; final state `terminal_outcome=success`, `cert_passed=true`, proof `story_count=19`, no missing visual evidence.
+- `uv run pytest -q tests/test_cli_merge.py tests/test_merge_orchestrator.py tests/test_logstream.py tests/test_certifier_stories.py tests/test_agent_safety.py`
+- `uv run ruff check otto/agent.py otto/certifier/__init__.py otto/logstream.py otto/merge/orchestrator.py otto/cli_merge.py tests/test_agent_safety.py tests/test_certifier_stories.py tests/test_merge_orchestrator.py tests/test_cli_merge.py`
+
+# OpsBoard Multi-Task Dogfood Proof Repair Exhaustion
+
+Date: 2026-05-01
+
+## Observations
+
+- Controlled dogfood project: `/Users/yuxuan/otto-projects/opsboard-dogfood-20260430-multitask`.
+- Task `incident-workflow-actions` ran through the normal queue path with `--rounds 4`.
+- Round 1 correctly failed missing workflow actions, then fix commit `0531525` implemented browser/API comment, status, owner, persistence, audit, validation, and tests.
+- Round 2 correctly failed missing README curl examples, then fix commit `4f774aa` added endpoint examples.
+- Round 3 passed the product story but failed the required demo proof gate because no browser visual proof was recorded.
+- Round 4 entered Proof Repair Focus, collected six story-specific PNG screenshots, emitted `VERDICT: PASS`, and regenerated proof manifests.
+- Despite that final PASS, `proof-of-work.json` still has `outcome=failed`, `demo_status=partial`, and `evidence_gate.blocks_pass=true` because `generic_recordings=0` and `story_videos=0`.
+- The queue result is therefore `FAILURE` with `exit_code=1`; the product code appears complete, but proof repair exhausted the configured rounds before collecting the required `.webm`.
+- The proof-repair certifier ignored the explicit instruction to verify a `.webm` exists, used macOS `open`, `screencapture`, and AppleScript, then attempted a broad `pkill -f "python.*run.py"` that Otto denied.
+
+## Hypotheses
+
+### H1: Proof-repair rounds are counted against product-fix rounds, so a successful product fix can still fail when one proof repair attempt misses video (ROOT HYPOTHESIS)
+
+- Supports: the run had two product-fix failures, one product-pass/proof-gate failure, then one proof-repair attempt; `max_rounds=4` left no extra proof-only retry after the certifier collected screenshots but not video.
+- Conflicts: the proof gate correctly blocked incomplete audit-grade proof; this is not a false product failure.
+- Test: add a focused pipeline regression where max product rounds are exhausted but all stories pass and proof repair keeps returning proof-gate failure; verify Otto allows a bounded extra proof-repair retry or records a proof-specific recovery state instead of treating it like product failure.
+
+### H2: The certifier prompt is too easy to ignore for `.webm` proof collection
+
+- Supports: the proof-repair focus explicitly asked to verify a `.webm`, but the certifier stopped after screenshots and still emitted `VERDICT: PASS`.
+- Conflicts: the structured proof gate still caught the missing video, so the backend policy layer is doing its job.
+- Test: inspect rendered proof-repair prompts and add stronger, tool-specific instructions and/or a backend-generated proof checklist that is impossible to satisfy without a `.webm`.
+
+### H3: Otto needs an owned app-server/proof-recorder helper instead of letting certifiers improvise browser proof
+
+- Supports: the certifier repeatedly hit macOS `localhost:5000` AirPlay/ControlCenter behavior, used local desktop commands, and tried process cleanup despite prior safety work.
+- Conflicts: previous dashboard task did eventually record a `.webm`, so the current ad hoc approach can work sometimes.
+- Test: add or prototype a single helper that starts the app on a safe `127.0.0.1` port, records browser video, writes story-specific artifacts, and kills only its own child process.
+
+## Experiments
+
+- Confirmed from the run checkpoint that round 4 had `stories_passed=1`, no failing story ids, but `result="FAIL proof gate (1/1 stories passed)"`.
+- Confirmed from `proof-of-work.json` that six story screenshots were mapped to `incident-workflow-actions-2026-04-30`, but no `.webm` was present and the evidence gate blocked pass.
+- Confirmed from the narrative log that the certifier believed proof repair succeeded even though it did not collect the required video.
+- Added a regression test with `max_certify_rounds=1` and two additional proof-repair attempts. Before the fix, the run failed after the product round cap even when a later proof-repair certifier call would provide valid media.
+
+## Root Cause
+
+The product-fix round budget and proof-repair evidence budget were coupled. That made code churn bounded, which is good, but it also meant a completed product could fail permanently when the first proof-repair certifier attempt missed required video.
+
+## Fix
+
+- Split the budgets in `run_certify_fix_loop`: product fixes still stop at `max_certify_rounds`, while proof-gate-only failures get a bounded `max_proof_repair_rounds` extension, defaulting to 2 and capped at 5.
+- Extra proof-repair rounds pass the prior passing stories back into the certifier and do not dispatch the code-fix agent.
+- Regression test: `uv run pytest -q tests/test_hardening.py -k 'certify_fix_loop_allows_extra_proof_repair_after_product_round_cap or certify_fix_loop_repairs_proof_gate_without_code_fix or certify_fix_loop_preserves_stories_when_proof_repair_is_evidence_only'`.

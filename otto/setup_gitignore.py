@@ -67,8 +67,15 @@ COMMON_BUILD_ARTIFACT_PATTERNS: tuple[str, ...] = (
     "*.pyc",
     "*.pyo",
     ".pytest_cache/",
+    ".coverage",
+    "htmlcov/",
+    "*.egg-info/",
     ".mypy_cache/",
     ".ruff_cache/",
+    "*.db",
+    "*.sqlite",
+    "*.sqlite3",
+    "instance/",
     # Node
     "node_modules/",
     ".npm/",
@@ -127,6 +134,42 @@ def is_otto_owned_path(path: str) -> bool:
         if norm == bare or norm.startswith(bare + "/"):
             return True
         if fnmatch.fnmatch(norm, bare):
+            return True
+    return False
+
+
+def is_common_build_artifact_path(path: str) -> bool:
+    """Return True for generated test/build/runtime artifacts Otto ignores.
+
+    This is deliberately narrower than "any untracked file": it mirrors the
+    common artifact patterns Otto writes into managed `.gitignore` files so
+    stale resume checks and dirty-target checks do not block on files produced
+    by pytest, Flask, SQLite-backed demos, or local build tools.
+    """
+    norm = path.strip()
+    while norm.startswith("./"):
+        norm = norm[2:]
+    norm = norm.rstrip("/")
+    if not norm:
+        return False
+
+    parts = Path(norm).parts
+    name = parts[-1] if parts else norm
+    for pattern in COMMON_BUILD_ARTIFACT_PATTERNS:
+        pat = pattern.strip()
+        if not pat:
+            continue
+        is_dir_pattern = pat.endswith("/")
+        bare = pat.rstrip("/")
+        if not bare:
+            continue
+        if is_dir_pattern:
+            if any(fnmatch.fnmatch(part, bare) for part in parts):
+                return True
+            if fnmatch.fnmatch(norm, bare) or fnmatch.fnmatch(norm, bare + "/*"):
+                return True
+            continue
+        if fnmatch.fnmatch(norm, pat) or fnmatch.fnmatch(name, pat):
             return True
     return False
 

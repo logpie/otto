@@ -136,7 +136,7 @@ def test_web_history_usage_reads_merge_summary_extra_artifact(tmp_path: Path) ->
 
     state = _client(repo).get("/api/state?type=merge").json()
 
-    assert state["history"]["items"][0]["cost_display"] == "2.3K tokens"
+    assert state["history"]["items"][0]["cost_display"] == "1.3K fresh + 1K cached · 50% hit"
 
 def test_web_project_stats_include_claude_cache_token_fields(tmp_path: Path) -> None:
     repo = tmp_path / "repo"

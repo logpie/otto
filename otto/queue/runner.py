@@ -85,6 +85,18 @@ from otto.runs.schema import TERMINAL_STATUSES
 
 logger = logging.getLogger("otto.queue.runner")
 
+AUTO_COMMIT_LOCKFILE_PATHS = {
+    "bun.lockb",
+    "Cargo.lock",
+    "go.sum",
+    "package-lock.json",
+    "Pipfile.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "uv.lock",
+    "yarn.lock",
+}
+
 
 def _json_fingerprint(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
@@ -93,6 +105,90 @@ def _json_fingerprint(value: Any) -> str:
 def _task_success_requires_clean_worktree(manifest: dict[str, Any]) -> bool:
     command = str(manifest.get("command") or "").strip().lower()
     return command in {"build", "improve", "certify"}
+
+
+def _task_success_can_commit_generated_lockfiles(manifest: dict[str, Any]) -> bool:
+    command = str(manifest.get("command") or "").strip().lower()
+    return command in {"build", "improve"}
+
+
+def _porcelain_status_path(line: str) -> str:
+    raw = line[3:] if len(line) > 3 else line
+    if " -> " in raw:
+        raw = raw.rsplit(" -> ", 1)[-1]
+    return raw.strip().strip('"')
+
+
+def _auto_commit_generated_lockfiles(worktree: Path) -> bool:
+    if not worktree.exists() or not (worktree / ".git").exists():
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("could not inspect generated lockfiles in %s: %s", worktree, exc)
+        return False
+    if result.returncode != 0:
+        logger.warning(
+            "could not inspect generated lockfiles in %s: %s",
+            worktree,
+            (result.stderr or result.stdout or "git status failed").strip(),
+        )
+        return False
+
+    paths_to_commit: list[str] = []
+    other_changes: list[str] = []
+    for line in (result.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        path = _porcelain_status_path(line)
+        if path in AUTO_COMMIT_LOCKFILE_PATHS:
+            paths_to_commit.append(path)
+        else:
+            other_changes.append(path)
+
+    if not paths_to_commit or other_changes:
+        return False
+
+    try:
+        add = subprocess.run(
+            ["git", "add", "--", *paths_to_commit],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if add.returncode != 0:
+            logger.warning(
+                "could not stage generated lockfiles in %s: %s",
+                worktree,
+                (add.stderr or add.stdout or "git add failed").strip(),
+            )
+            return False
+        commit = subprocess.run(
+            ["git", "commit", "-q", "-m", "chore: include generated dependency lockfile", "--", *paths_to_commit],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("could not commit generated lockfiles in %s: %s", worktree, exc)
+        return False
+    if commit.returncode != 0:
+        logger.warning(
+            "could not commit generated lockfiles in %s: %s",
+            worktree,
+            (commit.stderr or commit.stdout or "git commit failed").strip(),
+        )
+        return False
+    logger.info("committed generated lockfiles in %s: %s", worktree, ", ".join(paths_to_commit))
+    return True
 
 
 def _dirty_successful_worktree_reason(worktree: Path) -> str | None:
@@ -1864,7 +1960,10 @@ class Runner:
                 None,
             )
             if task is not None and task.worktree:
-                dirty_reason = _dirty_successful_worktree_reason(self.project_dir / task.worktree)
+                worktree = self.project_dir / task.worktree
+                if _task_success_can_commit_generated_lockfiles(manifest):
+                    _auto_commit_generated_lockfiles(worktree)
+                dirty_reason = _dirty_successful_worktree_reason(worktree)
                 if dirty_reason:
                     _mark_failed(ts, dirty_reason)
                     return

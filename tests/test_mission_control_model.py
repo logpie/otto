@@ -6,6 +6,7 @@ from pathlib import Path
 
 from otto import paths
 from otto.history import append_history_entry
+from otto.merge.state import BranchOutcome, MergeState, write_state as write_merge_state
 from otto.queue.schema import QueueTask, append_task, write_state
 from otto.runs.registry import finalize_record, make_run_record, update_record, write_record
 import otto.mission_control.model as mission_control_model
@@ -612,6 +613,91 @@ def test_history_outcome_removed_filters_correctly(tmp_path: Path) -> None:
     assert [item.row.run_id for item in state.history_page.items] == ["removed-run"]
     assert model.cycle_outcome_filter(state).filters.outcome_filter == "other"
     assert model.cycle_outcome_filter(state).filters.outcome_filter == "all"
+
+
+def test_history_projects_landed_queue_attempts_from_merge_state(tmp_path: Path) -> None:
+    append_history_entry(
+        tmp_path,
+        {
+            "schema_version": 2,
+            "history_kind": "terminal_snapshot",
+            "dedupe_key": "terminal_snapshot:queue-run",
+            "run_id": "queue-run",
+            "domain": "queue",
+            "run_type": "queue",
+            "command": "build analytics",
+            "status": "failed",
+            "terminal_outcome": "failure",
+            "queue_task_id": "analytics-reporting",
+            "branch": "build/analytics-reporting",
+            "timestamp": "2026-04-23T12:00:00Z",
+        },
+    )
+    write_merge_state(
+        tmp_path,
+        MergeState(
+            merge_id="merge-success",
+            target="main",
+            status="done",
+            terminal_outcome="success",
+            outcomes=[BranchOutcome(branch="build/analytics-reporting", status="merged")],
+        ),
+    )
+
+    model = MissionControlModel(tmp_path)
+    state = model.initial_state(filters=MissionControlFilters(outcome_filter="success"))
+
+    assert [item.row.run_id for item in state.history_page.items] == ["queue-run"]
+    item = state.history_page.items[0]
+    assert item.outcome_display == "LANDED"
+    assert item.row.status == "done"
+    assert item.row.terminal_outcome == "success"
+    assert item.row.merge_id == "merge-success"
+    assert state.project_stats.success_count == 1
+    assert state.project_stats.failed_count == 0
+
+    failed_state = model.initial_state(filters=MissionControlFilters(outcome_filter="failed"))
+    assert failed_state.history_page.items == []
+
+
+def test_history_ignores_failed_merge_state_for_landed_projection(tmp_path: Path) -> None:
+    append_history_entry(
+        tmp_path,
+        {
+            "schema_version": 2,
+            "history_kind": "terminal_snapshot",
+            "dedupe_key": "terminal_snapshot:queue-run",
+            "run_id": "queue-run",
+            "domain": "queue",
+            "run_type": "queue",
+            "command": "build analytics",
+            "status": "failed",
+            "terminal_outcome": "failure",
+            "queue_task_id": "analytics-reporting",
+            "branch": "build/analytics-reporting",
+            "timestamp": "2026-04-23T12:00:00Z",
+        },
+    )
+    write_merge_state(
+        tmp_path,
+        MergeState(
+            merge_id="merge-failed",
+            target="main",
+            status="failed",
+            terminal_outcome="failure",
+            outcomes=[BranchOutcome(branch="build/analytics-reporting", status="merged")],
+        ),
+    )
+
+    model = MissionControlModel(tmp_path)
+    success_state = model.initial_state(filters=MissionControlFilters(outcome_filter="success"))
+    assert success_state.history_page.items == []
+
+    failed_state = model.initial_state(filters=MissionControlFilters(outcome_filter="failed"))
+    assert [item.row.run_id for item in failed_state.history_page.items] == ["queue-run"]
+    item = failed_state.history_page.items[0]
+    assert item.outcome_display == "FAILURE"
+    assert item.row.merge_id is None
 
 
 def test_history_unknown_outcome_buckets_to_other_and_warns_once(caplog) -> None:

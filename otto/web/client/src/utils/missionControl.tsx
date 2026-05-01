@@ -1025,7 +1025,7 @@ export function useDocumentTitle({viewMode, selectedRunId, selectedDetail, inspe
       const truncated = intent.length > 60 ? `${intent.slice(0, 57)}...` : intent;
       prefix = truncated;
       if (inspectorOpen) {
-        const tabLabel = {try: "Runbook", proof: "Proof", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
+        const tabLabel = {try: "Proof", proof: "Proof", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
         prefix = `${truncated} - ${tabLabel}`;
       }
     }
@@ -1048,7 +1048,7 @@ export function useLiveAnnouncement({viewMode, selectedRunId, inspectorOpen, ins
     if (selectedRunId) {
       parts.push(`run ${selectedRunId}`);
       if (inspectorOpen) {
-        const tabLabel = {try: "Runbook", proof: "Proof", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
+        const tabLabel = {try: "Proof", proof: "Proof", diff: "Code changes", logs: "Logs", artifacts: "Artifacts"}[inspectorMode];
         parts.push(`${tabLabel} tab`);
       }
     }
@@ -1398,8 +1398,7 @@ export function canTryProduct(detail: RunDetail | null): boolean {
 }
 
 export function productActionLabel(detail: RunDetail | null): string {
-  const label = detail?.review_packet?.product_handoff?.preview_label;
-  return label && label.trim() ? label : "Preview product";
+  return detail?.review_packet?.product_handoff ? "Product handoff" : "Runbook";
 }
 
 /**

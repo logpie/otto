@@ -85,6 +85,29 @@ def test_render_includes_stories_section_when_provided(tmp_path: Path):
     assert "csv export" in out
 
 
+def test_render_includes_evidence_contract_with_explicit_story(tmp_path: Path):
+    out = _render_certifier_prompt(
+        mode="standard",
+        intent="Certify the PDF export web flow.",
+        evidence_dir=tmp_path / "evidence",
+        stories=[
+            {
+                "story_id": "pdf-export",
+                "claim": "User can click Export PDF and download the generated file.",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+            }
+        ],
+    )
+
+    assert "Evidence Contract" in out
+    assert str(tmp_path / "evidence") in out
+    assert "`pdf-export`" in out
+    assert "story-named screenshot/clip" in out
+    assert "file validation" in out
+    assert "$ " in out
+
+
 def test_render_omits_stories_section_when_none(tmp_path: Path):
     out = _render_certifier_prompt(
         mode="standard",
@@ -720,6 +743,280 @@ def test_pow_demo_evidence_assigns_story_number_screenshot_by_meaning(tmp_path: 
     assert report["evidence_gate"]["blocks_pass"] is True
 
 
+def test_pow_demo_evidence_matches_descriptive_visual_filenames(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "recording.webm").write_bytes(b"video")
+    (evidence_dir / "ui-incident-detail-full.png").write_bytes(b"image")
+    (evidence_dir / "invalid-incident-handling.png").write_bytes(b"image")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "Incident detail page renders all operator action UI elements",
+                "summary": "Incident detail page renders all operator action UI elements",
+                "claim": "Incident detail page renders all operator action UI elements.",
+                "observed_result": "Incident detail page displayed the operator forms and checklist.",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": "Browser screenshot shows the incident detail UI.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "Invalid incident IDs return proper 404 error pages",
+                "summary": "Invalid incident IDs return proper 404 error pages",
+                "claim": "Invalid incident IDs return proper 404 error pages.",
+                "observed_result": "Invalid incident page displayed a 404 error.",
+                "surface": "HTML page",
+                "methodology": "live-ui-events",
+                "evidence": "Browser screenshot shows invalid incident handling.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "Complete test suite passes with full coverage of all features",
+                "summary": "Complete test suite passes with full coverage",
+                "claim": "76 tests pass covering API, dashboard, incident detail, operator actions.",
+                "observed_result": "Full test coverage with 100% pass rate.",
+                "surface": "pytest",
+                "methodology": "source-level",
+                "evidence": "pytest reported 76/76 tests passed.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        3,
+        3,
+        evidence_dir=evidence_dir,
+        intent="Build an incident command center web app with operator workflows.",
+    )
+
+    by_id = {story["id"]: story for story in report["demo_evidence"]["stories"]}
+    assert by_id["Incident detail page renders all operator action UI elements"]["visual_items"][0]["name"] == (
+        "ui-incident-detail-full.png"
+    )
+    assert by_id["Invalid incident IDs return proper 404 error pages"]["visual_items"][0]["name"] == (
+        "invalid-incident-handling.png"
+    )
+    assert report["demo_evidence"]["demo_status"] == "strong"
+    assert report["evidence_gate"]["blocks_pass"] is False
+
+
+def test_pow_demo_evidence_matches_multisurface_story_id_screenshots(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "recording.webm").write_bytes(b"video")
+    (evidence_dir / "app-startup.png").write_bytes(b"image")
+    (evidence_dir / "incident-detail-display.png").write_bytes(b"image")
+    (evidence_dir / "incident-detail-labels.png").write_bytes(b"image")
+    (evidence_dir / "incident-list-display.png").write_bytes(b"image")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "app-startup",
+                "summary": "Flask app startup, health endpoint, and incident list all functional",
+                "claim": "App startup working, Flask initialized, health endpoint functional, incident list populated.",
+                "observed_result": "App startup with health endpoint functional confirmed via screenshot.",
+                "surface": "HTTP;DOM",
+                "methodology": "live-ui-events;http-request",
+                "evidence": "App startup with health endpoint functional confirmed via screenshot (app-startup.png).",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "incident-detail-display",
+                "summary": "Incident detail shows complete incident info with comments and audit trail",
+                "claim": "Detail page shows incident with comments and audit trail.",
+                "observed_result": "Detail page shows incident with comments and complete audit trail.",
+                "surface": "DOM;HTTP",
+                "methodology": "live-ui-events;http-request",
+                "evidence": "Detail page shows incident with comments and audit trail (incident-detail-display.png).",
+                "failure_evidence": "incident-detail-display.png",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "incident-detail-labels",
+                "summary": "Incident detail correctly displays labels with colors",
+                "claim": "Labels displayed on incident detail.",
+                "observed_result": "Labels displayed on incident detail with colors.",
+                "surface": "DOM;HTTP",
+                "methodology": "live-ui-events;http-request",
+                "evidence": "Labels displayed on incident detail with colors (incident-detail-labels.png).",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "incident-list-display",
+                "summary": "Incident list correctly displays all seeded data with proper formatting",
+                "claim": "Incident list displays seeded data correctly.",
+                "observed_result": "Incident list displays all seeded data correctly.",
+                "surface": "DOM;HTTP",
+                "methodology": "live-ui-events;http-request",
+                "evidence": "Incident list displays all seeded data correctly (incident-list-display.png).",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        4,
+        4,
+        evidence_dir=evidence_dir,
+        intent="Build an incident operations web app.",
+    )
+
+    by_id = {story["id"]: story for story in report["demo_evidence"]["stories"]}
+    assert by_id["app-startup"]["visual_items"][0]["name"] == "app-startup.png"
+    assert by_id["incident-detail-display"]["visual_items"][0]["name"] == "incident-detail-display.png"
+    assert by_id["incident-detail-display"]["visual_items"][0]["caption"] == ""
+    assert by_id["incident-detail-labels"]["visual_items"][0]["name"] == "incident-detail-labels.png"
+    assert by_id["incident-list-display"]["visual_items"][0]["name"] == "incident-list-display.png"
+    assert all(story["proof_level"] == "story screenshot" for story in by_id.values())
+    assert report["demo_evidence"]["demo_status"] == "strong"
+    assert report["evidence_gate"]["blocks_pass"] is False
+
+
+def test_pow_demo_evidence_groups_story_id_prefix_screenshots(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "operator-identity-and-audit.webm").write_bytes(b"video")
+    (evidence_dir / "operator-identity-01-incident-list.png").write_bytes(b"image")
+    (evidence_dir / "operator-identity-02-operator-set.png").write_bytes(b"image")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "operator-identity-and-audit",
+                "summary": "Operator identity and audit attribution",
+                "claim": "Operator selection persists and actions are attributed in the audit log.",
+                "observed_result": "Operator selector, role badges, and audit events were visible.",
+                "surface": "screenshot;HTTP;source-level;video",
+                "methodology": "live-ui-events",
+                "evidence": "Browser workflow recorded with matching screenshots.",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        evidence_dir=evidence_dir,
+        intent="Build an operator identity web workflow.",
+    )
+
+    story = report["demo_evidence"]["stories"][0]
+    visual_names = {item["name"] for item in story["visual_items"]}
+    assert "operator-identity-and-audit.webm" in visual_names
+    assert "operator-identity-01-incident-list.png" in visual_names
+    assert "operator-identity-02-operator-set.png" in visual_names
+    assert report["visual_evidence"]["unassigned"] == []
+    assert report["demo_evidence"]["counts"]["story_screenshots"] == 2
+    assert report["demo_evidence"]["demo_status"] == "strong"
+
+
+def test_pow_demo_evidence_can_attach_one_visual_to_multiple_ui_stories(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "recording.webm").write_bytes(b"video")
+    (evidence_dir / "search-results.png").write_bytes(b"image")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "search-posts",
+                "summary": "Search finds posts by content",
+                "claim": "Search finds posts by content.",
+                "observed_steps": ['entered "japan"', "results loaded"],
+                "observed_result": "Post results loaded with matching content.",
+                "surface": "DOM / screenshot",
+                "methodology": "live-ui-events",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "search-users",
+                "summary": "Search finds users",
+                "claim": "Search finds users.",
+                "observed_steps": ['entered "alice"', "results loaded"],
+                "observed_result": "User results loaded with matching profile details.",
+                "surface": "DOM / screenshot",
+                "methodology": "live-ui-events",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "api-search",
+                "summary": "JSON API search works",
+                "claim": "JSON API search returns matching data.",
+                "observed_result": "curl returned JSON results.",
+                "surface": "HTTP",
+                "methodology": "http-request",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        3,
+        3,
+        evidence_dir=evidence_dir,
+        intent="Certify the Microfeed search web UI and API.",
+    )
+
+    by_id = {story["id"]: story for story in report["demo_evidence"]["stories"]}
+    assert by_id["search-posts"]["visual_items"][0]["name"] == "search-results.png"
+    assert by_id["search-users"]["visual_items"][0]["name"] == "search-results.png"
+    assert by_id["api-search"]["visual_items"] == []
+    assert report["demo_evidence"]["demo_status"] == "strong"
+    assert report["evidence_gate"]["blocks_pass"] is False
+
+
+def test_pow_demo_evidence_matches_drilldown_visual_from_descriptive_filename(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "recording.webm").write_bytes(b"video")
+    (evidence_dir / "incident-detail-from-analytics.png").write_bytes(b"image")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "story-013-drill-down-to-details",
+                "summary": "Analytics dashboard provides functional drill-down to incident details",
+                "claim": "Analytics dashboard provides functional drill-down to incident details.",
+                "observed_result": "Clicking an incident link opened the incident detail page.",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": "Analytics page contains clickable incident links that navigate to detail pages.",
+                "verdict": "PASS",
+                "passed": True,
+            }
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        evidence_dir=evidence_dir,
+        intent="Certify the analytics web dashboard.",
+    )
+
+    story = report["demo_evidence"]["stories"][0]
+    assert story["visual_items"][0]["name"] == "incident-detail-from-analytics.png"
+    assert story["proof_level"] == "story screenshot"
+    assert report["demo_evidence"]["demo_status"] == "strong"
+    assert report["evidence_gate"]["blocks_pass"] is False
+
+
 def test_pow_demo_evidence_does_not_credit_broad_screenshot_as_story_specific(tmp_path: Path):
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
@@ -957,6 +1254,101 @@ def test_pow_demo_evidence_does_not_require_video_for_http_file_story(tmp_path: 
     assert report["verdict_label"] == "PASS"
 
 
+def test_pow_file_validation_satisfies_browser_download_header_story(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "recording.webm").write_bytes(b"video")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "story-014-csv-content-disposition",
+                "summary": "CSV export configured for proper browser download behavior",
+                "claim": "CSV export configured for proper browser download behavior.",
+                "observed_steps": ["requested the CSV export endpoint with curl"],
+                "observed_result": "HTTP 200 with text/csv and attachment content disposition.",
+                "surface": "HTTP",
+                "methodology": "http-request",
+                "evidence": (
+                    "$ curl -i http://localhost:5000/api/analytics/export.csv\n"
+                    "HTTP/1.1 200 OK\n"
+                    "Content-Type: text/csv\n"
+                    "Content-Disposition: attachment; filename=analytics.csv"
+                ),
+                "verdict": "PASS",
+                "passed": True,
+            }
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        evidence_dir=evidence_dir,
+        intent="Certify the analytics dashboard and CSV download flow.",
+    )
+
+    story = report["demo_evidence"]["stories"][0]
+    assert story["needs_file_validation"] is True
+    assert story["has_file_validation"] is True
+    assert story["needs_visual"] is False
+    assert story["proof_level"] == "file validation"
+    assert report["demo_evidence"]["demo_status"] == "strong"
+    assert report["evidence_gate"]["blocks_pass"] is False
+
+
+def test_pow_file_validation_accepts_observed_curl_export_details(tmp_path: Path):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "recording.webm").write_bytes(b"video")
+    (evidence_dir / "timeline.png").write_bytes(b"image")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "timeline",
+                "summary": "Timeline renders in the browser",
+                "claim": "Timeline renders in the browser.",
+                "observed_steps": ["opened the home timeline"],
+                "observed_result": "Timeline rendered with seeded posts.",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": "timeline.png",
+                "verdict": "PASS",
+                "passed": True,
+            },
+            {
+                "story_id": "csv-export",
+                "summary": "CSV export working",
+                "claim": "Timeline CSV export returns a downloadable file.",
+                "observed_steps": [
+                    "Called /api/export/timeline.csv?as=alice",
+                    "verified headers",
+                ],
+                "observed_result": "CSV file with proper headers returned.",
+                "surface": "HTTP",
+                "methodology": "http-request",
+                "evidence": "",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        2,
+        2,
+        evidence_dir=evidence_dir,
+        intent="Build a web app with timeline CSV export.",
+    )
+
+    story = next(story for story in report["demo_evidence"]["stories"] if story["id"] == "csv-export")
+    assert story["needs_file_validation"] is True
+    assert story["has_file_validation"] is True
+    assert story["proof_level"] == "file validation"
+    assert report["evidence_gate"]["blocks_pass"] is False
+
+
 def test_pow_generic_recording_does_not_cover_unvisualized_ui_story(tmp_path: Path):
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
@@ -1004,6 +1396,7 @@ def test_pow_generic_recording_does_not_cover_unvisualized_ui_story(tmp_path: Pa
     assert nav["proof_level"] == "generic walkthrough only"
     assert report["demo_evidence"]["demo_status"] == "partial"
     assert report["outcome"] == "failed"
+    assert report["evidence_gate"]["status"] == "fail"
     assert report["evidence_gate"]["blocks_pass"] is True
 
 
@@ -1068,8 +1461,102 @@ def test_pow_required_demo_missing_blocks_passing_report(tmp_path: Path):
     assert report["demo_evidence"]["demo_required"] is True
     assert report["demo_evidence"]["demo_status"] == "missing"
     assert report["evidence_gate"]["blocks_pass"] is True
+    assert report["evidence_gate"]["missing_requirements"]
+    assert report["round_history"][-1]["phase"] == "proof_gate"
+    assert report["round_history"][-1]["product_passed"] is True
     assert "Required demo proof gate failed" in report["diagnosis"]
     assert "FAIL" in (tmp_path / "proof-of-work.md").read_text()
+    html = (tmp_path / "proof-of-work.html").read_text()
+    assert "Proof check" in html
+    assert "INCOMPLETE" in html
+
+
+def test_pow_evidence_spec_records_story_requirements(tmp_path: Path):
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "json-notifications",
+                "summary": "JSON API returns notifications",
+                "claim": "GET /api/notifications returns notification payloads.",
+                "observed_steps": ["curl /api/notifications"],
+                "observed_result": "HTTP 200 JSON response",
+                "surface": "HTTP",
+                "methodology": "http-request",
+                "evidence": "$ curl -s http://localhost:5000/api/notifications\n[]",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        12.0,
+        0.0,
+        1,
+        1,
+        intent="Certify a JSON API.",
+    )
+
+    spec = report["evidence_spec"]
+    assert spec["app_kind"] == "api"
+    assert spec["global_video_required"] is False
+    story = spec["stories"][0]
+    assert story["id"] == "json-notifications"
+    assert story["requires_command"] is True
+    assert story["requires_visual"] is False
+
+
+def test_pow_round_history_labels_proof_repair_separately(tmp_path: Path):
+    (tmp_path / "recording.webm").write_bytes(b"video")
+    (tmp_path / "dashboard-create.png").write_bytes(b"image")
+    report = write_test_pow_report(
+        tmp_path,
+        [
+            {
+                "story_id": "dashboard-create",
+                "summary": "Dashboard create flow works",
+                "claim": "User can create a dashboard item.",
+                "observed_steps": ["clicked create"],
+                "observed_result": "item appeared",
+                "surface": "DOM",
+                "methodology": "live-ui-events",
+                "evidence": "dashboard-create.png",
+                "verdict": "PASS",
+                "passed": True,
+            },
+        ],
+        "passed",
+        20.0,
+        0.0,
+        1,
+        1,
+        evidence_dir=tmp_path,
+        round_history=[
+            {
+                "round": 1,
+                "verdict": "failed",
+                "stories_tested": 1,
+                "diagnosis": "Required demo proof gate failed: no browser video walkthrough was recorded",
+                "phase": "proof_gate",
+                "product_passed": True,
+            },
+            {
+                "round": 2,
+                "verdict": "passed",
+                "stories_tested": 1,
+                "phase": "proof_repair",
+                "phase_attempt": 1,
+                "product_passed": True,
+            },
+        ],
+        intent="Build a web dashboard.",
+    )
+
+    first, second = report["round_history"]
+    assert first["phase_label"] == "Proof check"
+    assert second["phase_label"] == "Proof repair 1"
+    html = (tmp_path / "proof-of-work.html").read_text()
+    assert "Proof check" in html
+    assert "Proof repair 1" in html
 
 
 # ---------- prompt placeholder support ----------

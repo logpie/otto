@@ -207,14 +207,14 @@ def test_web_does_not_stop_stale_watcher_pid_without_held_lock(tmp_path: Path, m
 
     client = _client(repo)
     state = client.get("/api/state").json()
-    assert state["watcher"]["health"]["state"] == "stopped"
+    assert state["watcher"]["health"]["state"] == "stale"
     assert state["watcher"]["health"]["watcher_pid"] == pid
-    assert state["watcher"]["health"]["blocking_pid"] is None
+    assert state["watcher"]["health"]["blocking_pid"] == pid
 
     response = client.post("/api/watcher/stop", json={})
 
-    assert response.status_code == 200
-    assert response.json()["message"] == "watcher is not running"
+    assert response.status_code == 409
+    assert "could not verify" in response.json()["message"]
     assert signals == []
 
 

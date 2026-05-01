@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import signal
 import traceback
 from collections import deque
@@ -18,24 +19,38 @@ from otto.token_usage import TOKEN_USAGE_KEYS
 _SDK_IMPORT_ERROR_MESSAGE = ""
 
 CODEX_STDIO_LIMIT_BYTES = 16 * 1024 * 1024
+DEFAULT_DISALLOWED_BASH_TOOLS = (
+    "Bash(killall*)",
+    "Bash(killall:*)",
+    "Bash(pkill*)",
+    "Bash(pkill:*)",
+)
 
 try:
+    from claude_agent_sdk import ClaudeSDKClient as _SDKClaudeSDKClient
     from claude_agent_sdk import ClaudeAgentOptions as _SDKClaudeAgentOptions
     from claude_agent_sdk import query as _sdk_query
     from claude_agent_sdk.types import AssistantMessage as _SDKAssistantMessage
     from claude_agent_sdk.types import ResultMessage as _SDKResultMessage
     from claude_agent_sdk.types import TextBlock as _SDKTextBlock
+    from claude_agent_sdk.types import HookMatcher as _SDKHookMatcher
+    from claude_agent_sdk.types import PermissionResultAllow as _SDKPermissionResultAllow
+    from claude_agent_sdk.types import PermissionResultDeny as _SDKPermissionResultDeny
     from claude_agent_sdk.types import ToolResultBlock as _SDKToolResultBlock
     from claude_agent_sdk.types import ToolUseBlock as _SDKToolUseBlock
 except ImportError:
     import sys
 
     _SDK_IMPORT_ERROR_MESSAGE = str(sys.exc_info()[1] or "")
+    _SDKClaudeSDKClient = None
     _SDKClaudeAgentOptions = None
     _sdk_query = None
     _SDKAssistantMessage = None
     _SDKResultMessage = None
     _SDKTextBlock = None
+    _SDKHookMatcher = None
+    _SDKPermissionResultAllow = None
+    _SDKPermissionResultDeny = None
     _SDKToolResultBlock = None
     _SDKToolUseBlock = None
 
@@ -122,6 +137,8 @@ class AgentOptions:
     max_buffer_size: int | None = None
     provider: str | None = None
     disallowed_tools: list[str] | None = None
+    hooks: dict[str, list[Any]] | None = None
+    can_use_tool: Callable[..., Any] | None = None
     output_format: dict[str, Any] | None = None
     max_subagent_dispatches: int | None = None
     debug_unredacted: bool | None = None
@@ -171,6 +188,9 @@ def make_agent_options(
         opts.max_subagent_dispatches = max(20, max_rounds * 20)
     if opts.debug_unredacted is None:
         opts.debug_unredacted = bool(cfg.get("debug_unredacted"))
+    if opts.can_use_tool is None:
+        opts.can_use_tool = _otto_can_use_tool_safety
+    opts.disallowed_tools = _merge_disallowed_tools(opts.disallowed_tools)
     opts.provider = agent_provider(cfg, agent_type)
     model = effective_agent_model(cfg, agent_type)
     if model:
@@ -179,6 +199,130 @@ def make_agent_options(
     if effort:
         opts.effort = str(effort)
     return opts
+
+
+def _merge_disallowed_tools(existing: list[str] | None) -> list[str]:
+    merged: list[str] = []
+    for item in [*(existing or []), *DEFAULT_DISALLOWED_BASH_TOOLS]:
+        if item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _default_agent_hooks() -> dict[str, list[Any]]:
+    if _SDKHookMatcher is not None:
+        return {
+            "PreToolUse": [
+                _SDKHookMatcher(matcher="Bash", hooks=[_otto_pre_tool_safety_hook])
+            ]
+        }
+    return {
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [_otto_pre_tool_safety_hook],
+            }
+        ]
+    }
+
+
+async def _otto_can_use_tool_safety(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    _context: Any,
+) -> Any:
+    """Allow normal tools while denying process-kill commands that can escape a run."""
+    if str(tool_name or "") != "Bash":
+        return _permission_allow()
+    reason = _unsafe_bash_command_reason(str((tool_input or {}).get("command") or ""))
+    if reason:
+        return _permission_deny(reason)
+    return _permission_allow()
+
+
+def _permission_allow() -> Any:
+    if _SDKPermissionResultAllow is not None:
+        return _SDKPermissionResultAllow()
+    return {"behavior": "allow"}
+
+
+def _permission_deny(reason: str) -> Any:
+    if _SDKPermissionResultDeny is not None:
+        return _SDKPermissionResultDeny(message=reason, interrupt=False)
+    return {"behavior": "deny", "message": reason}
+
+
+async def _otto_pre_tool_safety_hook(
+    hook_input: dict[str, Any],
+    _tool_use_id: str | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    """Block provider shell commands that can kill unrelated user processes."""
+    if str(hook_input.get("hook_event_name") or "") != "PreToolUse":
+        return {}
+    if str(hook_input.get("tool_name") or "") != "Bash":
+        return {}
+    tool_input = hook_input.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return {}
+    reason = _unsafe_bash_command_reason(str(tool_input.get("command") or ""))
+    if not reason:
+        return {}
+    return {
+        "decision": "block",
+        "reason": reason,
+        "systemMessage": reason,
+    }
+
+
+_KILL_COMMAND_RE = re.compile(r"(?<![\w./-])(?:/bin/)?(kill|pkill|killall)(?![\w./-])")
+_COMMAND_SPLIT_RE = re.compile(r"(?:&&|\|\||;|\n)")
+
+
+def _unsafe_bash_command_reason(command: str) -> str:
+    """Return a human-readable deny reason for process-kill commands.
+
+    Provider agents cannot reliably know which local PIDs belong to Otto. Even
+    an explicit numeric PID can target unrelated user processes discovered via
+    lsof or ps, so direct shell kills are denied here. Otto-owned subprocesses
+    should be stopped by Otto's managed process cleanup path instead.
+    """
+    text = str(command or "")
+    lowered = text.lower()
+    if not _KILL_COMMAND_RE.search(text):
+        return ""
+    if re.search(r"(?<![\w./-])(?:/bin/)?killall(?![\w./-])", lowered):
+        return (
+            "Otto blocked a broad killall command. Stop only the exact PID or "
+            "process group started by this run."
+        )
+    if re.search(r"(?<![\w./-])(?:/bin/)?pkill(?![\w./-])", lowered):
+        return (
+            "Otto blocked a broad pkill command. Stop only the exact PID or "
+            "process group started by this run."
+        )
+    for segment in _COMMAND_SPLIT_RE.split(text):
+        reason = _unsafe_kill_segment_reason(segment)
+        if reason:
+            return reason
+    return ""
+
+
+def _unsafe_kill_segment_reason(segment: str) -> str:
+    match = re.search(r"(?<![\w./-])(?:/bin/)?kill(?![\w./-])", segment)
+    if not match:
+        return ""
+    kill_invocation = segment[match.start():].strip()
+    try:
+        tokens = shlex.split(kill_invocation, comments=False, posix=True)
+    except ValueError:
+        return "Otto blocked a malformed kill command."
+    if not tokens:
+        return ""
+    return (
+        "Otto blocked a direct kill command. Agents must stop only processes "
+        "through Otto-managed cleanup, not by targeting local PIDs."
+    )
 
 
 class AgentCallError(Exception):
@@ -792,20 +936,29 @@ def _sdk_options(options: AgentOptions | None) -> Any:
     if _SDKClaudeAgentOptions is None:
         return options
     opts = options or AgentOptions()
+    permission_mode = opts.permission_mode
+    if opts.can_use_tool is not None and permission_mode == "bypassPermissions":
+        # Claude's bypass mode can execute tools without consulting the stdio
+        # permission callback. Keep the callback on the control path so Otto's
+        # process-kill guard applies to composed Bash commands, not just coarse
+        # disallowedTools prefixes.
+        permission_mode = "default"
     return _SDKClaudeAgentOptions(
-        permission_mode=opts.permission_mode,
+        permission_mode=permission_mode,
         cwd=opts.cwd,
         model=opts.model,
         resume=opts.resume,
         max_turns=opts.max_turns,
         system_prompt=opts.system_prompt,
         mcp_servers=opts.mcp_servers,
-        env=opts.env,
+        env=opts.env or {},
         setting_sources=opts.setting_sources,
         effort=opts.effort,
         agents=opts.agents,
         max_buffer_size=opts.max_buffer_size,
         disallowed_tools=opts.disallowed_tools or [],
+        hooks=opts.hooks,
+        can_use_tool=opts.can_use_tool,
         output_format=opts.output_format,
     )
 
@@ -955,10 +1108,18 @@ async def _query_claude(
     try:
         if original_open_process is not None:
             _sdk_subprocess_cli.anyio.open_process = _open_process_with_session
-        async for message in _sdk_query(prompt=prompt, options=sdk_options):
-            normalized = _normalize_message(message)
-            if normalized is not None:
-                yield normalized
+        if (opts.can_use_tool or opts.hooks) and _SDKClaudeSDKClient is not None:
+            async with _SDKClaudeSDKClient(sdk_options) as client:
+                await client.query(prompt)
+                async for message in client.receive_response():
+                    normalized = _normalize_message(message)
+                    if normalized is not None:
+                        yield normalized
+        else:
+            async for message in _sdk_query(prompt=prompt, options=sdk_options):
+                normalized = _normalize_message(message)
+                if normalized is not None:
+                    yield normalized
     finally:
         if original_open_process is not None:
             _sdk_subprocess_cli.anyio.open_process = original_open_process

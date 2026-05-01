@@ -10,6 +10,8 @@ is to find what's broken, weak, or missing — not just verify the happy path.
 
 {focus_section}
 
+{evidence_spec_section}
+
 ## Your Process
 
 1. **Read the project** — understand architecture, key modules, dependencies.

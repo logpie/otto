@@ -24,7 +24,10 @@ from otto.runs.schema import is_terminal_status
 from otto.mission_control.actions import ActionExecutingAdapter, make_action
 from otto.mission_control.adapters.common import (
     artifact_ref_for_path,
+    durable_session_dir_for_record,
     expanded_artifact_paths,
+    resolve_session_artifact_path,
+    session_artifact_roots,
     supplemental_session_artifact_paths,
 )
 from otto.mission_control.model import ArtifactRef, DetailModel, HistoryRow
@@ -70,13 +73,34 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
     def artifacts(self, record) -> list[ArtifactRef]:
         items: list[ArtifactRef] = []
         worktree = _queue_worktree(record)
-        intent_path = str(record.intent.get("intent_path") or "").strip()
-        spec_path = str(record.intent.get("spec_path") or "").strip()
+        durable_session_dir = durable_session_dir_for_record(record)
+        intent_path = resolve_session_artifact_path(
+            str(record.intent.get("intent_path") or "").strip(),
+            stale_session_dir=str(record.artifacts.get("session_dir") or "").strip(),
+            durable_session_dir=durable_session_dir,
+        )
+        spec_path = resolve_session_artifact_path(
+            str(record.intent.get("spec_path") or "").strip(),
+            stale_session_dir=str(record.artifacts.get("session_dir") or "").strip(),
+            durable_session_dir=durable_session_dir,
+        )
         manifest_path = str(record.artifacts.get("manifest_path") or "").strip()
-        checkpoint_path = str(record.artifacts.get("checkpoint_path") or "").strip()
-        summary_path = str(record.artifacts.get("summary_path") or "").strip()
-        primary_log = str(record.artifacts.get("primary_log_path") or "").strip()
         session_dir = str(record.artifacts.get("session_dir") or "").strip()
+        checkpoint_path = resolve_session_artifact_path(
+            str(record.artifacts.get("checkpoint_path") or "").strip(),
+            stale_session_dir=session_dir,
+            durable_session_dir=durable_session_dir,
+        )
+        summary_path = resolve_session_artifact_path(
+            str(record.artifacts.get("summary_path") or "").strip(),
+            stale_session_dir=session_dir,
+            durable_session_dir=durable_session_dir,
+        )
+        primary_log = resolve_session_artifact_path(
+            str(record.artifacts.get("primary_log_path") or "").strip(),
+            stale_session_dir=session_dir,
+            durable_session_dir=durable_session_dir,
+        )
         extra_log_paths = [str(path).strip() for path in record.artifacts.get("extra_log_paths") or [] if str(path).strip()]
 
         if intent_path:
@@ -100,7 +124,10 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
             if messages_path.exists():
                 items.append(ArtifactRef.from_path("messages", str(messages_path), kind="log"))
         seen_extra_paths = {artifact.path for artifact in items}
-        for index, path in enumerate([*supplemental_session_artifact_paths(session_dir), *extra_log_paths], start=1):
+        supplemental_paths: list[str] = []
+        for root in session_artifact_roots(session_dir, durable_session_dir):
+            supplemental_paths.extend(supplemental_session_artifact_paths(root))
+        for index, path in enumerate([*supplemental_paths, *extra_log_paths], start=1):
             if path.endswith("watcher.log"):
                 if path not in seen_extra_paths:
                     seen_extra_paths.add(path)
@@ -111,7 +138,7 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
                         continue
                     seen_extra_paths.add(expanded_path)
                     items.append(artifact_ref_for_path(expanded_path, fallback_label=f"extra {index}"))
-        if worktree:
+        if worktree and Path(worktree).expanduser().exists():
             items.append(ArtifactRef.from_path("worktree", worktree))
         return items
 

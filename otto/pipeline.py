@@ -73,6 +73,18 @@ def _stories_to_journeys(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return journeys
 
 
+def _latest_round_stories(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the newest serialized story set from split-loop checkpoint rounds."""
+    for round_item in reversed(rounds):
+        if not isinstance(round_item, dict):
+            continue
+        stories = round_item.get("stories")
+        if not isinstance(stories, list) or not stories:
+            continue
+        return [dict(story) for story in stories if isinstance(story, dict)]
+    return []
+
+
 def _write_session_summary(
     project_dir: Path,
     session_id: str,
@@ -1811,7 +1823,7 @@ async def run_certify_fix_loop(
     checkpoint_rounds = list(resume_rounds or [])
     last_completed_round = max(start_round - 1, 0)
     split_breakdown: dict[str, dict[str, Any]] = {}
-    last_stories: list[dict[str, Any]] = []
+    last_stories: list[dict[str, Any]] = _latest_round_stories(checkpoint_rounds)
     try:
         total_cost = resume_cost
         loop_start = time.monotonic()
@@ -1904,7 +1916,6 @@ async def run_certify_fix_loop(
             except Exception as exc:
                 logger.warning("Failed to write split-mode checkpoint: %s", exc)
 
-        last_stories = []
         last_diagnosis_text = ""
         child_session_ids_seen: set[str] = set()
 
@@ -2022,6 +2033,22 @@ async def run_certify_fix_loop(
             if isinstance(item, dict) and int(item.get("round", 0) or 0) > 0
         }
         max_retries = 2
+        try:
+            proof_repair_extra_rounds = int(config.get("max_proof_repair_rounds", 2))
+        except (TypeError, ValueError):
+            proof_repair_extra_rounds = 2
+        proof_repair_extra_rounds = max(0, min(proof_repair_extra_rounds, 5))
+        proof_repair_round_limit = max_rounds + proof_repair_extra_rounds
+        awaiting_proof_repair = (
+            bool(last_stories)
+            and all(story.get("passed") for story in last_stories)
+            and "Proof Repair Focus" in str(focus or "")
+        )
+        proof_repair_attempts = sum(
+            1
+            for item in round_history_by_round.values()
+            if isinstance(item, dict) and str(item.get("phase") or "") == "proof_repair"
+        )
 
         def _proof_repair_focus(report: Any) -> str:
             evidence_gate = getattr(report, "evidence_gate", {}) or {}
@@ -2038,6 +2065,7 @@ async def run_certify_fix_loop(
             focus_lines = [
                 "The previous certification proved the product behavior, but the proof packet failed the required demo proof gate.",
                 "Do not change product code. Re-run certification and collect the missing proof artifacts.",
+                "Do not create helper scripts or reports in the product repository. Put temporary scripts under `/tmp`; put persistent proof artifacts only under the exact evidence directory for this run.",
             ]
             if reason:
                 focus_lines.append(f"Proof gate reason: {reason}")
@@ -2062,7 +2090,7 @@ async def run_certify_fix_loop(
                 return str(focus).strip() + "\n\n" + section
             return section
 
-        for round_num in range(start_round, max_rounds + 1):
+        for round_num in range(start_round, proof_repair_round_limit + 1):
             try:
                 actual_rounds = round_num
                 round_id = init_round(project_dir, f"certify round {round_num}", session_id=build_id)
@@ -2082,6 +2110,7 @@ async def run_certify_fix_loop(
                     return _paused_result("certify", use_rounds=max(actual_rounds - 1, 1))
 
                 report = None
+                proof_repair_round = awaiting_proof_repair
                 for attempt in range(max_retries + 1):
                     try:
                         logger.info("Certify-fix loop round %d: certifying (%s)", round_num, certifier_mode)
@@ -2093,6 +2122,7 @@ async def run_certify_fix_loop(
                             mode=certifier_mode,
                             focus=focus,
                             target=target,
+                            stories=last_stories if proof_repair_round and last_stories else None,
                             budget=budget,
                             session_id=build_id,
                             write_session_summary=False,
@@ -2119,8 +2149,21 @@ async def run_certify_fix_loop(
                         ) from err
 
                 total_cost += report.cost_usd
-                stories = report.story_results
-                last_stories = stories
+                raw_stories = list(report.story_results or [])
+                stories = raw_stories
+                reused_prior_stories_for_proof = False
+                if raw_stories:
+                    last_stories = stories
+                    awaiting_proof_repair = False
+                elif proof_repair_round and last_stories and all(story.get("passed") for story in last_stories):
+                    stories = [dict(story) for story in last_stories]
+                    reused_prior_stories_for_proof = True
+                    logger.info(
+                        "Certify-fix loop round %d: proof repair returned no stories; "
+                        "preserving %d previously passing stories",
+                        round_num,
+                        len(stories),
+                    )
                 child_session_ids_seen.update(getattr(report, "child_session_ids", []) or [])
                 record_certifier(project_dir, round_id, report, stories, session_id=build_id)
 
@@ -2137,12 +2180,40 @@ async def run_certify_fix_loop(
                 failing_story_ids = [s.get("story_id", "?") for s in failures]
                 diagnosis_text = str(getattr(report, "diagnosis", "") or "")
                 last_diagnosis_text = diagnosis_text
+                evidence_gate = getattr(report, "evidence_gate", {}) or {}
                 report_passed = getattr(getattr(report, "outcome", None), "value", "") == "passed"
+                if (
+                    reused_prior_stories_for_proof
+                    and not failures
+                    and isinstance(evidence_gate, dict)
+                    and evidence_gate.get("blocks_pass") is False
+                ):
+                    report_passed = True
                 proof_gate_blocked = (
                     not report_passed
                     and not failures
-                    and bool((getattr(report, "evidence_gate", {}) or {}).get("blocks_pass"))
+                    and bool(evidence_gate.get("blocks_pass"))
                 )
+                if proof_repair_round:
+                    proof_repair_attempts += 1
+                product_passed_for_round = bool(stories) and not failures
+                evidence_gate_reason = (
+                    str(evidence_gate.get("reason") or "").strip()
+                    if isinstance(evidence_gate, dict)
+                    else ""
+                )
+                if proof_repair_round:
+                    phase = "proof_repair"
+                    phase_attempt = proof_repair_attempts
+                    phase_label = f"Proof repair {proof_repair_attempts}"
+                elif proof_gate_blocked and product_passed_for_round:
+                    phase = "proof_gate"
+                    phase_attempt = None
+                    phase_label = "Proof check"
+                else:
+                    phase = "certify"
+                    phase_attempt = None
+                    phase_label = "Certification"
                 if previous_attempts and previous_attempts[-1].get("round") == round_num - 1:
                     previous_attempts[-1]["still_failing_after_fix"] = list(failing_story_ids)
                     write_attempt_history(attempt_history_path, previous_attempts)
@@ -2173,6 +2244,11 @@ async def run_certify_fix_loop(
 
                 round_summary = {
                     "round": round_num,
+                    "phase": phase,
+                    "phase_label": phase_label,
+                    "phase_attempt": phase_attempt,
+                    "product_passed": product_passed_for_round,
+                    "proof_gate_reason": evidence_gate_reason if proof_gate_blocked else "",
                     "verdict": report_passed,
                     "tested": len(stories),
                     "stories": list(stories),
@@ -2228,6 +2304,7 @@ async def run_certify_fix_loop(
                         )
                         break
                 elif report_passed:
+                    awaiting_proof_repair = False
                     checkpoint_rounds.append(round_summary)
                     last_completed_round = round_num
                     _save_cp(
@@ -2248,6 +2325,7 @@ async def run_certify_fix_loop(
                     logger.info("Certify-fix loop: PASS on round %d", round_num)
                     break
                 elif proof_gate_blocked:
+                    awaiting_proof_repair = True
                     checkpoint_rounds.append(round_summary)
                     last_completed_round = round_num
                     _save_cp(
@@ -2256,8 +2334,13 @@ async def run_certify_fix_loop(
                         last_round_failures=[],
                         last_diagnosis=diagnosis_text,
                     )
-                    if round_num >= max_rounds:
-                        logger.info("Certify-fix loop: proof gate blocked pass on final round")
+                    if round_num >= proof_repair_round_limit:
+                        logger.info(
+                            "Certify-fix loop: proof gate blocked pass after %d product rounds "
+                            "and %d proof-repair rounds",
+                            max_rounds,
+                            proof_repair_extra_rounds,
+                        )
                         break
                     focus = _proof_repair_focus(report)
                     console.print(
@@ -2266,6 +2349,19 @@ async def run_certify_fix_loop(
                     )
                     logger.info("Certify-fix loop: proof gate blocked pass; re-certifying for evidence")
                     continue
+                elif reused_prior_stories_for_proof and not failures:
+                    checkpoint_rounds.append(round_summary)
+                    last_completed_round = round_num
+                    _save_cp(
+                        phase="round_complete",
+                        child_session_ids=sorted(child_session_ids_seen),
+                        last_round_failures=[],
+                        last_diagnosis=diagnosis_text,
+                    )
+                    logger.warning(
+                        "Certify-fix loop: proof repair returned no stories and no conclusive evidence gate"
+                    )
+                    break
                 else:
                     consecutive_passes = 0
 
