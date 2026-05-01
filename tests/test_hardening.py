@@ -591,8 +591,228 @@ class TestHistoryWrites:
         assert len(calls) == 2
         assert calls[0].get("focus") in (None, "")
         assert "Proof Repair Focus" in str(calls[1].get("focus"))
+        assert "Do not create helper scripts or reports in the product repository" in str(calls[1].get("focus"))
         assert "navigation-responsive" in str(calls[1].get("focus"))
         assert "Record one concise browser walkthrough" in str(calls[1].get("focus"))
+        assert calls[1].get("stories")
+
+    @pytest.mark.asyncio
+    async def test_certify_fix_loop_preserves_stories_when_proof_repair_is_evidence_only(self, tmp_git_repo):
+        from otto import paths
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        first_story = {
+            "story_id": "navigation-responsive",
+            "passed": True,
+            "summary": "Navigation works",
+            "verdict": "PASS",
+            "surface": "DOM",
+            "methodology": "live-ui-events",
+        }
+        proof_gate_report = CertificationReport(
+            outcome=CertificationOutcome.FAILED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[first_story],
+            diagnosis="Required demo proof gate failed: no browser video walkthrough was recorded",
+            evidence_gate={
+                "blocks_pass": True,
+                "reason": "no browser video walkthrough was recorded",
+                "status": "fail",
+            },
+            demo_evidence={
+                "stories": [
+                    {
+                        "id": "navigation-responsive",
+                        "needs_visual": True,
+                        "visual_items": [],
+                    }
+                ]
+            },
+        )
+        repaired_report = CertificationReport(
+            outcome=CertificationOutcome.FAILED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[],
+            diagnosis="Proof media collected",
+            evidence_gate={"blocks_pass": False, "status": "pass", "reason": ""},
+        )
+        calls: list[dict[str, object]] = []
+
+        async def fake_certifier(*args, **kwargs):
+            calls.append(dict(kwargs))
+            if len(calls) == 2:
+                evidence_dir = paths.certify_dir(tmp_git_repo, str(kwargs["session_id"])) / "evidence"
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                (evidence_dir / "recording.webm").write_bytes(b"video")
+                (evidence_dir / "navigation-responsive.png").write_bytes(b"image")
+            return proof_gate_report if len(calls) == 1 else repaired_report
+
+        async def unexpected_code_fix(*_args, **_kwargs):
+            raise AssertionError("proof-only repair must not run the code-fix agent")
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=unexpected_code_fix):
+            result = await run_certify_fix_loop(
+                "certify nav proof",
+                tmp_git_repo,
+                {"max_rounds": 2},
+                certifier_mode="standard",
+                skip_initial_build=True,
+                command="improve.feature",
+                session_id="run-proof-gate-evidence-only",
+            )
+
+        pow_data = json.loads(
+            (paths.certify_dir(tmp_git_repo, "run-proof-gate-evidence-only") / "proof-of-work.json").read_text()
+        )
+        assert result.passed is True
+        assert result.journeys == [
+            {
+                "name": "Navigation works",
+                "passed": True,
+                "verdict": "PASS",
+                "story_id": "navigation-responsive",
+            }
+        ]
+        assert calls[1].get("stories") == [first_story]
+        assert pow_data["outcome"] == "passed"
+        assert [story["story_id"] for story in pow_data["stories"]] == ["navigation-responsive"]
+
+    @pytest.mark.asyncio
+    async def test_certify_fix_loop_allows_extra_proof_repair_after_product_round_cap(self, tmp_git_repo):
+        from otto import paths
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        story = {
+            "story_id": "navigation-responsive",
+            "passed": True,
+            "summary": "Navigation works",
+            "verdict": "PASS",
+            "surface": "DOM",
+            "methodology": "live-ui-events",
+        }
+        proof_gate_report = CertificationReport(
+            outcome=CertificationOutcome.FAILED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[story],
+            diagnosis="Required demo proof gate failed: no browser video walkthrough was recorded",
+            evidence_gate={
+                "blocks_pass": True,
+                "reason": "no browser video walkthrough was recorded",
+                "status": "fail",
+            },
+            demo_evidence={
+                "stories": [
+                    {
+                        "id": "navigation-responsive",
+                        "needs_visual": True,
+                        "visual_items": [],
+                    }
+                ]
+            },
+        )
+        repaired_report = CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[{**story, "summary": "Navigation works with video proof"}],
+            evidence_gate={"blocks_pass": False, "status": "pass", "reason": ""},
+        )
+        calls: list[dict[str, object]] = []
+
+        async def fake_certifier(*args, **kwargs):
+            calls.append(dict(kwargs))
+            if len(calls) == 3:
+                evidence_dir = paths.certify_dir(tmp_git_repo, str(kwargs["session_id"])) / "evidence"
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                (evidence_dir / "recording.webm").write_bytes(b"video")
+                (evidence_dir / "navigation-responsive.png").write_bytes(b"image")
+            return proof_gate_report if len(calls) < 3 else repaired_report
+
+        async def unexpected_code_fix(*_args, **_kwargs):
+            raise AssertionError("extra proof-repair rounds must not run the code-fix agent")
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=unexpected_code_fix):
+            result = await run_certify_fix_loop(
+                "certify nav proof",
+                tmp_git_repo,
+                {"max_certify_rounds": 1, "max_proof_repair_rounds": 2},
+                certifier_mode="standard",
+                skip_initial_build=True,
+                command="improve.feature",
+                session_id="run-proof-gate-extra-round",
+            )
+
+        assert result.passed is True
+        assert len(calls) == 3
+        assert calls[0].get("focus") in (None, "")
+        assert "Proof Repair Focus" in str(calls[1].get("focus"))
+        assert "Proof Repair Focus" in str(calls[2].get("focus"))
+        assert calls[1].get("stories") == [story]
+        assert calls[2].get("stories") == [story]
+
+    @pytest.mark.asyncio
+    async def test_certify_fix_loop_seeds_proof_repair_stories_from_resume_rounds(self, tmp_git_repo):
+        from otto import paths
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        first_story = {
+            "story_id": "navigation-responsive",
+            "passed": True,
+            "summary": "Navigation works",
+            "verdict": "PASS",
+            "surface": "DOM",
+            "methodology": "live-ui-events",
+        }
+        repaired_report = CertificationReport(
+            outcome=CertificationOutcome.FAILED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[],
+            diagnosis="Proof media collected",
+            evidence_gate={"blocks_pass": False, "status": "pass", "reason": ""},
+        )
+        calls: list[dict[str, object]] = []
+
+        async def fake_certifier(*args, **kwargs):
+            calls.append(dict(kwargs))
+            evidence_dir = paths.certify_dir(tmp_git_repo, str(kwargs["session_id"])) / "evidence"
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            (evidence_dir / "recording.webm").write_bytes(b"video")
+            (evidence_dir / "navigation-responsive.png").write_bytes(b"image")
+            return repaired_report
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier):
+            result = await run_certify_fix_loop(
+                "certify nav proof",
+                tmp_git_repo,
+                {"max_rounds": 2},
+                certifier_mode="standard",
+                focus="## Proof Repair Focus\nCollect missing browser proof.",
+                skip_initial_build=True,
+                start_round=2,
+                resume_rounds=[
+                    {
+                        "round": 1,
+                        "stories": [first_story],
+                        "stories_tested": 1,
+                        "stories_passed": 1,
+                        "failing_story_ids": [],
+                    }
+                ],
+                command="improve.feature",
+                session_id="run-proof-gate-resume",
+            )
+
+        assert result.passed is True
+        assert calls[0].get("stories") == [first_story]
 
 
 class TestImproveCLIHardening:

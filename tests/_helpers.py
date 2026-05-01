@@ -108,6 +108,11 @@ def write_test_pow_report(
                 ),
                 "diagnosis": item.get("diagnosis", ""),
                 "tested": item.get("stories_tested", item.get("stories_count", 0)),
+                "phase": item.get("phase", ""),
+                "phase_label": item.get("phase_label", ""),
+                "phase_attempt": item.get("phase_attempt"),
+                "product_passed": item.get("product_passed", False),
+                "proof_gate_reason": item.get("proof_gate_reason", ""),
             }
             for index, item in enumerate(round_history or [])
         ],

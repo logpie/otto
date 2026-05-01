@@ -76,7 +76,6 @@ import {
   canMerge,
   canResolveRelease,
   canShowDiff,
-  canTryProduct,
   dedupeLiveAgainstHistory,
   detailWasRemoved,
   errorMessage,
@@ -708,10 +707,8 @@ export function App() {
       // 1..5 switch inspector tabs while inspector is open.
       // Loading for logs/diff is handled by separate effects keyed on
       // inspectorMode/inspectorOpen — we just flip the mode here.
-      if (inspectorOpen && noMods && !inputBlocked && /^[1-5]$/.test(event.key)) {
-        const tabModes: InspectorMode[] = canTryProduct(detail)
-          ? ["try", "proof", "diff", "logs", "artifacts"]
-          : ["proof", "diff", "logs", "artifacts"];
+      if (inspectorOpen && noMods && !inputBlocked && /^[1-4]$/.test(event.key)) {
+        const tabModes: InspectorMode[] = ["proof", "diff", "logs", "artifacts"];
         const mode = tabModes[Number(event.key) - 1];
         if (mode) {
           event.preventDefault();

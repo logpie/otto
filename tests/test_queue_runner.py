@@ -377,12 +377,12 @@ def _child_snapshot(proc: subprocess.Popen[Any], *, cwd: str, argv: list[str]) -
     }
 
 
-def _write_queue_manifest(repo: Path, task_id: str, *, exit_status: str = "success") -> Path:
+def _write_queue_manifest(repo: Path, task_id: str, *, exit_status: str = "success", command: str = "build") -> Path:
     manifest_path = repo / "otto_logs" / "queue" / task_id / "manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps({
-        "command": "build",
-        "argv": ["build", "test"],
+        "command": command,
+        "argv": [command, "test"],
         "queue_task_id": task_id,
         "run_id": "fake-run",
         "branch": None,
@@ -479,6 +479,79 @@ def test_finalize_success_manifest_ignores_otto_runtime_artifacts(tmp_path: Path
 
     assert ts["status"] == "done"
     assert ts["failure_reason"] is None
+
+
+def test_finalize_build_success_auto_commits_generated_lockfile(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    (repo / ".worktrees").mkdir()
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/t1", ".worktrees/t1", "main"],
+        cwd=repo,
+        check=True,
+    )
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    lockfile = repo / ".worktrees" / "t1" / "uv.lock"
+    lockfile.write_text("version = 1\n", encoding="utf-8")
+    _write_queue_manifest(repo, "t1", exit_status="success", command="build")
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume"), otto_bin="/bin/true")
+    ts = {
+        "status": "running",
+        "started_at": "2026-04-19T00:00:00Z",
+        "child": {"pid": 123456, "pgid": 123456},
+    }
+
+    runner._finalize_task_from_manifest(ts, "t1", exit_code=0)
+
+    assert ts["status"] == "done"
+    assert subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo / ".worktrees" / "t1",
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout == ""
+    last_commit = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s", "--", "uv.lock"],
+        cwd=repo / ".worktrees" / "t1",
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert last_commit == "chore: include generated dependency lockfile"
+
+
+def test_finalize_certify_success_does_not_auto_commit_generated_lockfile(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    (repo / ".worktrees").mkdir()
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "certify/t1", ".worktrees/t1", "main"],
+        cwd=repo,
+        check=True,
+    )
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["certify", "x"],
+        branch="certify/t1",
+        worktree=".worktrees/t1",
+    ))
+    (repo / ".worktrees" / "t1" / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    _write_queue_manifest(repo, "t1", exit_status="success", command="certify")
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume"), otto_bin="/bin/true")
+    ts = {
+        "status": "running",
+        "started_at": "2026-04-19T00:00:00Z",
+        "child": {"pid": 123456, "pgid": 123456},
+    }
+
+    runner._finalize_task_from_manifest(ts, "t1", exit_code=0)
+
+    assert ts["status"] == "failed"
+    assert "uv.lock" in ts["failure_reason"]
 
 
 def _spawn_orphan_child(*, cwd: Path, command: str) -> dict[str, Any]:

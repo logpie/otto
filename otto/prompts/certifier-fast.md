@@ -10,6 +10,8 @@ path works — nothing more. No edge cases, no error handling, no security.
 
 {focus_section}
 
+{evidence_spec_section}
+
 ## Your Process
 
 1. **Read the project** — understand what it is (web app, CLI, library, API).

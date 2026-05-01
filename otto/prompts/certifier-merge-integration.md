@@ -13,6 +13,8 @@ product still works where integration risk exists.
 
 {stories_section}
 
+{evidence_spec_section}
+
 ## How to Certify This Merge
 
 1. Read the merge verification plan first. Treat it as the scope authority.

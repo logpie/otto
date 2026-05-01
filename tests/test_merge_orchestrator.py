@@ -345,6 +345,14 @@ def test_transactional_fast_clean_merge_updates_target_after_all_branches(tmp_pa
     assert git_ops.head_sha(repo) != target_head_before
     assert (repo / "a.txt").read_text() == "A\n"
     assert (repo / "b.txt").read_text() == "B\n"
+    subject = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert subject == "Merge branch 'feat-b' into main"
     assert not git_ops.branch_exists(repo, f"otto/merge-staging/{result.merge_id}")
     assert not (paths.merge_dir(repo) / result.merge_id / "staging-worktree").exists()
 
@@ -383,6 +391,51 @@ def test_transactional_fast_smart_policy_runs_post_merge_verification(tmp_path: 
     assert result.note == "cert passed"
     assert captured["branches"] == ["feat-a"]
     assert getattr(captured["options"], "verification_policy") == "smart"
+
+
+def test_transactional_fast_smart_policy_rolls_back_target_when_verification_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    _make_branch(repo, "feat-a", "a.txt", "A\n")
+    target_head_before = git_ops.head_sha(repo)
+
+    async def fake_post_merge_verification(**kwargs):
+        assert git_ops.head_sha(repo) != target_head_before
+        kwargs["state"].cert_passed = False
+        return MergeRunResult(
+            success=False,
+            merge_id=kwargs["merge_id"],
+            state=kwargs["state"],
+            cert_passed=False,
+            note="cert failed",
+        )
+
+    monkeypatch.setattr("otto.merge.orchestrator._run_post_merge_verification", fake_post_merge_verification)
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(
+            target="main",
+            verification_policy="smart",
+            fast=True,
+            transactional=True,
+            allow_any_branch=True,
+        ),
+        explicit_ids_or_branches=["feat-a"],
+    ))
+
+    assert result.success is False
+    assert "cert failed" in result.note
+    assert "rolled back" in result.note
+    assert git_ops.head_sha(repo) == target_head_before
+    assert not (repo / "a.txt").exists()
+    persisted = load_state(repo, result.merge_id)
+    assert persisted.status == "failed"
+    assert persisted.outcomes[0].status == "skipped"
+    assert "verification failed" in (persisted.outcomes[0].note or "")
 
 
 def test_transactional_requires_fast_mode(tmp_path: Path):
@@ -971,6 +1024,109 @@ def test_rerun_post_merge_verification_marks_failed_on_base_exception(
     assert updated.status == "failed"
     assert updated.terminal_outcome == "failure"
     assert "merge verification rerun aborted" in (updated.note or "")
+
+
+def test_post_merge_verification_repairs_proof_gate_without_remerge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "README.md").write_text("x" * 9000, encoding="utf-8")
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.collect_stories_from_branches",
+        lambda **kwargs: [{"story_id": "story-a", "summary": "summary"}],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.dedupe_stories",
+        lambda stories: (stories, []),
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.changed_files_between",
+        lambda *args, **kwargs: ["app/ui.py"],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.head_sha",
+        lambda *args, **kwargs: "new-head",
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_run_agentic_certifier(**kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            return CertificationReport(
+                outcome=CertificationOutcome.FAILED,
+                story_results=[
+                    {
+                        "story_id": "story-a",
+                        "verdict": "PASS",
+                        "passed": True,
+                        "summary": "story passed",
+                    }
+                ],
+                diagnosis="Required demo proof gate failed: no browser video walkthrough was recorded",
+                evidence_gate={
+                    "blocks_pass": True,
+                    "reason": "no browser video walkthrough was recorded",
+                    "status": "fail",
+                },
+                demo_evidence={
+                    "stories": [
+                        {
+                            "id": "story-a",
+                            "needs_visual": True,
+                            "visual_items": [],
+                        }
+                    ]
+                },
+                run_id="cert-proof-gap",
+            )
+        return CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            story_results=[
+                {
+                    "story_id": "story-a",
+                    "verdict": "PASS",
+                    "passed": True,
+                    "summary": "story passed with proof",
+                }
+            ],
+            evidence_gate={"blocks_pass": False, "status": "pass", "reason": ""},
+            run_id="cert-repaired",
+        )
+
+    monkeypatch.setattr("otto.certifier.run_agentic_certifier", fake_run_agentic_certifier)
+
+    state = MergeState(
+        merge_id="merge-test",
+        started_at="2026-04-20T00:00:00Z",
+        target="main",
+        target_head_before="old-head",
+    )
+    result = asyncio.run(
+        _run_post_merge_verification(
+            project_dir=tmp_path,
+            config=_config_no_bookkeeping(),
+            options=MergeOptions(target="main"),
+            state=state,
+            merge_id="merge-test",
+            branches=["feature/random"],
+            queue_lookup={},
+            target_head_before="old-head",
+        )
+    )
+
+    assert result.success is True
+    assert result.cert_passed is True
+    assert result.state.cert_run_id == "cert-repaired"
+    assert len(calls) == 2
+    assert "Verify the merged branch integration" in str(calls[0].get("intent"))
+    assert "story-a" in str(calls[0].get("intent"))
+    assert len(str(calls[0].get("intent"))) < 8192
+    assert calls[0].get("focus") in (None, "")
+    assert "Proof Repair Focus" in str(calls[1].get("focus"))
+    assert "Do not create helper scripts or reports in the product repository" in str(calls[1].get("focus"))
+    assert "story-a" in str(calls[1].get("focus"))
+    assert calls[1].get("round_num") == 2
 
 
 def test_post_merge_verification_blocks_human_flag_even_if_certifier_verdict_passes(

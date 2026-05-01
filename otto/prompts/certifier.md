@@ -10,6 +10,8 @@ for real users by testing it thoroughly.
 
 {stories_section}
 
+{evidence_spec_section}
+
 ## Your Process
 
 1. **Read the project** — understand what it is, what framework, what files exist.

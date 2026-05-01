@@ -20,6 +20,7 @@ from otto.config import load_config
 from otto.config import resolve_certifier_mode
 from otto.mission_control.actions import ActionResult, ActionState
 from otto.setup_gitignore import (
+    is_common_build_artifact_path as _is_common_build_artifact_path,
     is_otto_owned_path as _is_otto_owned_path,
 )
 from otto.mission_control.model import (
@@ -93,7 +94,7 @@ def _project_is_user_dirty(project_dir: Path) -> bool:
     (W11-CRITICAL-1). Tracked-file modifications and any non-Otto
     untracked path still mark the project dirty.
     """
-    porcelain = _git_output(project_dir, ["status", "--porcelain"])
+    porcelain = _git_output(project_dir, ["status", "--porcelain", "--untracked-files=all"])
     if not porcelain:
         return False
     for line in porcelain.splitlines():
@@ -112,7 +113,7 @@ def _project_is_user_dirty(project_dir: Path) -> bool:
         # would still flag dirty so we notice the regression.
         if status != "??":
             return True
-        if not _is_otto_owned_path(path):
+        if not _is_otto_owned_path(path) and not _is_common_build_artifact_path(path):
             return True
     return False
 

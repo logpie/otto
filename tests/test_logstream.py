@@ -729,7 +729,7 @@ class TestNarrativeFormatter:
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
         assert lines[0] == "\u2014 CERTIFY complete \u2014"
         assert "RUN SUMMARY: certify=0:15 (1 round), total=0:15" in lines[1]
-        assert "SUCCESS in 0:15" in lines[2]
+        assert "AGENT COMPLETE in 0:15" in lines[2]
 
     def test_write_result_without_certify_omits_certify_summary(self, tmp_path):
         path = tmp_path / "narrative.log"

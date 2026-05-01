@@ -549,6 +549,11 @@ export interface RunDetail extends RunSummary {
 
 export interface CertificationRound {
   round: number | null;
+  phase: string;
+  phase_label: string;
+  phase_attempt: number | null;
+  product_passed: boolean;
+  proof_gate_reason: string | null;
   verdict: string;
   stories_tested: number | null;
   passed_count: number | null;
@@ -594,6 +599,7 @@ export interface DemoEvidence {
   demo_reason: string | null;
   primary_demo: DemoEvidenceItem | null;
   stories: DemoEvidenceStory[];
+  evidence_spec: Record<string, unknown>;
   counts: Record<string, number | string | boolean | null>;
 }
 
@@ -602,6 +608,7 @@ export interface EvidenceGate {
   status: "pass" | "warn" | "fail" | "not_applicable" | "unknown" | string;
   blocks_pass: boolean;
   reason: string;
+  missing_requirements: string[];
 }
 
 export interface ProofReportInfo {
@@ -709,6 +716,11 @@ export interface ProductSampleData {
   detail: string;
 }
 
+export interface ProductCodeStats {
+  files: number;
+  lines: number;
+}
+
 export interface ProductHandoff {
   kind: string;
   label: string;
@@ -716,6 +728,8 @@ export interface ProductHandoff {
   source_path: string | null;
   root: string;
   summary: string;
+  tech_stack: string[];
+  code_stats: ProductCodeStats;
   preview_available: boolean;
   preview_label: string;
   preview_reason: string;

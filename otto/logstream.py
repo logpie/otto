@@ -1109,7 +1109,12 @@ class NarrativeFormatter:
         if self._phase_name != "BUILD":
             self._write_phase_complete()
         self._write_terminal_event(self._summary_line(total_elapsed, breakdown, message.total_cost_usd))
-        status = "ERROR" if message.is_error else message.subtype.upper()
+        if message.is_error:
+            status = "ERROR"
+        elif self._phase_name == "CERTIFY":
+            status = "AGENT COMPLETE"
+        else:
+            status = message.subtype.upper()
         usage = _total_token_usage(breakdown) if breakdown else normalize_token_usage(message.usage or {})
         spend = format_token_spend(usage)
         spend_text = f" {spend}" if spend != "-" else ""

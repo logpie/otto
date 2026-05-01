@@ -615,7 +615,7 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
       - ``dirty_files`` — concrete paths corresponding to ``dirty`` +
         ``untracked`` entries (capped at 20), for UI surfacing.
     """
-    from otto.setup_gitignore import is_otto_owned_path
+    from otto.setup_gitignore import is_common_build_artifact_path, is_otto_owned_path
 
     dirty_issues: list[str] = []
     blocking_issues: list[str] = []
@@ -653,7 +653,7 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
                 f"repository has unmerged paths: {', '.join(conflicted[:5])}"
             )
 
-    # Untracked-but-not-ignored detection. ``--untracked-files=normal``
+    # Untracked-but-not-ignored detection. ``--untracked-files=all``
     # honours .gitignore, so OTTO_PATTERNS-covered files (queue state,
     # otto_logs/, etc.) drop out for projects with the standard Otto
     # ignore. Defence-in-depth: any remaining ``??`` paths still get
@@ -662,7 +662,7 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
     user_untracked: list[str] = []
     try:
         untracked = _run_git(
-            project_dir, "status", "--porcelain", "--untracked-files=normal"
+            project_dir, "status", "--porcelain", "--untracked-files=all"
         )
     except Exception:
         untracked = None
@@ -674,7 +674,7 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
                 path = line[3:].strip() if len(line) > 3 else ""
                 if not path:
                     continue
-                if is_otto_owned_path(path):
+                if is_otto_owned_path(path) or is_common_build_artifact_path(path):
                     continue
                 user_untracked.append(path)
                 if len(user_untracked) >= 20:
@@ -682,7 +682,7 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
         else:
             stderr = (untracked.stderr or "").strip()
             blocking_issues.append(
-                f"`git status --porcelain --untracked-files=normal` failed: "
+                f"`git status --porcelain --untracked-files=all` failed: "
                 f"{stderr or 'unknown git error'}"
             )
     if user_untracked:
@@ -1395,6 +1395,30 @@ def require_git() -> None:
         sys.exit(2)
 
 
+def _git_status_path_from_porcelain(line: str) -> tuple[str, str]:
+    status = line[:2]
+    path = line[3:].strip() if len(line) > 3 else line.strip()
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1].strip()
+    return status, path
+
+
+def _resume_relevant_git_status(porcelain: str) -> str:
+    from otto.setup_gitignore import is_common_build_artifact_path, is_otto_owned_path
+
+    kept: list[str] = []
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        status, path = _git_status_path_from_porcelain(line)
+        if status == "??" and path and (
+            is_otto_owned_path(path) or is_common_build_artifact_path(path)
+        ):
+            continue
+        kept.append(line)
+    return "\n".join(kept) + ("\n" if kept else "")
+
+
 def checkpoint_fingerprint(project_dir: Path) -> dict[str, str]:
     """Capture a lightweight resume fingerprint for the current workspace."""
     from otto.merge.git_ops import try_head_sha
@@ -1402,12 +1426,13 @@ def checkpoint_fingerprint(project_dir: Path) -> dict[str, str]:
     git_sha = try_head_sha(project_dir) or ""
 
     try:
-        git_status = _run_git(
+        raw_git_status = _run_git(
             project_dir,
             "status",
             "--porcelain",
             "--untracked-files=all",
         ).stdout
+        git_status = _resume_relevant_git_status(raw_git_status)
     except ConfigError:
         git_status = ""
 

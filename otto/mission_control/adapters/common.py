@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from otto import paths
 from otto.mission_control.model import ArtifactRef
 
 
@@ -46,7 +47,55 @@ def supplemental_session_artifact_paths(session_dir: str | None) -> list[str]:
             paths.extend(expanded_artifact_paths(str(candidate)))
         else:
             paths.append(str(candidate))
+    evidence_dir = certify_dir / "evidence"
+    if evidence_dir.exists() and evidence_dir.is_dir():
+        for candidate in sorted(evidence_dir.iterdir(), key=lambda item: item.name):
+            if not candidate.is_file() or candidate.name.endswith(".manifest.json"):
+                continue
+            paths.append(str(candidate))
     return paths
+
+
+def durable_session_dir_for_record(record: object) -> Path | None:
+    run_id = str(getattr(record, "run_id", "") or "").strip()
+    project_dir = str(getattr(record, "project_dir", "") or "").strip()
+    domain = str(getattr(record, "domain", "") or "").strip()
+    if not run_id or not project_dir or domain == "merge":
+        return None
+    return paths.session_dir(Path(project_dir), run_id).resolve(strict=False)
+
+
+def resolve_session_artifact_path(path: str, *, stale_session_dir: str | None, durable_session_dir: Path | None) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    candidate = Path(text).expanduser()
+    if candidate.exists():
+        return str(candidate)
+    if not stale_session_dir or durable_session_dir is None or not durable_session_dir.exists():
+        return text
+    stale_root = Path(stale_session_dir).expanduser().resolve(strict=False)
+    try:
+        relative = candidate.resolve(strict=False).relative_to(stale_root)
+    except ValueError:
+        return text
+    fallback = durable_session_dir / relative
+    if fallback.exists():
+        return str(fallback)
+    return text
+
+
+def session_artifact_roots(stale_session_dir: str | None, durable_session_dir: Path | None) -> list[str]:
+    roots: list[str] = []
+    if stale_session_dir:
+        stale = Path(stale_session_dir).expanduser().resolve(strict=False)
+        if stale.exists() and stale.is_dir():
+            roots.append(str(stale))
+    if durable_session_dir is not None and durable_session_dir.exists() and durable_session_dir.is_dir():
+        durable = str(durable_session_dir)
+        if durable not in roots:
+            roots.append(durable)
+    return roots
 
 
 def _artifact_label(path: Path, *, fallback_label: str) -> str:

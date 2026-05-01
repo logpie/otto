@@ -13,6 +13,8 @@ from typing import Any, Callable, Literal, Protocol
 
 from otto import paths
 from otto.history import command_family, history_run_id, normalize_command_label
+from otto.merge import git_ops
+from otto.merge.state import load_state as load_merge_state
 from otto.runs.history import load_project_history_rows
 from otto.runs.registry import HEARTBEAT_INTERVAL_S, load_live_record, read_live_records, writer_identity_matches_live_process
 from otto.runs.schema import RunRecord, is_terminal_status
@@ -696,7 +698,7 @@ class MissionControlModel:
                 HistoryItem(
                     row=row,
                     completed_at_display=_short_timestamp(row.finished_at or row.timestamp),
-                    outcome_display=(row.terminal_outcome or row.status or "-").upper(),
+                    outcome_display=_history_outcome_display(row),
                     duration_display=_format_elapsed(row.duration_s),
                     cost_display=_format_usage(row.cost_usd, token_usage),
                     token_usage=token_usage,
@@ -768,11 +770,13 @@ class MissionControlModel:
         )
 
     def _dedupe_history_rows(self, raw_rows: list[dict[str, Any]]) -> list[HistoryRow]:
+        merged_by_branch = _history_merged_branch_index(self.project_dir)
         best_by_dedupe: dict[str, HistoryRow] = {}
         for raw in raw_rows:
             row = _normalize_history_row(raw)
             if row is None:
                 continue
+            row = _project_landed_history_row(row, merged_by_branch)
             current = best_by_dedupe.get(row.dedupe_key)
             if current is None or _history_preference_key(row) > _history_preference_key(current):
                 best_by_dedupe[row.dedupe_key] = row
@@ -1224,6 +1228,68 @@ def _history_outcome(row: HistoryRow) -> OutcomeFilter:
         logger.warning("unknown history outcome for %s: %s", row.run_id, outcome or "<empty>")
         _WARNED_UNKNOWN_HISTORY_OUTCOMES.add(outcome)
     return "other"
+
+
+def _history_outcome_display(row: HistoryRow) -> str:
+    landing_state = str(row.raw.get("landing_state") or "").lower()
+    if landing_state == "merged":
+        return "LANDED"
+    if landing_state == "reviewed":
+        return "CERTIFIED"
+    return (row.terminal_outcome or row.status or "-").upper()
+
+
+def _project_landed_history_row(row: HistoryRow, merged_by_branch: dict[str, dict[str, Any]]) -> HistoryRow:
+    branch = row.branch
+    if row.domain != "queue" or not branch:
+        return row
+    merge_info = merged_by_branch.get(branch)
+    if not merge_info:
+        return row
+    return replace(
+        row,
+        status="done",
+        terminal_outcome="success",
+        merge_id=row.merge_id or _string_or_none(merge_info.get("merge_id")),
+        raw={
+            **row.raw,
+            "status": "done",
+            "terminal_outcome": "success",
+            "merge_id": row.merge_id or _string_or_none(merge_info.get("merge_id")),
+            "landing_state": "merged",
+            "merge_info": merge_info,
+        },
+    )
+
+
+def _history_merged_branch_index(project_dir: Path) -> dict[str, dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for state_path in sorted(paths.merge_dir(project_dir).glob("*/state.json")):
+        try:
+            state = load_merge_state(project_dir, state_path.parent.name)
+        except Exception:
+            continue
+        if str(state.status or "") != "done":
+            continue
+        for outcome in state.outcomes:
+            if outcome.status not in {"merged", "conflict_resolved"}:
+                continue
+            if outcome.merge_commit and not _history_merge_commit_reachable(project_dir, outcome.merge_commit, state.target):
+                continue
+            merged[outcome.branch] = {
+                "merge_id": state.merge_id,
+                "target": state.target,
+                "status": outcome.status,
+                "merge_run_status": state.status,
+                "target_head_before": state.target_head_before,
+                "merge_commit": outcome.merge_commit,
+            }
+    return merged
+
+
+def _history_merge_commit_reachable(project_dir: Path, commit: str, target: str) -> bool:
+    result = git_ops.run_git(project_dir, "merge-base", "--is-ancestor", commit, target or "HEAD")
+    return result.ok
 
 
 def _elapsed_seconds(record: RunRecord, now: datetime, overlay: StaleOverlay | None = None) -> float | None:

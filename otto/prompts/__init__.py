@@ -17,6 +17,7 @@ _KNOWN_PLACEHOLDERS = frozenset({
     "spec_path",
     "focus_section",
     "stories_section",   # Phase 4.0 — must-verify story subset for merge cert
+    "evidence_spec_section",
     "max_certify_rounds",
     "evidence_dir",
     "target",

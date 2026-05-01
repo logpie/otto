@@ -1438,7 +1438,8 @@ def _review_packet(project_dir: Path, detail: DetailView, *, landing_item: dict[
     certification = _certification_summary(project_dir, record)
     evidence = [serialize_artifact(artifact, index) for index, artifact in enumerate(detail.artifacts)]
     merge_preflight = _merge_preflight(project_dir)
-    failure = _failure_summary(project_dir, record, detail.overlay)
+    raw_failure = _failure_summary(project_dir, record, detail.overlay)
+    failure = None if merged else raw_failure
     if landing_item and landing_item.get("superseded"):
         return _superseded_review_packet(
             project_dir,
@@ -2380,6 +2381,7 @@ def _normalize_product_handoff(
     if not urls:
         urls = _urls_from_text(json.dumps(data, default=str))
     task_context = _task_handoff_context(record, certification=certification, changed_files=changed_files, kind=kind)
+    readme = _read_text(root / "README.md")
     preview = _product_preview_metadata(
         record,
         kind=kind,
@@ -2395,6 +2397,8 @@ def _normalize_product_handoff(
         "source_path": str(source_path) if source_path is not None else None,
         "root": str(root),
         "summary": _optional_str(data.get("summary") or data.get("description")) or _fallback_product_summary(root),
+        "tech_stack": _detect_tech_stack(root, readme=readme),
+        "code_stats": _product_code_stats(root),
         **preview,
         **task_context,
         "urls": urls[:8],
@@ -2433,6 +2437,8 @@ def _detected_product_handoff(
         "source_path": str(root / "README.md") if (root / "README.md").exists() else None,
         "root": str(root),
         "summary": _fallback_product_summary(root, readme=readme),
+        "tech_stack": _detect_tech_stack(root, readme=readme),
+        "code_stats": _product_code_stats(root),
         **preview,
         **task_context,
         "urls": urls,
@@ -2442,6 +2448,147 @@ def _detected_product_handoff(
         "sample_data": _sample_data_from_readme(readme)[:12],
         "notes": _fallback_handoff_notes(kind),
     }
+
+
+PRODUCT_STATS_EXCLUDED_DIRS = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    ".worktrees",
+    "__pycache__",
+    "dist",
+    "build",
+    "node_modules",
+    "otto_logs",
+}
+PRODUCT_STATS_TEXT_SUFFIXES = {
+    ".css",
+    ".go",
+    ".html",
+    ".java",
+    ".js",
+    ".jsx",
+    ".json",
+    ".md",
+    ".py",
+    ".rs",
+    ".sh",
+    ".sql",
+    ".svelte",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".vue",
+    ".yaml",
+    ".yml",
+}
+
+
+def _detect_tech_stack(root: Path, *, readme: str = "") -> list[str]:
+    lower_readme = readme.lower()
+    labels: list[str] = []
+
+    def add(label: str) -> None:
+        if label not in labels:
+            labels.append(label)
+
+    package = _read_json_object(root / "package.json")
+    deps: set[str] = set()
+    if isinstance(package, dict):
+        for key in ("dependencies", "devDependencies"):
+            value = package.get(key)
+            if isinstance(value, dict):
+                deps.update(str(name).lower() for name in value)
+        if (root / "package.json").exists():
+            add("Node")
+        if "react" in deps:
+            add("React")
+        if "vite" in deps:
+            add("Vite")
+        if "next" in deps:
+            add("Next.js")
+        if any(path.suffix in {".ts", ".tsx"} for path in _iter_product_files(root, limit=200)):
+            add("TypeScript")
+    pyproject = _read_text(root / "pyproject.toml")
+    python_files = list(_iter_product_files(root, suffixes={".py"}, limit=20))
+    if pyproject or python_files:
+        add("Python")
+    stack_text = f"{lower_readme}\n{pyproject.lower()}"
+    imports_flask = False
+    for path in python_files[:20]:
+        text = _read_text(path, limit=2_000).lower()
+        if "from flask" in text or "import flask" in text:
+            imports_flask = True
+            break
+    if "flask" in stack_text or imports_flask:
+        add("Flask")
+    if "fastapi" in stack_text:
+        add("FastAPI")
+    if "django" in stack_text or (root / "manage.py").exists():
+        add("Django")
+    if (root / "templates").exists() or any(path.suffix.lower() in {".html", ".jinja", ".j2"} for path in _iter_product_files(root, limit=200)):
+        add("HTML templates")
+    if any(path.suffix.lower() == ".css" for path in _iter_product_files(root, limit=200)):
+        add("CSS")
+    if "sqlite" in stack_text or any(path.suffix.lower() in {".db", ".sqlite", ".sqlite3"} for path in _iter_product_files(root, limit=200)):
+        add("SQLite")
+    if (root / "tests").exists() or "pytest" in stack_text:
+        add("pytest")
+    return labels[:8]
+
+
+def _product_code_stats(root: Path) -> dict[str, int]:
+    files = 0
+    lines = 0
+    for path in _iter_product_files(root):
+        suffix = path.suffix.lower()
+        if suffix not in PRODUCT_STATS_TEXT_SUFFIXES:
+            continue
+        files += 1
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                lines += sum(1 for _ in handle)
+        except OSError:
+            continue
+    return {"files": files, "lines": lines}
+
+
+def _iter_product_files(
+    root: Path,
+    *,
+    suffixes: set[str] | None = None,
+    limit: int | None = None,
+):
+    yielded = 0
+    try:
+        iterator = root.rglob("*")
+    except OSError:
+        return
+    for path in iterator:
+        if not _is_product_path(path):
+            continue
+        if suffixes is not None and path.suffix.lower() not in suffixes:
+            continue
+        yield path
+        yielded += 1
+        if limit is not None and yielded >= limit:
+            return
+
+
+def _is_product_path(path: Path) -> bool:
+    parts = set(path.parts)
+    if parts.intersection(PRODUCT_STATS_EXCLUDED_DIRS):
+        return False
+    if not path.is_file():
+        return False
+    if path.name.endswith((".log", ".webm", ".mp4", ".png", ".jpg", ".jpeg", ".gif", ".pdf")):
+        return False
+    return True
 
 
 def _task_handoff_context(
@@ -2704,9 +2851,11 @@ def _detect_product_kind(root: Path, readme: str = "") -> str:
             return "cli"
     if (root / "openapi.json").exists() or "openapi" in lower or "swagger" in lower:
         return "api"
-    if "uvicorn" in lower or "fastapi" in lower or "flask --app" in lower or "django" in lower:
+    if "uvicorn" in lower or "fastapi" in lower or "django" in lower:
         return "web" if any(token in lower for token in ("dashboard", "browser", "page", "web app", "html")) else "api"
-    if (root / "index.html").exists() or (root / "templates").exists() or (root / "static").exists():
+    if "flask" in lower or _project_imports_flask(root):
+        return "web" if any(token in lower for token in ("browser", "html", "microblog", "page", "server-rendered", "web app")) or _has_product_dir_named(root, {"templates"}) else "api"
+    if (root / "index.html").exists() or (root / "templates").exists() or (root / "static").exists() or _has_product_dir_named(root, {"templates", "static"}):
         return "web"
     pyproject = _read_text(root / "pyproject.toml")
     if "[project.scripts]" in pyproject or "[tool.poetry.scripts]" in pyproject:
@@ -2718,6 +2867,28 @@ def _detect_product_kind(root: Path, readme: str = "") -> str:
     if "pipeline" in lower or "batch" in lower:
         return "pipeline"
     return "unknown"
+
+
+def _project_imports_flask(root: Path) -> bool:
+    for path in _iter_product_files(root, suffixes={".py"}, limit=30):
+        text = _read_text(path, limit=2_000).lower()
+        if "from flask" in text or "import flask" in text:
+            return True
+    return False
+
+
+def _has_product_dir_named(root: Path, names: set[str]) -> bool:
+    try:
+        iterator = root.rglob("*")
+    except OSError:
+        return False
+    for path in iterator:
+        if not path.is_dir() or path.name not in names:
+            continue
+        if set(path.parts).intersection(PRODUCT_STATS_EXCLUDED_DIRS):
+            continue
+        return True
+    return False
 
 
 def _detect_launch_commands(root: Path, kind: str, readme: str) -> list[dict[str, str]]:
@@ -2735,6 +2906,8 @@ def _detect_launch_commands(root: Path, kind: str, readme: str) -> list[dict[str
     if kind in {"web", "api"}:
         if (root / "expense_portal").exists():
             commands.append({"label": "Start Flask app", "command": ".venv/bin/flask --app expense_portal run --host 0.0.0.0 --port ${PORT}"})
+        elif (root / "run.py").exists():
+            commands.append({"label": "Start server", "command": "uv run python run.py"})
         elif (root / "app" / "main.py").exists():
             commands.append({"label": "Start ASGI app", "command": "uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"})
         elif (root / "manage.py").exists():
@@ -3042,15 +3215,18 @@ def _certification_summary(project_dir: Path, record: Any) -> dict[str, Any]:
 
 def _certification_evidence_gate(proof_json: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(proof_json, dict):
-        return {"schema_version": 1, "status": "not_applicable", "blocks_pass": False, "reason": ""}
+        return {"schema_version": 1, "status": "not_applicable", "blocks_pass": False, "reason": "", "missing_requirements": []}
     raw = proof_json.get("evidence_gate")
     if not isinstance(raw, dict):
-        return {"schema_version": 1, "status": "not_applicable", "blocks_pass": False, "reason": ""}
+        return {"schema_version": 1, "status": "not_applicable", "blocks_pass": False, "reason": "", "missing_requirements": []}
     return {
         "schema_version": _int_or_none(raw.get("schema_version")) or 1,
         "status": _optional_str(raw.get("status")) or "unknown",
         "blocks_pass": bool(raw.get("blocks_pass")),
         "reason": _optional_str(raw.get("reason")) or "",
+        "missing_requirements": [
+            str(item) for item in (raw.get("missing_requirements") or []) if str(item)
+        ],
     }
 
 
@@ -3064,6 +3240,7 @@ def _certification_demo_evidence(proof_json: dict[str, Any] | None) -> dict[str,
             "demo_reason": "No structured proof metadata is available for this legacy run.",
             "primary_demo": None,
             "stories": [],
+            "evidence_spec": {},
             "counts": {},
         }
     raw = proof_json.get("demo_evidence")
@@ -3076,6 +3253,7 @@ def _certification_demo_evidence(proof_json: dict[str, Any] | None) -> dict[str,
             "demo_reason": "This proof report was generated before structured demo evidence was recorded.",
             "primary_demo": None,
             "stories": [],
+            "evidence_spec": {},
             "counts": {},
         }
     primary = raw.get("primary_demo") if isinstance(raw.get("primary_demo"), dict) else None
@@ -3122,6 +3300,7 @@ def _certification_demo_evidence(proof_json: dict[str, Any] | None) -> dict[str,
             else None
         ),
         "stories": stories[:100],
+        "evidence_spec": raw.get("evidence_spec") if isinstance(raw.get("evidence_spec"), dict) else {},
         "counts": raw.get("counts") if isinstance(raw.get("counts"), dict) else {},
     }
 
@@ -3149,6 +3328,11 @@ def _certification_round_history(proof_json: dict[str, Any] | None) -> list[dict
         rounds.append(
             {
                 "round": _int_or_none(entry.get("round")),
+                "phase": _optional_str(entry.get("phase")) or "certify",
+                "phase_label": _optional_str(entry.get("phase_label")) or "",
+                "phase_attempt": _int_or_none(entry.get("phase_attempt")),
+                "product_passed": bool(entry.get("product_passed")),
+                "proof_gate_reason": _optional_str(entry.get("proof_gate_reason")),
                 "verdict": _optional_str(entry.get("verdict")) or "unknown",
                 "stories_tested": _int_or_none(entry.get("stories_tested")),
                 "passed_count": _int_or_none(entry.get("passed_count")),
@@ -3190,7 +3374,7 @@ def _certification_stories(source: dict[str, Any] | None) -> list[dict[str, Any]
             continue
         story_id = _first_nonempty(raw.get("story_id"), raw.get("id"), raw.get("name"), f"story-{index}")
         title = _first_nonempty(raw.get("claim"), raw.get("title"), raw.get("summary"), raw.get("name"), story_id)
-        detail = _first_nonempty(
+        detail = _first_story_nonempty(
             raw.get("observed_result"),
             raw.get("key_finding"),
             raw.get("evidence"),
@@ -3213,6 +3397,14 @@ def _certification_stories(source: dict[str, Any] | None) -> list[dict[str, Any]
     return stories[:100]
 
 
+def _first_story_nonempty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text and not _is_placeholder_evidence_text(text):
+            return text
+    return ""
+
+
 def _story_evidence_excerpt(story: dict[str, Any]) -> str:
     command, output = _story_evidence_command_output(story)
     if command and output:
@@ -3220,10 +3412,10 @@ def _story_evidence_excerpt(story: dict[str, Any]) -> str:
     if command:
         return _truncate_story_evidence(_compact_evidence_command(command), 180)
     raw = _first_nonempty(story.get("evidence"), story.get("failure_evidence"))
-    if not raw:
+    if not raw or _is_placeholder_evidence_text(raw):
         return ""
     lines = _story_evidence_lines(raw)
-    return _truncate_story_evidence(lines[0] if lines else str(raw), 180)
+    return _truncate_story_evidence(lines[0] if lines else "", 180)
 
 
 def _story_evidence_command(story: dict[str, Any]) -> str:
@@ -3238,7 +3430,7 @@ def _story_evidence_output(story: dict[str, Any]) -> str:
 
 def _story_evidence_command_output(story: dict[str, Any]) -> tuple[str, str]:
     raw = _first_nonempty(story.get("evidence"), story.get("failure_evidence"))
-    if not raw:
+    if not raw or _is_placeholder_evidence_text(raw):
         return "", ""
     lines = _story_evidence_lines(raw)
     for index, line in enumerate(lines):
@@ -3258,10 +3450,14 @@ def _story_evidence_lines(raw: str) -> list[str]:
     lines = []
     for line in str(raw).splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("```") or stripped == "text":
+        if not stripped or stripped.startswith("```") or _is_placeholder_evidence_text(stripped):
             continue
         lines.append(stripped)
     return lines
+
+
+def _is_placeholder_evidence_text(value: str) -> bool:
+    return value.strip().lower() in {"text", "none", "null", "n/a", "na", "-", "not recorded", "not present"}
 
 
 def _truncate_story_evidence(value: str, limit: int) -> str:
@@ -3548,7 +3744,12 @@ def _proof_report_asset_root(record: Any, html_path: Path) -> Path:
     session_dir = _optional_str(artifacts.get("session_dir"))
     if session_dir:
         candidate = Path(session_dir).expanduser()
-        return candidate.resolve(strict=False)
+        root = candidate.resolve(strict=False)
+        try:
+            html_path.resolve(strict=False).relative_to(root)
+            return root
+        except ValueError:
+            pass
     return html_path.parent.parent.resolve(strict=False)
 
 
@@ -4280,6 +4481,8 @@ def _merged_branch_index(project_dir: Path, target: str) -> dict[str, dict[str, 
         try:
             state = load_merge_state(project_dir, state_path.parent.name)
         except Exception:
+            continue
+        if str(state.status or "") != "done":
             continue
         if str(state.target or "") != target:
             continue

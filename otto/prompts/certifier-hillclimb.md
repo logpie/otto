@@ -9,6 +9,8 @@ would make this product significantly more useful for real users.
 
 {stories_section}
 
+{evidence_spec_section}
+
 ## Your Process
 
 1. **Understand the product** — read the code, run it, understand what it does

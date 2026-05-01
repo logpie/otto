@@ -34,6 +34,13 @@ def test_ensure_gitignore_adds_common_build_artifacts(tmp_path: Path):
     assert "__pycache__/" in text
     assert "node_modules/" in text
     assert ".pytest_cache/" in text
+    assert ".coverage" in text
+    assert "*.egg-info/" in text
+    assert "htmlcov/" in text
+    assert "*.db" in text
+    assert "*.sqlite" in text
+    assert "*.sqlite3" in text
+    assert "instance/" in text
 
 
 def test_ensure_gitignore_adds_queue_runtime_journals(tmp_path: Path):

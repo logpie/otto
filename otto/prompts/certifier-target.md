@@ -12,6 +12,8 @@ it doesn't meet the target, identify what to change.
 
 {stories_section}
 
+{evidence_spec_section}
+
 ## Your Process
 
 1. **Read the project** — understand architecture, key modules, dependencies.

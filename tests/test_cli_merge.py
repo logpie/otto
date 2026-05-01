@@ -214,3 +214,25 @@ def test_merge_summary_lists_batch_pow_paths(tmp_path: Path, monkeypatch):
     assert "add (build/add-2026-04-21):  /tmp/add-proof-of-work.html" in out
     assert "mul (build/mul-2026-04-21):  /tmp/mul-proof-of-work.html" in out
     assert "Post-merge: /tmp/post-merge-proof-of-work.html" in out
+
+
+def test_merge_incomplete_suggests_merge_verify_rerun(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+
+    async def fake_run_merge(**kwargs):
+        return MergeRunResult(
+            success=False,
+            merge_id="merge-123",
+            state=MergeState(merge_id="merge-123", target="main", outcomes=[]),
+            cert_passed=False,
+            note="cert FAILED (failed; proof gate: missing story screenshots)",
+        )
+
+    monkeypatch.setattr("otto.merge.orchestrator.run_merge", fake_run_merge)
+
+    code, out = _run(["merge", "--all", "--verify", "full"], cwd=repo)
+
+    assert code == 1
+    assert "Merge incomplete (id: merge-123)" in out
+    assert "cert FAILED (failed; proof gate: missing story screenshots)" in out
+    assert "otto merge-verify merge-123 --verify full" in out

@@ -283,6 +283,11 @@ def register_merge_command(main: click.Group) -> None:
             else:
                 console.print("  [red bold]Merge blocked[/red bold]")
             console.print(f"  {rich_escape(result.note)}")
+            if result.merge_id and result.cert_passed is False:
+                console.print(
+                    "  [dim]Next:[/dim] "
+                    f"[info]otto merge-verify {rich_escape(result.merge_id)} --verify {rich_escape(resolved_verification_policy)}[/info]"
+                )
 
         sys.exit(0 if result.success else 1)
 

@@ -22,8 +22,9 @@ from pathlib import Path
 
 import pytest
 
+from otto.config import checkpoint_fingerprint, repo_preflight_issues
 from otto.mission_control.serializers import serialize_project
-from otto.setup_gitignore import OTTO_PATTERNS
+from otto.setup_gitignore import COMMON_BUILD_ARTIFACT_PATTERNS, OTTO_PATTERNS
 from otto.web.app import _create_managed_project
 
 
@@ -59,6 +60,11 @@ def test_gitignore_covers_all_otto_runtime_files(tmp_path: Path):
     assert not missing, (
         f"_create_managed_project's .gitignore is missing Otto runtime "
         f"patterns: {missing}\n--- gitignore ---\n{gitignore}"
+    )
+    missing_common = [pat for pat in COMMON_BUILD_ARTIFACT_PATTERNS if pat not in gitignore]
+    assert not missing_common, (
+        f"_create_managed_project's .gitignore is missing common build "
+        f"artifact patterns: {missing_common}\n--- gitignore ---\n{gitignore}"
     )
 
 
@@ -127,6 +133,46 @@ def test_serialize_project_dirty_false_for_otto_owned_untracked_only(tmp_path: P
         f"Otto-owned untracked files should not flag dirty.\n"
         f"git status:\n{porcelain}\nserialized: {project_payload}"
     )
+
+
+def test_generated_runtime_artifacts_do_not_block_resume_or_dirty_preflight(tmp_path: Path):
+    """Certifier/browser runs can leave local DB/cache files if interrupted.
+
+    They should not make Mission Control ask for a dirty-target acknowledgement,
+    block merge preflight as user dirt, or make a clean checkpoint look stale.
+    """
+    project = _make_project(tmp_path)
+    (project / ".gitignore").write_text("# baseline without common artifacts\n")
+    _git(project, "add", ".gitignore")
+    _git(project, "commit", "-q", "-m", "test baseline gitignore")
+
+    generated = [
+        "icc.db",
+        "local.sqlite",
+        "instance/app.sqlite3",
+        ".coverage",
+        "htmlcov/index.html",
+        "src/__pycache__/module.cpython-312.pyc",
+        "demo.egg-info/PKG-INFO",
+    ]
+    for rel in generated:
+        target = project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("generated")
+
+    porcelain = _git(project, "status", "--porcelain", "--untracked-files=all")
+    assert porcelain.strip(), "test setup error — generated artifacts should be untracked"
+
+    project_payload = serialize_project(project)
+    assert project_payload["dirty"] is False, (
+        f"common generated artifacts should not flag dirty.\n"
+        f"git status:\n{porcelain}\nserialized: {project_payload}"
+    )
+
+    preflight = repo_preflight_issues(project)
+    assert preflight["untracked"] == []
+    assert preflight["dirty_files"] == []
+    assert checkpoint_fingerprint(project)["git_status"] == ""
 
 
 def test_serialize_project_dirty_true_for_user_untracked_files(tmp_path: Path):
