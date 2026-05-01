@@ -30,7 +30,12 @@ from otto.runs.registry import (
     writer_identity_matches_live_process,
 )
 from otto.runs.schema import RunRecord, is_terminal_status
-from otto.verification import VerificationPolicy, normalize_verification_policy
+from otto.verification import (
+    VerificationPolicy,
+    normalize_verification_policy,
+    verification_policy_cli_value,
+    verification_policy_label,
+)
 
 _COMMAND_COUNTER = itertools.count(1)
 
@@ -186,9 +191,9 @@ def execute_merge_recover(
             detail = (abort.stderr or abort.stdout or "git merge --abort failed").strip()
             return _error_result("Recover landing failed", detail)
     return _launch_process(
-        _otto_cli_argv("merge", "--verify", "smart", "--all"),
+        _otto_cli_argv("merge", "--verify", "risk-based", "--all"),
         cwd=project_dir,
-        description="recover landing (smart verification)",
+        description="recover landing (risk-based verification)",
         post_result=post_result,
         settle_timeout_s=2.0,
     )
@@ -209,11 +214,11 @@ def execute_merge_verify(
     except ValueError as exc:
         return _error_result("Verification failed", str(exc))
     if policy not in {"smart", "full"}:
-        return _error_result("Verification failed", "Merge verification reruns support smart or full verification.")
+        return _error_result("Verification failed", "Merge verification reruns support risk-based or full verification.")
     return _launch_process(
-        _otto_cli_argv("merge-verify", merge_id, "--verify", policy),
+        _otto_cli_argv("merge-verify", merge_id, "--verify", verification_policy_cli_value(policy)),
         cwd=Path(project_dir),
-        description=f"rerun merge verification ({policy})",
+        description=f"rerun merge verification ({verification_policy_label(policy)})",
         post_result=post_result,
         settle_timeout_s=2.0,
     )
@@ -483,7 +488,7 @@ def _execute_merge_selected(
     return _launch_process(
         _otto_cli_argv(*_merge_argv(policy, ids=task_ids, transactional=False)),
         cwd=project_dir,
-        description=f"merge {' '.join(task_ids)} ({policy} verification)",
+        description=f"merge {' '.join(task_ids)} ({verification_policy_label(policy)} verification)",
         post_result=post_result,
         settle_timeout_s=2.0,
     )
@@ -506,7 +511,7 @@ def _merge_argv(
     argv = ["merge", "--fast"]
     if transactional:
         argv.append("--transactional")
-    argv.extend(["--verify", policy])
+    argv.extend(["--verify", verification_policy_cli_value(policy)])
     if all_done:
         argv.append("--all")
     else:

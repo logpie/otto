@@ -21,6 +21,7 @@ from otto.queue.schema import load_queue, load_state
 from otto.runs.registry import make_run_record, writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
+from otto.verification import verification_policy_cli_value
 from otto.mission_control.actions import ActionExecutingAdapter, make_action
 from otto.mission_control.adapters.common import (
     artifact_ref_for_path,
@@ -267,7 +268,7 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
                 preview=(
                     "cannot target queue merge"
                     if not task_id
-                    else f"would shell `otto merge --fast --verify smart {task_id}`"
+                    else f"would shell `otto merge --fast --verify {verification_policy_cli_value('smart')} {task_id}`"
                 ),
             ),
             make_action(
@@ -275,7 +276,10 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
                 "merge all",
                 enabled=True,
                 reason=None,
-                preview="would shell `otto merge --fast --transactional --verify smart --all`",
+                preview=(
+                    "would shell `otto merge --fast --transactional "
+                    f"--verify {verification_policy_cli_value('smart')} --all`"
+                ),
             ),
             make_action(
                 "o",

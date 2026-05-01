@@ -652,13 +652,13 @@ function shouldShowVerificationPlan(detail: RunDetail | null, queuedRunWaiting: 
 function verificationPolicyLabel(policy: string | null | undefined): string {
   switch (String(policy || "").toLowerCase()) {
     case "fast":
-      return "Fast smoke";
+      return "No post-merge check";
     case "full":
-      return "Full verification";
+      return "Full check";
     case "skip":
-      return "Verification skipped";
+      return "Check skipped";
     case "smart":
-      return "Smart verification";
+      return "Risk-based check";
     default:
       return "Verification";
   }
@@ -667,13 +667,13 @@ function verificationPolicyLabel(policy: string | null | undefined): string {
 function verificationPolicyDescription(policy: string | null | undefined): string {
   switch (String(policy || "").toLowerCase()) {
     case "fast":
-      return "Checks the core happy path only.";
+      return "Uses the existing task proof without another certification round.";
     case "full":
       return "Runs the broadest available certification scope.";
     case "skip":
       return "Records that certification was intentionally skipped.";
     case "smart":
-      return "Chooses checks based on changed code, risk, and available evidence.";
+      return "Checks the areas most likely to break, based on changed code, risk, and available evidence.";
     default:
       return "Records what Otto plans to verify and what evidence it produced.";
   }

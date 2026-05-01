@@ -1132,7 +1132,7 @@ export function landingBulkConfirmation(landing?: LandingState, includeChoice = 
     : "";
   const verificationText = includeChoice
     ? "Choose the verification level below."
-    : "Otto will use smart verification.";
+    : "Otto will use the risk-based check.";
   return `Land ${ready.length} ready task${ready.length === 1 ? "" : "s"} into ${target}: ${taskList}${suffix}. ${verificationText} Otto will stage ${changed} changed file${changed === 1 ? "" : "s"} across the ready work.${collisionNote}`;
 }
 

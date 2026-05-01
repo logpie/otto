@@ -126,22 +126,22 @@ function VerificationPolicySelector({policyRef}: {policyRef: MutableRefObject<Ve
 const VERIFICATION_POLICY_OPTIONS: Array<{value: VerificationPolicy; label: string; description: string}> = [
   {
     value: "smart",
-    label: "Smart verification",
-    description: "Default. Otto certifies the integration based on risk, changed files, and prior task evidence.",
+    label: "Risk-based check",
+    description: "Default. Otto checks the parts most likely to break after this merge.",
   },
   {
     value: "fast",
-    label: "Fast landing",
-    description: "Pure git landing only. Use when you need speed and already trust the task proof.",
+    label: "No post-merge check",
+    description: "Pure git landing only. Use only when the task proof is already sufficient.",
   },
   {
     value: "full",
-    label: "Full verification",
+    label: "Full check",
     description: "Certify every merged story. Slower, useful for conflicts or high-risk releases.",
   },
   {
     value: "skip",
-    label: "Skip verification",
+    label: "Skip check",
     description: "Land without post-merge certification. Audit responsibility stays with the operator.",
   },
 ];

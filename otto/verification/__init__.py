@@ -7,6 +7,8 @@ from otto.verification.schema import (
     VerificationPolicy,
     format_verification_plan,
     normalize_verification_policy,
+    verification_policy_cli_value,
+    verification_policy_label,
     verification_plan_from_dict,
     write_verification_plan,
 )
@@ -18,6 +20,8 @@ __all__ = [
     "VerificationPolicy",
     "format_verification_plan",
     "normalize_verification_policy",
+    "verification_policy_cli_value",
+    "verification_policy_label",
     "verification_plan_from_dict",
     "write_verification_plan",
 ]

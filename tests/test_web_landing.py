@@ -999,7 +999,7 @@ def test_web_merge_action_uses_fast_merge_and_reports_immediate_failure(tmp_path
     assert response.status_code == 200
     assert response.json()["ok"] is False
     assert "merge failed" in response.json()["message"]
-    assert any(call[-5:] == ["merge", "--fast", "--verify", "smart", "hello-web"] for call in calls)
+    assert any(call[-5:] == ["merge", "--fast", "--verify", "risk-based", "hello-web"] for call in calls)
     event = client.get("/api/events").json()["items"][0]
     assert event["kind"] == "run.merge"
     assert event["severity"] == "error"

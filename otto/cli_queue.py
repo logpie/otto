@@ -510,7 +510,7 @@ def register_queue_commands(main: click.Group) -> None:
             error_console.print(
                 "[error]"
                 "`otto queue certify --after` waits for tasks but does not merge their branches. "
-                "Use `otto merge --all --verify smart` after builds finish for post-merge "
+                "Use `otto merge --all --verify risk-based` after builds finish for post-merge "
                 "certification. If you intentionally want an independent certify run after "
                 "other tasks, pass `--allow-unmerged-after`."
                 "[/error]"

@@ -4,7 +4,7 @@ Single command with mode flags:
     otto merge --all                  # land all done queue tasks into target
     otto merge t3 build/x             # explicit task ids or branches
     otto merge --target develop       # merge target other than default_branch
-    otto merge --verify smart         # risk-based post-merge verification
+    otto merge --verify risk-based    # default post-merge verification
     otto merge --no-certify           # skip post-merge verification
     otto merge --full-verify          # test every merged story
     otto merge --fast                 # pure git, NO LLM, bail on first conflict
@@ -74,9 +74,9 @@ def register_merge_command(main: click.Group) -> None:
     @click.option("--no-certify", is_flag=True,
                   help="Skip post-merge story verification")
     @click.option("--verify", "verification_policy",
-                  type=click.Choice(["smart", "fast", "full", "skip"]),
+                  type=click.Choice(["risk-based", "smart", "full", "skip", "fast"]),
                   default=None,
-                  help="Post-merge verification policy (default: smart)")
+                  help="Post-merge verification policy (default: risk-based; smart is a legacy alias)")
     @click.option("--full-verify", is_flag=True,
                   help="Verify the full merged story union; don't allow per-story skips")
     @click.option("--fast", is_flag=True,
@@ -123,7 +123,11 @@ def register_merge_command(main: click.Group) -> None:
             merge_lock,
             run_merge,
         )
-        from otto.verification import normalize_verification_policy
+        from otto.verification import (
+            normalize_verification_policy,
+            verification_policy_cli_value,
+            verification_policy_label,
+        )
 
         try:
             project_dir = resolve_project_dir(Path.cwd())
@@ -186,7 +190,7 @@ def register_merge_command(main: click.Group) -> None:
         if full_verify:
             console.print("  [dim]Mode:[/dim] [yellow]--full-verify[/yellow]")
         if not no_certify and not full_verify:
-            console.print(f"  [dim]Verification:[/dim] [info]{resolved_verification_policy}[/info]")
+            console.print(f"  [dim]Verification:[/dim] [info]{verification_policy_label(resolved_verification_policy)}[/info]")
         if allow_any_branch:
             console.print("  [dim]Mode:[/dim] [yellow]--allow-any-branch[/yellow]")
 
@@ -286,7 +290,7 @@ def register_merge_command(main: click.Group) -> None:
             if result.merge_id and result.cert_passed is False:
                 console.print(
                     "  [dim]Next:[/dim] "
-                    f"[info]otto merge-verify {rich_escape(result.merge_id)} --verify {rich_escape(resolved_verification_policy)}[/info]"
+                    f"[info]otto merge-verify {rich_escape(result.merge_id)} --verify {rich_escape(verification_policy_cli_value(resolved_verification_policy))}[/info]"
                 )
 
         sys.exit(0 if result.success else 1)
@@ -296,8 +300,8 @@ def register_merge_command(main: click.Group) -> None:
     @click.option(
         "--verify",
         "verification_policy",
-        type=click.Choice(["smart", "full"]),
-        default="smart",
+        type=click.Choice(["risk-based", "smart", "full"]),
+        default="risk-based",
         show_default=True,
         help="Verification policy for the rerun.",
     )
@@ -310,6 +314,7 @@ def register_merge_command(main: click.Group) -> None:
             merge_lock,
             rerun_post_merge_verification,
         )
+        from otto.verification import normalize_verification_policy, verification_policy_label
 
         try:
             project_dir = resolve_project_dir(Path.cwd())
@@ -320,9 +325,10 @@ def register_merge_command(main: click.Group) -> None:
 
         _install_merge_logging(project_dir)
         budget = RunBudget.start_from(config)
+        resolved_verification_policy = normalize_verification_policy(verification_policy, default="smart")
         console.print(
             f"  [bold]Rerunning merge verification[/bold] "
-            f"[info]{rich_escape(merge_id)}[/info] ([info]{verification_policy}[/info])"
+            f"[info]{rich_escape(merge_id)}[/info] ([info]{verification_policy_label(resolved_verification_policy)}[/info])"
         )
         try:
             from otto.cli import _signal_interrupt_guard
@@ -334,7 +340,7 @@ def register_merge_command(main: click.Group) -> None:
                             project_dir=project_dir,
                             config=config,
                             merge_id=merge_id,
-                            verification_policy=verification_policy,
+                            verification_policy=resolved_verification_policy,
                             budget=budget,
                         )
                     )

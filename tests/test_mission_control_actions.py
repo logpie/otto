@@ -513,8 +513,22 @@ def test_merge_selected_and_all_shell_out(tmp_path: Path, monkeypatch) -> None:
     execute_action(record, "m", tmp_path, selected_queue_task_ids=["task-1", "task-2"])
     execute_merge_all(tmp_path)
 
-    assert _FakePopen.calls[0]["argv"][-6:] == ["merge", "--fast", "--verify", "smart", "task-1", "task-2"]
-    assert _FakePopen.calls[1]["argv"][-6:] == ["merge", "--fast", "--transactional", "--verify", "smart", "--all"]
+    assert _FakePopen.calls[0]["argv"][-6:] == [
+        "merge",
+        "--fast",
+        "--verify",
+        "risk-based",
+        "task-1",
+        "task-2",
+    ]
+    assert _FakePopen.calls[1]["argv"][-6:] == [
+        "merge",
+        "--fast",
+        "--transactional",
+        "--verify",
+        "risk-based",
+        "--all",
+    ]
     assert _FakePopen.calls[0]["start_new_session"] is True
     assert _FakePopen.calls[1]["start_new_session"] is True
 
@@ -577,7 +591,7 @@ def test_merge_recover_aborts_then_launches_agentic_merge(tmp_path: Path, monkey
 
     assert result.ok is True
     assert abort_calls == [str(tmp_path)]
-    assert _FakePopen.calls[-1]["argv"][-4:] == ["merge", "--verify", "smart", "--all"]
+    assert _FakePopen.calls[-1]["argv"][-4:] == ["merge", "--verify", "risk-based", "--all"]
     assert _FakePopen.calls[-1]["cwd"] == str(tmp_path)
 
 

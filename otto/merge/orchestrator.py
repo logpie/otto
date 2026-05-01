@@ -174,7 +174,7 @@ def _write_skipped_merge_verification_plan(
                 label="Post-landing certification",
                 status="skipped",
                 reason=(
-                    "Fast landing relies on each source task's existing proof packet and clean git merge."
+                    "No post-merge check was requested; Otto relies on each source task's proof packet and clean git merge."
                     if policy == "fast"
                     else "Operator selected skip verification for this landing."
                 ),

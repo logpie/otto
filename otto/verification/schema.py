@@ -26,6 +26,19 @@ VerificationStatus = Literal[
 
 VERIFICATION_POLICIES: tuple[VerificationPolicy, ...] = ("smart", "fast", "full", "skip")
 
+_VERIFICATION_POLICY_ALIASES: dict[str, VerificationPolicy] = {
+    "none": "skip",
+    "off": "skip",
+    "no-certify": "skip",
+    "no-cert": "skip",
+    "quick": "fast",
+    "risk": "smart",
+    "risk-based": "smart",
+    "riskbased": "smart",
+    "targeted": "smart",
+    "thorough": "full",
+}
+
 
 @dataclass(frozen=True)
 class VerificationCheck:
@@ -81,22 +94,31 @@ class VerificationPlan:
 
 def normalize_verification_policy(value: str | None, *, default: VerificationPolicy = "smart") -> VerificationPolicy:
     normalized = str(value or default).strip().lower().replace("_", "-")
-    aliases = {
-        "none": "skip",
-        "off": "skip",
-        "no-certify": "skip",
-        "no-cert": "skip",
-        "quick": "fast",
-        "targeted": "smart",
-        "thorough": "full",
-    }
-    normalized = aliases.get(normalized, normalized)
+    normalized = _VERIFICATION_POLICY_ALIASES.get(normalized, normalized)
     if normalized not in VERIFICATION_POLICIES:
         raise ValueError(
             f"unknown verification policy {value!r}; expected one of "
-            f"{', '.join(VERIFICATION_POLICIES)}"
+            "risk-based, full, skip, fast"
         )
     return normalized  # type: ignore[return-value]
+
+
+def verification_policy_cli_value(policy: str | None) -> str:
+    normalized = normalize_verification_policy(policy, default="smart")
+    if normalized == "smart":
+        return "risk-based"
+    return normalized
+
+
+def verification_policy_label(policy: str | None) -> str:
+    normalized = normalize_verification_policy(policy, default="smart")
+    if normalized == "smart":
+        return "risk-based"
+    if normalized == "full":
+        return "full"
+    if normalized == "skip":
+        return "skipped"
+    return "fast/no post-merge check"
 
 
 def verification_plan_from_dict(data: dict[str, Any]) -> VerificationPlan:
@@ -154,7 +176,7 @@ def format_verification_plan(plan: VerificationPlan | dict[str, Any]) -> str:
         "",
         f"- Scope: `{plan.scope}`",
         f"- Target: `{plan.target or '-'}`",
-        f"- Policy: `{plan.policy}`",
+        f"- Policy: `{verification_policy_label(plan.policy)}`",
         f"- Risk level: `{plan.risk_level or '-'}`",
         f"- Verification level: `{plan.verification_level or '-'}`",
         f"- Skips allowed: `{'yes' if plan.allow_skip else 'no'}`",

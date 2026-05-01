@@ -318,7 +318,7 @@ def test_queue_certify_after_requires_explicit_unmerged_opt_in(tmp_path: Path):
 
     assert code == 2
     assert "does not merge their branches" in out
-    assert "otto merge --all --verify smart" in out
+    assert "otto merge --all --verify risk-based" in out
 
 
 def test_queue_certify_after_can_be_explicitly_independent(tmp_path: Path):
