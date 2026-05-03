@@ -197,15 +197,18 @@ def detect_scope_violations(
     """Return paths the slice modified that violate owned_paths write-scope.
 
     Rule (write-scope, not exclusion):
-    - A path is a violation if it (a) matches another slice's owned_paths
-      AND (b) does NOT match this slice's owned_paths AND (c) the file
-      was MODIFIED (not newly created — newly created files are allowed
-      anywhere).
+    - A path is allowed if it matches the slice's own `owned_paths` globs.
+    - A path is allowed if it matches `spec.shared_scaffold` globs
+      (foundational files multiple slices extend: app entry, data model,
+      database init).
+    - A path is allowed if it was newly created (file did not exist before).
+    - Otherwise: violation if it matches another slice's `owned_paths`.
+    - Otherwise (no owner anywhere): allowed (shared by default).
 
     Newness is approximated: if `project_root` is provided, a path is
-    "newly created" iff it does not currently exist on disk before the
-    diff is applied. In tests, callers pass `project_root=None` and we
-    treat all paths as modifications (strictest).
+    "newly created" iff it does not currently exist on disk. In tests,
+    callers pass `project_root=None` and we treat all paths as modifications
+    (strictest).
     """
     own_globs = list(slice_obj.owned_paths or [])
     other_globs: list[str] = []
@@ -213,6 +216,7 @@ def detect_scope_violations(
         if s.id == slice_obj.id:
             continue
         other_globs.extend(s.owned_paths or [])
+    shared_globs = list(spec.shared_scaffold or [])
 
     violations: list[str] = []
     for raw in modified_paths:
@@ -221,8 +225,13 @@ def detect_scope_violations(
             continue
         if _matches_any(path, own_globs):
             continue
+        if _matches_any(path, shared_globs):
+            # Explicitly declared shared scaffold — any slice may extend.
+            continue
         if not _matches_any(path, other_globs):
-            # Not under any slice's ownership — likely shared scaffold; allow.
+            # Not under any slice's ownership and not shared scaffold —
+            # treated as implicitly shared (defensive: agents may add new
+            # top-level files like README.md without declaring them).
             continue
         # Path belongs to another slice. Check if it's newly created.
         if project_root is not None:

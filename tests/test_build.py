@@ -173,6 +173,48 @@ def test_scope_violations_allows_shared_scaffold() -> None:
     assert violations == []
 
 
+def test_scope_violations_allows_shared_scaffold_extension(tmp_path: Path) -> None:
+    """Microfeed bench learning: foundational files like models.py must be
+    extendable by multiple slices. shared_scaffold declares this; the rule
+    must honor it."""
+    spec = Spec(
+        intent="webapp",
+        project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        slices=[
+            Slice(id="s1", title="shell", deps=[], owned_paths=["routes/auth.py"], tasks=[], checks=[]),
+            Slice(id="s2", title="api", deps=["s1"], owned_paths=["routes/api.py"], tasks=[], checks=[]),
+        ],
+        shared_scaffold=["models.py", "app.py", "database.py"],
+    )
+    s2 = spec.slices[1]
+    # Pre-existing shared scaffold file; s2 extends it (would normally be
+    # a "modify" violation if any slice owned it).
+    (tmp_path / "models.py").write_text("# existing\n", encoding="utf-8")
+    violations = detect_scope_violations(s2, spec, ["models.py"], project_root=tmp_path)
+    assert violations == []
+
+
+def test_scope_violations_shared_scaffold_globs_match(tmp_path: Path) -> None:
+    """shared_scaffold may use globs (e.g. 'app/__init__.py' or 'config/*.py')."""
+    spec = Spec(
+        intent="webapp",
+        project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        slices=[
+            Slice(id="s1", title="x", deps=[], owned_paths=["routes/x.py"], tasks=[], checks=[]),
+        ],
+        shared_scaffold=["config/*.py", "app/__init__.py"],
+    )
+    s1 = spec.slices[0]
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "settings.py").write_text("# ex\n", encoding="utf-8")
+    violations = detect_scope_violations(
+        s1, spec, ["config/settings.py"], project_root=tmp_path,
+    )
+    assert violations == []
+
+
 def test_scope_violations_recursive_glob() -> None:
     spec = _spec(
         [

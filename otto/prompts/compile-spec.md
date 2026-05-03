@@ -125,8 +125,32 @@ endpoints into `routes` and entity-shaped data into `data_model`.
    file matched by another slice's `owned_paths` requires the other
    slice's permission (the runtime enforces this).
 
-3. **`shared_scaffold`** lists files that no slice owns (lockfiles,
-   build config). They are world-writable in v1.
+3. **`shared_scaffold`** lists files that no slice exclusively owns —
+   any slice may *modify* them. Use this for two categories:
+
+   * **Build/config** — lockfiles, `package.json`, `vite.config.*`,
+     `requirements.txt`, `pytest.ini`, `.gitignore`.
+   * **Foundational extension points** — files that MULTIPLE slices
+     will need to extend (not just append to). For a Flask webapp with
+     several feature slices, this typically means:
+     - The app entry / factory (`app.py`, `app/main.py`,
+       `app/__init__.py`) — every slice registers its blueprint here.
+     - The data model module (`models.py`) — every slice that adds an
+       entity declares it here.
+     - The database init (`database.py`) — every slice may add tables.
+     - The shared base templates (`templates/base.html`).
+     - The config (`config.py`) — slices may need new settings.
+
+   **CRITICAL RULE:** if you predict that two or more slices will
+   *modify* a file (not just create new files alongside it), put that
+   file in `shared_scaffold`, NOT in any slice's `owned_paths`. The
+   build runtime treats `owned_paths` as a write-scope: a slice cannot
+   modify another slice's owned files. Putting a foundational file in
+   one slice's `owned_paths` BLOCKS every other slice from touching
+   it, which is the wrong outcome for things like `models.py`.
+
+   The slice that initially creates a shared-scaffold file is fine —
+   the rule is about exclusive ownership, not initial authorship.
 
 4. **Every slice has at least one check**. Browser journeys are
    `subprocess + glob` for v1: `command` runs (typically a Playwright
