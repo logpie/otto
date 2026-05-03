@@ -415,8 +415,12 @@ def validate_spec(spec: Spec) -> ValidationResult:
             errors.append(f"slice {slice_.id!r}: title must be non-empty")
         if not slice_.checks:
             errors.append(f"slice {slice_.id!r}: must declare at least one check")
-        if not slice_.owned_paths:
-            errors.append(f"slice {slice_.id!r}: must declare at least one owned_paths glob")
+        # Empty owned_paths is permitted: a slice may purely add new files
+        # (anywhere) or purely modify files owned by transitive deps. The
+        # original strict rule was added before the dep-transitivity scope
+        # rule and is now over-restrictive — caught by the round-5 Microfeed
+        # bench where the agent wanted slices that extend shared scaffold +
+        # foundation files only.
 
     for slice_ in spec.slices:
         for dep in slice_.deps:

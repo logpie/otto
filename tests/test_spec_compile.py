@@ -252,12 +252,16 @@ def test_validator_requires_at_least_one_check_per_slice() -> None:
     assert any("check" in err for err in result.errors)
 
 
-def test_validator_requires_at_least_one_owned_paths_glob() -> None:
+def test_validator_allows_empty_owned_paths() -> None:
+    """A slice may have empty owned_paths if it only adds new files anywhere
+    or only modifies files owned by transitive deps. Round-5 Microfeed
+    bench learning: the original strict rule was over-restrictive once
+    the dep-transitivity scope rule landed.
+    """
     spec = _valid_webapp_spec()
     spec.slices[0].owned_paths = []
     result = validate_spec(spec)
-    assert not result.valid
-    assert any("owned_paths" in err for err in result.errors)
+    assert result.valid, result.errors
 
 
 def test_validator_rejects_invalid_slice_id_format() -> None:
