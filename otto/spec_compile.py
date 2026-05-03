@@ -186,6 +186,7 @@ class Spec:
     project_kind: str = "webapp"
     structure: StructureDecisions = field(default_factory=StructureDecisions)
     slices: list[Slice] = field(default_factory=list)
+    cross_slice_checks: list[CheckKind] = field(default_factory=list)
     shared_scaffold: list[str] = field(default_factory=list)
     non_goals: list[str] = field(default_factory=list)
     done_means: list[str] = field(default_factory=list)
@@ -238,6 +239,7 @@ def spec_to_dict(spec: Spec) -> dict[str, Any]:
             }
             for s in spec.slices
         ],
+        "cross_slice_checks": [_check_to_dict(c) for c in spec.cross_slice_checks],
         "shared_scaffold": list(spec.shared_scaffold),
         "non_goals": list(spec.non_goals),
         "done_means": list(spec.done_means),
@@ -284,12 +286,17 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
             diff_sha256_after=str(entry.get("diff_sha256_after") or ""),
         ))
 
+    cross_slice_checks = [
+        _check_from_dict(c) for c in (data.get("cross_slice_checks") or [])
+    ]
+
     return Spec(
         schema_version=int(data.get("schema_version") or SCHEMA_VERSION),
         intent=str(data.get("intent") or ""),
         project_kind=str(data.get("project_kind") or "webapp"),
         structure=StructureDecisions(payload=dict(structure_payload)),
         slices=slices,
+        cross_slice_checks=cross_slice_checks,
         shared_scaffold=[str(p) for p in (data.get("shared_scaffold") or [])],
         non_goals=[str(g) for g in (data.get("non_goals") or [])],
         done_means=[str(g) for g in (data.get("done_means") or [])],
