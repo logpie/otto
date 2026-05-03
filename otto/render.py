@@ -94,6 +94,8 @@ class ProofPacket:
     walkthrough_artifacts: list[str]  # absolute paths
     blocked_slice_ids: list[str]
     landed_slice_ids: list[str]
+    # v2.2 + phase 4: amendment chain rendered for human review
+    amendments: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +199,20 @@ def compose_proof_packet(
             )
         )
 
+    # v2.2 + phase 4: amendments rendered for human review.
+    amendments_render = [
+        {
+            "tier": a.tier,
+            "actor": a.actor,
+            "reason": a.reason,
+            "ts": a.ts,
+            "trigger_event_id": a.trigger_event_id,
+            "diff_sha256_before": a.diff_sha256_before[:16] if a.diff_sha256_before else "",
+            "diff_sha256_after": a.diff_sha256_after[:16] if a.diff_sha256_after else "",
+        }
+        for a in spec.amendments
+    ]
+
     return ProofPacket(
         schema_version=PROOF_PACKET_SCHEMA_VERSION,
         intent=spec.intent,
@@ -212,6 +228,7 @@ def compose_proof_packet(
         walkthrough_artifacts=[_path_to_str(p) for p in audit_result.walkthrough_artifacts],
         blocked_slice_ids=list(merge_result.blocked_ids) + list(build_result.blocked_ids),
         landed_slice_ids=list(merge_result.landed_ids),
+        amendments=amendments_render,
     )
 
 
@@ -239,6 +256,7 @@ def _packet_to_dict(packet: ProofPacket) -> dict[str, Any]:
         "walkthrough_artifacts": packet.walkthrough_artifacts,
         "blocked_slice_ids": packet.blocked_slice_ids,
         "landed_slice_ids": packet.landed_slice_ids,
+        "amendments": packet.amendments,
         "slices": [
             {
                 "slice_id": s.slice_id,

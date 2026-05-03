@@ -516,20 +516,54 @@ def test_audit_writes_contract_test_log(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_default_walkthrough_no_browser_journey_returns_no_op(tmp_path: Path) -> None:
-    """Spec without a BrowserJourney → callable returns no-op result with
-    a clear diagnostic, so audit can still run."""
+def test_default_walkthrough_no_browser_journey_non_webapp_returns_no_op(tmp_path: Path) -> None:
+    """Non-webapp spec without a BrowserJourney → callable returns
+    no-op with a clear diagnostic. webapp kinds get a synthesized
+    walkthrough (see test below).
+    """
     from otto.spec_compile import PytestCheck
 
     spec = Spec(
         intent="x",
+        project_kind="cli",
         slices=[Slice(id="s", title="t", checks=[PytestCheck(selector="x")])],
     )
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
     assert result.succeeded is True
     assert result.artifacts == []
-    assert "no BrowserJourney" in result.detail
+    assert "no synthesized fallback" in result.detail
+
+
+def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Path) -> None:
+    """Webapp spec without a BrowserJourney → synthesized walkthrough
+    boots the app via create_app and hits /. v2 phase 3: audit verdict
+    must NEVER come from 'LLM read code' alone for webapps.
+    """
+    from otto.spec_compile import PytestCheck
+
+    spec = Spec(
+        intent="x",
+        project_kind="webapp",
+        slices=[Slice(id="s", title="t", checks=[PytestCheck(selector="x")])],
+    )
+    # Seed a minimal Flask app at the project root.
+    (tmp_path / "app.py").write_text(
+        "from flask import Flask\n"
+        "def create_app(config=None):\n"
+        "    app = Flask(__name__)\n"
+        "    @app.get('/')\n"
+        "    def home(): return '<h1>Hello synthesized walkthrough</h1>'\n"
+        "    return app\n"
+    )
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(tmp_path, tmp_path / "log", 60)
+    assert result.succeeded is True
+    # log + body artifacts present
+    assert len(result.artifacts) >= 1
+    # The synthesized log captures the home-page response.
+    log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
+    assert "Hello synthesized walkthrough" in log_text or '"status": 200' in log_text
 
 
 def test_default_walkthrough_picks_cross_slice_journey_first(tmp_path: Path) -> None:

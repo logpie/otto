@@ -719,6 +719,20 @@ async def _run_slice(
             last_failure_narrative=last_failure,
             log_dir=raw_log_dir,
         )
+
+        # v2 phase 4 (observability): archive the rendered prompt
+        # alongside the agent's narrative log so post-hoc review can
+        # answer "did the agent see X instruction?" without parsing
+        # messages.jsonl. Cheap; one file per attempt.
+        try:
+            prompt_dir = session_dir / "build" / slice_obj.id / f"attempt-{attempt:02d}"
+            prompt_dir.mkdir(parents=True, exist_ok=True)
+            (prompt_dir / "prompt.md").write_text(
+                _build_agent_prompt(agent_input), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning("failed to archive prompt for %s attempt %d: %s",
+                           slice_obj.id, attempt, exc)
         try:
             agent_output = await build_agent(agent_input)
         except Exception as exc:

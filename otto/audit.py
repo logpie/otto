@@ -199,10 +199,22 @@ def default_walkthrough_from_spec(spec: Spec) -> WalkthroughCallable:
                 break
 
     if journey is None:
+        # No BrowserJourney declared. For webapp project_kind, synthesize
+        # a minimal one — boot the app, hit `/`, screenshot, capture
+        # console errors. Audit verdict should NEVER come from "LLM
+        # read code" alone for webapps. For non-webapp kinds (cli,
+        # library), legitimately no-op.
+        project_kind = (spec.project_kind or "").lower()
+        if project_kind == "webapp":
+            return _synthesized_webapp_walkthrough()
+
         def _no_journey(_pd: Path, _ld: Path, _ts: int) -> WalkthroughResult:
             return WalkthroughResult(
                 succeeded=True,
-                detail="no BrowserJourney check declared in spec; LLM judge will read code only",
+                detail=(
+                    f"no BrowserJourney declared and project_kind={project_kind!r} "
+                    "has no synthesized fallback; LLM judge reads code only"
+                ),
                 artifacts=[],
             )
         return _no_journey
@@ -224,6 +236,97 @@ def default_walkthrough_from_spec(spec: Spec) -> WalkthroughCallable:
         )
 
     return _run_journey
+
+
+def _synthesized_webapp_walkthrough() -> WalkthroughCallable:
+    """Default walkthrough for webapp project_kind when none was declared.
+
+    Boots the app via `create_app`, walks the home page using Flask's
+    test_client (no Playwright dependency, no real server), captures
+    response status/length, and saves the rendered HTML body as an
+    audit artifact. This is a best-effort default — projects that
+    don't expose `create_app()` (or aren't Flask-shaped) get a clear
+    diagnostic instead of silent no-op.
+
+    For richer interactive verification, projects should declare a
+    BrowserJourney check in cross_slice_checks (Playwright runner,
+    Cypress harness, etc.).
+    """
+    def _walk(project_dir: Path, log_dir: Path, _timeout_s: int) -> WalkthroughResult:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "synthesized-webapp.log"
+
+        # Try to boot via create_app.
+        import subprocess
+        from otto.checks import _subprocess_env
+
+        boot_script = (
+            "import json, sys, traceback\n"
+            "try:\n"
+            "    from app import create_app\n"
+            "    app = create_app({'TESTING': True})\n"
+            "    client = app.test_client()\n"
+            "    r = client.get('/')\n"
+            "    body = r.get_data(as_text=True) or ''\n"
+            "    print(json.dumps({'status': r.status_code, 'body_len': len(body), 'body_preview': body[:500]}))\n"
+            "    sys.stdout.flush()\n"
+            "    with open('__audit_home_body__.html', 'w') as f:\n"
+            "        f.write(body)\n"
+            "except Exception as exc:\n"
+            "    print(json.dumps({'error': f'{type(exc).__name__}: {exc}', 'traceback': traceback.format_exc()}))\n"
+            "    sys.exit(2)\n"
+        )
+
+        env = _subprocess_env(extra_pythonpath=[project_dir])
+        try:
+            completed = subprocess.run(
+                ["python", "-c", boot_script],
+                cwd=project_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            log_path.write_text("synthesized webapp walkthrough timed out after 60s\n")
+            return WalkthroughResult(
+                succeeded=False, detail="synthesized webapp walkthrough timed out", artifacts=[]
+            )
+        except FileNotFoundError as exc:
+            log_path.write_text(f"python not found: {exc}\n")
+            return WalkthroughResult(
+                succeeded=False, detail=f"python interpreter not available: {exc}", artifacts=[]
+            )
+
+        log_text = (
+            f"$ python -c <synthesized-webapp-walkthrough>\n"
+            f"exit_code={completed.returncode}\n\n"
+            f"STDOUT:\n{completed.stdout}\n\nSTDERR:\n{completed.stderr}"
+        )
+        log_path.write_text(log_text)
+
+        artifacts: list[Path] = [log_path]
+        body_path = project_dir / "__audit_home_body__.html"
+        if body_path.exists():
+            artifacts.append(body_path)
+
+        if completed.returncode == 0:
+            return WalkthroughResult(
+                succeeded=True,
+                detail=f"synthesized GET / succeeded ({completed.stdout.strip()[:200]})",
+                artifacts=artifacts,
+            )
+        return WalkthroughResult(
+            succeeded=False,
+            detail=(
+                f"synthesized webapp walkthrough failed "
+                f"(exit={completed.returncode}); see {log_path.name}"
+            ),
+            artifacts=artifacts,
+        )
+
+    return _walk
 
 
 # ---------------------------------------------------------------------------
