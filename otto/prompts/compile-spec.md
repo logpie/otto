@@ -73,6 +73,31 @@ each owned end-to-end by one build agent. Wrap the JSON in
 }
 ```
 
+## Home-page UI completeness (webapp)
+
+When `project_kind: "webapp"` AND the intent mentions a browser UI with
+controls (e.g. "include a usable browser UI with visible controls for
+creating users, following, posting, searching..."), the Home page
+component MUST enumerate **every primary user action** mentioned in the
+intent as a directly visible interactive control on `/`, not just a
+link to another page.
+
+For each primary action, the home page should have at minimum ONE of:
+- An inline form with appropriate `<input>` or `<textarea>` named after
+  the action target. For posts: `<textarea name="text">` or
+  `<input name="text">`. For follows: `<input name="target">` or
+  similar. For users: `<input name="username">`.
+- A visible button/link that opens an inline form (still on `/`).
+
+Why: downstream browser-quality evaluators check the home page DOM
+directly for these controls. Linking out to `/timeline/<username>` or
+`/posts/new` is NOT enough — the evaluator wants the form discoverable
+on the landing surface.
+
+For Microfeed-style social apps, the Home page key_text should
+explicitly mention: "signup form, post-creation form, follow form,
+search input, links to timeline + CSV export". List every action.
+
 ## REQUIRED fields by `project_kind` (validator-enforced)
 
 The compile fails CLOSED if `structure.payload` is missing required
