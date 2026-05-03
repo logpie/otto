@@ -164,13 +164,29 @@ endpoints into `routes` and entity-shaped data into `data_model`.
 
 ## Check kinds
 
-| kind             | payload                                                        |
-|------------------|----------------------------------------------------------------|
-| `pytest`         | `selector` (pytest selector), `timeout_s`                      |
-| `repo_test`      | `command` (e.g. `["npm", "test"]`), `timeout_s`                |
-| `api_probe`      | `method`, `path`, `expect_status`, `expect_body_contains`      |
-| `browser_journey`| `command`, `evidence_globs`, `timeout_s`                       |
-| `state_invariant`| `description`, `expression`                                    |
+| kind             | payload                                                        | v1 status |
+|------------------|----------------------------------------------------------------|-----------|
+| `pytest`         | `selector` (pytest selector), `timeout_s`                      | ✅ preferred |
+| `repo_test`      | `command` (e.g. `["npm", "test"]`), `timeout_s`                | ✅ preferred |
+| `browser_journey`| `command`, `evidence_globs`, `timeout_s`                       | ✅ subprocess+glob |
+| `state_invariant`| `description`, `expression`                                    | ✅ filesystem invariants |
+| `api_probe`      | `method`, `path`, `expect_status`, `expect_body_contains`      | ❌ DEFERRED |
+
+**Critical: do NOT emit `api_probe` checks in v1.** The build runtime has
+no app-server boot — there is no `base_url` for the probe to hit. An
+`api_probe` check will fail immediately at the check stage with
+"ApiProbe needs base_url" and BLOCK the slice.
+
+**Prefer `pytest` checks against the project's existing test command**
+when validating API routes. If the project root has
+`tests/run_acceptance.py` (the bench seeds this), use selectors like:
+
+```json
+{"kind": "pytest", "selector": "tests/run_acceptance.py::check_accounts", "timeout_s": 120}
+```
+
+These run via Flask's test_client (no server boot needed) and exercise
+the same contract as the eventual production app.
 
 ## Process
 
