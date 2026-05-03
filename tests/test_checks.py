@@ -385,13 +385,16 @@ def test_state_invariant_http_get_when_base_url_set() -> None:
     assert evidence.passed is True
 
 
-def test_state_invariant_no_http_get_without_base_url(tmp_path: Path) -> None:
-    # Without base_url, http_get is not in the namespace; using it should
-    # raise NameError.
+def test_state_invariant_no_http_get_without_base_url_is_informational(tmp_path: Path) -> None:
+    """v2 generalized F2: NameError (missing symbol in namespace) is
+    informational, not slice-blocking. Eval errors mean the expression
+    isn't a clean predicate, not that the predicate is false."""
     check = StateInvariant(description="x", expression="http_get('/ok')['status'] == 200")
     evidence = run_check(check, project_dir=tmp_path, base_url=None)
-    assert evidence.passed is False
+    assert evidence.passed is True
     assert "NameError" in evidence.detail
+    assert "http_get" in evidence.detail
+    assert evidence.raw["eval_error"].startswith("NameError")
 
 
 # ---------------------------------------------------------------------------

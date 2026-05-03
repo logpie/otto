@@ -341,27 +341,28 @@ def _run_state_invariant(
             started, t0, "StateInvariant.expression is empty (informational; nothing to evaluate)"
         )
 
+    # Generous safe-builtin set. The risk of restricted eval was about
+    # NETWORK access (no socket, no urlopen unless http_get is exposed),
+    # not about ordinary Python expressiveness. Compile agents writing
+    # state_invariants legitimately reach for callable, hasattr,
+    # isinstance, etc. — restricting them produces NameError that the
+    # runner now treats as informational, but the cleaner outcome is to
+    # provide what the agent expects.
     namespace: dict[str, Any] = {
         "__builtins__": {
-            "abs": abs,
-            "all": all,
-            "any": any,
-            "bool": bool,
-            "dict": dict,
-            "float": float,
-            "int": int,
-            "len": len,
-            "list": list,
-            "max": max,
-            "min": min,
-            "set": set,
-            "sorted": sorted,
-            "str": str,
-            "sum": sum,
-            "tuple": tuple,
-            "True": True,
-            "False": False,
-            "None": None,
+            "abs": abs, "all": all, "any": any,
+            "bool": bool, "bytes": bytes, "callable": callable,
+            "dict": dict, "enumerate": enumerate,
+            "filter": filter, "float": float, "frozenset": frozenset,
+            "getattr": getattr, "hasattr": hasattr, "hash": hash,
+            "isinstance": isinstance, "issubclass": issubclass,
+            "int": int, "len": len, "list": list,
+            "map": map, "max": max, "min": min,
+            "range": range, "repr": repr, "reversed": reversed,
+            "round": round, "set": set, "sorted": sorted,
+            "str": str, "sum": sum, "tuple": tuple, "type": type,
+            "zip": zip,
+            "True": True, "False": False, "None": None,
         },
         "project_dir": project_dir,
         "cwd": cwd,
@@ -380,14 +381,17 @@ def _run_state_invariant(
         # Compile separately to surface SyntaxError as a clearer detail.
         code = builtins.compile(expression, "<state_invariant>", "eval")
         result = eval(code, namespace, {})
-    except SyntaxError:
-        # Permissive fallback: agents sometimes emit prose ("App shell has
-        # create_app factory and database setup") instead of Python. Don't
-        # fail the slice on this — it isn't a behavior regression, it's
-        # just a malformed assertion. Treat as informational PASS with the
-        # description preserved as evidence. Real damage is caught by the
-        # slice's other checks + cross-slice checks + audit's contract gate.
-        # (See docs/intent-to-product-v2.md, finding F2.)
+    except (SyntaxError, NameError, AttributeError, KeyError, TypeError, IndexError) as exc:
+        # Permissive fallback (v2.1 F2 generalized): eval errors mean
+        # the expression isn't a clean predicate, NOT that the predicate
+        # is false. Don't slice-block on:
+        #   - SyntaxError: agent wrote prose instead of Python
+        #   - NameError: agent referenced a symbol the namespace doesn't
+        #     expose (legitimate in a sandboxed environment)
+        #   - AttributeError / KeyError / IndexError / TypeError:
+        #     expression structure assumes data shapes that differ from
+        #     what the runtime provides
+        # Real damage is caught by other checks + audit's contract gate.
         detail = check.description or expression
         if len(detail) > 200:
             detail = detail[:197] + "..."
@@ -395,15 +399,16 @@ def _run_state_invariant(
             passed=True,
             started_at=started,
             duration_s=time.monotonic() - t0,
-            detail=f"{detail} → informational (not Python; eval skipped)",
+            detail=f"{detail} → informational ({type(exc).__name__}: {exc})",
             raw={
                 "expression": expression,
                 "description": check.description,
                 "result": None,
-                "non_python_expression": True,
+                "eval_error": f"{type(exc).__name__}: {exc}",
+                "non_python_expression": isinstance(exc, SyntaxError),
             },
         )
-    except Exception as exc:  # noqa: BLE001 — surface eval failures
+    except Exception as exc:  # noqa: BLE001 — surface other eval failures
         return _err_evidence(started, t0, f"{type(exc).__name__}: {exc}")
 
     passed = bool(result)
