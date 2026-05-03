@@ -200,14 +200,11 @@ def detect_scope_violations(
     - A path is allowed if it matches the slice's own `owned_paths` globs.
     - A path is allowed if it matches `spec.shared_scaffold` globs.
     - A path is allowed if it matches owned_paths of any slice in the
-      slice's transitive deps OR any slice declared earlier in
-      `spec.slices` (topological-precedence rule). The merge queue
-      lands slices in this order, so by the time slice N builds,
-      slices 1..N-1 have already landed; allowing N to extend them
-      removes the consistent peer-overreach failure pattern.
+      slice's transitive deps. (Downstream slices extend foundations
+      they depend on. Peers cannot trample each other.)
     - A path is allowed if it was newly created (file did not exist before).
-    - Otherwise: violation if it matches a LATER peer slice's
-      `owned_paths` (a slice declared after this one in spec order).
+    - Otherwise: violation if it matches a peer slice's `owned_paths`
+      (a slice not in this slice's transitive deps).
 
     Newness is approximated: if `project_root` is provided, a path is
     "newly created" iff it does not currently exist on disk. In tests,
@@ -216,29 +213,14 @@ def detect_scope_violations(
     """
     own_globs = list(slice_obj.owned_paths or [])
     shared_globs = list(spec.shared_scaffold or [])
-    # Allowed-modify scope: transitive deps + topological-precedence.
-    # Compile lays slices out in dep order (compile validator rejects
-    # cycles and unknown deps), so a slice declared earlier in
-    # `spec.slices` is either a transitive dep or a same-layer peer
-    # whose work has already landed by the time this slice builds.
-    # Treating earlier-in-spec slices as implicitly modifiable matches
-    # the topological order the merge queue executes in, and removes
-    # the consistent failure where a feature slice naturally extends an
-    # earlier feature's source file (e.g. `posts` adds a helper to
-    # `routes/social.py` it relies on for follow data).
+    # Transitive deps: every slice this slice depends on, recursively.
     transitive_dep_ids = _transitive_deps(slice_obj.id, spec)
-    earlier_ids: set[str] = set()
-    for s in spec.slices:
-        if s.id == slice_obj.id:
-            break  # everything before us in declaration order
-        earlier_ids.add(s.id)
-    allowed_modify_ids = transitive_dep_ids | earlier_ids
     dep_globs: list[str] = []
     peer_globs: list[str] = []
     for s in spec.slices:
         if s.id == slice_obj.id:
             continue
-        if s.id in allowed_modify_ids:
+        if s.id in transitive_dep_ids:
             dep_globs.extend(s.owned_paths or [])
         else:
             peer_globs.extend(s.owned_paths or [])
