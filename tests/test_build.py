@@ -583,6 +583,34 @@ def test_run_build_handles_agent_crash_with_retry(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_build_agent_prompt_lists_peer_owned_paths_as_forbidden(tmp_path: Path) -> None:
+    """Round-6 Microfeed bench learning: build agents over-reach into peer
+    slices' owned files. Prompt must explicitly list the forbidden paths.
+    """
+    s_self = Slice(id="auth", title="Auth", deps=["shell"],
+                   owned_paths=["routes/auth.py"], tasks=[], checks=[])
+    s_shell = Slice(id="shell", title="Shell", deps=[],
+                    owned_paths=["app.py"], tasks=[], checks=[])
+    s_peer = Slice(id="search", title="Search", deps=["shell"],
+                   owned_paths=["routes/search.py", "templates/search.html"],
+                   tasks=[], checks=[])
+    spec = _spec([s_shell, s_self, s_peer])
+    inp = BuildAgentInput(
+        spec=spec, slice=s_self, project_dir=tmp_path, worktree=tmp_path,
+        branch="x", attempt=1,
+    )
+    prompt = _build_agent_prompt(inp)
+    # Self's owned_paths shown as MODIFY
+    assert "your owned: `routes/auth.py`" in prompt
+    # Dep's owned_paths shown as MODIFY (transitive dep)
+    assert "dep `shell`'s: `app.py`" in prompt
+    # Peer's owned_paths shown as FORBIDDEN
+    assert "FORBIDDEN" in prompt
+    assert "peer `search`'s: `routes/search.py`" in prompt
+    assert "peer `search`'s: `templates/search.html`" in prompt
+    assert "Stay in your lane" in prompt
+
+
 def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:
     s = Slice(
         id="s1",

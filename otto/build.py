@@ -709,17 +709,53 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     for i, task in enumerate(s.tasks or [], 1):
         lines.append(f"  {i}. {task}")
     lines.append("")
-    lines.append("## Files you may MODIFY (write-scope)")
+    # Compute transitive deps for accurate write-scope summary in the prompt.
+    transitive_deps = _transitive_deps(s.id, spec)
+    dep_owned: list[tuple[str, str]] = []
+    peer_owned: list[tuple[str, str]] = []
+    for other in spec.slices:
+        if other.id == s.id:
+            continue
+        if other.id in transitive_deps:
+            dep_owned.extend((other.id, g) for g in (other.owned_paths or []))
+        else:
+            peer_owned.extend((other.id, g) for g in (other.owned_paths or []))
+
+    lines.append("## Write-scope rules (the build runtime ENFORCES these)")
+    lines.append("")
+    lines.append("**You MAY MODIFY:**")
     if s.owned_paths:
         for g in s.owned_paths:
-            lines.append(f"  - {g}")
-    else:
+            lines.append(f"  - your owned: `{g}`")
+    if dep_owned:
+        for did, g in dep_owned:
+            lines.append(f"  - dep `{did}`'s: `{g}` (you depend on this slice)")
+    if spec.shared_scaffold:
+        for g in spec.shared_scaffold:
+            lines.append(f"  - shared scaffold: `{g}`")
+    if not s.owned_paths and not dep_owned and not spec.shared_scaffold:
         lines.append("  (none declared — you may only CREATE new files)")
     lines.append("")
+    if peer_owned:
+        lines.append(
+            "**FORBIDDEN — these belong to PEER slices (not your dependencies). "
+            "Do NOT create or modify them. The build runtime will reject your "
+            "attempt if you do, and the slice will be BLOCKED.**"
+        )
+        for sid, g in peer_owned:
+            lines.append(f"  - peer `{sid}`'s: `{g}`")
+    lines.append("")
     lines.append(
-        "You may create new files anywhere. You may NOT modify files owned "
-        "by other slices (they have their own owned_paths). The build "
-        "system will reject your attempt if it detects a scope violation."
+        "You MAY also create NEW files outside any declared scope (e.g. helper "
+        "modules, fixtures). The forbidden list above only applies to files "
+        "owned by peer slices."
+    )
+    lines.append("")
+    lines.append(
+        "**Stay in your lane.** Build only what this slice's tasks ask for. "
+        "Do NOT pre-emptively build features that belong to later slices "
+        "(they have their own dedicated build agents and will fail if you "
+        "trample their files)."
     )
     lines.append("")
     lines.append("## Slice acceptance checks")
