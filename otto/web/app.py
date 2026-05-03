@@ -364,6 +364,12 @@ def create_app(
     def queue(command: str, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
         return _service().enqueue(command, payload)
 
+    # i2p (intent-to-product) read-only routes — Step 8a.
+    # Mounted alongside legacy routes; safe coexistence.
+    if not project_launcher and project_dir is not None:
+        from otto.web.i2p_routes import install_i2p_routes
+        install_i2p_routes(app, project_dir=project_dir)
+
     app.mount("/static", _CacheHeaderStaticFiles(directory=static_dir), name="static")
     return app
 
