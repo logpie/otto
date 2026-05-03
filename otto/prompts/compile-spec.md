@@ -126,7 +126,7 @@ endpoints into `routes` and entity-shaped data into `data_model`.
    slice's permission (the runtime enforces this).
 
 3. **`shared_scaffold`** lists files that no slice exclusively owns —
-   any slice may *modify* them. Use this for two categories:
+   any slice may *modify* them. Use this for three categories:
 
    * **Build/config** — lockfiles, `package.json`, `vite.config.*`,
      `requirements.txt`, `pytest.ini`, `.gitignore`.
@@ -138,8 +138,24 @@ endpoints into `routes` and entity-shaped data into `data_model`.
      - The data model module (`models.py`) — every slice that adds an
        entity declares it here.
      - The database init (`database.py`) — every slice may add tables.
-     - The shared base templates (`templates/base.html`).
      - The config (`config.py`) — slices may need new settings.
+   * **Cross-cutting UI surfaces** — for any webapp where multiple
+     feature slices contribute UI to the SAME page, the page's HTML
+     templates must be `shared_scaffold`. Examples:
+     - `templates/base.html` — every slice registers nav links and
+       includes here.
+     - `templates/home.html` — slices add "Create user", "Follow",
+       "Create post", "Search", "Export" controls here.
+     - `templates/timeline.html` — `posts` shows posts; `social` adds
+       follow/unfollow buttons; `export` adds CSV export link.
+     - `templates/search.html` — `search` shows results; `export`
+       adds the export link.
+
+     **Rule of thumb**: any template that more than one slice's
+     functionality appears on belongs in `shared_scaffold`, NOT in
+     any single slice's `owned_paths`. If you predict that even ONE
+     other slice will want to add a button/link/form to a template,
+     put that template in shared_scaffold up front.
 
    **CRITICAL RULE:** if you predict that two or more slices will
    *modify* a file (not just create new files alongside it), put that
