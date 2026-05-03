@@ -104,10 +104,13 @@ For Microfeed-style social apps, the Home page key_text should
 explicitly mention: "signup form, post-creation form, follow form,
 search input, links to timeline + CSV export". List every action.
 
-## REQUIRED fields by `project_kind` (validator-enforced)
+## Recommended fields by `project_kind`
 
-The compile fails CLOSED if `structure.payload` is missing required
-fields. For `project_kind: "webapp"`:
+The parser is permissive (it coerces missing fields and surfaces
+warnings rather than failing the compile). But the slices still need
+concrete structure to avoid drifting on shapes — the recommended
+fields below are what stops two slices from inventing competing
+schemas. For `project_kind: "webapp"`:
 
 * **`routes`** — REQUIRED, non-empty array. Each route MUST have:
   `path` (string), `component` (string), `key_text` (string).
@@ -141,9 +144,11 @@ fields. For `project_kind: "webapp"`:
     "display_name"]}`. Naming the entities and their fields is what
     stops two slices from inventing competing schemas.
 
-DO NOT invent your own keys (`api_endpoints`, `pages`, `models`,
-`schemas`, etc.). The validator is strict on the names above. Fold
-endpoints into `routes` and entity-shaped data into `data_model`.
+Use the canonical key names (`routes`, `components`, `data_model`).
+Inventing custom keys (`api_endpoints`, `pages`, `models`, `schemas`)
+will parse, but downstream stages and reviewers expect the canonical
+shape. Fold endpoints into `routes` and entity-shaped data into
+`data_model`.
 
 ## Concreteness rules (mandatory)
 
