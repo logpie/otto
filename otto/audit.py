@@ -274,6 +274,25 @@ async def run_audit(
                 f"[contract test FAILED]\n{contract_detail}"
             ).strip()
 
+        # v2.2 defense D3: review the amendment chain. Broken chain or
+        # spec-mutated-outside-chain → BLOCKED. Suspicious patterns
+        # (missing trigger events, concentrated edits, 5+ amendments)
+        # cap at PARTIAL. See docs/intent-to-product-v2.md "Safe
+        # mutability" and otto/spec_amend.py.
+        from otto.spec_amend import verify_amendment_chain
+
+        chain_review = verify_amendment_chain(spec, session_dir=session_dir)
+        if chain_review.verdict_cap == "blocked":
+            verdict = AuditVerdict.BLOCKED
+        elif chain_review.verdict_cap == "partial" and verdict == AuditVerdict.PASSED:
+            verdict = AuditVerdict.PARTIAL
+        if chain_review.findings:
+            narrative = (
+                f"{narrative}\n\n"
+                f"[amendment chain review: {chain_review.verdict_cap}]\n"
+                + "\n".join(f"  - {f}" for f in chain_review.findings)
+            ).strip()
+
         last_result = AuditResult(
             verdict=verdict,
             narrative=narrative,

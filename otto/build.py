@@ -595,15 +595,20 @@ async def _run_slice(
                 len(scope_warnings),
                 ", ".join(scope_warnings[:5]),
             )
+            # v2.2: emit a dedicated scope.warning event with a stable
+            # event_id so the slice agent can cite it in a follow-up
+            # request_amendment call (e.g., to legitimately add the
+            # peer to its deps list).
             emit(
                 session_dir,
-                "slice.attempt.failed",  # journal-event reuse; severity is INFO
+                "scope.warning",
                 slice_id=slice_obj.id,
                 attempt=attempt,
                 detail=(
                     f"scope warning (non-blocking): modified {len(scope_warnings)} "
                     f"path(s) outside owned_paths: {', '.join(scope_warnings[:5])}"
                 ),
+                paths=list(scope_warnings),
             )
             for w in scope_warnings:
                 if w not in accumulated_scope_warnings:
