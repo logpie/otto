@@ -310,9 +310,15 @@ def _synthesized_webapp_walkthrough() -> WalkthroughCallable:
         )
 
         env = _subprocess_env(extra_pythonpath=[project_dir])
+        # Use sys.executable for portability — `python` isn't on PATH
+        # on macOS by default; `_subprocess_env` adds the interpreter
+        # bin dir but the basename varies (python3 vs python). Direct
+        # sys.executable bypasses the lookup entirely.
+        import sys as _sys
+
         try:
             completed = subprocess.run(
-                ["python", "-c", boot_script],
+                [_sys.executable, "-c", boot_script],
                 cwd=project_dir,
                 env=env,
                 capture_output=True,
