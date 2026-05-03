@@ -394,11 +394,16 @@ async def run_audit(
         if not failing_ids:
             # Verdict says partial/blocked but no specific slice flagged
             # — nothing actionable. Return as-is.
+            # Bug fix (2026-05-03 amendment-attack bench): emit the
+            # POST-OVERRIDE verdict, not agent_output.verdict. Otherwise
+            # the journal records "passed" while audit_result.verdict is
+            # PARTIAL (because contract gate or chain review capped it),
+            # and downstream consumers see the inconsistency.
             emit(
                 session_dir,
                 "audit.finished",
-                detail=agent_output.narrative[:200],
-                verdict=agent_output.verdict.value,
+                detail=narrative[:200],
+                verdict=verdict.value,
             )
             return last_result
 

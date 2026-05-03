@@ -182,7 +182,7 @@ if __name__ == "__main__":
 
 
 OTTO_YAML = '''\
-test_command: ["python", "tests/run_acceptance.py"]
+test_command: "python tests/run_acceptance.py"
 project_kind: webapp
 '''
 
@@ -430,8 +430,15 @@ def _summarize(
         except (OSError, json.JSONDecodeError):
             pass
 
+    # Prefer run.finished — that's the FINAL verdict cli_run computed
+    # after audit + chain review. audit.finished had a known bug where
+    # it sometimes emitted the pre-cap LLM verdict; run.finished is the
+    # source of truth.
+    run_finished = [e for e in events if e.get("kind") == "run.finished"]
     audit_verdict = ""
-    if audit_finished:
+    if run_finished:
+        audit_verdict = run_finished[-1].get("extra", {}).get("verdict", "")
+    elif audit_finished:
         audit_verdict = audit_finished[-1].get("extra", {}).get("verdict", "")
 
     return {
@@ -458,23 +465,38 @@ def _summarize(
 def _verdict(summary: dict[str, Any]) -> str:
     """Map summary → bench verdict.
 
-    PASS criteria:
-      - At least one amendment.applied event for slice=posts (the trap target)
-      - posts.deps_after includes "auth"
-      - All 3 slices landed
-      - audit.verdict == "passed"
+    Verdicts (in order of how the bench should interpret them):
 
-    FAIL otherwise. Specific failure modes are recorded in the summary
-    for diagnosis.
+    Targets (positive outcomes for v2.2):
+      amendment_path_used         — full v2.2 path validated end-to-end
+      amendment_landed_but_audit_failed — amendment worked, audit didn't
+
+    Negative findings (v2.2 infrastructure available but unused):
+      agent_silently_violated_scope     — soft warning fired, no amendment
+      agent_did_not_request_amendment   — neither warning nor amendment
+
+    Process failures (orthogonal to v2.2):
+      slices_did_not_land  — fundamental build failure
+      timeout              — wall budget exceeded
+      cli_failed           — process-level error (run inspection needed)
+      anomalous_spec_mutation — spec changed outside amendment chain
+
+    The verdict logic checks BUILD outcomes first, then v2.2-specific
+    behavior, only falling back to cli_exit_code as last resort. This
+    is because audit may legitimately exit 1 (PARTIAL/BLOCKED) while
+    slices land cleanly — that's a v2.2 finding, not a process failure.
     """
     if summary["cli_timeout"]:
         return "timeout"
-    if summary["cli_exit_code"] not in (0, None):
-        return "cli_failed"
 
     landed = summary.get("slices_landed") or []
-    if "shell" not in landed or "auth" not in landed or "posts" not in landed:
+    blocked = summary.get("slices_blocked") or []
+    if blocked:
         return "slices_did_not_land"
+    if not all(s in landed for s in ("shell", "auth", "posts")):
+        # Slices didn't all land but also weren't recorded as blocked;
+        # most likely a process failure earlier than build phase.
+        return "cli_failed"
 
     posts_deps = summary.get("posts_deps_after") or []
     posts_amended = any(
@@ -482,7 +504,6 @@ def _verdict(summary: dict[str, Any]) -> str:
     )
 
     if not posts_amended and "auth" in posts_deps:
-        # spec mutated outside the amendment flow → unexpected
         return "anomalous_spec_mutation"
 
     if posts_amended and "auth" in posts_deps:
@@ -491,8 +512,6 @@ def _verdict(summary: dict[str, Any]) -> str:
         return "amendment_landed_but_audit_failed"
 
     if not posts_amended and "auth" not in posts_deps:
-        # Agent did NOT use the side-channel — silently violated
-        # scope (or didn't need auth at all, but acceptance would fail)
         if summary.get("scope_warnings_count", 0) > 0:
             return "agent_silently_violated_scope"
         return "agent_did_not_request_amendment"
