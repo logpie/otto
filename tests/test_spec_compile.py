@@ -112,7 +112,13 @@ def test_spec_roundtrip_supports_all_check_kinds() -> None:
     assert kinds == ["pytest", "api_probe", "browser_journey"]
 
 
-def test_unknown_check_kind_raises() -> None:
+def test_unknown_check_kind_is_dropped_with_warning() -> None:
+    """v2.1: unknown check kinds parse permissively. The check is dropped
+    from the slice and a warning is recorded; parsing does not raise.
+    Real damage is caught by other checks + audit's contract gate.
+    """
+    from otto.spec_compile import parse_spec
+
     bad = {
         "intent": "x",
         "project_kind": "webapp",
@@ -128,8 +134,10 @@ def test_unknown_check_kind_raises() -> None:
             }
         ],
     }
-    with pytest.raises(SpecValidationError):
-        spec_from_dict(bad)
+    spec, warnings = parse_spec(bad)
+    assert spec.slices[0].checks == []
+    assert any(w.code == "spec.coerce.unknown_kind" for w in warnings)
+    assert any("rumor" in w.message for w in warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -142,37 +150,38 @@ def test_validator_passes_on_valid_webapp() -> None:
     assert result.valid, result.errors
 
 
-def test_validator_flags_webapp_missing_routes() -> None:
+def test_validator_warns_webapp_missing_routes() -> None:
+    """v2.1: missing recommended fields are warnings, not errors."""
     spec = _valid_webapp_spec()
     payload = dict(spec.structure.payload)
     payload.pop("routes")
     spec.structure = StructureDecisions(payload=payload)
     result = validate_spec(spec)
-    assert not result.valid
-    assert any("routes" in err for err in result.errors)
+    assert result.valid  # spec is still usable
+    assert any("routes" in w for w in result.warnings)
 
 
-def test_validator_flags_webapp_component_without_key_text() -> None:
+def test_validator_warns_webapp_component_without_key_text() -> None:
     spec = _valid_webapp_spec()
     payload = dict(spec.structure.payload)
-    payload["components"] = [{"name": "Home"}]   # missing key_text
+    payload["components"] = [{"name": "Home"}]
     spec.structure = StructureDecisions(payload=payload)
     result = validate_spec(spec)
-    assert not result.valid
-    assert any("key_text" in err for err in result.errors)
+    assert result.valid
+    assert any("key_text" in w for w in result.warnings)
 
 
-def test_validator_flags_route_without_key_text() -> None:
+def test_validator_warns_route_without_key_text() -> None:
     spec = _valid_webapp_spec()
     payload = dict(spec.structure.payload)
-    payload["routes"] = [{"path": "/", "component": "Home"}]   # missing key_text
+    payload["routes"] = [{"path": "/", "component": "Home"}]
     spec.structure = StructureDecisions(payload=payload)
     result = validate_spec(spec)
-    assert not result.valid
-    assert any("key_text" in err for err in result.errors)
+    assert result.valid
+    assert any("key_text" in w for w in result.warnings)
 
 
-def test_validator_flags_cli_missing_entrypoint() -> None:
+def test_validator_warns_cli_missing_entrypoint() -> None:
     spec = Spec(
         intent="a CLI",
         project_kind="cli",
@@ -190,25 +199,29 @@ def test_validator_flags_cli_missing_entrypoint() -> None:
         ],
     )
     result = validate_spec(spec)
-    assert not result.valid
-    assert any("entrypoint" in err for err in result.errors)
+    assert result.valid
+    assert any("entrypoint" in w for w in result.warnings)
 
 
-def test_validator_flags_duplicate_slice_ids() -> None:
+def test_validator_warns_duplicate_slice_ids() -> None:
+    """v2.1: duplicate IDs warn at the validator level. The parser's
+    `_coerce_slice_id` auto-suffixes duplicates, so this only fires
+    when callers construct a Spec by hand bypassing the parser.
+    """
     spec = _valid_webapp_spec()
     spec.slices.append(Slice(
-        id="shell",   # duplicate
+        id="shell",
         title="dup",
         tasks=["t"],
         owned_paths=["src/**"],
         checks=[PytestCheck(selector="tests/test_x.py")],
     ))
     result = validate_spec(spec)
-    assert not result.valid
-    assert any("duplicate slice id" in err for err in result.errors)
+    assert result.valid
+    assert any("duplicate slice id" in w for w in result.warnings)
 
 
-def test_validator_flags_unknown_dep() -> None:
+def test_validator_warns_unknown_dep() -> None:
     spec = _valid_webapp_spec()
     spec.slices.append(Slice(
         id="shell-extra",
@@ -219,11 +232,12 @@ def test_validator_flags_unknown_dep() -> None:
         checks=[PytestCheck(selector="tests/test_x.py")],
     ))
     result = validate_spec(spec)
-    assert not result.valid
-    assert any("dep" in err and "nope" in err for err in result.errors)
+    assert result.valid
+    assert any("dep" in w and "nope" in w for w in result.warnings)
 
 
 def test_validator_flags_dep_cycle() -> None:
+    """Dep cycles remain hard errors — they would loop the build forever."""
     spec = _valid_webapp_spec()
     spec.slices = [
         Slice(id="a", title="a", tasks=["t"], deps=["b"], owned_paths=["a/**"],
@@ -236,20 +250,23 @@ def test_validator_flags_dep_cycle() -> None:
     assert any("cycle" in err for err in result.errors)
 
 
-def test_validator_rejects_unknown_project_kind() -> None:
+def test_validator_warns_unknown_project_kind() -> None:
+    """v2.1: project_kind is open-enum. Unknown values warn but don't reject."""
     spec = _valid_webapp_spec()
     spec.project_kind = "alien"
     result = validate_spec(spec)
-    assert not result.valid
-    assert any("project_kind" in err for err in result.errors)
+    assert result.valid
+    assert any("project_kind" in w for w in result.warnings)
 
 
-def test_validator_requires_at_least_one_check_per_slice() -> None:
+def test_validator_allows_slice_with_no_checks() -> None:
+    """v2.1 (F5): a slice with no checks vacuously passes. Audit's
+    contract gate verifies the integrated product."""
     spec = _valid_webapp_spec()
     spec.slices[0].checks = []
     result = validate_spec(spec)
-    assert not result.valid
-    assert any("check" in err for err in result.errors)
+    assert result.valid
+    assert any("no checks declared" in w for w in result.warnings)
 
 
 def test_validator_allows_empty_owned_paths() -> None:
@@ -264,12 +281,14 @@ def test_validator_allows_empty_owned_paths() -> None:
     assert result.valid, result.errors
 
 
-def test_validator_rejects_invalid_slice_id_format() -> None:
+def test_validator_warns_unrecommended_slice_id_format() -> None:
+    """v2.1 (F4): slice ID regex is advisory. The parser slugifies; the
+    validator (when called on a hand-constructed Spec) warns."""
     spec = _valid_webapp_spec()
     spec.slices[0].id = "BadID"
     result = validate_spec(spec)
-    assert not result.valid
-    assert any("BadID" in err for err in result.errors)
+    assert result.valid
+    assert any("BadID" in w for w in result.warnings)
 
 
 def test_project_kinds_constant_matches_shipped_schemas() -> None:

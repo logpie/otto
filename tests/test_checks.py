@@ -79,11 +79,16 @@ def test_repo_test_nonzero_exit_fails(tmp_path: Path) -> None:
     assert evidence.raw["exit_code"] == 7
 
 
-def test_repo_test_empty_command_returns_error(tmp_path: Path) -> None:
+def test_repo_test_empty_command_is_informational(tmp_path: Path) -> None:
+    """v2.1 (F-class generalization): malformed check payload (empty
+    command) → informational PASS, not slice-blocking. Audit's contract
+    gate verifies the integrated product. See docs/intent-to-product-v2-plan.md.
+    """
     check = RepoTestCheck(command=(), timeout_s=10)
     evidence = run_check(check, project_dir=tmp_path)
-    assert evidence.passed is False
+    assert evidence.passed is True
     assert "command is empty" in evidence.detail
+    assert evidence.raw["malformed_check"] is True
 
 
 def test_repo_test_timeout_marked_as_failure(tmp_path: Path) -> None:
@@ -130,11 +135,13 @@ def test_pytest_check_failing_test(tmp_path: Path) -> None:
     assert check.selector in evidence.raw["selector"]
 
 
-def test_pytest_check_empty_selector_returns_error(tmp_path: Path) -> None:
+def test_pytest_check_empty_selector_is_informational(tmp_path: Path) -> None:
+    """v2.1: empty selector → informational PASS. See test_repo_test variant."""
     check = PytestCheck(selector="", timeout_s=10)
     evidence = run_check(check, project_dir=tmp_path)
-    assert evidence.passed is False
+    assert evidence.passed is True
     assert "selector is empty" in evidence.detail
+    assert evidence.raw["malformed_check"] is True
 
 
 def test_pytest_check_imports_top_level_module_without_conftest(tmp_path: Path) -> None:
@@ -220,11 +227,13 @@ def test_browser_journey_subprocess_failure_keeps_partial_artifacts(tmp_path: Pa
     assert evidence.artifacts[0].name == "partial.png"
 
 
-def test_browser_journey_empty_command_returns_error(tmp_path: Path) -> None:
+def test_browser_journey_empty_command_is_informational(tmp_path: Path) -> None:
+    """v2.1: empty browser command → informational PASS."""
     check = BrowserJourney(command=(), evidence_globs=(), timeout_s=10)
     evidence = run_check(check, project_dir=tmp_path)
-    assert evidence.passed is False
+    assert evidence.passed is True
     assert "command is empty" in evidence.detail
+    assert evidence.raw["malformed_check"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +290,16 @@ def test_api_probe_body_mismatch() -> None:
     assert "body_contains" in evidence.detail
 
 
-def test_api_probe_missing_base_url_returns_error() -> None:
+def test_api_probe_missing_base_url_is_informational() -> None:
+    """v2.1: ApiProbe with no base_url → informational PASS. The check
+    pipeline doesn't always boot a server; treating this as a failure
+    blocked entire slices on missing infrastructure rather than missing
+    behavior."""
     check = ApiProbe(method="GET", path="/", expect_status=200)
     evidence = run_check(check, project_dir=Path("/tmp"), base_url=None)
-    assert evidence.passed is False
+    assert evidence.passed is True
     assert "base_url" in evidence.detail
+    assert evidence.raw["malformed_check"] is True
 
 
 def test_api_probe_connection_error() -> None:
@@ -352,11 +366,13 @@ def test_state_invariant_non_python_expression_treated_as_informational(tmp_path
     assert evidence.raw["non_python_expression"] is True
 
 
-def test_state_invariant_empty_expression_returns_error(tmp_path: Path) -> None:
+def test_state_invariant_empty_expression_is_informational(tmp_path: Path) -> None:
+    """v2.1: empty expression → informational PASS."""
     check = StateInvariant(description="x", expression="")
     evidence = run_check(check, project_dir=tmp_path)
-    assert evidence.passed is False
+    assert evidence.passed is True
     assert "expression is empty" in evidence.detail
+    assert evidence.raw["malformed_check"] is True
 
 
 def test_state_invariant_http_get_when_base_url_set() -> None:

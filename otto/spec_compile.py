@@ -45,6 +45,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from otto.spec_warnings import ValidationWarning, WarningCollector
+
 if TYPE_CHECKING:
     from otto.budget import RunBudget
 
@@ -202,7 +204,69 @@ def _check_to_dict(check: CheckKind) -> dict[str, Any]:
     return dataclasses.asdict(check)
 
 
-def _check_from_dict(payload: dict[str, Any]) -> CheckKind:
+def _check_from_dict(
+    payload: dict[str, Any],
+    *,
+    collector: WarningCollector | None = None,
+    path: str = "",
+) -> CheckKind | None:
+    """Permissively parse one check payload.
+
+    Returns:
+        A CheckKind instance, or None if the payload was so malformed
+        that no sensible kind could be selected. In strict-mode callers
+        (e.g., test_unknown_check_kind_raises), use the legacy
+        `_check_from_dict_strict` wrapper.
+    """
+    if not isinstance(payload, dict):
+        if collector is not None:
+            collector.add(
+                code="spec.coerce.check",
+                path=path,
+                message=f"check entry is {type(payload).__name__}, not dict; dropped",
+            )
+        return None
+    kind = str(payload.get("kind") or "").strip()
+    cls = _CHECK_TYPES.get(kind)
+    if cls is None:
+        if collector is not None:
+            collector.add(
+                code="spec.coerce.unknown_kind",
+                path=path,
+                message=f"unknown check kind {kind!r}; dropped",
+            )
+        return None
+    fields = {f.name for f in dataclasses.fields(cls)}
+    kwargs: dict[str, Any] = {}
+    for name in fields:
+        if name in payload:
+            value = payload[name]
+            # Re-tuplify list-typed frozen dataclass fields so equality
+            # round-trips without surprising callers who construct from a
+            # list and compare against a deserialised tuple.
+            if isinstance(value, list) and name in {"command", "evidence_globs"}:
+                value = tuple(value)
+            kwargs[name] = value
+    try:
+        return cls(**kwargs)
+    except TypeError as exc:
+        if collector is not None:
+            collector.add(
+                code="spec.coerce.check",
+                path=path,
+                message=f"{kind!r} check payload invalid ({exc}); dropped",
+            )
+        return None
+
+
+def _check_from_dict_strict(payload: dict[str, Any]) -> CheckKind:
+    """Strict back-compat wrapper. Raises SpecValidationError on any failure.
+
+    Kept only for tests that explicitly assert strictness; the v2.1
+    permissive path uses `_check_from_dict(..., collector=...)` directly.
+    """
+    if not isinstance(payload, dict):
+        raise SpecValidationError(f"check entry must be a dict, got {type(payload).__name__}")
     kind = str(payload.get("kind") or "").strip()
     cls = _CHECK_TYPES.get(kind)
     if cls is None:
@@ -212,9 +276,6 @@ def _check_from_dict(payload: dict[str, Any]) -> CheckKind:
     for name in fields:
         if name in payload:
             value = payload[name]
-            # Re-tuplify list-typed frozen dataclass fields so equality
-            # round-trips without surprising callers who construct from a
-            # list and compare against a deserialised tuple.
             if isinstance(value, list) and name in {"command", "evidence_globs"}:
                 value = tuple(value)
             kwargs[name] = value
@@ -247,26 +308,104 @@ def spec_to_dict(spec: Spec) -> dict[str, Any]:
     }
 
 
-def spec_from_dict(data: dict[str, Any]) -> Spec:
-    """Inverse of `spec_to_dict`. Raises on unknown check kinds."""
+def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
+    """Permissively parse a Spec from a JSON-decoded payload.
+
+    v2.1 design (docs/intent-to-product-v2-plan.md):
+
+    - **Coerces** obvious mistakes (non-list slices wrapped, non-dict
+      amendments synthesized, unknown check kinds dropped).
+    - **Warns** for departures from recommended shape. Warnings are
+      returned alongside the Spec so callers can surface them in the
+      journal/proof packet.
+    - **Hard-rejects** ONLY on truly unusable input: not a dict, or no
+      slices AND no intent AND no structure (literally nothing to do).
+
+    The compile-stage cheap-fail class (R3, R5, R8, R17, R22, R26) is
+    closed by this function: malformed agent output now produces a
+    workable Spec + warnings instead of slice-blocking exceptions.
+    """
+    collector = WarningCollector()
+
     if not isinstance(data, dict):
-        raise SpecValidationError("spec must be a JSON object")
+        raise SpecValidationError(
+            f"spec must be a JSON object, got {type(data).__name__}"
+        )
 
-    structure_payload = ((data.get("structure") or {}).get("payload")) or {}
-    if not isinstance(structure_payload, dict):
-        raise SpecValidationError("structure.payload must be an object")
+    # ---- structure.payload ----
+    raw_structure = data.get("structure")
+    if isinstance(raw_structure, dict):
+        structure_payload = raw_structure.get("payload")
+        if not isinstance(structure_payload, dict):
+            if structure_payload is not None:
+                collector.add(
+                    code="spec.coerce.field",
+                    path="structure.payload",
+                    message=f"structure.payload should be a dict, got {type(structure_payload).__name__}; using empty dict",
+                    coerced_to="{}",
+                )
+            structure_payload = {}
+    else:
+        if raw_structure is not None:
+            collector.add(
+                code="spec.coerce.field",
+                path="structure",
+                message=f"structure should be a dict, got {type(raw_structure).__name__}; using defaults",
+            )
+        structure_payload = {}
 
-    slices_data = data.get("slices") or []
-    if not isinstance(slices_data, list):
-        raise SpecValidationError("slices must be a list")
+    # ---- slices ----
+    raw_slices = data.get("slices")
+    if raw_slices is None:
+        slices_data: list[Any] = []
+    elif isinstance(raw_slices, list):
+        slices_data = raw_slices
+    elif isinstance(raw_slices, dict):
+        # Single slice declared at top level → wrap.
+        collector.add(
+            code="spec.coerce.field",
+            path="slices",
+            message="slices was a dict; wrapped in a single-element list",
+            coerced_to="[<dict>]",
+        )
+        slices_data = [raw_slices]
+    else:
+        collector.add(
+            code="spec.coerce.field",
+            path="slices",
+            message=f"slices should be a list, got {type(raw_slices).__name__}; using empty list",
+            coerced_to="[]",
+        )
+        slices_data = []
 
     slices: list[Slice] = []
-    for entry in slices_data:
+    seen_ids: set[str] = set()
+    for index, entry in enumerate(slices_data):
         if not isinstance(entry, dict):
-            raise SpecValidationError("each slice must be an object")
-        checks = [_check_from_dict(c) for c in (entry.get("checks") or [])]
+            collector.add(
+                code="spec.coerce.slice",
+                path=f"slices[{index}]",
+                message=f"slice entry is {type(entry).__name__}, not dict; dropped",
+            )
+            continue
+
+        slice_id = _coerce_slice_id(
+            entry.get("id"), index=index, seen=seen_ids, collector=collector
+        )
+        seen_ids.add(slice_id)
+
+        checks: list[CheckKind] = []
+        for c_index, c_payload in enumerate(entry.get("checks") or []):
+            check = _check_from_dict(
+                c_payload,
+                collector=collector,
+                path=f"slices[{index}].checks[{c_index}]",
+            )
+            if check is not None:
+                checks.append(check)
+
         slices.append(Slice(
-            id=str(entry.get("id") or ""),
+            id=slice_id,
             title=str(entry.get("title") or ""),
             tasks=[str(t) for t in (entry.get("tasks") or [])],
             deps=[str(d) for d in (entry.get("deps") or [])],
@@ -274,26 +413,75 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
             checks=checks,
         ))
 
+    # ---- amendments (coerce non-dict to synthesized record) ----
     amendments: list[Amendment] = []
-    for entry in (data.get("amendments") or []):
-        if not isinstance(entry, dict):
-            raise SpecValidationError("each amendment must be an object")
-        amendments.append(Amendment(
-            reason=str(entry.get("reason") or ""),
-            actor=str(entry.get("actor") or ""),
-            ts=str(entry.get("ts") or ""),
-            diff_sha256_before=str(entry.get("diff_sha256_before") or ""),
-            diff_sha256_after=str(entry.get("diff_sha256_after") or ""),
-        ))
+    raw_amendments = data.get("amendments") or []
+    if not isinstance(raw_amendments, list):
+        collector.add(
+            code="spec.coerce.field",
+            path="amendments",
+            message=f"amendments should be a list, got {type(raw_amendments).__name__}; using empty list",
+            coerced_to="[]",
+        )
+        raw_amendments = []
+    for index, entry in enumerate(raw_amendments):
+        if isinstance(entry, dict):
+            amendments.append(Amendment(
+                reason=str(entry.get("reason") or ""),
+                actor=str(entry.get("actor") or ""),
+                ts=str(entry.get("ts") or ""),
+                diff_sha256_before=str(entry.get("diff_sha256_before") or ""),
+                diff_sha256_after=str(entry.get("diff_sha256_after") or ""),
+            ))
+        else:
+            collector.add(
+                code="spec.coerce.amendment",
+                path=f"amendments[{index}]",
+                message=f"amendment entry is {type(entry).__name__}, not dict; coerced",
+                coerced_to=f"Amendment(reason={str(entry)[:40]!r}, ...)",
+            )
+            amendments.append(Amendment(
+                reason=str(entry)[:200],
+                actor="parser-coerced",
+                ts=_iso_now(),
+                diff_sha256_before="",
+                diff_sha256_after="",
+            ))
 
-    cross_slice_checks = [
-        _check_from_dict(c) for c in (data.get("cross_slice_checks") or [])
-    ]
+    # ---- cross-slice checks ----
+    cross_slice_checks: list[CheckKind] = []
+    for index, c_payload in enumerate(data.get("cross_slice_checks") or []):
+        check = _check_from_dict(
+            c_payload, collector=collector, path=f"cross_slice_checks[{index}]"
+        )
+        if check is not None:
+            cross_slice_checks.append(check)
 
-    return Spec(
+    # ---- project_kind: open enum (warn but accept) ----
+    project_kind_raw = data.get("project_kind")
+    if project_kind_raw is None:
+        project_kind = "webapp"
+    else:
+        project_kind = str(project_kind_raw).strip() or "webapp"
+        if project_kind not in PROJECT_KINDS:
+            collector.add(
+                code="spec.coerce.project_kind",
+                path="project_kind",
+                message=f"project_kind {project_kind!r} not in {PROJECT_KINDS}; treated as free-form",
+            )
+
+    intent = str(data.get("intent") or "")
+
+    # ---- hard reject: truly unusable input ----
+    if not intent.strip() and not slices and not structure_payload:
+        raise SpecValidationError(
+            "spec is empty: no intent, no slices, no structure — nothing to build"
+        )
+
+    spec = Spec(
         schema_version=int(data.get("schema_version") or SCHEMA_VERSION),
-        intent=str(data.get("intent") or ""),
-        project_kind=str(data.get("project_kind") or "webapp"),
+        intent=intent,
+        project_kind=project_kind,
         structure=StructureDecisions(payload=dict(structure_payload)),
         slices=slices,
         cross_slice_checks=cross_slice_checks,
@@ -302,6 +490,68 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
         done_means=[str(g) for g in (data.get("done_means") or [])],
         amendments=amendments,
     )
+    return spec, list(collector.warnings)
+
+
+def spec_from_dict(data: dict[str, Any]) -> Spec:
+    """Permissive inverse of `spec_to_dict` — drops warnings.
+
+    Kept for backward compatibility with callers that don't care about
+    warnings. The compile/persist path uses `parse_spec` directly to
+    surface warnings into the journal and proof packet.
+    """
+    spec, _warnings = parse_spec(data)
+    return spec
+
+
+_SLUG_RE = re.compile(r"[^a-z0-9_-]+")
+
+
+def _coerce_slice_id(
+    raw: Any,
+    *,
+    index: int,
+    seen: set[str],
+    collector: WarningCollector,
+) -> str:
+    """Slugify and disambiguate a slice id.
+
+    v2.1: accept any non-empty unique string. Internally slugify for
+    path-safe use. Empty / non-string values get a synthesized id.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        new_id = f"slice_{index}"
+        collector.add(
+            code="spec.coerce.slice_id",
+            path=f"slices[{index}].id",
+            message=f"slice id missing; synthesized {new_id!r}",
+            coerced_to=new_id,
+        )
+        return new_id
+    slug = _SLUG_RE.sub("-", text.lower()).strip("-_")
+    if not slug:
+        slug = f"slice_{index}"
+    if slug != text:
+        collector.add(
+            code="spec.coerce.slice_id",
+            path=f"slices[{index}].id",
+            message=f"slice id {text!r} slugified to {slug!r}",
+            coerced_to=slug,
+        )
+    candidate = slug
+    counter = 1
+    while candidate in seen:
+        counter += 1
+        candidate = f"{slug}-{counter}"
+    if candidate != slug:
+        collector.add(
+            code="spec.coerce.duplicate_id",
+            path=f"slices[{index}].id",
+            message=f"duplicate slice id {slug!r}; renamed to {candidate!r}",
+            coerced_to=candidate,
+        )
+    return candidate
 
 
 def _canonical_dump(spec: Spec) -> str:
@@ -323,8 +573,16 @@ def spec_content_sha256(spec: Spec) -> str:
 
 @dataclass
 class ValidationResult:
+    """Result of `validate_spec`.
+
+    v2.1 design: most former "errors" are now `warnings` (informational,
+    non-blocking). `errors` is reserved for genuinely unusable specs:
+    dep cycles (would loop forever), hash-chain breaks (tampering),
+    truly empty input.
+    """
     valid: bool
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 class SpecValidationError(ValueError):
@@ -386,54 +644,61 @@ def _validate_against_schema(payload: dict[str, Any], schema: dict[str, Any], pa
     return errors
 
 
-def validate_spec(spec: Spec) -> ValidationResult:
-    """Schema-only validation: structural well-formedness, not LLM judgement.
+def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
+    """Validate a Spec.
 
-    Operational meaning of "concrete enough" is: the structure payload
-    passes the per-`project_kind` JSON schema, slices have unique ids and
-    at least one check each, deps reference real slices, no cycles.
+    v2.1 (default, `strict=False`): every former error becomes a
+    warning EXCEPT genuinely unusable specs (dep cycles). The Spec is
+    valid as long as no cycles exist; everything else is informational.
+
+    `strict=True`: legacy v1 mode — warnings become errors. Kept for
+    tests that explicitly assert v1 strictness; do not use in
+    production paths.
     """
     errors: list[str] = []
+    warnings: list[str] = []
 
+    # ---- always-error: dep cycles (would loop forever) ----
+    cycles = _detect_dep_cycles(spec.slices)
+    errors.extend(cycles)
+
+    # ---- former-errors-now-warnings ----
     if spec.project_kind not in PROJECT_KINDS:
-        errors.append(f"project_kind must be one of {PROJECT_KINDS}; got {spec.project_kind!r}")
+        warnings.append(f"project_kind {spec.project_kind!r} not in {PROJECT_KINDS} (free-form accepted)")
 
     if not spec.intent.strip():
-        errors.append("intent must be non-empty")
+        warnings.append("intent is empty")
 
     if not spec.slices:
-        errors.append("spec must declare at least one slice")
+        warnings.append("spec declares no slices")
 
     seen_ids: set[str] = set()
     for slice_ in spec.slices:
         if not _SLICE_ID_RE.match(slice_.id):
-            errors.append(f"slice id {slice_.id!r} must match {_SLICE_ID_RE.pattern}")
+            warnings.append(f"slice id {slice_.id!r} does not match recommended pattern {_SLICE_ID_RE.pattern}")
         if slice_.id in seen_ids:
-            errors.append(f"duplicate slice id: {slice_.id!r}")
+            warnings.append(f"duplicate slice id: {slice_.id!r}")
         seen_ids.add(slice_.id)
         if not slice_.title.strip():
-            errors.append(f"slice {slice_.id!r}: title must be non-empty")
+            warnings.append(f"slice {slice_.id!r}: title is empty")
         if not slice_.checks:
-            errors.append(f"slice {slice_.id!r}: must declare at least one check")
-        # Empty owned_paths is permitted: a slice may purely add new files
-        # (anywhere) or purely modify files owned by transitive deps. The
-        # original strict rule was added before the dep-transitivity scope
-        # rule and is now over-restrictive — caught by the round-5 Microfeed
-        # bench where the agent wanted slices that extend shared scaffold +
-        # foundation files only.
+            warnings.append(f"slice {slice_.id!r}: no checks declared (vacuously passes)")
 
     for slice_ in spec.slices:
         for dep in slice_.deps:
             if dep not in seen_ids:
-                errors.append(f"slice {slice_.id!r}: dep {dep!r} not in spec")
-
-    errors.extend(_detect_dep_cycles(spec.slices))
+                warnings.append(f"slice {slice_.id!r}: dep {dep!r} not in spec")
 
     schema = _load_kind_schema(spec.project_kind)
     if schema is not None:
-        errors.extend(_validate_against_schema(spec.structure.payload, schema, path="structure.payload"))
+        warnings.extend(_validate_against_schema(spec.structure.payload, schema, path="structure.payload"))
 
-    return ValidationResult(valid=not errors, errors=errors)
+    if strict:
+        # Legacy v1 mode: warnings become errors.
+        errors.extend(warnings)
+        warnings = []
+
+    return ValidationResult(valid=not errors, errors=errors, warnings=warnings)
 
 
 def _detect_dep_cycles(slices: list[Slice]) -> list[str]:

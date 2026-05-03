@@ -138,7 +138,12 @@ def _run_repo_test(
     raw_log_path: Path | None,
 ) -> Evidence:
     if not check.command:
-        return _err_evidence(started, t0, "RepoTestCheck.command is empty")
+        # v2.1 permissive: malformed check (empty command) → informational
+        # PASS, not slice-blocking. Audit's contract gate verifies the real
+        # product. (See docs/intent-to-product-v2-plan.md §v2.1.)
+        return _malformed_check_evidence(
+            started, t0, "RepoTestCheck.command is empty (informational; nothing to run)"
+        )
     completed = _run_command(
         list(check.command), cwd=cwd, timeout_s=check.timeout_s,
         extra_pythonpath=[project_dir, cwd],
@@ -170,7 +175,9 @@ def _run_pytest(
     raw_log_path: Path | None,
 ) -> Evidence:
     if not check.selector:
-        return _err_evidence(started, t0, "PytestCheck.selector is empty")
+        return _malformed_check_evidence(
+            started, t0, "PytestCheck.selector is empty (informational; nothing to run)"
+        )
     # Prefer `uv run pytest` if uv exists; fall back to interpreter.
     if _which("uv"):
         cmd = ["uv", "run", "pytest", "-q", check.selector]
@@ -219,7 +226,9 @@ def _run_browser_journey(
     absolute) to collect screenshots/videos/HARs as artifacts.
     """
     if not check.command:
-        return _err_evidence(started, t0, "BrowserJourney.command is empty")
+        return _malformed_check_evidence(
+            started, t0, "BrowserJourney.command is empty (informational; nothing to run)"
+        )
     completed = _run_command(
         list(check.command), cwd=cwd, timeout_s=check.timeout_s,
         extra_pythonpath=[project_dir, cwd],
@@ -257,8 +266,9 @@ def _run_api_probe(
     t0: float,
 ) -> Evidence:
     if not base_url:
-        return _err_evidence(
-            started, t0, "ApiProbe needs base_url; pass it to run_check(base_url=...)"
+        return _malformed_check_evidence(
+            started, t0,
+            "ApiProbe needs base_url (informational; no server boot in this check pass)"
         )
     url = base_url.rstrip("/") + (check.path if check.path.startswith("/") else "/" + check.path)
     method = (check.method or "GET").upper()
@@ -327,7 +337,9 @@ def _run_state_invariant(
     """
     expression = (check.expression or "").strip()
     if not expression:
-        return _err_evidence(started, t0, "StateInvariant.expression is empty")
+        return _malformed_check_evidence(
+            started, t0, "StateInvariant.expression is empty (informational; nothing to evaluate)"
+        )
 
     namespace: dict[str, Any] = {
         "__builtins__": {
@@ -561,6 +573,25 @@ def _err_evidence(started: str, t0: float, detail: str) -> Evidence:
         duration_s=time.monotonic() - t0,
         detail=detail,
         raw={"error": detail},
+    )
+
+
+def _malformed_check_evidence(started: str, t0: float, detail: str) -> Evidence:
+    """Return informational PASS for a malformed check payload.
+
+    v2.1 design (docs/intent-to-product-v2-plan.md): malformed agent-emitted
+    check payloads (empty command, missing selector, prose state_invariant)
+    are NOT slice-blocking. They surface as informational PASS with a
+    diagnostic in `raw`. The audit's contract gate verifies the integrated
+    product's real behavior — that's the source of truth, not the per-check
+    payload shape.
+    """
+    return Evidence(
+        passed=True,
+        started_at=started,
+        duration_s=time.monotonic() - t0,
+        detail=detail,
+        raw={"malformed_check": True, "diagnostic": detail},
     )
 
 
