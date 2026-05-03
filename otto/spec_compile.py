@@ -167,12 +167,20 @@ class Amendment:
     `diff_sha256_before` / `diff_sha256_after` hash the canonical-form
     spec content (see `_canonical_dump`) so two runs that produce the
     same bytes round-trip equal.
+
+    v2.2 (`trigger_event_id`, `tier`): every agent-driven amendment must
+    cite the journal event that motivated it (a scope warning, a check
+    failure, a build error). User-initiated amendments may omit it.
+    `tier` records which tier the amendment touched (1/2/3); audit
+    review uses this to flag suspicious chains.
     """
     reason: str
     actor: str
     ts: str                                          # ISO-8601 UTC
     diff_sha256_before: str
     diff_sha256_after: str
+    trigger_event_id: str = ""                       # v2.2: journal event reference
+    tier: int = 0                                    # v2.2: 1, 2, or 3 (0 = unspecified/legacy)
 
 
 @dataclass
@@ -182,9 +190,15 @@ class Spec:
     `intent` is the user's verbatim intent. `non_goals` and `done_means`
     are the unified replacements for codex-feats' `non_goals` /
     `done_means` ProductContract fields and feed the spec-review UI.
+
+    v2.2 (tiered mutability): `intent_hash` is the SHA-256 of
+    `intent` at session start. Persist enforces it never changes
+    without an explicit user override. See `otto.spec_amend` for the
+    full tiered amendment API.
     """
     schema_version: int = SCHEMA_VERSION
     intent: str = ""
+    intent_hash: str = ""  # tier-1 invariant; "" = legacy spec
     project_kind: str = "webapp"
     structure: StructureDecisions = field(default_factory=StructureDecisions)
     slices: list[Slice] = field(default_factory=list)
@@ -282,11 +296,36 @@ def _check_from_dict_strict(payload: dict[str, Any]) -> CheckKind:
     return cls(**kwargs)
 
 
+def compute_intent_hash(intent: str) -> str:
+    """Stable SHA-256 of the intent's verbatim bytes (tier-1 lock).
+
+    The intent_hash is computed once at session start and verified on
+    every persist_spec call. Any divergence from the locked hash is a
+    tampering signal — the run is blocked until a human overrides.
+    """
+    return hashlib.sha256(intent.encode("utf-8")).hexdigest()
+
+
+def lock_intent(spec: Spec) -> Spec:
+    """Return a Spec with `intent_hash` stamped from `intent`.
+
+    Idempotent: if `spec.intent_hash` already matches `intent`, returns
+    the spec unchanged (no `dataclasses.replace`). Used at compile time
+    to seal the bedrock layer; existing-spec callers don't need to call
+    this — `parse_spec` populates intent_hash on load.
+    """
+    expected = compute_intent_hash(spec.intent) if spec.intent else ""
+    if spec.intent_hash == expected:
+        return spec
+    return dataclasses.replace(spec, intent_hash=expected)
+
+
 def spec_to_dict(spec: Spec) -> dict[str, Any]:
     """Convert a `Spec` to a plain dict for JSON serialisation."""
     return {
         "schema_version": spec.schema_version,
         "intent": spec.intent,
+        "intent_hash": spec.intent_hash,
         "project_kind": spec.project_kind,
         "structure": {"payload": dict(spec.structure.payload)},
         "slices": [
@@ -432,6 +471,8 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
                 ts=str(entry.get("ts") or ""),
                 diff_sha256_before=str(entry.get("diff_sha256_before") or ""),
                 diff_sha256_after=str(entry.get("diff_sha256_after") or ""),
+                trigger_event_id=str(entry.get("trigger_event_id") or ""),
+                tier=int(entry.get("tier") or 0),
             ))
         else:
             collector.add(
@@ -478,9 +519,16 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
             "spec is empty: no intent, no slices, no structure — nothing to build"
         )
 
+    # intent_hash: preserve what's on disk verbatim. If absent, leave
+    # empty — back-compat specs round-trip identically. New specs
+    # explicitly call `lock_intent(spec)` (compile_spec does this) to
+    # stamp the bedrock layer.
+    intent_hash = str(data.get("intent_hash") or "").strip()
+
     spec = Spec(
         schema_version=int(data.get("schema_version") or SCHEMA_VERSION),
         intent=intent,
+        intent_hash=intent_hash,
         project_kind=project_kind,
         structure=StructureDecisions(payload=dict(structure_payload)),
         slices=slices,
@@ -768,11 +816,23 @@ def append_amendment(spec: Spec, *, reason: str, actor: str, prior_sha256: str |
     return amended
 
 
-def persist_spec(spec: Spec, path: Path, *, allow_initial: bool = False) -> Path:
+def persist_spec(
+    spec: Spec,
+    path: Path,
+    *,
+    allow_initial: bool = False,
+    user_override_intent: bool = False,
+) -> Path:
     """Write `spec.json` to `path`.
 
     Enforces immutability:
 
+    * **Tier-1 (v2.2)**: `spec.intent` and `spec.intent_hash` are
+      bedrock. If the on-disk spec has a non-empty intent_hash, the new
+      spec MUST match — both the literal intent and its hash. The only
+      escape is `user_override_intent=True` (a deliberate user-driven
+      reset). Any other mismatch raises `SpecValidationError` and the
+      run is blocked.
     * If `path` does not exist, write directly. The first write is the
       initial spec; pass `allow_initial=True` (the compile path does so).
     * If `path` exists and the on-disk content (excluding amendments) is
@@ -806,6 +866,27 @@ def persist_spec(spec: Spec, path: Path, *, allow_initial: bool = False) -> Path
 
     on_disk_data = json.loads(path.read_text(encoding="utf-8"))
     on_disk = spec_from_dict(on_disk_data)
+
+    # ---- Tier-1 (BEDROCK): intent and intent_hash are immutable ----
+    # If the on-disk spec stamped a hash, the new spec must match —
+    # both the literal intent and the hash. The only escape is an
+    # explicit user override (`user_override_intent=True`) that the
+    # spec-review gate flips deliberately. v2.2 design: see
+    # docs/intent-to-product-v2.md "Safe mutability".
+    if on_disk.intent_hash and not user_override_intent:
+        if spec.intent != on_disk.intent:
+            raise SpecValidationError(
+                "tier-1 violation: intent changed without user override "
+                f"(was {on_disk.intent[:60]!r}..., now {spec.intent[:60]!r}...). "
+                "Pass user_override_intent=True via the spec-review gate."
+            )
+        if spec.intent_hash and spec.intent_hash != on_disk.intent_hash:
+            raise SpecValidationError(
+                "tier-1 violation: intent_hash changed without user override "
+                f"(was {on_disk.intent_hash[:16]}..., now {spec.intent_hash[:16]}...). "
+                "Pass user_override_intent=True via the spec-review gate."
+            )
+
     on_disk_hash = spec_content_sha256(on_disk)
     new_hash = spec_content_sha256(spec)
 

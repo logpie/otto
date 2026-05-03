@@ -79,6 +79,12 @@ EVENT_KINDS: tuple[str, ...] = (
     "audit.started",
     "audit.finished",
     "run.finished",
+    # v2.2 — amendments + scope events ----------------------------------
+    "scope.warning",            # build agent attempted out-of-scope edit (informational)
+    "amendment.requested",      # build agent (or user) requested a tier-3 amendment
+    "amendment.applied",        # request passed all tier checks and persisted
+    "amendment.rejected",       # request failed a tier rule
+    "intent.lock.violated",     # tier-1 invariant violated (tampering signal)
 )
 
 EventKind = Literal[
@@ -93,14 +99,25 @@ EventKind = Literal[
     "audit.started",
     "audit.finished",
     "run.finished",
+    "scope.warning",
+    "amendment.requested",
+    "amendment.applied",
+    "amendment.rejected",
+    "intent.lock.violated",
 ]
 
 
 @dataclass(frozen=True)
 class Event:
-    """One append-only journal event."""
+    """One append-only journal event.
+
+    `event_id` is stable per-session and assigned at append time
+    (`ev-NNNNNN` based on the journal's line count). Amendments
+    reference these IDs in `Amendment.trigger_event_id`.
+    """
     ts: str                                   # ISO-8601 UTC, e.g. 2026-05-03T12:34:56Z
     kind: str                                 # one of EVENT_KINDS
+    event_id: str = ""                        # set at append time, never changes
     slice_id: str = ""                        # blank for audit.* and run.*
     check_id: str = ""                        # blank unless slice.check.*
     attempt: int = 0                          # 0 unless retry-aware event
@@ -184,22 +201,47 @@ def journal_path(session_dir: Path) -> Path:
     return Path(session_dir) / JOURNAL_FILENAME
 
 
-def append_event(session_dir: Path, event: Event) -> Path:
+def _next_event_id(session_dir: Path) -> str:
+    """Generate the next stable event id for this session.
+
+    Format: ``ev-NNNNNN`` based on the current line count of
+    `spec-state.jsonl`. New events get the next number; once written,
+    an event's id is permanent. Amendments reference these via
+    `Amendment.trigger_event_id`.
+    """
+    target = journal_path(session_dir)
+    if not target.exists():
+        return "ev-000001"
+    try:
+        with target.open("rb") as fh:
+            count = sum(1 for _ in fh)
+    except OSError:
+        count = 0
+    return f"ev-{count + 1:06d}"
+
+
+def append_event(session_dir: Path, event: Event) -> Event:
     """Append one event to the session's `spec-state.jsonl`.
 
     Lines are written with a trailing `\\n` so a reader can split on
     newlines without sentinel. Caller is responsible for picking the
     `kind` from `EVENT_KINDS`; we validate to catch typos early.
+
+    Returns the event with its assigned `event_id` populated. If the
+    caller already supplied an event_id, that's preserved (used during
+    replay reconstruction); otherwise a fresh stable id is generated.
     """
     if event.kind not in EVENT_KINDS:
         raise ValueError(f"unknown event kind {event.kind!r}; expected one of {EVENT_KINDS}")
     target = journal_path(session_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
+    if not event.event_id:
+        event = dataclasses.replace(event, event_id=_next_event_id(session_dir))
     payload = dataclasses.asdict(event)
     line = json.dumps(payload, sort_keys=True) + "\n"
     with target.open("a", encoding="utf-8") as fh:
         fh.write(line)
-    return target
+    return event
 
 
 def emit(
@@ -212,7 +254,11 @@ def emit(
     detail: str = "",
     **extra: Any,
 ) -> Event:
-    """Convenience wrapper around `append_event` with `ts=_iso_now()`."""
+    """Convenience wrapper around `append_event` with `ts=_iso_now()`.
+
+    Returns the persisted Event with `event_id` populated; amendment
+    callers store this id in `Amendment.trigger_event_id`.
+    """
     event = Event(
         ts=_iso_now(),
         kind=kind,
@@ -222,8 +268,20 @@ def emit(
         detail=detail,
         extra=dict(extra),
     )
-    append_event(session_dir, event)
-    return event
+    return append_event(session_dir, event)
+
+
+def find_event(session_dir: Path, event_id: str) -> Event | None:
+    """Locate an event by its stable id. Returns None if not found.
+
+    Used by the amendment API to verify trigger_event_id linkage.
+    """
+    if not event_id:
+        return None
+    for event in iter_events(session_dir):
+        if event.event_id == event_id:
+            return event
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +306,7 @@ def iter_events(session_dir: Path) -> Iterator[Event]:
             yield Event(
                 ts=str(payload.get("ts") or ""),
                 kind=str(payload.get("kind") or ""),
+                event_id=str(payload.get("event_id") or ""),
                 slice_id=str(payload.get("slice_id") or ""),
                 check_id=str(payload.get("check_id") or ""),
                 attempt=int(payload.get("attempt") or 0),
