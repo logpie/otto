@@ -139,7 +139,10 @@ def _run_repo_test(
 ) -> Evidence:
     if not check.command:
         return _err_evidence(started, t0, "RepoTestCheck.command is empty")
-    completed = _run_command(list(check.command), cwd=cwd, timeout_s=check.timeout_s)
+    completed = _run_command(
+        list(check.command), cwd=cwd, timeout_s=check.timeout_s,
+        extra_pythonpath=[project_dir, cwd],
+    )
     output = _format_subprocess_output(check.command, completed)
     if raw_log_path is not None:
         _write_raw(raw_log_path, output)
@@ -173,7 +176,14 @@ def _run_pytest(
         cmd = ["uv", "run", "pytest", "-q", check.selector]
     else:
         cmd = [sys.executable, "-m", "pytest", "-q", check.selector]
-    completed = _run_command(cmd, cwd=cwd, timeout_s=check.timeout_s)
+    # Project-root layouts (e.g. flat `app.py` + `tests/test_x.py`) need the
+    # project_dir on PYTHONPATH or `from app import …` fails at collect time.
+    # `pytest` itself only auto-adds rootdir if a conftest.py is present;
+    # build agents don't reliably create one. Make the import path
+    # predictable here.
+    completed = _run_command(
+        cmd, cwd=cwd, timeout_s=check.timeout_s, extra_pythonpath=[project_dir, cwd]
+    )
     output = _format_subprocess_output(cmd, completed)
     if raw_log_path is not None:
         _write_raw(raw_log_path, output)
@@ -210,7 +220,10 @@ def _run_browser_journey(
     """
     if not check.command:
         return _err_evidence(started, t0, "BrowserJourney.command is empty")
-    completed = _run_command(list(check.command), cwd=cwd, timeout_s=check.timeout_s)
+    completed = _run_command(
+        list(check.command), cwd=cwd, timeout_s=check.timeout_s,
+        extra_pythonpath=[project_dir, cwd],
+    )
     output = _format_subprocess_output(check.command, completed)
     if raw_log_path is not None:
         _write_raw(raw_log_path, output)
@@ -406,15 +419,21 @@ def _run_command(
     *,
     cwd: Path,
     timeout_s: int,
+    extra_pythonpath: list[Path] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command list with PATH + venv injection. Returns completed process.
+
+    `extra_pythonpath` (if set) is prepended to PYTHONPATH so the spawned
+    process can resolve top-level project modules (e.g. ``from app import …``
+    when project layout has flat top-level files). pytest does NOT auto-add
+    rootdir without a conftest.py; agents don't reliably create one.
 
     Raises subprocess.TimeoutExpired on timeout (caller catches in run_check).
     """
     return subprocess.run(
         command,
         cwd=cwd,
-        env=_subprocess_env(),
+        env=_subprocess_env(extra_pythonpath=extra_pythonpath),
         capture_output=True,
         text=True,
         timeout=timeout_s,
@@ -422,8 +441,12 @@ def _run_command(
     )
 
 
-def _subprocess_env() -> dict[str, str]:
-    """Augment env with interpreter bin and active venv bin on PATH."""
+def _subprocess_env(extra_pythonpath: list[Path] | None = None) -> dict[str, str]:
+    """Augment env with interpreter bin and active venv bin on PATH.
+
+    If `extra_pythonpath` is provided, those paths are prepended to
+    PYTHONPATH (deduplicated, preserving caller order).
+    """
     env = os.environ.copy()
     path_entries = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
     interpreter_bin = str(Path(sys.executable).parent)
@@ -436,6 +459,16 @@ def _subprocess_env() -> dict[str, str]:
             path_entries.insert(0, venv_bin)
     if path_entries:
         env["PATH"] = os.pathsep.join(path_entries)
+    if extra_pythonpath:
+        existing = env.get("PYTHONPATH", "").split(os.pathsep) if env.get("PYTHONPATH") else []
+        prepend = [str(p) for p in extra_pythonpath if str(p)]
+        seen: set[str] = set()
+        merged: list[str] = []
+        for entry in [*prepend, *existing]:
+            if entry and entry not in seen:
+                merged.append(entry)
+                seen.add(entry)
+        env["PYTHONPATH"] = os.pathsep.join(merged)
     return env
 
 

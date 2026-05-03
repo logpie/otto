@@ -137,6 +137,39 @@ def test_pytest_check_empty_selector_returns_error(tmp_path: Path) -> None:
     assert "selector is empty" in evidence.detail
 
 
+def test_pytest_check_imports_top_level_module_without_conftest(tmp_path: Path) -> None:
+    """Regression: project_dir on PYTHONPATH so `from app import …` works.
+
+    Reproduces the Microfeed bench failure where build agents emitted
+    ``tests/test_models.py: from app import create_app`` and pytest's
+    rootdir-without-conftest path fell back to import-mode that doesn't
+    add the project root to sys.path.
+    """
+    (tmp_path / "app.py").write_text("def create_app(): return 'ok'\n", encoding="utf-8")
+    test_file = tmp_path / "tests" / "test_app.py"
+    test_file.parent.mkdir()
+    test_file.write_text(
+        "from app import create_app\n"
+        "def test_app(): assert create_app() == 'ok'\n",
+        encoding="utf-8",
+    )
+    check = PytestCheck(selector="tests/test_app.py", timeout_s=30)
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+    assert evidence.passed is True, evidence.raw
+    assert evidence.raw["exit_code"] == 0
+
+
+def test_repo_test_check_passes_pythonpath_to_subprocess(tmp_path: Path) -> None:
+    """RepoTestCheck.command sees project_dir on PYTHONPATH."""
+    (tmp_path / "mymod.py").write_text("VALUE = 42\n", encoding="utf-8")
+    check = RepoTestCheck(
+        command=("python", "-c", "import mymod; assert mymod.VALUE == 42"),
+        timeout_s=10,
+    )
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+    assert evidence.passed is True, evidence.raw
+
+
 # ---------------------------------------------------------------------------
 # BrowserJourney
 # ---------------------------------------------------------------------------

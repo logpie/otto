@@ -11,7 +11,20 @@
         "properties": {
           "path": {"type": "string", "minLength": 1},
           "component": {"type": "string", "minLength": 1},
-          "key_text": {"type": "string", "minLength": 1}
+          "key_text": {"type": "string", "minLength": 1},
+          "method": {"type": "string", "minLength": 1},
+          "request_shape": {
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+          },
+          "response_shape": {
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+          },
+          "error_codes": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
         }
       }
     },

@@ -641,6 +641,11 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     Fresh prompt on retry: clear conversation, re-state the spec context,
     call out the previous attempt's failure narrative without rehashing
     its reasoning.
+
+    Also surfaces the project's own contract surface so the agent doesn't
+    invent its own (Microfeed bench learning: agent built `{follower,
+    following}` against a contract that uses `{follower, target}` because
+    the build prompt didn't say "read the existing test files").
     """
     s = agent_input.slice
     spec = agent_input.spec
@@ -657,6 +662,19 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     if s.deps:
         lines.append(f"This slice depends on (already landed): {', '.join(s.deps)}")
     lines.append("")
+    # Surface the project's contract surface — test_command in otto.yaml +
+    # any seeded test/contract files. The agent must read these BEFORE
+    # designing APIs to avoid drifting from the contract.
+    contract_lines = _project_contract_summary(agent_input.project_dir)
+    if contract_lines:
+        lines.append("## Project contract surface (READ THESE FIRST)")
+        lines.append(
+            "The project root has these existing contract artifacts. Your "
+            "implementation must satisfy them — do NOT invent your own API "
+            "shapes when the contract pins them down."
+        )
+        lines.extend(contract_lines)
+        lines.append("")
     lines.append("## What you must do (slice tasks)")
     for i, task in enumerate(s.tasks or [], 1):
         lines.append(f"  {i}. {task}")
@@ -698,6 +716,60 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     lines.append("")
     lines.append("Make all changes. When done, just confirm completion.")
     return "\n".join(lines)
+
+
+def _project_contract_summary(project_dir: Path) -> list[str]:
+    """Surface contract-shaped files in the project root for the build prompt.
+
+    Returns a list of bullet lines (already markdown-formatted) listing:
+    * otto.yaml's test_command, if present
+    * intent.md (first 2KB)
+    * tests/run_acceptance.py and any tests/contract*.py / tests/conftest.py
+      (paths only — agent reads them via Read tool)
+
+    Empty list when nothing relevant is found.
+    """
+    bullets: list[str] = []
+    # otto.yaml test_command
+    yaml_path = project_dir / "otto.yaml"
+    if yaml_path.is_file():
+        try:
+            from otto.config import load_config
+
+            config = load_config(yaml_path)
+            test_command = str(config.get("test_command") or "").strip()
+            if test_command:
+                bullets.append(
+                    f"- **test_command** (otto.yaml): `{test_command}` — this is the "
+                    f"contract test the audit will run at the end. Make it pass."
+                )
+        except Exception:
+            pass
+    # intent.md
+    intent_md = project_dir / "intent.md"
+    if intent_md.is_file():
+        bullets.append(f"- **intent.md** at `{intent_md}` — read it for product intent")
+    # Existing test / contract files
+    contract_paths: list[Path] = []
+    tests_dir = project_dir / "tests"
+    if tests_dir.is_dir():
+        for name in (
+            "run_acceptance.py",
+            "conftest.py",
+            "test_contract.py",
+            "test_acceptance.py",
+        ):
+            candidate = tests_dir / name
+            if candidate.is_file():
+                contract_paths.append(candidate)
+    if contract_paths:
+        bullets.append(
+            "- **Existing test/contract files** — read these to learn the API "
+            "shapes (request/response field names) the contract pins down:"
+        )
+        for p in contract_paths:
+            bullets.append(f"    - `{p.relative_to(project_dir)}`")
+    return bullets
 
 
 def _describe_check(check: CheckKind) -> str:

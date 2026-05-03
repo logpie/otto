@@ -82,6 +82,8 @@ class AuditResult:
     slice_verdicts: list[SliceVerdict] = field(default_factory=list)
     cross_slice_evidence: list[Evidence] = field(default_factory=list)
     walkthrough_artifacts: list[Path] = field(default_factory=list)
+    contract_test_passed: bool | None = None  # None if no test_command configured
+    contract_test_detail: str = ""
     retries: int = 0
     cost_usd: float = 0.0
     wall_s: float = 0.0
@@ -230,6 +232,15 @@ async def run_audit(
         )
         cross_evidence = [ev for _check, ev in cross_pairs]
 
+        # 1b: project contract — if otto.yaml declares a `test_command`,
+        # run it as a deterministic gate the audit can't argue with.
+        # This is the "does the integrated product actually satisfy the
+        # contract the project declared" check, distinct from per-slice
+        # tests the build agents wrote themselves.
+        contract_passed, contract_detail = _run_project_contract_test(
+            project_dir, log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "contract"
+        )
+
         # 2: walkthrough subprocess
         walk_log_dir = session_dir / "audit" / f"attempt-{retries:02d}" / "walkthrough"
         walk_log_dir.mkdir(parents=True, exist_ok=True)
@@ -249,32 +260,48 @@ async def run_audit(
         agent_output = await audit_agent(agent_input)
         cost_total += agent_output.cost_usd
 
+        # The contract test result OVERRIDES the LLM verdict when a
+        # test_command exists. If the contract test fails, the verdict is
+        # at most PARTIAL (cannot be PASSED), regardless of what the
+        # walkthrough agent thinks.
+        verdict = agent_output.verdict
+        narrative = agent_output.narrative
+        if contract_passed is False:
+            if verdict == AuditVerdict.PASSED:
+                verdict = AuditVerdict.PARTIAL
+            narrative = (
+                f"{narrative}\n\n"
+                f"[contract test FAILED]\n{contract_detail}"
+            ).strip()
+
         last_result = AuditResult(
-            verdict=agent_output.verdict,
-            narrative=agent_output.narrative,
+            verdict=verdict,
+            narrative=narrative,
             slice_verdicts=list(agent_output.slice_verdicts),
             cross_slice_evidence=cross_evidence,
             walkthrough_artifacts=list(walk_result.artifacts),
+            contract_test_passed=contract_passed,
+            contract_test_detail=contract_detail,
             retries=retries_this_pass,
             cost_usd=cost_total,
             wall_s=time.monotonic() - t0,
         )
 
         # If passed or no repair available, return.
-        if agent_output.verdict == AuditVerdict.PASSED:
+        if verdict == AuditVerdict.PASSED:
             emit(
                 session_dir,
                 "audit.finished",
-                detail=agent_output.narrative[:200],
-                verdict=agent_output.verdict.value,
+                detail=narrative[:200],
+                verdict=verdict.value,
             )
             return last_result
         if fix_agent is None or retries >= budget.audit_retries:
             emit(
                 session_dir,
                 "audit.finished",
-                detail=agent_output.narrative[:200],
-                verdict=agent_output.verdict.value,
+                detail=narrative[:200],
+                verdict=verdict.value,
             )
             return last_result
 
@@ -357,6 +384,77 @@ async def run_audit(
 # ---------------------------------------------------------------------------
 # Summaries
 # ---------------------------------------------------------------------------
+
+
+def _run_project_contract_test(
+    project_dir: Path, *, log_dir: Path | None = None
+) -> tuple[bool | None, str]:
+    """Run the project's `test_command` from otto.yaml as the contract gate.
+
+    Returns (passed, detail):
+      * passed=True   — test_command exited 0
+      * passed=False  — test_command exited non-zero
+      * passed=None   — no test_command configured; gate is no-op
+
+    The audit's LLM walkthrough can be fooled by an agent's own self-tests
+    that don't match the project's contract. The test_command IS the
+    contract; running it deterministically prevents drift between what the
+    LLM sees and what a downstream consumer sees.
+    """
+    import shlex
+    import subprocess as _sp
+
+    try:
+        from otto.config import load_config
+        config = load_config(project_dir / "otto.yaml")
+    except Exception as exc:
+        return None, f"otto.yaml unreadable: {exc}"
+    test_command = str(config.get("test_command") or "").strip()
+    if not test_command:
+        return None, "no test_command configured in otto.yaml"
+
+    # Use the same PATH+venv augmentation as checks.py.
+    from otto.checks import _subprocess_env
+
+    try:
+        argv = shlex.split(test_command)
+    except ValueError as exc:
+        return False, f"test_command shlex error: {exc}"
+    if not argv:
+        return None, "test_command parsed to empty argv"
+
+    env = _subprocess_env(extra_pythonpath=[project_dir])
+    try:
+        completed = _sp.run(
+            argv,
+            cwd=project_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+    except _sp.TimeoutExpired:
+        return False, f"test_command timed out: {test_command}"
+    except Exception as exc:  # noqa: BLE001 — surface any subprocess failure
+        return False, f"test_command launch failed: {type(exc).__name__}: {exc}"
+
+    output = (
+        f"$ {test_command}\nexit_code={completed.returncode}\n\n"
+        f"STDOUT:\n{completed.stdout or ''}\n\nSTDERR:\n{completed.stderr or ''}"
+    )
+    if log_dir is not None:
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "test_command.log").write_text(output, encoding="utf-8")
+        except OSError:
+            pass
+
+    detail = (
+        f"test_command={test_command!r} exit={completed.returncode}; "
+        + ((completed.stdout or "")[-400:].strip() or "(no stdout)")
+    )
+    return completed.returncode == 0, detail
 
 
 def _build_summary(build_result: BuildResult) -> dict:

@@ -22,7 +22,16 @@ each owned end-to-end by one build agent. Wrap the JSON in
   "structure": {
     "payload": {
       "routes": [
-        {"path": "/", "component": "Home", "key_text": "Bookmark Manager"}
+        {"path": "/", "component": "Home", "key_text": "Bookmark Manager"},
+        {
+          "path": "/api/bookmarks",
+          "component": "BookmarkApiHandler",
+          "key_text": "Create or list bookmarks",
+          "method": "POST",
+          "request_shape": {"url": "string", "title": "string"},
+          "response_shape": {"id": "string", "url": "string", "title": "string", "created_at": "string"},
+          "error_codes": ["400 on missing url", "400 on duplicate url"]
+        }
       ],
       "components": [
         {"name": "Home", "key_text": "Bookmark Manager"},
@@ -75,6 +84,20 @@ fields. For `project_kind: "webapp"`:
     Any URL the server responds to is a route. Set `component` to the
     name of the React component / template / handler that renders it
     (or a logical name like `PostsApiHandler` for JSON-only routes).
+  → **For non-trivial API routes, you MUST also include**:
+    * `method` — `"GET" | "POST" | "PUT" | "DELETE" | "PATCH"`
+    * `request_shape` — flat object mapping request body field name to
+      type (e.g. `{"follower": "string", "target": "string"}`). Field
+      names are CONTRACT — two slices reading the spec must produce the
+      same wire format. Do NOT invent semantically-similar names like
+      `following` when the contract uses `target`. If the project
+      already has tests/run_acceptance.py or similar, READ IT and pin
+      `request_shape` to those exact names.
+    * `response_shape` — flat object mapping response field name to
+      type (e.g. `{"following": "list[string]"}`).
+    * `error_codes` — array of expected non-200 status codes when the
+      route should refuse (e.g. `["400 on duplicate user", "400 on
+      self-follow"]`).
 * **`components`** — REQUIRED, non-empty array. Each component MUST
   have: `name` (string), `key_text` (string).
   → For webapps, list every named UI surface the user sees: Home,

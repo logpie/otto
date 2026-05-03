@@ -518,3 +518,57 @@ def test_build_agent_prompt_includes_last_failure_on_retry(tmp_path: Path) -> No
     assert "Previous attempt failed" in prompt
     assert "missing route /api/posts" in prompt
     assert "fresh approach" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Project contract surface in build prompt (Microfeed bench learning)
+# ---------------------------------------------------------------------------
+
+
+def test_build_agent_prompt_surfaces_otto_yaml_test_command(tmp_path: Path) -> None:
+    """Reproduce: agent built `{follower, following}` against contract that uses
+    `{follower, target}`. Fix: build prompt explicitly tells agent the
+    test_command + contract files exist and to read them."""
+    (tmp_path / "otto.yaml").write_text(
+        "default_branch: main\ntest_command: 'python tests/run_acceptance.py'\n",
+        encoding="utf-8",
+    )
+    s = Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[])
+    spec = _spec([s])
+    inp = BuildAgentInput(
+        spec=spec, slice=s, project_dir=tmp_path, worktree=tmp_path,
+        branch="x", attempt=1,
+    )
+    prompt = _build_agent_prompt(inp)
+    assert "Project contract surface" in prompt
+    assert "test_command" in prompt
+    assert "tests/run_acceptance.py" in prompt
+    assert "READ THESE FIRST" in prompt
+
+
+def test_build_agent_prompt_surfaces_seeded_test_files(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "run_acceptance.py").write_text("# contract\n", encoding="utf-8")
+    (tmp_path / "tests" / "conftest.py").write_text("# fixtures\n", encoding="utf-8")
+    s = Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[])
+    spec = _spec([s])
+    inp = BuildAgentInput(
+        spec=spec, slice=s, project_dir=tmp_path, worktree=tmp_path,
+        branch="x", attempt=1,
+    )
+    prompt = _build_agent_prompt(inp)
+    assert "tests/run_acceptance.py" in prompt
+    assert "tests/conftest.py" in prompt
+
+
+def test_build_agent_prompt_omits_contract_section_when_no_contract(tmp_path: Path) -> None:
+    """If there's no otto.yaml test_command and no seeded test files, skip
+    the contract section entirely — don't push noise into the prompt."""
+    s = Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[])
+    spec = _spec([s])
+    inp = BuildAgentInput(
+        spec=spec, slice=s, project_dir=tmp_path, worktree=tmp_path,
+        branch="x", attempt=1,
+    )
+    prompt = _build_agent_prompt(inp)
+    assert "Project contract surface" not in prompt

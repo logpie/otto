@@ -381,3 +381,130 @@ def test_parse_audit_output_unknown_verdict_defaults_to_blocked() -> None:
     text = '```json\n{"verdict": "weird", "narrative": "x"}\n```'
     parsed = _parse_audit_output(text)
     assert parsed.verdict == AuditVerdict.BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# Contract-test gate (otto.yaml test_command)
+# ---------------------------------------------------------------------------
+
+
+def _seed_otto_yaml(project_dir: Path, test_command: str) -> None:
+    project_dir.mkdir(parents=True, exist_ok=True)
+    # Use a YAML-quoted string (single-quoted, escape internal single quotes
+    # by doubling them per YAML 1.2). repr() uses Python quoting rules which
+    # don't parse cleanly in YAML.
+    quoted = "'" + test_command.replace("'", "''") + "'"
+    (project_dir / "otto.yaml").write_text(
+        f"default_branch: main\ntest_command: {quoted}\n",
+        encoding="utf-8",
+    )
+
+
+def test_audit_runs_test_command_and_passes_when_zero_exit(tmp_path: Path) -> None:
+    project_dir = tmp_path
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    _seed_otto_yaml(project_dir, "python -c \"print('contract ok')\"")
+    spec = _spec(["s1"])
+
+    async def passing_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="walkthrough ok")
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=project_dir,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], project_dir),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=passing_agent,
+        )
+    )
+    assert result.verdict == AuditVerdict.PASSED
+    assert result.contract_test_passed is True
+    assert "exit=0" in result.contract_test_detail
+
+
+def test_audit_downgrades_passed_to_partial_when_contract_test_fails(tmp_path: Path) -> None:
+    """The contract test OVERRIDES the LLM verdict — the audit can't claim
+    PASSED when the project's own test_command is failing.
+    """
+    project_dir = tmp_path
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    _seed_otto_yaml(project_dir, "python -c \"import sys; sys.exit(1)\"")
+    spec = _spec(["s1"])
+
+    async def overconfident_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="all great according to me",
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=project_dir,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], project_dir),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=overconfident_agent,
+        )
+    )
+    assert result.verdict == AuditVerdict.PARTIAL
+    assert result.contract_test_passed is False
+    assert "[contract test FAILED]" in result.narrative
+    assert "exit=1" in result.contract_test_detail
+
+
+def test_audit_no_test_command_keeps_llm_verdict(tmp_path: Path) -> None:
+    """When otto.yaml has no test_command, the contract gate is a no-op."""
+    project_dir = tmp_path
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    # No otto.yaml at all.
+    spec = _spec(["s1"])
+
+    async def passing_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="ok")
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=project_dir,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], project_dir),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=passing_agent,
+        )
+    )
+    assert result.verdict == AuditVerdict.PASSED
+    assert result.contract_test_passed is None
+    assert "no test_command" in result.contract_test_detail
+
+
+def test_audit_writes_contract_test_log(tmp_path: Path) -> None:
+    project_dir = tmp_path
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    _seed_otto_yaml(project_dir, "python -c \"print('hello-from-test_command')\"")
+    spec = _spec(["s1"])
+
+    async def passing_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="ok")
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=project_dir,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], project_dir),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=passing_agent,
+        )
+    )
+    log_path = session_dir / "audit" / "attempt-00" / "contract" / "test_command.log"
+    assert log_path.exists()
+    contents = log_path.read_text(encoding="utf-8")
+    assert "hello-from-test_command" in contents
+    assert result.verdict == AuditVerdict.PASSED
