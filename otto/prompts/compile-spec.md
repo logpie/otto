@@ -210,7 +210,7 @@ endpoints into `routes` and entity-shaped data into `data_model`.
 | `pytest`         | `selector` (pytest selector), `timeout_s`                      | ✅ preferred |
 | `repo_test`      | `command` (e.g. `["npm", "test"]`), `timeout_s`                | ✅ preferred |
 | `browser_journey`| `command`, `evidence_globs`, `timeout_s`                       | ✅ subprocess+glob |
-| `state_invariant`| `description`, `expression`                                    | ✅ filesystem invariants |
+| `state_invariant`| `description`, `expression` (**Python boolean expression**)    | ✅ filesystem invariants |
 | `api_probe`      | `method`, `path`, `expect_status`, `expect_body_contains`      | ❌ DEFERRED |
 
 **Critical: do NOT emit `api_probe` checks in v1.** The build runtime has
@@ -228,6 +228,41 @@ when validating API routes. If the project root has
 
 These run via Flask's test_client (no server boot needed) and exercise
 the same contract as the eventual production app.
+
+**`state_invariant` is Python `eval`, not English.** The `expression`
+field MUST be a Python boolean expression — the runtime calls
+`eval(expression)` against a restricted namespace. Available helpers:
+
+- `exists(path)`, `is_file(path)`, `is_dir(path)` — filesystem checks
+  rooted at project_dir.
+- `glob_count(pattern)` — count of paths matching a glob.
+- `read_text(path)` — read a file's contents (returns string).
+- `Path` — pathlib.Path class.
+- `project_dir`, `cwd` — Path objects.
+- Standard builtins: `len`, `all`, `any`, `sorted`, etc.
+
+Examples that WORK:
+
+```json
+{"kind": "state_invariant",
+ "description": "App entry exists and models module has User class",
+ "expression": "exists('app.py') and 'class User' in read_text('models.py')"}
+```
+
+```json
+{"kind": "state_invariant",
+ "description": "Single source-of-truth for User model",
+ "expression": "glob_count('**/*models*.py') >= 1 and not exists('app/legacy_models.py')"}
+```
+
+Examples that FAIL (DO NOT emit these — they cause SyntaxError at
+eval-time and the slice will be BLOCKED):
+
+```
+"app.py exists and models.py has User class"            ← prose
+"models.py contains User, Follow, Post"                 ← prose
+"all required tables are defined"                       ← prose without code
+```
 
 **Browser UI verification**: if the project root has
 `tests/run_browser_journey.py` (the bench seeds this for webapps with
