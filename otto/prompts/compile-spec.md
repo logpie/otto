@@ -79,30 +79,31 @@ each owned end-to-end by one build agent. Wrap the JSON in
 }
 ```
 
-## Home-page UI completeness (webapp)
+## Landing-page completeness (webapp)
 
-When `project_kind: "webapp"` AND the intent mentions a browser UI with
-controls (e.g. "include a usable browser UI with visible controls for
-creating users, following, posting, searching..."), the Home page
-component MUST enumerate **every primary user action** mentioned in the
-intent as a directly visible interactive control on `/`, not just a
-link to another page.
+When `project_kind: "webapp"` AND the intent mentions browser UI with
+interactive controls, every primary user action named in the intent
+should be reachable from `/` (the landing page) via either:
 
-For each primary action, the home page should have at minimum ONE of:
-- An inline form with appropriate `<input>` or `<textarea>` named after
-  the action target. For posts: `<textarea name="text">` or
-  `<input name="text">`. For follows: `<input name="target">` or
-  similar. For users: `<input name="username">`.
-- A visible button/link that opens an inline form (still on `/`).
+- An inline form/control on `/` itself, OR
+- A direct, prominent link from `/` to a page that exposes it.
 
-Why: downstream browser-quality evaluators check the home page DOM
-directly for these controls. Linking out to `/timeline/<username>` or
-`/posts/new` is NOT enough — the evaluator wants the form discoverable
-on the landing surface.
+Why: downstream browser evaluators (and humans) check `/` first.
+Forms buried at `/feature/sub-page` that have no entry from `/` are
+effectively invisible.
 
-For Microfeed-style social apps, the Home page key_text should
-explicitly mention: "signup form, post-creation form, follow form,
-search input, links to timeline + CSV export". List every action.
+For each primary action, set the home component's `key_text` to enumerate
+the controls it exposes — that's what stops slices from rendering
+competing app shells. Examples:
+
+- Social app intent ("create users, follow, post, search, export CSV")
+  → home `key_text`: "signup form, post-creation form, follow form,
+  search input, links to timeline + CSV export".
+- Static-site generator intent ("build site from markdown")
+  → home (= produced output/index.html) `key_text`: "list of all
+  posts with date and tags".
+- Note-taking app intent ("create, list, edit notes")
+  → home `key_text`: "new-note form, notes list with edit links".
 
 ## Recommended fields by `project_kind`
 
@@ -162,46 +163,49 @@ shape. Fold endpoints into `routes` and entity-shaped data into
    slice's permission (the runtime enforces this).
 
 3. **`shared_scaffold`** lists files that no slice exclusively owns —
-   any slice may *modify* them. Use this for three categories:
+   any slice may *modify* them. The **rule of thumb**: if you predict
+   that two or more slices will *modify* a file (not just create new
+   files alongside it), put that file in `shared_scaffold`, NOT in
+   any slice's `owned_paths`. Three categories typically belong here:
 
-   * **Build/config** — lockfiles, `package.json`, `vite.config.*`,
-     `requirements.txt`, `pytest.ini`, `.gitignore`.
-   * **Foundational extension points** — files that MULTIPLE slices
-     will need to extend (not just append to). For a Flask webapp with
-     several feature slices, this typically means:
-     - The app entry / factory (`app.py`, `app/main.py`,
-       `app/__init__.py`) — every slice registers its blueprint here.
-     - The data model module (`models.py`) — every slice that adds an
-       entity declares it here.
-     - The database init (`database.py`) — every slice may add tables.
-     - The config (`config.py`) — slices may need new settings.
-   * **Cross-cutting UI surfaces** — for any webapp where multiple
-     feature slices contribute UI to the SAME page, the page's HTML
-     templates must be `shared_scaffold`. Examples:
-     - `templates/base.html` — every slice registers nav links and
-       includes here.
-     - `templates/home.html` — slices add "Create user", "Follow",
-       "Create post", "Search", "Export" controls here.
-     - `templates/timeline.html` — `posts` shows posts; `social` adds
-       follow/unfollow buttons; `export` adds CSV export link.
-     - `templates/search.html` — `search` shows results; `export`
-       adds the export link.
+   * **Build/config files** — anything every slice may add to:
+     lockfiles, `package.json`, `vite.config.*`, `requirements.txt`,
+     `pytest.ini`, `.gitignore`, language-specific manifests.
 
-     **Rule of thumb**: any template that more than one slice's
-     functionality appears on belongs in `shared_scaffold`, NOT in
-     any single slice's `owned_paths`. If you predict that even ONE
-     other slice will want to add a button/link/form to a template,
-     put that template in shared_scaffold up front.
+   * **Extension-point modules** — files where MULTIPLE slices register
+     themselves. The shape varies by stack but the pattern is:
+     - **App factory / entry**: e.g. `app.py`, `app/__init__.py`,
+       `cmd/main.go`, `src/main.ts`. Every slice registers its
+       blueprint / route / handler / command.
+     - **Data model module**: e.g. `models.py`, `schema.sql`,
+       `db/schema.go`. Every slice that adds an entity declares it.
+     - **Config / settings**: e.g. `config.py`, `settings.toml`. Slices
+       may need new settings.
+     - **Init / DB setup**: e.g. `database.py`, `migrations/`.
 
-   **CRITICAL RULE:** if you predict that two or more slices will
-   *modify* a file (not just create new files alongside it), put that
-   file in `shared_scaffold`, NOT in any slice's `owned_paths`. The
-   build runtime treats `owned_paths` as a write-scope: a slice cannot
-   modify another slice's owned files. Putting a foundational file in
-   one slice's `owned_paths` BLOCKS every other slice from touching
-   it, which is the wrong outcome for things like `models.py`.
+   * **Shared rendering surfaces** — for any project that produces
+     output through templates / shared layouts, the templates that
+     multiple slices contribute to belong here. Pattern-recognize by
+     asking "do two or more slices' features appear on the same page
+     / output file?". Examples across project shapes:
+     - **Webapp** (multi-feature pages): `templates/base.html` (nav,
+       layout), `templates/home.html` (slices add their controls),
+       `templates/timeline.html` or any feature page where multiple
+       slices contribute UI fragments (links, buttons, embeds).
+     - **Static-site generator**: `templates/base.html`, `templates/
+       index.html`, `templates/post.html`, `templates/tag.html` — if
+       multiple slices (rendering, indexing, RSS, tags) all touch
+       these files, they're shared.
+     - **Documentation site**: `templates/_layout.html`,
+       `templates/_sidebar.html` — TOC + navigation are cross-cutting.
 
-   The slice that initially creates a shared-scaffold file is fine —
+   **CRITICAL**: putting a foundational file in one slice's
+   `owned_paths` BLOCKS every other slice from touching it. The
+   runtime emits scope warnings (informational, not blocking) when
+   peer-owned files get modified, but the cleaner outcome is to
+   declare shared-scaffold up front.
+
+   The slice that initially CREATES a shared-scaffold file is fine —
    the rule is about exclusive ownership, not initial authorship.
 
 4. **Every slice has at least one check**. Browser journeys are
@@ -211,26 +215,33 @@ shape. Fold endpoints into `routes` and entity-shaped data into
 
 5. **`deps` is a DAG**. No cycles. Slices with no deps run first.
 
-   **Critical**: `deps` declares both DATA and UI dependencies, not just
-   data. A slice may modify a dep's owned files; it CANNOT modify a
-   peer's (a slice not in its transitive deps).
+   `deps` declares both DATA and UI dependencies. A slice may modify
+   a dep's owned files; modifying a peer's (a slice not in its
+   transitive deps) emits a scope warning (informational).
 
-   So if slice X needs to add ANY UI fragment (link, button, embedded
-   form) to slice Y's owned page, X MUST declare Y in `deps`.
+   When slice X needs to add code or UI to slice Y's owned area, you
+   have two options:
 
-   Common Microfeed-shaped traps to avoid:
-   - `export` adds a "Download CSV" link to the search results page →
-     `export.deps` MUST include `search` (or move templates/search.html
-     to `shared_scaffold` so search no longer owns it exclusively).
-   - `social` adds follow buttons to the timeline page → `social.deps`
-     MUST include `posts_timeline` (or templates/timeline.html in
-     shared_scaffold).
-   - `posts` displays counts of users who follow each author →
-     `posts.deps` MUST include `social` (data dep).
+   - **Either** declare Y in `X.deps` (X depends on Y, modification
+     is in-scope), OR
+   - **Move Y's contested file(s) to `shared_scaffold`** (no slice
+     owns them exclusively).
 
-   When in doubt, **prefer putting cross-cutting templates in
-   `shared_scaffold`** over chaining many slice deps. A page that gets
-   contributions from 3+ feature slices is shared infrastructure.
+   Common cross-slice-edit patterns (pattern-recognize across project
+   shapes; specific names will vary):
+
+   - **Add a control to a peer's page**: e.g. an "export" feature adds
+     a download link to a "search results" page. Either declare the
+     dep, or shared-scaffold the template.
+   - **Display data from a peer**: e.g. one feature shows counts/info
+     produced by another. Declare the data dep.
+   - **Wire a navigation entry**: every slice that adds a route should
+     either own the nav source-of-truth or declare the layout template
+     as shared.
+
+   Rule of thumb: **a file that 3+ feature slices contribute to is
+   shared infrastructure** — put it in `shared_scaffold` rather than
+   chaining many transitive deps.
 
 6. **`done_means`** is the integration-level success criteria — what
    the audit pass at the end of the pipeline will verify.
