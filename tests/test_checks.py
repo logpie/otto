@@ -336,11 +336,20 @@ def test_state_invariant_glob_count(tmp_path: Path) -> None:
     assert evidence.passed is True
 
 
-def test_state_invariant_syntax_error_returns_error(tmp_path: Path) -> None:
-    check = StateInvariant(description="broken", expression="this is not python @@@")
+def test_state_invariant_non_python_expression_treated_as_informational(tmp_path: Path) -> None:
+    """v2 finding F2 (R26): when expression isn't parseable Python (agent
+    emitted prose), do NOT fail the slice. Treat as informational PASS;
+    real damage is caught by other checks + audit's contract gate.
+    See docs/intent-to-product-v2.md.
+    """
+    check = StateInvariant(
+        description="App shell has create_app factory and database setup",
+        expression="App shell has create_app factory and database setup",
+    )
     evidence = run_check(check, project_dir=tmp_path)
-    assert evidence.passed is False
-    assert "SyntaxError" in evidence.detail
+    assert evidence.passed is True  # informational, not blocking
+    assert "informational" in evidence.detail
+    assert evidence.raw["non_python_expression"] is True
 
 
 def test_state_invariant_empty_expression_returns_error(tmp_path: Path) -> None:

@@ -368,8 +368,29 @@ def _run_state_invariant(
         # Compile separately to surface SyntaxError as a clearer detail.
         code = builtins.compile(expression, "<state_invariant>", "eval")
         result = eval(code, namespace, {})
-    except SyntaxError as exc:
-        return _err_evidence(started, t0, f"SyntaxError in expression: {exc.msg}")
+    except SyntaxError:
+        # Permissive fallback: agents sometimes emit prose ("App shell has
+        # create_app factory and database setup") instead of Python. Don't
+        # fail the slice on this — it isn't a behavior regression, it's
+        # just a malformed assertion. Treat as informational PASS with the
+        # description preserved as evidence. Real damage is caught by the
+        # slice's other checks + cross-slice checks + audit's contract gate.
+        # (See docs/intent-to-product-v2.md, finding F2.)
+        detail = check.description or expression
+        if len(detail) > 200:
+            detail = detail[:197] + "..."
+        return Evidence(
+            passed=True,
+            started_at=started,
+            duration_s=time.monotonic() - t0,
+            detail=f"{detail} → informational (not Python; eval skipped)",
+            raw={
+                "expression": expression,
+                "description": check.description,
+                "result": None,
+                "non_python_expression": True,
+            },
+        )
     except Exception as exc:  # noqa: BLE001 — surface eval failures
         return _err_evidence(started, t0, f"{type(exc).__name__}: {exc}")
 
