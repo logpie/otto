@@ -573,6 +573,46 @@ async def _run_slice(
             )
             continue
 
+        # v2.2 amendment side-channel: did the agent write
+        # `.otto/amendment_request.json`? If so, validate via
+        # request_amendment, mutate spec in place, persist. The amended
+        # state takes effect for THIS attempt's scope check.
+        from otto.spec_amend import consume_amendment_request
+
+        amended_spec, amendment_result = consume_amendment_request(
+            worktree, spec, slice_id=slice_obj.id, session_dir=session_dir
+        )
+        if amendment_result is not None:
+            if amendment_result.accepted and amended_spec is not spec:
+                # Apply in place: replace the matching slice in spec.slices
+                # so subsequent slices in this build session see the change.
+                for index, s in enumerate(spec.slices):
+                    if s.id == slice_obj.id:
+                        spec.slices[index] = amended_spec.slices[index]
+                        break
+                spec.amendments.extend(
+                    amended_spec.amendments[len(spec.amendments):]
+                )
+                # Refresh slice_obj for downstream use this attempt.
+                slice_obj = next(s for s in spec.slices if s.id == slice_obj.id)
+                emit(
+                    session_dir,
+                    "amendment.applied",
+                    slice_id=slice_obj.id,
+                    attempt=attempt,
+                    detail=(amendment_result.amendment.reason or "")[:200] if amendment_result.amendment else "",
+                    trigger_event_id=amendment_result.amendment.trigger_event_id if amendment_result.amendment else "",
+                )
+            elif amendment_result.rejection is not None:
+                emit(
+                    session_dir,
+                    "amendment.rejected",
+                    slice_id=slice_obj.id,
+                    attempt=attempt,
+                    detail=amendment_result.rejection.message[:200],
+                    code=amendment_result.rejection.code,
+                )
+
         # Scope check: detect modifications outside the slice's declared
         # owned_paths + transitive deps + shared_scaffold. Soft-warning
         # mode: don't block the slice — just log the warnings and let
@@ -777,6 +817,50 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     lines.append(
         "**Stay in your lane** when reasonable: build what your slice's "
         "tasks ask for. Don't pre-emptively build later slices' features."
+    )
+    lines.append("")
+    lines.append("## Amendment escape hatch (v2.2)")
+    lines.append(
+        "If you discover during your work that the spec's slice graph is "
+        "wrong — your slice genuinely needs a peer's helper, your dep list "
+        "is missing a slice, your owned_paths globs are too narrow — you "
+        "can REQUEST AN AMENDMENT instead of silently violating scope."
+    )
+    lines.append("")
+    lines.append(
+        "Mechanism: write a JSON file at `.otto/amendment_request.json` in "
+        "your worktree before finishing this turn. The runtime validates "
+        "and applies it after your turn, then runs scope detection against "
+        "the AMENDED spec — meaning a legitimately-needed cross-slice edit "
+        "no longer surfaces as a warning."
+    )
+    lines.append("")
+    lines.append("Schema (only fields you need):")
+    lines.append("```json")
+    lines.append("{")
+    lines.append('  "changes": {')
+    lines.append('    "deps": ["existing-slice-1", "newly-needed-slice-2"],')
+    lines.append('    "owned_paths": ["templates/timeline.html", "templates/_post_card.html"]')
+    lines.append("  },")
+    lines.append('  "reason": "timeline rendering needs auth-helper get_display_name() which lives in the auth slice",')
+    lines.append('  "trigger_event_id": "ev-NNNNNN"')
+    lines.append("}")
+    lines.append("```")
+    lines.append("")
+    lines.append("Rules:")
+    lines.append("  - You can only amend YOUR OWN slice (`" + s.id + "`).")
+    lines.append("  - Tier-1 BEDROCK fields (intent) are immutable.")
+    lines.append("  - Tier-2 LOCKED fields (project_kind, slice.id, etc.) are user-only.")
+    lines.append("  - Tier-3 fields are: deps, owned_paths, tasks, title. checks are append-only.")
+    lines.append("  - `reason` must be a real, specific justification.")
+    lines.append("  - `trigger_event_id` is REQUIRED. Use the most recent journal event id you observed (e.g., a scope warning's id).")
+    lines.append("")
+    lines.append(
+        "Don't write this file unless you need it. Spec amendments are "
+        "audit-visible — random or unjustified amendments cap the run "
+        "verdict at PARTIAL. They exist to fix real spec mistakes, not to "
+        "expand your reach. The audit reviews the amendment chain at "
+        "end-of-run and flags suspicious patterns."
     )
     lines.append("")
     lines.append("## Slice acceptance checks")

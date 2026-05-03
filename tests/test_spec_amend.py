@@ -14,7 +14,10 @@ from pathlib import Path
 import pytest
 
 from otto.spec_amend import (
+    AMENDMENT_REQUEST_PATH,
+    AMENDMENT_RESPONSE_PATH,
     AmendmentRejection,
+    consume_amendment_request,
     request_amendment,
     verify_amendment_chain,
 )
@@ -573,3 +576,155 @@ def test_compute_intent_hash_stable() -> None:
     b = compute_intent_hash("the same intent")
     assert a == b
     assert len(a) == 64  # SHA-256 hex
+
+
+# ---------------------------------------------------------------------------
+# Build-agent side-channel: consume_amendment_request
+# ---------------------------------------------------------------------------
+
+
+def test_consume_no_request_file_is_noop(tmp_path: Path) -> None:
+    """If the agent didn't write the request file, return spec unchanged."""
+    spec = _seed_spec()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    new_spec, result = consume_amendment_request(
+        worktree, spec, slice_id="posts", session_dir=session_dir,
+    )
+    assert new_spec is spec
+    assert result is None
+
+
+def test_consume_valid_request_applies_and_writes_response(tmp_path: Path) -> None:
+    import json
+
+    spec = _seed_spec()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    event = emit(session_dir, "scope.warning", slice_id="posts", detail="touched auth/")
+
+    request_path = worktree / AMENDMENT_REQUEST_PATH
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text(json.dumps({
+        "changes": {"deps": ["shell", "auth"]},
+        "reason": "needs auth helper for timeline",
+        "trigger_event_id": event.event_id,
+    }))
+
+    new_spec, result = consume_amendment_request(
+        worktree, spec, slice_id="posts", session_dir=session_dir,
+    )
+    assert result is not None
+    assert result.accepted
+    posts = next(s for s in new_spec.slices if s.id == "posts")
+    assert posts.deps == ["shell", "auth"]
+
+    # Request file consumed; response file written.
+    assert not request_path.exists()
+    response = json.loads((worktree / AMENDMENT_RESPONSE_PATH).read_text())
+    assert response["accepted"] is True
+    assert response["trigger_event_id"] == event.event_id
+    assert response["amendment_index"] == 0
+    assert response["tier"] == 3
+
+
+def test_consume_rejected_request_writes_rejection_response(tmp_path: Path) -> None:
+    """Bad request → response file says why; spec untouched."""
+    import json
+
+    spec = _seed_spec()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    request_path = worktree / AMENDMENT_REQUEST_PATH
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text(json.dumps({
+        "changes": {"deps": ["shell", "auth"]},
+        "reason": "no trigger event was provided",
+    }))
+
+    new_spec, result = consume_amendment_request(
+        worktree, spec, slice_id="posts", session_dir=session_dir,
+    )
+    assert result is not None
+    assert not result.accepted
+    assert result.rejection is not None
+    assert result.rejection.code == "missing_trigger"
+    # Spec returned unchanged.
+    assert new_spec is spec
+    # Response file written with rejection.
+    response = json.loads((worktree / AMENDMENT_RESPONSE_PATH).read_text())
+    assert response["accepted"] is False
+    assert response["code"] == "missing_trigger"
+
+
+def test_consume_malformed_json_is_rejected(tmp_path: Path) -> None:
+    """Garbage in the request file → rejection, not crash."""
+    import json
+
+    spec = _seed_spec()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    request_path = worktree / AMENDMENT_REQUEST_PATH
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text("{this is not json")
+
+    new_spec, result = consume_amendment_request(
+        worktree, spec, slice_id="posts", session_dir=session_dir,
+    )
+    assert result is not None
+    assert not result.accepted
+    assert result.rejection is not None
+    assert result.rejection.code == "invalid_field"
+    assert new_spec is spec
+    # Request file consumed even when malformed.
+    assert not request_path.exists()
+    response = json.loads((worktree / AMENDMENT_RESPONSE_PATH).read_text())
+    assert response["accepted"] is False
+
+
+def test_consume_side_channel_hardcodes_actor_to_slice(tmp_path: Path) -> None:
+    """The side-channel binds actor = slice_id by construction. There's
+    no field for the agent to specify a different actor — the runtime
+    sets it from the slice context. This makes scope_violation
+    unreachable via the side-channel (the cross-slice rejection is
+    covered by test_agent_cannot_amend_another_slice on the underlying
+    request_amendment API)."""
+    import json
+
+    spec = _seed_spec()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    event = emit(session_dir, "scope.warning", slice_id="posts", detail="x")
+
+    # Even if the agent tries to put "actor" in the JSON, it's ignored.
+    request_path = worktree / AMENDMENT_REQUEST_PATH
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text(json.dumps({
+        "actor": "user",  # agent attempts privilege escalation
+        "changes": {"deps": ["shell", "auth"]},
+        "reason": "legitimately needs auth",
+        "trigger_event_id": event.event_id,
+    }))
+
+    new_spec, result = consume_amendment_request(
+        worktree, spec, slice_id="posts", session_dir=session_dir,
+    )
+    assert result is not None
+    assert result.accepted
+    assert result.amendment is not None
+    # Actor is the slice id, not "user" — the JSON's actor field was ignored.
+    assert result.amendment.actor == "posts"
+    assert result.amendment.tier == 3

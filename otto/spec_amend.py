@@ -384,10 +384,135 @@ def _apply_changes(slice_: Slice, changes: dict[str, Any]) -> Slice:
     return Slice(**payload)
 
 
+# ---------------------------------------------------------------------------
+# Build-agent side-channel: file-based amendment request
+# ---------------------------------------------------------------------------
+
+
+AMENDMENT_REQUEST_PATH = ".otto/amendment_request.json"
+AMENDMENT_RESPONSE_PATH = ".otto/amendment_response.json"
+
+
+def consume_amendment_request(
+    worktree: Path,
+    spec: Spec,
+    *,
+    slice_id: str,
+    session_dir: Path,
+) -> tuple[Spec, AmendmentResult | None]:
+    """Process a build-agent's amendment request from the worktree side-channel.
+
+    The build agent writes its request to
+    `<worktree>/.otto/amendment_request.json` during its turn:
+
+      {
+        "changes": {"deps": ["shell", "auth"], "tasks": ["..."]},
+        "reason": "needs auth helper to render timeline metadata",
+        "trigger_event_id": "ev-000007"
+      }
+
+    After the agent finishes, the runtime calls this helper. If the
+    request validates, returns `(updated_spec, AmendmentResult)`. The
+    caller is responsible for persisting the new spec to disk and
+    propagating it to subsequent slices.
+
+    A response file is always written so the agent (or a follow-up
+    review tool) can see whether the request was accepted:
+
+      {"accepted": true, "trigger_event_id": "...", "amendment_index": 1}
+      {"accepted": false, "code": "missing_trigger", "message": "..."}
+
+    The request file is consumed (deleted) after processing so a stuck
+    file from a prior attempt doesn't double-fire. Returns
+    `(spec, None)` if no request file existed.
+    """
+    request_path = worktree / AMENDMENT_REQUEST_PATH
+    response_path = worktree / AMENDMENT_RESPONSE_PATH
+    if not request_path.exists():
+        return spec, None
+
+    import json
+
+    try:
+        payload = json.loads(request_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        result = _reject("invalid_field", f"could not parse amendment_request.json: {exc}")
+        _write_response(response_path, result, amendment_index=None)
+        request_path.unlink(missing_ok=True)
+        return spec, result
+
+    if not isinstance(payload, dict):
+        result = _reject(
+            "invalid_field",
+            f"amendment_request.json must be an object, got {type(payload).__name__}",
+        )
+        _write_response(response_path, result, amendment_index=None)
+        request_path.unlink(missing_ok=True)
+        return spec, result
+
+    changes = payload.get("changes") or {}
+    if not isinstance(changes, dict):
+        result = _reject(
+            "invalid_field",
+            f"changes must be an object, got {type(changes).__name__}",
+        )
+        _write_response(response_path, result, amendment_index=None)
+        request_path.unlink(missing_ok=True)
+        return spec, result
+
+    result = request_amendment(
+        spec,
+        actor=slice_id,
+        slice_id=slice_id,
+        changes=changes,
+        reason=str(payload.get("reason") or ""),
+        trigger_event_id=str(payload.get("trigger_event_id") or ""),
+        session_dir=session_dir,
+    )
+
+    amendment_index: int | None = None
+    if result.accepted and result.spec is not None:
+        amendment_index = len(result.spec.amendments) - 1
+        spec = result.spec
+
+    _write_response(response_path, result, amendment_index=amendment_index)
+    request_path.unlink(missing_ok=True)
+    return spec, result
+
+
+def _write_response(
+    response_path: Path,
+    result: AmendmentResult,
+    *,
+    amendment_index: int | None,
+) -> None:
+    import json
+
+    response_path.parent.mkdir(parents=True, exist_ok=True)
+    if result.accepted and result.amendment is not None:
+        body = {
+            "accepted": True,
+            "trigger_event_id": result.amendment.trigger_event_id,
+            "amendment_index": amendment_index,
+            "tier": result.amendment.tier,
+        }
+    else:
+        rej = result.rejection
+        body = {
+            "accepted": False,
+            "code": rej.code if rej else "unknown",
+            "message": rej.message if rej else "",
+        }
+    response_path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+
+
 __all__ = [
+    "AMENDMENT_REQUEST_PATH",
+    "AMENDMENT_RESPONSE_PATH",
     "AmendmentRejection",
     "AmendmentResult",
     "ChainVerification",
+    "consume_amendment_request",
     "request_amendment",
     "verify_amendment_chain",
     "TIER_1_FIELDS",

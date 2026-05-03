@@ -162,6 +162,70 @@ def no_op_walkthrough(_project_dir: Path, _log_dir: Path, _timeout_s: int) -> Wa
     return WalkthroughResult(succeeded=True, detail="no walkthrough configured", artifacts=[])
 
 
+def default_walkthrough_from_spec(spec: Spec) -> WalkthroughCallable:
+    """Build a production walkthrough callable from the spec.
+
+    Strategy: find a `BrowserJourney` check anywhere in the spec
+    (cross_slice_checks first, then any slice's checks), run its
+    command in `project_dir`, glob the configured `evidence_globs`,
+    and return them as audit artifacts. The audit's walkthrough dir
+    receives the raw stdout/stderr log; the artifacts themselves stay
+    where the runner wrote them (typically `otto_artifacts/browser/`)
+    so the proof packet can link directly.
+
+    If no BrowserJourney is declared anywhere in the spec, falls back
+    to no-op with a clear diagnostic so audit can still proceed but
+    flags the absence in `detail`.
+
+    This was the missing wiring that left `audit/<attempt>/walkthrough/`
+    empty in v1 — the LLM judge was reading code without any
+    interactive verification.
+    """
+    from otto.checks import run_check
+    from otto.spec_compile import BrowserJourney
+
+    journey: BrowserJourney | None = None
+    for check in spec.cross_slice_checks:
+        if isinstance(check, BrowserJourney):
+            journey = check
+            break
+    if journey is None:
+        for slice_ in spec.slices:
+            for check in slice_.checks:
+                if isinstance(check, BrowserJourney):
+                    journey = check
+                    break
+            if journey is not None:
+                break
+
+    if journey is None:
+        def _no_journey(_pd: Path, _ld: Path, _ts: int) -> WalkthroughResult:
+            return WalkthroughResult(
+                succeeded=True,
+                detail="no BrowserJourney check declared in spec; LLM judge will read code only",
+                artifacts=[],
+            )
+        return _no_journey
+
+    journey_check = journey  # capture for closure
+
+    def _run_journey(project_dir: Path, log_dir: Path, _timeout_s: int) -> WalkthroughResult:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        evidence = run_check(
+            journey_check,
+            project_dir=project_dir,
+            cwd=project_dir,
+            raw_log_path=log_dir / "browser-journey.log",
+        )
+        return WalkthroughResult(
+            succeeded=evidence.passed,
+            detail=evidence.detail,
+            artifacts=list(evidence.artifacts),
+        )
+
+    return _run_journey
+
+
 # ---------------------------------------------------------------------------
 # The audit driver
 # ---------------------------------------------------------------------------

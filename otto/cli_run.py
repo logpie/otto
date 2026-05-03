@@ -33,6 +33,7 @@ from otto.audit import (
     AuditResult,
     AuditVerdict,
     default_audit_agent,
+    default_walkthrough_from_spec,
     run_audit,
 )
 from otto.build import (
@@ -182,6 +183,7 @@ async def _drive_full_pipeline(
         merge_result=merge_result,
         audit_agent=default_audit_agent,
         base_url=base_url,
+        walkthrough=default_walkthrough_from_spec(spec),
         fix_agent=default_build_agent,
         budget=AuditBudget(),
     )

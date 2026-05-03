@@ -23,6 +23,7 @@ from otto.audit import (
     SliceVerdict,
     WalkthroughResult,
     _parse_audit_output,
+    default_walkthrough_from_spec,
     run_audit,
 )
 from otto.build import (
@@ -508,3 +509,62 @@ def test_audit_writes_contract_test_log(tmp_path: Path) -> None:
     contents = log_path.read_text(encoding="utf-8")
     assert "hello-from-test_command" in contents
     assert result.verdict == AuditVerdict.PASSED
+
+
+# ---------------------------------------------------------------------------
+# default_walkthrough_from_spec — production wiring
+# ---------------------------------------------------------------------------
+
+
+def test_default_walkthrough_no_browser_journey_returns_no_op(tmp_path: Path) -> None:
+    """Spec without a BrowserJourney → callable returns no-op result with
+    a clear diagnostic, so audit can still run."""
+    from otto.spec_compile import PytestCheck
+
+    spec = Spec(
+        intent="x",
+        slices=[Slice(id="s", title="t", checks=[PytestCheck(selector="x")])],
+    )
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(tmp_path, tmp_path / "log", 60)
+    assert result.succeeded is True
+    assert result.artifacts == []
+    assert "no BrowserJourney" in result.detail
+
+
+def test_default_walkthrough_picks_cross_slice_journey_first(tmp_path: Path) -> None:
+    """When both cross-slice and slice-level BrowserJourney exist, the
+    cross-slice one wins (it's the integrated test)."""
+    from otto.spec_compile import BrowserJourney
+
+    cross = BrowserJourney(command=("echo", "cross"), evidence_globs=("c-*.png",))
+    slice_journey = BrowserJourney(command=("echo", "slice"), evidence_globs=("s-*.png",))
+    spec = Spec(
+        intent="x",
+        cross_slice_checks=[cross],
+        slices=[Slice(id="s", title="t", checks=[slice_journey])],
+    )
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(tmp_path, tmp_path / "log", 60)
+    # Subprocess ran (echo exits 0); detail comes from BrowserJourney runner.
+    assert result.succeeded is True
+    log_path = tmp_path / "log" / "browser-journey.log"
+    assert log_path.exists()
+    assert "cross" in log_path.read_text(encoding="utf-8")
+
+
+def test_default_walkthrough_falls_back_to_slice_journey(tmp_path: Path) -> None:
+    """No cross-slice BrowserJourney → first slice's BrowserJourney is used."""
+    from otto.spec_compile import BrowserJourney
+
+    slice_journey = BrowserJourney(command=("echo", "slice"), evidence_globs=("*.png",))
+    spec = Spec(
+        intent="x",
+        slices=[Slice(id="s", title="t", checks=[slice_journey])],
+    )
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(tmp_path, tmp_path / "log", 60)
+    assert result.succeeded is True
+    log_path = tmp_path / "log" / "browser-journey.log"
+    assert log_path.exists()
+    assert "slice" in log_path.read_text(encoding="utf-8")
