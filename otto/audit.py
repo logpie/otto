@@ -84,6 +84,8 @@ class AuditResult:
     walkthrough_artifacts: list[Path] = field(default_factory=list)
     contract_test_passed: bool | None = None  # None if no test_command configured
     contract_test_detail: str = ""
+    quality_score: int = 0  # 1-5; 0 = not assessed
+    quality_findings: list[str] = field(default_factory=list)
     retries: int = 0
     cost_usd: float = 0.0
     wall_s: float = 0.0
@@ -124,6 +126,15 @@ class AuditAgentOutput:
     verdict: AuditVerdict
     narrative: str
     slice_verdicts: list[SliceVerdict] = field(default_factory=list)
+    # Quality dimension (added when "audit final app quality" check
+    # surfaced that bare-bones-but-functional products were passing).
+    # Score 1-5 where 1 = unusable, 3 = MVP, 5 = polished. Findings
+    # are concrete UX/visual issues. Functional verdict and quality
+    # are independent — a product can be functional but rate quality
+    # 2 (passes contract test, but UX is rough). Quality < 3 caps the
+    # final verdict at PARTIAL.
+    quality_score: int = 0  # 0 = not assessed
+    quality_findings: list[str] = field(default_factory=list)
     cost_usd: float = 0.0
     wall_s: float = 0.0
 
@@ -498,6 +509,24 @@ async def run_audit(
                 + "\n".join(f"  - {f}" for f in chain_review.findings)
             ).strip()
 
+        # Audit-final-quality cap: a functionally-correct but
+        # bare-bones product (forms stacked vertically, no nav, raw
+        # browser styling) shouldn't claim PASSED. Quality < 3 (worse
+        # than MVP) caps at PARTIAL. The intent is to surface "looks
+        # broken" UX without re-litigating "does the contract test
+        # pass" — those are independent dimensions.
+        if (
+            agent_output.quality_score
+            and agent_output.quality_score < 3
+            and verdict == AuditVerdict.PASSED
+        ):
+            verdict = AuditVerdict.PARTIAL
+            narrative = (
+                f"{narrative}\n\n"
+                f"[quality assessment: {agent_output.quality_score}/5]\n"
+                + "\n".join(f"  - {f}" for f in agent_output.quality_findings)
+            ).strip()
+
         last_result = AuditResult(
             verdict=verdict,
             narrative=narrative,
@@ -506,6 +535,8 @@ async def run_audit(
             walkthrough_artifacts=list(walk_result.artifacts),
             contract_test_passed=contract_passed,
             contract_test_detail=contract_detail,
+            quality_score=agent_output.quality_score,
+            quality_findings=list(agent_output.quality_findings),
             retries=retries_this_pass,
             cost_usd=cost_total,
             wall_s=time.monotonic() - t0,
@@ -771,9 +802,14 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         lines.append(f"- {'PASS' if ev.passed else 'FAIL'} — {ev.detail}")
     lines.append("")
     if agent_input.walkthrough_artifacts:
-        lines.append("## Walkthrough artifacts (paths)")
+        lines.append("## Walkthrough artifacts (paths — READ these)")
         for p in agent_input.walkthrough_artifacts:
             lines.append(f"- {p}")
+        lines.append(
+            "These are the rendered home page, screenshots, or "
+            "browser-journey logs from the integrated product. Read them "
+            "to assess what a user actually sees."
+        )
         lines.append("")
     lines.append("## Your task")
     lines.append("")
@@ -788,11 +824,52 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "  2. A per-slice verdict: for each slice id, pass or fail with reason."
     )
     lines.append("  3. A final verdict: 'passed', 'partial', or 'blocked'.")
+    lines.append(
+        "  4. A quality assessment of the user-facing experience (REQUIRED, "
+        "independent of the functional verdict):"
+    )
+    lines.append(
+        "     - quality_score: integer 1-5 where 1=unusable, 2=broken UX, "
+        "3=MVP (works but rough), 4=polished, 5=production-ready."
+    )
+    lines.append(
+        "     - quality_findings: list of CONCRETE issues you observe in "
+        "the user-facing surfaces (rendered HTML, screenshots, walkthrough "
+        "logs). Examples: 'home page has no nav bar', 'forms have no "
+        "labels, only placeholders', 'no error states visible', 'tags "
+        "render as plain text instead of clickable links', 'no responsive "
+        "styling for mobile'. Empty list = no issues found (be honest; "
+        "low scores need findings)."
+    )
+    lines.append("")
+    lines.append("Quality criteria by project_kind:")
+    lines.append(
+        "  - **webapp**: nav present and consistent; primary actions "
+        "discoverable from /; forms labelled; error states visible; "
+        "responsive at narrow widths; visual hierarchy (not raw browser "
+        "default styling)."
+    )
+    lines.append(
+        "  - **static-site / blog**: navigation between pages works; post "
+        "list ordered properly; dates formatted; tag links clickable; RSS "
+        "link visible; readable typography (not raw browser default)."
+    )
+    lines.append(
+        "  - **cli / library**: --help text complete; error messages "
+        "actionable; exit codes meaningful; usage-friendly defaults."
+    )
+    lines.append("")
+    lines.append(
+        "**Be specific in findings.** \"Could be better\" is not useful. "
+        "\"Home page has 6 forms stacked vertically with no styling, no "
+        "labels, no nav bar — feels like 1998\" is useful."
+    )
     lines.append("")
     lines.append(
         "Output as a single fenced JSON block with keys: "
         "{ verdict: passed|partial|blocked, narrative: str, "
-        "slice_verdicts: [{slice_id, passed: bool, detail: str}, ...] }."
+        "slice_verdicts: [{slice_id, passed: bool, detail: str}, ...], "
+        "quality_score: int (1-5), quality_findings: [str, ...] }."
     )
     return "\n".join(lines)
 
@@ -828,10 +905,25 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
                 detail=str(entry.get("detail") or ""),
             )
         )
+    # Quality assessment (added with audit-final-quality check). Permissive
+    # parsing — score absent / non-int → 0 (not assessed). Findings absent
+    # → []. Score outside 1-5 → clamped.
+    raw_score = data.get("quality_score") or 0
+    try:
+        quality_score = max(0, min(5, int(raw_score)))
+    except (TypeError, ValueError):
+        quality_score = 0
+    raw_findings = data.get("quality_findings") or []
+    quality_findings: list[str] = []
+    if isinstance(raw_findings, list):
+        quality_findings = [str(f) for f in raw_findings if f]
+
     return AuditAgentOutput(
         verdict=verdict,
         narrative=str(data.get("narrative") or ""),
         slice_verdicts=slice_verdicts,
+        quality_score=quality_score,
+        quality_findings=quality_findings,
     )
 
 

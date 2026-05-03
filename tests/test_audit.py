@@ -516,6 +516,107 @@ def test_audit_writes_contract_test_log(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Audit-final-quality: prompt asks for quality, parser reads it,
+# verdict caps at PARTIAL when quality_score < 3
+# ---------------------------------------------------------------------------
+
+
+def test_audit_prompt_requests_quality_assessment(tmp_path: Path) -> None:
+    """The audit prompt MUST ask for quality_score + quality_findings.
+    A functionally-correct but bare-bones product (forms stacked
+    vertically, no styling, no nav) should not be allowed to claim
+    PASSED — the audit prompt now requires a concrete quality grade."""
+    from otto.audit import _audit_prompt
+
+    spec = Spec(intent="x", project_kind="webapp",
+                slices=[Slice(id="s", title="t")])
+    inp = AuditAgentInput(
+        spec=spec, project_dir=tmp_path, integrated_worktree=tmp_path,
+        build_summary={}, merge_summary={}, cross_slice_evidence=[],
+        walkthrough_artifacts=[],
+    )
+    prompt = _audit_prompt(inp)
+    assert "quality_score" in prompt
+    assert "quality_findings" in prompt
+    assert "1-5" in prompt or "1 to 5" in prompt
+    # Must include quality criteria for the project_kind dimensions.
+    assert "webapp" in prompt
+    assert "static-site" in prompt or "blog" in prompt
+
+
+def test_audit_parser_reads_quality_fields() -> None:
+    """The parser must read quality_score + quality_findings from JSON."""
+    from otto.audit import _parse_audit_output
+
+    output = """```json
+{
+  "verdict": "passed",
+  "narrative": "all good",
+  "slice_verdicts": [],
+  "quality_score": 2,
+  "quality_findings": [
+    "home page has no nav bar",
+    "forms have no labels"
+  ]
+}
+```"""
+    result = _parse_audit_output(output)
+    assert result.quality_score == 2
+    assert result.quality_findings == [
+        "home page has no nav bar",
+        "forms have no labels",
+    ]
+
+
+def test_audit_parser_clamps_quality_score() -> None:
+    """Score outside 1-5 clamped; absent → 0 (not assessed)."""
+    from otto.audit import _parse_audit_output
+
+    high = _parse_audit_output('```json\n{"verdict":"passed","quality_score":9}\n```')
+    assert high.quality_score == 5
+    low = _parse_audit_output('```json\n{"verdict":"passed","quality_score":-3}\n```')
+    assert low.quality_score == 0  # max(0, min(5, -3)) = 0
+    absent = _parse_audit_output('```json\n{"verdict":"passed"}\n```')
+    assert absent.quality_score == 0
+    assert absent.quality_findings == []
+
+
+def test_audit_quality_low_caps_verdict_at_partial(tmp_path: Path) -> None:
+    """Functional verdict PASSED + quality_score < 3 → final verdict
+    PARTIAL. This is the audit-final-quality check enforcing that
+    bare-bones products don't claim PASSED."""
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    spec = Spec(intent="x", project_kind="webapp",
+                slices=[Slice(id="s1", title="t",
+                              checks=[StateInvariant(description="exists",
+                                                     expression="True")])])
+
+    async def passing_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="functional",
+            slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
+            quality_score=2,
+            quality_findings=["bare-bones UI", "no nav"],
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=passing_agent,
+        )
+    )
+    # Functional was PASSED but quality 2 caps to PARTIAL.
+    assert result.verdict == AuditVerdict.PARTIAL
+    assert result.quality_score == 2
+    assert "bare-bones UI" in result.quality_findings
+    assert "quality assessment" in result.narrative
+
+
 def test_default_walkthrough_no_browser_journey_non_webapp_returns_no_op(tmp_path: Path) -> None:
     """Non-webapp spec without a BrowserJourney → callable returns
     no-op with a clear diagnostic. webapp kinds get a synthesized

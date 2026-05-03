@@ -91,6 +91,9 @@ class I2pSummary:
     audit_narrative: str = ""
     cost_usd: float = 0.0
     proof_packet_path: str = ""
+    # Audit-final-quality (audit-final-quality check). 0 = not assessed.
+    quality_score: int = 0
+    quality_findings: list[str] = field(default_factory=list)
     hidden_result: str = "not_run"
     browser_result: str = "not_run"
     visible_result: str = "not_run"
@@ -198,6 +201,10 @@ def _run_i2p(
                 summary.slices_landed = len(packet.get("landed_slice_ids") or [])
                 summary.slices_blocked = len(packet.get("blocked_slice_ids") or [])
                 summary.proof_packet_path = str(session_dir / "proof-packet.html")
+                summary.quality_score = int(packet.get("quality_score") or 0)
+                summary.quality_findings = [
+                    str(f) for f in (packet.get("quality_findings") or [])[:20]
+                ]
             except Exception:
                 summary.notes.append("proof-packet.json present but unreadable")
         else:
@@ -250,13 +257,21 @@ def _run_i2p(
 
 
 def _verdict(summary: I2pSummary) -> str:
-    must = (
+    must_functional = (
         summary.audit_verdict == "passed"
         and summary.hidden_result == "pass"
         and summary.browser_result == "pass"
         and summary.slices_blocked == 0
     )
-    return "i2p_passed" if must else "i2p_failed"
+    if not must_functional:
+        return "i2p_failed"
+    # Audit-final-quality (added per /loop check). Score 0 = audit didn't
+    # assess; treat as "no quality signal" not failure. Score 1-2 means
+    # the audit actively flagged quality issues — that's a separate-from-
+    # functional fail dimension.
+    if 0 < summary.quality_score < 3:
+        return "i2p_quality_low"
+    return "i2p_passed"
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +426,13 @@ def _format_report(report: dict[str, Any]) -> str:
     lines.append(f"- slices landed: {s['slices_landed']}")
     lines.append(f"- slices blocked: {s['slices_blocked']}")
     lines.append(f"- audit verdict: {s['audit_verdict']}")
+    lines.append(f"- quality_score: {s.get('quality_score', 0)}/5")
     lines.append("")
+    if s.get("quality_findings"):
+        lines.append("## Quality findings")
+        for f in s["quality_findings"]:
+            lines.append(f"- {f}")
+        lines.append("")
     lines.append("## Evaluators")
     lines.append("")
     lines.append(f"- visible (public acceptance): **{s['visible_result']}**")
@@ -438,6 +459,7 @@ def _format_report(report: dict[str, Any]) -> str:
         ("0 slices blocked", s["slices_blocked"] == 0),
         ("wall_s <= 1500", s["wall_s"] <= 1500),
         ("audit verdict == passed", s["audit_verdict"] == "passed"),
+        ("quality_score >= 3", s.get("quality_score", 0) >= 3),
     ]
     for label, ok in parity:
         lines.append(f"- {'✅' if ok else '❌'} {label}")

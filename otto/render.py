@@ -96,6 +96,10 @@ class ProofPacket:
     landed_slice_ids: list[str]
     # v2.2 + phase 4: amendment chain rendered for human review
     amendments: list[dict[str, Any]] = field(default_factory=list)
+    # Audit-final-quality: human-facing quality score 1-5 (0 = not assessed)
+    # plus concrete UX/visual findings.
+    quality_score: int = 0
+    quality_findings: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +233,8 @@ def compose_proof_packet(
         blocked_slice_ids=list(merge_result.blocked_ids) + list(build_result.blocked_ids),
         landed_slice_ids=list(merge_result.landed_ids),
         amendments=amendments_render,
+        quality_score=audit_result.quality_score,
+        quality_findings=list(audit_result.quality_findings),
     )
 
 
@@ -257,6 +263,8 @@ def _packet_to_dict(packet: ProofPacket) -> dict[str, Any]:
         "blocked_slice_ids": packet.blocked_slice_ids,
         "landed_slice_ids": packet.landed_slice_ids,
         "amendments": packet.amendments,
+        "quality_score": packet.quality_score,
+        "quality_findings": packet.quality_findings,
         "slices": [
             {
                 "slice_id": s.slice_id,

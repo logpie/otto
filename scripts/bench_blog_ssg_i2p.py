@@ -398,6 +398,18 @@ def _summarize(
         except (OSError, json.JSONDecodeError):
             pass
 
+    # Audit-final-quality (audit-final-quality check).
+    quality_score = 0
+    quality_findings: list[str] = []
+    packet_path = session_dir / "proof-packet.json" if session_dir else None
+    if packet_path and packet_path.exists():
+        try:
+            packet = json.loads(packet_path.read_text(encoding="utf-8"))
+            quality_score = int(packet.get("quality_score") or 0)
+            quality_findings = [str(f) for f in (packet.get("quality_findings") or [])[:20]]
+        except (OSError, json.JSONDecodeError):
+            pass
+
     return {
         "cli_exit_code": cli_exit,
         "cli_timeout": cli_timeout,
@@ -411,6 +423,8 @@ def _summarize(
         "scope_warnings_count": sum(1 for e in events if e.get("kind") == "scope.warning"),
         "acceptance_independent_pass": accept_passed,
         "acceptance_output": accept_output,
+        "quality_score": quality_score,
+        "quality_findings": quality_findings,
     }, session_dir
 
 
@@ -427,6 +441,12 @@ def _verdict(summary: dict[str, Any]) -> str:
         return f"unexpected_audit_verdict_{summary.get('audit_verdict','')}"
     if not summary.get("acceptance_independent_pass"):
         return "acceptance_failed"
+    # Audit-final-quality (audit-final-quality check). Score 0 = audit
+    # didn't assess (treat as no-signal). Score 1-2 = audit flagged
+    # quality issues; surface as a separate verdict.
+    qs = summary.get("quality_score") or 0
+    if 0 < qs < 3:
+        return "low_quality"
     if summary.get("audit_verdict") == "partial":
         return "partial_but_acceptance_passes"
     return "passed"
@@ -492,10 +512,16 @@ def main() -> int:
         f"- slices landed: {summary.get('slices_landed')}",
         f"- slices blocked: {summary.get('slices_blocked')}",
         f"- audit verdict: {summary.get('audit_verdict')}",
+        f"- quality_score: {summary.get('quality_score', 0)}/5",
         f"- amendments: {summary.get('amendments_count')}",
         f"- scope_warnings: {summary.get('scope_warnings_count')}",
         f"- acceptance_independent_pass: {summary.get('acceptance_independent_pass')}",
     ]
+    if summary.get("quality_findings"):
+        lines.append("")
+        lines.append("## Quality findings")
+        for f in summary["quality_findings"]:
+            lines.append(f"- {f}")
     (artifacts_dir / "REPORT.md").write_text("\n".join(lines) + "\n")
     print(f"\nwrote {artifacts_dir}/REPORT.md")
     print(f"verdict: {verdict}")
