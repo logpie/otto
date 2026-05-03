@@ -2483,6 +2483,10 @@ register_cleanup_command(main)
 from otto.cli_merge import register_merge_command  # noqa: E402
 register_merge_command(main)
 
+# Run command (intent-to-product pipeline, Phase A: compile-only)
+from otto.cli_run import register_run_command  # noqa: E402
+register_run_command(main)
+
 
 if __name__ == "__main__":
     main()
