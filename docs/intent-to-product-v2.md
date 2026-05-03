@@ -123,6 +123,36 @@ example of a valid spec, structural fields' purposes. No "Critical
 Rules" sections, no counter-examples, no enumeration of forbidden
 patterns. Trust the parser.
 
+### R26 confirmation (added after the v1 trajectory closed)
+
+R26 (the round immediately following the soft-warning refactor land)
+went 0/7 slices landed despite the soft-warning model working
+correctly. Cause: the compile agent emitted a `state_invariant.expression`
+as English prose ("App shell has create_app factory and database
+setup") — exactly the F2 failure mode. R17's prompt clarification
+didn't take this round.
+
+R26 confirms F2 is a real, recurring brittleness. Soft-warning fixed
+the scope-rule layer; F2 is the next strict-rule that needs the same
+permissive treatment. Specifically: when `state_invariant.expression`
+isn't parseable Python, the runtime should NOT fail the slice. Either:
+
+- Treat as informational (log the description, mark check passed) so
+  the slice's other checks decide its fate, OR
+- Fall back to an LLM-judge that reads the description and inspects
+  the project state (more powerful but adds an LLM call).
+
+Either is consistent with the v2 principle: **trust the test-based
+safety net, don't layer rules on top that block work the tests would
+have validated**.
+
+Empirical pass rate post-soft-warning, pre-F2-fix:
+- R25: PASS 5/5
+- R26: FAIL (state_invariant prose) 0/7 with all evaluators PASS
+
+The 50% rate is exactly the "compile agent output variance" failure
+mode, made concrete. F2's permissive parsing would close it.
+
 ---
 
 ## Layer 2 — system design findings (deferred to v2)
@@ -288,15 +318,204 @@ library slice).
 
 ---
 
+## Safe mutability — preventing agents from hacking the spec
+
+The mutable-spec idea (S1) opens a real attack surface: agents will
+discover that "amend the spec to make my work valid" is easier than
+"actually do the work correctly." If we just let any agent amend any
+field for any reason, agents will:
+
+- Expand `owned_paths` to retroactively legalize over-reach
+- Remove or weaken slice checks that were going to fail
+- Add themselves as transitive deps of every other slice
+- Rewrite `done_means` to remove items they couldn't deliver
+- Rewrite the intent itself to match what they built
+
+**The principle**: not all parts of the spec are equal. **Intent is
+immutable. Common guardrails are immutable. Only slice-local fields
+are agent-mutable, and even those are bounded.**
+
+### Three tiers of immutability
+
+| Tier | Fields | Mutation rule |
+|---|---|---|
+| **1 — Bedrock** | `intent`, `intent_hash`, the user's verbatim request | IMMUTABLE. Hashed at session start. Verified at every persist_spec. Any attempt to change → hard reject + run blocked. |
+| **2 — Locked guardrails** | `project_kind`, `done_means`, `non_goals`, `cross_slice_checks`, `test_command` (in otto.yaml), `slice.id`, references to private evaluators | LOCKED. Can only be amended by USER via spec-review gate, never by agents. Compile sets them once; they stay until human edits. |
+| **3 — Slice-local** | A slice's `deps`, `owned_paths`, `tasks`, `shared_scaffold` (collective), the slice's checks (only TIGHTENING allowed) | MUTABLE by agents via `append_amendment()`, with the constraints below. |
+
+The asymmetry: the LOOSER the constraint (tier 3), the more bounded
+the agent's scope. They can refine their own slice's understanding;
+they can't escape the universal contract.
+
+### Constraints on tier-3 amendments
+
+Even slice-local amendments are bounded:
+
+1. **Scope-limited.** An agent can amend ONLY its own slice's fields.
+   Modifying ANOTHER slice's deps/checks/owned_paths requires the
+   other slice's permission (which agents don't have a way to grant).
+
+2. **Checks can only be tightened, not weakened.** Adding a new check
+   is allowed; removing an existing one is not; changing a check's
+   behavior to be more permissive (e.g., turning `expected_status: 200`
+   into `expected_status: 500`) is not. Strictly: amendments to checks
+   are append-only. Removals are blocked at amendment time.
+
+3. **Reasons must be linked to trigger events.** Every amendment must
+   carry a `trigger_event_id` referencing a real journal event (a
+   check failure, a scope warning, a build error). An amendment with
+   no trigger event is suspicious and the audit will flag it.
+   (Storage: amendment.trigger_event_id; journal events have
+   stable IDs.)
+
+4. **Hash-chained tampering detection.** Already implemented in v1 —
+   `diff_sha256_before` and `diff_sha256_after` form a chain. Breaks
+   in the chain indicate tampering. v2 adds: the audit verifies the
+   full chain at end-of-run; broken chains BLOCK the verdict.
+
+5. **Amendments are visible in the proof packet.** The human reviewer
+   sees the full amendment chain with reasons + trigger events. If
+   the chain looks adversarial (10 amendments removing checks, agent
+   names suspicious), the human can reject the run.
+
+### Audit-time defenses (independent of agent claims)
+
+Even if an agent escapes the per-amendment rules, three independent
+checks catch the cheating:
+
+#### D1. The contract test is the truth
+
+`test_command` lives in `otto.yaml` (LOCKED, tier 2). The audit ALWAYS
+runs it against the integrated worktree at end-of-run. If the contract
+test fails, the verdict cannot be PASSED, regardless of what the spec
+says or what the LLM walkthrough thinks. Agents can amend the spec all
+they want; if the integrated product doesn't satisfy the project's
+own declared test, the run is BLOCKED.
+
+This is the single most important defense. It's already implemented in
+v1 (audit's contract gate fix, root-cause #2). Carries over to v2
+unchanged.
+
+#### D2. Private evaluators are outside the agent's view
+
+The bench's hidden + browser evaluators are kept under
+`bench-results/<run_id>/private-evaluator/` — outside the project repo,
+outside any agent's worktree, never seeded into anything an agent
+reads. Agents cannot game them because agents don't see them.
+
+This is a project-author responsibility: keep the truth-evaluators
+external. Otto's bench harness already does this; production users
+should follow the same pattern (e.g., CI runs an external eval against
+the merged result).
+
+#### D3. The audit reviews the amendment chain
+
+At end-of-run, the audit inspects every amendment:
+
+- Does each amendment have a trigger event reference?
+- Does the trigger event actually exist in the journal?
+- Did the amendment weaken a check (removed, made more permissive)?
+- Is the cumulative effect of amendments suspicious (e.g., 80% of
+  checks were amended, mostly to lower expectations)?
+
+If yes to any of these red flags, the audit verdict is at most
+PARTIAL (never PASSED), and the proof packet surfaces the suspicious
+amendments prominently.
+
+This is a new v2 component (no v1 equivalent). It's an LLM
+amendment-reviewer, but a SCOPED one — it judges only the amendment
+chain, not the spec or the product. Limited surface, limited
+brittleness.
+
+### Concrete amendment flow under v2
+
+When a slice's build agent finds a problem (e.g., scope warning fired
+on `routes/social.py`):
+
+1. Agent decides: "I need `social` in my deps to legitimately extend
+   that file." Calls `request_amendment(slice="posts", deps_add=["social"],
+   reason="follow data needed for timeline rendering",
+   trigger_event_id="2026-05-03T16:35:12-scope-warning-456")`.
+
+2. The runtime validates:
+   - Slice "posts" amending its OWN deps → tier 3, allowed.
+   - Reason is non-empty. ✓
+   - Trigger event exists in journal. ✓
+   - Hash chain extends correctly. ✓
+   - `social` exists as a slice. ✓
+
+3. Amendment persisted; spec updated; `posts.deps` now `[..., "social"]`.
+
+4. The slice's next check run sees the updated deps; the modification
+   to `routes/social.py` is no longer a scope warning.
+
+5. End of run: the audit sees the amendment in the chain, verifies
+   trigger linkage, judges plausibility. If clean, PASSED is allowed.
+
+### What this design is NOT
+
+It's NOT trying to make the spec immune to all bad-faith agents.
+That's impossible. Sufficiently determined agents could:
+
+- Skip the amendment flow and modify spec.json directly on disk
+  (broken hash chain — caught at next persist_spec).
+- Construct a fake journal event with a fake trigger ID (audit can
+  cross-check journal integrity, but not 100% defense).
+- Argue compelling-sounding reasons that aren't true (audit reviews;
+  human can override).
+
+The design is a defense-in-depth against the COMMON failure mode:
+LLM agents taking the path of least resistance, which is amending the
+spec to declare success rather than doing the work. The contract test
++ private evaluators are the real moats; the amendment rules are the
+inner walls that keep agents pointed at honest work.
+
+### Mapping to current v1 fields
+
+| v1 field | v2 tier | v2 mutation rule |
+|---|---|---|
+| `Spec.intent` | 1 | Immutable. Hashed at session start. |
+| `Spec.project_kind` | 2 | Locked at compile; user-only edit via review gate. |
+| `Spec.shared_scaffold` | 3 | Slice agents can propose adding paths, with reasons. |
+| `Spec.cross_slice_checks` | 2 | Locked. Compile sets; user can edit. |
+| `Spec.non_goals` / `done_means` | 2 | Locked. |
+| `Slice.id` | 2 | Locked once set (rename = drop + re-add, audit-visible). |
+| `Slice.title` | 3 | Slice agent can refine. |
+| `Slice.deps` | 3 | Slice agent can ADD; remove requires user. |
+| `Slice.owned_paths` | 3 | Slice agent can refine; cannot expand into another slice's territory unilaterally. |
+| `Slice.tasks` | 3 | Free-form, agent-editable. |
+| `Slice.checks` | 3 (append-only) | New checks allowed; removal/weakening blocked at amendment time. |
+
+### Implementation cost
+
+This is meaningful work but not enormous. Approximate:
+- Add `intent_hash` field + verification in persist_spec (~30 LOC).
+- Add `mutable_by` enum on Spec fields (~20 LOC).
+- Add `request_amendment()` API that validates tier rules
+  (~80 LOC + tests).
+- Add `trigger_event_id` to Amendment + journal event ID system
+  (~50 LOC).
+- Add audit-time amendment review (~150 LOC including the LLM call).
+- Update existing tests for new flow (~50 LOC).
+
+Total: ~400 LOC + ~100 LOC tests. Self-contained module
+(`otto/spec_amend.py`). Most code is enum/validation; the LLM bit is
+small.
+
+---
+
 ## v2 design principles (the synthesis)
 
 1. **Permissive everywhere**. Schema parses what it gets, coerces
    obvious mistakes, warns instead of rejecting. Hard fail only on
    "literally unusable input."
 
-2. **Spec is a living document**. Mutable during the run. Build agents
-   can amend deps, owned_paths, slice decomposition, even checks.
-   Every amendment is hash-chained for audit.
+2. **Spec is a living document, but tiered**. Intent is immutable;
+   global guardrails are locked (user-only edit); slice-local fields
+   are agent-mutable with constraints. Every amendment is hash-chained,
+   linked to a trigger event, and audit-reviewed at end-of-run. The
+   contract test + private evaluators remain the truth, independent
+   of any spec amendment. (See "Safe mutability" section above.)
 
 3. **Pipeline scales by complexity**. Single-slice mode collapses to
    "one agent, one verification." Multi-slice mode uses the full
@@ -358,8 +577,14 @@ What v2 explicitly should NOT include:
 
 1. **Permissive parser** for spec.json. Replaces the strict validator;
    most cheap fails go away. Run the bench; reliability goes up.
-2. **Mutable spec during build**. Implement amendment requests from
-   build agents. Test the feedback loop.
+   Includes F2 fix specifically: state_invariant.expression non-Python
+   becomes informational, not slice-blocking. (Prevents the R26 cascade.)
+2. **Tiered mutable spec during build**. Implement
+   `request_amendment()` API with the three-tier mutation rules.
+   `intent_hash` immutability check. Trigger-event linkage on every
+   amendment. Audit-time chain review. (See "Safe mutability" section
+   for detailed design.) Test the feedback loop on a real run where
+   compile gets the dep graph wrong and the agent self-corrects.
 3. **Auto-collapse pipeline for tiny products**. Single-slice mode.
 4. **Pluggable build agents**. `BuildAgent.kind` → dispatch to
    appropriate implementation.
