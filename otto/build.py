@@ -198,12 +198,13 @@ def detect_scope_violations(
 
     Rule (write-scope, not exclusion):
     - A path is allowed if it matches the slice's own `owned_paths` globs.
-    - A path is allowed if it matches `spec.shared_scaffold` globs
-      (foundational files multiple slices extend: app entry, data model,
-      database init).
+    - A path is allowed if it matches `spec.shared_scaffold` globs.
+    - A path is allowed if it matches owned_paths of any slice in the
+      slice's transitive deps. (Downstream slices extend foundations
+      they depend on. Peers cannot trample each other.)
     - A path is allowed if it was newly created (file did not exist before).
-    - Otherwise: violation if it matches another slice's `owned_paths`.
-    - Otherwise (no owner anywhere): allowed (shared by default).
+    - Otherwise: violation if it matches a peer slice's `owned_paths`
+      (a slice not in this slice's transitive deps).
 
     Newness is approximated: if `project_root` is provided, a path is
     "newly created" iff it does not currently exist on disk. In tests,
@@ -211,12 +212,18 @@ def detect_scope_violations(
     (strictest).
     """
     own_globs = list(slice_obj.owned_paths or [])
-    other_globs: list[str] = []
+    shared_globs = list(spec.shared_scaffold or [])
+    # Transitive deps: every slice this slice depends on, recursively.
+    transitive_dep_ids = _transitive_deps(slice_obj.id, spec)
+    dep_globs: list[str] = []
+    peer_globs: list[str] = []
     for s in spec.slices:
         if s.id == slice_obj.id:
             continue
-        other_globs.extend(s.owned_paths or [])
-    shared_globs = list(spec.shared_scaffold or [])
+        if s.id in transitive_dep_ids:
+            dep_globs.extend(s.owned_paths or [])
+        else:
+            peer_globs.extend(s.owned_paths or [])
 
     violations: list[str] = []
     for raw in modified_paths:
@@ -226,24 +233,38 @@ def detect_scope_violations(
         if _matches_any(path, own_globs):
             continue
         if _matches_any(path, shared_globs):
-            # Explicitly declared shared scaffold — any slice may extend.
             continue
-        if not _matches_any(path, other_globs):
-            # Not under any slice's ownership and not shared scaffold —
-            # treated as implicitly shared (defensive: agents may add new
-            # top-level files like README.md without declaring them).
+        if _matches_any(path, dep_globs):
+            # Modifying a transitive dep's owned files is allowed —
+            # downstream slices extend foundations they depend on.
             continue
-        # Path belongs to another slice. Check if it's newly created.
+        if not _matches_any(path, peer_globs):
+            # Not under any slice's ownership — implicitly shared
+            # (agents may add new top-level files like README.md).
+            continue
+        # Peer-slice ownership. Check if it's newly created.
         if project_root is not None:
             on_disk = (project_root / path).exists()
             if not on_disk:
-                # Newly created path that happens to match another slice's
-                # glob. Allowed per write-scope rule. (Build agent could
-                # have created e.g. app/components/Foo.tsx that happens to
-                # match S1's glob `app/components/**`.)
                 continue
         violations.append(path)
     return violations
+
+
+def _transitive_deps(slice_id: str, spec: Spec) -> set[str]:
+    """Return all slices `slice_id` depends on, transitively (excluding self)."""
+    by_id = {s.id: s for s in spec.slices}
+    visited: set[str] = set()
+    stack = list(by_id.get(slice_id, Slice(id=slice_id, title="")).deps or [])
+    while stack:
+        dep = stack.pop()
+        if dep in visited or dep == slice_id:
+            continue
+        visited.add(dep)
+        upstream = by_id.get(dep)
+        if upstream is not None:
+            stack.extend(upstream.deps or [])
+    return visited
 
 
 def _matches_any(path: str, globs: list[str]) -> bool:

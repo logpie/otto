@@ -129,15 +129,15 @@ def test_scope_violations_allows_own_paths() -> None:
     assert violations == []
 
 
-def test_scope_violations_flags_modifications_to_other_slice_paths(tmp_path: Path) -> None:
+def test_scope_violations_flags_modifications_to_peer_slice_paths(tmp_path: Path) -> None:
+    """Modifying a peer slice (no dep relation) IS a violation."""
     spec = _spec(
         [
             Slice(id="s1", title="shell", deps=[], owned_paths=["app/main.py"], tasks=[], checks=[]),
-            Slice(id="s2", title="api", deps=["s1"], owned_paths=["app/api/*"], tasks=[], checks=[]),
+            Slice(id="s2", title="api", deps=[], owned_paths=["app/api.py"], tasks=[], checks=[]),
         ]
     )
-    s2 = spec.slices[1]
-    # Make s1's file pre-exist so it's a "modification" not a "creation".
+    s2 = spec.slices[1]  # peer of s1, not a dep
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "main.py").write_text("# existing", encoding="utf-8")
     violations = detect_scope_violations(s2, spec, ["app/main.py"], project_root=tmp_path)
@@ -211,6 +211,74 @@ def test_scope_violations_shared_scaffold_globs_match(tmp_path: Path) -> None:
     (tmp_path / "config" / "settings.py").write_text("# ex\n", encoding="utf-8")
     violations = detect_scope_violations(
         s1, spec, ["config/settings.py"], project_root=tmp_path,
+    )
+    assert violations == []
+
+
+def test_scope_violations_allows_transitive_dep_modification(tmp_path: Path) -> None:
+    """A slice may modify any file owned by a slice in its transitive deps.
+
+    Microfeed bench learning: downstream feature slices need to extend
+    foundation slice's files (User model in models.py, blueprint
+    registration in app.py). The dep relation already declares this
+    "extends" relationship — the rule should respect it.
+    """
+    spec = _spec(
+        [
+            Slice(id="shell", title="x", deps=[],
+                  owned_paths=["app.py", "models.py"], tasks=[], checks=[]),
+            Slice(id="auth", title="y", deps=["shell"],
+                  owned_paths=["routes/auth.py"], tasks=[], checks=[]),
+        ]
+    )
+    auth = spec.slices[1]
+    # Pre-existing files owned by shell; auth (deps=[shell]) extends them.
+    (tmp_path / "app.py").write_text("# shell\n", encoding="utf-8")
+    (tmp_path / "models.py").write_text("# shell\n", encoding="utf-8")
+    violations = detect_scope_violations(
+        auth, spec, ["app.py", "models.py"], project_root=tmp_path,
+    )
+    assert violations == []
+
+
+def test_scope_violations_blocks_peer_slice_modification(tmp_path: Path) -> None:
+    """A slice may NOT modify a peer slice's owned files (no dep relation)."""
+    spec = _spec(
+        [
+            Slice(id="shell", title="x", deps=[],
+                  owned_paths=["app.py"], tasks=[], checks=[]),
+            Slice(id="posts", title="p", deps=["shell"],
+                  owned_paths=["routes/posts.py"], tasks=[], checks=[]),
+            Slice(id="search", title="s", deps=["shell"],
+                  owned_paths=["routes/search.py"], tasks=[], checks=[]),
+        ]
+    )
+    search = spec.slices[2]
+    (tmp_path / "routes").mkdir()
+    (tmp_path / "routes" / "posts.py").write_text("# posts\n", encoding="utf-8")
+    # search wants to modify posts' file — should be blocked.
+    violations = detect_scope_violations(
+        search, spec, ["routes/posts.py"], project_root=tmp_path,
+    )
+    assert violations == ["routes/posts.py"]
+
+
+def test_scope_violations_transitive_dep_chain(tmp_path: Path) -> None:
+    """Dep transitivity: posts (deps=auth) (deps=shell) can modify shell's files."""
+    spec = _spec(
+        [
+            Slice(id="shell", title="x", deps=[],
+                  owned_paths=["app.py"], tasks=[], checks=[]),
+            Slice(id="auth", title="y", deps=["shell"],
+                  owned_paths=["routes/auth.py"], tasks=[], checks=[]),
+            Slice(id="posts", title="p", deps=["auth"],
+                  owned_paths=["routes/posts.py"], tasks=[], checks=[]),
+        ]
+    )
+    posts = spec.slices[2]
+    (tmp_path / "app.py").write_text("# shell\n", encoding="utf-8")
+    violations = detect_scope_violations(
+        posts, spec, ["app.py"], project_root=tmp_path,
     )
     assert violations == []
 
@@ -445,8 +513,8 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
             Slice(id="s1", title="shell", deps=[], owned_paths=["app/main.py"], tasks=[], checks=[]),
             Slice(
                 id="s2",
-                title="naughty",
-                deps=["s1"],
+                title="naughty-peer",
+                deps=[],  # peer of s1, NOT a dep — so it can't modify s1's files
                 owned_paths=["app/api/*"],
                 tasks=[],
                 checks=[_no_op_passing_check()],
@@ -454,7 +522,7 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
         ]
     )
 
-    # s2's agent illegally modifies s1's file.
+    # s2's agent illegally modifies s1's file (peer slice, no dep).
     async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
         if input_.slice.id == "s2":
             (input_.worktree / "app" / "main.py").write_text("# tampered\n", encoding="utf-8")
