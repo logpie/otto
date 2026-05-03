@@ -103,7 +103,7 @@ def test_run_with_intent_dispatches_to_compile_spec(tmp_path: Path, monkeypatch)
 
     env = {"OTTO_RUN_ID": "2026-05-03-120000-abc123"}
     code, out = _run(
-        ["run", "build me a tiny webapp"],
+        ["run", "--no-build", "build me a tiny webapp"],
         cwd=tmp_path,
         env=env,
     )
@@ -120,8 +120,8 @@ def test_run_with_intent_dispatches_to_compile_spec(tmp_path: Path, monkeypatch)
     assert persisted["intent"] == "hello fixture"
     assert persisted["project_kind"] == "webapp"
 
-    # The Phase-A stub message is printed
-    assert "Build, audit, and render are not yet implemented" in out
+    # The --no-build skip message is printed
+    assert "Build, audit, and render skipped" in out
     # Rich may line-wrap long paths in the console output; check the
     # filename is mentioned and that the run-id segment is present so we
     # know the message points at the right session.
@@ -147,7 +147,7 @@ def test_run_respects_project_kind_flag(tmp_path: Path, monkeypatch) -> None:
 
     env = {"OTTO_RUN_ID": "2026-05-03-120100-def456"}
     code, _out = _run(
-        ["run", "--project-kind", "cli", "make a small linter"],
+        ["run", "--no-build", "--project-kind", "cli", "make a small linter"],
         cwd=tmp_path,
         env=env,
     )
@@ -181,6 +181,150 @@ def test_run_falls_back_to_intent_md(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("otto.cli_run.compile_spec", fake_compile_spec)
 
     env = {"OTTO_RUN_ID": "2026-05-03-120200-aaa111"}
-    code, out = _run(["run"], cwd=tmp_path, env=env)
+    code, out = _run(["run", "--no-build"], cwd=tmp_path, env=env)
     assert code == 0, out
     assert captured["intent"] == "intent loaded from file"
+
+
+def test_run_full_pipeline_drives_build_audit_render(tmp_path: Path, monkeypatch) -> None:
+    """End-to-end mock: stub compile + build/merge/audit so the pipeline runs."""
+    from otto.audit import AuditResult, AuditVerdict
+    from otto.build import BuildResult, SliceResult, SliceStatus
+    from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
+
+    _init_project(tmp_path)
+    fake_spec = _fixture_spec("full pipe")
+
+    async def fake_compile(intent, *, project_dir, run_dir, config, project_kind, **kwargs):
+        from otto.spec_compile import persist_spec
+        run_dir.mkdir(parents=True, exist_ok=True)
+        persist_spec(fake_spec, run_dir / "spec.json", allow_initial=True)
+        return fake_spec
+
+    async def fake_build(spec, *, project_dir, session_dir, build_agent, **kwargs):
+        return BuildResult(
+            spec_session_dir=session_dir,
+            slice_results=[
+                SliceResult(slice_id="shell", status=SliceStatus.PASSING, attempts=1,
+                            branch="b", worktree=project_dir),
+            ],
+            total_cost_usd=0.05,
+            total_wall_s=10.0,
+        )
+
+    async def fake_merge(spec, build_result, *, project_dir, session_dir, **kwargs):
+        return MergeQueueResult(
+            landed_ids=["shell"],
+            results=[MergeResult(slice_id="shell", status=MergeStatus.LANDED,
+                                 landed_commit="abc")],
+            total_cost_usd=0.02,
+            total_wall_s=2.0,
+        )
+
+    async def fake_audit(spec, *, project_dir, session_dir, build_result, merge_result,
+                        audit_agent, **kwargs):
+        return AuditResult(
+            verdict=AuditVerdict.PASSED,
+            narrative="stub audit",
+            cost_usd=0.10,
+            wall_s=5.0,
+        )
+
+    monkeypatch.setattr("otto.cli_run.compile_spec", fake_compile)
+    monkeypatch.setattr("otto.cli_run.run_build", fake_build)
+    monkeypatch.setattr("otto.cli_run.run_merge_queue", fake_merge)
+    monkeypatch.setattr("otto.cli_run.run_audit", fake_audit)
+
+    env = {"OTTO_RUN_ID": "2026-05-03-130000-fff999"}
+    code, out = _run(["run", "build it"], cwd=tmp_path, env=env)
+    assert code == 0, out
+    assert "Compile complete" in out
+    assert "Build phase" in out
+    assert "Merge phase" in out
+    assert "Audit phase" in out
+    assert "Render phase" in out
+    assert "verdict" in out.lower()
+    # Proof packet artifacts written
+    session_dir = tmp_path / "otto_logs" / "sessions" / env["OTTO_RUN_ID"]
+    assert (session_dir / "proof-packet.html").exists()
+    assert (session_dir / "proof-packet.json").exists()
+
+
+def test_run_full_pipeline_returns_nonzero_on_partial_audit(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import AuditResult, AuditVerdict
+    from otto.build import BuildResult, SliceResult, SliceStatus
+    from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
+
+    _init_project(tmp_path)
+    fake_spec = _fixture_spec("partial pipe")
+
+    async def fake_compile(intent, *, project_dir, run_dir, config, project_kind, **kwargs):
+        from otto.spec_compile import persist_spec
+        run_dir.mkdir(parents=True, exist_ok=True)
+        persist_spec(fake_spec, run_dir / "spec.json", allow_initial=True)
+        return fake_spec
+
+    async def fake_build(spec, *, project_dir, session_dir, **kwargs):
+        return BuildResult(
+            spec_session_dir=session_dir,
+            slice_results=[
+                SliceResult(slice_id="shell", status=SliceStatus.PASSING, attempts=1,
+                            branch="b", worktree=project_dir),
+            ],
+        )
+
+    async def fake_merge(spec, build_result, *, project_dir, session_dir, **kwargs):
+        return MergeQueueResult(landed_ids=["shell"],
+                                results=[MergeResult(slice_id="shell",
+                                                     status=MergeStatus.LANDED,
+                                                     landed_commit="abc")])
+
+    async def fake_audit(spec, **kwargs):
+        return AuditResult(verdict=AuditVerdict.PARTIAL, narrative="partial")
+
+    monkeypatch.setattr("otto.cli_run.compile_spec", fake_compile)
+    monkeypatch.setattr("otto.cli_run.run_build", fake_build)
+    monkeypatch.setattr("otto.cli_run.run_merge_queue", fake_merge)
+    monkeypatch.setattr("otto.cli_run.run_audit", fake_audit)
+
+    env = {"OTTO_RUN_ID": "2026-05-03-130100-aaa999"}
+    code, _out = _run(["run", "x"], cwd=tmp_path, env=env)
+    assert code == 1  # partial → exit 1
+
+
+def test_run_from_spec_loads_existing_spec(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import AuditResult, AuditVerdict
+    from otto.build import BuildResult
+    from otto.merge_queue import MergeQueueResult
+    from otto.spec_compile import persist_spec
+
+    _init_project(tmp_path)
+    fake_spec = _fixture_spec("from-spec")
+    spec_dir = tmp_path / "otto_logs" / "sessions" / "manual-session" / "spec"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    persist_spec(fake_spec, spec_dir / "spec.json", allow_initial=True)
+
+    captured: dict[str, object] = {}
+
+    async def fake_build(spec, *, project_dir, session_dir, **kwargs):
+        captured["build_spec_intent"] = spec.intent
+        captured["session_dir"] = session_dir
+        return BuildResult(spec_session_dir=session_dir, slice_results=[])
+
+    async def fake_merge(spec, build_result, **kwargs):
+        return MergeQueueResult()
+
+    async def fake_audit(spec, **kwargs):
+        return AuditResult(verdict=AuditVerdict.PASSED, narrative="from-spec passed")
+
+    monkeypatch.setattr("otto.cli_run.run_build", fake_build)
+    monkeypatch.setattr("otto.cli_run.run_merge_queue", fake_merge)
+    monkeypatch.setattr("otto.cli_run.run_audit", fake_audit)
+
+    code, out = _run(
+        ["run", "--from-spec", str(spec_dir / "spec.json")],
+        cwd=tmp_path,
+    )
+    assert code == 0, out
+    assert captured["build_spec_intent"] == "from-spec"
+    assert "manual-session" in str(captured["session_dir"])
