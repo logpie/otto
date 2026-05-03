@@ -136,6 +136,10 @@ class BuildAgentInput:
     attempt: int  # 1-indexed
     last_failure_narrative: str = ""  # empty on first attempt
     log_dir: Path | None = None  # if set, agent writes narrative there
+    # v2.2: stable journal event ids for THIS slice that the agent can
+    # cite as `trigger_event_id` when requesting an amendment. Populated
+    # by the build loop from spec-state.jsonl. Most recent first.
+    recent_event_ids: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -298,6 +302,36 @@ def _matches_any(path: str, globs: list[str]) -> bool:
                     if fnmatch(path, candidate):
                         return True
     return False
+
+
+def _recent_event_ids_for_slice(
+    session_dir: Path, slice_id: str, *, limit: int = 5
+) -> list[tuple[str, str]]:
+    """Return recent (event_id, kind) pairs for `slice_id`, most recent first.
+
+    v2.2: build agents cite an event_id as `trigger_event_id` when
+    requesting an amendment. They can't read spec-state.jsonl from
+    their worktree (it's outside), so the build loop reads the journal
+    here and the prompt surfaces the ids inline.
+
+    Excludes the legacy event types that don't model an actionable
+    "something the agent should react to" — the relevant ones are
+    `slice.started`, `scope.warning`, `slice.attempt.failed`,
+    `slice.check.finished`.
+    """
+    from otto.spec_state import iter_events
+
+    relevant_kinds = {
+        "slice.started",
+        "scope.warning",
+        "slice.attempt.failed",
+        "slice.check.finished",
+    }
+    matches: list[tuple[str, str]] = []
+    for event in iter_events(session_dir):
+        if event.slice_id == slice_id and event.kind in relevant_kinds:
+            matches.append((event.event_id, event.kind))
+    return list(reversed(matches[-limit:]))
 
 
 def _git_diff_modified_paths(worktree: Path, base_ref: str = "HEAD") -> list[str]:
@@ -531,6 +565,9 @@ async def _run_slice(
             )
 
         attempt_t0 = time.monotonic()
+        # v2.2: surface this slice's recent journal events so the agent
+        # can cite a real trigger_event_id when requesting an amendment.
+        recent_events = _recent_event_ids_for_slice(session_dir, slice_obj.id)
         agent_input = BuildAgentInput(
             spec=spec,
             slice=slice_obj,
@@ -540,6 +577,7 @@ async def _run_slice(
             attempt=attempt,
             last_failure_narrative=last_failure,
             log_dir=raw_log_dir,
+            recent_event_ids=recent_events,
         )
         try:
             agent_output = await build_agent(agent_input)
@@ -853,7 +891,18 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     lines.append("  - Tier-2 LOCKED fields (project_kind, slice.id, etc.) are user-only.")
     lines.append("  - Tier-3 fields are: deps, owned_paths, tasks, title. checks are append-only.")
     lines.append("  - `reason` must be a real, specific justification.")
-    lines.append("  - `trigger_event_id` is REQUIRED. Use the most recent journal event id you observed (e.g., a scope warning's id).")
+    lines.append("  - `trigger_event_id` is REQUIRED.")
+    if agent_input.recent_event_ids:
+        lines.append("")
+        lines.append("Available trigger_event_ids for THIS slice (most recent first):")
+        for eid, kind in agent_input.recent_event_ids:
+            lines.append(f"  - `{eid}` ({kind})")
+        lines.append(
+            "Pick the one that best matches WHY you need this amendment "
+            "(e.g., a `scope.warning` if a prior attempt hit one; otherwise "
+            "the `slice.started` event for this attempt is fine for proactive "
+            "amendments)."
+        )
     lines.append("")
     lines.append(
         "Don't write this file unless you need it. Spec amendments are "
