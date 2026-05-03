@@ -200,6 +200,27 @@ endpoints into `routes` and entity-shaped data into `data_model`.
 
 5. **`deps` is a DAG**. No cycles. Slices with no deps run first.
 
+   **Critical**: `deps` declares both DATA and UI dependencies, not just
+   data. A slice may modify a dep's owned files; it CANNOT modify a
+   peer's (a slice not in its transitive deps).
+
+   So if slice X needs to add ANY UI fragment (link, button, embedded
+   form) to slice Y's owned page, X MUST declare Y in `deps`.
+
+   Common Microfeed-shaped traps to avoid:
+   - `export` adds a "Download CSV" link to the search results page →
+     `export.deps` MUST include `search` (or move templates/search.html
+     to `shared_scaffold` so search no longer owns it exclusively).
+   - `social` adds follow buttons to the timeline page → `social.deps`
+     MUST include `posts_timeline` (or templates/timeline.html in
+     shared_scaffold).
+   - `posts` displays counts of users who follow each author →
+     `posts.deps` MUST include `social` (data dep).
+
+   When in doubt, **prefer putting cross-cutting templates in
+   `shared_scaffold`** over chaining many slice deps. A page that gets
+   contributions from 3+ feature slices is shared infrastructure.
+
 6. **`done_means`** is the integration-level success criteria — what
    the audit pass at the end of the pipeline will verify.
 
