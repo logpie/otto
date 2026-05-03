@@ -584,10 +584,12 @@ def test_run_build_handles_agent_crash_with_retry(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_agent_prompt_lists_peer_owned_paths_as_warnings(tmp_path: Path) -> None:
-    """Soft-warning model: peer-owned files appear in the prompt as
-    'territory of other slices' rather than as hard-forbidden. Modifying
-    them is allowed but flagged in the proof packet for review.
+def test_build_agent_prompt_writeable_paths_only(tmp_path: Path) -> None:
+    """Phase 1A simplification: prompt lists ONLY the paths the slice may
+    write — its own owned_paths, transitive deps, and shared_scaffold.
+    Peer-owned paths are NOT enumerated (they were dead text the agent
+    treated as 'fine, just a warning'). Soft-warning behavior remains
+    in the runtime; the prompt no longer recites it.
     """
     s_self = Slice(id="auth", title="Auth", deps=["shell"],
                    owned_paths=["routes/auth.py"], tasks=[], checks=[])
@@ -602,16 +604,16 @@ def test_build_agent_prompt_lists_peer_owned_paths_as_warnings(tmp_path: Path) -
         branch="x", attempt=1,
     )
     prompt = _build_agent_prompt(inp)
-    # Self's owned_paths shown as MODIFY
-    assert "your owned: `routes/auth.py`" in prompt
-    # Dep's owned_paths shown as MODIFY (transitive dep)
-    assert "dep `shell`'s: `app.py`" in prompt
-    # Peer's paths shown as warning territory, not FORBIDDEN
+    # Writable paths are enumerated.
+    assert "routes/auth.py" in prompt
+    assert "app.py" in prompt
+    # Hard-forbid language never appears.
     assert "FORBIDDEN" not in prompt
-    assert "Owned by other slices" in prompt
-    assert "slice `search`'s: `routes/search.py`" in prompt
-    assert "slice `search`'s: `templates/search.html`" in prompt
-    assert "Stay in your lane" in prompt
+    # Peer's exclusive paths NOT enumerated (no longer ceremony).
+    assert "routes/search.py" not in prompt
+    assert "templates/search.html" not in prompt
+    # The "stay in lane" guidance survives in compact form.
+    assert "don't pre-build" in prompt or "build only" in prompt.lower()
 
 
 def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:

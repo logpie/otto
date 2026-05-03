@@ -162,20 +162,21 @@ def request_amendment(
             f"actor {actor!r} cannot amend slice {slice_id!r} (own-slice rule)",
         )
 
-    # ---- trigger event linkage (mandatory for agents) ----
-    if not is_user:
-        if not trigger_event_id:
+    # ---- trigger event linkage: optional, validated if present ----
+    # v2.2 evolution: requiring trigger_event_id was ceremony — agents
+    # picked an arbitrary id without it actually linking the amendment
+    # to a real cause. The cumulative chain review (defense D3) is the
+    # actual safeguard against pattern-of-amendments abuse. If a
+    # trigger_event_id IS provided and we have a session_dir, validate
+    # it exists; otherwise accept the amendment on the strength of
+    # `reason` + chain review at audit time.
+    if trigger_event_id and session_dir is not None:
+        event = find_event(session_dir, trigger_event_id)
+        if event is None:
             return _reject(
-                "missing_trigger",
-                "agent amendments must reference a trigger_event_id from the journal",
+                "trigger_not_found",
+                f"trigger_event_id {trigger_event_id!r} not found in session journal",
             )
-        if session_dir is not None:
-            event = find_event(session_dir, trigger_event_id)
-            if event is None:
-                return _reject(
-                    "trigger_not_found",
-                    f"trigger_event_id {trigger_event_id!r} not found in session journal",
-                )
 
     # ---- validate every field in `changes` is tier-3 / slice-local ----
     for field_name, new_value in changes.items():

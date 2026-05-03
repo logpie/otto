@@ -136,10 +136,6 @@ class BuildAgentInput:
     attempt: int  # 1-indexed
     last_failure_narrative: str = ""  # empty on first attempt
     log_dir: Path | None = None  # if set, agent writes narrative there
-    # v2.2: stable journal event ids for THIS slice that the agent can
-    # cite as `trigger_event_id` when requesting an amendment. Populated
-    # by the build loop from spec-state.jsonl. Most recent first.
-    recent_event_ids: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -302,36 +298,6 @@ def _matches_any(path: str, globs: list[str]) -> bool:
                     if fnmatch(path, candidate):
                         return True
     return False
-
-
-def _recent_event_ids_for_slice(
-    session_dir: Path, slice_id: str, *, limit: int = 5
-) -> list[tuple[str, str]]:
-    """Return recent (event_id, kind) pairs for `slice_id`, most recent first.
-
-    v2.2: build agents cite an event_id as `trigger_event_id` when
-    requesting an amendment. They can't read spec-state.jsonl from
-    their worktree (it's outside), so the build loop reads the journal
-    here and the prompt surfaces the ids inline.
-
-    Excludes the legacy event types that don't model an actionable
-    "something the agent should react to" — the relevant ones are
-    `slice.started`, `scope.warning`, `slice.attempt.failed`,
-    `slice.check.finished`.
-    """
-    from otto.spec_state import iter_events
-
-    relevant_kinds = {
-        "slice.started",
-        "scope.warning",
-        "slice.attempt.failed",
-        "slice.check.finished",
-    }
-    matches: list[tuple[str, str]] = []
-    for event in iter_events(session_dir):
-        if event.slice_id == slice_id and event.kind in relevant_kinds:
-            matches.append((event.event_id, event.kind))
-    return list(reversed(matches[-limit:]))
 
 
 def _git_diff_modified_paths(worktree: Path, base_ref: str = "HEAD") -> list[str]:
@@ -565,9 +531,6 @@ async def _run_slice(
             )
 
         attempt_t0 = time.monotonic()
-        # v2.2: surface this slice's recent journal events so the agent
-        # can cite a real trigger_event_id when requesting an amendment.
-        recent_events = _recent_event_ids_for_slice(session_dir, slice_obj.id)
         agent_input = BuildAgentInput(
             spec=spec,
             slice=slice_obj,
@@ -577,7 +540,6 @@ async def _run_slice(
             attempt=attempt,
             last_failure_narrative=last_failure,
             log_dir=raw_log_dir,
-            recent_event_ids=recent_events,
         )
         try:
             agent_output = await build_agent(agent_input)
@@ -820,96 +782,24 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         else:
             peer_owned.extend((other.id, g) for g in (other.owned_paths or []))
 
-    lines.append("## Write-scope rules (the build runtime ENFORCES these)")
+    lines.append("## Scope")
     lines.append("")
-    lines.append("**You MAY MODIFY:**")
+    writable: list[str] = []
     if s.owned_paths:
-        for g in s.owned_paths:
-            lines.append(f"  - your owned: `{g}`")
-    if dep_owned:
-        for did, g in dep_owned:
-            lines.append(f"  - dep `{did}`'s: `{g}` (you depend on this slice)")
+        writable.extend(s.owned_paths)
+    for did, g in dep_owned:
+        writable.append(g)
     if spec.shared_scaffold:
-        for g in spec.shared_scaffold:
-            lines.append(f"  - shared scaffold: `{g}`")
-    if not s.owned_paths and not dep_owned and not spec.shared_scaffold:
-        lines.append("  (none declared — you may only CREATE new files)")
-    lines.append("")
-    if peer_owned:
+        writable.extend(spec.shared_scaffold)
+    if writable:
         lines.append(
-            "**Owned by other slices** (these are their declared territory; "
-            "modifying them is allowed but will be flagged in the proof "
-            "packet as a scope warning, so prefer to use their public "
-            "interfaces or extend a transitive dep instead):"
+            "Modify these paths: " + ", ".join(f"`{g}`" for g in writable) + "."
         )
-        for sid, g in peer_owned:
-            lines.append(f"  - slice `{sid}`'s: `{g}`")
-    lines.append("")
+    else:
+        lines.append("Modify only files you create new.")
     lines.append(
-        "You MAY freely create new files anywhere. Modifying files owned "
-        "by transitive deps is fine. Modifying peer-owned files works "
-        "(no hard block) but surfaces a warning for human review — so do "
-        "it deliberately, not by accident."
-    )
-    lines.append("")
-    lines.append(
-        "**Stay in your lane** when reasonable: build what your slice's "
-        "tasks ask for. Don't pre-emptively build later slices' features."
-    )
-    lines.append("")
-    lines.append("## Amendment escape hatch (v2.2)")
-    lines.append(
-        "If you discover during your work that the spec's slice graph is "
-        "wrong — your slice genuinely needs a peer's helper, your dep list "
-        "is missing a slice, your owned_paths globs are too narrow — you "
-        "can REQUEST AN AMENDMENT instead of silently violating scope."
-    )
-    lines.append("")
-    lines.append(
-        "Mechanism: write a JSON file at `.otto/amendment_request.json` in "
-        "your worktree before finishing this turn. The runtime validates "
-        "and applies it after your turn, then runs scope detection against "
-        "the AMENDED spec — meaning a legitimately-needed cross-slice edit "
-        "no longer surfaces as a warning."
-    )
-    lines.append("")
-    lines.append("Schema (only fields you need):")
-    lines.append("```json")
-    lines.append("{")
-    lines.append('  "changes": {')
-    lines.append('    "deps": ["existing-slice-1", "newly-needed-slice-2"],')
-    lines.append('    "owned_paths": ["templates/timeline.html", "templates/_post_card.html"]')
-    lines.append("  },")
-    lines.append('  "reason": "timeline rendering needs auth-helper get_display_name() which lives in the auth slice",')
-    lines.append('  "trigger_event_id": "ev-NNNNNN"')
-    lines.append("}")
-    lines.append("```")
-    lines.append("")
-    lines.append("Rules:")
-    lines.append("  - You can only amend YOUR OWN slice (`" + s.id + "`).")
-    lines.append("  - Tier-1 BEDROCK fields (intent) are immutable.")
-    lines.append("  - Tier-2 LOCKED fields (project_kind, slice.id, etc.) are user-only.")
-    lines.append("  - Tier-3 fields are: deps, owned_paths, tasks, title. checks are append-only.")
-    lines.append("  - `reason` must be a real, specific justification.")
-    lines.append("  - `trigger_event_id` is REQUIRED.")
-    if agent_input.recent_event_ids:
-        lines.append("")
-        lines.append("Available trigger_event_ids for THIS slice (most recent first):")
-        for eid, kind in agent_input.recent_event_ids:
-            lines.append(f"  - `{eid}` ({kind})")
-        lines.append(
-            "Pick the one that best matches WHY you need this amendment "
-            "(e.g., a `scope.warning` if a prior attempt hit one; otherwise "
-            "the `slice.started` event for this attempt is fine for proactive "
-            "amendments)."
-        )
-    lines.append("")
-    lines.append(
-        "Don't write this file unless you need it. Spec amendments are "
-        "audit-visible — random or unjustified amendments cap the run "
-        "verdict at PARTIAL. They exist to fix real spec mistakes, not to "
-        "expand your reach. The audit reviews the amendment chain at "
-        "end-of-run and flags suspicious patterns."
+        "Build only what your slice's tasks ask for. Other slices' code "
+        "exists or will exist — don't pre-build it."
     )
     lines.append("")
     lines.append("## Slice acceptance checks")

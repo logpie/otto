@@ -250,18 +250,23 @@ def test_checks_cannot_be_removed(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_agent_amendment_without_trigger_rejected() -> None:
+def test_agent_amendment_without_trigger_accepted() -> None:
+    """v2.2 generalization (post-bench): trigger_event_id is no longer
+    required. Cumulative chain review at audit time is the real
+    defense; requiring an id-on-every-amendment was ceremony agents
+    cargo-culted without it actually linking cause→change."""
     spec = _seed_spec()
     result = request_amendment(
         spec,
         actor="posts",
         slice_id="posts",
         changes={"deps": ["shell", "auth"]},
-        reason="agent forgot to cite a trigger",
+        reason="needs auth helper for timeline",
     )
-    assert not result.accepted
-    assert result.rejection is not None
-    assert result.rejection.code == "missing_trigger"
+    assert result.accepted
+    assert result.amendment is not None
+    assert result.amendment.tier == 3
+    assert result.amendment.trigger_event_id == ""
 
 
 def test_agent_amendment_with_fake_trigger_rejected(tmp_path: Path) -> None:
@@ -634,7 +639,8 @@ def test_consume_valid_request_applies_and_writes_response(tmp_path: Path) -> No
 
 
 def test_consume_rejected_request_writes_rejection_response(tmp_path: Path) -> None:
-    """Bad request → response file says why; spec untouched."""
+    """Bad request → response file says why; spec untouched.
+    Use a tier-1 violation as the rejection trigger (intent change)."""
     import json
 
     spec = _seed_spec()
@@ -646,8 +652,8 @@ def test_consume_rejected_request_writes_rejection_response(tmp_path: Path) -> N
     request_path = worktree / AMENDMENT_REQUEST_PATH
     request_path.parent.mkdir(parents=True, exist_ok=True)
     request_path.write_text(json.dumps({
-        "changes": {"deps": ["shell", "auth"]},
-        "reason": "no trigger event was provided",
+        "changes": {"intent": "agent escalation attempt"},
+        "reason": "trying to amend tier-1 field",
     }))
 
     new_spec, result = consume_amendment_request(
@@ -656,13 +662,13 @@ def test_consume_rejected_request_writes_rejection_response(tmp_path: Path) -> N
     assert result is not None
     assert not result.accepted
     assert result.rejection is not None
-    assert result.rejection.code == "missing_trigger"
+    assert result.rejection.code == "tier_1_violation"
     # Spec returned unchanged.
     assert new_spec is spec
     # Response file written with rejection.
     response = json.loads((worktree / AMENDMENT_RESPONSE_PATH).read_text())
     assert response["accepted"] is False
-    assert response["code"] == "missing_trigger"
+    assert response["code"] == "tier_1_violation"
 
 
 def test_consume_malformed_json_is_rejected(tmp_path: Path) -> None:
