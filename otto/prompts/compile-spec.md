@@ -229,6 +229,25 @@ when validating API routes. If the project root has
 These run via Flask's test_client (no server boot needed) and exercise
 the same contract as the eventual production app.
 
+**Browser UI verification**: if the project root has
+`tests/run_browser_journey.py` (the bench seeds this for webapps with
+browser UI requirements), the slice that owns the Home page MUST include
+a `browser_journey` check pointing at it:
+
+```json
+{
+  "kind": "browser_journey",
+  "command": ["python", "tests/run_browser_journey.py"],
+  "evidence_globs": ["otto_artifacts/browser/*.png"],
+  "timeout_s": 600
+}
+```
+
+This script boots the app, drives Playwright through the home page,
+asserts the required forms exist, and screenshots each surface. Without
+this check, the slice will pass its other tests but the integrated app
+will fail downstream browser quality evaluators.
+
 ## Process
 
 1. If the project root has files (existing repo), read README / key

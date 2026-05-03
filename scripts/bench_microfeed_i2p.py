@@ -295,6 +295,12 @@ def _setup_repo(repo: Path, *, provider: str) -> None:
         ),
     )
     _write(repo / "tests" / "run_acceptance.py", ACCEPTANCE_SCRIPT)
+    # Seed a browser-test contract too. Without it, agents have no in-repo
+    # signal that the home page must expose specific form selectors —
+    # they read the prompt's "browser UI" guidance but consistently
+    # don't implement it. The seeded test_command-style script gives
+    # build agents a deterministic check to satisfy.
+    _write(repo / "tests" / "run_browser_journey.py", BROWSER_SCRIPT)
     _run(["git", "add", "."], cwd=repo)
     _run(["git", "commit", "-q", "-m", "seed acceptance contract", "--no-verify"], cwd=repo)
 
@@ -730,6 +736,88 @@ def main() -> int:
     finally:
         server.shutdown()
     print(f"private-browser:pass artifacts={out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+BROWSER_SCRIPT = r'''
+from __future__ import annotations
+
+import json
+import threading
+from pathlib import Path
+from urllib import request
+
+from playwright.sync_api import sync_playwright
+from werkzeug.serving import make_server
+
+from run_acceptance import load_app
+
+
+def post_json(base: str, path: str, payload: dict) -> None:
+    req = request.Request(
+        base + path,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with request.urlopen(req, timeout=5) as response:
+        if response.status >= 400:
+            raise AssertionError((path, response.status, response.read()))
+
+
+def main() -> int:
+    app = load_app()
+    server = make_server("127.0.0.1", 0, app)
+    port = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{port}"
+    out = Path("otto_artifacts/browser")
+    videos = out / "videos"
+    out.mkdir(parents=True, exist_ok=True)
+    videos.mkdir(parents=True, exist_ok=True)
+    try:
+        post_json(base, "/api/reset", {})
+    except Exception:
+        request.urlopen(request.Request(base + "/api/reset", method="POST"), timeout=5).read()
+    for username, display in [("ada", "Ada Lovelace"), ("grace", "Grace Hopper"), ("linus", "Linus Torvalds")]:
+        post_json(base, "/api/users", {"username": username, "display_name": display})
+    post_json(base, "/api/follow", {"follower": "ada", "target": "grace"})
+    post_json(base, "/api/posts", {"author": "grace", "text": "Compiler UX", "tags": ["compiler"]})
+    post_json(base, "/api/posts", {"author": "ada", "text": "Analytical notes", "tags": ["math"]})
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(record_video_dir=str(videos), viewport={"width": 1280, "height": 900})
+        page = context.new_page()
+        page.goto(base + "/", wait_until="networkidle")
+        home = page.text_content("body") or ""
+        assert "Microfeed" in home
+        assert page.locator("form").count() >= 2, "home must expose real workflow forms"
+        assert page.locator("input[name='username'], input[placeholder*=user i]").count() >= 1, "home missing user creation control"
+        assert page.locator("input[name='target'], input[placeholder*=follow i]").count() >= 1, "home missing follow/unfollow control"
+        assert page.locator("input[name='text'], textarea[name='text'], textarea[placeholder*=post i]").count() >= 1, "home missing post creation control"
+        assert page.locator("input[name='q'], input[type='search']").count() >= 1, "home missing search control"
+        page.screenshot(path=str(out / "home.png"), full_page=True)
+        page.goto(base + "/timeline/ada", wait_until="networkidle")
+        body = page.text_content("body")
+        assert "Analytical notes" in body and "Compiler UX" in body
+        assert page.locator("a[href*='export'], a[href$='.csv']").count() >= 1, "timeline missing CSV export link"
+        page.screenshot(path=str(out / "timeline.png"), full_page=True)
+        page.goto(base + "/search?q=compiler", wait_until="networkidle")
+        assert "Compiler UX" in page.text_content("body")
+        page.screenshot(path=str(out / "search.png"), full_page=True)
+        with request.urlopen(base + "/api/export/ada.csv", timeout=5) as response:
+            export_text = response.read().decode()
+        assert "author" in export_text and "Compiler UX" in export_text
+        context.close()
+        browser.close()
+    server.shutdown()
+    print(f"browser:pass artifacts={out}")
     return 0
 
 
