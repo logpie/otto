@@ -18,13 +18,19 @@ each owned end-to-end by one build agent. Wrap the JSON in
 {
   "schema_version": 1,
   "intent": "<verbatim user intent>",
-  "project_kind": "webapp" | "cli" | "library" | "api",
+  "project_kind": "webapp",
   "structure": {
     "payload": {
-      // project_kind-specific. For webapp:
-      // "routes": [{"path": "/", "component": "Home", "key_text": "..."}],
-      // "components": [{"name": "Home", "key_text": "..."}],
-      // "data_model": [...],
+      "routes": [
+        {"path": "/", "component": "Home", "key_text": "Bookmark Manager"}
+      ],
+      "components": [
+        {"name": "Home", "key_text": "Bookmark Manager"},
+        {"name": "AddBookmarkForm", "key_text": "Add bookmark"}
+      ],
+      "data_model": [
+        {"name": "Bookmark", "fields": ["id", "url", "title", "created_at"]}
+      ]
     }
   },
   "slices": [
@@ -57,6 +63,33 @@ each owned end-to-end by one build agent. Wrap the JSON in
   "amendments": []
 }
 ```
+
+## REQUIRED fields by `project_kind` (validator-enforced)
+
+The compile fails CLOSED if `structure.payload` is missing required
+fields. For `project_kind: "webapp"`:
+
+* **`routes`** — REQUIRED, non-empty array. Each route MUST have:
+  `path` (string), `component` (string), `key_text` (string).
+  → API endpoints, JSON-only routes, and CSV-export routes ALL go here.
+    Any URL the server responds to is a route. Set `component` to the
+    name of the React component / template / handler that renders it
+    (or a logical name like `PostsApiHandler` for JSON-only routes).
+* **`components`** — REQUIRED, non-empty array. Each component MUST
+  have: `name` (string), `key_text` (string).
+  → For webapps, list every named UI surface the user sees: Home,
+    Timeline, Search, Forms, etc. Even back-end handlers that you
+    referenced under `routes[].component` must appear here.
+* **`data_model`** — OPTIONAL but RECOMMENDED for any webapp with
+  persistence. Each entry MUST have: `name` (string), `fields`
+  (non-empty array of strings).
+  → Example: `{"name": "User", "fields": ["id", "username",
+    "display_name"]}`. Naming the entities and their fields is what
+    stops two slices from inventing competing schemas.
+
+DO NOT invent your own keys (`api_endpoints`, `pages`, `models`,
+`schemas`, etc.). The validator is strict on the names above. Fold
+endpoints into `routes` and entity-shaped data into `data_model`.
 
 ## Concreteness rules (mandatory)
 
