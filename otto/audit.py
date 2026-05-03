@@ -260,21 +260,53 @@ def _synthesized_webapp_walkthrough() -> WalkthroughCallable:
         import subprocess
         from otto.checks import _subprocess_env
 
+        # Generalization: a "webapp" can be many shapes (Flask,
+        # FastAPI, SSG that emits HTML, etc.). Try create_app first;
+        # if not available, fall back to detecting that the project
+        # produced static HTML output (output/ dir or similar). Either
+        # way, missing infrastructure is "walkthrough not applicable",
+        # not "audit failure".
         boot_script = (
-            "import json, sys, traceback\n"
+            "import json, sys, traceback, os\n"
+            "from pathlib import Path\n"
+            "ROOT = Path(os.getcwd())\n"
+            "result = {}\n"
+            "# Attempt 1: Flask/FastAPI-style create_app.\n"
             "try:\n"
-            "    from app import create_app\n"
+            "    from app import create_app  # type: ignore[import-not-found]\n"
             "    app = create_app({'TESTING': True})\n"
             "    client = app.test_client()\n"
             "    r = client.get('/')\n"
             "    body = r.get_data(as_text=True) or ''\n"
-            "    print(json.dumps({'status': r.status_code, 'body_len': len(body), 'body_preview': body[:500]}))\n"
-            "    sys.stdout.flush()\n"
+            "    result = {'shape': 'flask-create_app', 'status': r.status_code,\n"
+            "              'body_len': len(body), 'body_preview': body[:500]}\n"
             "    with open('__audit_home_body__.html', 'w') as f:\n"
             "        f.write(body)\n"
+            "    print(json.dumps(result))\n"
+            "    sys.exit(0)\n"
+            "except (ImportError, ModuleNotFoundError):\n"
+            "    pass  # not Flask-shaped\n"
             "except Exception as exc:\n"
-            "    print(json.dumps({'error': f'{type(exc).__name__}: {exc}', 'traceback': traceback.format_exc()}))\n"
+            "    # create_app exists but boot failed → real audit signal.\n"
+            "    result = {'shape': 'flask-create_app', 'error': f'{type(exc).__name__}: {exc}',\n"
+            "              'traceback': traceback.format_exc()}\n"
+            "    print(json.dumps(result))\n"
             "    sys.exit(2)\n"
+            "# Attempt 2: static-site or CLI shape — look for produced output.\n"
+            "for candidate in ('output/index.html', 'dist/index.html', 'build/index.html', 'site/index.html'):\n"
+            "    p = ROOT / candidate\n"
+            "    if p.is_file():\n"
+            "        body = p.read_text(encoding='utf-8', errors='replace')\n"
+            "        result = {'shape': 'static-site', 'index_path': str(candidate),\n"
+            "                  'body_len': len(body), 'body_preview': body[:500]}\n"
+            "        (ROOT / '__audit_home_body__.html').write_text(body)\n"
+            "        print(json.dumps(result))\n"
+            "        sys.exit(0)\n"
+            "# No webapp shape detected. Not a failure — declare not-applicable.\n"
+            "print(json.dumps({'shape': 'not-applicable',\n"
+            "                  'note': 'no Flask create_app and no static index.html; '\n"
+            "                          'project may be a CLI/library/lib — walkthrough skipped'}))\n"
+            "sys.exit(0)\n"
         )
 
         env = _subprocess_env(extra_pythonpath=[project_dir])

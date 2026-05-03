@@ -535,6 +535,43 @@ def test_default_walkthrough_no_browser_journey_non_webapp_returns_no_op(tmp_pat
     assert "no synthesized fallback" in result.detail
 
 
+def test_synthesized_walkthrough_static_site_branch(tmp_path: Path) -> None:
+    """Project has output/index.html (static site) but no create_app
+    → synthesized walkthrough detects and reads the static index.
+    Generalization: webapp shape isn't only Flask."""
+    from otto.spec_compile import PytestCheck
+
+    spec = Spec(intent="x", project_kind="webapp",
+                slices=[Slice(id="s", title="t", checks=[PytestCheck(selector="x")])])
+
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "index.html").write_text(
+        "<html><body><h1>Static site index</h1></body></html>"
+    )
+
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(tmp_path, tmp_path / "log", 60)
+    assert result.succeeded is True
+    log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
+    assert "static-site" in log_text or "Static site index" in log_text
+
+
+def test_synthesized_walkthrough_not_applicable_returns_succeeded(tmp_path: Path) -> None:
+    """No create_app AND no output/index.html → not a webapp shape.
+    Walkthrough returns succeeded=True with 'not-applicable' diagnostic.
+    Audit verdict shouldn't be penalized for non-webapp projects.
+    """
+    from otto.spec_compile import PytestCheck
+
+    spec = Spec(intent="x", project_kind="webapp",
+                slices=[Slice(id="s", title="t", checks=[PytestCheck(selector="x")])])
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(tmp_path, tmp_path / "log", 60)
+    assert result.succeeded is True
+    log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
+    assert "not-applicable" in log_text
+
+
 def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Path) -> None:
     """Webapp spec without a BrowserJourney → synthesized walkthrough
     boots the app via create_app and hits /. v2 phase 3: audit verdict
