@@ -527,6 +527,18 @@ def persist_spec(spec: Spec, path: Path, *, allow_initial: bool = False) -> Path
         path.write_text(json.dumps(spec_to_dict(spec), indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return path
 
+    if allow_initial:
+        # Initial-write mode overrides immutability. Use case from the
+        # compile path: the agent writes spec.json itself per the
+        # compile-spec prompt, then compile_spec parses + canonicalizes
+        # and calls persist_spec(allow_initial=True). The on-disk file
+        # exists (agent wrote it), but content may differ in formatting
+        # — that's a no-op-equivalent canonicalization, not an
+        # amendment-requiring change. Without this branch, fresh runs
+        # cheap-fail on flaky agent JSON formatting.
+        path.write_text(json.dumps(spec_to_dict(spec), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return path
+
     on_disk_data = json.loads(path.read_text(encoding="utf-8"))
     on_disk = spec_from_dict(on_disk_data)
     on_disk_hash = spec_content_sha256(on_disk)

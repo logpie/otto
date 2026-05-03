@@ -321,6 +321,35 @@ def test_persist_spec_initial_write_requires_allow_initial(tmp_path: Path) -> No
     assert target.exists()
 
 
+def test_persist_spec_allow_initial_overwrites_pre_existing_file(tmp_path: Path) -> None:
+    """Round-12 Microfeed bench learning: the compile agent writes spec.json
+    itself per the prompt, then compile_spec parses + canonicalizes and
+    calls persist_spec(allow_initial=True). The on-disk file already
+    exists with the agent's formatting; the parsed-and-canonicalized
+    version differs in JSON formatting (key order, spacing). Without
+    this branch, fresh runs cheap-fail with "spec content changed but
+    no new amendment" because the immutability check fired.
+
+    `allow_initial=True` semantics: this is the initial write — overwrite
+    directly without the immutability gate, even if the file already
+    exists.
+    """
+    spec = _valid_webapp_spec()
+    target = tmp_path / "spec.json"
+    # Simulate the agent having written its own (slightly different)
+    # serialization.
+    target.write_text(
+        '{"intent": "agent-formatted", "schema_version": 1}\n', encoding="utf-8"
+    )
+    # persist_spec(allow_initial=True) should NOT raise — it's the first
+    # canonical write.
+    persist_spec(spec, target, allow_initial=True)
+    # File now contains the canonical form.
+    on_disk = json.loads(target.read_text(encoding="utf-8"))
+    assert on_disk["intent"] == spec.intent
+    assert on_disk["schema_version"] == spec.schema_version
+
+
 def test_persist_spec_idempotent_rewrite_no_op(tmp_path: Path) -> None:
     spec = _valid_webapp_spec()
     target = tmp_path / "spec.json"
