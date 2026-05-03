@@ -726,24 +726,39 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
     Builds a prompt from the slice tasks + checks + spec structure, runs
     the agent with timeout, treats agent crash as failure (caller will
     retry with fresh prompt).
+
+    Uses `make_agent_options(agent_type="build")` to inherit provider
+    credentials and the project's `otto.yaml` agent configuration —
+    constructing AgentOptions manually skips that auth setup and the
+    spawned subprocess crashes with "Not logged in".
     """
-    from otto import agent as agent_mod
+    from otto.agent import make_agent_options, run_agent_with_timeout
+    from otto.agent import AgentCallError
+    from otto.config import load_config
 
     prompt = _build_agent_prompt(agent_input)
     log_dir = agent_input.log_dir or (agent_input.worktree / "_otto_build_logs")
     log_dir.mkdir(parents=True, exist_ok=True)
+    log_subdir = log_dir / f"attempt-{agent_input.attempt:02d}"
+    log_subdir.mkdir(parents=True, exist_ok=True)
 
-    options = agent_mod.AgentOptions(
-        cwd=str(agent_input.worktree),
-        permission_mode="acceptEdits",
-        system_prompt={"type": "preset", "preset": "claude_code"},
-    )
+    config_path = agent_input.project_dir / "otto.yaml"
+    try:
+        config = load_config(config_path)
+    except Exception:
+        config = {}
+    options = make_agent_options(agent_input.project_dir, config, agent_type="build")
+    # The slice's worktree is the agent's working directory. AgentOptions is
+    # a mutable dataclass; mutate in place rather than reconstruct.
+    options.cwd = str(agent_input.worktree)
+    options.permission_mode = "acceptEdits"  # build agents may edit owned files
+
     t0 = time.monotonic()
     try:
-        text, cost, _session_id, _breakdown = await agent_mod.run_agent_with_timeout(
+        text, cost, _session_id, _breakdown = await run_agent_with_timeout(
             prompt,
             options,
-            log_dir=log_dir / f"attempt-{agent_input.attempt:02d}",
+            log_dir=log_subdir,
             phase_name="BUILD",
             phase_label=f"slice/{agent_input.slice.id}/attempt-{agent_input.attempt}",
             timeout=None,
@@ -755,7 +770,7 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
             wall_s=time.monotonic() - t0,
             detail=text[:500],
         )
-    except agent_mod.AgentCallError as exc:
+    except AgentCallError as exc:
         return BuildAgentOutput(
             succeeded=False,
             cost_usd=0.0,

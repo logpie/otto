@@ -509,20 +509,33 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
 
 
 async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
-    """Default LLM-driven audit agent."""
-    from otto import agent as agent_mod
+    """Default LLM-driven audit agent.
+
+    Uses `make_agent_options(agent_type="certifier")` to inherit
+    provider credentials and otto.yaml agent configuration. Constructing
+    AgentOptions manually skips that auth setup.
+    """
+    from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
+    from otto.config import load_config
 
     prompt = _audit_prompt(agent_input)
     log_dir = agent_input.log_dir or (agent_input.integrated_worktree / "_otto_audit_logs")
     log_dir.mkdir(parents=True, exist_ok=True)
-    options = agent_mod.AgentOptions(
-        cwd=str(agent_input.integrated_worktree),
-        permission_mode="bypassPermissions",  # audit reads, doesn't edit
-        system_prompt={"type": "preset", "preset": "claude_code"},
+
+    config_path = agent_input.project_dir / "otto.yaml"
+    try:
+        config = load_config(config_path)
+    except Exception:
+        config = {}
+    options = make_agent_options(
+        agent_input.project_dir, config, agent_type="certifier"
     )
+    options.cwd = str(agent_input.integrated_worktree)
+    options.permission_mode = "bypassPermissions"  # audit reads, doesn't edit
+
     t0 = time.monotonic()
     try:
-        text, cost, _session_id, _breakdown = await agent_mod.run_agent_with_timeout(
+        text, cost, _session_id, _breakdown = await run_agent_with_timeout(
             prompt,
             options,
             log_dir=log_dir,
@@ -535,7 +548,7 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
         parsed.cost_usd = cost or 0.0
         parsed.wall_s = time.monotonic() - t0
         return parsed
-    except agent_mod.AgentCallError as exc:
+    except AgentCallError as exc:
         return AuditAgentOutput(
             verdict=AuditVerdict.BLOCKED,
             narrative=f"audit agent crashed: {exc}",
