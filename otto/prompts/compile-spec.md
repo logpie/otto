@@ -70,6 +70,12 @@ each owned end-to-end by one build agent. Wrap the JSON in
     "every slice's checks pass"
   ],
   "amendments": []
+  // ⚠️ amendments MUST be `[]` for the initial compile. It is NOT a
+  // free-form notes field. It is a hash-chained log of post-approval
+  // edits to the spec, populated by `append_amendment(...)` later.
+  // DO NOT write design notes, slice-graph rationale, or implementation
+  // hints here — those go in `non_goals`, `done_means`, or just inside
+  // each slice's `tasks`. Initial compile = empty list.
 }
 ```
 
