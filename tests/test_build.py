@@ -129,19 +129,40 @@ def test_scope_violations_allows_own_paths() -> None:
     assert violations == []
 
 
-def test_scope_violations_flags_modifications_to_peer_slice_paths(tmp_path: Path) -> None:
-    """Modifying a peer slice (no dep relation) IS a violation."""
+def test_scope_violations_flags_modifications_to_LATER_peer_slice_paths(tmp_path: Path) -> None:
+    """Topological-precedence rule: an EARLIER slice cannot modify a
+    LATER slice's owned files. (Direction matters: the later slice
+    hasn't built yet, so its files don't exist for modification.)
+    """
     spec = _spec(
         [
             Slice(id="s1", title="shell", deps=[], owned_paths=["app/main.py"], tasks=[], checks=[]),
             Slice(id="s2", title="api", deps=[], owned_paths=["app/api.py"], tasks=[], checks=[]),
         ]
     )
-    s2 = spec.slices[1]  # peer of s1, not a dep
+    s1 = spec.slices[0]  # earlier in spec order
     (tmp_path / "app").mkdir()
-    (tmp_path / "app" / "main.py").write_text("# existing", encoding="utf-8")
-    violations = detect_scope_violations(s2, spec, ["app/main.py"], project_root=tmp_path)
-    assert violations == ["app/main.py"]
+    (tmp_path / "app" / "api.py").write_text("# existing", encoding="utf-8")
+    violations = detect_scope_violations(s1, spec, ["app/api.py"], project_root=tmp_path)
+    assert violations == ["app/api.py"]
+
+
+def test_scope_violations_allows_LATER_slice_modifying_EARLIER_peer(tmp_path: Path) -> None:
+    """Topological-precedence: later slices can extend earlier slices'
+    work even without an explicit dep declaration. This is the rule
+    relaxation that solved the consistent peer-overreach failure
+    (e.g. `posts` adding helpers to `routes/social.py`)."""
+    spec = _spec(
+        [
+            Slice(id="social", title="social", deps=[], owned_paths=["routes/social.py"], tasks=[], checks=[]),
+            Slice(id="posts", title="posts", deps=[], owned_paths=["routes/posts.py"], tasks=[], checks=[]),
+        ]
+    )
+    posts = spec.slices[1]  # later in spec order
+    (tmp_path / "routes").mkdir()
+    (tmp_path / "routes" / "social.py").write_text("# existing", encoding="utf-8")
+    violations = detect_scope_violations(posts, spec, ["routes/social.py"], project_root=tmp_path)
+    assert violations == []
 
 
 def test_scope_violations_allows_create_in_other_slice_glob(tmp_path: Path) -> None:
@@ -241,8 +262,10 @@ def test_scope_violations_allows_transitive_dep_modification(tmp_path: Path) -> 
     assert violations == []
 
 
-def test_scope_violations_blocks_peer_slice_modification(tmp_path: Path) -> None:
-    """A slice may NOT modify a peer slice's owned files (no dep relation)."""
+def test_scope_violations_blocks_EARLIER_modifying_LATER_peer(tmp_path: Path) -> None:
+    """The topological-precedence rule still blocks earlier slices from
+    modifying later slices' files (those files haven't been built yet
+    in the merge order)."""
     spec = _spec(
         [
             Slice(id="shell", title="x", deps=[],
@@ -253,14 +276,14 @@ def test_scope_violations_blocks_peer_slice_modification(tmp_path: Path) -> None
                   owned_paths=["routes/search.py"], tasks=[], checks=[]),
         ]
     )
-    search = spec.slices[2]
+    posts = spec.slices[1]  # earlier than search
     (tmp_path / "routes").mkdir()
-    (tmp_path / "routes" / "posts.py").write_text("# posts\n", encoding="utf-8")
-    # search wants to modify posts' file — should be blocked.
+    (tmp_path / "routes" / "search.py").write_text("# search\n", encoding="utf-8")
+    # posts wants to modify search's file (search is LATER) — blocked.
     violations = detect_scope_violations(
-        search, spec, ["routes/posts.py"], project_root=tmp_path,
+        posts, spec, ["routes/search.py"], project_root=tmp_path,
     )
-    assert violations == ["routes/posts.py"]
+    assert violations == ["routes/search.py"]
 
 
 def test_scope_violations_transitive_dep_chain(tmp_path: Path) -> None:
@@ -510,21 +533,22 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Slice(id="s1", title="shell", deps=[], owned_paths=["app/main.py"], tasks=[], checks=[]),
             Slice(
-                id="s2",
-                title="naughty-peer",
-                deps=[],  # peer of s1, NOT a dep — so it can't modify s1's files
+                id="s1",
+                title="naughty-earlier",
+                deps=[],  # earlier in spec order
                 owned_paths=["app/api/*"],
                 tasks=[],
                 checks=[_no_op_passing_check()],
             ),
+            Slice(id="s2", title="shell", deps=[], owned_paths=["app/main.py"], tasks=[], checks=[]),
         ]
     )
 
-    # s2's agent illegally modifies s1's file (peer slice, no dep).
+    # s1's agent illegally modifies s2's file. s2 is LATER in spec order,
+    # so under topological-precedence s1 cannot modify it.
     async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        if input_.slice.id == "s2":
+        if input_.slice.id == "s1":
             (input_.worktree / "app" / "main.py").write_text("# tampered\n", encoding="utf-8")
         return BuildAgentOutput(succeeded=True)
 
@@ -537,11 +561,10 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
         )
     )
     by_id = {r.slice_id: r for r in result.slice_results}
-    # s1 has no checks → empty list → all_pass==True (vacuously)
-    assert by_id["s1"].status == SliceStatus.PASSING
-    assert by_id["s2"].status == SliceStatus.FAILED_SCOPE
-    assert "scope violation" in by_id["s2"].failure_narrative
-    assert "app/main.py" in by_id["s2"].failure_narrative
+    # s1 ran first (earlier in spec) and tampered with s2's file → FAILED_SCOPE.
+    assert by_id["s1"].status == SliceStatus.FAILED_SCOPE
+    assert "scope violation" in by_id["s1"].failure_narrative
+    assert "app/main.py" in by_id["s1"].failure_narrative
 
 
 # ---------------------------------------------------------------------------
