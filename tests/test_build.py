@@ -537,11 +537,12 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
         )
     )
     by_id = {r.slice_id: r for r in result.slice_results}
-    # s1 has no checks → empty list → all_pass==True (vacuously)
+    # Soft-warning model: scope crossing does NOT block the slice. Both
+    # slices still PASS (each has a no-op-passing check), and the
+    # warning is captured on s2's SliceResult for the proof packet.
     assert by_id["s1"].status == SliceStatus.PASSING
-    assert by_id["s2"].status == SliceStatus.FAILED_SCOPE
-    assert "scope violation" in by_id["s2"].failure_narrative
-    assert "app/main.py" in by_id["s2"].failure_narrative
+    assert by_id["s2"].status == SliceStatus.PASSING
+    assert "app/main.py" in by_id["s2"].scope_warnings
 
 
 # ---------------------------------------------------------------------------
@@ -583,9 +584,10 @@ def test_run_build_handles_agent_crash_with_retry(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_agent_prompt_lists_peer_owned_paths_as_forbidden(tmp_path: Path) -> None:
-    """Round-6 Microfeed bench learning: build agents over-reach into peer
-    slices' owned files. Prompt must explicitly list the forbidden paths.
+def test_build_agent_prompt_lists_peer_owned_paths_as_warnings(tmp_path: Path) -> None:
+    """Soft-warning model: peer-owned files appear in the prompt as
+    'territory of other slices' rather than as hard-forbidden. Modifying
+    them is allowed but flagged in the proof packet for review.
     """
     s_self = Slice(id="auth", title="Auth", deps=["shell"],
                    owned_paths=["routes/auth.py"], tasks=[], checks=[])
@@ -604,10 +606,11 @@ def test_build_agent_prompt_lists_peer_owned_paths_as_forbidden(tmp_path: Path) 
     assert "your owned: `routes/auth.py`" in prompt
     # Dep's owned_paths shown as MODIFY (transitive dep)
     assert "dep `shell`'s: `app.py`" in prompt
-    # Peer's owned_paths shown as FORBIDDEN
-    assert "FORBIDDEN" in prompt
-    assert "peer `search`'s: `routes/search.py`" in prompt
-    assert "peer `search`'s: `templates/search.html`" in prompt
+    # Peer's paths shown as warning territory, not FORBIDDEN
+    assert "FORBIDDEN" not in prompt
+    assert "Owned by other slices" in prompt
+    assert "slice `search`'s: `routes/search.py`" in prompt
+    assert "slice `search`'s: `templates/search.html`" in prompt
     assert "Stay in your lane" in prompt
 
 

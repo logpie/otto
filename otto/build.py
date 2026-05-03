@@ -86,6 +86,7 @@ class SliceResult:
     worktree: Path
     last_evidence: list[Evidence] = field(default_factory=list)
     failure_narrative: str = ""
+    scope_warnings: list[str] = field(default_factory=list)
     cost_usd: float = 0.0
     wall_s: float = 0.0
 
@@ -494,6 +495,7 @@ async def _run_slice(
     slice_t0 = time.monotonic()
     last_failure = ""
     last_evidence: list[Evidence] = []
+    accumulated_scope_warnings: list[str] = []
     cost_total = 0.0
     attempt = 0
     raw_log_dir = session_dir / "build" / slice_obj.id
@@ -510,6 +512,7 @@ async def _run_slice(
                 worktree=worktree,
                 last_evidence=last_evidence,
                 failure_narrative=f"per-slice wall budget exhausted after {elapsed:.0f}s",
+                scope_warnings=list(accumulated_scope_warnings),
                 cost_usd=cost_total,
                 wall_s=elapsed,
             )
@@ -522,6 +525,7 @@ async def _run_slice(
                 worktree=worktree,
                 last_evidence=last_evidence,
                 failure_narrative="total repair budget exhausted (audit + build)",
+                scope_warnings=list(accumulated_scope_warnings),
                 cost_usd=cost_total,
                 wall_s=time.monotonic() - slice_t0,
             )
@@ -569,31 +573,41 @@ async def _run_slice(
             )
             continue
 
-        # Scope check: agent must not have modified other slices' owned files.
+        # Scope check: detect modifications outside the slice's declared
+        # owned_paths + transitive deps + shared_scaffold. Soft-warning
+        # mode: don't block the slice — just log the warnings and let
+        # the slice's own checks + cross-slice checks + audit catch any
+        # actual behavior regressions. A modification that crossed a
+        # declared scope boundary is interesting documentation, not
+        # automatically harmful.
         try:
             modified = _git_diff_modified_paths(worktree)
         except Exception as exc:
             modified = []
             logger.warning("git diff failed for %s: %s", slice_obj.id, exc)
-        violations = detect_scope_violations(
+        scope_warnings = detect_scope_violations(
             slice_obj, spec, modified, project_root=worktree
         )
-        if violations:
-            return SliceResult(
-                slice_id=slice_obj.id,
-                status=SliceStatus.FAILED_SCOPE,
-                attempts=attempt,
-                branch=branch,
-                worktree=worktree,
-                last_evidence=last_evidence,
-                failure_narrative=(
-                    f"scope violation: modified {len(violations)} path(s) outside "
-                    f"owned_paths: {', '.join(violations[:5])}"
-                    + (f" (+{len(violations) - 5} more)" if len(violations) > 5 else "")
-                ),
-                cost_usd=cost_total,
-                wall_s=time.monotonic() - slice_t0,
+        if scope_warnings:
+            logger.info(
+                "slice %s: scope warnings (%d path(s) outside declared scope): %s",
+                slice_obj.id,
+                len(scope_warnings),
+                ", ".join(scope_warnings[:5]),
             )
+            emit(
+                session_dir,
+                "slice.attempt.failed",  # journal-event reuse; severity is INFO
+                slice_id=slice_obj.id,
+                attempt=attempt,
+                detail=(
+                    f"scope warning (non-blocking): modified {len(scope_warnings)} "
+                    f"path(s) outside owned_paths: {', '.join(scope_warnings[:5])}"
+                ),
+            )
+            for w in scope_warnings:
+                if w not in accumulated_scope_warnings:
+                    accumulated_scope_warnings.append(w)
 
         # Run slice's deterministic checks.
         emit(
@@ -629,6 +643,7 @@ async def _run_slice(
                 worktree=worktree,
                 last_evidence=last_evidence,
                 failure_narrative="",
+                scope_warnings=list(accumulated_scope_warnings),
                 cost_usd=cost_total,
                 wall_s=time.monotonic() - slice_t0,
             )
@@ -655,6 +670,7 @@ async def _run_slice(
         worktree=worktree,
         last_evidence=last_evidence,
         failure_narrative=last_failure or "exceeded per-slice retry budget",
+        scope_warnings=list(accumulated_scope_warnings),
         cost_usd=cost_total,
         wall_s=time.monotonic() - slice_t0,
     )
@@ -738,24 +754,24 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     lines.append("")
     if peer_owned:
         lines.append(
-            "**FORBIDDEN — these belong to PEER slices (not your dependencies). "
-            "Do NOT create or modify them. The build runtime will reject your "
-            "attempt if you do, and the slice will be BLOCKED.**"
+            "**Owned by other slices** (these are their declared territory; "
+            "modifying them is allowed but will be flagged in the proof "
+            "packet as a scope warning, so prefer to use their public "
+            "interfaces or extend a transitive dep instead):"
         )
         for sid, g in peer_owned:
-            lines.append(f"  - peer `{sid}`'s: `{g}`")
+            lines.append(f"  - slice `{sid}`'s: `{g}`")
     lines.append("")
     lines.append(
-        "You MAY also create NEW files outside any declared scope (e.g. helper "
-        "modules, fixtures). The forbidden list above only applies to files "
-        "owned by peer slices."
+        "You MAY freely create new files anywhere. Modifying files owned "
+        "by transitive deps is fine. Modifying peer-owned files works "
+        "(no hard block) but surfaces a warning for human review — so do "
+        "it deliberately, not by accident."
     )
     lines.append("")
     lines.append(
-        "**Stay in your lane.** Build only what this slice's tasks ask for. "
-        "Do NOT pre-emptively build features that belong to later slices "
-        "(they have their own dedicated build agents and will fail if you "
-        "trample their files)."
+        "**Stay in your lane** when reasonable: build what your slice's "
+        "tasks ask for. Don't pre-emptively build later slices' features."
     )
     lines.append("")
     lines.append("## Slice acceptance checks")
