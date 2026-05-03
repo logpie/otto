@@ -301,12 +301,22 @@ def test_scope_violations_recursive_glob() -> None:
 
 
 def test_build_budget_repair_charge_and_remaining() -> None:
-    budget = BuildBudget(per_slice_retries=3, total_repair_s=100)
+    budget = BuildBudget(total_repair_s=100)
     assert budget.remaining_repair_s() == 100
     budget.charge_repair(40)
     assert budget.remaining_repair_s() == 60
     budget.charge_repair(70)  # over-charge clamps at 0
     assert budget.remaining_repair_s() == 0
+
+
+def test_build_budget_cost_charge_and_remaining() -> None:
+    """v2 phase 2: total cost is a primary bound, not a count."""
+    budget = BuildBudget(total_cost_usd=10.0)
+    assert budget.remaining_total_cost_usd() == 10.0
+    budget.charge_cost(3.0)
+    assert budget.remaining_total_cost_usd() == 7.0
+    budget.charge_cost(8.0)
+    assert budget.remaining_total_cost_usd() == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -452,13 +462,16 @@ def test_run_build_blocks_after_retry_exhaustion(tmp_path: Path) -> None:
             project_dir=tmp_path,
             session_dir=session_dir,
             build_agent=fake_agent,
-            budget=BuildBudget(per_slice_retries=2),
+            budget=BuildBudget(per_slice_retries_hard_cap=8),
         )
     )
     r = result.slice_results[0]
     assert r.status == SliceStatus.BLOCKED
+    # v2 phase 2: bound by progress. Two consecutive identical failures
+    # (after the first) trigger the no-progress bound, so attempts==2
+    # by the time we exit. (Hard cap is 8 but rarely fires in practice.)
     assert r.attempts == 2
-    assert "checks failed" in r.failure_narrative
+    assert "no progress" in r.failure_narrative or "checks failed" in r.failure_narrative
 
 
 def test_run_build_propagates_block_to_dependent_slice(tmp_path: Path) -> None:
@@ -476,13 +489,16 @@ def test_run_build_propagates_block_to_dependent_slice(tmp_path: Path) -> None:
     async def fake_agent(_input: BuildAgentInput) -> BuildAgentOutput:
         return BuildAgentOutput(succeeded=True)
 
+    # Use a tiny cost ceiling so the slice fails fast on its first attempt.
+    # The dep-block propagation logic doesn't depend on the failure
+    # mechanism — only that s1 ended in BLOCKED.
     result = asyncio.run(
         run_build(
             spec,
             project_dir=tmp_path,
             session_dir=session_dir,
             build_agent=fake_agent,
-            budget=BuildBudget(per_slice_retries=1),
+            budget=BuildBudget(per_slice_cost_usd=0.0, total_cost_usd=0.0),
         )
     )
     by_id = {r.slice_id: r for r in result.slice_results}

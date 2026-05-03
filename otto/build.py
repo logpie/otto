@@ -61,18 +61,45 @@ class SliceStatus(str, Enum):
 
 @dataclass
 class BuildBudget:
-    """Bounds shared across the build loop and audit-driven repair."""
+    """Bounds shared across the build loop and audit-driven repair.
 
-    per_slice_retries: int = 3
+    v2 design (bound-by-progress, not by count): the runtime stops
+    retrying a slice when the agent stops making progress — same error
+    repeats, cost ceiling exceeded, or wall budget exhausted. Hardcoded
+    retry counts (per_slice_retries=3) were overfit to Microfeed-shape
+    products; complex products may need 5+ attempts before convergence,
+    trivial ones may converge in 1.
+
+    Bounds, in order of likely activation:
+      - **Progress**: if attempt N's failure narrative matches attempt
+        N-1 verbatim → STUCK, stop. (Most likely to fire first on real
+        no-progress loops.)
+      - **Cost**: cumulative slice cost exceeds `per_slice_cost_usd`.
+      - **Wall**: per_slice_wall_s as backstop.
+      - **Hard cap**: per_slice_retries_hard_cap defends against
+        runaway agents that keep producing different errors. Set high
+        (default 8) so it rarely fires before progress / cost.
+    """
+
+    per_slice_retries_hard_cap: int = 8
     per_slice_wall_s: int = 30 * 60  # 30 minutes
+    per_slice_cost_usd: float = 5.0  # any single slice should cost <$5
     total_repair_s: int = 90 * 60  # 90 minutes shared with audit
+    total_cost_usd: float = 30.0  # total run budget; audit + build share
     _spent_repair_s: float = 0.0
+    _spent_cost_usd: float = 0.0
 
     def remaining_repair_s(self) -> float:
         return max(0.0, self.total_repair_s - self._spent_repair_s)
 
     def charge_repair(self, seconds: float) -> None:
         self._spent_repair_s += max(0.0, seconds)
+
+    def charge_cost(self, dollars: float) -> None:
+        self._spent_cost_usd += max(0.0, dollars)
+
+    def remaining_total_cost_usd(self) -> float:
+        return max(0.0, self.total_cost_usd - self._spent_cost_usd)
 
 
 @dataclass
@@ -300,6 +327,83 @@ def _matches_any(path: str, globs: list[str]) -> bool:
     return False
 
 
+# Substring patterns excluded from the no-progress hash. These are
+# cache / build-tool / runtime-log artifacts that accumulate during
+# check runs and would falsely make the hash differ between attempts
+# even when the agent isn't making real changes.
+_HASH_NOISE_PATTERNS: tuple[str, ...] = (
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".coverage",
+    "node_modules",
+    ".tox",
+    ".venv",
+    "instance/",
+    ".otto/",  # v2.2 amendment side-channel files
+    # Otto runtime + log paths. The session dir often lives inside the
+    # worktree (otto_logs/sessions/<id>/ in production, _session/ or
+    # _s/ in tests) and accumulates per-attempt log files.
+    "otto_logs/",
+    "_session/",
+    "_s/",
+    ".log",   # any log file
+    "spec-state.jsonl",
+)
+
+
+def _hash_worktree_diff(worktree: Path) -> str:
+    """Return a SHA-256 of the agent's tracked-file changes + new
+    source files vs HEAD.
+
+    Combines `git diff HEAD` (committed + unstaged tracked files) with
+    the contents of any untracked files NOT matching common cache /
+    build-artifact noise patterns. Used by the no-progress bound to
+    detect agents that aren't making any real change between retries.
+
+    Returns "" if git isn't available or the worktree isn't a repo.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    try:
+        diff = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        h.update(diff.stdout.encode("utf-8", errors="replace"))
+        # Include untracked file contents (new files the agent created),
+        # filtering common cache noise.
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for path in sorted((untracked.stdout or "").splitlines()):
+            if not path:
+                continue
+            if any(noise in path for noise in _HASH_NOISE_PATTERNS):
+                continue
+            file_path = worktree / path
+            if file_path.is_file():
+                try:
+                    h.update(b"\x00")
+                    h.update(path.encode("utf-8"))
+                    h.update(b"\x00")
+                    h.update(file_path.read_bytes())
+                except OSError:
+                    pass
+    except (FileNotFoundError, OSError):
+        return ""
+    return h.hexdigest()
+
+
 def _git_diff_modified_paths(worktree: Path, base_ref: str = "HEAD") -> list[str]:
     """Return paths the worktree has modified vs. base_ref (committed + uncommitted)."""
     try:
@@ -499,10 +603,80 @@ async def _run_slice(
     cost_total = 0.0
     attempt = 0
     raw_log_dir = session_dir / "build" / slice_obj.id
+    # For progress detection: hash of the agent's diff vs base after
+    # each attempt. If two consecutive attempts produce the same diff
+    # hash, the agent isn't changing anything — stuck. This is stronger
+    # than comparing check failure messages (which can be identical
+    # while the agent makes incremental progress).
+    prior_diff_hash: str = ""
+    current_diff_hash: str = ""
 
-    while attempt < budget.per_slice_retries:
+    while attempt < budget.per_slice_retries_hard_cap:
         attempt += 1
         elapsed = time.monotonic() - slice_t0
+
+        # Bound 1: progress. If the agent's diff at end of attempt N
+        # matches attempt N-1, the agent isn't producing any work →
+        # stop. Strong signal: even an agent making partial progress
+        # will produce a different diff between attempts.
+        if (
+            attempt > 2
+            and current_diff_hash
+            and current_diff_hash == prior_diff_hash
+        ):
+            return SliceResult(
+                slice_id=slice_obj.id,
+                status=SliceStatus.BLOCKED,
+                attempts=attempt - 1,
+                branch=branch,
+                worktree=worktree,
+                last_evidence=last_evidence,
+                failure_narrative=(
+                    f"no progress: agent produced identical diff on attempts "
+                    f"{attempt - 2} and {attempt - 1}; stuck"
+                ),
+                scope_warnings=list(accumulated_scope_warnings),
+                cost_usd=cost_total,
+                wall_s=time.monotonic() - slice_t0,
+            )
+
+        # Bound 2: per-slice cost ceiling.
+        if cost_total >= budget.per_slice_cost_usd:
+            return SliceResult(
+                slice_id=slice_obj.id,
+                status=SliceStatus.BLOCKED,
+                attempts=attempt - 1,
+                branch=branch,
+                worktree=worktree,
+                last_evidence=last_evidence,
+                failure_narrative=(
+                    f"per-slice cost ceiling reached "
+                    f"(${cost_total:.2f} >= ${budget.per_slice_cost_usd:.2f})"
+                ),
+                scope_warnings=list(accumulated_scope_warnings),
+                cost_usd=cost_total,
+                wall_s=time.monotonic() - slice_t0,
+            )
+
+        # Bound 3: total run cost (shared with audit).
+        if budget.remaining_total_cost_usd() <= 0 and attempt > 1:
+            return SliceResult(
+                slice_id=slice_obj.id,
+                status=SliceStatus.BLOCKED,
+                attempts=attempt - 1,
+                branch=branch,
+                worktree=worktree,
+                last_evidence=last_evidence,
+                failure_narrative=(
+                    f"total run cost ceiling reached "
+                    f"(${budget._spent_cost_usd:.2f} >= ${budget.total_cost_usd:.2f})"
+                ),
+                scope_warnings=list(accumulated_scope_warnings),
+                cost_usd=cost_total,
+                wall_s=time.monotonic() - slice_t0,
+            )
+
+        # Bound 4: per-slice wall budget (backstop).
         if elapsed >= budget.per_slice_wall_s:
             return SliceResult(
                 slice_id=slice_obj.id,
@@ -516,6 +690,8 @@ async def _run_slice(
                 cost_usd=cost_total,
                 wall_s=elapsed,
             )
+
+        # Bound 5: total repair budget (shared with audit).
         if budget.remaining_repair_s() <= 0 and attempt > 1:
             return SliceResult(
                 slice_id=slice_obj.id,
@@ -529,6 +705,8 @@ async def _run_slice(
                 cost_usd=cost_total,
                 wall_s=time.monotonic() - slice_t0,
             )
+
+        prior_diff_hash = current_diff_hash
 
         attempt_t0 = time.monotonic()
         agent_input = BuildAgentInput(
@@ -558,6 +736,7 @@ async def _run_slice(
             continue
 
         cost_total += agent_output.cost_usd
+        budget.charge_cost(agent_output.cost_usd)
         attempt_wall = time.monotonic() - attempt_t0
         if attempt > 1:
             budget.charge_repair(attempt_wall)
@@ -698,6 +877,8 @@ async def _run_slice(
         last_failure = (
             f"checks failed on attempt {attempt}: " + "; ".join(failed_summaries[:5])
         )
+        # Snapshot the agent's work-so-far for the no-progress bound.
+        current_diff_hash = _hash_worktree_diff(worktree)
         emit(
             session_dir,
             "slice.attempt.failed",
