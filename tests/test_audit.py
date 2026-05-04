@@ -589,6 +589,148 @@ def test_audit_parser_clamps_quality_score() -> None:
     assert absent.quality_findings == []
 
 
+def test_audit_prompt_requests_capability_verdicts(tmp_path: Path) -> None:
+    """v2.6: prompt asks for per-capability verdicts (one per done_means)."""
+    from otto.audit import _audit_prompt
+
+    spec = Spec(
+        intent="x", project_kind="webapp",
+        slices=[Slice(id="s", title="t")],
+        done_means=["users can sign up", "RSS feed is reachable from /"],
+    )
+    inp = AuditAgentInput(
+        spec=spec, project_dir=tmp_path, integrated_worktree=tmp_path,
+        build_summary={}, merge_summary={}, cross_slice_evidence=[],
+        walkthrough_artifacts=[],
+    )
+    prompt = _audit_prompt(inp)
+    assert "capability_verdicts" in prompt
+    assert "evidence_refs" in prompt
+    assert "passed" in prompt and "partial" in prompt and "blocked" in prompt
+    # done_means anchor reference
+    assert "done_means" in prompt
+
+
+def test_audit_parser_reads_capability_verdicts() -> None:
+    """v2.6: parser reads capability_verdicts list with status, detail, evidence."""
+    from otto.audit import _parse_audit_output
+
+    output = """```json
+{
+  "verdict": "partial",
+  "narrative": "mostly works",
+  "slice_verdicts": [],
+  "capability_verdicts": [
+    {"name": "user signup", "status": "passed",
+     "detail": "Signup form works",
+     "evidence_refs": ["templates/home.html:5"]},
+    {"name": "RSS discoverability", "status": "blocked",
+     "detail": "no <link> in head, no nav link",
+     "evidence_refs": ["output/index.html"]}
+  ]
+}
+```"""
+    result = _parse_audit_output(output)
+    assert len(result.capability_verdicts) == 2
+    assert result.capability_verdicts[0].name == "user signup"
+    assert result.capability_verdicts[0].status == "passed"
+    assert result.capability_verdicts[0].evidence_refs == ["templates/home.html:5"]
+    assert result.capability_verdicts[1].status == "blocked"
+
+
+def test_audit_parser_unknown_capability_status_defaults_blocked() -> None:
+    """v2.6 permissive: malformed status → 'blocked' (defensive)."""
+    from otto.audit import _parse_audit_output
+
+    output = """```json
+{"verdict":"passed",
+ "capability_verdicts":[{"name":"x","status":"works fine"}]}```"""
+    result = _parse_audit_output(output)
+    assert result.capability_verdicts[0].status == "blocked"
+
+
+def test_audit_blocked_capability_caps_passed_to_partial(tmp_path: Path) -> None:
+    """v2.6 cap: any blocked capability prevents PASSED. Real damage
+    surfaces — even if everything else is green."""
+    from otto.audit import CapabilityVerdict
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    spec = Spec(
+        intent="x", project_kind="webapp",
+        slices=[Slice(id="s1", title="t",
+                      checks=[StateInvariant(description="exists",
+                                             expression="True")])],
+        done_means=["users can sign up", "RSS reachable"],
+    )
+
+    async def passing_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="functional",
+            slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
+            capability_verdicts=[
+                CapabilityVerdict(name="users can sign up", status="passed", detail="ok"),
+                CapabilityVerdict(name="RSS reachable", status="blocked",
+                                  detail="no link in head"),
+            ],
+            quality_score=4,
+            quality_findings=["minor"],
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=passing_agent,
+        )
+    )
+    # Functional says PASSED + quality 4/5 OK, BUT capability blocked → PARTIAL.
+    assert result.verdict == AuditVerdict.PARTIAL
+    assert len(result.capability_verdicts) == 2
+    blocked = [c for c in result.capability_verdicts if c.status == "blocked"]
+    assert len(blocked) == 1
+    assert "capability cap" in result.narrative
+
+
+def test_audit_majority_partial_capabilities_caps_passed(tmp_path: Path) -> None:
+    """v2.6: >50% partial caps PASSED → PARTIAL even with no blocked."""
+    from otto.audit import CapabilityVerdict
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    spec = Spec(
+        intent="x", project_kind="webapp",
+        slices=[Slice(id="s1", title="t",
+                      checks=[StateInvariant(description="x", expression="True")])],
+    )
+
+    async def majority_partial_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="works",
+            slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
+            capability_verdicts=[
+                CapabilityVerdict(name="a", status="passed", detail="ok"),
+                CapabilityVerdict(name="b", status="partial", detail="caveat"),
+                CapabilityVerdict(name="c", status="partial", detail="caveat"),
+                CapabilityVerdict(name="d", status="partial", detail="caveat"),
+            ],
+            quality_score=4,
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=majority_partial_agent,
+        )
+    )
+    assert result.verdict == AuditVerdict.PARTIAL
+
+
 def test_audit_quality_low_caps_verdict_at_partial(tmp_path: Path) -> None:
     """Functional verdict PASSED + quality_score < 3 → final verdict
     PARTIAL. This is the audit-final-quality check enforcing that

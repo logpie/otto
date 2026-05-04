@@ -36,7 +36,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 
 from otto.build import (
     BuildAgentCallable,
@@ -74,12 +74,40 @@ class SliceVerdict:
 
 
 @dataclass
+class CapabilityVerdict:
+    """Per-capability judgment from the audit (v2.6).
+
+    A capability is one user-observable feature, typically derived
+    from a `done_means` item. Replaces the single-verdict-for-everything
+    model with structured per-feature judgments — lets the proof
+    packet show a "feature checklist" and lets downstream tooling
+    target specific gaps.
+
+    Status:
+      - "passed": capability fully works.
+      - "partial": works but with caveats (specific in `narrative`).
+      - "blocked": doesn't work or unverified.
+
+    `evidence_refs` are paths or URLs the audit consulted (rendered
+    HTML, screenshots, contract-test logs) — empty list is allowed
+    when the verdict is from code-reading alone, but paths anchor the
+    judgment.
+    """
+
+    name: str  # short label (e.g. "user signup", "RSS discoverability")
+    status: Literal["passed", "partial", "blocked"]
+    detail: str = ""  # 1-2 sentence rationale
+    evidence_refs: list[str] = field(default_factory=list)
+
+
+@dataclass
 class AuditResult:
     """Aggregate audit outcome."""
 
     verdict: AuditVerdict
     narrative: str
     slice_verdicts: list[SliceVerdict] = field(default_factory=list)
+    capability_verdicts: list[CapabilityVerdict] = field(default_factory=list)
     cross_slice_evidence: list[Evidence] = field(default_factory=list)
     walkthrough_artifacts: list[Path] = field(default_factory=list)
     contract_test_passed: bool | None = None  # None if no test_command configured
@@ -126,6 +154,10 @@ class AuditAgentOutput:
     verdict: AuditVerdict
     narrative: str
     slice_verdicts: list[SliceVerdict] = field(default_factory=list)
+    # v2.6 per-capability verdicts: one entry per done_means item
+    # (or per derived feature). Lets the proof packet show a feature
+    # checklist instead of one global verdict.
+    capability_verdicts: list[CapabilityVerdict] = field(default_factory=list)
     # Quality dimension (added when "audit final app quality" check
     # surfaced that bare-bones-but-functional products were passing).
     # Score 1-5 where 1 = unusable, 3 = MVP, 5 = polished. Findings
@@ -527,10 +559,40 @@ async def run_audit(
                 + "\n".join(f"  - {f}" for f in agent_output.quality_findings)
             ).strip()
 
+        # v2.6 capability cap: any blocked capability prevents PASSED.
+        # >50% of capabilities partial OR mixed → cap at PARTIAL.
+        # This makes the per-feature signal load-bearing: a product
+        # where "RSS feed" is blocked can't pass even if every other
+        # capability works.
+        caps = agent_output.capability_verdicts
+        if caps:
+            blocked_count = sum(1 for c in caps if c.status == "blocked")
+            partial_count = sum(1 for c in caps if c.status == "partial")
+            if blocked_count and verdict == AuditVerdict.PASSED:
+                verdict = AuditVerdict.PARTIAL
+                narrative = (
+                    f"{narrative}\n\n"
+                    f"[capability cap: {blocked_count} blocked]\n"
+                    + "\n".join(
+                        f"  - {c.name}: {c.detail[:120]}"
+                        for c in caps if c.status == "blocked"
+                    )
+                ).strip()
+            elif (
+                partial_count > len(caps) / 2
+                and verdict == AuditVerdict.PASSED
+            ):
+                verdict = AuditVerdict.PARTIAL
+                narrative = (
+                    f"{narrative}\n\n"
+                    f"[capability cap: {partial_count}/{len(caps)} partial]"
+                ).strip()
+
         last_result = AuditResult(
             verdict=verdict,
             narrative=narrative,
             slice_verdicts=list(agent_output.slice_verdicts),
+            capability_verdicts=list(agent_output.capability_verdicts),
             cross_slice_evidence=cross_evidence,
             walkthrough_artifacts=list(walk_result.artifacts),
             contract_test_passed=contract_passed,
@@ -823,9 +885,26 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     lines.append(
         "  2. A per-slice verdict: for each slice id, pass or fail with reason."
     )
-    lines.append("  3. A final verdict: 'passed', 'partial', or 'blocked'.")
     lines.append(
-        "  4. A quality assessment of the user-facing experience (REQUIRED, "
+        "  3. **Per-capability verdicts (REQUIRED, v2.6)**: one verdict per "
+        "user-observable feature listed in `done_means` above. Each entry "
+        "MUST cite specific evidence — what file/page/log you inspected to "
+        "reach the verdict. Format:"
+    )
+    lines.append(
+        "       {name: \"<capability name, ideally matching a done_means line>\", "
+        "status: \"passed\"|\"partial\"|\"blocked\", "
+        "detail: \"1-2 sentence rationale\", "
+        "evidence_refs: [\"path/to/file:line\" or URL or screenshot path]}"
+    )
+    lines.append(
+        "       Aim for one capability per `done_means` item. If a "
+        "capability is implemented but with caveats, mark partial and "
+        "explain. Empty list is NOT acceptable when done_means has items."
+    )
+    lines.append("  4. A final verdict: 'passed', 'partial', or 'blocked'.")
+    lines.append(
+        "  5. A quality assessment of the user-facing experience (REQUIRED, "
         "independent of the functional verdict):"
     )
     lines.append("")
@@ -908,10 +987,16 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     )
     lines.append("")
     lines.append(
-        "Output as a single fenced JSON block with keys: "
-        "{ verdict: passed|partial|blocked, narrative: str, "
-        "slice_verdicts: [{slice_id, passed: bool, detail: str}, ...], "
-        "quality_score: int (1-5), quality_findings: [str, ...] }."
+        "Output as a single fenced JSON block with keys:\n"
+        "{\n"
+        "  verdict: passed|partial|blocked,\n"
+        "  narrative: str,\n"
+        "  slice_verdicts: [{slice_id, passed: bool, detail: str}, ...],\n"
+        "  capability_verdicts: [{name: str, status: passed|partial|blocked,\n"
+        "                         detail: str, evidence_refs: [str, ...]}, ...],\n"
+        "  quality_score: int (1-5),\n"
+        "  quality_findings: [str, ...]\n"
+        "}"
     )
     return "\n".join(lines)
 
@@ -960,10 +1045,42 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
     if isinstance(raw_findings, list):
         quality_findings = [str(f) for f in raw_findings if f]
 
+    # v2.6: per-capability verdicts. Permissive — invalid status →
+    # "blocked" (defensive default), missing fields → empty.
+    capability_verdicts: list[CapabilityVerdict] = []
+    raw_caps = data.get("capability_verdicts") or []
+    if isinstance(raw_caps, list):
+        for entry in raw_caps:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            status_raw = str(entry.get("status") or "").strip().lower()
+            status: Literal["passed", "partial", "blocked"]
+            if status_raw == "passed":
+                status = "passed"
+            elif status_raw == "partial":
+                status = "partial"
+            else:
+                status = "blocked"
+            evidence_raw = entry.get("evidence_refs") or []
+            evidence_refs = (
+                [str(e) for e in evidence_raw if e]
+                if isinstance(evidence_raw, list) else []
+            )
+            capability_verdicts.append(CapabilityVerdict(
+                name=name,
+                status=status,
+                detail=str(entry.get("detail") or ""),
+                evidence_refs=evidence_refs,
+            ))
+
     return AuditAgentOutput(
         verdict=verdict,
         narrative=str(data.get("narrative") or ""),
         slice_verdicts=slice_verdicts,
+        capability_verdicts=capability_verdicts,
         quality_score=quality_score,
         quality_findings=quality_findings,
     )
@@ -1028,6 +1145,7 @@ __all__ = [
     "AuditBudget",
     "AuditResult",
     "AuditVerdict",
+    "CapabilityVerdict",
     "SliceVerdict",
     "WalkthroughCallable",
     "WalkthroughResult",

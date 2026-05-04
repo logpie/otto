@@ -100,6 +100,8 @@ class ProofPacket:
     # plus concrete UX/visual findings.
     quality_score: int = 0
     quality_findings: list[str] = field(default_factory=list)
+    # v2.6 per-capability verdicts — feature checklist for the proof packet.
+    capability_verdicts: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +219,17 @@ def compose_proof_packet(
         for a in spec.amendments
     ]
 
+    # v2.6: render per-capability verdicts as a feature checklist.
+    capability_render = [
+        {
+            "name": c.name,
+            "status": c.status,
+            "detail": c.detail,
+            "evidence_refs": list(c.evidence_refs),
+        }
+        for c in audit_result.capability_verdicts
+    ]
+
     return ProofPacket(
         schema_version=PROOF_PACKET_SCHEMA_VERSION,
         intent=spec.intent,
@@ -235,6 +248,7 @@ def compose_proof_packet(
         amendments=amendments_render,
         quality_score=audit_result.quality_score,
         quality_findings=list(audit_result.quality_findings),
+        capability_verdicts=capability_render,
     )
 
 
@@ -265,6 +279,7 @@ def _packet_to_dict(packet: ProofPacket) -> dict[str, Any]:
         "amendments": packet.amendments,
         "quality_score": packet.quality_score,
         "quality_findings": packet.quality_findings,
+        "capability_verdicts": packet.capability_verdicts,
         "slices": [
             {
                 "slice_id": s.slice_id,
