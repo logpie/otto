@@ -75,9 +75,11 @@ EVENT_KINDS: tuple[str, ...] = (
     "slice.merge.eligible",
     "slice.merge.started",
     "slice.merge.landed",
+    "slice.merge.redundant",   # Pattern A: slice produced no new diff (over-reach symptom)
     "slice.blocked",
     "audit.started",
     "audit.finished",
+    "audit.attempt.finished",  # Pattern A: per-attempt audit verdict in retry loop
     "run.finished",
     # v2.2 — amendments + scope events ----------------------------------
     "scope.warning",            # build agent attempted out-of-scope edit (informational)
@@ -149,6 +151,7 @@ FAILED = "failed"
 ELIGIBLE = "eligible"
 MERGING = "merging"
 LANDED = "landed"
+REDUNDANT = "redundant"  # Pattern A: slice's checks passed but no new commit
 BLOCKED = "blocked"
 
 _PHASE_FOR_KIND: dict[str, str] = {
@@ -159,6 +162,7 @@ _PHASE_FOR_KIND: dict[str, str] = {
     "slice.merge.eligible": ELIGIBLE,
     "slice.merge.started": MERGING,
     "slice.merge.landed": LANDED,
+    "slice.merge.redundant": REDUNDANT,
     "slice.blocked": BLOCKED,
 }
 
@@ -181,6 +185,14 @@ class RunState:
     audit_verdict: str = ""                   # "" | "passed" | "partial" | "blocked"
     run_finished: bool = False
     run_verdict: str = ""
+    # Pattern A reconciliation: when replay() is given a project_dir,
+    # it cross-checks LANDED events against `git log`. Slices whose
+    # claimed commit hash isn't in the actual git history land here.
+    unreconciled_landed_ids: list[str] = field(default_factory=list)
+    # Slices whose LANDED hash matches a real commit, BUT >1 slice
+    # claimed the same hash (only the first contributed; the rest are
+    # bookkeeping echoes of an over-reaching slice).
+    duplicate_hash_landed_ids: list[str] = field(default_factory=list)
 
     def slice_state(self, slice_id: str) -> SliceState:
         if slice_id not in self.slices:
@@ -315,20 +327,36 @@ def iter_events(session_dir: Path) -> Iterator[Event]:
             )
 
 
-def replay(session_dir: Path, slice_ids: Iterable[str] = ()) -> RunState:
+def replay(
+    session_dir: Path,
+    slice_ids: Iterable[str] = (),
+    *,
+    project_dir: Path | None = None,
+) -> RunState:
     """Derive per-slice state by scanning the journal in order.
 
     Pre-seeds slice entries from `slice_ids` so the caller's spec slice
     set is reflected even if no events have fired yet (slices in PENDING
     show up in `state.slices`).
+
+    Pattern A fix: when `project_dir` is provided, cross-checks every
+    `LANDED` event's commit hash against `git log --oneline` on the
+    project repo. If a slice claims LANDED but its commit isn't in
+    the actual git history, downgrade to a special UNRECONCILED phase
+    in `state.unreconciled_landed_ids` (and leave the journal phase
+    intact for backward compat). This catches the bookkeeping-vs-reality
+    bug where multiple slices reported the same hash.
     """
     state = RunState()
     for sid in slice_ids:
         state.slice_state(sid)
 
     attempts_by_slice: dict[str, int] = defaultdict(int)
+    landed_events: list[tuple[str, str]] = []  # (slice_id, commit_hash)
 
     for event in iter_events(session_dir):
+        if event.kind == "slice.merge.landed" and event.slice_id and event.detail:
+            landed_events.append((event.slice_id, event.detail.strip().split()[0] if event.detail.strip() else ""))
         if event.kind in {"audit.started", "audit.finished", "run.finished"}:
             if event.kind == "audit.started":
                 state.audit_started = True
@@ -360,6 +388,36 @@ def replay(session_dir: Path, slice_ids: Iterable[str] = ()) -> RunState:
         new_phase = _PHASE_FOR_KIND.get(event.kind)
         if new_phase is not None:
             slice_state.phase = new_phase
+
+    # Pattern A: cross-check LANDED against git history.
+    if project_dir is not None and landed_events:
+        try:
+            log = subprocess.run(
+                ["git", "log", "--all", "--format=%h %H"],
+                cwd=str(project_dir), capture_output=True, text=True, check=False,
+            )
+            if log.returncode == 0:
+                # Each line: short hash + full hash; both forms valid for matching.
+                known_hashes: set[str] = set()
+                for line in log.stdout.splitlines():
+                    parts = line.split()
+                    for p in parts:
+                        if p:
+                            known_hashes.add(p)
+                # Detect duplicates: multiple slices claiming the same hash.
+                hash_counts: dict[str, int] = defaultdict(int)
+                for _sid, h in landed_events:
+                    if h:
+                        hash_counts[h] += 1
+                for sid, h in landed_events:
+                    if not h or h not in known_hashes:
+                        state.unreconciled_landed_ids.append(sid)
+                    elif hash_counts.get(h, 0) > 1:
+                        # >1 slice claims the same commit — only the first
+                        # one possibly contributed; the rest are duplicates.
+                        state.duplicate_hash_landed_ids.append(sid)
+        except (FileNotFoundError, OSError):
+            pass
 
     return state
 

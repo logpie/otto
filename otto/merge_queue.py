@@ -55,6 +55,13 @@ class MergeStatus(str, Enum):
     PENDING = "pending"
     LANDED = "landed"
     BLOCKED = "blocked"
+    # Pattern A fix: distinguish a real new commit from a no-op merge
+    # (worktree had no changes to commit, e.g., because an earlier slice
+    # already wrote this slice's work). REDUNDANT means the slice's
+    # checks passed but no new code was added — the slice didn't
+    # contribute meaningfully. Treated as a non-pass for verdict
+    # purposes; surfaces the over-reach pattern instead of hiding it.
+    REDUNDANT = "redundant"
 
 
 @dataclass
@@ -96,6 +103,9 @@ class MergeQueueResult:
 
     landed_ids: list[str] = field(default_factory=list)
     blocked_ids: list[str] = field(default_factory=list)
+    # Pattern A: slices whose checks passed but produced no new commit.
+    # Symptom of over-reach (earlier slice wrote this slice's work).
+    redundant_ids: list[str] = field(default_factory=list)
     results: list[MergeResult] = field(default_factory=list)
     total_cost_usd: float = 0.0
     total_wall_s: float = 0.0
@@ -181,6 +191,7 @@ async def run_merge_queue(
     passing_ids = list(build_result.passing_ids)
     landed_ids: list[str] = []
     blocked_ids: list[str] = []
+    redundant_ids: list[str] = []
     results: list[MergeResult] = []
     total_t0 = time.monotonic()
     total_cost = 0.0
@@ -228,6 +239,23 @@ async def run_merge_queue(
                 slice_id=slice_obj.id,
                 detail=result.landed_commit,
             )
+        elif result.status == MergeStatus.REDUNDANT:
+            # Pattern A: don't lie. The slice's checks passed but it
+            # produced no new commit. Surface this as a distinct
+            # outcome — usually means an earlier slice over-reached
+            # and wrote this slice's work too. Counts toward
+            # `landed_ids` for dep-flow purposes (downstream slices
+            # depending on this one can still proceed, since the
+            # required state is in HEAD via the over-reaching slice).
+            # `redundant_ids` is the diagnostic side-channel.
+            landed_ids.append(slice_obj.id)
+            redundant_ids.append(slice_obj.id)
+            emit(
+                session_dir,
+                "slice.merge.redundant",
+                slice_id=slice_obj.id,
+                detail=result.failure_narrative or "no new diff",
+            )
         else:
             blocked_ids.append(slice_obj.id)
             emit(
@@ -240,6 +268,7 @@ async def run_merge_queue(
     return MergeQueueResult(
         landed_ids=landed_ids,
         blocked_ids=blocked_ids,
+        redundant_ids=redundant_ids,
         results=results,
         total_cost_usd=total_cost,
         total_wall_s=time.monotonic() - total_t0,
@@ -308,18 +337,29 @@ async def _process_candidate(
         cross_pass = all(ev.passed for ev in cross_evidence) if cross_evidence else True
 
         if slice_pass and cross_pass:
-            commit_hash = _commit_integration(
+            outcome = _commit_integration(
                 git, candidate.worktree, slice_id=slice_obj.id, branch=candidate.branch
             )
+            # Pattern A nuance: REDUNDANT only signals over-reach when the
+            # slice HAD declared work (owned_paths or tasks). A vacuous
+            # slice (no tasks, no owned_paths — usually a pure structural
+            # placeholder or test fixture) producing no diff is just
+            # LANDED-vacuously, not a symptom.
+            status = outcome.status
+            if status == MergeStatus.REDUNDANT and not (slice_obj.tasks or slice_obj.owned_paths):
+                status = MergeStatus.LANDED
             return MergeResult(
                 slice_id=slice_obj.id,
-                status=MergeStatus.LANDED,
-                landed_commit=commit_hash,
+                status=status,
+                landed_commit=outcome.head_after,
                 cross_slice_evidence=cross_evidence,
                 slice_recheck_evidence=slice_evidence,
                 repair_attempts=repair_attempts,
                 cost_usd=cost_total,
                 wall_s=time.monotonic() - t0,
+                failure_narrative=(
+                    outcome.detail if status not in (MergeStatus.LANDED, MergeStatus.REDUNDANT) else ""
+                ),
             )
 
         # Failure: prepare narrative.
@@ -413,27 +453,100 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+@dataclass
+class CommitOutcome:
+    """Result of `_commit_integration`. Pattern A fix — events must
+    reflect git reality, not be derived from an unconditional return.
+
+    Status semantics:
+      - LANDED: a new commit was created (HEAD advanced).
+      - REDUNDANT: nothing to commit (worktree had no changes against
+        HEAD). Slice contributed no new code. NOT a failure but also
+        NOT a real landing.
+      - BLOCKED: git operation failed (commit returned non-zero,
+        rev-parse failed, identity not configured, etc.).
+    """
+    status: MergeStatus
+    head_before: str
+    head_after: str
+    detail: str = ""
+
+
 def _commit_integration(
     git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
     worktree: Path,
     *,
     slice_id: str,
     branch: str,
-) -> str:
+) -> CommitOutcome:
     """Stage and commit current worktree state as a slice-tagged commit.
 
-    No-op if there are no changes (idempotent re-run case). Returns the
-    short commit hash of HEAD after the commit (or before, if no changes).
+    Honestly reports what happened. Captures HEAD before and after,
+    distinguishes real commits from no-ops and from failures.
     """
-    git(["add", "-A"], worktree)
+    head_before_proc = git(["rev-parse", "--short", "HEAD"], worktree)
+    head_before = (head_before_proc.stdout or "").strip()
+    if head_before_proc.returncode != 0 or not head_before:
+        return CommitOutcome(
+            status=MergeStatus.BLOCKED,
+            head_before="",
+            head_after="",
+            detail=f"rev-parse HEAD failed: {head_before_proc.stderr.strip()[:200]}",
+        )
+
+    add_proc = git(["add", "-A"], worktree)
+    if add_proc.returncode != 0:
+        return CommitOutcome(
+            status=MergeStatus.BLOCKED,
+            head_before=head_before,
+            head_after=head_before,
+            detail=f"git add -A failed: {add_proc.stderr.strip()[:200]}",
+        )
+
     status = git(["status", "--porcelain"], worktree)
-    if status.stdout.strip():
-        msg = f"i2p({slice_id}): land slice from {branch}"
-        commit = git(["commit", "-q", "-m", msg, "--no-verify"], worktree)
-        if commit.returncode != 0:
-            logger.warning("git commit failed for slice %s: %s", slice_id, commit.stderr)
-    head = git(["rev-parse", "--short", "HEAD"], worktree)
-    return (head.stdout or "").strip()
+    if not status.stdout.strip():
+        # No changes to commit — slice didn't contribute new code.
+        return CommitOutcome(
+            status=MergeStatus.REDUNDANT,
+            head_before=head_before,
+            head_after=head_before,
+            detail="no changes to commit (slice produced no diff)",
+        )
+
+    msg = f"i2p({slice_id}): land slice from {branch}"
+    commit = git(["commit", "-q", "-m", msg, "--no-verify"], worktree)
+    if commit.returncode != 0:
+        logger.warning("git commit failed for slice %s: %s", slice_id, commit.stderr)
+        return CommitOutcome(
+            status=MergeStatus.BLOCKED,
+            head_before=head_before,
+            head_after=head_before,
+            detail=f"git commit failed: {commit.stderr.strip()[:200]}",
+        )
+
+    head_after_proc = git(["rev-parse", "--short", "HEAD"], worktree)
+    head_after = (head_after_proc.stdout or "").strip()
+    if head_after_proc.returncode != 0 or not head_after:
+        return CommitOutcome(
+            status=MergeStatus.BLOCKED,
+            head_before=head_before,
+            head_after="",
+            detail=f"rev-parse HEAD after commit failed: {head_after_proc.stderr.strip()[:200]}",
+        )
+    if head_after == head_before:
+        # Commit returned 0 but HEAD didn't change — anomalous.
+        return CommitOutcome(
+            status=MergeStatus.BLOCKED,
+            head_before=head_before,
+            head_after=head_after,
+            detail="commit reported success but HEAD did not advance",
+        )
+    return CommitOutcome(
+        status=MergeStatus.LANDED,
+        head_before=head_before,
+        head_after=head_after,
+        detail="",
+    )
 
 
 # ---------------------------------------------------------------------------

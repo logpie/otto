@@ -628,8 +628,13 @@ def test_build_agent_prompt_writeable_paths_only(tmp_path: Path) -> None:
     # Peer's exclusive paths NOT enumerated (no longer ceremony).
     assert "routes/search.py" not in prompt
     assert "templates/search.html" not in prompt
-    # The "stay in lane" guidance survives in compact form.
-    assert "don't pre-build" in prompt or "build only" in prompt.lower()
+    # The "stay in lane" guidance survives in some form.
+    assert (
+        "don't pre-build" in prompt
+        or "build only" in prompt.lower()
+        or "another slice will deliver" in prompt.lower()
+        or "do not implement features that belong to other slices" in prompt.lower()
+    )
 
 
 def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:
@@ -676,7 +681,9 @@ def test_build_agent_prompt_includes_last_failure_on_retry(tmp_path: Path) -> No
     prompt = _build_agent_prompt(inp)
     assert "Previous attempt failed" in prompt
     assert "missing route /api/posts" in prompt
-    assert "fresh approach" in prompt
+    # Pattern C: prompt instructs not to widen scope on retry.
+    assert "Re-read your slice tasks" in prompt
+    assert "do NOT widen scope" in prompt.lower() or "do not widen scope" in prompt.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -702,7 +709,9 @@ def test_build_agent_prompt_surfaces_otto_yaml_test_command(tmp_path: Path) -> N
     assert "Project contract surface" in prompt
     assert "test_command" in prompt
     assert "tests/run_acceptance.py" in prompt
-    assert "READ THESE FIRST" in prompt
+    # Pattern C: contract surface is informational context, not a directive
+    # to "make it pass" (whole-product test isn't the slice's job).
+    assert "read these to learn API shapes" in prompt.lower() or "read for api/data shapes" in prompt.lower()
 
 
 def test_build_agent_prompt_surfaces_seeded_test_files(tmp_path: Path) -> None:

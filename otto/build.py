@@ -327,30 +327,57 @@ def _matches_any(path: str, globs: list[str]) -> bool:
     return False
 
 
-# Substring patterns excluded from the no-progress hash. These are
-# cache / build-tool / runtime-log artifacts that accumulate during
-# check runs and would falsely make the hash differ between attempts
-# even when the agent isn't making real changes.
-_HASH_NOISE_PATTERNS: tuple[str, ...] = (
+# Path-segment patterns excluded from the no-progress hash. Pattern A
+# fix: substring matching was leaky — `.log` matched `dialog.py`,
+# `_s/` matched any path containing `_s/`. Match against PATH SEGMENTS
+# (split on `/`), with explicit suffix matching for log extensions.
+_HASH_NOISE_DIRS: frozenset[str] = frozenset({
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
-    ".coverage",
     "node_modules",
     ".tox",
     ".venv",
-    "instance/",
-    ".otto/",  # v2.2 amendment side-channel files
-    # Otto runtime + log paths. The session dir often lives inside the
-    # worktree (otto_logs/sessions/<id>/ in production, _session/ or
-    # _s/ in tests) and accumulates per-attempt log files.
-    "otto_logs/",
-    "_session/",
-    "_s/",
-    ".log",   # any log file
-    "spec-state.jsonl",
+    "instance",
+    ".otto",                # v2.2 amendment side-channel files
+    "otto_logs",            # production session dir
+    "_session",             # test session dir
+    "_s",                   # alt test session dir
+})
+_HASH_NOISE_FILE_SUFFIXES: tuple[str, ...] = (
+    ".log",
+    ".pyc",
 )
+_HASH_NOISE_FILES: frozenset[str] = frozenset({
+    ".coverage",
+    "spec-state.jsonl",
+})
+
+
+def _is_hash_noise(path: str) -> bool:
+    """Return True if `path` should be excluded from no-progress hashing.
+
+    Splits on `/` and checks segments against directory/file sets, plus
+    file-extension match. Strict — `.log` matches only files ending in
+    `.log`, NOT `dialog.py`. `_s` matches only a directory segment named
+    `_s`, NOT `_synthetic.py`.
+    """
+    if not path:
+        return False
+    segments = path.split("/")
+    for seg in segments[:-1]:
+        if seg in _HASH_NOISE_DIRS:
+            return True
+    last = segments[-1]
+    if last in _HASH_NOISE_FILES:
+        return True
+    if last in _HASH_NOISE_DIRS:
+        return True
+    for suffix in _HASH_NOISE_FILE_SUFFIXES:
+        if last.endswith(suffix):
+            return True
+    return False
 
 
 def _hash_worktree_diff(worktree: Path) -> str:
@@ -388,7 +415,7 @@ def _hash_worktree_diff(worktree: Path) -> str:
         for path in sorted((untracked.stdout or "").splitlines()):
             if not path:
                 continue
-            if any(noise in path for noise in _HASH_NOISE_PATTERNS):
+            if _is_hash_noise(path):
                 continue
             file_path = worktree / path
             if file_path.is_file():
@@ -924,48 +951,63 @@ async def _run_slice(
 def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     """Compose the per-attempt prompt for the build agent.
 
-    Fresh prompt on retry: clear conversation, re-state the spec context,
-    call out the previous attempt's failure narrative without rehashing
-    its reasoning.
+    Pattern C fix: every section is explicitly scoped. Whole-product
+    signals (intent, structure, done_means, contract test) are
+    framed as CONTEXT — not the slice's responsibility. Slice-specific
+    sections (tasks, scope, acceptance checks) are PRIMARY.
 
-    Also surfaces the project's own contract surface so the agent doesn't
-    invent its own (Microfeed bench learning: agent built `{follower,
-    following}` against a contract that uses `{follower, target}` because
-    the build prompt didn't say "read the existing test files").
+    The previous prompt mixed whole-product signals with slice-narrow
+    signals without per-slice filtering. The first slice (no deps,
+    foundational paths) read the whole-product surface as its personal
+    checklist and built everything; subsequent slices found their work
+    already done and no-op-merged.
     """
     s = agent_input.slice
     spec = agent_input.spec
     lines: list[str] = []
     lines.append(f"# Build slice `{s.id}` — {s.title}")
     lines.append("")
-    lines.append(
-        f"You are working on slice {s.id} of an approved Spec for: "
-        f"{spec.intent!r} (project_kind={spec.project_kind})."
-    )
-    lines.append(f"Branch: {agent_input.branch}")
-    lines.append(f"Worktree: {agent_input.worktree}")
+
+    # === SLICE FRAMING (primary, slice-narrow) ===
+    total = len(spec.slices)
+    pos = next((i + 1 for i, sl in enumerate(spec.slices) if sl.id == s.id), 0)
+    if total > 1:
+        lines.append(
+            f"You are slice **{pos} of {total}** (`{s.id}`) — one of "
+            f"several agents collaborating on a multi-slice product. "
+            f"Each slice owns a narrow vertical of the product; you are "
+            f"NOT building the whole product. Other slices will deliver "
+            f"the parts not in your task list."
+        )
+    else:
+        lines.append(
+            f"You are the only slice (`{s.id}`) in this build. Implement "
+            f"the slice tasks below; nothing depends on you that you "
+            f"don't see."
+        )
     lines.append("")
     if s.deps:
         lines.append(f"This slice depends on (already landed): {', '.join(s.deps)}")
-    lines.append("")
-    # Surface the project's contract surface — test_command in otto.yaml +
-    # any seeded test/contract files. The agent must read these BEFORE
-    # designing APIs to avoid drifting from the contract.
-    contract_lines = _project_contract_summary(agent_input.project_dir)
-    if contract_lines:
-        lines.append("## Project contract surface (READ THESE FIRST)")
+    elif total > 1:
         lines.append(
-            "The project root has these existing contract artifacts. Your "
-            "implementation must satisfy them — do NOT invent your own API "
-            "shapes when the contract pins them down."
+            f"This is a slice with no deps — your worktree is empty "
+            f"except for project seed files. **You are NOT responsible "
+            f"for whole-product features mentioned in the intent or "
+            f"done_means below — those belong to slices {pos+1}..{total}.**"
         )
-        lines.extend(contract_lines)
-        lines.append("")
-    lines.append("## What you must do (slice tasks)")
-    for i, task in enumerate(s.tasks or [], 1):
-        lines.append(f"  {i}. {task}")
     lines.append("")
-    # Compute transitive deps for accurate write-scope summary in the prompt.
+
+    # === TASKS (primary, the slice's job) ===
+    lines.append("## What you must do (slice tasks — THIS is your job)")
+    if s.tasks:
+        for i, task in enumerate(s.tasks, 1):
+            lines.append(f"  {i}. {task}")
+    else:
+        lines.append("  (no tasks declared — likely a structural slice; "
+                     "create only files matching `## Scope` below)")
+    lines.append("")
+
+    # === SCOPE (primary, with own/dep/shared labeled separately) ===
     transitive_deps = _transitive_deps(s.id, spec)
     dep_owned: list[tuple[str, str]] = []
     peer_owned: list[tuple[str, str]] = []
@@ -977,84 +1019,128 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         else:
             peer_owned.extend((other.id, g) for g in (other.owned_paths or []))
 
-    lines.append("## Scope")
+    lines.append("## Scope (what you may write/modify)")
     lines.append("")
-    writable: list[str] = []
     if s.owned_paths:
-        writable.extend(s.owned_paths)
-    for did, g in dep_owned:
-        writable.append(g)
+        lines.append("**Yours (write here):**")
+        for g in s.owned_paths:
+            lines.append(f"  - `{g}`")
+        lines.append("")
+    if dep_owned:
+        lines.append("**Dep-owned (extend if your tasks require it):**")
+        for did, g in dep_owned:
+            lines.append(f"  - `{g}` (owned by `{did}`)")
+        lines.append("")
     if spec.shared_scaffold:
-        writable.extend(spec.shared_scaffold)
-    if writable:
-        lines.append(
-            "Modify these paths: " + ", ".join(f"`{g}`" for g in writable) + "."
-        )
-    else:
-        lines.append("Modify only files you create new.")
+        lines.append("**Shared scaffold (any slice may extend):**")
+        for g in spec.shared_scaffold:
+            lines.append(f"  - `{g}`")
+        lines.append("")
+    if not s.owned_paths and not dep_owned and not spec.shared_scaffold:
+        lines.append("(No declared paths — create only new files matching your tasks.)")
+        lines.append("")
     lines.append(
-        "Build only what your slice's tasks ask for. Other slices' code "
-        "exists or will exist — don't pre-build it."
+        "**Hard rule**: do NOT write files outside the lists above. "
+        "If you need to (e.g., to make a check pass), STOP and request "
+        "an amendment via `.otto/amendment_request.json` rather than "
+        "silently over-reaching."
     )
     lines.append("")
-    lines.append("## Slice acceptance checks")
-    for i, c in enumerate(s.checks or [], 1):
-        lines.append(f"  {i}. {_describe_check(c)}")
+
+    # === SLICE ACCEPTANCE CHECKS (primary, narrow) ===
+    lines.append("## Slice acceptance checks (your slice passes when these pass)")
+    if s.checks:
+        for i, c in enumerate(s.checks, 1):
+            lines.append(f"  {i}. {_describe_check(c)}")
+    else:
+        lines.append("  (no checks declared — slice vacuously passes)")
     lines.append("")
-    # Surface integration-level done_means as CONTEXT (not as a
-    # personal checklist). Wiring bug observed: when this section
-    # said "the audit checks for these", the first slice read it as
-    # its own todo list and over-reached to implement the whole
-    # product, leaving subsequent slices with nothing meaningful to
-    # do (no-op merges, fake "5/5 landed"). The diagnostic was: every
-    # slice's slice.merge.landed event reported the same commit hash
-    # because only the first slice's commit landed.
-    #
-    # Reframed: done_means is what the FULL product (across all
-    # slices combined) ships. THIS slice's responsibility is in the
-    # `## What you must do (slice tasks)` section above. If a
-    # done_means item isn't covered by your tasks, another slice
-    # will deliver it — DO NOT implement it.
-    if spec.done_means:
-        lines.append("## Cross-slice done-means (context — NOT your personal checklist)")
-        lines.append(
-            "These are what the FULL product ships across ALL slices "
-            "combined. Listed here so you know how your slice fits the "
-            "whole. **Your individual responsibility is `## What you must "
-            "do (slice tasks)` above** — if a done_means item below is not "
-            "covered by one of your tasks, it belongs to another slice. "
-            "DO NOT implement features outside your tasks even if they "
-            "appear here. The audit at end-of-run reads done_means to "
-            "check the integrated product; it does NOT mean each slice "
-            "must satisfy each line."
-        )
-        for item in spec.done_means:
-            lines.append(f"  - {item}")
-        lines.append("")
+
+    # === RETRY CONTEXT (if applicable) ===
     if agent_input.attempt > 1 and agent_input.last_failure_narrative:
         lines.append("## Previous attempt failed")
         lines.append(agent_input.last_failure_narrative)
         lines.append("")
         lines.append(
-            "Start over with a fresh approach. Do NOT rehash your previous "
-            "reasoning. Re-read the spec and the current branch state and "
-            "build to satisfy the checks."
+            "Re-read your slice tasks above. Make ONLY the changes needed "
+            "to satisfy the slice's acceptance checks. Do NOT widen scope "
+            "to make whole-product tests pass — that's other slices' job."
         )
         lines.append("")
-    lines.append("## Project structure decisions (binding)")
-    payload = (spec.structure.payload or {}) if spec.structure else {}
-    lines.append("```json")
-    import json as _json
 
-    lines.append(_json.dumps(payload, indent=2, sort_keys=True))
-    lines.append("```")
+    # === CONTEXT BLOCK (whole-product signals, clearly framed as informational) ===
+    lines.append("---")
+    lines.append("")
+    lines.append("## Whole-product context (informational — NOT your responsibility)")
     lines.append("")
     lines.append(
-        "Implement ONLY the tasks under `## What you must do (slice tasks)` "
-        "above, modifying ONLY the paths in `## Scope`. Do NOT implement "
-        "features that belong to other slices, even if you see them in the "
-        "intent or done_means. Other slices will fill those in. When done "
-        "with your slice's tasks, confirm completion."
+        "Everything below describes the FULL product across ALL slices. "
+        "It's here for context (so you understand how your slice fits "
+        "the whole), NOT as your personal checklist. **Do NOT implement "
+        "anything below that isn't in your slice tasks above.** Whole-"
+        "product features are delivered by the combined work of all "
+        "slices; the audit verifies the integrated product, not each "
+        "slice individually."
+    )
+    lines.append("")
+
+    # Original intent — collapsed under context.
+    lines.append(f"### Original intent (whole product)")
+    lines.append(f"> {spec.intent}")
+    lines.append("")
+    lines.append(f"`project_kind`: {spec.project_kind}")
+    lines.append("")
+
+    # done_means — explicitly cross-slice.
+    if spec.done_means:
+        lines.append("### Cross-slice done-means (combined product success criteria)")
+        lines.append(
+            "The audit checks these against the integrated product. "
+            "Your slice contributes only items covered by your tasks above."
+        )
+        for item in spec.done_means:
+            lines.append(f"  - {item}")
+        lines.append("")
+
+    # Contract surface — reframed: read for context, not "make it pass".
+    contract_lines = _project_contract_summary(agent_input.project_dir)
+    if contract_lines:
+        lines.append("### Project contract surface (read for API/data shapes)")
+        lines.append(
+            "Existing contract files. Read these to learn API shapes "
+            "(field names, request/response formats) so your slice "
+            "doesn't drift. **Do NOT try to make the whole-product "
+            "test pass yourself** — your slice's narrow check is "
+            "above. The contract test runs at end-of-run against the "
+            "integrated product."
+        )
+        lines.extend(contract_lines)
+        lines.append("")
+
+    # Project structure — filtered to slice's portion when possible.
+    payload = (spec.structure.payload or {}) if spec.structure else {}
+    if payload:
+        lines.append("### Project structure (binding contracts)")
+        lines.append(
+            "Naming and shape decisions for the whole product. "
+            "Reference these when writing code that touches them. "
+            "Other slices use the same source of truth."
+        )
+        lines.append("```json")
+        import json as _json
+        lines.append(_json.dumps(payload, indent=2, sort_keys=True))
+        lines.append("```")
+        lines.append("")
+
+    # Final instruction — reinforces narrowness.
+    lines.append("---")
+    lines.append("")
+    lines.append(
+        "**Final instruction**: Implement ONLY the tasks under `## What "
+        "you must do` above, writing ONLY to paths under `## Scope`. "
+        "If a whole-product feature in the context block isn't in your "
+        "tasks, another slice will deliver it. When your slice's tasks "
+        "are done and your acceptance checks pass, confirm completion."
     )
     return "\n".join(lines)
 

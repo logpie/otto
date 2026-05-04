@@ -731,6 +731,102 @@ def test_audit_majority_partial_capabilities_caps_passed(tmp_path: Path) -> None
     assert result.verdict == AuditVerdict.PARTIAL
 
 
+def test_caps_compose_order_independent(tmp_path: Path) -> None:
+    """Pattern B regression: when contract test fails AND quality is low
+    AND a capability is blocked, the narrative must mention ALL THREE,
+    not just the first one to fire its cap. Previously each cap had
+    its own `if verdict == PASSED` guard and silently no-op'd later
+    caps' narratives."""
+    from otto.audit import CapabilityVerdict
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    # otto.yaml seeds a contract test that exits non-zero.
+    (tmp_path / "otto.yaml").write_text(
+        'test_command: "python -c \\"import sys; sys.exit(1)\\""\n'
+    )
+
+    spec = Spec(
+        intent="x", project_kind="webapp",
+        slices=[Slice(id="s1", title="t",
+                      checks=[StateInvariant(description="x", expression="True")])],
+    )
+
+    async def multi_cap_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="LLM thinks it works",
+            slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
+            capability_verdicts=[
+                CapabilityVerdict(name="signup", status="passed", detail="ok"),
+                CapabilityVerdict(name="search", status="blocked", detail="not implemented"),
+            ],
+            quality_score=2,
+            quality_findings=["bare-bones UI", "no error states"],
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=multi_cap_agent,
+        )
+    )
+    # Strictest cap wins: contract failed → PARTIAL, quality<3 → PARTIAL,
+    # 1/2 blocked capability → PARTIAL. All three are at most PARTIAL,
+    # so verdict = PARTIAL.
+    assert result.verdict == AuditVerdict.PARTIAL
+    # ALL THREE caps must appear in narrative — this was the order-
+    # dependent bug.
+    assert "contract test FAILED" in result.narrative
+    assert "quality assessment" in result.narrative or "2/5" in result.narrative
+    assert "capability cap" in result.narrative
+    assert "bare-bones UI" in result.narrative
+    assert "search" in result.narrative
+
+
+def test_capability_cap_can_escalate_to_blocked(tmp_path: Path) -> None:
+    """Pattern B fix: when more than half of capabilities are blocked,
+    verdict must escalate to BLOCKED, not just PARTIAL. Previously the
+    cap could only downgrade PASSED→PARTIAL."""
+    from otto.audit import CapabilityVerdict
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    spec = Spec(
+        intent="x", project_kind="webapp",
+        slices=[Slice(id="s1", title="t",
+                      checks=[StateInvariant(description="x", expression="True")])],
+    )
+
+    async def mostly_blocked(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="agent says ok",
+            slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
+            capability_verdicts=[
+                CapabilityVerdict(name="a", status="blocked", detail="missing"),
+                CapabilityVerdict(name="b", status="blocked", detail="missing"),
+                CapabilityVerdict(name="c", status="blocked", detail="missing"),
+                CapabilityVerdict(name="d", status="passed", detail="works"),
+            ],
+            quality_score=4,
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=mostly_blocked,
+        )
+    )
+    # 3/4 blocked > 50% → BLOCKED escalation
+    assert result.verdict == AuditVerdict.BLOCKED
+
+
 def test_audit_quality_low_caps_verdict_at_partial(tmp_path: Path) -> None:
     """Functional verdict PASSED + quality_score < 3 → final verdict
     PARTIAL. This is the audit-final-quality check enforcing that

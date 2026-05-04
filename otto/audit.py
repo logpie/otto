@@ -508,85 +508,23 @@ async def run_audit(
         agent_output = await audit_agent(agent_input)
         cost_total += agent_output.cost_usd
 
-        # The contract test result OVERRIDES the LLM verdict when a
-        # test_command exists. If the contract test fails, the verdict is
-        # at most PARTIAL (cannot be PASSED), regardless of what the
-        # walkthrough agent thinks.
-        verdict = agent_output.verdict
-        narrative = agent_output.narrative
-        if contract_passed is False:
-            if verdict == AuditVerdict.PASSED:
-                verdict = AuditVerdict.PARTIAL
-            narrative = (
-                f"{narrative}\n\n"
-                f"[contract test FAILED]\n{contract_detail}"
-            ).strip()
-
-        # v2.2 defense D3: review the amendment chain. Broken chain or
-        # spec-mutated-outside-chain → BLOCKED. Suspicious patterns
-        # (missing trigger events, concentrated edits, 5+ amendments)
-        # cap at PARTIAL. See docs/intent-to-product-v2.md "Safe
-        # mutability" and otto/spec_amend.py.
+        # Pattern B fix: caps compose order-independent. Collect ALL
+        # caps as records first, then compute final verdict + narrative
+        # ONCE. Previously each cap had its own `if verdict == PASSED:
+        # verdict = X; narrative += Y` pattern — when one cap fired
+        # first, every later cap's narrative addition was silently
+        # dropped. Now narrative ALWAYS captures every active cap;
+        # verdict takes the strictest of all caps.
         from otto.spec_amend import verify_amendment_chain
 
         chain_review = verify_amendment_chain(spec, session_dir=session_dir)
-        if chain_review.verdict_cap == "blocked":
-            verdict = AuditVerdict.BLOCKED
-        elif chain_review.verdict_cap == "partial" and verdict == AuditVerdict.PASSED:
-            verdict = AuditVerdict.PARTIAL
-        if chain_review.findings:
-            narrative = (
-                f"{narrative}\n\n"
-                f"[amendment chain review: {chain_review.verdict_cap}]\n"
-                + "\n".join(f"  - {f}" for f in chain_review.findings)
-            ).strip()
 
-        # Audit-final-quality cap: a functionally-correct but
-        # bare-bones product (forms stacked vertically, no nav, raw
-        # browser styling) shouldn't claim PASSED. Quality < 3 (worse
-        # than MVP) caps at PARTIAL. The intent is to surface "looks
-        # broken" UX without re-litigating "does the contract test
-        # pass" — those are independent dimensions.
-        if (
-            agent_output.quality_score
-            and agent_output.quality_score < 3
-            and verdict == AuditVerdict.PASSED
-        ):
-            verdict = AuditVerdict.PARTIAL
-            narrative = (
-                f"{narrative}\n\n"
-                f"[quality assessment: {agent_output.quality_score}/5]\n"
-                + "\n".join(f"  - {f}" for f in agent_output.quality_findings)
-            ).strip()
-
-        # v2.6 capability cap: any blocked capability prevents PASSED.
-        # >50% of capabilities partial OR mixed → cap at PARTIAL.
-        # This makes the per-feature signal load-bearing: a product
-        # where "RSS feed" is blocked can't pass even if every other
-        # capability works.
-        caps = agent_output.capability_verdicts
-        if caps:
-            blocked_count = sum(1 for c in caps if c.status == "blocked")
-            partial_count = sum(1 for c in caps if c.status == "partial")
-            if blocked_count and verdict == AuditVerdict.PASSED:
-                verdict = AuditVerdict.PARTIAL
-                narrative = (
-                    f"{narrative}\n\n"
-                    f"[capability cap: {blocked_count} blocked]\n"
-                    + "\n".join(
-                        f"  - {c.name}: {c.detail[:120]}"
-                        for c in caps if c.status == "blocked"
-                    )
-                ).strip()
-            elif (
-                partial_count > len(caps) / 2
-                and verdict == AuditVerdict.PASSED
-            ):
-                verdict = AuditVerdict.PARTIAL
-                narrative = (
-                    f"{narrative}\n\n"
-                    f"[capability cap: {partial_count}/{len(caps)} partial]"
-                ).strip()
+        verdict, narrative = _compose_verdict(
+            agent_output=agent_output,
+            contract_passed=contract_passed,
+            contract_detail=contract_detail,
+            chain_review=chain_review,
+        )
 
         last_result = AuditResult(
             verdict=verdict,
@@ -602,6 +540,23 @@ async def run_audit(
             retries=retries_this_pass,
             cost_usd=cost_total,
             wall_s=time.monotonic() - t0,
+        )
+
+        # Pattern A: emit a per-attempt verdict event so the journal
+        # records each retry's outcome. Previously only the FINAL
+        # audit.finished was emitted — debugging a fix loop required
+        # reading per-attempt log dirs by hand.
+        emit(
+            session_dir,
+            "audit.attempt.finished",
+            attempt=retries,
+            detail=narrative[:200],
+            verdict=verdict.value,
+            quality_score=agent_output.quality_score,
+            blocked_capabilities=[
+                c.name for c in agent_output.capability_verdicts
+                if c.status == "blocked"
+            ],
         )
 
         # If passed or no repair available, return.
@@ -999,6 +954,105 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "}"
     )
     return "\n".join(lines)
+
+
+_VERDICT_RANK = {
+    AuditVerdict.PASSED: 0,
+    AuditVerdict.PARTIAL: 1,
+    AuditVerdict.BLOCKED: 2,
+}
+
+
+def _strictest(a: AuditVerdict, b: AuditVerdict) -> AuditVerdict:
+    """Return the stricter of two verdicts (BLOCKED > PARTIAL > PASSED)."""
+    return a if _VERDICT_RANK[a] >= _VERDICT_RANK[b] else b
+
+
+def _compose_verdict(
+    *,
+    agent_output: AuditAgentOutput,
+    contract_passed: bool | None,
+    contract_detail: str,
+    chain_review,  # ChainVerification, but spec_amend imports audit so avoid cycle
+) -> tuple[AuditVerdict, str]:
+    """Compose final verdict + narrative from all caps, order-independent.
+
+    Pattern B fix. Previously each cap was an `if verdict == PASSED:
+    verdict = X; narrative += Y` block; the first cap to fire silently
+    dropped every subsequent cap's narrative because the guard never
+    held. Now every active cap contributes a narrative section AND
+    the verdict is the strictest of all cap-implied verdicts.
+
+    Caps:
+      - LLM-judge verdict (the agent's own output) is the floor.
+      - Contract test failed → at least PARTIAL.
+      - Chain review BLOCKED → BLOCKED. PARTIAL → at least PARTIAL.
+      - Quality score < 3 → at least PARTIAL.
+      - Capability has any BLOCKED → at least PARTIAL. With ALL/MOSTLY
+        blocked → BLOCKED (escalation that the old code couldn't do).
+      - Capability >50% partial → at least PARTIAL.
+    """
+    verdict = agent_output.verdict
+    narrative = agent_output.narrative or ""
+    sections: list[str] = []
+
+    # Contract test cap.
+    if contract_passed is False:
+        verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+        sections.append(f"[contract test FAILED]\n{contract_detail}")
+
+    # Amendment chain cap.
+    if chain_review.verdict_cap == "blocked":
+        verdict = _strictest(verdict, AuditVerdict.BLOCKED)
+    elif chain_review.verdict_cap == "partial":
+        verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+    if chain_review.findings:
+        sections.append(
+            f"[amendment chain review: {chain_review.verdict_cap}]\n"
+            + "\n".join(f"  - {f}" for f in chain_review.findings)
+        )
+
+    # Quality cap.
+    qs = agent_output.quality_score
+    if qs and qs < 3:
+        verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+    # Always narrate quality if assessed and either the score is low OR
+    # findings exist. Doesn't gate on verdict — every active cap surfaces.
+    if qs and (qs < 3 or agent_output.quality_findings):
+        sections.append(
+            f"[quality assessment: {qs}/5]\n"
+            + "\n".join(f"  - {f}" for f in agent_output.quality_findings[:10])
+        )
+
+    # Capability cap.
+    caps = agent_output.capability_verdicts
+    if caps:
+        blocked = [c for c in caps if c.status == "blocked"]
+        partial = [c for c in caps if c.status == "partial"]
+        # Pattern B fix #3: capability cap CAN escalate to BLOCKED when
+        # MORE THAN HALF of capabilities are blocked (catastrophic).
+        # 50/50 stays at PARTIAL — partial damage, not catastrophic.
+        # Previously the cap could only downgrade PASSED→PARTIAL.
+        if len(blocked) * 2 > len(caps):
+            verdict = _strictest(verdict, AuditVerdict.BLOCKED)
+        elif blocked:
+            verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+        elif len(partial) * 2 > len(caps):
+            verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+        # Always narrate any blocked or majority-partial pattern.
+        if blocked or (len(partial) * 2 > len(caps) and partial):
+            section_lines = []
+            if blocked:
+                section_lines.append(f"[capability cap: {len(blocked)}/{len(caps)} blocked]")
+                for c in blocked[:10]:
+                    section_lines.append(f"  - {c.name}: {(c.detail or '')[:120]}")
+            if partial and (len(partial) * 2 > len(caps)):
+                section_lines.append(f"[capability cap: {len(partial)}/{len(caps)} partial]")
+            sections.append("\n".join(section_lines))
+
+    if sections:
+        narrative = (narrative + "\n\n" + "\n\n".join(sections)).strip()
+    return verdict, narrative
 
 
 def _parse_audit_output(text: str) -> AuditAgentOutput:
