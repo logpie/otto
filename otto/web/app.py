@@ -366,9 +366,19 @@ def create_app(
 
     # i2p (intent-to-product) read-only routes — Step 8a.
     # Mounted alongside legacy routes; safe coexistence.
-    if not project_launcher and project_dir is not None:
-        from otto.web.i2p_routes import install_i2p_routes
-        install_i2p_routes(app, project_dir=project_dir)
+    # V19 fix: always mount, with a dynamic provider that reads
+    # `app.state.project_dir` at request time. Previously gated on
+    # `not project_launcher`, which meant launcher-mode users (the
+    # default for `otto web` from a managed projects root) had no
+    # /api/i2p/* routes at all — clicking into a project showed
+    # empty session history because i2p sessions live under
+    # `<project>/otto_logs/sessions/<id>/`, not in MC's legacy
+    # mission-control/events.jsonl.
+    from otto.web.i2p_routes import install_i2p_routes
+    install_i2p_routes(
+        app,
+        project_dir_provider=lambda: getattr(app.state, "project_dir", None),
+    )
 
     app.mount("/static", _CacheHeaderStaticFiles(directory=static_dir), name="static")
     return app

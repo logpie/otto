@@ -129,6 +129,19 @@ Each RUA finding goes through this triage:
    If the next project of the SAME shape passes, it might just be
    stochastic — wait for cross-shape evidence.
 
+## Loop responsibility: keep MC UI usable
+
+If MC UI breaks (the operator can't browse runs / sessions / proof
+packets), **stop the project ladder and fix MC first**. The user
+relies on MC for manual review — without it, the loop can't surface
+findings back to them, and the whole feedback chain breaks.
+
+MC issues are Otto-class by definition (MC IS Otto). Treat them
+exactly like RUA findings: the fix must be generic, not project-
+specific. V19 (MC doesn't surface i2p-pipeline sessions) is the
+canonical example: fix the session reader, not any one project's
+session.
+
 ### RUA budget
 
 RUA adds 5–15 min per project. Worth it for T2+; optional for T1

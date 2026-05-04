@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -45,8 +45,40 @@ from otto.spec_state import journal_path, replay
 logger = logging.getLogger("otto.web.i2p")
 
 
-def install_i2p_routes(app: FastAPI, *, project_dir: Path) -> None:
-    """Mount /api/i2p/* routes and the /i2p/ HTML view onto the given app."""
+def install_i2p_routes(
+    app: FastAPI,
+    *,
+    project_dir: Path | None = None,
+    project_dir_provider: Callable[[], Path | None] | None = None,
+) -> None:
+    """Mount /api/i2p/* routes and the /i2p/ HTML view onto the given app.
+
+    V19 fix: support launcher mode by accepting a callable that resolves
+    the current project at REQUEST time. In launcher mode the active
+    project changes via /api/projects/select; routes constructed with a
+    fixed `project_dir` from app boot point at the wrong (or no) project.
+    Pass `project_dir_provider=lambda: app.state.project_dir` so each
+    request consults the currently-selected project.
+
+    `project_dir` (legacy fixed) and `project_dir_provider` (V19 dynamic)
+    are mutually exclusive. Provider takes precedence when both are set.
+    """
+    if project_dir_provider is None and project_dir is None:
+        raise ValueError("install_i2p_routes needs project_dir or project_dir_provider")
+
+    def _resolve_project_dir() -> Path:
+        """Get the current project dir or raise 409 if none selected."""
+        if project_dir_provider is not None:
+            resolved = project_dir_provider()
+        else:
+            resolved = project_dir
+        if resolved is None:
+            raise HTTPException(
+                status_code=409,
+                detail="No project selected. Open a project from the launcher first.",
+            )
+        return resolved
+
     router = APIRouter(prefix="/api/i2p", tags=["i2p"])
     page_router = APIRouter(prefix="/i2p", tags=["i2p"])
 
@@ -63,7 +95,7 @@ def install_i2p_routes(app: FastAPI, *, project_dir: Path) -> None:
 
     @router.get("/sessions")
     def list_sessions() -> JSONResponse:
-        sessions_root = _paths.sessions_root(project_dir)
+        sessions_root = _paths.sessions_root(_resolve_project_dir())
         if not sessions_root.exists():
             return JSONResponse({"sessions": []})
         items: list[dict[str, Any]] = []
@@ -78,7 +110,7 @@ def install_i2p_routes(app: FastAPI, *, project_dir: Path) -> None:
 
     @router.get("/sessions/{session_id}")
     def get_session(session_id: str) -> JSONResponse:
-        session_dir = _resolve_session_dir(project_dir, session_id)
+        session_dir = _resolve_session_dir(_resolve_project_dir(), session_id)
         spec_path = session_dir / "spec" / "spec.json"
         if not spec_path.exists():
             raise HTTPException(status_code=404, detail="not an i2p session")
@@ -115,7 +147,7 @@ def install_i2p_routes(app: FastAPI, *, project_dir: Path) -> None:
 
     @router.get("/sessions/{session_id}/proof-packet.html")
     def get_proof_packet_html(session_id: str) -> FileResponse:
-        session_dir = _resolve_session_dir(project_dir, session_id)
+        session_dir = _resolve_session_dir(_resolve_project_dir(), session_id)
         path = session_dir / "proof-packet.html"
         if not path.exists():
             raise HTTPException(status_code=404, detail="proof-packet.html not yet produced")
@@ -123,7 +155,7 @@ def install_i2p_routes(app: FastAPI, *, project_dir: Path) -> None:
 
     @router.get("/sessions/{session_id}/proof-packet.json")
     def get_proof_packet_json(session_id: str) -> FileResponse:
-        session_dir = _resolve_session_dir(project_dir, session_id)
+        session_dir = _resolve_session_dir(_resolve_project_dir(), session_id)
         path = session_dir / "proof-packet.json"
         if not path.exists():
             raise HTTPException(status_code=404, detail="proof-packet.json not yet produced")
@@ -131,7 +163,7 @@ def install_i2p_routes(app: FastAPI, *, project_dir: Path) -> None:
 
     @router.get("/sessions/{session_id}/evidence/{path:path}")
     def get_evidence(session_id: str, path: str) -> FileResponse:
-        session_dir = _resolve_session_dir(project_dir, session_id)
+        session_dir = _resolve_session_dir(_resolve_project_dir(), session_id)
         target = (session_dir / path).resolve()
         # Path traversal guard — must remain inside session_dir.
         try:
