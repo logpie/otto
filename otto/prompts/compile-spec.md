@@ -296,6 +296,61 @@ will parse, but downstream stages and reviewers expect the canonical
 shape. Fold endpoints into `routes` and entity-shaped data into
 `data_model`.
 
+### V7 — `project_kind=cli`: required structure fields
+
+For `project_kind: "cli"`, populate `structure.payload` with these
+fields (the per-kind schema validates them; missing fields surface
+as compile warnings):
+
+* **`entrypoint`** — REQUIRED, non-empty string. The Python module
+  path the console script invokes, e.g. `"mksite.cli:main"` or
+  `"mytool.__main__:main"`.
+* **`commands`** — REQUIRED, non-empty array. Each entry MUST have:
+  `name` (string, the subcommand keyword) and `summary` (string,
+  one-line description). Optional: `args` (array of strings naming
+  positional/flag args).
+  → Even single-command CLIs declare one entry (e.g. name=`run`).
+  → Listing commands here pins the CLI surface so two slices do not
+    invent contradictory subcommand sets or flag spellings.
+
+Example:
+```json
+"structure": {
+  "payload": {
+    "entrypoint": "mksite.cli:main",
+    "commands": [
+      {"name": "build", "summary": "Compile content/ → output/", "args": ["--input", "--output", "--config"]},
+      {"name": "clean", "summary": "Remove output dir", "args": ["--output"]},
+      {"name": "serve", "summary": "Local dev preview", "args": ["--output", "--port"]}
+    ]
+  }
+}
+```
+
+### V7 — `project_kind=api`: required structure fields
+
+For `project_kind: "api"`, populate `structure.payload` with:
+
+* **`base_path`** — REQUIRED, string (may be `""`). E.g. `""`, `"/api"`,
+  `"/v1"`. Common prefix for all endpoints.
+* **`endpoints`** — REQUIRED, non-empty array. Each MUST have:
+  `path` (string), `method` (`"GET"|"POST"|...`), `summary` (string).
+  Optional: `auth` (`"public"|"bearer"|"session"`), `request_shape`,
+  `response_shape`, `error_codes` (same shape as webapp routes).
+  → Pinning endpoints here is what stops two slices from drifting on
+    auth scheme, status codes, or field names.
+
+### `project_kind=library`: required structure fields
+
+For `project_kind: "library"`, populate `structure.payload` with:
+
+* **`module`** — REQUIRED, top-level package name (e.g. `"mylib"`).
+* **`exports`** — REQUIRED, non-empty array of public symbol records:
+  `{"name": str, "kind": "function"|"class"|"constant", "summary": str}`.
+  Optional `signature` (str, e.g. `"def parse(text: str) -> dict"`).
+  → A library's public surface IS its contract. Slices that depend on
+    the library import only what's listed here.
+
 ## Concreteness rules (mandatory)
 
 0. **Tasks are CONCRETE actions, not vague prose.** Every entry in
@@ -371,6 +426,36 @@ shape. Fold endpoints into `routes` and entity-shaped data into
 
    The slice that initially CREATES a shared-scaffold file is fine —
    the rule is about exclusive ownership, not initial authorship.
+
+   **V13 — Package-metadata exception (initialize-once, not append-many)**
+
+   Package metadata files are a SPECIAL CASE of shared scaffold:
+
+   * `setup.py`, `pyproject.toml`, `setup.cfg`, `requirements.txt`
+   * `package.json`, `pnpm-lock.yaml`, `package-lock.json`
+   * `Cargo.toml`, `go.mod`, `Gemfile`, `pubspec.yaml`, `build.gradle`
+
+   These files declare DEPENDENCIES for the whole product. If two
+   sibling slices both modify them — each adding their own deps —
+   merge phase WILL hit a real content conflict, because the files
+   have project-wide singletons (single `[project.dependencies]`
+   list, single `dependencies` map, etc.) that two independent edits
+   cannot coexist in.
+
+   **Rule**: package-metadata files MUST be:
+     - In `shared_scaffold` (NOT in any slice's `owned_paths`).
+     - Initialized by exactly ONE slice (the foundation/scaffold
+       slice). That slice declares ALL dependencies the entire
+       product needs upfront, predicting from the spec.
+     - Treated as READ-ONLY by every other slice. If a slice needs
+       a new dep, it MUST request an amendment via
+       `.otto/amendment_request.json` (the runtime supports this);
+       it must NOT modify the metadata file directly.
+
+   This is the only correct way to avoid content conflicts on these
+   files. List ALL needed deps on the foundation slice's tasks,
+   even if predicting forward — better to have an unused dep than
+   a content conflict at merge.
 
 4. **Every slice has at least one check**. Browser journeys are
    `subprocess + glob` for v1: `command` runs (typically a Playwright
