@@ -116,3 +116,83 @@ not PASSED). The structural fix is in the compile prompt:
    from modifying files they don't own.
 
 ## Final verdict: FAIL on rubric (PARTIAL = product incomplete), Otto behavior PASSES (no false positives).
+
+---
+
+# P5 v713 — re-run with V7+V13 prompt fixes — judgment: **PASS**
+
+Session: `/tmp/otto-e2e/p5-ssg/otto_logs/sessions/2026-05-04-131203-caa6d2`
+
+| Phase | Result | Cost | Wall |
+|---|---|---|---|
+| Compile | 4 slices DAG, **only 1 validator warning** (was 5 with V7 absent) | – | – |
+| Build | 4/4 passing | $2.07 | 871s |
+| Merge | **4 landed, 0 blocked** (DAG slice cli-serve-integration with 3 deps merged via V12 path) | $0.00 | – |
+| Audit | **verdict: passed** | $0.27 | 101s |
+| **Total** | | **$2.34** | ~16 min |
+
+## V7 + V13 effects observed in this run
+
+- ✅ V7: structure.payload populated cleanly with `entrypoint`,
+  `commands` (full array), and per-command `summary`/`args`. 5 → 1
+  validator warnings.
+- ✅ V13: `setup.py` lived in `scaffold.owned_paths` (the foundation
+  slice). Other slices did NOT modify it — no merge conflict on
+  package metadata. Foundation declared all deps upfront.
+- ✅ V12: cli-serve-integration has deps=[scaffold, core-pipeline,
+  feeds-discovery]. Build phase used multi-dep branching:
+  ```
+  31f8340 i2p(cli-serve-integration): merge dep i2p/.../scaffold
+  ```
+  V12's `_setup_slice_branch_with_deps` actually fired and brought in
+  sibling-dep code.
+
+## Per-rubric-dimension verdicts
+
+All 5 dimensions PASS.
+
+**Manual product verification** — built the fixture content end-to-end:
+
+```
+$ mksite build --input content --output output
+Site built in 'output'.
+
+$ find output -type f
+output/about.html
+output/index.html
+output/posts/hello-world.html
+output/posts/second-post.html
+output/posts/third-post.html
+output/rss.xml                    # valid RSS 2.0 with 3 items
+output/sitemap.xml
+output/static/style.css
+output/tags/intro.html
+output/tags/meta.html
+```
+
+- Real markdown→HTML rendering with frontmatter parsing.
+- Internal link rewriting works: `[about](about)` → `/about.html`,
+  `[second post](second-post)` → `/posts/second-post.html`.
+- RSS feed has correct items with pubDate, ordered newest first.
+- Tag pages list relevant posts (intro.html, meta.html).
+- Templates extend base.html cleanly.
+- 91 unit tests pass (after `pip install -e .` to register console
+  script).
+
+### Overall: **PASS — first T3 success.**
+
+## V15 noted (lower priority)
+
+Audit's contract test runs with `extra_pythonpath=[project_dir]`,
+making `from mksite import ...` work without pip install. A real user
+running `python -m pytest tests/` from a clean venv must first run
+`pip install -e .`. Audit doesn't surface this requirement. Not a
+runtime correctness bug — just a divergence between Otto's audit
+environment and a fresh-clone user's. Document or auto-install for
+audit-time fidelity. Defer.
+
+## T3 progress
+
+P5 v713: PASS. Need 1 more T3 for tier-pass. Next: a **library**
+project_kind to exercise the third structure schema (V7's library
+section was added but never run).
