@@ -429,18 +429,63 @@ field MUST be a Python boolean expression — the runtime calls
 - `project_dir`, `cwd` — Path objects.
 - Standard builtins: `len`, `all`, `any`, `sorted`, etc.
 
+### **Critical: state_invariants must NOT pin implementation details**
+
+The most common state_invariant failure mode is overfitting: the
+compile agent pins a specific function name, class name, or import
+path that the build agent legitimately implements differently. Two
+real failures observed in benches:
+
+- `'def generate_index' in read_text('blog/pages.py')` — predicted
+  the function would be named `generate_index`. Build agent named it
+  `build_index_page`. Predicate returns False → slice blocked even
+  though the file exists with working code that satisfies the
+  acceptance test.
+- `exists('src/__main__.py')` — predicted package directory `src/`.
+  Build agent (correctly inferring from acceptance test) used `blog/`.
+  Slice blocked.
+
+**Rule**: state_invariants check structural facts, NOT
+implementation details.
+
+Acceptable patterns:
+- File / directory existence: `exists('app.py')`, `is_dir('templates')`.
+- Symbol presence by *role*, not name: prefer the slice's `repo_test`
+  / `pytest` check (which exercises behavior) over a state_invariant
+  that grep's for a specific function name.
+- Counts: `glob_count('migrations/*.sql') >= 1`.
+- Negative invariants for shared-scaffold conflicts: `not exists('app/legacy_models.py')`.
+
+Discouraged patterns (these brittle-fail when the build agent picks
+different but valid implementations):
+- `'def some_function_name' in read_text(...)` — pins a function name.
+- `'class SomeClassName' in read_text(...)` — pins a class name.
+- `'from somewhere import' in read_text(...)` — pins import shape.
+- `exists('src/foo.py')` when the package directory could legitimately
+  be `app/`, `pkg/`, the project name, etc.
+
+If you need to verify behavior, use `repo_test` / `pytest` checks
+that run the actual code. If you need to verify structure, test
+existence/count, not contents-by-string-match.
+
 Examples that WORK:
 
 ```json
 {"kind": "state_invariant",
- "description": "App entry exists and models module has User class",
- "expression": "exists('app.py') and 'class User' in read_text('models.py')"}
+ "description": "App entry exists",
+ "expression": "exists('app.py') or exists('app/__init__.py')"}
 ```
 
 ```json
 {"kind": "state_invariant",
- "description": "Single source-of-truth for User model",
- "expression": "glob_count('**/*models*.py') >= 1 and not exists('app/legacy_models.py')"}
+ "description": "Migrations directory has at least one file",
+ "expression": "glob_count('migrations/*.sql') >= 1 or glob_count('migrations/*.py') >= 1"}
+```
+
+```json
+{"kind": "state_invariant",
+ "description": "No legacy duplicate of models.py left over",
+ "expression": "not exists('app/legacy_models.py')"}
 ```
 
 Examples that FAIL (DO NOT emit these — they cause SyntaxError at
@@ -450,6 +495,15 @@ eval-time and the slice will be BLOCKED):
 "app.py exists and models.py has User class"            ← prose
 "models.py contains User, Follow, Post"                 ← prose
 "all required tables are defined"                       ← prose without code
+```
+
+Examples that PARSE BUT BRITTLE-FAIL (DO NOT emit — they over-specify
+implementation; build agent's correct-but-different output trips them):
+
+```
+"'def generate_index' in read_text('blog/pages.py')"    ← pins function name
+"'class User' in read_text('models.py')"                ← pins class name
+"exists('src/__main__.py')"                             ← pins package dir name
 ```
 
 **Browser UI verification**: if the project root has
