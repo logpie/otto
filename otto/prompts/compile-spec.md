@@ -105,7 +105,7 @@ competing app shells. Examples:
 - Note-taking app intent ("create, list, edit notes")
   → home `key_text`: "new-note form, notes list with edit links".
 
-## UX baseline by `project_kind`
+## UX baseline by feature (additive, not exclusive)
 
 The spec captures functional structure well, but the audit's quality
 check has surfaced a recurring weakness: products consistently produce
@@ -114,10 +114,29 @@ no human-friendly date formatting, no session state) because these
 concerns aren't anchored in the spec. Add the relevant baseline items
 to `done_means` so the build agent treats them as success criteria.
 
+**Apply baselines ADDITIVELY based on what the project actually has,
+not exclusively by project_kind.** A static-site generator typically
+has BOTH a static-site output (HTML pages) AND a CLI build tool — both
+baselines apply. A webapp with a sidecar CLI deploy script: same.
+Don't pick one and skip the rest.
+
+To decide which baselines apply, ask:
+- Does the product produce HTML the user views in a browser? → apply
+  the **HTML output baseline** below (covers webapp + static-site).
+- Does the product expose a CLI entry-point users invoke? → apply
+  the **CLI baseline** below.
+- Does the product expose a Python/JS importable API? → apply the
+  **library baseline** below.
+
 These are NOT optional decoration — they are what separates a
 working code sample from a usable product.
 
-### `project_kind: "webapp"` — required baseline
+### HTML output baseline (webapp / static-site / docs site)
+
+Apply this baseline whenever the product renders HTML the user views
+in a browser, REGARDLESS of project_kind. A static-site generator
+that emits HTML files needs the same UX baseline as a Flask app
+that renders templates.
 
 Add to `done_means`:
 
@@ -159,9 +178,10 @@ Add to `done_means`:
   controls; focus-visible state on interactive elements;
   keyboard-reachable controls (no `<div onclick>` for actions).
 
-### `project_kind: "static-site" / blog` — required baseline
+### Static-site / blog additions (on top of HTML output baseline)
 
-Add to `done_means`:
+If the product is a static-site generator producing post pages, an
+index, and a feed, ALSO add to `done_means`:
 
 - **Custom CSS**: same rule as webapp — go beyond browser default.
 - **Human-readable dates**: render dates as e.g. "January 15, 2026",
@@ -184,18 +204,41 @@ Add to `done_means`:
   `<main>`); `aria-current="page"` on the current-page nav link;
   alt text on images.
 
-### `project_kind: "cli" / "library"` — required baseline
+### CLI baseline (any project that exposes a command-line entry-point)
+
+Apply this baseline whenever the product has a CLI users invoke —
+including projects whose primary kind is webapp or static-site but
+that ALSO ship a build/deploy/dev CLI tool. The static-site bench
+(blog-ssg-i2p-20260503-175229) showed Python tracebacks bubbling up
+to users from a `python -m blog build` failure because the CLI
+baseline only fired for project_kind=cli.
 
 Add to `done_means`:
 
 - **`--help` is complete**: every subcommand listed; flags documented;
   one-line summary at the top.
 - **Error messages are actionable**: errors say WHY and HOW to fix,
-  not just "invalid argument".
+  not just "invalid argument". **Catch internal exceptions and wrap
+  them with user-friendly messages — raw Python tracebacks are NOT
+  acceptable user-facing output.**
 - **Exit codes match convention**: 0 success, non-zero on failure,
   with codes that scripts can switch on.
 - **Default behavior is useful**: running with no flags does
   something sensible (e.g., prints help, processes obvious-target).
+
+### Library baseline (any importable Python/JS module the user calls)
+
+Apply when the product is consumed via `import` rather than
+invoked as a process. Add to `done_means`:
+
+- **Public API is small and stable**: prefer 3-5 well-named
+  exports over 20 grab-bag exports.
+- **Type hints / signatures**: every public function has return
+  and parameter types annotated.
+- **Docstrings**: every public symbol documented with at least
+  one example invocation.
+- **No surprising side effects on import**: importing the package
+  doesn't read disk, hit network, or print to stdout.
 
 ### Why this section exists
 
