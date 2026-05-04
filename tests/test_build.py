@@ -740,3 +740,142 @@ def test_build_agent_prompt_omits_contract_section_when_no_contract(tmp_path: Pa
     )
     prompt = _build_agent_prompt(inp)
     assert "Project contract surface" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Pattern D — real per-slice branches in build loop
+# ---------------------------------------------------------------------------
+
+
+def test_run_build_creates_real_per_slice_branch(tmp_path: Path) -> None:
+    """Pattern D: when run_build runs in a git repo with `base_branch`
+    present, each slice gets a real git branch checked out before its
+    build agent runs. The branch persists after the build (so merge_queue
+    can merge it) and contains the slice's commits.
+    """
+    _init_git(tmp_path)
+    # Ensure we're on `main` (older git default `master`).
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if current != "main":
+        subprocess.run(["git", "branch", "-m", current, "main"], cwd=tmp_path, check=True)
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        # Write to the slice's owned path so there's a real diff.
+        path = input_.worktree / "slice-output.txt"
+        path.write_text(f"work from {input_.slice.id}", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    spec = _spec(
+        [
+            Slice(id="alpha", title="x", deps=[],
+                  owned_paths=["slice-output.txt"],
+                  tasks=["write slice-output.txt"],
+                  checks=[_no_op_passing_check()]),
+        ]
+    )
+    result = asyncio.run(
+        run_build(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_agent=writing_agent, base_branch="main",
+        )
+    )
+    assert result.all_passing
+    # Slice's branch exists in git.
+    branch_check = subprocess.run(
+        ["git", "rev-parse", "--verify", f"i2p/{session_dir.name}/alpha"],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    assert branch_check.returncode == 0, "slice branch should exist after build"
+    # Slice branch has a commit beyond main.
+    log = subprocess.run(
+        ["git", "log", "--format=%s", f"main..i2p/{session_dir.name}/alpha"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout
+    assert "i2p(alpha): build slice" in log
+
+
+def test_run_build_dependent_slice_branches_off_dep_tip(tmp_path: Path) -> None:
+    """Pattern D: a slice with deps branches off its dep's tip so it sees
+    the dep's work. Avoids the trap where each slice starts from a stale
+    base and can't import its dep.
+    """
+    _init_git(tmp_path)
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if current != "main":
+        subprocess.run(["git", "branch", "-m", current, "main"], cwd=tmp_path, check=True)
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        # Each slice writes its own file. Slice b should see slice a's file.
+        out = input_.worktree / f"{input_.slice.id}.txt"
+        out.write_text(f"from {input_.slice.id}", encoding="utf-8")
+        # Verify dep visibility for slice b.
+        if input_.slice.deps:
+            dep_file = input_.worktree / f"{input_.slice.deps[0]}.txt"
+            assert dep_file.exists(), f"dep file {dep_file} should be visible to slice {input_.slice.id}"
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    spec = _spec(
+        [
+            Slice(id="a", title="A", deps=[], owned_paths=["a.txt"],
+                  tasks=["write a"], checks=[_no_op_passing_check()]),
+            Slice(id="b", title="B", deps=["a"], owned_paths=["b.txt"],
+                  tasks=["write b"], checks=[_no_op_passing_check()]),
+        ]
+    )
+    result = asyncio.run(
+        run_build(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_agent=writing_agent, base_branch="main",
+        )
+    )
+    assert result.all_passing
+    # Branch b should contain commits from BOTH a and b.
+    log = subprocess.run(
+        ["git", "log", "--format=%s", f"main..i2p/{session_dir.name}/b"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout
+    assert "i2p(a): build slice" in log
+    assert "i2p(b): build slice" in log
+
+
+def test_run_build_falls_back_when_not_a_git_repo(tmp_path: Path) -> None:
+    """Pattern D: if project_dir isn't a git repo, branch setup is
+    skipped silently and the build completes in single-worktree mode.
+    Ensures Pattern D is non-breaking for non-git fixtures.
+    """
+    # No _init_git — tmp_path is a plain directory.
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        (input_.worktree / "out.txt").write_text("ok", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    spec = _spec(
+        [
+            Slice(id="s1", title="x", deps=[], owned_paths=["out.txt"],
+                  tasks=["write out.txt"], checks=[_no_op_passing_check()]),
+        ]
+    )
+    result = asyncio.run(
+        run_build(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_agent=writing_agent,
+        )
+    )
+    assert result.all_passing
+    # File exists (build agent ran), no git artifacts.
+    assert (tmp_path / "out.txt").exists()
+    assert not (tmp_path / ".git").exists()

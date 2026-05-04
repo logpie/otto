@@ -337,8 +337,14 @@ async def _process_candidate(
         cross_pass = all(ev.passed for ev in cross_evidence) if cross_evidence else True
 
         if slice_pass and cross_pass:
-            outcome = _commit_integration(
-                git, candidate.worktree, slice_id=slice_obj.id, branch=candidate.branch
+            # Pattern D: prefer real `git merge` of the slice's branch
+            # into `base_branch`. Falls back to commit-in-worktree
+            # when no slice branch exists (test fixtures, non-git
+            # project dirs).
+            outcome = _merge_slice_branch(
+                git, candidate.worktree,
+                slice_id=slice_obj.id, branch=candidate.branch,
+                base_branch=candidate.base_branch,
             )
             # Pattern A nuance: REDUNDANT only signals over-reach when the
             # slice HAD declared work (owned_paths or tasks). A vacuous
@@ -472,6 +478,90 @@ class CommitOutcome:
     detail: str = ""
 
 
+def _branch_exists(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+    branch: str,
+) -> bool:
+    """True if `branch` resolves to a commit in `worktree`."""
+    proc = git(["rev-parse", "--verify", branch], worktree)
+    return proc.returncode == 0 and bool((proc.stdout or "").strip())
+
+
+def _merge_slice_branch(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+    *,
+    slice_id: str,
+    branch: str,
+    base_branch: str,
+) -> CommitOutcome:
+    """Real `git merge --no-ff` of slice's branch into `base_branch`.
+
+    Pattern D — replaces the old "git add -A && git commit in shared
+    worktree" model. The slice's branch already has its work as a
+    commit (build.py committed it). This function:
+
+      1. Checks out `base_branch`.
+      2. Runs `git merge --no-ff <slice-branch>` to produce a merge
+         commit (or fast-forward to slice tip if base is unchanged).
+      3. Reports LANDED with the new HEAD, REDUNDANT if no commits to
+         merge, or BLOCKED on conflict / git failure.
+
+    On conflict, aborts the merge cleanly so the worktree is left on
+    `base_branch` ready for the caller to repair or skip the slice.
+    """
+    # 1. Verify slice branch exists. If not, fall back to commit-in-worktree.
+    if not _branch_exists(git, worktree, branch):
+        return _commit_integration(git, worktree, slice_id=slice_id, branch=branch)
+
+    # 2. Checkout base_branch.
+    co_base = git(["checkout", base_branch], worktree)
+    if co_base.returncode != 0:
+        return CommitOutcome(
+            status=MergeStatus.BLOCKED,
+            head_before="",
+            head_after="",
+            detail=f"checkout {base_branch} failed: {co_base.stderr.strip()[:200]}",
+        )
+
+    head_before_proc = git(["rev-parse", "--short", "HEAD"], worktree)
+    head_before = (head_before_proc.stdout or "").strip()
+
+    # 3. Check if slice branch has anything beyond base.
+    range_check = git(["log", "--format=%H", f"{base_branch}..{branch}"], worktree)
+    if range_check.returncode == 0 and not (range_check.stdout or "").strip():
+        # No commits between base and slice tip — REDUNDANT (no diff).
+        return CommitOutcome(
+            status=MergeStatus.REDUNDANT,
+            head_before=head_before,
+            head_after=head_before,
+            detail=f"slice branch {branch} has no commits beyond {base_branch}",
+        )
+
+    # 4. Real merge.
+    msg = f"i2p({slice_id}): merge slice branch {branch}"
+    merge = git(["merge", "--no-ff", "-m", msg, branch], worktree)
+    if merge.returncode != 0:
+        # Conflict — abort cleanly.
+        git(["merge", "--abort"], worktree)
+        return CommitOutcome(
+            status=MergeStatus.BLOCKED,
+            head_before=head_before,
+            head_after=head_before,
+            detail=f"merge conflict on slice branch {branch}: {merge.stderr.strip()[:200]}",
+        )
+
+    head_after_proc = git(["rev-parse", "--short", "HEAD"], worktree)
+    head_after = (head_after_proc.stdout or "").strip()
+    return CommitOutcome(
+        status=MergeStatus.LANDED,
+        head_before=head_before,
+        head_after=head_after,
+        detail="",
+    )
+
+
 def _commit_integration(
     git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
     worktree: Path,
@@ -480,6 +570,11 @@ def _commit_integration(
     branch: str,
 ) -> CommitOutcome:
     """Stage and commit current worktree state as a slice-tagged commit.
+
+    Phase A fallback path — used when the slice branch doesn't exist
+    (no per-slice branches were set up, e.g., test fixtures without
+    git, or non-git project_dir). When a slice branch DOES exist,
+    `_merge_slice_branch` is used instead.
 
     Honestly reports what happened. Captures HEAD before and after,
     distinguishes real commits from no-ops and from failures.

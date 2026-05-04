@@ -467,6 +467,129 @@ def _git_diff_modified_paths(worktree: Path, base_ref: str = "HEAD") -> list[str
 
 
 # ---------------------------------------------------------------------------
+# Pattern D — real per-slice branches
+# ---------------------------------------------------------------------------
+#
+# In single-worktree mode (Phase A), the slice branch is the agent's
+# isolation boundary: each slice's edits land on a fresh branch off
+# `base_branch`, then merge_queue does a real `git merge` to integrate
+# back. Sequential dispatch means we never need parallel worktrees;
+# checking out per-slice branches in the shared worktree is enough.
+#
+# Why this matters: without real branches, every slice's "merge" was
+# `git add -A && git commit` in the shared worktree against whatever
+# state the previous slice left. The first over-reaching slice would
+# leave its work in the worktree, and subsequent slices would see no
+# diff (REDUNDANT) — which Pattern A made honest, but Pattern D fixes
+# the architectural cause. With real branches, each slice starts from
+# a clean base and can only contribute its own diff to its branch.
+
+
+def _is_git_repo(worktree: Path) -> bool:
+    """Cheap check: is `worktree` inside a git repo?"""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=worktree, capture_output=True, text=True, check=False,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _setup_slice_branch(worktree: Path, *, branch: str, parent_ref: str) -> bool:
+    """Create or reset `branch` off `parent_ref`, then check it out.
+
+    `parent_ref` is the git ref this slice should base its work on:
+    - For a slice with no deps: base_branch (e.g., "main").
+    - For a slice with deps: the last-built dep's branch tip
+      (so the slice sees its dep's work and can build on top).
+
+    Returns True on success, False if any git op failed (including
+    "not a git repo"). On failure, callers should fall back to
+    single-worktree behavior — silent corruption of the user's repo
+    state is a worse outcome than a missing per-slice branch.
+
+    Pattern D: this is the entry into a slice's isolation boundary.
+    Every slice starts from a clean copy of its parent ref, so its
+    only contribution is what its build agent writes on top.
+    """
+    if not _is_git_repo(worktree):
+        return False
+    # Verify parent_ref exists.
+    parent_check = subprocess.run(
+        ["git", "rev-parse", "--verify", parent_ref],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    if parent_check.returncode != 0:
+        return False
+    # Don't clobber an in-progress merge/rebase.
+    git_dir = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    if git_dir.returncode == 0:
+        gd = (worktree / git_dir.stdout.strip()).resolve()
+        for sentinel in ("MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD"):
+            if (gd / sentinel).exists():
+                logger.warning(
+                    "git is mid-%s in %s; skipping slice branch setup",
+                    sentinel, worktree,
+                )
+                return False
+    # Reset any uncommitted state so the new branch starts clean.
+    subprocess.run(
+        ["git", "reset", "--hard", "HEAD"],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    subprocess.run(
+        ["git", "clean", "-fdx", "-e", ".otto/", "-e", "_otto_*", "-e", "_session/", "-e", "otto_logs/"],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    # `git checkout -B <branch> <parent_ref>` creates or resets branch
+    # to point at parent_ref and checks it out.
+    co_slice = subprocess.run(
+        ["git", "checkout", "-B", branch, parent_ref],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    return co_slice.returncode == 0
+
+
+def _commit_slice_work(worktree: Path, *, slice_id: str, branch: str) -> bool:
+    """Stage and commit the slice's work to its branch.
+
+    Called at the END of a slice's successful build, so the slice
+    branch has a real commit (or no commit if there's no diff,
+    surfaced as REDUNDANT downstream).
+
+    Returns True if a commit was made or there were no changes;
+    False on git failure.
+    """
+    if not _is_git_repo(worktree):
+        return False
+    add = subprocess.run(
+        ["git", "add", "-A"],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    if add.returncode != 0:
+        return False
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    if not (status.stdout or "").strip():
+        # Nothing to commit. Slice contributed no diff; merge_queue
+        # will surface this as REDUNDANT.
+        return True
+    msg = f"i2p({slice_id}): build slice on {branch}"
+    commit = subprocess.run(
+        ["git", "commit", "-q", "-m", msg, "--no-verify"],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    return commit.returncode == 0
+
+
+# ---------------------------------------------------------------------------
 # The build loop
 # ---------------------------------------------------------------------------
 
@@ -479,6 +602,7 @@ async def run_build(
     build_agent: BuildAgentCallable,
     base_url: str | None = None,
     budget: BuildBudget | None = None,
+    base_branch: str = "main",
     branch_for_slice: Callable[[Slice], str] | None = None,
     worktree_for_slice: Callable[[Slice], Path] | None = None,
     on_state_change: Callable[[str, str, dict[str, Any]], None] | None = None,
@@ -542,6 +666,10 @@ async def run_build(
         if on_state_change is not None:
             on_state_change(slice_id, status.value, extra or {})
 
+    # Pattern D: track each completed slice's branch so dependent
+    # slices can branch off them and see their work.
+    branch_by_slice: dict[str, str] = {}
+
     while True:
         ready = ready_slices(spec, completed_ids, skipped_ids=blocked_ids)
         if not ready:
@@ -550,7 +678,37 @@ async def run_build(
         next_slice = ready[0]
         slice_branch = branch_for_slice(next_slice)
         slice_worktree = worktree_for_slice(next_slice)
-        _emit_state(next_slice.id, SliceStatus.IN_PROGRESS, {"branch": slice_branch})
+
+        # Pattern D: choose the parent ref based on deps. A slice with
+        # no deps branches off `base_branch`. A slice with deps branches
+        # off the LAST dep's tip — so it sees that dep's work AND
+        # (transitively) all earlier deps. This works because the
+        # build runs sequential dep-topological order, and each dep's
+        # branch was itself created off its own dep's tip.
+        if next_slice.deps:
+            last_dep = next_slice.deps[-1]
+            parent_ref = branch_by_slice.get(last_dep, base_branch)
+        else:
+            parent_ref = base_branch
+
+        # Create a real per-slice branch so the slice's edits
+        # accumulate on its own branch — no taint from peer slices,
+        # real merges downstream. Falls back gracefully if the worktree
+        # isn't a git repo (tests, certain bench fixtures); the build
+        # still works, just without branch isolation.
+        branch_real = _setup_slice_branch(
+            slice_worktree, branch=slice_branch, parent_ref=parent_ref,
+        )
+        if not branch_real:
+            logger.info(
+                "slice %s: per-slice branch setup skipped (not a git repo or "
+                "base branch missing); using single-worktree mode",
+                next_slice.id,
+            )
+        _emit_state(
+            next_slice.id, SliceStatus.IN_PROGRESS,
+            {"branch": slice_branch, "branch_real": branch_real},
+        )
 
         slice_result = await _run_slice(
             spec=spec,
@@ -563,6 +721,20 @@ async def run_build(
             base_url=base_url,
             budget=budget,
         )
+
+        # Pattern D: commit the slice's work to its branch so merge_queue
+        # can do a real `git merge`. Only run when branch setup succeeded.
+        if branch_real and slice_result.status == SliceStatus.PASSING:
+            committed = _commit_slice_work(
+                slice_worktree, slice_id=next_slice.id, branch=slice_branch,
+            )
+            if not committed:
+                logger.warning(
+                    "slice %s: failed to commit work to branch %s",
+                    next_slice.id, slice_branch,
+                )
+            branch_by_slice[next_slice.id] = slice_branch
+
         total_cost += slice_result.cost_usd
         results.append(slice_result)
         if slice_result.status == SliceStatus.PASSING:

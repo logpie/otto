@@ -444,6 +444,158 @@ def test_run_merge_queue_no_op_commit_when_no_changes(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pattern D — real per-slice branches and real merges
+# ---------------------------------------------------------------------------
+
+
+def test_run_merge_queue_real_merge_when_slice_branch_exists(tmp_path: Path) -> None:
+    """Pattern D: when the slice's branch exists in git, merge_queue does
+    a real `git merge --no-ff` instead of `git add && git commit` in the
+    shared worktree. The integration commit is a true merge commit
+    (two parents) traceable to the slice branch.
+    """
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    branch = "i2p/_session/s1"
+    # Set up the slice branch with its own commit, then return to main.
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "slice-work.txt").write_text("from slice", encoding="utf-8")
+    subprocess.run(["git", "add", "slice-work.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(s1): build slice", "--no-verify"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec(
+        [
+            Slice(id="s1", title="x", deps=[], owned_paths=["slice-work.txt"],
+                  tasks=["write slice-work"], checks=[_passing_check()]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        slice_results=[
+            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1,
+                        branch=branch, worktree=tmp_path),
+        ],
+    )
+    # Use the same branch_for_slice formula as the production default.
+    result = asyncio.run(
+        run_merge_queue(
+            spec, build_result, project_dir=tmp_path, session_dir=session_dir,
+            branch_for_slice=lambda s: branch,
+        )
+    )
+    assert result.landed_ids == ["s1"]
+    # Verify a real merge commit was created (two parents).
+    head_parents = subprocess.run(
+        ["git", "log", "-1", "--pretty=format:%P"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip().split()
+    assert len(head_parents) == 2, f"expected merge commit (2 parents), got {head_parents}"
+    # Slice's file is now on main.
+    assert (tmp_path / "slice-work.txt").exists()
+
+
+def test_run_merge_queue_real_merge_redundant_when_branch_empty(tmp_path: Path) -> None:
+    """Pattern D: a slice branch that exists but has no commits beyond
+    base_branch reports REDUNDANT (slice produced no diff).
+    """
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    branch = "i2p/_session/s1"
+    # Create slice branch but make NO commits on it.
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec(
+        [
+            Slice(id="s1", title="x", deps=[],
+                  owned_paths=["expected.txt"],  # had declared work
+                  tasks=["write expected.txt"],
+                  checks=[_passing_check()]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        slice_results=[
+            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1,
+                        branch=branch, worktree=tmp_path),
+        ],
+    )
+    result = asyncio.run(
+        run_merge_queue(
+            spec, build_result, project_dir=tmp_path, session_dir=session_dir,
+            branch_for_slice=lambda s: branch,
+        )
+    )
+    # Slice declared work but produced no diff — REDUNDANT, surfaced
+    # as the over-reach diagnostic. Counts as landed for dep flow.
+    assert "s1" in result.landed_ids
+    assert "s1" in result.redundant_ids
+    assert result.results[0].status == MergeStatus.REDUNDANT
+
+
+def test_run_merge_queue_real_merge_blocks_on_conflict(tmp_path: Path) -> None:
+    """Pattern D: a slice branch that conflicts with main on merge
+    BLOCKS without an agent (real merge errors are surfaced, not hidden).
+    """
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    # main: file with content A
+    (tmp_path / "shared.txt").write_text("A", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "main A", "--no-verify"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+
+    # slice branch off an EARLIER state, modify shared.txt to B.
+    subprocess.run(["git", "checkout", "-b", "i2p/_session/s1", "main~1"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "shared.txt").write_text("B", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(s1): conflicting B", "--no-verify"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec(
+        [
+            Slice(id="s1", title="x", deps=[], owned_paths=["shared.txt"],
+                  tasks=["edit shared.txt"], checks=[_passing_check()]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        slice_results=[
+            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1,
+                        branch="i2p/_session/s1", worktree=tmp_path),
+        ],
+    )
+    result = asyncio.run(
+        run_merge_queue(
+            spec, build_result, project_dir=tmp_path, session_dir=session_dir,
+            branch_for_slice=lambda s: "i2p/_session/s1",
+        )
+    )
+    assert result.blocked_ids == ["s1"]
+    assert "merge conflict" in result.results[0].failure_narrative.lower()
+    # Verify worktree is left clean (merge --abort ran).
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert status == "", f"worktree should be clean after aborted merge, got: {status}"
+
+
+# ---------------------------------------------------------------------------
 # Integration with build.py's BuildResult
 # ---------------------------------------------------------------------------
 
