@@ -622,7 +622,10 @@ def _merge_slice_branch(
     # to HEAD discards uncommitted changes to tracked files; clean
     # (preserving log/session dirs) removes untracked transient files.
     git(["reset", "--hard", "HEAD"], worktree)
-    git(["clean", "-fdx", "-e", ".otto/", "-e", "_otto_*", "-e", "_session/", "-e", "otto_logs/"], worktree)
+    # V18: preserve user-owned project config files alongside Otto runtime paths.
+    git(["clean", "-fdx",
+         "-e", ".otto/", "-e", "_otto_*", "-e", "_session/", "-e", "otto_logs/",
+         "-e", "otto.yaml", "-e", "intent.md"], worktree)
 
     # 2. Checkout base_branch.
     co_base = git(["checkout", base_branch], worktree)

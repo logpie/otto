@@ -630,7 +630,14 @@ def _setup_slice_branch(worktree: Path, *, branch: str, parent_ref: str) -> bool
         cwd=worktree, capture_output=True, text=True, check=False,
     )
     subprocess.run(
-        ["git", "clean", "-fdx", "-e", ".otto/", "-e", "_otto_*", "-e", "_session/", "-e", "otto_logs/"],
+        # V18: also preserve user-owned project config files (otto.yaml,
+        # intent.md). These are untracked at project root by default
+        # but are essential inputs Otto reads each slice; clobbering
+        # them between slices breaks subsequent build/merge/audit
+        # phases that consult test_command etc.
+        ["git", "clean", "-fdx",
+         "-e", ".otto/", "-e", "_otto_*", "-e", "_session/", "-e", "otto_logs/",
+         "-e", "otto.yaml", "-e", "intent.md"],
         cwd=worktree, capture_output=True, text=True, check=False,
     )
     # `git checkout -B <branch> <parent_ref>` creates or resets branch
