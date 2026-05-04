@@ -1,0 +1,30 @@
+  otto run — session 2026-05-04-102212-403448
+
+spec validator: multi-slice spec declares no cross_slice_checks (integration testing is missing — slices may pass in isolation while their composition is broken)
+spec validator: structure.payload: missing required field 'base_path'
+spec validator: structure.payload: missing required field 'endpoints'
+  Compile complete — 3 slice(s), project_kind=api
+  Spec: 
+/private/tmp/otto-e2e/p4-fastapi-tasks/otto_logs/sessions/2026-05-04-102212-4034
+48/spec/spec.json
+  Spec validator warnings (3):
+    · multi-slice spec declares no cross_slice_checks (integration testing is 
+missing — slices may pass in isolation while their composition is broken)
+    · structure.payload: missing required field 'base_path'
+    · structure.payload: missing required field 'endpoints'
+
+  Build phase — dispatching slice agents
+  Build: 3/3 slices passing, $1.28, 531s
+
+  Merge phase — landing slices in dep order
+  Merge: 3 landed, 0 blocked, $0.00
+
+  Audit phase — final integrated review
+  Audit verdict: passed; $0.18, 91s
+
+  Render phase — assembling proof packet
+  Proof: 
+/private/tmp/otto-e2e/p4-fastapi-tasks/otto_logs/sessions/2026-05-04-102212-4034
+48/proof-packet.html
+        /private/tmp/otto-e2e/p4-fastapi-tasks/otto_logs/sessions/2026-05-04-102
+212-403448/proof-packet.json
