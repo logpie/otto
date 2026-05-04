@@ -455,20 +455,40 @@ def _verdict(summary: dict[str, Any]) -> str:
         return "timeout"
     if not summary.get("session_dir"):
         return "no_session_produced"
-    if summary.get("slices_blocked"):
-        return "slices_did_not_land"
     if not summary.get("slices_landed"):
         return "no_slices_landed"
     if summary.get("audit_verdict") not in ("passed", "partial"):
         return f"unexpected_audit_verdict_{summary.get('audit_verdict','')}"
     if not summary.get("acceptance_independent_pass"):
         return "acceptance_failed"
+
+    # Bookkeeping vs reality: slices can show "blocked" in the journal
+    # while the integrated worktree contains a working product (single-
+    # worktree artifact + soft scope warnings). The truth-source is the
+    # framework + acceptance + audit, NOT the slice tracker. Surface
+    # the disagreement explicitly.
+    blocked_count = len(summary.get("slices_blocked") or [])
+    eval_agg = summary.get("evaluator_aggregate", "skipped")
+    audit_pass = summary.get("audit_verdict") == "passed"
+    real_works = (
+        summary.get("acceptance_independent_pass") is True
+        and audit_pass
+        and eval_agg in ("passed", "partial", "skipped")
+    )
+
     # Audit-final-quality (audit-final-quality check). Score 0 = audit
     # didn't assess (treat as no-signal). Score 1-2 = audit flagged
     # quality issues; surface as a separate verdict.
     qs = summary.get("quality_score") or 0
     if 0 < qs < 3:
         return "low_quality"
+
+    if blocked_count and real_works:
+        return "passed_despite_blocked_slices"
+    if blocked_count:
+        return "slices_did_not_land"
+    if eval_agg == "blocked":
+        return "evaluators_blocked"
     if summary.get("audit_verdict") == "partial":
         return "partial_but_acceptance_passes"
     return "passed"
