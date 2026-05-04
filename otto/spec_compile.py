@@ -464,12 +464,37 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
             if check is not None:
                 checks.append(check)
 
+        # S5 fix: warn on silent coercion of tasks/deps/owned_paths.
+        # Pattern E already did this for `checks`; the same hole exists
+        # for the other list fields. Under-specified slices that look
+        # valid because the parser swallowed the gap are exactly the
+        # bugs the validator should catch.
+        def _coerce_str_list(field_name: str) -> list[str]:
+            raw = entry.get(field_name)
+            if raw is None:
+                collector.add(
+                    code="spec.coerce.field",
+                    path=f"slices[{index}].{field_name}",
+                    message=f"{field_name} field missing on slice; using []",
+                    coerced_to="[]",
+                )
+                return []
+            if not isinstance(raw, list):
+                collector.add(
+                    code="spec.coerce.field",
+                    path=f"slices[{index}].{field_name}",
+                    message=f"{field_name} should be a list, got {type(raw).__name__}; using []",
+                    coerced_to="[]",
+                )
+                return []
+            return [str(item) for item in raw]
+
         slices.append(Slice(
             id=slice_id,
             title=str(entry.get("title") or ""),
-            tasks=[str(t) for t in (entry.get("tasks") or [])],
-            deps=[str(d) for d in (entry.get("deps") or [])],
-            owned_paths=[str(p) for p in (entry.get("owned_paths") or [])],
+            tasks=_coerce_str_list("tasks"),
+            deps=_coerce_str_list("deps"),
+            owned_paths=_coerce_str_list("owned_paths"),
             checks=checks,
         ))
 
@@ -755,6 +780,16 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
 
     if not spec.slices:
         warnings.append("spec declares no slices")
+    elif len(spec.slices) > 1 and not spec.cross_slice_checks:
+        # S4 fix: a multi-slice product without integration tests means
+        # each slice passes in isolation but their composition is
+        # unverified. Surface as a warning so the spec author can
+        # decide whether to add checks or accept the gap.
+        warnings.append(
+            "multi-slice spec declares no cross_slice_checks "
+            "(integration testing is missing — slices may pass in "
+            "isolation while their composition is broken)"
+        )
 
     seen_ids: set[str] = set()
     for slice_ in spec.slices:
@@ -767,6 +802,25 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
             warnings.append(f"slice {slice_.id!r}: title is empty")
         if not slice_.checks:
             warnings.append(f"slice {slice_.id!r}: no checks declared (vacuously passes)")
+        # S1 fix: tasks must be present and concrete enough that two
+        # independent build agents cannot drift on what to do. Empty
+        # tasks → vacuous slice (BLOCKED downstream is unhelpful;
+        # better to surface at validate). Single-word/very-short tasks
+        # → likely vague prose (e.g. "implement", "build it") rather
+        # than actionable steps tied to file paths or API shapes.
+        if not slice_.tasks:
+            warnings.append(
+                f"slice {slice_.id!r}: tasks field empty (no concrete work declared)"
+            )
+        else:
+            for t_idx, task in enumerate(slice_.tasks):
+                stripped = task.strip()
+                if len(stripped) < 10:
+                    warnings.append(
+                        f"slice {slice_.id!r}.tasks[{t_idx}]: task too vague "
+                        f"({stripped!r}); needs a concrete action tied to file "
+                        f"paths, API shapes, or behaviors"
+                    )
 
     for slice_ in spec.slices:
         for dep in slice_.deps:
@@ -819,13 +873,26 @@ def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def append_amendment(spec: Spec, *, reason: str, actor: str, prior_sha256: str | None = None) -> Spec:
+def append_amendment(
+    spec: Spec,
+    *,
+    reason: str,
+    actor: str,
+    prior_sha256: str | None = None,
+    trigger_event_id: str = "",
+    tier: int = 0,
+) -> Spec:
     """Return a new `Spec` with an amendment appended.
 
     Use this whenever the spec content changes after the initial write.
     `prior_sha256` is the content hash before the user's edit; if absent
     we use `spec.amendments[-1].diff_sha256_after` (or empty for first
     edit). `reason` must be non-empty.
+
+    S2 fix: callers may pass `trigger_event_id` and `tier` so the
+    amendment record cites the journal event that motivated it.
+    Without these, replay can't reconstruct what triggered an amendment
+    and the v2.2 traceability promise is broken.
     """
     if not reason or not reason.strip():
         raise ValueError("amendment reason must be non-empty")
@@ -846,6 +913,8 @@ def append_amendment(spec: Spec, *, reason: str, actor: str, prior_sha256: str |
                 ts=_iso_now(),
                 diff_sha256_before=prior_sha256,
                 diff_sha256_after=after_hash,
+                trigger_event_id=trigger_event_id,
+                tier=tier,
             ),
         ],
     )

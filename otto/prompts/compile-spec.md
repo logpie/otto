@@ -298,6 +298,25 @@ shape. Fold endpoints into `routes` and entity-shaped data into
 
 ## Concreteness rules (mandatory)
 
+0. **Tasks are CONCRETE actions, not vague prose.** Every entry in
+   `slice.tasks` must name a specific file path, API shape, data
+   structure, or visible behavior — referenced from elsewhere in the
+   spec where possible. Vague prose ("implement the feature", "build
+   the API", "fix the bug", "add error handling") is rejected: a
+   second build agent could not reproduce the work from such a task.
+
+   Acceptable:
+   - "Add `GET /api/bookmarks` returning `[{id, url, title}]`"
+   - "Scaffold React component `<AddBookmarkForm>` referenced in `routes[1].component`"
+   - "Create SQLAlchemy `Bookmark` model with fields: id, url, title, created_at"
+   - "In `app.py`, register the auth blueprint at `/auth`"
+
+   Rejected (too vague):
+   - "Implement the API" — which API? what contract?
+   - "Build the feature" — which feature? what does done look like?
+   - "Add error handling" — where? for which error codes?
+   - "Wire it up" — what to what?
+
 1. **Routes / components are NAMED** with their key visible text. "Home"
    alone is not enough — say `"key_text": "Bookmark Manager"`. This is
    what stops two slices from rendering competing app shells.

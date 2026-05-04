@@ -41,6 +41,7 @@ from typing import Any, Callable
 from otto.build import (
     BuildAgentCallable,
     BuildAgentInput,
+    BuildBudget,
     BuildResult,
     SliceStatus,
 )
@@ -164,6 +165,7 @@ async def run_merge_queue(
     base_url: str | None = None,
     build_agent: BuildAgentCallable | None = None,
     budget: MergeBudget | None = None,
+    shared_budget: BuildBudget | None = None,
     branch_for_slice: Callable[[Slice], str] | None = None,
     git_runner: Callable[[list[str], Path], subprocess.CompletedProcess[str]] | None = None,
 ) -> MergeQueueResult:
@@ -227,6 +229,7 @@ async def run_merge_queue(
             base_url=base_url,
             build_agent=build_agent,
             budget=budget,
+            shared_budget=shared_budget,
             git=git,
         )
         total_cost += result.cost_usd
@@ -285,6 +288,7 @@ async def _process_candidate(
     base_url: str | None,
     build_agent: BuildAgentCallable | None,
     budget: MergeBudget,
+    shared_budget: BuildBudget | None,
     git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
 ) -> MergeResult:
     """Run the slice's merge step.
@@ -354,28 +358,49 @@ async def _process_candidate(
             status = outcome.status
             if status == MergeStatus.REDUNDANT and not (slice_obj.tasks or slice_obj.owned_paths):
                 status = MergeStatus.LANDED
-            return MergeResult(
-                slice_id=slice_obj.id,
-                status=status,
-                landed_commit=outcome.head_after,
-                cross_slice_evidence=cross_evidence,
-                slice_recheck_evidence=slice_evidence,
-                repair_attempts=repair_attempts,
-                cost_usd=cost_total,
-                wall_s=time.monotonic() - t0,
-                failure_narrative=(
-                    outcome.detail if status not in (MergeStatus.LANDED, MergeStatus.REDUNDANT) else ""
-                ),
-            )
+            # B1 fix: if the merge BLOCKED on a conflict, route into the
+            # repair loop instead of returning immediately. The repair
+            # agent will be checked out onto the slice branch and asked
+            # to fix the conflict; the next loop iteration re-runs
+            # checks and re-attempts the merge.
+            if status == MergeStatus.BLOCKED and "merge conflict" in (outcome.detail or "").lower():
+                last_failure = outcome.detail or "merge conflict"
+                # Fall through to the repair-or-block path below.
+            else:
+                return MergeResult(
+                    slice_id=slice_obj.id,
+                    status=status,
+                    landed_commit=outcome.head_after,
+                    cross_slice_evidence=cross_evidence,
+                    slice_recheck_evidence=slice_evidence,
+                    repair_attempts=repair_attempts,
+                    cost_usd=cost_total,
+                    wall_s=time.monotonic() - t0,
+                    failure_narrative=(
+                        outcome.detail if status not in (MergeStatus.LANDED, MergeStatus.REDUNDANT) else ""
+                    ),
+                )
+            # Skip the verification-failure narrative below since we
+            # already have one from the merge conflict.
+            slice_failed_summaries = []
+            cross_failed_summaries = []
+        else:
+            slice_failed_summaries = None  # type: ignore[assignment]
+            cross_failed_summaries = None  # type: ignore[assignment]
 
         # Failure: prepare narrative.
-        slice_failed_summaries = [ev.detail for ev in slice_evidence if not ev.passed]
-        cross_failed_summaries = [ev.detail for ev in cross_evidence if not ev.passed]
-        last_failure = "merge verification failed"
-        if slice_failed_summaries:
-            last_failure += f" — slice: {'; '.join(slice_failed_summaries[:3])}"
-        if cross_failed_summaries:
-            last_failure += f" — cross-slice: {'; '.join(cross_failed_summaries[:3])}"
+        # B1 fix: if we fell through here from a merge-conflict, both
+        # *_failed_summaries are already set to []; the last_failure
+        # narrative was set by the merge_slice_branch outcome above.
+        if slice_failed_summaries is None:
+            slice_failed_summaries = [ev.detail for ev in slice_evidence if not ev.passed]
+        if cross_failed_summaries is None:
+            cross_failed_summaries = [ev.detail for ev in cross_evidence if not ev.passed]
+            last_failure = "merge verification failed"
+            if slice_failed_summaries:
+                last_failure += f" — slice: {'; '.join(slice_failed_summaries[:3])}"
+            if cross_failed_summaries:
+                last_failure += f" — cross-slice: {'; '.join(cross_failed_summaries[:3])}"
 
         # If we have no agent or no repair retries left → BLOCKED.
         if build_agent is None:
@@ -402,7 +427,29 @@ async def _process_candidate(
             )
 
         # 4: invoke the build agent for repair.
+        # B1 fix: when a slice branch exists, the repair MUST happen on
+        # the slice's branch — not on base_branch. After
+        # `_merge_slice_branch` aborts a conflict, the worktree is left
+        # on base_branch; if the agent edits there, the slice branch
+        # never gets the fix and the next merge attempt repeats the
+        # same conflict. Checkout the slice's branch first, repair,
+        # commit on the slice branch, then let the next loop iteration
+        # re-merge.
         repair_attempts += 1
+        on_slice_branch = False
+        if _branch_exists(git, candidate.worktree, candidate.branch):
+            co = git(["checkout", candidate.branch], candidate.worktree)
+            on_slice_branch = co.returncode == 0
+            if not on_slice_branch:
+                last_failure = (
+                    f"could not checkout slice branch {candidate.branch} for repair: "
+                    f"{co.stderr.strip()[:200]}"
+                )
+                emit(
+                    session_dir, "slice.attempt.failed",
+                    slice_id=slice_obj.id, attempt=repair_attempts, detail=last_failure,
+                )
+                continue
         agent_input = BuildAgentInput(
             spec=spec,
             slice=slice_obj,
@@ -413,9 +460,26 @@ async def _process_candidate(
             last_failure_narrative=last_failure,
             log_dir=raw_log_dir / f"repair-attempt-{repair_attempts:02d}",
         )
+        # C1 fix: bail out if the shared cost pool is exhausted.
+        # Without this, repair retries can drain past the global cap.
+        if shared_budget is not None and shared_budget.remaining_total_cost_usd() <= 0:
+            last_failure = (
+                f"shared cost budget exhausted "
+                f"(${shared_budget._spent_cost_usd:.2f} >= "
+                f"${shared_budget.total_cost_usd:.2f})"
+            )
+            emit(
+                session_dir, "slice.attempt.failed",
+                slice_id=slice_obj.id, attempt=repair_attempts, detail=last_failure,
+            )
+            if on_slice_branch:
+                git(["checkout", candidate.base_branch], candidate.worktree)
+            continue
         try:
             agent_output = await build_agent(agent_input)
             cost_total += agent_output.cost_usd
+            if shared_budget is not None:
+                shared_budget.charge_cost(agent_output.cost_usd)
             if not agent_output.succeeded:
                 last_failure = agent_output.detail or "agent reported failure during merge repair"
                 emit(
@@ -425,9 +489,29 @@ async def _process_candidate(
                     attempt=repair_attempts,
                     detail=last_failure,
                 )
+                if on_slice_branch:
+                    git(["checkout", candidate.base_branch], candidate.worktree)
                 # Loop back to retry verification (which will fail again
                 # and either re-invoke the agent or block).
                 continue
+            # Agent succeeded — commit the repair to the slice branch
+            # so the next merge attempt sees the fix.
+            if on_slice_branch:
+                add = git(["add", "-A"], candidate.worktree)
+                if add.returncode == 0:
+                    status = git(["status", "--porcelain"], candidate.worktree)
+                    if (status.stdout or "").strip():
+                        msg = f"i2p({slice_obj.id}): repair on {candidate.branch} (attempt {repair_attempts})"
+                        commit = git(
+                            ["commit", "-q", "-m", msg, "--no-verify"],
+                            candidate.worktree,
+                        )
+                        if commit.returncode != 0:
+                            logger.warning(
+                                "repair commit failed for slice %s: %s",
+                                slice_obj.id, commit.stderr,
+                            )
+                git(["checkout", candidate.base_branch], candidate.worktree)
         except Exception as exc:
             last_failure = (
                 f"merge repair agent crashed on attempt {repair_attempts}: "
@@ -440,6 +524,8 @@ async def _process_candidate(
                 attempt=repair_attempts,
                 detail=last_failure,
             )
+            if on_slice_branch:
+                git(["checkout", candidate.base_branch], candidate.worktree)
             continue
 
 

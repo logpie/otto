@@ -418,3 +418,138 @@ def test_persist_spec_rejects_amendment_with_wrong_prior_hash(tmp_path: Path) ->
     amended = append_amendment(spec_changed, reason="bad", actor="tester", prior_sha256="deadbeef")
     with pytest.raises(SpecValidationError):
         persist_spec(amended, target)
+
+
+# ---------------------------------------------------------------------------
+# S1: validator warns on empty/vague tasks
+# ---------------------------------------------------------------------------
+
+
+def _slice_with_tasks(tasks: list[str], slice_id: str = "s1") -> Slice:
+    return Slice(
+        id=slice_id, title="x", deps=[],
+        owned_paths=["x.txt"], tasks=tasks,
+        checks=[PytestCheck(selector="tests/")],
+    )
+
+
+def _spec_with_slice(slice_: Slice) -> Spec:
+    return Spec(
+        intent="test", project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        slices=[slice_],
+    )
+
+
+def test_validator_warns_on_empty_tasks() -> None:
+    spec = _spec_with_slice(_slice_with_tasks([]))
+    result = validate_spec(spec)
+    assert any(
+        "tasks field empty" in w for w in result.warnings
+    ), f"expected empty-tasks warning; got {result.warnings}"
+
+
+def test_validator_warns_on_vague_short_tasks() -> None:
+    spec = _spec_with_slice(_slice_with_tasks(["build it", "fix"]))
+    result = validate_spec(spec)
+    vague_warnings = [w for w in result.warnings if "too vague" in w]
+    assert len(vague_warnings) == 2, (
+        f"expected 2 vague-task warnings, got {vague_warnings}"
+    )
+
+
+def test_validator_accepts_concrete_tasks() -> None:
+    spec = _spec_with_slice(_slice_with_tasks([
+        "Add GET /api/items returning [{id, name}]",
+        "Wire register_blueprint(items_bp) in app.py",
+    ]))
+    result = validate_spec(spec)
+    assert not any("too vague" in w for w in result.warnings)
+    assert not any("tasks field empty" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# S4: validator warns on multi-slice spec without cross_slice_checks
+# ---------------------------------------------------------------------------
+
+
+def test_validator_warns_multi_slice_without_cross_checks() -> None:
+    spec = Spec(
+        intent="test", project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        slices=[
+            _slice_with_tasks(["Add foo to app.py"], slice_id="a"),
+            _slice_with_tasks(["Add bar to app.py"], slice_id="b"),
+        ],
+        cross_slice_checks=[],
+    )
+    result = validate_spec(spec)
+    assert any("cross_slice_checks" in w for w in result.warnings)
+
+
+def test_validator_silent_on_single_slice_without_cross_checks() -> None:
+    spec = _spec_with_slice(_slice_with_tasks(["Add /api/foo endpoint"]))
+    result = validate_spec(spec)
+    # Single-slice spec shouldn't trigger the multi-slice integration warning.
+    assert not any("cross_slice_checks" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# S5: parser warns on missing/wrong-type tasks/deps/owned_paths
+# ---------------------------------------------------------------------------
+
+
+def test_parse_warns_on_missing_tasks_field() -> None:
+    from otto.spec_compile import parse_spec
+    bad = {
+        "intent": "x", "project_kind": "webapp",
+        "structure": {"payload": {}},
+        "slices": [{"id": "s1", "title": "x"}],  # NO tasks/deps/owned_paths
+    }
+    spec, warnings = parse_spec(bad)
+    codes = [w.code for w in warnings]
+    paths = [w.path for w in warnings]
+    assert "spec.coerce.field" in codes
+    assert "slices[0].tasks" in paths
+    assert "slices[0].deps" in paths
+    assert "slices[0].owned_paths" in paths
+
+
+def test_parse_warns_on_wrong_type_tasks() -> None:
+    from otto.spec_compile import parse_spec
+    bad = {
+        "intent": "x", "project_kind": "webapp",
+        "structure": {"payload": {}},
+        "slices": [{"id": "s1", "title": "x", "tasks": "build it"}],  # str instead of list
+    }
+    spec, warnings = parse_spec(bad)
+    assert any(
+        w.path == "slices[0].tasks" and "should be a list" in w.message
+        for w in warnings
+    )
+
+
+# ---------------------------------------------------------------------------
+# S2: append_amendment threads trigger_event_id and tier
+# ---------------------------------------------------------------------------
+
+
+def test_append_amendment_records_trigger_event_id_and_tier() -> None:
+    spec = _spec_with_slice(_slice_with_tasks(["Add /api/foo endpoint"]))
+    amended = append_amendment(
+        spec,
+        reason="user fixed a typo",
+        actor="user",
+        trigger_event_id="ev-000042",
+        tier=1,
+    )
+    assert len(amended.amendments) == 1
+    assert amended.amendments[0].trigger_event_id == "ev-000042"
+    assert amended.amendments[0].tier == 1
+
+
+def test_append_amendment_defaults_remain_for_back_compat() -> None:
+    spec = _spec_with_slice(_slice_with_tasks(["Add /api/foo endpoint"]))
+    amended = append_amendment(spec, reason="x", actor="user")
+    assert amended.amendments[0].trigger_event_id == ""
+    assert amended.amendments[0].tier == 0

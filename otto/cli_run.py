@@ -137,6 +137,12 @@ async def _drive_full_pipeline(
 ) -> tuple[BuildResult, MergeQueueResult, AuditResult]:
     """Drive build → merge → audit using the default LLM agents."""
     console.print()
+    # C1 fix: ONE BuildBudget instance threaded across build, merge,
+    # and audit phases so cost/repair-time accumulate into a single
+    # pool. Without this, each phase's fresh budget could silently
+    # exceed the documented "$30 total" ceiling because nobody owns
+    # the shared accounting.
+    shared_budget = BuildBudget()
     console.print("  [bold]Build phase[/bold] — dispatching slice agents")
     build_result = await run_build(
         spec,
@@ -144,7 +150,7 @@ async def _drive_full_pipeline(
         session_dir=session_dir,
         build_agent=default_build_agent,
         base_url=base_url,
-        budget=BuildBudget(),
+        budget=shared_budget,
     )
     console.print(
         f"  Build: {len(build_result.passing_ids)}/{len(build_result.slice_results)} "
@@ -166,6 +172,7 @@ async def _drive_full_pipeline(
         base_url=base_url,
         build_agent=default_build_agent,
         budget=MergeBudget(),
+        shared_budget=shared_budget,
     )
     console.print(
         f"  Merge: {len(merge_result.landed_ids)} landed, "
@@ -186,6 +193,7 @@ async def _drive_full_pipeline(
         walkthrough=default_walkthrough_from_spec(spec),
         fix_agent=default_build_agent,
         budget=AuditBudget(),
+        shared_budget=shared_budget,
     )
     console.print(
         f"  Audit verdict: [bold]{audit_result.verdict.value}[/bold]; "

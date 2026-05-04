@@ -618,3 +618,79 @@ def test_passing_slice_ids_drives_eligible_candidates(tmp_path: Path) -> None:
         spec, passing_ids=passing_slice_ids(build_result), landed_ids=set()
     )
     assert [s.id for s in eligible] == ["s1"]
+
+
+# ---------------------------------------------------------------------------
+# B1: merge-conflict repair runs on slice branch, not base_branch
+# ---------------------------------------------------------------------------
+
+
+def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
+    """B1: when a merge conflicts and a build_agent is provided, the
+    repair MUST happen on the slice's branch (so the next merge attempt
+    sees the fix). Previously the repair edited base_branch, leaving
+    the slice branch unchanged and producing the same conflict on the
+    next loop iteration.
+    """
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    # main: shared.txt = A
+    (tmp_path / "shared.txt").write_text("A", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "main A", "--no-verify"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    # Slice branch off main~1, modify shared.txt to B → will conflict.
+    subprocess.run(["git", "checkout", "-b", "i2p/_session/s1", "main~1"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "shared.txt").write_text("B", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(s1): B", "--no-verify"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec(
+        [
+            Slice(id="s1", title="x", deps=[], owned_paths=["shared.txt"],
+                  tasks=["edit shared"], checks=[_passing_check()]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        slice_results=[
+            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1,
+                        branch="i2p/_session/s1", worktree=tmp_path),
+        ],
+    )
+
+    # Track which branch the repair agent saw.
+    seen_branches: list[str] = []
+
+    async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        # Record what branch is checked out at the moment the agent runs.
+        proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=input_.worktree, capture_output=True, text=True, check=True,
+        )
+        seen_branches.append(proc.stdout.strip())
+        # "Repair" by aligning shared.txt with main.
+        (input_.worktree / "shared.txt").write_text("A", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec, build_result, project_dir=tmp_path, session_dir=session_dir,
+            build_agent=repair_agent,
+            branch_for_slice=lambda s: "i2p/_session/s1",
+        )
+    )
+    # B1 assertion: when the agent runs, it MUST be on the slice's branch,
+    # NOT on base_branch.
+    assert seen_branches, "repair agent should have been called at least once"
+    assert all(b == "i2p/_session/s1" for b in seen_branches), (
+        f"repair must run on slice branch; saw {seen_branches}"
+    )

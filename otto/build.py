@@ -431,6 +431,46 @@ def _hash_worktree_diff(worktree: Path) -> str:
     return h.hexdigest()
 
 
+def _snapshot_worktree_files(worktree: Path) -> dict[str, tuple[int, int]]:
+    """Snapshot (relative_path → (mtime_ns, size)) for all non-noise files.
+
+    B3 fallback: when git isn't available (or the worktree isn't a
+    repo), scope detection still needs to know which files the slice
+    touched. A pre/post snapshot diff yields the modified set without
+    relying on git.
+    """
+    import os
+    out: dict[str, tuple[int, int]] = {}
+    for root, dirs, files in os.walk(worktree, followlinks=False):
+        # Skip noise dirs in-place so os.walk doesn't descend.
+        dirs[:] = [d for d in dirs if not _is_hash_noise(d) and d != ".git"]
+        for name in files:
+            full = Path(root) / name
+            try:
+                rel = full.relative_to(worktree).as_posix()
+            except ValueError:
+                continue
+            if _is_hash_noise(rel):
+                continue
+            try:
+                st = full.stat()
+            except OSError:
+                continue
+            out[rel] = (st.st_mtime_ns, st.st_size)
+    return out
+
+
+def _diff_snapshots(
+    before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]
+) -> list[str]:
+    """Files added or modified between two snapshots (B3 fallback)."""
+    changed: list[str] = []
+    for path, sig in after.items():
+        if before.get(path) != sig:
+            changed.append(path)
+    return sorted(changed)
+
+
 def _git_diff_modified_paths(worktree: Path, base_ref: str = "HEAD") -> list[str]:
     """Return paths the worktree has modified vs. base_ref (committed + uncommitted)."""
     try:
@@ -724,16 +764,30 @@ async def run_build(
 
         # Pattern D: commit the slice's work to its branch so merge_queue
         # can do a real `git merge`. Only run when branch setup succeeded.
+        # B2/B4 fix: if the commit fails, the slice branch may be empty
+        # or dirty — downstream slices MUST NOT branch off it. Mark
+        # the slice BLOCKED, do NOT add to branch_by_slice, and emit
+        # a blocked event so resume reconstructs reality.
         if branch_real and slice_result.status == SliceStatus.PASSING:
             committed = _commit_slice_work(
                 slice_worktree, slice_id=next_slice.id, branch=slice_branch,
             )
-            if not committed:
+            if committed:
+                branch_by_slice[next_slice.id] = slice_branch
+            else:
                 logger.warning(
-                    "slice %s: failed to commit work to branch %s",
+                    "slice %s: failed to commit work to branch %s — marking BLOCKED",
                     next_slice.id, slice_branch,
                 )
-            branch_by_slice[next_slice.id] = slice_branch
+                import dataclasses as _dc
+                slice_result = _dc.replace(
+                    slice_result,
+                    status=SliceStatus.BLOCKED,
+                    failure_narrative=(
+                        slice_result.failure_narrative
+                        or f"failed to commit work to slice branch {slice_branch}"
+                    ),
+                )
 
         total_cost += slice_result.cost_usd
         results.append(slice_result)
@@ -802,6 +856,11 @@ async def _run_slice(
     cost_total = 0.0
     attempt = 0
     raw_log_dir = session_dir / "build" / slice_obj.id
+    # B3 fix: pre-slice snapshot of files for scope detection fallback.
+    # When git is unavailable, we can't `git diff` to find modified
+    # files, but a pre/post snapshot diff still gives us the truth.
+    # In a git repo, this is cheap-but-unused (the git path wins).
+    pre_slice_snapshot = _snapshot_worktree_files(worktree)
     # For progress detection: hash of the agent's diff vs base after
     # each attempt. If two consecutive attempts produce the same diff
     # hash, the agent isn't changing anything — stuck. This is stronger
@@ -1012,11 +1071,25 @@ async def _run_slice(
         # actual behavior regressions. A modification that crossed a
         # declared scope boundary is interesting documentation, not
         # automatically harmful.
+        # B3 fix: try git first; if it returns no paths (likely because
+        # we're in single-worktree fallback or not a repo), fall back
+        # to filesystem-snapshot diff. Without a fallback, the first
+        # over-reaching slice in a non-git fixture passes scope check
+        # vacuously — exactly the symptom Pattern D was meant to fix.
         try:
             modified = _git_diff_modified_paths(worktree)
         except Exception as exc:
             modified = []
             logger.warning("git diff failed for %s: %s", slice_obj.id, exc)
+        if not modified and not _is_git_repo(worktree):
+            post_snapshot = _snapshot_worktree_files(worktree)
+            modified = _diff_snapshots(pre_slice_snapshot, post_snapshot)
+            if modified:
+                logger.info(
+                    "slice %s: scope detection via filesystem snapshot "
+                    "(%d modified path(s))",
+                    slice_obj.id, len(modified),
+                )
         scope_warnings = detect_scope_violations(
             slice_obj, spec, modified, project_root=worktree
         )

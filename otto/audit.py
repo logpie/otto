@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable
+import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -41,6 +42,7 @@ from typing import Callable, Literal, Protocol
 from otto.build import (
     BuildAgentCallable,
     BuildAgentInput,
+    BuildBudget,
     BuildResult,
     SliceStatus,
 )
@@ -427,6 +429,7 @@ async def run_audit(
     walkthrough: WalkthroughCallable | None = None,
     fix_agent: BuildAgentCallable | None = None,
     budget: AuditBudget | None = None,
+    shared_budget: BuildBudget | None = None,
 ) -> AuditResult:
     """Run the end-of-run audit.
 
@@ -465,6 +468,11 @@ async def run_audit(
     cost_total = 0.0
     retries = 0
     last_result: AuditResult | None = None
+    # C4 fix: tracks audit-attempt indices where the fix loop failed.
+    # When non-empty, subsequent verdicts are floored at PARTIAL —
+    # otherwise the audit could re-judge the integrated state as
+    # PASSED on a later attempt while real repair work never landed.
+    fix_loop_failed_attempts: list[int] = []
 
     emit(session_dir, "audit.started")
 
@@ -505,8 +513,48 @@ async def run_audit(
             walkthrough_artifacts=list(walk_result.artifacts),
             log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "judge",
         )
+        # C1 fix: bail out before invoking the audit agent if the
+        # shared cost pool is exhausted. Prevents an audit retry
+        # loop from blowing past the global $30 ceiling. Returns
+        # the last completed result (or a synthetic PARTIAL if no
+        # attempt has succeeded yet) with a budget-exhausted narrative.
+        if shared_budget is not None and shared_budget.remaining_total_cost_usd() <= 0:
+            halt_msg = (
+                f"audit halted: shared cost budget exhausted "
+                f"(${shared_budget._spent_cost_usd:.2f} >= "
+                f"${shared_budget.total_cost_usd:.2f})"
+            )
+            emit(
+                session_dir, "audit.finished",
+                detail=halt_msg[:200],
+                verdict=AuditVerdict.PARTIAL.value,
+            )
+            if last_result is not None:
+                return dataclasses.replace(
+                    last_result,
+                    narrative=last_result.narrative + "\n\n" + halt_msg,
+                    cost_usd=cost_total,
+                    wall_s=time.monotonic() - t0,
+                )
+            return AuditResult(
+                verdict=AuditVerdict.PARTIAL,
+                narrative=halt_msg,
+                slice_verdicts=[],
+                capability_verdicts=[],
+                cross_slice_evidence=cross_evidence,
+                walkthrough_artifacts=list(walk_result.artifacts),
+                contract_test_passed=contract_passed,
+                contract_test_detail=contract_detail,
+                quality_score=0,
+                quality_findings=[],
+                retries=retries,
+                cost_usd=cost_total,
+                wall_s=time.monotonic() - t0,
+            )
         agent_output = await audit_agent(agent_input)
         cost_total += agent_output.cost_usd
+        if shared_budget is not None:
+            shared_budget.charge_cost(agent_output.cost_usd)
 
         # Pattern B fix: caps compose order-independent. Collect ALL
         # caps as records first, then compute final verdict + narrative
@@ -525,6 +573,18 @@ async def run_audit(
             contract_detail=contract_detail,
             chain_review=chain_review,
         )
+        # C4 fix: if a prior round's fix loop failed, the agent's
+        # judgment on this pass cannot upgrade past PARTIAL. The
+        # composer floors verdict at PARTIAL and appends a section
+        # to the narrative so the operator sees WHY.
+        if fix_loop_failed_attempts and verdict == AuditVerdict.PASSED:
+            verdict = AuditVerdict.PARTIAL
+            narrative = (
+                narrative
+                + "\n\n[fix-loop floor] prior audit attempts had fix-agent "
+                + f"failures (rounds {fix_loop_failed_attempts}); verdict "
+                + "floored at PARTIAL until repair lands cleanly."
+            )
 
         last_result = AuditResult(
             verdict=verdict,
@@ -546,6 +606,11 @@ async def run_audit(
         # records each retry's outcome. Previously only the FINAL
         # audit.finished was emitted — debugging a fix loop required
         # reading per-attempt log dirs by hand.
+        # C2 fix: include the FULL capability_verdicts payload (not
+        # just the names of blocked ones) so the journal is a complete
+        # audit trail. C5 fix: also include contract_test_passed and
+        # contract_test_detail so an operator can reconstruct WHY the
+        # verdict was capped from the journal alone.
         emit(
             session_dir,
             "audit.attempt.finished",
@@ -557,6 +622,17 @@ async def run_audit(
                 c.name for c in agent_output.capability_verdicts
                 if c.status == "blocked"
             ],
+            capability_verdicts=[
+                {
+                    "name": c.name,
+                    "status": c.status,
+                    "detail": (c.detail or "")[:500],
+                    "evidence_refs": list(c.evidence_refs or []),
+                }
+                for c in agent_output.capability_verdicts
+            ],
+            contract_test_passed=contract_passed,
+            contract_test_detail=(contract_detail or "")[:500],
         )
 
         # If passed or no repair available, return.
@@ -596,7 +672,22 @@ async def run_audit(
             )
             return last_result
 
+        # C4 fix: track whether ALL slice fixes succeeded this round.
+        # If any fix crashed or returned succeeded=False, downgrade
+        # the next attempt's verdict floor to PARTIAL so the audit
+        # cannot silently return PASSED on the next pass when the
+        # underlying repair didn't actually land.
+        any_fix_failed = False
         for slice_id in failing_ids:
+            # C1 fix: check shared budget before each fix dispatch too.
+            if shared_budget is not None and shared_budget.remaining_total_cost_usd() <= 0:
+                any_fix_failed = True
+                emit(
+                    session_dir, "slice.attempt.failed",
+                    slice_id=slice_id, attempt=retries + 1,
+                    detail="shared cost budget exhausted; fix skipped",
+                )
+                break
             slice_obj = next((s for s in spec.slices if s.id == slice_id), None)
             if slice_obj is None:
                 continue
@@ -623,6 +714,10 @@ async def run_audit(
             try:
                 fix_output = await fix_agent(agent_input_fix)
                 cost_total += fix_output.cost_usd
+                if shared_budget is not None:
+                    shared_budget.charge_cost(fix_output.cost_usd)
+                if not fix_output.succeeded:
+                    any_fix_failed = True
                 emit(
                     session_dir,
                     "slice.attempt.failed" if not fix_output.succeeded else "slice.merge.eligible",
@@ -631,6 +726,7 @@ async def run_audit(
                     detail=fix_output.detail or "",
                 )
             except Exception as exc:
+                any_fix_failed = True
                 emit(
                     session_dir,
                     "slice.attempt.failed",
@@ -638,6 +734,11 @@ async def run_audit(
                     attempt=retries + 1,
                     detail=f"audit-routed fix crashed: {type(exc).__name__}: {exc}",
                 )
+        # C4 fix: if any fix in this cycle failed, the next audit pass
+        # must NOT silently upgrade to PASSED. Track in a flag the
+        # next iteration of `_compose_verdict` consults.
+        if any_fix_failed:
+            fix_loop_failed_attempts.append(retries + 1)
         retries += 1
 
     # Out of retries; return the latest result we have.
@@ -1169,6 +1270,15 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
     )
     options.cwd = str(agent_input.integrated_worktree)
     options.permission_mode = "bypassPermissions"  # audit reads, doesn't edit
+    # C3 fix: hard-assert the read-only invariant. The certifier
+    # reports symptoms, not fixes; if a refactor flips this to
+    # "acceptEdits", the audit silently starts patching the integrated
+    # worktree and the fix loop's slice-targeted dispatch is bypassed.
+    assert options.permission_mode == "bypassPermissions", (
+        "audit agent must be read-only (permission_mode='bypassPermissions'); "
+        f"got {options.permission_mode!r}. Audit reports symptoms, not fixes — "
+        "patches must go through the fix_agent dispatch."
+    )
 
     t0 = time.monotonic()
     try:

@@ -879,3 +879,108 @@ def test_run_build_falls_back_when_not_a_git_repo(tmp_path: Path) -> None:
     # File exists (build agent ran), no git artifacts.
     assert (tmp_path / "out.txt").exists()
     assert not (tmp_path / ".git").exists()
+
+
+# ---------------------------------------------------------------------------
+# B2/B4: commit-failure handling — branch_by_slice not populated, slice BLOCKED,
+#        journal records BLOCKED instead of PASSING
+# ---------------------------------------------------------------------------
+
+
+def test_run_build_marks_blocked_on_commit_failure(tmp_path: Path) -> None:
+    """B2/B4: if _commit_slice_work fails (e.g., git not configured),
+    the slice is marked BLOCKED rather than PASSING. branch_by_slice is
+    NOT populated, so a downstream dependent slice would not branch off
+    a phantom commit.
+    """
+    _init_git(tmp_path)
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if current != "main":
+        subprocess.run(["git", "branch", "-m", current, "main"], cwd=tmp_path, check=True)
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        (input_.worktree / "a.txt").write_text(f"from {input_.slice.id}", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    # Force commit to fail by clobbering git identity in the slice's branch.
+    # Run build with the user.email config unset for *this* command — easiest
+    # is to monkeypatch _commit_slice_work to return False.
+    import otto.build as build_mod
+    orig = build_mod._commit_slice_work
+    build_mod._commit_slice_work = lambda *a, **k: False
+    try:
+        spec = _spec(
+            [
+                Slice(id="a", title="A", deps=[], owned_paths=["a.txt"],
+                      tasks=["write a"], checks=[_no_op_passing_check()]),
+            ]
+        )
+        result = asyncio.run(
+            run_build(
+                spec, project_dir=tmp_path, session_dir=session_dir,
+                build_agent=writing_agent, base_branch="main",
+            )
+        )
+    finally:
+        build_mod._commit_slice_work = orig
+
+    assert not result.all_passing
+    a_result = next(r for r in result.slice_results if r.slice_id == "a")
+    assert a_result.status == SliceStatus.BLOCKED
+    assert "failed to commit work" in a_result.failure_narrative
+
+
+# ---------------------------------------------------------------------------
+# B3: scope detection in single-worktree fallback (no git repo)
+# ---------------------------------------------------------------------------
+
+
+def test_run_build_detects_scope_violation_without_git(tmp_path: Path) -> None:
+    """B3: when the worktree isn't a git repo, scope detection MUST
+    still work — a slice writing into a PEER slice's owned_paths
+    should produce scope_warnings via the filesystem-snapshot
+    fallback path. Without the fallback, scope detection silently
+    becomes a no-op when git isn't available.
+    """
+    # No _init_git — tmp_path is a plain dir.
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    # Pre-create peer.txt so detect_scope_violations sees it as an
+    # existing file (the "newly created" allowance does not apply).
+    (tmp_path / "peer.txt").write_text("baseline", encoding="utf-8")
+
+    async def over_reaching_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        # Slice s1 owns only a.txt; the agent over-reaches and writes
+        # peer.txt (owned by slice s2) — this is real over-reach.
+        if input_.slice.id == "s1":
+            (input_.worktree / "a.txt").write_text("ok", encoding="utf-8")
+            (input_.worktree / "peer.txt").write_text("from s1 over-reach", encoding="utf-8")
+        else:
+            (input_.worktree / "peer.txt").write_text("from s2", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    spec = _spec(
+        [
+            Slice(id="s1", title="A", deps=[], owned_paths=["a.txt"],
+                  tasks=["write a.txt"], checks=[_no_op_passing_check()]),
+            Slice(id="s2", title="B", deps=[], owned_paths=["peer.txt"],
+                  tasks=["write peer.txt"], checks=[_no_op_passing_check()]),
+        ]
+    )
+    result = asyncio.run(
+        run_build(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_agent=over_reaching_agent,
+        )
+    )
+    s1_result = next(r for r in result.slice_results if r.slice_id == "s1")
+    # Scope detection must catch peer.txt write even without git.
+    assert any("peer.txt" in w for w in s1_result.scope_warnings), (
+        f"expected scope warning for peer.txt; got {s1_result.scope_warnings}"
+    )
