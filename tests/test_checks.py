@@ -443,3 +443,59 @@ def test_unsupported_kind_returns_failure_evidence(tmp_path: Path) -> None:
     evidence = run_check(FakeCheck(), project_dir=tmp_path)  # type: ignore[arg-type]
     assert evidence.passed is False
     assert "unsupported check kind" in evidence.detail
+
+
+# ---------------------------------------------------------------------------
+# V11: pytest selector with logical operators routes through -k
+# ---------------------------------------------------------------------------
+
+
+def test_pytest_selector_with_or_uses_k_expression(tmp_path: Path) -> None:
+    """V11: 'tests/test_x.py::a or tests/test_x.py::b' must run BOTH tests
+    via pytest -k. Previously passed verbatim, pytest interpreted the
+    whole string as a single nonexistent node ID and returned exit=4.
+    Observed in P3 e2e (bookmarks slice spuriously BLOCKED).
+    """
+    from otto.checks import run_checks
+    from otto.spec_compile import PytestCheck
+    # Create a test file with two passing tests.
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+    (tests_dir / "test_v11.py").write_text(
+        "def test_alpha():\n    assert True\n\n"
+        "def test_beta():\n    assert True\n\n"
+        "def test_gamma():\n    assert True\n",
+        encoding="utf-8",
+    )
+    check = PytestCheck(
+        selector="tests/test_v11.py::test_alpha or tests/test_v11.py::test_beta",
+        timeout_s=30,
+    )
+    pairs = run_checks([check], project_dir=tmp_path, cwd=tmp_path)
+    evidence = pairs[0][1]
+    assert evidence.passed, f"V11: -k expression should match both tests; detail={evidence.detail}"
+    cmd = evidence.raw.get("command") or []
+    assert "-k" in cmd, f"-k flag missing; got cmd={cmd}"
+
+
+def test_pytest_selector_single_node_id_unchanged(tmp_path: Path) -> None:
+    """V11: a plain single node id (no `or`/`and`) is passed verbatim
+    as a positional arg, preserving the existing happy path.
+    """
+    from otto.checks import run_checks
+    from otto.spec_compile import PytestCheck
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+    (tests_dir / "test_v11.py").write_text(
+        "def test_one():\n    assert True\n",
+        encoding="utf-8",
+    )
+    check = PytestCheck(selector="tests/test_v11.py::test_one", timeout_s=30)
+    pairs = run_checks([check], project_dir=tmp_path, cwd=tmp_path)
+    evidence = pairs[0][1]
+    assert evidence.passed
+    cmd = evidence.raw.get("command") or []
+    assert "-k" not in cmd, f"-k should NOT be used for single node id; got {cmd}"
+    assert "tests/test_v11.py::test_one" in cmd

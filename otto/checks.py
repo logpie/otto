@@ -178,11 +178,45 @@ def _run_pytest(
         return _malformed_check_evidence(
             started, t0, "PytestCheck.selector is empty (informational; nothing to run)"
         )
+    # V11 fix: the spec compile agent sometimes generates selectors like
+    # "tests/test_x.py::a or tests/test_x.py::b" intending "either node id".
+    # Passed verbatim to pytest, the literal " or " makes it look for a
+    # single nonexistent test; pytest exits 4 (no tests collected). Detect
+    # the boolean-expression intent and route via `-k` (which supports
+    # `or`/`and`/`not`), otherwise split multi-token selectors into
+    # separate positional node ids.
+    selector = check.selector
+    selector_parts: list[str]
+    selector_lower = f" {selector.lower()} "
+    if " or " in selector_lower or " and " in selector_lower:
+        # Strip explicit file path prefixes (`tests/x.py::`) and join the
+        # bare test names with `or`/`and`. -k matches by substring on
+        # the test ID, so `test_list_bookmarks or test_add_bookmark`
+        # matches both even with file paths in node IDs.
+        import re
+        keywords = re.split(r"\s+(?:or|and|not)\s+", selector, flags=re.IGNORECASE)
+        ops = re.findall(r"\s+(or|and|not)\s+", selector, flags=re.IGNORECASE)
+        bare_keywords = [
+            (k.split("::", 1)[-1] if "::" in k else k).strip()
+            for k in keywords
+        ]
+        # Reassemble as a -k expression preserving original operator order.
+        kexpr_parts = [bare_keywords[0]]
+        for op, kw in zip(ops, bare_keywords[1:]):
+            kexpr_parts.append(op.lower())
+            kexpr_parts.append(kw)
+        kexpr = " ".join(kexpr_parts)
+        selector_parts = ["-k", kexpr]
+    else:
+        # Single selector or whitespace-separated multiple node ids.
+        selector_parts = [s for s in selector.split() if s]
+        if not selector_parts:
+            selector_parts = [selector]
     # Prefer `uv run pytest` if uv exists; fall back to interpreter.
     if _which("uv"):
-        cmd = ["uv", "run", "pytest", "-q", check.selector]
+        cmd = ["uv", "run", "pytest", "-q", *selector_parts]
     else:
-        cmd = [sys.executable, "-m", "pytest", "-q", check.selector]
+        cmd = [sys.executable, "-m", "pytest", "-q", *selector_parts]
     # Project-root layouts (e.g. flat `app.py` + `tests/test_x.py`) need the
     # project_dir on PYTHONPATH or `from app import …` fails at collect time.
     # `pytest` itself only auto-adds rootdir if a conftest.py is present;
