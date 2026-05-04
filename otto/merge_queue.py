@@ -608,6 +608,16 @@ def _merge_slice_branch(
     if not _branch_exists(git, worktree, branch):
         return _commit_integration(git, worktree, slice_id=slice_id, branch=branch)
 
+    # V6 fix: ensure the worktree is clean before checkout. Post-merge
+    # checks (V2) can leave runtime artifacts modified (e.g. a Flask
+    # check that imports the app mutates instance/db.sqlite3). Without
+    # this, the next slice's `git checkout base_branch` fails with
+    # "Your local changes would be overwritten by checkout". Hard-reset
+    # to HEAD discards uncommitted changes to tracked files; clean
+    # (preserving log/session dirs) removes untracked transient files.
+    git(["reset", "--hard", "HEAD"], worktree)
+    git(["clean", "-fdx", "-e", ".otto/", "-e", "_otto_*", "-e", "_session/", "-e", "otto_logs/"], worktree)
+
     # 2. Checkout base_branch.
     co_base = git(["checkout", base_branch], worktree)
     if co_base.returncode != 0:

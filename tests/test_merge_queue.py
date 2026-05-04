@@ -812,3 +812,69 @@ def test_merge_rolls_back_when_post_merge_check_fails(tmp_path: Path) -> None:
     assert main_head_before == main_head_after, (
         f"failed merge must roll back; main moved {main_head_before} → {main_head_after}"
     )
+
+
+# ---------------------------------------------------------------------------
+# V6: dirty-worktree resilience — checkout cleans before switching branches
+# ---------------------------------------------------------------------------
+
+
+def test_merge_handles_dirty_worktree_from_prior_check(tmp_path: Path) -> None:
+    """V6: post-merge checks (V2) can leave runtime artifacts modified
+    in the worktree (e.g., a Flask app's instance/db.sqlite3). The
+    next slice's `_merge_slice_branch` MUST hard-reset before its
+    checkout, otherwise git refuses with 'Your local changes would
+    be overwritten by checkout' and the slice is spuriously BLOCKED.
+    Observed in the P1 e2e re-run: 2 slices blocked back-to-back
+    with `instance/db.sqlite3` git error.
+    """
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    # main has runtime.bin tracked at version 1.
+    (tmp_path / "runtime.bin").write_text("v1", encoding="utf-8")
+    subprocess.run(["git", "add", "runtime.bin"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "v1", "--no-verify"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    # Slice branch off main; modifies a DIFFERENT file (no merge conflict).
+    branch = "i2p/_session/clean_slice"
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "feature.txt").write_text("feature", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feature", "--no-verify"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+    # Simulate a post-merge check having mutated runtime.bin in the workdir
+    # without committing — the exact P1 symptom.
+    (tmp_path / "runtime.bin").write_text("v-mutated-by-check", encoding="utf-8")
+    (tmp_path / "transient.tmp").write_text("untracked transient", encoding="utf-8")
+    status_dirty = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout
+    assert "runtime.bin" in status_dirty, "test setup: workdir should be dirty"
+
+    spec = _spec(
+        [
+            Slice(id="clean_slice", title="x", deps=[],
+                  owned_paths=["feature.txt"], tasks=["add feature"],
+                  checks=[_passing_check()]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        slice_results=[
+            SliceResult(slice_id="clean_slice", status=SliceStatus.PASSING,
+                        attempts=1, branch=branch, worktree=tmp_path),
+        ],
+    )
+    result = asyncio.run(
+        run_merge_queue(
+            spec, build_result, project_dir=tmp_path, session_dir=session_dir,
+            branch_for_slice=lambda s: branch,
+        )
+    )
+    # V6: merge should succeed despite the dirty worktree at start.
+    assert result.landed_ids == ["clean_slice"], (
+        f"merge with dirty worktree should reset+clean before checkout; "
+        f"got blocked={result.blocked_ids}, results[0]={result.results[0]}"
+    )
