@@ -97,9 +97,11 @@ EventKind = Literal[
     "slice.merge.eligible",
     "slice.merge.started",
     "slice.merge.landed",
+    "slice.merge.redundant",   # Pattern A — slice produced no diff
     "slice.blocked",
     "audit.started",
     "audit.finished",
+    "audit.attempt.finished",  # Pattern A — per-attempt audit verdict in retry loop
     "run.finished",
     "scope.warning",
     "amendment.requested",
@@ -182,6 +184,12 @@ class RunState:
     slices: dict[str, SliceState] = field(default_factory=dict)
     audit_started: bool = False
     audit_finished: bool = False
+    # Pattern G: count audit retries from journal so resume reports
+    # "audit took N attempts" honestly. Each `audit.attempt.finished`
+    # event increments this; the final `audit.finished` event sets
+    # the terminal verdict. The two are independent — partial
+    # verdicts in attempts don't change `audit_verdict`.
+    audit_attempts: int = 0
     audit_verdict: str = ""                   # "" | "passed" | "partial" | "blocked"
     run_finished: bool = False
     run_verdict: str = ""
@@ -357,9 +365,15 @@ def replay(
     for event in iter_events(session_dir):
         if event.kind == "slice.merge.landed" and event.slice_id and event.detail:
             landed_events.append((event.slice_id, event.detail.strip().split()[0] if event.detail.strip() else ""))
-        if event.kind in {"audit.started", "audit.finished", "run.finished"}:
+        if event.kind in {"audit.started", "audit.finished", "audit.attempt.finished", "run.finished"}:
             if event.kind == "audit.started":
                 state.audit_started = True
+            elif event.kind == "audit.attempt.finished":
+                # Pattern G: track retry count, but DO NOT touch
+                # audit_verdict — only audit.finished sets the
+                # terminal verdict. This event is journal-only for
+                # observability; it does not change run state.
+                state.audit_attempts += 1
             elif event.kind == "audit.finished":
                 state.audit_finished = True
                 verdict = str(event.extra.get("verdict") or "")

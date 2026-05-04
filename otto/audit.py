@@ -1155,10 +1155,15 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     config_path = agent_input.project_dir / "otto.yaml"
-    try:
-        config = load_config(config_path)
-    except Exception:
-        config = {}
+    # Pattern F: distinguish missing (fine) from unreadable (fail).
+    config: dict = {}
+    if config_path.exists():
+        try:
+            config = load_config(config_path)
+        except Exception as exc:
+            raise RuntimeError(
+                f"otto.yaml at {config_path} is unreadable: {exc}"
+            ) from exc
     options = make_agent_options(
         agent_input.project_dir, config, agent_type="certifier"
     )

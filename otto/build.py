@@ -1170,8 +1170,14 @@ def _project_contract_summary(project_dir: Path) -> list[str]:
                     f"- **test_command** (otto.yaml): `{test_command}` — this is the "
                     f"contract test the audit will run at the end. Make it pass."
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            # Pattern F: log instead of silently passing. A malformed
+            # otto.yaml that disappears from the prompt is a debugging
+            # nightmare; at least leave a trail.
+            logger.warning(
+                "could not load otto.yaml for prompt instructions at %s: %s",
+                yaml_path, exc,
+            )
     # intent.md
     intent_md = project_dir / "intent.md"
     if intent_md.is_file():
@@ -1242,10 +1248,19 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
     log_subdir.mkdir(parents=True, exist_ok=True)
 
     config_path = agent_input.project_dir / "otto.yaml"
-    try:
-        config = load_config(config_path)
-    except Exception:
-        config = {}
+    # Pattern F: distinguish "file missing" (fine, use defaults) from
+    # "file malformed/unreadable" (hard fail). A broken otto.yaml that
+    # silently becomes {} causes the build agent to run with default
+    # options instead of the project's configured venv/test_command —
+    # the run "succeeds" but produces wrong output.
+    config: dict = {}
+    if config_path.exists():
+        try:
+            config = load_config(config_path)
+        except Exception as exc:
+            raise RuntimeError(
+                f"otto.yaml at {config_path} is unreadable: {exc}"
+            ) from exc
     options = make_agent_options(agent_input.project_dir, config, agent_type="build")
     # The slice's worktree is the agent's working directory. AgentOptions is
     # a mutable dataclass; mutate in place rather than reconstruct.

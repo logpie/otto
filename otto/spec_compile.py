@@ -434,7 +434,28 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
         seen_ids.add(slice_id)
 
         checks: list[CheckKind] = []
-        for c_index, c_payload in enumerate(entry.get("checks") or []):
+        # Pattern E: warn explicitly when checks is missing or wrong-typed,
+        # rather than silently coercing to []. A slice with no checks
+        # vacuously passes — operators must see this in the validator
+        # report, not have it hidden by a permissive `or []`.
+        raw_checks = entry.get("checks")
+        if raw_checks is None:
+            collector.add(
+                code="spec.coerce.field",
+                path=f"slices[{index}].checks",
+                message="checks field missing on slice; using []",
+                coerced_to="[]",
+            )
+            raw_checks = []
+        elif not isinstance(raw_checks, list):
+            collector.add(
+                code="spec.coerce.field",
+                path=f"slices[{index}].checks",
+                message=f"checks should be a list, got {type(raw_checks).__name__}; using []",
+                coerced_to="[]",
+            )
+            raw_checks = []
+        for c_index, c_payload in enumerate(raw_checks):
             check = _check_from_dict(
                 c_payload,
                 collector=collector,
@@ -490,8 +511,23 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
             ))
 
     # ---- cross-slice checks ----
+    # Pattern E: same as per-slice checks — warn on missing/wrong-typed
+    # field rather than silently defaulting to [].
     cross_slice_checks: list[CheckKind] = []
-    for index, c_payload in enumerate(data.get("cross_slice_checks") or []):
+    raw_cross = data.get("cross_slice_checks")
+    if raw_cross is None:
+        # Field absent is fine — many specs have no cross-slice checks.
+        # Don't warn for this case; only warn when present-but-wrong-type.
+        raw_cross = []
+    elif not isinstance(raw_cross, list):
+        collector.add(
+            code="spec.coerce.field",
+            path="cross_slice_checks",
+            message=f"cross_slice_checks should be a list, got {type(raw_cross).__name__}; using []",
+            coerced_to="[]",
+        )
+        raw_cross = []
+    for index, c_payload in enumerate(raw_cross):
         check = _check_from_dict(
             c_payload, collector=collector, path=f"cross_slice_checks[{index}]"
         )
