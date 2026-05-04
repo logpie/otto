@@ -139,6 +139,25 @@ Add to `done_means`:
   (font-family / line-height), spacing (margin / padding), and a
   cohesive color scheme (background, accent, text). Browser-default
   forms are explicitly NOT acceptable.
+- **Async feedback on form submission**: forms that POST to APIs
+  must show a pending state (disabled button, spinner, or
+  "Submitting…" indicator) and a result indicator (success/error
+  message). Without this, users click repeatedly and don't know if
+  anything is happening.
+- **Form validation**: mark required inputs with `required` and
+  visible labels (not just placeholders). Validate format
+  client-side before submission where possible. Errors displayed
+  inline near the field that failed.
+- **Information architecture for multi-action homes**: if the home
+  page exposes 5+ primary actions, group related ones (e.g.,
+  account management vs content creation) into clear sections, or
+  use a tabbed/accordion layout. Don't present every action as an
+  equal-weight card stacked vertically — that's a feature checklist,
+  not a usable dashboard.
+- **Accessibility baseline**: semantic HTML elements (`<main>`,
+  `<nav>`, `<header>`, `<footer>`); aria-labels on icon-only
+  controls; focus-visible state on interactive elements;
+  keyboard-reachable controls (no `<div onclick>` for actions).
 
 ### `project_kind: "static-site" / blog` — required baseline
 
@@ -157,6 +176,13 @@ Add to `done_means`:
 - **Tag pages cross-link**: posts on a tag page should show their
   OTHER tags too, not just the current one — tag pages are
   discoverability surfaces.
+- **Distinctive site identity**: the site title in the nav and RSS
+  feed should reflect the project's intent, NOT placeholder strings
+  like "My Blog" or "Blog RSS Feed". Pull a meaningful name from the
+  intent or use a deliberate placeholder that reads as a real brand.
+- **Accessibility baseline**: semantic HTML (`<article>`, `<nav>`,
+  `<main>`); `aria-current="page"` on the current-page nav link;
+  alt text on images.
 
 ### `project_kind: "cli" / "library"` — required baseline
 
