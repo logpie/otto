@@ -104,6 +104,27 @@ OTTO_OWNED_DIRTY_PATTERNS: tuple[str, ...] = (
     ".worktrees/*",
     ".worktrees",
     ".watcher.log",
+    # V20: audit phase walks the running app and saves rendered HTML
+    # snapshots like `__audit_home_body__.html`, `__audit_signup_body__.html`
+    # next to the project root. They're Otto's own artifacts; if a user
+    # cleans them up the next audit will recreate them. Don't flag dirty.
+    "__audit_*.html",
+    "__audit_*.json",
+    "__audit_*.png",
+    # V20: user-owned Otto inputs. `otto.yaml` and `intent.md` are
+    # the project's Otto config and product spec; they sit at project
+    # root and may legitimately exist untracked on first run (the
+    # user authored them but never `git add`-ed). MC should not
+    # show "dirty" + "Landing blocked" for these.
+    "otto.yaml",
+    "intent.md",
+    # i2p pipeline writes session dirs under otto_logs/ already
+    # covered, but also some pipelines drop a top-level `_session/`
+    # alias (test fixtures); guard.
+    "_session",
+    "_session/*",
+    ".otto",
+    ".otto/*",
 )
 
 
