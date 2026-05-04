@@ -318,85 +318,92 @@ async def _process_candidate(
                 wall_s=wall,
             )
 
-        # 1 + 2: rerun slice's checks AND cross-slice checks against the
-        # current integrated worktree.
-        slice_pairs = run_checks(
-            list(slice_obj.checks),
-            project_dir=project_dir,
-            cwd=candidate.worktree,
-            base_url=base_url,
-            raw_log_dir=raw_log_dir / f"slice-attempt-{repair_attempts:02d}",
+        # V2 fix: merge-first-then-verify. Old order ran slice + cross-slice
+        # checks BEFORE merging — but with Pattern D real branches, the
+        # slice's deliverables live on its branch, not on `base_branch`.
+        # Running the slice's check pre-merge meant testing a state that
+        # didn't include the slice's contributions, so any check that
+        # tested its own deliverable (e.g., "Templates exist") failed
+        # spuriously. New order: merge first → run all checks against
+        # the integrated post-merge state → rollback if checks fail.
+        slice_evidence: list[Evidence] = []
+        cross_evidence: list[Evidence] = []
+        outcome = _merge_slice_branch(
+            git, candidate.worktree,
+            slice_id=slice_obj.id, branch=candidate.branch,
+            base_branch=candidate.base_branch,
         )
-        slice_evidence = [ev for _check, ev in slice_pairs]
-        slice_pass = all(ev.passed for ev in slice_evidence)
 
-        cross_pairs = run_checks(
-            list(spec.cross_slice_checks),
-            project_dir=project_dir,
-            cwd=candidate.worktree,
-            base_url=base_url,
-            raw_log_dir=raw_log_dir / f"cross-attempt-{repair_attempts:02d}",
-        )
-        cross_evidence = [ev for _check, ev in cross_pairs]
-        cross_pass = all(ev.passed for ev in cross_evidence) if cross_evidence else True
+        # REDUNDANT semantics (Pattern A): preserve.
+        merge_status = outcome.status
+        if merge_status == MergeStatus.REDUNDANT and not (slice_obj.tasks or slice_obj.owned_paths):
+            merge_status = MergeStatus.LANDED
 
-        if slice_pass and cross_pass:
-            # Pattern D: prefer real `git merge` of the slice's branch
-            # into `base_branch`. Falls back to commit-in-worktree
-            # when no slice branch exists (test fixtures, non-git
-            # project dirs).
-            outcome = _merge_slice_branch(
-                git, candidate.worktree,
-                slice_id=slice_obj.id, branch=candidate.branch,
-                base_branch=candidate.base_branch,
+        # Conflict → route to repair (B1 path).
+        if merge_status == MergeStatus.BLOCKED and "merge conflict" in (outcome.detail or "").lower():
+            last_failure = outcome.detail or "merge conflict"
+            slice_failed_summaries = []
+            cross_failed_summaries = []
+        elif merge_status in (MergeStatus.LANDED, MergeStatus.REDUNDANT):
+            # Merge succeeded — worktree is now `base + this_slice`.
+            # Run slice + cross-slice checks against this integrated state.
+            slice_pairs = run_checks(
+                list(slice_obj.checks),
+                project_dir=project_dir,
+                cwd=candidate.worktree,
+                base_url=base_url,
+                raw_log_dir=raw_log_dir / f"slice-attempt-{repair_attempts:02d}",
             )
-            # Pattern A nuance: REDUNDANT only signals over-reach when the
-            # slice HAD declared work (owned_paths or tasks). A vacuous
-            # slice (no tasks, no owned_paths — usually a pure structural
-            # placeholder or test fixture) producing no diff is just
-            # LANDED-vacuously, not a symptom.
-            status = outcome.status
-            if status == MergeStatus.REDUNDANT and not (slice_obj.tasks or slice_obj.owned_paths):
-                status = MergeStatus.LANDED
-            # B1 fix: if the merge BLOCKED on a conflict, route into the
-            # repair loop instead of returning immediately. The repair
-            # agent will be checked out onto the slice branch and asked
-            # to fix the conflict; the next loop iteration re-runs
-            # checks and re-attempts the merge.
-            if status == MergeStatus.BLOCKED and "merge conflict" in (outcome.detail or "").lower():
-                last_failure = outcome.detail or "merge conflict"
-                # Fall through to the repair-or-block path below.
-            else:
+            slice_evidence = [ev for _check, ev in slice_pairs]
+            slice_pass = all(ev.passed for ev in slice_evidence)
+
+            cross_pairs = run_checks(
+                list(spec.cross_slice_checks),
+                project_dir=project_dir,
+                cwd=candidate.worktree,
+                base_url=base_url,
+                raw_log_dir=raw_log_dir / f"cross-attempt-{repair_attempts:02d}",
+            )
+            cross_evidence = [ev for _check, ev in cross_pairs]
+            cross_pass = all(ev.passed for ev in cross_evidence) if cross_evidence else True
+
+            if slice_pass and cross_pass:
                 return MergeResult(
                     slice_id=slice_obj.id,
-                    status=status,
+                    status=merge_status,
                     landed_commit=outcome.head_after,
                     cross_slice_evidence=cross_evidence,
                     slice_recheck_evidence=slice_evidence,
                     repair_attempts=repair_attempts,
                     cost_usd=cost_total,
                     wall_s=time.monotonic() - t0,
-                    failure_narrative=(
-                        outcome.detail if status not in (MergeStatus.LANDED, MergeStatus.REDUNDANT) else ""
-                    ),
+                    failure_narrative="",
                 )
-            # Skip the verification-failure narrative below since we
-            # already have one from the merge conflict.
+
+            # Post-merge checks failed — rollback the merge so the slice
+            # branch can be repaired and re-merged. Without rollback the
+            # bad merge stays on base_branch and corrupts subsequent
+            # slices' parent state.
+            if outcome.head_before and outcome.status == MergeStatus.LANDED:
+                git(["reset", "--hard", outcome.head_before], candidate.worktree)
+            slice_failed_summaries = None
+            cross_failed_summaries = None
+        else:
+            # Other BLOCKED (e.g., git failure other than conflict).
+            last_failure = outcome.detail or "merge failed"
             slice_failed_summaries = []
             cross_failed_summaries = []
-        else:
-            slice_failed_summaries = None  # type: ignore[assignment]
-            cross_failed_summaries = None  # type: ignore[assignment]
 
         # Failure: prepare narrative.
-        # B1 fix: if we fell through here from a merge-conflict, both
-        # *_failed_summaries are already set to []; the last_failure
-        # narrative was set by the merge_slice_branch outcome above.
+        # If we fell through here from a merge-conflict or other merge
+        # error, slice_failed_summaries is [] and last_failure is set.
+        # If we fell through from post-merge check failure (rollback path),
+        # both summaries are None and we compute them here.
         if slice_failed_summaries is None:
             slice_failed_summaries = [ev.detail for ev in slice_evidence if not ev.passed]
         if cross_failed_summaries is None:
             cross_failed_summaries = [ev.detail for ev in cross_evidence if not ev.passed]
-            last_failure = "merge verification failed"
+            last_failure = "post-merge verification failed"
             if slice_failed_summaries:
                 last_failure += f" — slice: {'; '.join(slice_failed_summaries[:3])}"
             if cross_failed_summaries:

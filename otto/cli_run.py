@@ -125,6 +125,18 @@ async def _run_compile_phase(
         f"project_kind={spec.project_kind}"
     )
     console.print(f"  Spec: {written}")
+    # Surface validator warnings to the operator. The validator catches
+    # under-specified slices (S1: vague tasks; S4: missing cross_slice
+    # checks; S5: missing tasks/deps/owned_paths fields) but the warnings
+    # used to be silently dropped after compile. They're now logged AND
+    # printed so the operator can decide whether to amend or proceed.
+    warnings = getattr(spec, "_validator_warnings", []) or []
+    if warnings:
+        console.print(
+            f"  [yellow]Spec validator warnings ({len(warnings)}):[/yellow]"
+        )
+        for warning in warnings:
+            console.print(f"    [yellow]·[/yellow] {warning}")
     return written, spec
 
 

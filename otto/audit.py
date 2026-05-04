@@ -430,6 +430,7 @@ async def run_audit(
     fix_agent: BuildAgentCallable | None = None,
     budget: AuditBudget | None = None,
     shared_budget: BuildBudget | None = None,
+    base_branch: str = "main",
 ) -> AuditResult:
     """Run the end-of-run audit.
 
@@ -468,6 +469,7 @@ async def run_audit(
     cost_total = 0.0
     retries = 0
     last_result: AuditResult | None = None
+    audit_base_branch = base_branch
     # C4 fix: tracks audit-attempt indices where the fix loop failed.
     # When non-empty, subsequent verdicts are floored at PARTIAL —
     # otherwise the audit could re-judge the integrated state as
@@ -567,11 +569,18 @@ async def run_audit(
 
         chain_review = verify_amendment_chain(spec, session_dir=session_dir)
 
+        # V4 fix: pass merge_result so the verdict reflects merge BLOCKED.
+        # Slices that were BLOCKED at merge time mean the product is
+        # missing their contribution; PASSED is structurally impossible
+        # while merge_blocked_ids is non-empty.
         verdict, narrative = _compose_verdict(
             agent_output=agent_output,
             contract_passed=contract_passed,
             contract_detail=contract_detail,
             chain_review=chain_review,
+            merge_blocked_ids=list(merge_result.blocked_ids or []),
+            total_passing_slices=len(getattr(merge_result, "landed_ids", []) or [])
+                + len(merge_result.blocked_ids or []),
         )
         # C4 fix: if a prior round's fix loop failed, the agent's
         # judgment on this pass cannot upgrade past PARTIAL. The
@@ -711,6 +720,35 @@ async def run_audit(
                 ),
                 log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "fix" / slice_id,
             )
+            # V3 fix: checkout the slice's branch before invoking the
+            # fix-agent so its edits accumulate on the slice branch, NOT
+            # on base_branch. After the agent runs, commit the diff to
+            # the slice branch and attempt a real merge into base via
+            # _merge_slice_branch — so blocked slices can be landed
+            # through the same path as build-phase slices, never as
+            # rogue commits on main. Without this, fix-agents bypass
+            # branch isolation entirely (observed in P1: fix-agent ran
+            # `git commit` directly on main, audit then declared PASSED
+            # while merge_queue still recorded the slice as BLOCKED).
+            from otto.build import (
+                _is_git_repo as _build_is_git_repo,
+                _setup_slice_branch as _build_setup_slice_branch,
+                _commit_slice_work as _build_commit_slice_work,
+            )
+            from otto.merge_queue import _merge_slice_branch, _git as _merge_git, MergeStatus as _MergeStatus
+            on_slice_branch = False
+            if _build_is_git_repo(worktree):
+                on_slice_branch = _build_setup_slice_branch(
+                    worktree, branch=branch, parent_ref=branch,
+                )
+                if not on_slice_branch:
+                    any_fix_failed = True
+                    emit(
+                        session_dir, "slice.attempt.failed",
+                        slice_id=slice_id, attempt=retries + 1,
+                        detail=f"could not checkout slice branch {branch} for fix",
+                    )
+                    continue
             try:
                 fix_output = await fix_agent(agent_input_fix)
                 cost_total += fix_output.cost_usd
@@ -718,6 +756,33 @@ async def run_audit(
                     shared_budget.charge_cost(fix_output.cost_usd)
                 if not fix_output.succeeded:
                     any_fix_failed = True
+                    if on_slice_branch:
+                        _build_commit_slice_work(worktree, slice_id=slice_id, branch=branch)
+                else:
+                    if on_slice_branch:
+                        committed = _build_commit_slice_work(
+                            worktree, slice_id=slice_id, branch=branch,
+                        )
+                        if not committed:
+                            any_fix_failed = True
+                        else:
+                            # Re-merge the fixed slice through the canonical
+                            # merge path. If the merge succeeds the slice
+                            # finally lands; if it conflicts or no diff, the
+                            # next audit cycle will see it.
+                            merge_outcome = _merge_slice_branch(
+                                _merge_git, worktree,
+                                slice_id=slice_id, branch=branch,
+                                base_branch=audit_base_branch,
+                            )
+                            if merge_outcome.status == _MergeStatus.LANDED:
+                                emit(
+                                    session_dir, "slice.merge.landed",
+                                    slice_id=slice_id, attempt=retries + 1,
+                                    detail=merge_outcome.head_after,
+                                )
+                            else:
+                                any_fix_failed = True
                 emit(
                     session_dir,
                     "slice.attempt.failed" if not fix_output.succeeded else "slice.merge.eligible",
@@ -725,8 +790,14 @@ async def run_audit(
                     attempt=retries + 1,
                     detail=fix_output.detail or "",
                 )
+                # Return to base_branch so the next audit pass judges
+                # the integrated state.
+                if on_slice_branch:
+                    _merge_git(["checkout", audit_base_branch], worktree)
             except Exception as exc:
                 any_fix_failed = True
+                if on_slice_branch:
+                    _merge_git(["checkout", audit_base_branch], worktree)
                 emit(
                     session_dir,
                     "slice.attempt.failed",
@@ -1075,6 +1146,8 @@ def _compose_verdict(
     contract_passed: bool | None,
     contract_detail: str,
     chain_review,  # ChainVerification, but spec_amend imports audit so avoid cycle
+    merge_blocked_ids: list[str] | None = None,
+    total_passing_slices: int = 0,
 ) -> tuple[AuditVerdict, str]:
     """Compose final verdict + narrative from all caps, order-independent.
 
@@ -1111,6 +1184,24 @@ def _compose_verdict(
         sections.append(
             f"[amendment chain review: {chain_review.verdict_cap}]\n"
             + "\n".join(f"  - {f}" for f in chain_review.findings)
+        )
+
+    # V4 fix: merge-blocked cap. If any slice was BLOCKED at merge time,
+    # the integrated product is missing that slice's contribution. The
+    # audit MUST NOT silently declare PASSED while merge_result.blocked_ids
+    # is non-empty (the false-positive class observed in P1, where audit
+    # said PASSED while home_page never landed). Cap at PARTIAL when any
+    # slice blocked; cap at BLOCKED when more than half of expected
+    # passing slices were blocked.
+    blocked_ids = list(merge_blocked_ids or [])
+    if blocked_ids:
+        if total_passing_slices and len(blocked_ids) * 2 > total_passing_slices:
+            verdict = _strictest(verdict, AuditVerdict.BLOCKED)
+        else:
+            verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+        sections.append(
+            f"[merge: {len(blocked_ids)} slice(s) blocked at merge time]\n"
+            + "\n".join(f"  - {sid} did not land via merge_queue" for sid in blocked_ids)
         )
 
     # Quality cap.

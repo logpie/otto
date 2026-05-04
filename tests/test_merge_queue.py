@@ -694,3 +694,121 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
     assert all(b == "i2p/_session/s1" for b in seen_branches), (
         f"repair must run on slice branch; saw {seen_branches}"
     )
+
+
+# ---------------------------------------------------------------------------
+# V2: merge-first-then-verify — pre-merge state shouldn't be checked
+# ---------------------------------------------------------------------------
+
+
+def test_merge_passes_check_against_post_merge_state(tmp_path: Path) -> None:
+    """V2: a slice's check must be evaluated against the POST-merge
+    integrated state, not against base_branch alone. The slice's
+    deliverables only exist on `base + this_slice` after merge — running
+    the check pre-merge would fail spuriously for any slice whose check
+    tests its own contribution (the bug observed in P1: home_page's
+    'Templates exist' check passed at build time on the slice branch
+    but failed at merge time when run on bare base_branch).
+    """
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    branch = "i2p/_session/templates_slice"
+    # Set up the slice branch with templates/ (its deliverable).
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "templates").mkdir()
+    (tmp_path / "templates" / "index.html").write_text("<h1>hi</h1>", encoding="utf-8")
+    subprocess.run(["git", "add", "templates"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "templates", "--no-verify"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+    # Templates do NOT exist on main pre-merge.
+    assert not (tmp_path / "templates").exists()
+
+    # Slice's check: a state invariant requiring templates/ to exist.
+    spec = _spec(
+        [
+            Slice(id="templates_slice", title="x", deps=[],
+                  owned_paths=["templates/*"],
+                  tasks=["render index"],
+                  checks=[_passing_state_invariant("exists('templates')")]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        slice_results=[
+            SliceResult(slice_id="templates_slice", status=SliceStatus.PASSING,
+                        attempts=1, branch=branch, worktree=tmp_path),
+        ],
+    )
+    result = asyncio.run(
+        run_merge_queue(
+            spec, build_result, project_dir=tmp_path, session_dir=session_dir,
+            branch_for_slice=lambda s: branch,
+        )
+    )
+    # V2: with merge-first-then-verify, the check runs after the slice
+    # is merged — templates exist on main — and the slice LANDS.
+    assert result.landed_ids == ["templates_slice"], (
+        f"slice with own-deliverable check should land via merge-first; "
+        f"got blocked={result.blocked_ids}"
+    )
+    # Verify templates are now on main.
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, capture_output=True)
+    assert (tmp_path / "templates" / "index.html").exists()
+
+
+def test_merge_rolls_back_when_post_merge_check_fails(tmp_path: Path) -> None:
+    """V2: if post-merge slice checks fail (somehow the merged state is
+    bad), rollback the merge so base_branch isn't corrupted with a bad
+    slice. The slice is then BLOCKED.
+    """
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    branch = "i2p/_session/bad_slice"
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "broken.txt").write_text("broken", encoding="utf-8")
+    subprocess.run(["git", "add", "broken.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "bad", "--no-verify"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+    main_head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    spec = _spec(
+        [
+            Slice(id="bad_slice", title="x", deps=[],
+                  owned_paths=["broken.txt"],
+                  tasks=["create broken.txt"],
+                  # Check that will FAIL post-merge.
+                  checks=[_passing_state_invariant("exists('not-there.txt')")]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        slice_results=[
+            SliceResult(slice_id="bad_slice", status=SliceStatus.PASSING,
+                        attempts=1, branch=branch, worktree=tmp_path),
+        ],
+    )
+    result = asyncio.run(
+        run_merge_queue(
+            spec, build_result, project_dir=tmp_path, session_dir=session_dir,
+            branch_for_slice=lambda s: branch,
+        )
+    )
+    assert result.blocked_ids == ["bad_slice"]
+    # main HEAD must be unchanged — rollback worked.
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, capture_output=True)
+    main_head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert main_head_before == main_head_after, (
+        f"failed merge must roll back; main moved {main_head_before} → {main_head_after}"
+    )

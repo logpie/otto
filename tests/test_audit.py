@@ -985,3 +985,94 @@ def test_default_walkthrough_falls_back_to_slice_journey(tmp_path: Path) -> None
     log_path = tmp_path / "log" / "browser-journey.log"
     assert log_path.exists()
     assert "slice" in log_path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# V4: verdict caps on merge BLOCKED
+# ---------------------------------------------------------------------------
+
+
+def test_compose_verdict_caps_at_partial_when_merge_blocked() -> None:
+    """V4: a PASSED LLM verdict must be downgraded to PARTIAL if any
+    slice was BLOCKED at merge time. PASSED while
+    merge_result.blocked_ids is non-empty is the false-positive class
+    observed in the P1 E2E run.
+    """
+    from otto.audit import _compose_verdict, AuditAgentOutput, AuditVerdict
+    from otto.spec_amend import ChainVerification
+
+    agent_output = AuditAgentOutput(
+        verdict=AuditVerdict.PASSED,
+        narrative="all good",
+        slice_verdicts=[],
+        capability_verdicts=[],
+        quality_score=4,
+        quality_findings=[],
+    )
+    chain = ChainVerification(verdict_cap="passed", findings=[])
+
+    verdict, narrative = _compose_verdict(
+        agent_output=agent_output,
+        contract_passed=True,
+        contract_detail="",
+        chain_review=chain,
+        merge_blocked_ids=["home_page"],
+        total_passing_slices=3,
+    )
+    assert verdict == AuditVerdict.PARTIAL, (
+        f"PASSED with 1/3 blocked must downgrade to PARTIAL; got {verdict}"
+    )
+    assert "1 slice(s) blocked" in narrative
+    assert "home_page" in narrative
+
+
+def test_compose_verdict_caps_at_blocked_when_majority_blocked() -> None:
+    """V4: when more than half of expected passing slices were blocked,
+    cap at BLOCKED (not just PARTIAL) — most of the product is missing.
+    """
+    from otto.audit import _compose_verdict, AuditAgentOutput, AuditVerdict
+    from otto.spec_amend import ChainVerification
+
+    agent_output = AuditAgentOutput(
+        verdict=AuditVerdict.PASSED,
+        narrative="",
+        slice_verdicts=[],
+        capability_verdicts=[],
+        quality_score=4,
+        quality_findings=[],
+    )
+    chain = ChainVerification(verdict_cap="passed", findings=[])
+    verdict, narrative = _compose_verdict(
+        agent_output=agent_output,
+        contract_passed=True,
+        contract_detail="",
+        chain_review=chain,
+        merge_blocked_ids=["a", "b"],
+        total_passing_slices=3,
+    )
+    assert verdict == AuditVerdict.BLOCKED
+
+
+def test_compose_verdict_passes_when_no_merge_blocked() -> None:
+    """V4: when merge_blocked_ids is empty, the cap doesn't fire."""
+    from otto.audit import _compose_verdict, AuditAgentOutput, AuditVerdict
+    from otto.spec_amend import ChainVerification
+
+    agent_output = AuditAgentOutput(
+        verdict=AuditVerdict.PASSED,
+        narrative="ok",
+        slice_verdicts=[],
+        capability_verdicts=[],
+        quality_score=5,
+        quality_findings=[],
+    )
+    chain = ChainVerification(verdict_cap="passed", findings=[])
+    verdict, _ = _compose_verdict(
+        agent_output=agent_output,
+        contract_passed=True,
+        contract_detail="",
+        chain_review=chain,
+        merge_blocked_ids=[],
+        total_passing_slices=3,
+    )
+    assert verdict == AuditVerdict.PASSED

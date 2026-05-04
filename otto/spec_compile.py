@@ -1144,6 +1144,14 @@ async def compile_spec(
         raise SpecValidationError(
             "compiled spec failed validation:\n  - " + "\n  - ".join(result.errors)
         )
+    # E2E rubric finding: validator warnings used to be discarded
+    # silently — operators never saw "tasks too vague" or "no
+    # cross_slice_checks" alerts that the validator emitted. Surface
+    # them via the standard logger so they hit narrative.log AND
+    # attach to the spec object so callers can render them.
+    for warning in result.warnings:
+        logger.warning("spec validator: %s", warning)
+    setattr(spec, "_validator_warnings", list(result.warnings))
 
     persist_spec(spec, spec_path, allow_initial=True)
     return spec
