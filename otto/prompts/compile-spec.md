@@ -329,27 +329,52 @@ Example:
 
 ### V7 — `project_kind=api`: required structure fields
 
-For `project_kind: "api"`, populate `structure.payload` with:
+For `project_kind: "api"`, populate `structure.payload` with these
+EXACT field names (the per-kind json schema validates them):
 
-* **`base_path`** — REQUIRED, string (may be `""`). E.g. `""`, `"/api"`,
-  `"/v1"`. Common prefix for all endpoints.
-* **`endpoints`** — REQUIRED, non-empty array. Each MUST have:
-  `path` (string), `method` (`"GET"|"POST"|...`), `summary` (string).
-  Optional: `auth` (`"public"|"bearer"|"session"`), `request_shape`,
-  `response_shape`, `error_codes` (same shape as webapp routes).
-  → Pinning endpoints here is what stops two slices from drifting on
-    auth scheme, status codes, or field names.
+* **`base_path`** — REQUIRED, non-empty string. E.g. `"/"`, `"/api"`,
+  `"/v1"`. Common prefix for all endpoints. Use `"/"` if no prefix.
+* **`endpoints`** — REQUIRED, non-empty array. Each entry MUST have:
+  `method` (`"GET"|"POST"|...`), `path` (string), `summary` (string),
+  `response_shape` (string describing JSON shape, e.g.
+  `'{"users": [{"id": int, "username": str}]}'`). Optional:
+  `auth` (`"public"|"bearer"|"session"`), `request_shape`.
+  → Pinning endpoints here stops two slices from drifting on auth
+    scheme, status codes, or field names.
+* **`data_model`** — OPTIONAL but recommended. Each entry has
+  `name` and `fields` (non-empty array of strings).
 
 ### `project_kind=library`: required structure fields
 
-For `project_kind: "library"`, populate `structure.payload` with:
+For `project_kind: "library"`, populate `structure.payload` with these
+EXACT field names:
 
-* **`module`** — REQUIRED, top-level package name (e.g. `"mylib"`).
-* **`exports`** — REQUIRED, non-empty array of public symbol records:
-  `{"name": str, "kind": "function"|"class"|"constant", "summary": str}`.
-  Optional `signature` (str, e.g. `"def parse(text: str) -> dict"`).
-  → A library's public surface IS its contract. Slices that depend on
-    the library import only what's listed here.
+* **`package_name`** — REQUIRED, non-empty string. The top-level
+  package name as imported (e.g. `"validate"`, `"mylib"`).
+* **`public_api`** — REQUIRED, non-empty array of exported symbols.
+  Each entry MUST have:
+  `symbol` (string, the exported name), `kind` (string —
+  `"function"|"class"|"constant"|"exception"`), `summary` (string,
+  one-line description). Optional: `signature` (string, e.g.
+  `"def parse(text: str) -> dict"`).
+  → A library's public surface IS its contract. Slices that depend
+    on the library import only what's listed here.
+* **`examples`** — OPTIONAL. Array of `{title, code}` doctest-shaped
+  usage snippets.
+
+Example for a library:
+```json
+"structure": {
+  "payload": {
+    "package_name": "validate",
+    "public_api": [
+      {"symbol": "Schema", "kind": "class", "summary": "Validates a dict against a field spec"},
+      {"symbol": "ValidationError", "kind": "exception", "summary": "Raised when validation fails; .errors is a list"},
+      {"symbol": "String", "kind": "class", "summary": "String type validator with optional min_len/max_len/pattern"}
+    ]
+  }
+}
+```
 
 ## Concreteness rules (mandatory)
 
