@@ -1001,18 +1001,32 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     for i, c in enumerate(s.checks or [], 1):
         lines.append(f"  {i}. {_describe_check(c)}")
     lines.append("")
-    # Surface integration-level done_means so the slice agent knows
-    # what the audit will check for (responsive design, session state,
-    # discoverable RSS, custom CSS — UX baseline items beyond the
-    # functional check). Without this, slice agents optimize only
-    # for their pytest selector and produce code-sample-grade UI.
+    # Surface integration-level done_means as CONTEXT (not as a
+    # personal checklist). Wiring bug observed: when this section
+    # said "the audit checks for these", the first slice read it as
+    # its own todo list and over-reached to implement the whole
+    # product, leaving subsequent slices with nothing meaningful to
+    # do (no-op merges, fake "5/5 landed"). The diagnostic was: every
+    # slice's slice.merge.landed event reported the same commit hash
+    # because only the first slice's commit landed.
+    #
+    # Reframed: done_means is what the FULL product (across all
+    # slices combined) ships. THIS slice's responsibility is in the
+    # `## What you must do (slice tasks)` section above. If a
+    # done_means item isn't covered by your tasks, another slice
+    # will deliver it — DO NOT implement it.
     if spec.done_means:
-        lines.append("## Integration done-means (the audit checks for these)")
+        lines.append("## Cross-slice done-means (context — NOT your personal checklist)")
         lines.append(
-            "These are the integration-level success criteria across all "
-            "slices. Your slice contributes to these — do the parts that "
-            "are within your scope. The audit's quality check verifies "
-            "them at end-of-run."
+            "These are what the FULL product ships across ALL slices "
+            "combined. Listed here so you know how your slice fits the "
+            "whole. **Your individual responsibility is `## What you must "
+            "do (slice tasks)` above** — if a done_means item below is not "
+            "covered by one of your tasks, it belongs to another slice. "
+            "DO NOT implement features outside your tasks even if they "
+            "appear here. The audit at end-of-run reads done_means to "
+            "check the integrated product; it does NOT mean each slice "
+            "must satisfy each line."
         )
         for item in spec.done_means:
             lines.append(f"  - {item}")
@@ -1035,7 +1049,13 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     lines.append(_json.dumps(payload, indent=2, sort_keys=True))
     lines.append("```")
     lines.append("")
-    lines.append("Make all changes. When done, just confirm completion.")
+    lines.append(
+        "Implement ONLY the tasks under `## What you must do (slice tasks)` "
+        "above, modifying ONLY the paths in `## Scope`. Do NOT implement "
+        "features that belong to other slices, even if you see them in the "
+        "intent or done_means. Other slices will fill those in. When done "
+        "with your slice's tasks, confirm completion."
+    )
     return "\n".join(lines)
 
 
