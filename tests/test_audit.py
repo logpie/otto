@@ -543,6 +543,13 @@ def test_audit_prompt_requests_quality_assessment(tmp_path: Path) -> None:
     # Must include quality criteria for the project_kind dimensions.
     assert "webapp" in prompt
     assert "static-site" in prompt or "blog" in prompt
+    # Calibration anchors (anti-grade-inflation, root fix found by
+    # observing audit gave 4/5 to bare-bones products). MVP must
+    # be explicitly the default 3/5 score.
+    assert "MVP" in prompt
+    assert "3/5" in prompt or "3 = MVP" in prompt or "3=MVP" in prompt
+    # Required minimum-2-findings rule.
+    assert "at least 2" in prompt or "Empty list is NOT" in prompt
 
 
 def test_audit_parser_reads_quality_fields() -> None:

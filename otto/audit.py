@@ -828,31 +828,73 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "  4. A quality assessment of the user-facing experience (REQUIRED, "
         "independent of the functional verdict):"
     )
+    lines.append("")
     lines.append(
-        "     - quality_score: integer 1-5 where 1=unusable, 2=broken UX, "
-        "3=MVP (works but rough), 4=polished, 5=production-ready."
+        "     **Calibration — what each score MEANS** (be honest, don't grade-inflate):"
     )
     lines.append(
-        "     - quality_findings: list of CONCRETE issues you observe in "
-        "the user-facing surfaces (rendered HTML, screenshots, walkthrough "
-        "logs). Examples: 'home page has no nav bar', 'forms have no "
-        "labels, only placeholders', 'no error states visible', 'tags "
-        "render as plain text instead of clickable links', 'no responsive "
-        "styling for mobile'. Empty list = no issues found (be honest; "
-        "low scores need findings)."
+        "     - **1/5 = unusable**: errors visible, broken layout, can't "
+        "complete primary action."
+    )
+    lines.append(
+        "     - **2/5 = broken UX**: things work but UX is wrong — "
+        "missing labels, no error states, controls hidden where users "
+        "won't find them."
+    )
+    lines.append(
+        "     - **3/5 = MVP**: this is the DEFAULT for a project that "
+        "passed acceptance tests with no extra design effort. "
+        "Browser-default form styling, vertical-stacked sections, "
+        "minimal CSS, plain typography, basic nav. Functional, but "
+        "looks like a code sample, not a product. **Most projects that "
+        "shipped for the first time will land here.**"
+    )
+    lines.append(
+        "     - **4/5 = thoughtful**: clear design language — consistent "
+        "spacing, typography, color, hover/focus states, responsive at "
+        "narrow widths, error states styled, visual hierarchy beyond "
+        "<h1>/<h2>. Goes beyond MVP."
+    )
+    lines.append(
+        "     - **5/5 = polished**: production-ready feel — accessibility "
+        "(aria-labels, keyboard nav), loading states, animations, "
+        "branded look-and-feel, consistent design system across all "
+        "surfaces."
     )
     lines.append("")
-    lines.append("Quality criteria by project_kind:")
+    lines.append(
+        "     **Anti-grade-inflation rule**: if you find yourself wanting "
+        "to give 4/5 to a product whose home page is just stacked forms "
+        "with browser-default styling, that's a 3/5. Reserve 4 for "
+        "products that show evidence of design thinking, not just "
+        "label/nav presence."
+    )
+    lines.append("")
+    lines.append(
+        "     - quality_findings: list of CONCRETE observations about the "
+        "user-facing experience. **Required: list at least 2 specific "
+        "findings, even if the product is good** — name the WEAKEST thing "
+        "you see and the next-most-actionable improvement. Findings can "
+        "be issues (\"home page has no responsive styling — overflows on "
+        "mobile\") OR opportunities (\"could group account-related forms "
+        "into a single section instead of three sections at top of "
+        "home\"). Empty list is NOT acceptable for a real product — if "
+        "you can't find ANY improvement, you're not looking hard enough."
+    )
+    lines.append("")
+    lines.append("Quality criteria by project_kind (use as a checklist):")
     lines.append(
         "  - **webapp**: nav present and consistent; primary actions "
         "discoverable from /; forms labelled; error states visible; "
         "responsive at narrow widths; visual hierarchy (not raw browser "
-        "default styling)."
+        "default styling); each page has the same design language."
     )
     lines.append(
         "  - **static-site / blog**: navigation between pages works; post "
-        "list ordered properly; dates formatted; tag links clickable; RSS "
-        "link visible; readable typography (not raw browser default)."
+        "list ordered properly; dates formatted; tag links clickable; "
+        "**RSS feed has both a discovery <link> in head AND a visible "
+        "footer/header link** (artifact existing isn't enough); "
+        "readable typography (not raw browser default)."
     )
     lines.append(
         "  - **cli / library**: --help text complete; error messages "
