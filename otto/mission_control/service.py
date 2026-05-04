@@ -1463,6 +1463,7 @@ def _review_packet(project_dir: Path, detail: DetailView, *, landing_item: dict[
         failure=failure,
         spec_review_pending=spec_review_pending,
         certification_only=certification_only,
+        domain=record.domain,
     )
     next_action = (
         {"label": "No action", "action_key": None, "enabled": False, "reason": f"Already merged into {target}."}
@@ -1823,8 +1824,32 @@ def _review_readiness(
     failure: dict[str, Any] | None = None,
     spec_review_pending: bool = False,
     certification_only: bool = False,
+    domain: str | None = None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
+    # V19c: i2p-pipeline runs (otto run) don't have a single source
+    # branch — they merge several slice branches into target. The
+    # legacy "needs source branch to land" checks below would mark
+    # every successful i2p run as blocked. Short-circuit: if the run
+    # status is `done` (verdict=passed) for an i2p run, treat as merged
+    # already (slices landed during the run itself).
+    if domain == "i2p":
+        if display_status == "done":
+            return {
+                "state": "merged",
+                "label": "Slices landed",
+                "tone": "success",
+                "blockers": blockers,
+                "next_step": "Open the proof packet to inspect verdict, slices, and capability evidence.",
+            }
+        if display_status == "failed":
+            return {
+                "state": "needs_attention",
+                "label": "Run completed with issues",
+                "tone": "warning",
+                "blockers": [f"i2p verdict: {(overlay.reason if overlay else 'partial or blocked')}"],
+                "next_step": "Open the proof packet for capability-by-capability detail.",
+            }
     if merged:
         return {
             "state": "merged",
