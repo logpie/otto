@@ -49,6 +49,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from real_cost_guard import require_real_cost_opt_in  # noqa: E402
 
+import bench_evaluator as be  # noqa: E402
+
 PYTHON_BIN = REPO_ROOT / ".venv" / "bin" / "python3"
 if not PYTHON_BIN.exists():
     PYTHON_BIN = Path(sys.executable)
@@ -410,6 +412,23 @@ def _summarize(
         except (OSError, json.JSONDecodeError):
             pass
 
+    # Run bench_evaluator framework's static evaluators.
+    eval_results = be.run_evaluators(
+        be.EvaluatorContext(
+            project_dir=project_dir, python=PYTHON_BIN,
+            project_kind="webapp", timeout_s=120,
+        ),
+        [be.eval_contract_test, be.eval_code_health],
+    )
+    eval_aggregate = be.aggregate_status(eval_results)
+    eval_summary = {r.name: r.status for r in eval_results}
+    eval_findings = [
+        {"evaluator": r.name, "status": r.status, "summary": r.summary,
+         "findings": [{"severity": f.severity, "message": f.message,
+                       "evidence": f.evidence[:200]} for f in r.findings[:5]]}
+        for r in eval_results
+    ]
+
     return {
         "cli_exit_code": cli_exit,
         "cli_timeout": cli_timeout,
@@ -425,6 +444,9 @@ def _summarize(
         "acceptance_output": accept_output,
         "quality_score": quality_score,
         "quality_findings": quality_findings,
+        "evaluator_aggregate": eval_aggregate,
+        "evaluator_summary": eval_summary,
+        "evaluator_findings": eval_findings,
     }, session_dir
 
 
@@ -513,6 +535,10 @@ def main() -> int:
         f"- slices blocked: {summary.get('slices_blocked')}",
         f"- audit verdict: {summary.get('audit_verdict')}",
         f"- quality_score: {summary.get('quality_score', 0)}/5",
+        f"- evaluator_aggregate: {summary.get('evaluator_aggregate')}",
+        f"- evaluator_summary: " + ", ".join(
+            f"{k}={v}" for k, v in (summary.get('evaluator_summary') or {}).items()
+        ),
         f"- amendments: {summary.get('amendments_count')}",
         f"- scope_warnings: {summary.get('scope_warnings_count')}",
         f"- acceptance_independent_pass: {summary.get('acceptance_independent_pass')}",

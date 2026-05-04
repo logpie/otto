@@ -48,6 +48,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from real_cost_guard import require_real_cost_opt_in  # noqa: E402
 
+import bench_evaluator as be  # noqa: E402
+
 PYTHON = REPO_ROOT / ".venv" / "bin" / "python3"
 if not PYTHON.exists():
     PYTHON = Path(sys.executable)
@@ -94,6 +96,11 @@ class I2pSummary:
     # Audit-final-quality (audit-final-quality check). 0 = not assessed.
     quality_score: int = 0
     quality_findings: list[str] = field(default_factory=list)
+    # bench_evaluator framework results (static-only here — HTTP-flavor
+    # evaluators need server-boot scaffolding, separate work).
+    evaluator_aggregate: str = "skipped"
+    evaluator_summary: dict = field(default_factory=dict)
+    evaluator_findings: list[dict] = field(default_factory=list)
     hidden_result: str = "not_run"
     browser_result: str = "not_run"
     visible_result: str = "not_run"
@@ -211,6 +218,22 @@ def _run_i2p(
             summary.notes.append("proof-packet.json was not produced")
     else:
         summary.notes.append("no i2p session found under otto_logs/sessions/")
+
+    # Run bench_evaluator framework's static evaluators.
+    eval_results = be.run_evaluators(
+        be.EvaluatorContext(
+            project_dir=repo, python=PYTHON, project_kind="webapp", timeout_s=120,
+        ),
+        [be.eval_contract_test, be.eval_code_health],
+    )
+    summary.evaluator_aggregate = be.aggregate_status(eval_results)
+    summary.evaluator_summary = {r.name: r.status for r in eval_results}
+    summary.evaluator_findings = [
+        {"evaluator": r.name, "status": r.status, "summary": r.summary,
+         "findings": [{"severity": f.severity, "message": f.message,
+                       "evidence": f.evidence[:200]} for f in r.findings[:5]]}
+        for r in eval_results
+    ]
 
     # Run public visible acceptance (the same harness the legacy bench used,
     # seeded into the repo via _setup_repo). This validates the integrated
@@ -427,6 +450,12 @@ def _format_report(report: dict[str, Any]) -> str:
     lines.append(f"- slices blocked: {s['slices_blocked']}")
     lines.append(f"- audit verdict: {s['audit_verdict']}")
     lines.append(f"- quality_score: {s.get('quality_score', 0)}/5")
+    lines.append(f"- evaluator_aggregate: {s.get('evaluator_aggregate', 'skipped')}")
+    lines.append(
+        f"- evaluator_summary: " + ", ".join(
+            f"{k}={v}" for k, v in (s.get('evaluator_summary') or {}).items()
+        )
+    )
     lines.append("")
     if s.get("quality_findings"):
         lines.append("## Quality findings")
