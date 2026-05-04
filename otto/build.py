@@ -642,6 +642,69 @@ def _setup_slice_branch(worktree: Path, *, branch: str, parent_ref: str) -> bool
     return co_slice.returncode == 0
 
 
+def _setup_slice_branch_with_deps(
+    worktree: Path,
+    *,
+    branch: str,
+    primary_parent_ref: str,
+    additional_dep_refs: list[str],
+) -> bool:
+    """V12 fix: set up a slice branch with multiple deps.
+
+    Pattern D's original `_setup_slice_branch(parent_ref=last_dep)` only
+    follows ONE dep. For DAG specs where a slice has sibling deps from
+    different branches (e.g. P5 SSG: `builder` depends on both
+    `link_rewriting` and `feeds`, which are siblings off `rendering`),
+    that loses sibling-dep code from the slice's branch. The build
+    agent then writes code against incompatible API guesses, and the
+    merge phase conflicts (V13 in P5).
+
+    This helper:
+      1. Creates/resets `branch` off `primary_parent_ref` (typically
+         the deepest dep, last in topo order).
+      2. For each `additional_dep_refs`: skip if already an ancestor
+         of HEAD (its commits are reachable transitively); otherwise
+         `git merge --no-edit` it in.
+      3. On any merge conflict during step 2: abort the merge cleanly
+         and return False (caller should fall back to single-parent
+         setup via `_setup_slice_branch`, or surface a build-time
+         error if even that fails).
+
+    The slice's branch ends up containing the union of all deps'
+    contributions — exactly the integrated state the slice's build
+    agent needs to write code against.
+    """
+    if not _setup_slice_branch(worktree, branch=branch, parent_ref=primary_parent_ref):
+        return False
+    for dep_ref in additional_dep_refs:
+        if not dep_ref or dep_ref == primary_parent_ref:
+            continue
+        is_ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", dep_ref, "HEAD"],
+            cwd=worktree, capture_output=True, text=True, check=False,
+        )
+        if is_ancestor.returncode == 0:
+            continue
+        msg = f"i2p({branch.split('/')[-1]}): merge dep {dep_ref}"
+        merge = subprocess.run(
+            ["git", "merge", "--no-edit", "--no-ff", "-m", msg, dep_ref],
+            cwd=worktree, capture_output=True, text=True, check=False,
+        )
+        if merge.returncode != 0:
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                cwd=worktree, capture_output=True, text=True, check=False,
+            )
+            logger.warning(
+                "slice %s: dep-merge of %s into branch failed: rc=%d stdout=%r stderr=%r",
+                branch, dep_ref, merge.returncode,
+                (merge.stdout or "").strip()[:300],
+                (merge.stderr or "").strip()[:300],
+            )
+            return False
+    return True
+
+
 def _commit_slice_work(worktree: Path, *, slice_id: str, branch: str) -> bool:
     """Stage and commit the slice's work to its branch.
 
@@ -654,17 +717,50 @@ def _commit_slice_work(worktree: Path, *, slice_id: str, branch: str) -> bool:
     """
     if not _is_git_repo(worktree):
         return False
+    # V14 fix: explicit pathspec exclusions for Otto's runtime artifacts.
+    # Without these, `git add -A` stages otto_logs/, _session/, .otto/
+    # contents into slice branches whenever the user's .gitignore doesn't
+    # exclude them. Sibling slices then commit divergent state-journal
+    # contents and merge phase hits spurious conflicts on Otto's INTERNAL
+    # state (not user code). Observed in V12 unit test where session_dir
+    # = tmp_path/_session was committed; would also bite real users who
+    # forget to gitignore these paths. The exclusions belong to Otto
+    # regardless of the project's .gitignore.
     add = subprocess.run(
-        ["git", "add", "-A"],
+        [
+            "git", "add", "-A", "--",
+            ".",
+            ":(exclude)_session", ":(exclude)_session/**",
+            ":(exclude)otto_logs", ":(exclude)otto_logs/**",
+            ":(exclude).otto", ":(exclude).otto/**",
+            ":(exclude)_otto_*",
+        ],
         cwd=worktree, capture_output=True, text=True, check=False,
     )
     if add.returncode != 0:
         return False
+    # Also unstage any Otto runtime files that previously got tracked
+    # (left over from before this fix) so they don't keep diverging.
+    # `git rm --cached -rf` is a no-op if the paths aren't tracked.
+    for runtime_path in ("_session", "otto_logs", ".otto"):
+        subprocess.run(
+            ["git", "rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", runtime_path],
+            cwd=worktree, capture_output=True, text=True, check=False,
+        )
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=worktree, capture_output=True, text=True, check=False,
     )
-    if not (status.stdout or "").strip():
+    # V14 nuance: --porcelain reports BOTH staged changes (e.g. ` A foo`,
+    # `M  bar`) and untracked files (`?? path`). We deliberately excluded
+    # `_session/`, `otto_logs/`, etc. from staging — those still appear
+    # as untracked. They must NOT count as "changes to commit" or
+    # `git commit` fails with "nothing added". Filter to staged-only.
+    staged_lines = [
+        line for line in (status.stdout or "").splitlines()
+        if line.strip() and not line.startswith("??")
+    ]
+    if not staged_lines:
         # Nothing to commit. Slice contributed no diff; merge_queue
         # will surface this as REDUNDANT.
         return True
@@ -769,23 +865,52 @@ async def run_build(
         # Pattern D: choose the parent ref based on deps. A slice with
         # no deps branches off `base_branch`. A slice with deps branches
         # off the LAST dep's tip — so it sees that dep's work AND
-        # (transitively) all earlier deps. This works because the
-        # build runs sequential dep-topological order, and each dep's
-        # branch was itself created off its own dep's tip.
+        # (transitively) all earlier deps via that dep's own branch
+        # ancestry. V12 fix: when the slice has multiple deps that may
+        # be siblings (DAG topology, not linear chain), the last-dep
+        # primary parent doesn't include sibling deps. Merge the rest
+        # in via `_setup_slice_branch_with_deps` so the slice branch
+        # contains the integrated state of ALL its deps.
+        primary_parent_ref: str
+        additional_dep_refs: list[str] = []
         if next_slice.deps:
-            last_dep = next_slice.deps[-1]
-            parent_ref = branch_by_slice.get(last_dep, base_branch)
+            primary_parent_ref = branch_by_slice.get(next_slice.deps[-1], base_branch)
+            additional_dep_refs = [
+                branch_by_slice[d]
+                for d in next_slice.deps[:-1]
+                if d in branch_by_slice
+            ]
         else:
-            parent_ref = base_branch
+            primary_parent_ref = base_branch
 
         # Create a real per-slice branch so the slice's edits
         # accumulate on its own branch — no taint from peer slices,
         # real merges downstream. Falls back gracefully if the worktree
         # isn't a git repo (tests, certain bench fixtures); the build
         # still works, just without branch isolation.
-        branch_real = _setup_slice_branch(
-            slice_worktree, branch=slice_branch, parent_ref=parent_ref,
-        )
+        if additional_dep_refs:
+            branch_real = _setup_slice_branch_with_deps(
+                slice_worktree, branch=slice_branch,
+                primary_parent_ref=primary_parent_ref,
+                additional_dep_refs=additional_dep_refs,
+            )
+            # Fall back to single-parent setup if the dep-merge produced a
+            # conflict — preserves the build run instead of failing the
+            # slice purely from V12. The slice will then fail at merge time
+            # with an honest conflict, surfaced via V4.
+            if not branch_real:
+                logger.warning(
+                    "slice %s: multi-dep branch setup failed (likely "
+                    "sibling-dep conflict); falling back to single-parent",
+                    next_slice.id,
+                )
+                branch_real = _setup_slice_branch(
+                    slice_worktree, branch=slice_branch, parent_ref=primary_parent_ref,
+                )
+        else:
+            branch_real = _setup_slice_branch(
+                slice_worktree, branch=slice_branch, parent_ref=primary_parent_ref,
+            )
         if not branch_real:
             logger.info(
                 "slice %s: per-slice branch setup skipped (not a git repo or "

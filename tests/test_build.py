@@ -1096,3 +1096,66 @@ def test_build_prompt_forbids_git_mutations(tmp_path: Path) -> None:
     assert "git checkout" in prompt.lower() or "git rebase" in prompt.lower()
     # Must allow the read-only forms so the agent isn't crippled.
     assert "git log" in prompt.lower()
+
+
+def test_run_build_dag_slice_branch_contains_all_dep_work(tmp_path: Path) -> None:
+    """V12: a slice with multiple deps from sibling branches must have
+    ALL deps' contributions on its branch when its build agent runs.
+    Without this fix, the slice only sees `last_dep`'s ancestry — sibling
+    deps are missing, agent guesses APIs, merges conflict (P5 SSG).
+
+    Topology: a (no deps) → both b and c. d depends on both b and c.
+    d's branch must contain BOTH b's and c's commits.
+    """
+    _init_git(tmp_path)
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if current != "main":
+        subprocess.run(["git", "branch", "-m", current, "main"], cwd=tmp_path, check=True)
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        # Each slice writes its own owned file.
+        out = input_.worktree / f"{input_.slice.id}.txt"
+        out.write_text(f"from {input_.slice.id}", encoding="utf-8")
+        # Slice d MUST be able to see both b.txt and c.txt at build time.
+        if input_.slice.id == "d":
+            assert (input_.worktree / "b.txt").exists(), "V12: b.txt missing"
+            assert (input_.worktree / "c.txt").exists(), "V12: c.txt missing"
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    spec = _spec(
+        [
+            Slice(id="a", title="A", deps=[], owned_paths=["a.txt"],
+                  tasks=["x"], checks=[_no_op_passing_check()]),
+            Slice(id="b", title="B", deps=["a"], owned_paths=["b.txt"],
+                  tasks=["x"], checks=[_no_op_passing_check()]),
+            Slice(id="c", title="C", deps=["a"], owned_paths=["c.txt"],
+                  tasks=["x"], checks=[_no_op_passing_check()]),
+            Slice(id="d", title="D", deps=["b", "c"], owned_paths=["d.txt"],
+                  tasks=["x"], checks=[_no_op_passing_check()]),
+        ]
+    )
+    result = asyncio.run(
+        run_build(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_agent=writing_agent, base_branch="main",
+        )
+    )
+    assert result.all_passing, (
+        f"V12: d should see b.txt and c.txt; got: "
+        f"{[(r.slice_id, r.status, r.failure_narrative) for r in result.slice_results]}"
+    )
+    # Verify d's branch contains commits from BOTH b and c.
+    log = subprocess.run(
+        ["git", "log", "--format=%s", f"main..i2p/{session_dir.name}/d"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout
+    assert "i2p(a): build slice" in log, f"a missing from d's branch: {log}"
+    assert "i2p(b): build slice" in log, f"b missing from d's branch: {log}"
+    assert "i2p(c): build slice" in log, f"c missing from d's branch: {log}"
+    assert "i2p(d): build slice" in log, f"d's own commit missing: {log}"
