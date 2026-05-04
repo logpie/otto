@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -175,7 +175,7 @@ def read_history_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def load_project_history_rows(project_dir: Path, *, limit_hint: int | None = None) -> list[dict[str, Any]]:
-    """Merge v2, legacy, and archived history rows into one deduped timeline."""
+    """Merge v2, legacy, archived, and i2p-session history rows into one deduped timeline."""
     sources = [
         paths.history_jsonl(project_dir),
         paths.legacy_run_history_jsonl(project_dir),
@@ -197,7 +197,116 @@ def load_project_history_rows(project_dir: Path, *, limit_hint: int | None = Non
         loaded_sources = _load_bounded_history_sources(sources, limit_hint=max(limit_hint, 1))
     selected = _dedupe_history_entries(_flatten_history_entries(loaded_sources))
     selected.sort(key=lambda item: item[0])
-    return [entry for _, _, _, entry in selected]
+    rows: list[dict[str, Any]] = [entry for _, _, _, entry in selected]
+    # V19b: also surface i2p-pipeline runs (otto run) as history rows.
+    # Legacy `otto build/certify` writes to history.jsonl; the new
+    # i2p pipeline writes per-session dirs under otto_logs/sessions/<id>/
+    # and never touches history.jsonl. Without this merge, MC's dashboard
+    # appears empty for any project that only has i2p runs (every recent
+    # project — observed in P1-P9). The fix is generic: scan the well-
+    # known sessions root and synthesize HistoryRow-shaped dicts for
+    # every session that has spec.json or proof-packet.json.
+    rows.extend(_load_i2p_session_history_rows(project_dir))
+    rows.sort(key=lambda r: str(r.get("timestamp") or r.get("finished_at") or ""))
+    return rows
+
+
+def _load_i2p_session_history_rows(project_dir: Path) -> list[dict[str, Any]]:
+    """Synthesize HistoryRow-shaped dicts from i2p-pipeline session dirs.
+
+    Each session directory contains:
+      - spec/spec.json (always present after compile)
+      - proof-packet.json (after render; carries verdict/cost/wall)
+      - spec-state.jsonl (event journal)
+    We map verdict ∈ {passed, partial, blocked} to status/passed/outcome
+    so the dashboard's filtering (Outcome=Success/Failed) works without
+    the user needing to know which run is i2p.
+    """
+    sessions_root = paths.sessions_root(project_dir)
+    if not sessions_root.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in sorted(sessions_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        spec_path = entry / "spec" / "spec.json"
+        if not spec_path.exists():
+            continue  # not an i2p session
+        proof_path = entry / "proof-packet.json"
+        proof: dict[str, Any] = {}
+        if proof_path.exists():
+            try:
+                proof = json.loads(proof_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                proof = {}
+        verdict = str(proof.get("verdict") or "").strip().lower()
+        # Status mapping: in-progress → "running"; final → done/failed.
+        if verdict == "passed":
+            status = "done"
+            terminal_outcome = "success"
+            passed = True
+        elif verdict in ("partial", "blocked"):
+            status = "failed"
+            terminal_outcome = verdict  # surface "partial" / "blocked"
+            passed = False
+        else:
+            # No proof packet yet (in flight or aborted) — skip; live
+            # tracking surfaces in-flight runs through other paths.
+            continue
+        # Use the session dir mtime as a stable fallback timestamp;
+        # otherwise the directory name (yyyy-mm-dd-HHMMSS-hex) parses too.
+        try:
+            ts = float(entry.stat().st_mtime)
+        except OSError:
+            ts = 0.0
+        finished_iso = utc_now_iso() if ts == 0.0 else (
+            datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        intent_text = str(proof.get("intent") or "").splitlines()[0][:200]
+        out.append({
+            "run_id": entry.name,
+            "build_id": entry.name,
+            "domain": "i2p",
+            "run_type": "run",
+            "command": "otto run",
+            "intent": intent_text,
+            "intent_path": None,
+            "spec_path": str(spec_path),
+            "passed": passed,
+            "status": status,
+            "terminal_outcome": terminal_outcome,
+            "started_at": finished_iso,
+            "finished_at": finished_iso,
+            "timestamp": finished_iso,
+            "branch": None,
+            "target_branch": None,
+            "head_sha": None,
+            "worktree": str(project_dir),
+            "resumable": False,
+            "session_dir": str(entry),
+            "manifest_path": None,
+            "summary_path": None,
+            "checkpoint_path": None,
+            "primary_log_path": str(entry / "spec-state.jsonl"),
+            "extra_log_paths": [],
+            "artifacts": {
+                "session_dir": str(entry),
+                "manifest_path": None,
+                "summary_path": None,
+                "checkpoint_path": None,
+                "primary_log_path": str(entry / "spec-state.jsonl"),
+                "extra_log_paths": [],
+                "proof_packet_html": str(entry / "proof-packet.html"),
+                "proof_packet_json": str(proof_path),
+            },
+            "cost_usd": _float_or_none(proof.get("cost_usd")),
+            "duration_s": _float_or_none(proof.get("wall_s")),
+            "i2p_verdict": verdict,
+            "i2p_landed_count": len(proof.get("landed_slice_ids") or []),
+            "i2p_blocked_count": len(proof.get("blocked_slice_ids") or []),
+            "i2p_slice_count": len(proof.get("slices") or []),
+        })
+    return out
 
 
 def _normalize_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:

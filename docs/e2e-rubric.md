@@ -129,6 +129,33 @@ Each RUA finding goes through this triage:
    If the next project of the SAME shape passes, it might just be
    stochastic — wait for cross-shape evidence.
 
+## Audit MC as a real user (not as an API tester)
+
+The standard for "MC works" is **a real Otto user can click through
+and inspect runs without knowing the URL structure or invoking curl**.
+"`curl /api/i2p/sessions` returns 200" is API-tester quality, not
+real-user quality. Specifically:
+
+- Open the landing page → understand at a glance which projects are
+  healthy vs need attention. Indicators must mean what users think
+  they mean (no false alarms).
+- Click into a project → see its run history immediately. Not blank.
+  Not "navigate to /i2p/ in the URL bar." The dashboard the click
+  lands on must surface the runs.
+- Click a run → see its slices, verdict, evidence, proof packet.
+  Without scrolling through file:// URLs.
+- Open the audit's screenshots / video / narrative inline.
+- Compare two runs (the same project across iterations).
+
+I will personally do this flow against P1–PN after each loop pass.
+Any place I have to leave MC and use shell/file:// is an Otto bug.
+
+**Screenshots are mandatory** for UI-related work. Use chrome-devtools
+MCP to capture: landing page state, project dashboard after click,
+run detail view, any error states encountered. Attach to e2e-results
+or paste inline in the loop response. "It looks fine on my end"
+without a screenshot is not evidence — the operator can't verify.
+
 ## Loop responsibility: keep MC UI usable
 
 If MC UI breaks (the operator can't browse runs / sessions / proof
