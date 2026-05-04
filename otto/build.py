@@ -1461,6 +1461,29 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         "silently over-reaching."
     )
     lines.append("")
+    # V16b: even when the scope check would allow modifying a transitive
+    # dep's owned file (the "downstream slices extend foundations"
+    # exception), specific FILE PATTERNS are extension points where
+    # modification by sibling slices causes unrecoverable merge
+    # conflicts. Spell this out so the agent treats them as read-only.
+    lines.append(
+        "**App entry points are read-only across slices.** Even if a "
+        "transitive dep's `owned_paths` includes one of these — "
+        "`app.py`, `app/__init__.py`, `wsgi.py`, `main.py`, `cli.py`, "
+        "`models.py`, `db/__init__.py`, `routes.py`, `urls.py`, "
+        "`server.py`, `index.ts`, `index.js`, `cmd/main.go` — DO NOT "
+        "modify them. Multiple slices each editing the same entry-point "
+        "to register their own routes/blueprints/models will hit a "
+        "merge conflict that Otto's fix-loop cannot reliably resolve. "
+        "Instead: the foundation slice provides a registration point "
+        "(auto-discovery loop or explicit list); your slice creates a "
+        "NEW file in your own subdirectory (e.g. `routes/<your_slice>.py`, "
+        "`blueprints/<your_slice>.py`, `app/<your_feature>.py`) that "
+        "exports `bp`/`router`/`Model` per the convention. If foundation "
+        "didn't establish a registration point, request an amendment "
+        "rather than editing the entry point yourself."
+    )
+    lines.append("")
     # V8 fix: build agents had unrestricted git/bash and one slice in
     # P2 ran `git merge other-slice-branch` to grab files from another
     # slice. That breaks branch isolation: the slice's own contribution
