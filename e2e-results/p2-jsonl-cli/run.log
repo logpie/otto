@@ -1,0 +1,33 @@
+  otto run — session 2026-05-04-090523-2a5254
+
+spec validator: multi-slice spec declares no cross_slice_checks (integration testing is missing — slices may pass in isolation while their composition is broken)
+spec validator: structure.payload: missing required field 'entrypoint'
+spec validator: structure.payload: missing required field 'commands'
+  Compile complete — 4 slice(s), project_kind=cli
+  Spec: 
+/private/tmp/otto-e2e/p2-jsonl-cli/otto_logs/sessions/2026-05-04-090523-2a5254/s
+pec/spec.json
+  Spec validator warnings (3):
+    · multi-slice spec declares no cross_slice_checks (integration testing is 
+missing — slices may pass in isolation while their composition is broken)
+    · structure.payload: missing required field 'entrypoint'
+    · structure.payload: missing required field 'commands'
+
+  Build phase — dispatching slice agents
+  Build: 4/4 slices passing, $1.80, 687s
+
+  Merge phase — landing slices in dep order
+  Merge: 1 landed, 2 blocked, $0.41
+
+  Audit phase — final integrated review
+git is mid-MERGE_HEAD in /private/tmp/otto-e2e/p2-jsonl-cli; skipping slice branch setup
+git is mid-MERGE_HEAD in /private/tmp/otto-e2e/p2-jsonl-cli; skipping slice branch setup
+git is mid-MERGE_HEAD in /private/tmp/otto-e2e/p2-jsonl-cli; skipping slice branch setup
+  Audit verdict: blocked; $1.20, 412s
+
+  Render phase — assembling proof packet
+  Proof: 
+/private/tmp/otto-e2e/p2-jsonl-cli/otto_logs/sessions/2026-05-04-090523-2a5254/p
+roof-packet.html
+        /private/tmp/otto-e2e/p2-jsonl-cli/otto_logs/sessions/2026-05-04-090523-
+2a5254/proof-packet.json

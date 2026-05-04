@@ -984,3 +984,115 @@ def test_run_build_detects_scope_violation_without_git(tmp_path: Path) -> None:
     assert any("peer.txt" in w for w in s1_result.scope_warnings), (
         f"expected scope warning for peer.txt; got {s1_result.scope_warnings}"
     )
+
+
+# ---------------------------------------------------------------------------
+# V9: ensure_clean_git_state aborts in-progress merges/rebases
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_clean_git_state_aborts_inprogress_merge(tmp_path: Path) -> None:
+    """V9: a worktree left in mid-merge state (MERGE_HEAD present) should
+    be recovered by `_ensure_clean_git_state` so subsequent branch ops
+    can proceed. P2 hit this — audit phase saw repeated 'mid-MERGE_HEAD'
+    after the merge phase ended; without recovery the audit fix-loop
+    silently skipped slices.
+    """
+    from otto.build import _ensure_clean_git_state, _is_git_repo
+    _init_git(tmp_path)
+    # Create a conflicting situation: two branches modifying same file.
+    (tmp_path / "shared.txt").write_text("base", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base", "--no-verify"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    # Branch A
+    subprocess.run(["git", "checkout", "-b", "branchA"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "shared.txt").write_text("from A", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "A", "--no-verify"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    # Branch B from base, conflicting change
+    subprocess.run(["git", "checkout", "-b", "branchB", "main"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "shared.txt").write_text("from B", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "B", "--no-verify"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    # Trigger a conflict — git merge --no-commit will leave MERGE_HEAD.
+    proc = subprocess.run(
+        ["git", "merge", "--no-commit", "--no-ff", "branchA"],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    # Verify MERGE_HEAD now exists.
+    git_dir = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    merge_head = tmp_path / git_dir / "MERGE_HEAD"
+    assert merge_head.exists(), "test setup: MERGE_HEAD should exist"
+
+    # V9: ensure_clean_git_state should abort the merge.
+    assert _ensure_clean_git_state(tmp_path) is True
+    assert not merge_head.exists(), "MERGE_HEAD should be cleared"
+
+    # And subsequent branch ops should now work.
+    co = subprocess.run(
+        ["git", "checkout", "main"],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    assert co.returncode == 0, f"checkout should succeed; stderr: {co.stderr}"
+
+
+def test_setup_slice_branch_recovers_from_mid_merge(tmp_path: Path) -> None:
+    """V9: _setup_slice_branch used to silently skip when MERGE_HEAD was
+    present. Now it calls _ensure_clean_git_state first to recover, so
+    a leftover mid-merge from a prior phase doesn't trap the build.
+    """
+    from otto.build import _setup_slice_branch
+    _init_git(tmp_path)
+    # Setup conflicting state and trigger MERGE_HEAD same way as above.
+    (tmp_path / "f.txt").write_text("base", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base", "--no-verify"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "branchA"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "f.txt").write_text("A", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "A", "--no-verify"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "branchB", "main"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "f.txt").write_text("B", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "B", "--no-verify"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "merge", "--no-commit", "--no-ff", "branchA"],
+                   cwd=tmp_path, capture_output=True, text=True, check=False)
+
+    # V9: _setup_slice_branch should now recover and succeed.
+    ok = _setup_slice_branch(tmp_path, branch="i2p/test/recovery", parent_ref="main")
+    assert ok is True, "setup should recover from mid-merge state"
+    head = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head == "i2p/test/recovery"
+
+
+def test_build_prompt_forbids_git_mutations(tmp_path: Path) -> None:
+    """V8: build agent prompt MUST tell the agent that git is read-only.
+    Without this, agents have run `git merge other-slice-branch` to
+    grab files from other slices, breaking branch isolation (P2).
+    """
+    s = Slice(id="s1", title="x", deps=[], owned_paths=["x.py"],
+              tasks=["build x.py"], checks=[_no_op_passing_check()])
+    spec = _spec([s])
+    inp = BuildAgentInput(
+        spec=spec, slice=s, project_dir=tmp_path, worktree=tmp_path,
+        branch="x", attempt=1,
+    )
+    prompt = _build_agent_prompt(inp)
+    # Must explicitly forbid git state mutations.
+    assert "Git is read-only" in prompt
+    assert "git merge" in prompt.lower()
+    assert "git checkout" in prompt.lower() or "git rebase" in prompt.lower()
+    # Must allow the read-only forms so the agent isn't crippled.
+    assert "git log" in prompt.lower()

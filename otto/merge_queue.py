@@ -608,6 +608,12 @@ def _merge_slice_branch(
     if not _branch_exists(git, worktree, branch):
         return _commit_integration(git, worktree, slice_id=slice_id, branch=branch)
 
+    # V9 fix: abort any in-progress merge/rebase/cherry-pick BEFORE the
+    # reset+clean. Without this, MERGE_HEAD persists and `git checkout
+    # base_branch` fails (observed in P2 audit: repeated "mid-MERGE_HEAD"
+    # warnings).
+    from otto.build import _ensure_clean_git_state
+    _ensure_clean_git_state(worktree)
     # V6 fix: ensure the worktree is clean before checkout. Post-merge
     # checks (V2) can leave runtime artifacts modified (e.g. a Flask
     # check that imports the app mutates instance/db.sqlite3). Without

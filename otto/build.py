@@ -537,6 +537,56 @@ def _is_git_repo(worktree: Path) -> bool:
         return False
 
 
+def _ensure_clean_git_state(worktree: Path) -> bool:
+    """Best-effort recovery: abort any in-progress merge/rebase/cherry-pick
+    so subsequent `git checkout` and `git merge` can proceed.
+
+    V9 fix: `git merge --abort` doesn't always run cleanly when called
+    from inside Otto (observed in P2 — audit phase saw repeated
+    "git is mid-MERGE_HEAD" because either a build-phase rogue merge
+    by an LLM agent or some merge-queue path left MERGE_HEAD around).
+    Without this, downstream branch ops fail and the audit fix-loop
+    silently skips with no recovery (V10).
+
+    Returns True if the worktree is now in a clean (no-mid-op) state,
+    False if recovery couldn't complete.
+    """
+    if not _is_git_repo(worktree):
+        return False
+    git_dir_proc = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    if git_dir_proc.returncode != 0:
+        return False
+    gd = (worktree / git_dir_proc.stdout.strip()).resolve()
+    # Abort each in-progress operation if its sentinel exists. The
+    # abort commands are no-ops on a clean repo (they return non-zero
+    # but don't corrupt state), so it's safe to call them defensively.
+    if (gd / "MERGE_HEAD").exists():
+        subprocess.run(
+            ["git", "merge", "--abort"],
+            cwd=worktree, capture_output=True, text=True, check=False,
+        )
+    if (gd / "REBASE_HEAD").exists() or (gd / "rebase-merge").exists() or (gd / "rebase-apply").exists():
+        subprocess.run(
+            ["git", "rebase", "--abort"],
+            cwd=worktree, capture_output=True, text=True, check=False,
+        )
+    if (gd / "CHERRY_PICK_HEAD").exists():
+        subprocess.run(
+            ["git", "cherry-pick", "--abort"],
+            cwd=worktree, capture_output=True, text=True, check=False,
+        )
+    # Verify clean state now.
+    for sentinel in ("MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD"):
+        if (gd / sentinel).exists():
+            return False
+    if (gd / "rebase-merge").exists() or (gd / "rebase-apply").exists():
+        return False
+    return True
+
+
 def _setup_slice_branch(worktree: Path, *, branch: str, parent_ref: str) -> bool:
     """Create or reset `branch` off `parent_ref`, then check it out.
 
@@ -556,6 +606,17 @@ def _setup_slice_branch(worktree: Path, *, branch: str, parent_ref: str) -> bool
     """
     if not _is_git_repo(worktree):
         return False
+    # V9 fix: try to recover from any in-progress merge/rebase/cherry-pick
+    # before doing branch ops. Used to silently skip with a warning, which
+    # caused audit fix-loops to abandon BLOCKED slices without surfacing
+    # WHY (V10).
+    if not _ensure_clean_git_state(worktree):
+        logger.warning(
+            "git is mid-merge/rebase/cherry-pick in %s and abort failed; "
+            "skipping slice branch setup",
+            worktree,
+        )
+        return False
     # Verify parent_ref exists.
     parent_check = subprocess.run(
         ["git", "rev-parse", "--verify", parent_ref],
@@ -563,20 +624,6 @@ def _setup_slice_branch(worktree: Path, *, branch: str, parent_ref: str) -> bool
     )
     if parent_check.returncode != 0:
         return False
-    # Don't clobber an in-progress merge/rebase.
-    git_dir = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
-        cwd=worktree, capture_output=True, text=True, check=False,
-    )
-    if git_dir.returncode == 0:
-        gd = (worktree / git_dir.stdout.strip()).resolve()
-        for sentinel in ("MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD"):
-            if (gd / sentinel).exists():
-                logger.warning(
-                    "git is mid-%s in %s; skipping slice branch setup",
-                    sentinel, worktree,
-                )
-                return False
     # Reset any uncommitted state so the new branch starts clean.
     subprocess.run(
         ["git", "reset", "--hard", "HEAD"],
@@ -1289,6 +1336,26 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         "If you need to (e.g., to make a check pass), STOP and request "
         "an amendment via `.otto/amendment_request.json` rather than "
         "silently over-reaching."
+    )
+    lines.append("")
+    # V8 fix: build agents had unrestricted git/bash and one slice in
+    # P2 ran `git merge other-slice-branch` to grab files from another
+    # slice. That breaks branch isolation: the slice's own contribution
+    # gets entangled with another's, downstream merges conflict, and
+    # Otto's merge attribution is wrong. Forbid git mutations explicitly.
+    lines.append("**Git is read-only for slice agents.**")
+    lines.append(
+        "You MAY run `git log`, `git show`, `git diff`, `git status`, "
+        "`git ls-files` to inspect history. You MUST NOT run `git "
+        "commit`, `git merge`, `git checkout`, `git rebase`, `git "
+        "reset`, `git push`, `git stash`, `git cherry-pick`, `git "
+        "branch -f/-D`, `git tag`, `git rm`, or any other command "
+        "that mutates the repo's state. Otto manages branches, commits, "
+        "and merges automatically. If you think you need a file that "
+        "doesn't exist on your branch (e.g. another slice's source), "
+        "create the file yourself within your scope OR request an "
+        "amendment via `.otto/amendment_request.json` to widen your "
+        "scope. Do NOT pull in another slice's branch via git merge."
     )
     lines.append("")
 
