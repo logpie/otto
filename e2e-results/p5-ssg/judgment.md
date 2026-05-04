@@ -73,3 +73,46 @@ To pass T3 I'd need either:
 **Honest read**: Otto's RUNTIME is now strong (V1-V11 fixed, 152 tests pass, 4/5 projects PASSED, 1 PARTIAL but verdict-honest). The remaining gap is COMPILE QUALITY — getting the LLM to produce specs that decompose without internal contradictions. That's a different class of problem than the runtime bugs the user flagged ("foundation correctness").
 
 Pausing the loop to check in with the user on direction.
+
+---
+
+# P5 v14b — re-run with V12+V14+V14b — judgment: PARTIAL (honest, no regression)
+
+Session: `/tmp/otto-e2e/p5-ssg/otto_logs/sessions/2026-05-04-120252-9b7dec`
+
+| Phase | Result | Cost | Wall |
+|---|---|---|---|
+| Compile | 5 slices, mostly-linear, 5 validator warnings | – | – |
+| Build | **5/5 passing** (V14b regression test ✓) | $4.22 | 1468s |
+| Merge | 2 landed, 1 blocked, 2 dep-blocked | $0.44 | – |
+| Audit | **verdict: partial** (V4 cap correct) | $2.29 | 842s |
+| **Total** | | **$6.95** | ~50 min |
+
+## What V12/V14/V14b proved
+
+- ✅ **V14b verified**: build phase no longer fails on `git add` rc=1 from gitignored-path warnings. All 5 slices committed successfully (vs 0/5 in V14 first cut).
+- 🟡 V12 not exercised: this run's spec was near-linear (no slice had >1 dep). Earlier P5 first-run hit the DAG path; V12 unit test covers the topology directly.
+- ✅ V14 still effective: no Otto runtime artifacts (`_session/`, `otto_logs/`) leaked into slice branches.
+
+## Why content-processing BLOCKED
+
+`cli-foundation` and `content-processing` both had `deps=[]` (parallel
+roots). Both wrote `setup.py`, `pyproject.toml`, `requirements.txt` —
+shared scaffold files. The compile agent put these in cli-foundation's
+`owned_paths` but didn't constrain content-processing from modifying
+them. Result: real merge conflict on `setup.py` etc. The fix-loop
+attempted repair but the conflict required redesigning content-
+processing's setup.py to be a strict superset/subset of cli-
+foundation's, which the agent couldn't reason about within the budget.
+
+This is **V13-class spec quality**: sibling slices write incompatible
+content into shared files. Otto's runtime is honest about it (PARTIAL,
+not PASSED). The structural fix is in the compile prompt:
+
+1. `setup.py`/`pyproject.toml`/`requirements.txt` should be in
+   `shared_scaffold` (not owned by any slice); only ONE slice should
+   own each of them.
+2. Or: the compile prompt should explicitly forbid sibling slices
+   from modifying files they don't own.
+
+## Final verdict: FAIL on rubric (PARTIAL = product incomplete), Otto behavior PASSES (no false positives).
