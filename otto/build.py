@@ -717,32 +717,30 @@ def _commit_slice_work(worktree: Path, *, slice_id: str, branch: str) -> bool:
     """
     if not _is_git_repo(worktree):
         return False
-    # V14 fix: explicit pathspec exclusions for Otto's runtime artifacts.
-    # Without these, `git add -A` stages otto_logs/, _session/, .otto/
-    # contents into slice branches whenever the user's .gitignore doesn't
-    # exclude them. Sibling slices then commit divergent state-journal
-    # contents and merge phase hits spurious conflicts on Otto's INTERNAL
-    # state (not user code). Observed in V12 unit test where session_dir
-    # = tmp_path/_session was committed; would also bite real users who
-    # forget to gitignore these paths. The exclusions belong to Otto
-    # regardless of the project's .gitignore.
+    # V14 fix: stage all user changes via plain `git add -A` (so the
+    # project's .gitignore works normally), then DEFENSIVELY unstage
+    # Otto's runtime artifact paths. Two steps because:
+    #   - explicit pathspec exclusions on `git add` make git complain
+    #     with rc=1 when the excluded path is also gitignored
+    #     ("paths are ignored by one of your .gitignore files"), even
+    #     though the staging of everything else succeeded;
+    #   - users who DON'T gitignore `_session/` etc. would otherwise
+    #     get Otto runtime artifacts committed into slice branches,
+    #     causing sibling slices to commit divergent journal contents
+    #     and merge phase to hit spurious conflicts on internal state.
+    # `git reset HEAD -- <path>` unstages without affecting working
+    # tree; safe even when the path isn't currently tracked.
     add = subprocess.run(
-        [
-            "git", "add", "-A", "--",
-            ".",
-            ":(exclude)_session", ":(exclude)_session/**",
-            ":(exclude)otto_logs", ":(exclude)otto_logs/**",
-            ":(exclude).otto", ":(exclude).otto/**",
-            ":(exclude)_otto_*",
-        ],
+        ["git", "add", "-A"],
         cwd=worktree, capture_output=True, text=True, check=False,
     )
     if add.returncode != 0:
         return False
-    # Also unstage any Otto runtime files that previously got tracked
-    # (left over from before this fix) so they don't keep diverging.
-    # `git rm --cached -rf` is a no-op if the paths aren't tracked.
     for runtime_path in ("_session", "otto_logs", ".otto"):
+        subprocess.run(
+            ["git", "reset", "HEAD", "--", runtime_path],
+            cwd=worktree, capture_output=True, text=True, check=False,
+        )
         subprocess.run(
             ["git", "rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", runtime_path],
             cwd=worktree, capture_output=True, text=True, check=False,
