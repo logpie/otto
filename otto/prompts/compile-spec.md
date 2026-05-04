@@ -105,6 +105,82 @@ competing app shells. Examples:
 - Note-taking app intent ("create, list, edit notes")
   → home `key_text`: "new-note form, notes list with edit links".
 
+## UX baseline by `project_kind`
+
+The spec captures functional structure well, but the audit's quality
+check has surfaced a recurring weakness: products consistently produce
+**code-sample-grade UX** (browser-default styling, no responsive layout,
+no human-friendly date formatting, no session state) because these
+concerns aren't anchored in the spec. Add the relevant baseline items
+to `done_means` so the build agent treats them as success criteria.
+
+These are NOT optional decoration — they are what separates a
+working code sample from a usable product.
+
+### `project_kind: "webapp"` — required baseline
+
+Add to `done_means`:
+
+- **Responsive layout**: works at 320px, 768px, and 1200px viewport
+  widths without horizontal scroll. Use `@media (max-width: 768px)`
+  rules; avoid fixed-pixel grids without fallbacks.
+- **Visible session/identity**: if the app has the concept of a
+  current user (login, signup), the logged-in identity must be
+  visible in the header or nav. Forms should NOT require re-entering
+  the username on every action.
+- **Consistent design language across pages**: the same nav, color
+  palette, typography, and spacing on every surface. Define this
+  once (e.g. `templates/base.html` + a single CSS file) and have
+  every page extend/reuse it.
+- **Styled error and empty states**: form errors visible with color
+  (not just text); empty lists show "No X yet" messages instead of a
+  blank surface.
+- **Custom CSS, not browser default**: at minimum, set typography
+  (font-family / line-height), spacing (margin / padding), and a
+  cohesive color scheme (background, accent, text). Browser-default
+  forms are explicitly NOT acceptable.
+
+### `project_kind: "static-site" / blog` — required baseline
+
+Add to `done_means`:
+
+- **Custom CSS**: same rule as webapp — go beyond browser default.
+- **Human-readable dates**: render dates as e.g. "January 15, 2026",
+  not "2026-01-15" (the latter is fine inside `<time datetime>` for
+  semantic correctness, but the visible text should be natural).
+- **Discoverable RSS** (if the project produces a feed): both a
+  `<link rel="alternate" type="application/rss+xml">` in `<head>`
+  AND a visible footer/header link. Producing rss.xml without a way
+  for users to find it is incomplete.
+- **Footer with metadata**: site name + copyright/year at minimum.
+  Pages that are only header + main content feel unfinished.
+- **Tag pages cross-link**: posts on a tag page should show their
+  OTHER tags too, not just the current one — tag pages are
+  discoverability surfaces.
+
+### `project_kind: "cli" / "library"` — required baseline
+
+Add to `done_means`:
+
+- **`--help` is complete**: every subcommand listed; flags documented;
+  one-line summary at the top.
+- **Error messages are actionable**: errors say WHY and HOW to fix,
+  not just "invalid argument".
+- **Exit codes match convention**: 0 success, non-zero on failure,
+  with codes that scripts can switch on.
+- **Default behavior is useful**: running with no flags does
+  something sensible (e.g., prints help, processes obvious-target).
+
+### Why this section exists
+
+Two consecutive bench rounds with the audit's calibrated quality
+rubric showed BOTH Microfeed (webapp) and SSG (static-site) shipped
+at 3/5 — MVP, not 4/5. The findings clustered around the items
+above: no responsive design, no session state UI, no custom CSS,
+ISO dates, missing RSS link, missing footer. Embedding these as
+explicit done_means items is how OTTO learns from each audit
+round (same mechanism that fixed RSS discovery one round earlier).
+
 ## Recommended fields by `project_kind`
 
 The parser is permissive (it coerces missing fields and surfaces

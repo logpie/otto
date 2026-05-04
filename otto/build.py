@@ -1001,6 +1001,22 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     for i, c in enumerate(s.checks or [], 1):
         lines.append(f"  {i}. {_describe_check(c)}")
     lines.append("")
+    # Surface integration-level done_means so the slice agent knows
+    # what the audit will check for (responsive design, session state,
+    # discoverable RSS, custom CSS — UX baseline items beyond the
+    # functional check). Without this, slice agents optimize only
+    # for their pytest selector and produce code-sample-grade UI.
+    if spec.done_means:
+        lines.append("## Integration done-means (the audit checks for these)")
+        lines.append(
+            "These are the integration-level success criteria across all "
+            "slices. Your slice contributes to these — do the parts that "
+            "are within your scope. The audit's quality check verifies "
+            "them at end-of-run."
+        )
+        for item in spec.done_means:
+            lines.append(f"  - {item}")
+        lines.append("")
     if agent_input.attempt > 1 and agent_input.last_failure_narrative:
         lines.append("## Previous attempt failed")
         lines.append(agent_input.last_failure_narrative)
