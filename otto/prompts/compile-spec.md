@@ -482,6 +482,82 @@ Example for a library:
    even if predicting forward — better to have an unused dep than
    a content conflict at merge.
 
+   **V16 — Extension points: register-via-discovery, not append-many**
+
+   The same conflict class arises with **app/server entry-point files**:
+
+   * `app.py`, `app/__init__.py`, `wsgi.py`, `cmd/main.go`, `src/main.ts`
+   * `models.py`, `db/schema.go`, `schema.sql`
+   * `routes.py`, `urls.py`, route registries
+   * `config.py`/`settings.toml` when slices add settings
+
+   Sibling slices each "register their routes/blueprints/models" by
+   independently editing `app.py`. Build phase passes (each slice
+   tests in isolation). Merge phase HITS A CONFLICT because two
+   slices added registrations to the same line range or imported the
+   same symbol differently. The fix-loop usually can't reconcile
+   because the conflict is structural, not textual. Observed in the
+   P7 e2e: dashboard and public_shortening BOTH registered their
+   blueprints in `app.py` independently, conflicted on merge,
+   dashboard couldn't recover.
+
+   **Rule**: extension-point files MUST follow register-via-discovery:
+
+   1. The **foundation slice** creates the entry-point file ONCE
+      with a single registration point. Two patterns work:
+
+      a) **Auto-discovery** (preferred for Python/JS):
+         ```python
+         # app.py — foundation slice owns this; do NOT edit elsewhere
+         from flask import Flask
+         from importlib import import_module
+         from pathlib import Path
+
+         def create_app(config=None):
+             app = Flask(__name__)
+             # ... base config ...
+             # Auto-register all blueprints in routes/
+             routes_dir = Path(__file__).parent / "routes"
+             for f in routes_dir.glob("*.py"):
+                 if f.stem == "__init__": continue
+                 mod = import_module(f"routes.{f.stem}")
+                 if hasattr(mod, "bp"): app.register_blueprint(mod.bp)
+             return app
+         ```
+
+      b) **Explicit list** (for small projects):
+         ```python
+         # app.py — foundation owns; list updated via amendment only
+         BLUEPRINTS = ["routes.auth", "routes.public", "routes.dashboard", ...]
+         ```
+
+   2. **Other slices DO NOT modify the entry-point file.** They each
+      create new files at `routes/<slice>.py` (or equivalent
+      sub-namespace). Each slice's file exports the blueprint/handler
+      via the convention the foundation chose (e.g. module-level `bp`).
+
+   3. For `models.py` / data layer: split per-slice models into
+      `models/<slice>.py` files; foundation provides a `models/__init__.py`
+      that re-exports or imports them. Each slice owns its own model
+      file; the foundation's `__init__.py` is the only file that
+      knows about all of them.
+
+   4. Use `shared_scaffold` for the registration POINT itself (so the
+      foundation slice owns it but it's documented as "do not modify
+      from peer slices"); but the slices that NEED to register go in
+      a sub-namespace they own (`routes/auth.py` is in auth's
+      `owned_paths`, not in shared_scaffold).
+
+   This pattern means **each slice writes ONLY to files it owns**.
+   Merge phase has zero conflicts on shared structure. The foundation
+   slice's auto-discovery imports new files as they appear without
+   needing modification.
+
+   When you compile a multi-slice spec, design the foundation's
+   registration mechanism FIRST and document it in the foundation
+   slice's tasks. Then every other slice's tasks include "create
+   `routes/<slice>.py` exporting `bp`" or similar.
+
 4. **Every slice has at least one check**. Browser journeys are
    `subprocess + glob` for v1: `command` runs (typically a Playwright
    pytest), then matching files in `evidence_globs` are collected as
