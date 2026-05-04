@@ -79,6 +79,63 @@ For each E2E run, I'll write `e2e-results/<project-id>/judgment.md` containing:
 4. If FAIL: root cause analysis — is this an Otto design bug or a one-off
    LLM artifact? Otto bugs trigger a fix in the codebase before the next run.
 
+## Real-user audit (RUA) — higher bar than pytest+test_client
+
+Pytest + `app.test_client()` + reading test outputs is "developer
+sanity testing." A real Otto user would actually run the deployed
+product. RUA enforces that bar; it's mandatory before declaring
+Dim 5 PASS for any T2+ project.
+
+**RUA is for finding root issues in OTTO, not patching the project.**
+If RUA surfaces a bug in the LLM-generated product, I do NOT fix
+that project's code. I treat it as evidence of an Otto design or
+prompt gap and fix Otto so the next project doesn't recur. Fixes
+to Otto must be generic — applicable to any project shape — not
+overfit to the specific output the audit examined.
+
+### RUA checklist (per project)
+
+For every PASS-candidate run, before signing off Dim 5:
+
+| RUA check | What to do |
+|---|---|
+| **Real server boot** | Run the spec's documented command verbatim (`python -m flask --app app run`, `uvicorn app:app`, console script entry point, etc.) in a subshell. Confirm it binds, doesn't crash on startup, serves the documented base URL. |
+| **Real HTTP traffic** | curl/HTTPie the documented endpoints against the live server (not test_client). Status codes, content-types, redirect Location headers, JSON body shape. |
+| **Browser inspection (webapp/api with HTML)** | Use chrome-devtools MCP (configured) to navigate the running server, render the home + 1-2 key pages, take screenshots, check console for errors, dump rendered DOM for the `key_text` from the spec. Read the actual HTML — not just the templates. |
+| **Concurrency / race** (where spec implies it) | If spec says "concurrent worker safety," "rate-limited," "atomic," "exactly-once," exercise that property. Race two workers against the same queued job, fire 31 requests in a hot loop and verify the 31st gets 429. |
+| **Edge cases beyond test suite** | Pick 3 inputs the spec implies but the test suite doesn't cover: malformed JSON body, oversized payload, zero-width unicode in usernames, etc. Verify graceful failure (4xx not 5xx). |
+| **Code quality skim** | Open each top-level `.py` (or `.ts`, `.go`) file and grep for: `raise NotImplementedError`, `TODO`/`FIXME`, `pass  # stub`, `print("debug")`, hardcoded secrets, broad `except Exception:` that swallows. Note findings — don't fix in this project. |
+| **Fresh-shell install** | In a clean tmp dir / fresh venv, `pip install -e <project>` and run the documented command from a NEW shell with no PYTHONPATH set. If it fails (V15-class), that's an Otto packaging gap, not a project gap. |
+| **Verdict honesty cross-check** | Compare Otto's `audit verdict` and `proof-packet.json` against my findings. Any divergence is V4-class (verdict honesty bug) and a foundation issue. |
+
+### RUA findings → Otto fixes, not project fixes
+
+Each RUA finding goes through this triage:
+
+1. **Is the symptom in the LLM's product code?** (Yes for almost
+   everything RUA finds.)
+2. **Could a different LLM run produce a similar symptom on a
+   different project?** If yes → it's an Otto-class issue (compile
+   prompt, build prompt, scope check, audit rubric, schema, validator).
+   Add to V-table; fix in Otto; document the abstraction.
+   If no → it's a one-off; record in the project's judgment but
+   don't change Otto.
+3. **What's the smallest generic fix?** Update a prompt rule, add
+   a validator warning, add a check kind, tighten the scope rule.
+   Never special-case "for projects matching X, do Y."
+4. **Verify by re-running Otto on a DIFFERENT project shape.** If
+   the same RUA check now passes on a different project that
+   previously would have hit the same issue, the fix generalized.
+   If the next project of the SAME shape passes, it might just be
+   stochastic — wait for cross-shape evidence.
+
+### RUA budget
+
+RUA adds 5–15 min per project. Worth it for T2+; optional for T1
+smoke since those barely exercise structural complexity. Run RUA
+**after** the unit-test/test_client pass succeeds but **before**
+declaring overall PASS.
+
 ## Project escalation ladder
 
 Microfeed-scale (~5-8 slices, 1 framework, 1 datastore) is a **checkpoint**,
