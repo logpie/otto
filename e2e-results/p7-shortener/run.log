@@ -1,0 +1,28 @@
+  otto run — session 2026-05-04-140347-2777e4
+
+spec validator: multi-slice spec declares no cross_slice_checks (integration testing is missing — slices may pass in isolation while their composition is broken)
+  Compile complete — 7 slice(s), project_kind=webapp
+  Spec: 
+/private/tmp/otto-e2e/p7-shortener/otto_logs/sessions/2026-05-04-140347-2777e4/s
+pec/spec.json
+  Spec validator warnings (1):
+    · multi-slice spec declares no cross_slice_checks (integration testing is 
+missing — slices may pass in isolation while their composition is broken)
+
+  Build phase — dispatching slice agents
+slice i2p/2026-05-04-140347-2777e4/analytics: dep-merge of i2p/2026-05-04-140347-2777e4/dashboard into branch failed: rc=1 stdout='Auto-merging app.py\nCONFLICT (content): Merge conflict in app.py\nAutomatic merge failed; fix conflicts and then commit the result.' stderr=''
+slice analytics: multi-dep branch setup failed (likely sibling-dep conflict); falling back to single-parent
+  Build: 7/7 slices passing, $4.73, 1929s
+
+  Merge phase — landing slices in dep order
+  Merge: 4 landed, 1 blocked, $0.41
+
+  Audit phase — final integrated review
+  Audit verdict: partial; $1.76, 644s
+
+  Render phase — assembling proof packet
+  Proof: 
+/private/tmp/otto-e2e/p7-shortener/otto_logs/sessions/2026-05-04-140347-2777e4/p
+roof-packet.html
+        /private/tmp/otto-e2e/p7-shortener/otto_logs/sessions/2026-05-04-140347-
+2777e4/proof-packet.json
