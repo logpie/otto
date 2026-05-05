@@ -1,0 +1,931 @@
+# Otto redesign — research
+
+This document is the load-bearing source of truth for Otto's redesign
+around Feature / Group / Guardrail. It supersedes any prior
+"V21 detail panel" framing in this branch — the panel is one
+consequence of the redesign, not the unit of work.
+
+Conversation transcript that produced these decisions:
+[`docs/otto-redesign-conversation.md`](docs/otto-redesign-conversation.md).
+
+Implementation plan derived from this doc:
+[`plan.md`](plan.md). Wireframes:
+[`docs/otto-wireframes.md`](docs/otto-wireframes.md).
+
+---
+
+## 1. Mental model (user-facing)
+
+A user opens Otto with a goal: "build me a doc editor." That's the
+Intent. From the Intent, Otto produces a **Spec** the user can read,
+edit, and approve.
+
+A Spec contains three things:
+
+- **Features** — what the product does. Each Feature is a unit of value
+  the user asked for or accepted. Each gets a verdict in the Proof.
+- **Groups** — logical product verticals that bundle related Features
+  ("Editor surface," "Comments," "Auth"). Each Group is also Otto's
+  execution unit at runtime.
+- **Guardrails** — explicit "don'ts" pinned to the Spec. ("Don't
+  support video upload yet.")
+
+Example doc-editor Spec, in user-facing language:
+
+```
+Intent: a doc editor with markdown rendering and inline commenting
+
+Groups & Features
+  Editor surface
+    ✓ Markdown rendering
+    ✓ Save / load
+    ✓ Image upload (drag-drop, max 5MB, embed inline)
+  Comments
+    ✓ Line-anchored comments
+    ✓ Threaded replies (one level)
+    ✓ Resolve thread
+
+Guardrails
+  ✗ No video upload
+  ✗ No real-time presence
+  ✗ No mobile-specific UI
+```
+
+The user reads this, may edit it (add Features, add Guardrails, split
+Groups, drop Features), then approves. Otto runs. Proof comes back at
+the end.
+
+---
+
+## 2. Vocabulary (unified, normative)
+
+This vocabulary is used **everywhere** — code, prompts, MC labels,
+file paths, debug output, docs. Aligning code and UI prevents the
+"slice in code, group in UI" trap that produced today's confusion.
+
+| Term | Meaning |
+|---|---|
+| **Intent** | Free-text user input. The starting point. |
+| **Spec** | Otto's compiled plan. Fields: `intent`, `features[]`, `groups[]`, `guardrails[]`, `structure`, `project_kind`. |
+| **Feature** | One unit of value with a verdict. Fields: `id`, `name`, `description`, `acceptance_detail`, `evidence_kinds[]`, `group_id`, `verdict?`. |
+| **Group** | One logical product vertical. Fields: `id`, `name`, `description`, `feature_ids[]`, `dispatch_plan`, `owned_paths`, `dependencies[]`. |
+| **Guardrail** | Pinned negative scope. Fields: `id`, `text`, `applies_to` (whole product / specific Group / specific Feature). |
+| **Audit** | The verification stage. Verb. Produces Feature verdicts + walkthrough evidence. |
+| **Proof** | The final artifact. Noun. HTML + JSON + assets. |
+| **Stage** | One pipeline phase: Compile / Build / Audit / Render / Land. |
+| **Run** | One end-to-end session. One session dir under `otto_logs/sessions/<id>/`. |
+| **Check** | A deterministic contract test inside Build. Kinds: `RepoTestCheck`, `ApiProbe`, `StateInvariant`, `BrowserJourney` (focused). |
+| **Check loop** | Layer 1 retry loop. Per-Group. Triggered by Check failure. |
+| **Audit loop** | Layer 2 retry loop. Per-Feature. Triggered by Audit verdict. |
+
+Retired words (do not use anywhere): `slice`, `capability`,
+`capability_verdict`, `task` (in user surface), `certifier`, `story`,
+`stories_passed/tested`, `acceptance check`, `AC`.
+
+---
+
+## 2.1 Spec artifact contract — two artifacts, one source of truth
+
+The Spec exists in two synchronized artifacts:
+
+| | `spec.md` (user-facing) | `spec.json` (runtime) |
+|---|---|---|
+| Format | Markdown with HTML-comment metadata | JSON, schema-validated |
+| Audience | Humans — read, edit, approve, share | Otto's stages — compile, build, audit, render |
+| Editability | Free-text prose edits welcome | No free edits; derived |
+| Lifetime | Versioned per user-edit (`spec-v1.md`, ...) | Versioned in lockstep |
+| Source of truth for | Intent prose, Feature names + descriptions, Guardrails, Project-kind summary | Feature ids, group_ids, owned_paths, dependencies, evidence_kinds, dispatch_plan, full structure detail |
+| Sharable | Yes (paste in PR, render in GitHub) | Internal artifact in session dir |
+
+**Three rules:**
+
+1. **User owns prose; Otto owns mechanics.** Users edit feature names,
+   descriptions, group placements, guardrails. Otto derives ids,
+   owned_paths, dependencies, dispatch plans. User cannot edit ids —
+   they're stable across renames.
+2. **Round-trip is byte-stable.** `parse_spec_md(render_spec_md(s), base=s) == s`.
+   Otto's HTML-comment markers (`<!-- feature: id | evidence: ... -->`)
+   persist through user edits. User's prose persists.
+3. **Runtime never reads markdown.** Compile / Build / Audit / Render /
+   Merge / Land all read `spec.json`. If user breaks the markdown,
+   runtime is unaffected — but the next save fails until fixed.
+
+**API surface in `otto/spec.py`:**
+- `parse_spec_md(md_text, base=None) -> Spec | ParseError`
+- `render_spec_md(spec) -> str` — produces the `.md` rendering
+- `compile_spec(intent, project_kind, base=None) -> Spec` — LLM call
+
+`compile_spec` and `parse_spec_md` both produce the same `Spec`
+dataclass; runtime doesn't care which produced it.
+
+**Versioning:** every user-save creates `spec-v<N>.md` and
+`spec-v<N>.json` side by side. Latest version is symlinked as
+`spec.{md,json}`.
+
+**Final artifact:** at end of Run, Render emits
+`proof/spec-final.md` — what was actually built, with verdict
+annotations per Feature. This is the human-readable "what shipped"
+view distinct from "what was planned."
+
+---
+
+## 2.6 Components and shared paths (load-bearing additions)
+
+The four mental-walkthrough reviews (browser, twitter, slack, non-webapp)
+converged on two gaps in the original Group model that surface immediately
+beyond doc-editor scale. Both must be fixed *during* Phase A1 dataclass
+work, not retrofitted later.
+
+### Component — non-Feature dispatch unit
+
+Real products have infrastructure that isn't a Feature: a WebSocket hub,
+a search indexer, a notification fan-out, a job queue. These have:
+
+- Code that needs to be built (so they need an agent)
+- Files they own (so they need owned_paths)
+- Verifiable behavior (so they need checks)
+- **No user-facing verdict** (the user didn't ask for "the WebSocket
+  layer," they asked for "live updates")
+
+Trying to fit these into the Feature model produces dishonest verdicts
+("WebSocket layer: passed" — but passed *what*?). The right shape:
+
+```
+Component (in spec.json):
+  id: "websocket-hub"
+  name: "WebSocket hub"
+  description: "Pub/sub layer for live updates."
+  owned_paths: [...]
+  dependencies: []
+  checks: [StateInvariant, ApiProbe, ...]
+  consumed_by: [feature_id, feature_id, ...]   # Features that need this Component
+```
+
+Components are dispatched like Groups (own agent, branch, worktree). They
+have checks but no audit verdict — the audit pass verifies the Features
+that consume them, transitively proving the Component works.
+
+In the Proof:
+- Whole-product packet has a "Components" section (collapsed by default)
+  showing build status + check evidence + cost — but no pass/fail "verdict"
+- Per-Feature pages list the Components they depend on, link to their
+  build evidence
+
+### Shared paths — files no Group owns
+
+`models.py`, `app.py`, `routes/__init__.py`, `requirements.txt` get
+touched by every Group. The current "overlap → merge into one Group"
+rule collapses everything into one mega-Group at multi-tenant scale.
+
+Fix: the Spec declares `shared_paths[]` — files everyone may edit but no
+one owns:
+
+```
+{
+  "shared_paths": [
+    "models.py",
+    "app.py",
+    "requirements.txt",
+    "routes/__init__.py"
+  ]
+}
+```
+
+Rules:
+- Any Group may **add** to a shared file.
+- Any Group may **modify** existing entries in a shared file (subject
+  to merge-queue serialization on conflicts).
+- Compile auto-detects shared paths from the project structure plus
+  user override via the spec-review screen.
+- Merge queue serializes lands across Groups that touched any shared
+  path (already covered by existing eligibility logic).
+
+Together, Components and shared_paths replace the old "merge Groups
+that share files" rule. Groups remain logical product verticals;
+file conflicts are handled by ownership tiers (owned by one Group /
+owned by a Component / shared / unowned).
+
+---
+
+## 2.7 Per-kind structure schemas
+
+The walkthrough on non-webapp projects (api, library, cli) confirmed
+that today's design implicitly assumes webapp. The fix is per-kind
+`structure` schemas in the Spec, plus per-kind evidence-kind defaults.
+
+### `structure` field per `project_kind`
+
+```
+project_kind=webapp:
+  structure: { framework, database, ui_style, auth, runtime_entry_url }
+  default evidence kinds: BrowserJourney, ApiProbe, StateInvariant, RepoTestCheck
+
+project_kind=api:
+  structure: { framework, database, auth, openapi_spec_path, runtime_entry_url }
+  default evidence kinds: ApiProbe, StateInvariant, RepoTestCheck
+
+project_kind=library:
+  structure: { language, package_name, api_surface_doc_path, package_manager }
+  default evidence kinds: ImportCheck, TypeCheck, RepoTestCheck
+
+project_kind=cli:
+  structure: { language, binary_name, subcommands, runtime_entry_argv }
+  default evidence kinds: CLIProbe, RepoTestCheck
+```
+
+`runtime_entry_*` fields tell the audit agent how to reach the product
+under test. For webapp/api: a URL. For cli: an argv list. For library:
+no runtime entry — audit verifies via import + tests.
+
+### New evidence kinds (additions to `otto/checks.py`)
+
+- **`CLIProbe`** — invoke a subprocess with given argv; assert exit
+  code, stdout substring, stderr substring, file-system side effects.
+- **`ImportCheck`** — `python -c "import <package>"` returns exit 0;
+  optionally check `<package>.__version__` matches expected.
+- **`TypeCheck`** — `mypy` / `pyright` / equivalent passes on declared
+  package paths.
+
+### Walkthrough schema extension
+
+`audit/attempt-NN/walkthrough.jsonl` line schema gains kind-aware fields:
+
+```
+{
+  "t": "00:42.13",
+  "feature_ids": ["..."],
+  "action_kind": "browser_navigation | api_request | cli_invoke | import_check",
+  "narrative": "...",
+
+  // browser_navigation
+  "screenshot": "assets/...",
+  "dom_snapshot": "assets/...",
+  "url": "...",
+  "method": "GET",
+
+  // api_request
+  "method": "POST",
+  "path": "/api/users",
+  "request_body": "...",
+  "response_status": 201,
+  "response_body": "...",
+
+  // cli_invoke
+  "command": ["git-flow-helper", "start", "feature/foo"],
+  "exit_code": 0,
+  "stdout": "...",
+  "stderr": "...",
+
+  // import_check
+  "package": "retryable",
+  "version": "0.1.0",
+  "import_succeeded": true
+}
+```
+
+Audit prompt must be parameterized by `project_kind` — webapp variant
+gets browser-walkthrough instructions; cli variant gets shell-invocation
+instructions; library variant gets import+test instructions.
+
+### Proof template branches
+
+`feature-proof.html.j2` gets per-`action_kind` rendering:
+- Browser actions render as screenshot grid (current default)
+- API actions render as request/response trace tables
+- CLI actions render as terminal-style transcripts (monospace, ansi
+  colors)
+- Import actions render as a status table
+
+UI checkbox filter: spec-review screen filters evidence-kind checkboxes
+by `project_kind`. `BrowserJourney` doesn't appear when
+`project_kind=library`.
+
+---
+
+## 3. Atomic units
+
+The redesign distinguishes atomic units by *what they're atomic for*:
+
+| Unit | Atomic for | Cardinality |
+|---|---|---|
+| **Feature** | Value / verdict | One Feature → one verdict in Proof |
+| **Group** | Dispatch | One Group → one branch + agent (typically) |
+| **Stage** | Pipeline progress | Five Stages per Run, in fixed order |
+| **Run** | Session | One Run → one session dir → one Proof packet |
+
+**Tasks** (todo items inside the agent's loop) are below the user's
+surface. Internal-only. Never appear in Spec, Proof, MC, or CLI.
+
+### How Features and Groups relate
+
+Default rule: **one Feature per Group**, *unless file-ownership forces
+grouping*. Concretely, at Compile time:
+
+1. For each Feature, the compile agent emits a candidate `owned_paths`.
+2. If two Features have overlapping `owned_paths`, they're merged into
+   one Group.
+3. Otherwise each Feature gets its own Group.
+4. The compile agent may also override this with logical-coherence
+   reasoning ("Comments and Reply share enough context that the same
+   agent should build both") — but logical merging is the exception,
+   file-overlap merging is the rule.
+
+A Group's *logical* identity (name, description) is what the user
+sees in spec review. Its *dispatch plan* (one or more execution units,
+file-ownership rules) is internal.
+
+### Brownfield routing for new Features
+
+When the user adds a Feature to an existing project, Compile decides:
+
+- **Modifies an existing Feature** → re-dispatch the existing Group
+  with focused intent. Same agent identity, same branch base, surgical
+  edits.
+- **New Feature, no file overlap** → new Group, fresh agent.
+- **New Feature, overlaps existing files** → new Group with extended
+  `owned_paths` covering the overlapped files. Merge queue serializes
+  the land.
+
+Existing Groups are *not* re-built when a related Feature is added.
+Targeted Feature implementation is the rule.
+
+---
+
+## 4. Retry / loop layers (only two)
+
+### Layer 1 — Check loop
+
+- **Where:** inside Build, per-Group.
+- **Trigger:** a Group's `check_evidence` fails (RepoTestCheck,
+  ApiProbe, StateInvariant, focused BrowserJourney).
+- **Detection:** deterministic. Each Check has a clear pass/fail
+  contract. No LLM judgment.
+- **Retry:** the same Group's agent gets the failure narrative, edits,
+  re-runs failing Checks.
+- **Cap:** configurable, default `retries.check_loop.max_attempts_per_group = 3`.
+- **Cost:** cheap. Local. No browser walkthrough of full product.
+
+### Layer 2 — Audit loop
+
+- **Where:** between Audit and Render.
+- **Trigger:** Audit's LLM judge flags a Feature as failing or partial.
+- **Detection:** LLM-judged. Holistic walkthrough verdict.
+- **Retry:** the failing Feature is routed back to its Group's agent
+  for one repair attempt; Audit re-runs *only the affected Features*.
+- **Cap:** configurable, default
+  `retries.audit_loop.max_repair_attempts_per_run = 1`,
+  `retries.audit_loop.max_audit_passes_per_run = 2`.
+- **Cost:** expensive. Browser walkthrough, LLM judgment, audit re-pass.
+
+### No Layer 3
+
+After Layer 2, if a Feature still fails, it lands in the Proof as
+`partial` or `blocked` honestly. The Run completes. The user reads the
+Proof and decides: accept the partial product, run a follow-up with
+better guidance, or abort.
+
+Quality findings (e.g. "hero section lacks visual distinction, 3/5
+quality") are **informational**, never blocking. They appear in the
+Proof; they do not trigger another retry.
+
+### Severity ladder for findings
+
+Quality findings (informational by default) need a severity ladder so
+"my product has 8s page load and stale counts" doesn't slip past as
+"passed":
+
+| Severity | Meaning | Effect on verdict |
+|---|---|---|
+| `critical` | Feature passes its checks but is functionally unusable (e.g. 8s load time, stale state, broken UX) | Flips Feature verdict to `partial`; routes to Audit loop |
+| `important` | Functional but suboptimal (small UX bug, missing edge case) | Surfaces in Proof under the Feature; verdict stays as audited |
+| `polish` | Cosmetic (color, spacing, copy) | Surfaces in a "Polish suggestions" Proof section, never blocks |
+
+Audit prompt produces severity-tagged findings; render renders them at
+the appropriate visibility tier. Critical findings re-trigger Layer 2
+repair within budget.
+
+### Audit honesty contract
+
+Walkthrough reviews surfaced three patterns that produce dishonest
+verdicts. Each is fixed by an explicit field on Feature verdicts:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `evidence_completeness` | `full`, `proxy_only`, `partial` | Whether evidence directly verifies the Feature (`full`) vs verifies via a proxy (e.g. DB row exists for "delivered notification") |
+| `coverage_confidence` | `high`, `medium`, `low` | How conclusive the evidence is. `low` = "this passed but evidence is suggestive, not conclusive" |
+| `multi_actor_required` | bool | True if Feature inherently needs multiple browser sessions (DM delivery, cross-user follows, presence indicators) |
+
+`multi_actor_required: true` Features cannot be verified `full`
+completeness in v1 (single audit agent, single browser session). They
+get `proxy_only` completeness with explicit narrative: "Verified
+sender side + DB persistence; live multi-session delivery not directly
+tested in v1." Honest partial > false complete.
+
+### Audit fixtures
+
+Multi-user products (Slack, Twitter) need pre-seeded fixture state
+before audit walkthrough. Without this, audit wastes its budget creating
+test users, follows, channels.
+
+Spec gains an optional `audit_fixtures[]` block:
+
+```
+{
+  "audit_fixtures": [
+    {"kind": "user", "username": "alice@test", "role": "admin"},
+    {"kind": "user", "username": "bob@test", "role": "member"},
+    {"kind": "channel", "name": "general", "members": ["alice@test", "bob@test"]},
+    {"kind": "follow", "follower": "alice@test", "followed": "bob@test"}
+  ]
+}
+```
+
+A new stage between Build and Audit — **Seed** — applies fixtures to the
+live product before walkthrough. Seed runs are deterministic, idempotent,
+and themselves checked (failed seed = blocked Run, not silent
+proceed-with-empty-state).
+
+### Audit modes (configurable)
+
+Default: **whole-product audit at end of Run** with Feature anchors,
+plus per-Feature deterministic Checks pre-merge inside Build.
+
+Optional flags:
+
+- `audit.walkthrough_per_feature: true` — audit produces per-Feature
+  walkthrough segments (more expensive; needed if running many
+  re-audits later).
+- `audit.pre_merge_audit_groups: ["auth", "payments"]` — Groups in
+  this list get a focused audit pre-merge. The merge queue blocks
+  until that Group's Features pass a focused audit.
+
+---
+
+## 5. Configurable budgets
+
+All retry counts, timeouts, cost caps, and audit modes live in
+`otto.yaml` per project, with sane defaults from `otto/defaults.py`.
+
+```yaml
+# otto.yaml — project defaults
+retries:
+  check_loop:
+    max_attempts_per_group: 3
+    timeout_per_attempt_s: 1800
+  audit_loop:
+    max_repair_attempts_per_run: 1
+    max_audit_passes_per_run: 2
+
+budgets:
+  total_repair_wall_s: 7200
+  total_cost_usd: null   # null = no cap
+
+audit:
+  walkthrough_per_feature: false
+  pre_merge_audit_groups: []
+
+agents:
+  default_provider: claude
+  default_model: claude-sonnet-4-6
+  per_group: {}   # advanced: override provider/model per Group id
+```
+
+CLI flags override per-run:
+
+```
+otto run "<intent>" \
+  --max-check-attempts 5 \
+  --max-audit-repairs 2 \
+  --total-cost-usd 30 \
+  --audit-walkthrough-per-feature
+```
+
+Spec-level overrides allowed for advanced users:
+
+```json
+{
+  "groups": [
+    {
+      "id": "auth",
+      "audit_pre_merge": true,
+      "max_check_attempts": 5,
+      ...
+    }
+  ]
+}
+```
+
+**Rule for code:** no magic numbers anywhere except `otto/defaults.py`.
+Every count/timeout/budget reads from config-with-defaults.
+
+---
+
+## 6. Pipeline stages
+
+```
+Compile → [Spec review gate] → Build → Audit → Render → Land
+```
+
+### Compile
+
+LLM produces Spec from Intent. Or normalizes a user-supplied Spec.
+Outputs `spec/spec.json`. May read existing project state in brownfield
+mode (planned, not yet specified — see §9.4).
+
+### Spec review gate
+
+Optional, default-on for greenfield, default-off when user already
+supplied concrete Features.
+
+User can:
+- Add / edit / remove Features
+- Split / merge / rename Groups
+- Add / remove Guardrails
+- Approve, regenerate (recompile), or abort
+
+Gate produces `spec/spec.json` (versioned: `spec-v1.json`, `spec-v2.json`
+on regeneration).
+
+### Build
+
+For each Group, dispatch a long-lived agent in its own worktree on its
+own branch. Agent's job: implement Features in the Group, run their
+Checks, retry on failure (Check loop), produce a clean diff.
+
+Per-Group output:
+- `groups/<group-id>/branch` — git branch
+- `groups/<group-id>/narrative.log` — agent trace
+- `groups/<group-id>/check-evidence.jsonl` — per-Check results, tagged
+  with `feature_id`
+- `groups/<group-id>/cost.json` — tokens, dollars, wall
+
+### Audit
+
+One LLM pass on the integrated product (after all Groups have landed
+or the merge queue declares a stable integrated state). The audit
+agent walks the product, evidences each Feature against the spec,
+emits a verdict per Feature.
+
+Critical: **every walkthrough action is tagged with the Feature(s) it
+evidences.** This is what enables per-Feature Proof.
+
+Audit output:
+- `audit/attempt-NN/walkthrough.jsonl` — line-per-action with
+  `feature_ids[]`, `screenshot?`, `dom_snapshot?`, `narrative`
+- `audit/attempt-NN/feature-verdicts.json` — per-Feature verdicts +
+  evidence-ref lists
+- `audit/attempt-NN/quality-findings.json` — informational findings
+  with severity
+
+### Render
+
+Deterministic publish stage. Reads Spec + audit output + group logs +
+state. Writes Proof packet:
+- `proof/proof-packet.html` — whole-product front door
+- `proof/proof-packet.json` — machine-readable
+- `proof/features/<feature-id>/proof.html` — per-Feature mini-page
+- `proof/features/<feature-id>/proof.json` — per-Feature machine
+- `proof/assets/` — copied screenshots, DOM snapshots, audit clips
+
+Pure function. No LLM. Re-runnable: `otto render <session-id>` to
+update presentation without re-auditing.
+
+### Land
+
+Merge each Group's branch into target via eligibility-gated FIFO. Per
+Group: refresh target, rebase, rerun checks, atomic land, post-land
+recheck. On conflict or check fail: same Group's agent repairs in own
+worktree.
+
+Final state events emitted to `state.jsonl`:
+- `run.finished` with `verdict ∈ {passed, partial, blocked}`
+
+---
+
+## 7. Proof granularity
+
+### Whole-product Proof packet
+
+`proof/proof-packet.html` — what the user lands on. Contents:
+
+- Intent (verbatim)
+- Verdict header: passed / partial / blocked, X/Y Features, quality score
+- Feature list (primary surface):
+  - Each Feature: verdict, one-line detail, expandable evidence
+- Groups (secondary, expander below feature list):
+  - Each Group: name, contained Feature ids, files changed, narrative
+    log link, cost, wall, repair history
+- Guardrails (verified — audit checked nothing violated them)
+- Stage timeline: Compile → Build → Audit → Render → Land with
+  durations and costs
+- Spec amendments (if non-empty)
+- Run metadata (collapsed)
+
+### Per-Feature mini-packet
+
+`proof/features/<feature-id>/proof.html`. Contents:
+
+- Feature name + intent context (which Spec line produced it)
+- Verdict + detail
+- Evidence:
+  - Browser walkthrough segment (timestamped, video-grid-style with
+    screenshots and saved DOM)
+  - Deterministic checks: per-check pass/fail, output excerpts
+- Built in Group: name, files, diff link, repair history
+- Audit narrative excerpt
+- Spec context: was this added by Compile or by user during review?
+
+### Per-Group narrative
+
+Under `groups/<group-id>/`. Not Proof-level (these are *how* it was
+built, not *what* was proven), but linked from Proof.
+
+### Linking and embedding
+
+- Whole-product packet embeds per-Feature blocks via anchors:
+  `#feature-<id>` scrolls to that Feature's section in the same page.
+- Per-Feature URL `/api/sessions/<id>/features/<feature-id>` returns
+  the standalone mini-page; user can share that URL.
+- The whole-product packet contains a link to each per-Feature page
+  for "view this Feature in isolation."
+
+---
+
+## 8. Hybrid plan ownership
+
+Same pipeline, two entry modes:
+
+### Otto plans (default greenfield)
+
+```
+otto run "build me a doc editor with markdown and inline comments"
+```
+
+Compile derives full Spec from Intent. Spec review gate defaults to
+on; user reads Otto's plan, edits, approves. Build runs.
+
+### User plans (default brownfield)
+
+User supplies concrete Features in a structured intent file:
+
+```
+# intent.md (user-supplied)
+
+# Doc editor — image upload
+
+## Features
+- Drag-drop image upload, max 5MB, embed inline
+- Server-side resize for images > 1MB
+
+## Guardrails
+- No video upload
+```
+
+Compile normalizes (no derivation, just structure validation). Spec
+review gate defaults to off (user said what they wanted). Build runs.
+
+### Mixed
+
+Most common in practice. User says "add image upload" → Otto compiles
+a Spec (one Group, one or two Features) → user reviews briefly →
+Build runs.
+
+---
+
+## 9. Constraints
+
+### 9.1 Source-of-truth discipline
+
+- Anything MC shows for a Run that isn't in `proof-packet.json` is
+  either (a) a derived metric, (b) a real-time progress field for
+  in-flight Runs, or (c) a bug.
+- If MC needs a field that doesn't exist in Proof, the renderer adds
+  it; MC doesn't compute it independently.
+
+### 9.2 Real evidence only
+
+- Every metric MC shows must trace to a real file under
+  `otto_logs/sessions/<id>/`.
+- If a field doesn't exist for a session (partial / blocked), MC shows
+  "—" not zeroes.
+- No mock data, no placeholders.
+
+### 9.3 Phase B/C compatibility
+
+- Legacy `otto build`/`certify`/`improve` runs still readable in
+  history during Phase A.
+- Phase B: legacy commands route through the new stack. Phase C:
+  legacy code, prompts, MC widgets, dataclasses deleted.
+- New code paths must stand on their own without any legacy mount.
+
+### 9.4 Brownfield compile mode (deferred spec)
+
+When Otto runs against a project with existing code:
+- Compile must read the working tree (not just Intent).
+- Compile must diff against any existing `spec/spec.json` and only
+  emit new/changed Features.
+- Compile must respect file-level "leave it alone" markers (mechanism
+  TBD — comment-based? `.otto/preserve` file?).
+- Existing Groups carry forward; new Groups append.
+
+This is acknowledged-needed but not yet specified. Tracked in §11
+open items.
+
+### 9.5b Out-of-scope products
+
+Otto is not fit for systems-level products. Explicit out-of-scope
+clause:
+
+- Operating systems, kernels, hypervisors
+- Web browsers, JavaScript runtimes, language compilers
+- Database engines (storage layers, query planners)
+- Embedded firmware, drivers
+- Anything where "passes" requires verifying memory safety, sandboxing,
+  spec compliance against external standards (HTML/CSS/JS specs,
+  POSIX, etc.), or correctness under adversarial inputs
+
+Compile detects out-of-scope intents heuristically (intent text contains
+"browser," "kernel," "compiler," "OS," etc.) and emits a warning before
+spending LLM cost. User can override; if they do, the proof packet
+prominently notes "this is outside Otto's verified scope; treat verdict
+as suggestive."
+
+The browser walkthrough (`docs/review-walkthrough-browser.md`) is the
+load-bearing analysis here. Audit instruments (BrowserJourney, ApiProbe,
+StateInvariant, RepoTestCheck) cannot meaningfully verify a browser; the
+proof would be dishonest by construction. Same logic for kernels, JS
+engines, etc.
+
+### 9.5c Adversarial criteria generation
+
+Default Compile produces happy-path acceptance criteria. Real products
+need adversarial coverage: double-like, like-deleted-tweet, race
+conditions, malformed inputs. **Deferred to v2** — not blocking on
+A0-A6.
+
+When implemented: a separate Compile pass after the happy-path Compile
+generates adversarial criteria as additional Features (or as additional
+acceptance steps within existing Features, depending on cost/UX).
+Audit verifies them like any other Feature. For v1, users can manually
+add adversarial Features at the spec-review gate.
+
+### 9.5d Cost cap default
+
+`$5` was a doc-editor-scale default. Realistic per-Run budgets:
+
+- Doc editor / shortener / kanban: $1-5
+- Twitter clone / Slack clone: $20-50
+- Brownfield iteration (one or two Features): $0.50-2
+
+`otto.yaml` `budgets.total_cost_usd_default` is project-default. The
+New Run dialog (wireframe screen 8) shows an estimate based on Spec
+size before user clicks Start. Estimate formula derives from per-stage
+cost averages tracked in `bench-results/`.
+
+### 9.5e No hardcoded numbers (renumbered from §9.5)
+
+All retry counts, timeouts, budgets, max sizes, max steps come from
+`otto.yaml` with defaults from `otto/defaults.py`. No literal magic
+numbers anywhere else.
+
+---
+
+## 10. CLI surface (target)
+
+```
+otto run [intent | --intent-file path] [options]
+otto run --resume <session-id>
+otto run --rerun-audit <session-id> [--feature <id> ...]
+otto run --recompile <session-id>
+otto render <session-id>
+otto history
+otto sessions <session-id>
+otto setup
+otto web [--project-launcher] [--projects-root <dir>]
+otto replay <session-id>
+```
+
+Deprecated and deleted in Phase C: `otto build`, `otto certify`,
+`otto improve`.
+
+`otto run` flags (selection):
+- `--intent-file path`
+- `--project-kind {webapp,cli,library,api}`
+- `--no-spec-review` (skip review gate)
+- `--from-spec path` (skip compile, drive from existing spec)
+- `--no-build` (compile only)
+- `--max-check-attempts N`
+- `--max-audit-repairs N`
+- `--total-cost-usd N`
+- `--audit-walkthrough-per-feature`
+- `--audit-pre-merge-groups id1,id2`
+- `--provider {claude,codex,...}`
+
+---
+
+## 11. Open items deferred
+
+These came up but are not fully resolved. Tracked here so future
+sessions don't re-derive them.
+
+1. **Per-Feature audit cost vs whole-product audit cost.** Empirical
+   measurement needed before committing to "per-Feature is expensive."
+2. **Multi-Feature evidence cross-linking.** Walkthrough segments that
+   evidence multiple Features — sketched as "list under each, mark
+   'shared with X'" but not implemented.
+3. **Per-Group provider/model surfacing.** Cheap to add to Proof; open
+   question whether to surface by default.
+4. **Brownfield compile mode** (§9.4). What does Compile read, how
+   does it diff against existing Spec, what's the marker for "preserve
+   this file."
+5. **Spec-edit propagation during in-flight runs.** If user edits Spec
+   mid-Run (rare), do dependent Groups get re-dispatched, or does the
+   edit only apply to next Run?
+6. **Concurrent Runs in the same project.** Forbidden today (single
+   project lock). Should we support N parallel `otto run`s? If yes,
+   how does the merge queue cope?
+
+---
+
+## 12. Verification plan
+
+For the redesign to be considered shipped:
+
+1. **Vocabulary refactor verified.** Single grep across the repo:
+   `slice`, `capability`, `capability_verdict`, `certifier`, `story`,
+   `stories_passed/tested` return zero hits in `otto/`, `tests/`,
+   `docs/`. Existing files in `otto_logs/` and `bench-results/` are
+   read-only history; not touched.
+
+2. **`otto/defaults.py` exists and is the only place magic numbers
+   live.** Grep for hardcoded retry counts in `otto/` returns matches
+   only in `defaults.py` and `tests/`.
+
+3. **Per-Feature Proof renders.** Run a fixture intent, assert
+   `proof/features/<id>/proof.html` exists for every Feature, contains
+   verdict + at least one evidence ref. Whole-product packet contains
+   anchor links to all per-Feature pages.
+
+4. **Audit walkthrough is Feature-tagged.** Each line of
+   `audit/attempt-NN/walkthrough.jsonl` has `feature_ids[]` populated.
+
+5. **Check loop and Audit loop tested independently.** Unit tests
+   inject failing Checks (Layer 1) and failing Audit verdicts (Layer 2)
+   and assert correct retry behavior with configurable caps.
+
+6. **MC renders the new shape.** Click any Run row, drawer shows
+   Feature list as primary, Groups as expander, stage timeline,
+   per-Feature drilldown link. No legacy WARN noise. No Skipped
+   Build/Certify phases.
+
+7. **Microfeed parity bench.** End-to-end run produces a Spec with
+   recognizable Features ("post creation," "RSS feed," etc.), all
+   Features pass audit, Proof packet reads cleanly to a human, cost +
+   wall within 1.5× / 1.2× of mono baseline (per the original plan
+   step 11).
+
+8. **Real-User-Audit (RUA).** Drive MC end-to-end in
+   chrome-devtools against three different intents (greenfield webapp,
+   greenfield CLI, brownfield "add a feature"), screenshot every
+   panel state, check for misleading copy / dead links / empty values
+   that should have data. Any RUA failure blocks merge.
+
+9. **Codex implementation gate.** Before merging, dispatch
+   `/codex-gate` with the implementation diff + this research.md.
+   Codex finds bugs → Codex fixes them.
+
+---
+
+## 13. What this redesign deletes (Phase C, gated on bench)
+
+- `otto/campaign.py` (codex-i2p)
+- `otto/oracles.py` (codex-i2p) — logic ported to `otto/checks.py`
+- `otto/product_contract.py` (both branches)
+- `otto/queue/` — replaced by `otto run` orchestration
+- `otto/checkpoint.py` legacy parts — replaced by `otto/state.py`
+- `otto/cli.py` `build` / `certify` / `improve` subcommands
+- `otto/mission_control/service.py:_review_packet` and friends —
+  replaced by `otto/mission_control/run_view.py`
+- `otto/web/client/src/components/inspector/RunInspector.tsx` (the
+  2700-line beast) — replaced by `otto/web/client/src/components/run/`
+- All "story" / "AC" / "stories_passed" code paths
+- HistoryRow `domain` field once `otto run` covers all run types
+
+---
+
+## 14. What this redesign keeps (Phase A coexistence)
+
+During Phase A:
+- New code lives in: `otto/spec.py`, `otto/checks.py`, `otto/state.py`,
+  `otto/build.py`, `otto/merge.py`, `otto/audit.py`, `otto/render.py`,
+  `otto/defaults.py`
+- New MC: `otto/mission_control/run_view.py`,
+  `otto/web/client/src/components/run/`
+- Legacy modules untouched until Phase B routes through the new stack
+  and Phase C deletes them.
+
+This means Phase A is purely additive in code. The detail-panel mess
+that triggered this redesign (mc-i2p drawer showing legacy WARN noise
+on i2p runs) is fixed not by patching the legacy panel but by routing
+i2p runs to the new `run_view.py` + `<RunDrawer />` from day one.
+Legacy runs keep using the legacy panel until Phase B.

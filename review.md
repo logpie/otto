@@ -475,3 +475,46 @@ Reviewed full diff 99a53ccfe..HEAD (15558 lines, 45 files) — entire 5-phase wo
 - APPROVED. No remaining cross-phase regressions, Repair Precedence violations, or missing gate-exit blockers.
 
 Final state: 844 tests passing. All 5 design gate exits (A/B/C/D/E) verified.
+
+---
+
+### A5 Approval — 2026-05-04 (tick 37)
+
+**Phase**: A5 — Spec review screen + hybrid plan ownership.
+**Verdict**: APPROVED for the data + plumbing layer. Visual polish (Add Feature modal, diff view, full markdown styling) is tracked in progress.md as post-cutover items, not blockers.
+
+Acceptance evidence:
+- 1774 unit tests pass after the tick-35 alias-bug fix (slices=/groups= silent no-op resolved at root in `Spec.__init__`).
+- `tests/integration/test_spec_review_e2e.py::test_a5_full_review_flow` passes — full GET → /edit → /approve flow produces correct on-disk artifacts (spec.json updated, spec-v1.json archived, lifecycle.json approved) and emits all three spec.* events in order.
+- `tests/integration/test_spec_review_e2e.py::test_a5_stale_edit_blocked_during_concurrent_session` passes — Tier-1 concurrency guard verified end-to-end: stale intent_hash → 409, on-disk spec untouched.
+- Frontend: `?view=spec-review&spec=<id>` route mounts SpecReviewPage; typecheck + vite build green (tick 34).
+- Backend routes: 14/14 spec_review_routes tests pass (CRUD + path-traversal + lifecycle).
+
+Pending (NOT blocking A5 closure):
+- `spec.regenerated` event wiring (compile-agent recompile path; lands when that path is exercised).
+- Visual polish (markdown rendering, Add Feature modal, diff view).
+- Browser RUA against an in-flight pause (deferred to Phase B/C — needs a real running session).
+
+---
+
+### A6 Approval — 2026-05-04 (tick 46)
+
+**Phase**: A6 — Brownfield compile mode.
+**Verdict**: APPROVED for the data + plumbing layer. A6.6 (file preserve markers) deferred per progress.md until a real user need triggers it; not blocking.
+
+Acceptance evidence:
+- 45/45 brownfield + guard tests pass across:
+  - `tests/test_brownfield_preamble.py` — 13 tests (file tree, README, manifest, truncation, ignore filter, determinism)
+  - `tests/test_brownfield_compile.py` — 8 tests (greenfield path unchanged, brownfield prompt switch, additive reconcile rules)
+  - `tests/test_out_of_scope_guard.py` — 22 tests (15 parametrized keyword cases + override + integration with compile_spec)
+  - `tests/integration/test_brownfield_compile_real.py` — 2 tests (full Python plumbing against realistic CLI fixture, empty-base + additive paths)
+- All caps in `otto/defaults.py` (`BROWNFIELD_PREAMBLE_MAX_FILES=200`, `MAX_LINES_PER_FILE=200`).
+- Greenfield `compile_spec` path entirely unchanged (verified by test_greenfield_compile_unchanged + test_compile_spec_rejects_out_of_scope_intent_before_llm guards).
+- Tier-1 invariants honored in additive mode (intent + intent_hash from base; mechanical/historical fields preserved).
+
+What this unblocks:
+- B.1 — `otto certify` cutover: brownfield-compile a baseline spec from the existing project, then run audit_loop + render. The "no spec to drive audit" gap from tick 39 is now closed.
+- B.2 — `otto improve` cutover: same pattern, with multi-round audit_loop wrapping cli_improve.
+
+Pending (NOT blocking A6 closure):
+- A6.6 (file preserve markers, e.g. `.otto/preserve` file pattern) — deferred until needed by a real user; mechanism options sketched in progress.md.
