@@ -26,6 +26,22 @@ slice's build agent re-engages, and the audit re-runs (bounded by
 For testability, the LLM judge is abstracted via `AuditAgentCallable`.
 A trivial `default_audit_agent` implementation is provided that
 delegates to `otto.agent.run_agent_with_timeout`.
+
+**Retry-layer landscape (gap A10 in `docs/codex-followups.md`).** The
+end-to-end run can issue up to ~4 LLM judge calls per session through
+three composed layers — be aware when reading this module in isolation:
+
+1. ``run_audit`` self-loop bounded by ``AuditBudget.audit_retries``
+   (default 2; see ``audit.py:585``).
+2. Internal fix-agent slice-repair loop inside ``run_audit`` itself
+   (``audit.py:805,870``).
+3. Layer-2 ``audit_loop.repair_failing_features`` (``audit_loop.py:211``)
+   wraps ``run_audit`` for failure-driven re-audits with a separate
+   budget (``defaults.py``: ``max_repair_attempts_per_run``,
+   ``max_audit_passes_per_run``).
+
+v2 candidate: collapse to two layers. Documented in
+``docs/intent-to-product-design.md`` "Audit, in detail".
 """
 
 from __future__ import annotations

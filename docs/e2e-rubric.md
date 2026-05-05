@@ -49,7 +49,7 @@ The audit must report symptoms accurately, never patch.
 | Check | Criteria |
 |---|---|
 | Verdict matches reality | If I run the product manually, behavior matches what audit verdict claims. PASSED means the contract test really passes; PARTIAL means there are real gaps; BLOCKED means the product genuinely doesn't work. |
-| Capability verdicts populated | `audit_result.capability_verdicts` non-empty, each with status/detail/evidence_refs. |
+| Feature audits populated | `audit_result.feature_audits` non-empty, each with status/detail/evidence_refs. (Renamed from `capability_verdicts` — A0.4.) |
 | Contract test result honest | `contract_test_passed` reflects the actual `test_command` exit code. If `False`, `contract_test_detail` cites the failure. |
 | Audit didn't write code | `git log --author=audit` is empty. The audit agent's permission_mode is `bypassPermissions` (asserted at runtime). |
 | Fix-loop integrity | If audit attempted fixes, each `audit.attempt.finished` event records the verdict per attempt. Final verdict reflects whether fixes landed (no silent PASSED upgrade after a failed fix). |
