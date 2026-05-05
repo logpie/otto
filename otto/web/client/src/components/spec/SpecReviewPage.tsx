@@ -249,6 +249,18 @@ export function SpecReviewPage({ specId, onApproved }: Props) {
     }
   }, [confirm]);
 
+  // Hooks below MUST be called unconditionally — they were below the
+  // early returns, which violates React's Rules of Hooks (renders an
+  // inconsistent hook count and trips React error #310).
+  const renderedMarkdown = useMemo(
+    () => (data ? stripHtmlComments(data.markdown) : ""),
+    [data],
+  );
+  const structure = useMemo(
+    () => (data ? parseStructure(data.markdown) : []),
+    [data],
+  );
+
   if (loading && !data) {
     return (
       <div className="spec-review-loading" data-testid="spec-review-loading">
@@ -386,15 +398,6 @@ export function SpecReviewPage({ specId, onApproved }: Props) {
       },
     });
   }
-
-  const renderedMarkdown = useMemo(
-    () => stripHtmlComments(data.markdown),
-    [data.markdown],
-  );
-  const structure = useMemo(
-    () => parseStructure(data.markdown),
-    [data.markdown],
-  );
 
   return (
     <div className="spec-review" data-testid="spec-review">
