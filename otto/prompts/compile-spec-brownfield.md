@@ -45,7 +45,9 @@ Specifically:
   `lib/auth.py`).
 
 If a Feature in your output cites a path that doesn't exist, your spec
-is wrong — that's hallucinated work, not documentation.
+is wrong — that's hallucinated work, not documentation. Do not invent
+routes, commands, modules, fixtures, checks, or behavior that you did not
+observe in the project or receive as an explicit target-mode requirement.
 
 ## Reconciling with intent
 

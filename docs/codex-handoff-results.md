@@ -1034,3 +1034,198 @@ Decision:
 - Escalate to Tier 6. Tier 5 passed after one generic Otto detector fix and
   exposed two documented design gaps: multi-group cross-check weakness and
   incomplete dynamic webapp screenshot/video capture.
+
+## 2026-05-05 Pressure Test Tier 6 - Adversarial Beyond-Capability Probe
+
+Project:
+- Tier: 6, adversarial/beyond-capability probe.
+- Source/path: fresh Saleor clone at
+  `/tmp/otto-i2p-pressure-20260505/tier6/saleor`, starting from
+  `b205b2b bump: Django v5.2.14 (#19186)`.
+- Why this is harder than Tier 5: Saleor is a large production GraphQL/Django
+  commerce codebase with PostgreSQL-only migrations, broad native tests,
+  schema generation, checkout domain invariants, event/webhook side effects,
+  migrations, and concurrency-sensitive mutation semantics. The task required
+  durable idempotency across API, domain, persistence, tests, and generated
+  schema without regressing existing checkout behavior.
+
+Setup and retry:
+- Local setup used `uv sync --group dev`, Homebrew `libmagic`, and an
+  ephemeral Homebrew PostgreSQL 16 cluster on port `55432`
+  (`DATABASE_URL=postgres://saleor:saleor@localhost:55432/saleor`).
+- Baseline focused native checkout mutation tests before Otto:
+  `DATABASE_URL=postgres://saleor:saleor@localhost:55432/saleor DATABASE_URL_REPLICA=postgres://saleor:saleor@localhost:55432/saleor uv run pytest -q saleor/graphql/checkout/tests/mutations/test_checkout_lines_add.py saleor/graphql/checkout/tests/mutations/test_checkout_lines_update.py -n0 --reuse-db`
+  -> `108 passed, 2 warnings in 59.09s`.
+- An initial Otto command with `--max-turns 220` failed before creating a
+  session because the CLI caps `--max-turns` at 200. The real run below is the
+  retried command.
+
+Otto run:
+- Exact command:
+  `/usr/bin/time -p env DATABASE_URL=postgres://saleor:saleor@localhost:55432/saleor DATABASE_URL_REPLICA=postgres://saleor:saleor@localhost:55432/saleor uv --project /Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2 run --extra dev python -m otto.cli improve feature "Add durable idempotency to Saleor checkout line mutations: checkoutLinesAdd and checkoutLinesUpdate accept an optional idempotencyKey string. For the same checkout and mutation type, the first successful call records a durable key, normalized input fingerprint, and resulting checkout state. Retrying the same mutation with the same key and semantically identical line payload must be a no-op that returns the current checkout without increasing quantities, duplicating lines, or dispatching duplicate checkout events. Reusing the same key for the same checkout and mutation type with a different line payload must return a GraphQL checkout error and leave checkout lines unchanged. The key must be scoped by checkout and mutation type so the same key can be used on a different checkout or on the other line mutation. Invalid empty or over-128-character keys must return validation errors without mutation. Preserve existing checkout line behavior, stock validation, permissions, and webhook/event behavior for calls without an idempotencyKey. Add migrations, focused GraphQL tests for add/update/retry/conflict/scope/validation, and keep the native focused checkout tests passing." --i2p --provider codex --budget 6000 --max-turns 200 --break-lock --verbose`
+- Provider/model: Codex provider requested; concrete model name was not
+  surfaced in Otto artifacts.
+- Session id: `2026-05-05-215145-0e3585`.
+- Wall time: `/usr/bin/time` `real 4186.09s`; `summary.json`
+  `duration_s=3860.4688793332316`.
+- Cost: `summary.json cost_usd=0.0`; Codex token usage was recorded in logs
+  but no USD cost was surfaced by the provider adapter.
+- Final Otto verdict: `partial`; `summary.json` reports `passed=false`,
+  `stories_passed=1`, `stories_tested=9`, `rounds=1`.
+- Proof packet:
+  `/tmp/otto-i2p-pressure-20260505/tier6/saleor/otto_logs/sessions/2026-05-05-215145-0e3585/proof-packet.html`
+  and
+  `/tmp/otto-i2p-pressure-20260505/tier6/saleor/otto_logs/sessions/2026-05-05-215145-0e3585/proof-packet.json`.
+- Browser/video/screenshot artifacts: none. This tier was a backend GraphQL
+  probe; synthesized webapp capture again logged non-applicable for the project
+  shape.
+
+Run behavior and evidence:
+- Attempt 00 correctly blocked the missing feature. The integrated contract
+  command ran the large native pytest suite and found a pre-existing/runtime
+  AVIF MIME failure before implementation:
+  `1 failed, 17227 passed, 1 skipped`.
+- Layer 2 repair produced six target commits ending at
+  `792afe8292598ca64bc4c3b742169a42fb365a36`; target diff stat was
+  `12 files changed, 1336 insertions(+), 44 deletions(-)`.
+- Attempt 01 correctly refused to call the result passed. It found the public
+  `idempotencyKey` API and exact-retry/conflict branches, but reported:
+  durable records were not the runtime source of truth, input fingerprints were
+  raw line-list JSON rather than normalized checkout-line semantics, generated
+  schema had trailing whitespace, and DB-backed focused tests inside the agent
+  could not connect to PostgreSQL.
+- Attempt 01 contract result:
+  `13 failed, 17227 passed, 1 skipped, 34 warnings in 265.09s`.
+
+External verifier:
+- Focused add/update tests outside Otto, using the working PostgreSQL URL:
+  `DATABASE_URL=postgres://saleor:saleor@localhost:55432/saleor DATABASE_URL_REPLICA=postgres://saleor:saleor@localhost:55432/saleor uv run pytest -q saleor/graphql/checkout/tests/mutations/test_checkout_lines_add.py saleor/graphql/checkout/tests/mutations/test_checkout_lines_update.py -n0 --reuse-db --maxfail=20`
+  -> `119 passed, 2 warnings in 8.52s`.
+- Generated diff hygiene outside Otto:
+  `git diff --check origin/main...HEAD` -> failed with trailing whitespace at
+  `saleor/graphql/schema.graphql:20868` and `saleor/graphql/schema.graphql:20897`.
+- Clean GraphQL context test outside Otto after dropping reused test DBs:
+  `DATABASE_URL=postgres://saleor:saleor@localhost:55432/saleor DATABASE_URL_REPLICA=postgres://saleor:saleor@localhost:55432/saleor uv run pytest -q saleor/graphql/tests/test_context.py -n0 --create-db --maxfail=10`
+  -> `1 failed, 4 passed`; the Otto-added test mixed introspection and normal
+  GraphQL fields, which Saleor rejects.
+- Independent semantic fingerprint oracle outside Otto:
+  imported `saleor.graphql.checkout.mutations.utils._fingerprint_checkout_line_idempotency_payload`
+  after `django.setup()` and compared grouped-equivalent and order-equivalent
+  line payloads. Result:
+  `grouped_equals_split False` and `order_a_equals_order_b False`, confirming
+  semantically equivalent retries can be classified as conflicts.
+- Static oracle outside Otto:
+  `saleor/graphql/checkout/mutations/utils.py` reads
+  `CheckoutMetadata.private_metadata` as the idempotency lookup source;
+  `CheckoutLineIdempotencyRecord` exists in `saleor/checkout/models.py`, but
+  `saleor/checkout/utils.py` mirrors metadata into durable rows instead of
+  making those rows authoritative.
+
+Bugs found and classification:
+- Otto bug fixed: provider agents stripped project runtime environment
+  variables even though deterministic checks inherited them. The parent Otto
+  process and external verifier used PostgreSQL on port `55432`, while inner
+  agent audit/repair commands tried Saleor's default localhost `5432`. This
+  made logs misleading and blocked agent-side DB execution on real projects.
+- Beyond-current-capability: the Saleor product change did not satisfy the
+  requested durable idempotency contract. It requires target-specific domain
+  design work around durable authoritative records, normalized line semantics,
+  event dispatch, schema hygiene, and full checkout regression behavior. That
+  is not an Otto generic root-cause fix in this pass.
+- Provider/runtime flake or local setup issue: the AVIF/libmagic MIME test
+  failure appeared in attempt 00 before implementation and was not caused by
+  Otto's target patch.
+- Target implementation bugs: raw-list idempotency fingerprints, durable table
+  used only as a mirror, bad mixed-introspection context test, generated schema
+  trailing whitespace, and full-suite checkout regressions.
+- Design gap documented: the Saleor spec again compiled multiple groups with
+  `cross_group_checks: []`, so integration coverage depended on the final audit
+  instead of an explicit compiled cross-group contract.
+
+Root cause:
+- Otto's agent env allowlist was too narrow for real projects. It kept provider
+  credentials and shell basics, but excluded common app/test runtime handles
+  such as `DATABASE_URL`, `DATABASE_URL_REPLICA`, `DJANGO_SETTINGS_MODULE`, and
+  project API URL variables. Deterministic checks and provider agents therefore
+  reasoned about different environments.
+- The Saleor beyond-capability result was primarily a product/domain complexity
+  limit, not a single orchestration failure: Otto made plausible partial
+  edits, then its audit correctly identified important semantic gaps instead of
+  claiming success.
+
+Generic fixes made in this worktree:
+- `otto/testing.py` now passes through common project runtime env variables to
+  provider agents while still excluding arbitrary secrets such as
+  `CUSTOM_PASSWORD`.
+- `.codex/skills/otto-as-user/SKILL.md` was refreshed because the skill was
+  mildly stale after the redesign: it now identifies `otto run` as the direct
+  i2p surface, notes that provider-specific Codex pressure evidence still needs
+  provider-capable entrypoints, records the `--max-turns` cap, and calls out
+  runtime env verification.
+
+Regression tests added:
+- `tests/test_hardening.py::TestSubprocessEnv::test_project_runtime_env_is_allowlisted`
+
+Gates run for this entry:
+- Worktree env/provider regression:
+  `uv run pytest -q tests/test_hardening.py::TestSubprocessEnv tests/test_agent.py::test_codex_resume_command_uses_resume_subcommand_shape tests/test_agent.py::test_make_agent_options_cli_overrides_beat_per_agent_yaml tests/test_agent.py::test_make_agent_options_phase_cli_overrides_beat_global_cli`
+  -> `6 passed`.
+- Touched-file lint:
+  `uv run ruff check otto/testing.py tests/test_hardening.py` -> passed.
+- Target repo focused tests and external oracles -> results listed above.
+
+Decision:
+- Stop after Tier 6 as beyond-current-capability. The run satisfies the
+  breaking-point criteria: real session id, failed logs, external verifier
+  evidence, repair/audit retry path, and a written reason why the target product
+  implementation is not a generic Otto fix in this pass.
+
+## 2026-05-05 Final Pressure Campaign Summary
+
+Fixed Otto bugs:
+- Brownfield improve target specs now preserve user intent instead of compiling
+  a generic certification prompt.
+- Mixed-manifest project kind detection no longer misclassifies substantial
+  existing repos from stale generated manifests.
+- Contract-command detection now prefers a prepared project venv pytest over a
+  broad tox/nox matrix when that is the usable local native contract.
+- `certify --i2p` no longer warns that forwarded `--budget` and `--max-turns`
+  flags are ignored.
+- Django `manage.py test` is detected for project-venv Django apps.
+- Provider agents now inherit common project runtime env vars needed to run the
+  same app/test environment as deterministic checks.
+
+Remaining design gaps:
+- Multi-group specs repeatedly emitted `cross_group_checks: []` on complex
+  brownfield tasks. Final audit caught integration issues, but compile should
+  produce explicit cross-group checks for multi-group plans.
+- A8 screenshot/video capture is present for static/Flask-like shapes but not
+  yet broad enough for Django or backend GraphQL projects.
+- `otto run` is the direct i2p surface but does not expose provider/budget/turn
+  overrides in CLI help, so Codex-provider pressure tests still use
+  `build/improve/certify --i2p --provider codex`.
+- Large-repo contract planning still defaults toward very broad native suites
+  in some repos. That is honest but expensive and can surface unrelated
+  environment flakes; future spec compilation should choose focused native
+  contract commands more deliberately.
+
+Deferred non-blockers:
+- Optional MySQL headers for Healthchecks were unavailable locally; SQLite
+  native tests and an independent durable-state oracle covered the requested
+  workflow.
+- Saleor's pre-existing AVIF MIME test failure is local runtime/tooling noise,
+  not an Otto target implementation regression.
+
+Beyond-current-capability finding:
+- Saleor checkout-line durable idempotency remained partial. Otto produced API
+  and model scaffolding plus tests, but did not produce an authoritative durable
+  runtime design or normalized semantic fingerprinting, and full-suite
+  regressions remained. The audit verdict was honest and externally confirmed.
+
+Fast-gate addendum:
+- The final fast gate initially found
+  `tests/test_brownfield_preamble.py::test_brownfield_prompt_renders_with_preamble`
+  failing because `compile-spec-brownfield.md` had lost the explicit
+  `do not invent` / `never invent` anti-derivation wording. This was fixed in
+  the prompt, preserving the existing test because the guidance matters for
+  brownfield correctness.

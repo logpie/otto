@@ -31,6 +31,35 @@ _AGENT_ENV_KEYS = {
     "GIT_ASKPASS",
     "SSH_AUTH_SOCK",
 }
+_PROJECT_RUNTIME_ENV_KEYS = {
+    "APP_ENV",
+    "BROKER_URL",
+    "CELERY_BROKER_URL",
+    "DATABASE_URL",
+    "DATABASE_URL_REPLICA",
+    "DJANGO_SETTINGS_MODULE",
+    "FLASK_APP",
+    "FLASK_ENV",
+    "HOST",
+    "NODE_ENV",
+    "PGDATABASE",
+    "PGHOST",
+    "PGPASSWORD",
+    "PGPORT",
+    "PGUSER",
+    "PORT",
+    "PYTEST_DB_URL",
+    "REDIS_URL",
+}
+_PROJECT_RUNTIME_ENV_SUFFIXES = (
+    "_API_URL",
+    "_BASE_URL",
+    "_BROKER_URL",
+    "_DATABASE_URL",
+    "_DATABASE_URI",
+    "_DB_URL",
+    "_REDIS_URL",
+)
 
 
 def _allowed_parent_env() -> dict[str, str]:
@@ -41,6 +70,14 @@ def _allowed_parent_env() -> dict[str, str]:
             allowed[key] = value
             continue
         if any(key.startswith(prefix) for prefix in _AGENT_ENV_PREFIXES):
+            allowed[key] = value
+            continue
+        if key in _PROJECT_RUNTIME_ENV_KEYS or any(
+            key.endswith(suffix) for suffix in _PROJECT_RUNTIME_ENV_SUFFIXES
+        ):
+            # Provider agents need the same project runtime handles as the
+            # deterministic checks they are debugging. Keep this to explicit,
+            # common app/test env names instead of passing the whole shell env.
             allowed[key] = value
     return allowed
 

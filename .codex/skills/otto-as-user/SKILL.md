@@ -48,7 +48,17 @@ projects when the task is about redesign readiness.
 
 ## Redesigned i2p Runs
 
-Use the live CLI entrypoints and force i2p when testing redesign behavior:
+Use the live CLI entrypoints. `otto run` is the direct i2p surface for
+compile/build/merge/audit/render checks:
+
+```bash
+uv run --extra dev python -m otto.cli run "build a product..." --project-kind webapp --review-gate
+uv run --extra dev python -m otto.cli run --from-spec otto_logs/sessions/<id>/spec/spec.json
+uv run --extra dev python -m otto.cli run --resume --auto-approve
+```
+
+For provider-specific pressure tests, use the entrypoints that currently expose
+provider/budget/turn flags and force i2p explicitly:
 
 ```bash
 uv run --extra dev python -m otto.cli build "build a product..." --i2p --provider codex --budget 1800 --max-turns 120 --verbose
@@ -58,15 +68,25 @@ uv run --extra dev python -m otto.cli certify --i2p --provider codex --budget 12
 
 Useful i2p flags:
 
+- `otto run --resume`: resume the paused direct i2p session.
 - `otto build --resume`: continue an interrupted i2p build checkpoint.
 - `otto certify --resume`: resume a paused i2p audit checkpoint.
 - `otto improve ... --resume` is currently legacy-only/ignored; do not use it
   as evidence that brownfield improve resume works unless the CLI changes.
+- `--max-turns` is capped at 200 by the CLI.
 - `--reset-budget`: do not count prior attempt spend on resume.
 - `--review-gate`: pause after compile until spec review approves.
 - `--auto-approve`: make scripted runs explicit about skipping review gate.
 - `--break-lock`: clear a stale project lock before starting.
 - `--allow-dirty`: run in a repo with local changes when the test requires it.
+
+`otto run` does not currently expose provider/budget/turn overrides in its
+CLI help. Do not use it as Codex-provider evidence unless the target project
+configuration already selects Codex and the logs prove all child agents used it.
+
+For projects that require environment variables (database URLs, API keys,
+server ports), put those variables on the exact Otto command and verify repair
+agents used the same environment in their build/audit logs.
 
 For real project pressure tests, record at minimum:
 

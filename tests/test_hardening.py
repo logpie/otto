@@ -6,20 +6,12 @@ parser hardening, certifier story dedup, target metrics, resume
 infrastructure that does not exercise the deleted entry points.
 """
 
-import asyncio
-import contextlib
 import json
-import os
-import subprocess
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
-import click
 import pytest
 
 from otto.testing import _subprocess_env
-from tests.conftest import make_mock_query as _make_mock_query
 
 # `tmp_git_repo` fixture comes from tests/conftest.py.
 
@@ -96,6 +88,21 @@ class TestSubprocessEnv:
         assert env["OPENAI_API_KEY"] == "sk-allowedsecret1234567890"
         assert env["PATH"]
         assert "AWS_SECRET_ACCESS_KEY" not in env
+        assert "CUSTOM_PASSWORD" not in env
+
+    def test_project_runtime_env_is_allowlisted(self, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@localhost:55432/app")
+        monkeypatch.setenv("DATABASE_URL_REPLICA", "postgres://user:pass@localhost:55432/app")
+        monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "project.settings")
+        monkeypatch.setenv("SALEOR_API_URL", "http://127.0.0.1:8000/graphql/")
+        monkeypatch.setenv("CUSTOM_PASSWORD", "dont-pass-through")
+
+        env = _subprocess_env()
+
+        assert env["DATABASE_URL"] == "postgres://user:pass@localhost:55432/app"
+        assert env["DATABASE_URL_REPLICA"] == "postgres://user:pass@localhost:55432/app"
+        assert env["DJANGO_SETTINGS_MODULE"] == "project.settings"
+        assert env["SALEOR_API_URL"] == "http://127.0.0.1:8000/graphql/"
         assert "CUSTOM_PASSWORD" not in env
 
 
@@ -1174,5 +1181,3 @@ class TestLegacyLayoutResume:
         assert state.agent_session_id == "sdk-new"
         assert state.run_id == "2026-04-20-170200-abcdef"
         assert state.total_cost == 3.33
-
-
