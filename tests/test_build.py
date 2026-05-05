@@ -23,6 +23,7 @@ from otto.build import (
     BuildBudget,
     GroupStatus,
     _build_agent_prompt,
+    detect_dependency_scope_extensions,
     detect_scope_violations,
     ready_groups,
     run_build,
@@ -239,6 +240,27 @@ def test_scope_violations_allows_transitive_dep_modification(tmp_path: Path) -> 
         auth, spec, ["app.py", "models.py"], project_root=tmp_path,
     )
     assert violations == []
+
+
+def test_dep_owned_modifications_are_reported_as_extensions() -> None:
+    """Allowed dep-owned edits should still be visible to operators."""
+    spec = _spec(
+        [
+            Group(id="cli_scaffold", name="scaffold", owned_paths=["todo.py"]),
+            Group(
+                id="task_lifecycle",
+                name="lifecycle",
+                dependencies=["cli_scaffold"],
+                owned_paths=["tasks.json"],
+            ),
+        ]
+    )
+    lifecycle = spec.groups[1]
+
+    assert detect_scope_violations(lifecycle, spec, ["todo.py", "tasks.json"]) == []
+    assert detect_dependency_scope_extensions(
+        lifecycle, spec, ["todo.py", "tasks.json"]
+    ) == ["todo.py"]
 
 
 def test_scope_violations_blocks_peer_slice_modification(tmp_path: Path) -> None:
@@ -559,6 +581,58 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
     assert by_id["s1"].status == GroupStatus.PASSING
     assert by_id["s2"].status == GroupStatus.PASSING
     assert "app/main.py" in by_id["s2"].scope_warnings
+
+
+def test_run_build_warns_on_dep_owned_extension(tmp_path: Path) -> None:
+    """Downstream edits to dep-owned files pass but are surfaced."""
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    spec = _spec(
+        [
+            Group(
+                id="cli_scaffold",
+                name="CLI scaffold",
+                owned_paths=["todo.py"],
+                checks=[_no_op_passing_check()],
+            ),
+            Group(
+                id="task_lifecycle",
+                name="Task lifecycle",
+                dependencies=["cli_scaffold"],
+                owned_paths=["tasks.json"],
+                checks=[_no_op_passing_check()],
+            ),
+        ]
+    )
+
+    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        todo = input_.worktree / "todo.py"
+        if input_.group.id == "cli_scaffold":
+            todo.write_text("def main():\n    return 0\n", encoding="utf-8")
+        else:
+            todo.write_text(
+                todo.read_text(encoding="utf-8") + "\n# lifecycle handlers\n",
+                encoding="utf-8",
+            )
+        return BuildAgentOutput(succeeded=True)
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+        )
+    )
+
+    by_id = {r.group_id: r for r in result.group_results}
+    assert by_id["task_lifecycle"].status == GroupStatus.PASSING
+    assert "todo.py" in by_id["task_lifecycle"].scope_warnings
+    journal = (session_dir / "spec-state.jsonl").read_text(encoding="utf-8")
+    assert '"kind": "scope.warning"' in journal
+    assert "todo.py" in journal
 
 
 # ---------------------------------------------------------------------------
@@ -998,7 +1072,7 @@ def test_ensure_clean_git_state_aborts_inprogress_merge(tmp_path: Path) -> None:
     after the merge phase ended; without recovery the audit fix-loop
     silently skipped slices.
     """
-    from otto.build import _ensure_clean_git_state, _is_git_repo
+    from otto.build import _ensure_clean_git_state
     _init_git(tmp_path)
     # Create a conflicting situation: two branches modifying same file.
     (tmp_path / "shared.txt").write_text("base", encoding="utf-8")
@@ -1018,7 +1092,7 @@ def test_ensure_clean_git_state_aborts_inprogress_merge(tmp_path: Path) -> None:
     subprocess.run(["git", "commit", "-q", "-m", "B", "--no-verify"],
                    cwd=tmp_path, check=True, capture_output=True)
     # Trigger a conflict — git merge --no-commit will leave MERGE_HEAD.
-    proc = subprocess.run(
+    subprocess.run(
         ["git", "merge", "--no-commit", "--no-ff", "branchA"],
         cwd=tmp_path, capture_output=True, text=True, check=False,
     )

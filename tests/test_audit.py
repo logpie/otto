@@ -13,6 +13,7 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 
 from otto.audit import (
@@ -20,6 +21,7 @@ from otto.audit import (
     AuditAgentOutput,
     AuditBudget,
     AuditVerdict,
+    FeatureAudit,
     GroupVerdict,
     WalkthroughResult,
     _parse_audit_output,
@@ -35,6 +37,7 @@ from otto.build import (
 )
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.spec_compile import (
+    Feature,
     Group,
     Spec,
     StateInvariant,
@@ -123,6 +126,46 @@ def test_run_audit_passed_in_one_pass(tmp_path: Path) -> None:
     assert len(result.group_verdicts) == 2
 
 
+def test_run_audit_feature_scope_filters_feature_audits(tmp_path: Path) -> None:
+    """Layer-2 re-audit scope returns only affected Feature verdicts."""
+    spec = _spec(["s1"])
+    spec.features = [
+        Feature(id="f1", name="Feature one", group_id="s1"),
+        Feature(id="f2", name="Feature two", group_id="s1"),
+    ]
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+
+    seen_scope: tuple[str, ...] | None = None
+
+    async def scoped_agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        nonlocal seen_scope
+        seen_scope = input_.feature_scope_ids
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="scoped",
+            feature_audits=[
+                FeatureAudit(feature_id="f1", name="Feature one", status="passed"),
+                FeatureAudit(feature_id="f2", name="Feature two", status="blocked"),
+            ],
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=scoped_agent,
+            feature_scope_ids=["f1"],
+        )
+    )
+
+    assert seen_scope == ("f1",)
+    assert [fa.feature_id for fa in result.feature_audits] == ["f1"]
+
+
 def test_run_audit_runs_cross_slice_checks(tmp_path: Path) -> None:
     spec = _spec(
         ["s1"],
@@ -201,6 +244,109 @@ def test_run_audit_routes_to_fix_loop_for_failing_slice(tmp_path: Path) -> None:
     assert result.verdict == AuditVerdict.PASSED
     assert fix_calls == ["s1"]  # only the failing slice got the fix call
     assert result.retries == 1
+
+
+def test_run_audit_brownfield_fix_repairs_integrated_worktree(tmp_path: Path) -> None:
+    """Brownfield improve has no build slice branch; repair runs on main."""
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@otto.local"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Otto Tester"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True)
+    (tmp_path / "app.js").write_text("reset = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.js"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=tmp_path, check=True)
+    generated = tmp_path / ".playwright-cli" / "page.yml"
+    generated.parent.mkdir()
+    generated.write_text("runtime artifact\n", encoding="utf-8")
+
+    spec = _spec(["counter"])
+    spec.groups[0].owned_paths = ["app.js"]
+    session_dir = tmp_path / "otto_logs" / "sessions" / "test-session"
+    session_dir.mkdir(parents=True)
+    fix_calls: list[Path] = []
+
+    async def audit_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        fixed = "reset = 0" in (tmp_path / "app.js").read_text(encoding="utf-8")
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED if fixed else AuditVerdict.BLOCKED,
+            narrative="ok" if fixed else "reset broken",
+            group_verdicts=[GroupVerdict(group_id="counter", passed=fixed)],
+        )
+
+    async def fix_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        fix_calls.append(input_.worktree)
+        (input_.worktree / "app.js").write_text("reset = 0\n", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, detail="fixed")
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=BuildResult(spec_session_dir=session_dir, group_results=[]),
+            merge_result=_merge_result([]),
+            audit_agent=audit_agent,
+            fix_agent=fix_agent,
+            budget=AuditBudget(audit_retries=1),
+            base_branch="main",
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert fix_calls == [tmp_path]
+    assert "reset = 0" in (tmp_path / "app.js").read_text(encoding="utf-8")
+    committed_files = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert committed_files == ["app.js"]
+    journal = (session_dir / "spec-state.jsonl").read_text(encoding="utf-8")
+    assert '"kind": "group.merge.landed"' in journal
+
+
+def test_run_audit_skips_downstream_repair_when_dependency_blocked(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(["counter_app", "counter_tests"])
+    spec.groups[1].dependencies = ["counter_app"]
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    fix_calls: list[str] = []
+
+    async def audit_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.BLOCKED,
+            narrative="app and tests blocked",
+            group_verdicts=[
+                GroupVerdict(group_id="counter_app", passed=False, detail="app missing"),
+                GroupVerdict(group_id="counter_tests", passed=False, detail="tests missing app"),
+            ],
+        )
+
+    async def fix_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        fix_calls.append(input_.group.id)
+        return BuildAgentOutput(succeeded=False, detail="app still blocked")
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["counter_app", "counter_tests"], tmp_path),
+            merge_result=MergeQueueResult(blocked_ids=["counter_app"]),
+            audit_agent=audit_agent,
+            fix_agent=fix_agent,
+            budget=AuditBudget(audit_retries=1),
+        )
+    )
+
+    assert result.verdict == AuditVerdict.BLOCKED
+    assert fix_calls == ["counter_app"]
+    journal = (session_dir / "spec-state.jsonl").read_text(encoding="utf-8")
+    assert "repair skipped because dependency group(s) are blocked: counter_app" in journal
 
 
 def test_run_audit_no_fix_agent_returns_first_verdict(tmp_path: Path) -> None:
@@ -623,10 +769,10 @@ def test_audit_parser_reads_feature_audits() -> None:
   "narrative": "mostly works",
   "group_verdicts": [],
   "feature_audits": [
-    {"name": "user signup", "status": "passed",
+    {"feature_id": "signup", "name": "user signup", "status": "passed",
      "detail": "Signup form works",
      "evidence_refs": ["templates/home.html:5"]},
-    {"name": "RSS discoverability", "status": "blocked",
+    {"feature_id": "rss", "name": "RSS discoverability", "status": "blocked",
      "detail": "no <link> in head, no nav link",
      "evidence_refs": ["output/index.html"]}
   ]
@@ -635,8 +781,10 @@ def test_audit_parser_reads_feature_audits() -> None:
     result = _parse_audit_output(output)
     assert len(result.feature_audits) == 2
     assert result.feature_audits[0].name == "user signup"
+    assert result.feature_audits[0].feature_id == "signup"
     assert result.feature_audits[0].status == "passed"
     assert result.feature_audits[0].evidence_refs == ["templates/home.html:5"]
+    assert result.feature_audits[1].feature_id == "rss"
     assert result.feature_audits[1].status == "blocked"
 
 
@@ -652,7 +800,7 @@ def test_audit_parser_unknown_capability_status_defaults_blocked() -> None:
 
 
 def test_audit_blocked_capability_caps_passed_to_partial(tmp_path: Path) -> None:
-    """v2.6 cap: any blocked capability prevents PASSED. Real damage
+    """v2.6 cap: any blocked feature prevents PASSED. Real damage
     surfaces — even if everything else is green."""
     from otto.audit import FeatureAudit
 
@@ -693,7 +841,7 @@ def test_audit_blocked_capability_caps_passed_to_partial(tmp_path: Path) -> None
     assert len(result.feature_audits) == 2
     blocked = [c for c in result.feature_audits if c.status == "blocked"]
     assert len(blocked) == 1
-    assert "capability cap" in result.narrative
+    assert "feature cap" in result.narrative
 
 
 def test_audit_majority_partial_capabilities_caps_passed(tmp_path: Path) -> None:
@@ -735,7 +883,7 @@ def test_audit_majority_partial_capabilities_caps_passed(tmp_path: Path) -> None
 
 def test_caps_compose_order_independent(tmp_path: Path) -> None:
     """Pattern B regression: when contract test fails AND quality is low
-    AND a capability is blocked, the narrative must mention ALL THREE,
+    AND a feature is blocked, the narrative must mention ALL THREE,
     not just the first one to fire its cap. Previously each cap had
     its own `if verdict == PASSED` guard and silently no-op'd later
     caps' narratives."""
@@ -777,14 +925,14 @@ def test_caps_compose_order_independent(tmp_path: Path) -> None:
         )
     )
     # Strictest cap wins: contract failed → PARTIAL, quality<3 → PARTIAL,
-    # 1/2 blocked capability → PARTIAL. All three are at most PARTIAL,
+    # 1/2 blocked feature → PARTIAL. All three are at most PARTIAL,
     # so verdict = PARTIAL.
     assert result.verdict == AuditVerdict.PARTIAL
     # ALL THREE caps must appear in narrative — this was the order-
     # dependent bug.
     assert "contract test FAILED" in result.narrative
     assert "quality assessment" in result.narrative or "2/5" in result.narrative
-    assert "capability cap" in result.narrative
+    assert "feature cap" in result.narrative
     assert "bare-bones UI" in result.narrative
     assert "search" in result.narrative
 
@@ -933,6 +1081,26 @@ def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Pat
         groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])],
     )
     # Seed a minimal Flask app at the project root.
+    (tmp_path / "flask.py").write_text(
+        "class _Response:\n"
+        "    status_code = 200\n"
+        "    def __init__(self, body): self._body = body\n"
+        "    def get_data(self, as_text=False):\n"
+        "        return self._body if as_text else self._body.encode()\n"
+        "class Flask:\n"
+        "    def __init__(self, name): self.routes = {}\n"
+        "    def get(self, path):\n"
+        "        def decorator(fn):\n"
+        "            self.routes[path] = fn\n"
+        "            return fn\n"
+        "        return decorator\n"
+        "    def test_client(self):\n"
+        "        app = self\n"
+        "        class Client:\n"
+        "            def get(self, path): return _Response(app.routes[path]())\n"
+        "        return Client()\n",
+        encoding="utf-8",
+    )
     (tmp_path / "app.py").write_text(
         "from flask import Flask\n"
         "def create_app(config=None):\n"
@@ -1024,12 +1192,12 @@ def test_compose_verdict_caps_at_partial_when_merge_blocked() -> None:
     assert verdict == AuditVerdict.PARTIAL, (
         f"PASSED with 1/3 blocked must downgrade to PARTIAL; got {verdict}"
     )
-    assert "1 slice(s) blocked" in narrative
+    assert "1 group(s) blocked" in narrative
     assert "home_page" in narrative
 
 
 def test_compose_verdict_caps_at_blocked_when_majority_blocked() -> None:
-    """V4: when more than half of expected passing slices were blocked,
+    """V4: when more than half of expected passing Groups were blocked,
     cap at BLOCKED (not just PARTIAL) — most of the product is missing.
     """
     from otto.audit import _compose_verdict, AuditAgentOutput, AuditVerdict

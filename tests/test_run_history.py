@@ -143,6 +143,38 @@ def test_cli_history_loader_threads_limit_hint(tmp_path: Path) -> None:
     assert loader.call_args.kwargs["limit_hint"] == 17
 
 
+def test_i2p_history_rows_count_canonical_groups(tmp_path: Path) -> None:
+    session_dir = tmp_path / "otto_logs" / "sessions" / "i2p-run"
+    (session_dir / "spec").mkdir(parents=True)
+    (session_dir / "spec" / "spec.json").write_text(
+        json.dumps({"intent": "build app", "schema_version": 2}),
+        encoding="utf-8",
+    )
+    (session_dir / "proof-packet.json").write_text(
+        json.dumps(
+            {
+                "intent": "build app",
+                "verdict": "passed",
+                "cost_usd": 0.12,
+                "wall_s": 5.0,
+                "landed_group_ids": ["g1"],
+                "blocked_group_ids": ["g2"],
+                "groups": [{"group_id": "g1"}, {"group_id": "g2"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows = load_project_history_rows(tmp_path)
+    row = next(row for row in rows if row["run_id"] == "i2p-run")
+
+    assert row["domain"] == "i2p"
+    assert row["i2p_landed_count"] == 1
+    assert row["i2p_blocked_count"] == 1
+    assert row["i2p_group_count"] == 2
+    assert row["i2p_slice_count"] == 2
+
+
 def test_terminal_history_writers_emit_v2_snapshots_for_all_domains(tmp_path: Path) -> None:
     build_session = paths.ensure_session_scaffold(tmp_path, "build-run", phase="build")
     (build_session / "build" / "narrative.log").write_text("", encoding="utf-8")

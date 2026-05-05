@@ -110,6 +110,25 @@ def _agent_returning(verdict: AuditVerdict):
     return _agent
 
 
+def _agent_writing_walkthrough(verdict: AuditVerdict, entries: list[dict]):
+    """Stub audit_agent that writes the JSONL during judging."""
+
+    async def _agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        assert input_.walkthrough_jsonl_path is not None
+        input_.walkthrough_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        input_.walkthrough_jsonl_path.write_text(
+            "\n".join(json.dumps(e) for e in entries) + ("\n" if entries else "")
+        )
+        return AuditAgentOutput(
+            verdict=verdict,
+            narrative=f"llm-judge says {verdict.value}",
+            group_verdicts=[],
+            cost_usd=0.0,
+        )
+
+    return _agent
+
+
 def _walkthrough_writing(entries: list[dict] | None):
     """Stub walkthrough that writes `entries` to walkthrough.jsonl in walk_log_dir.
 
@@ -156,8 +175,8 @@ def test_full_coverage_passed_stays_passed(tmp_path: Path) -> None:
     flows through unchanged."""
     spec = _spec_with_features("login")
     entries = [
-        {"t": "0:01", "action_kind": "click", "feature_ids": ["login"]},
-        {"t": "0:02", "action_kind": "assert", "feature_ids": ["login"]},
+        {"t": "0:01", "action_kind": "browser_navigation", "feature_ids": ["login"]},
+        {"t": "0:02", "action_kind": "api_request", "feature_ids": ["login"]},
     ]
     result = _run(spec, tmp_path, agent_verdict=AuditVerdict.PASSED, walk_entries=entries)
     assert result.verdict == AuditVerdict.PASSED
@@ -172,13 +191,13 @@ def test_below_threshold_caps_passed_to_partial(tmp_path: Path) -> None:
     spec = _spec_with_features("login")
     # 8 non-exploration entries; 6 tagged → 6/8 = 75% < 90%
     entries: list[dict] = [
-        {"t": f"0:{i:02d}", "action_kind": "click", "feature_ids": ["login"]}
+        {"t": f"0:{i:02d}", "action_kind": "browser_navigation", "feature_ids": ["login"]}
         for i in range(6)
     ]
     entries.extend(
         [
-            {"t": "0:90", "action_kind": "click", "feature_ids": []},
-            {"t": "0:91", "action_kind": "click", "feature_ids": []},
+            {"t": "0:90", "action_kind": "browser_navigation", "feature_ids": []},
+            {"t": "0:91", "action_kind": "browser_navigation", "feature_ids": []},
         ]
     )
     result = _run(spec, tmp_path, agent_verdict=AuditVerdict.PASSED, walk_entries=entries)
@@ -221,6 +240,42 @@ def test_no_jsonl_file_means_no_cap(tmp_path: Path) -> None:
     assert result.verdict_cap_reasons == []
 
 
+def test_walkthrough_written_by_audit_agent_is_validated(tmp_path: Path) -> None:
+    """run_audit validates walkthrough.jsonl again after the judge.
+
+    Without the post-agent read, an agent-created walkthrough trace would
+    be invisible and coverage would stay None.
+    """
+    spec = _spec_with_features("login")
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(tmp_path),
+            merge_result=_merge_result(),
+            audit_agent=_agent_writing_walkthrough(
+                AuditVerdict.PASSED,
+                [
+                    {
+                        "t": "0:01",
+                        "action_kind": "browser_navigation",
+                        "feature_ids": ["login"],
+                    }
+                ],
+            ),
+            walkthrough=_walkthrough_writing(None),
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert result.walkthrough_coverage is not None
+    assert result.walkthrough_coverage["tagged_entries"] == 1
+    assert result.walkthrough_entries
+
+
 def test_blocked_verdict_not_downgraded_by_cap(tmp_path: Path) -> None:
     """80% coverage + LLM BLOCKED → final BLOCKED.
 
@@ -230,13 +285,13 @@ def test_blocked_verdict_not_downgraded_by_cap(tmp_path: Path) -> None:
     reason is still recorded for the audit trail."""
     spec = _spec_with_features("login")
     entries: list[dict] = [
-        {"t": f"0:{i:02d}", "action_kind": "click", "feature_ids": ["login"]}
+        {"t": f"0:{i:02d}", "action_kind": "browser_navigation", "feature_ids": ["login"]}
         for i in range(6)
     ]
     entries.extend(
         [
-            {"t": "0:90", "action_kind": "click", "feature_ids": []},
-            {"t": "0:91", "action_kind": "click", "feature_ids": []},
+            {"t": "0:90", "action_kind": "browser_navigation", "feature_ids": []},
+            {"t": "0:91", "action_kind": "browser_navigation", "feature_ids": []},
         ]
     )
     result = _run(spec, tmp_path, agent_verdict=AuditVerdict.BLOCKED, walk_entries=entries)

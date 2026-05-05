@@ -18,22 +18,31 @@ No LLM cost; no real git/subprocess.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from otto import paths
 from otto.audit import AuditResult, AuditVerdict
 from otto.audit_loop import RepairAttempt, RepairResult
-from otto.build import BuildResult, GroupResult, GroupStatus
+from otto.build import BuildAgentOutput, BuildResult, GroupResult, GroupStatus
 from otto.merge_queue import MergeQueueResult
-from otto.runner import RunResult, run_pipeline
+from otto.runner import (
+    RunResult,
+    _feature_audits_to_verdicts,
+    _invalidated_group_ids,
+    run_pipeline,
+)
 from otto.seed import SeedResult
 from otto.spec_compile import (
     AuditFixture,
     Feature,
     Group,
     Spec,
+    persist_spec,
 )
 
 
@@ -83,6 +92,34 @@ def _partial_audit_with_failing_feature(spec: Spec) -> AuditResult:
     )
 
 
+def test_feature_audits_to_verdicts_prefers_feature_id() -> None:
+    """Layer 2 repair routing must use Feature.id as the stable join key."""
+    from otto.audit import FeatureAudit
+
+    spec = _spec(with_features=True)
+    audit = AuditResult(
+        verdict=AuditVerdict.PARTIAL,
+        narrative="x",
+        feature_audits=[
+            FeatureAudit(
+                feature_id="f1",
+                name="display name drifted",
+                status="partial",
+                detail="needs work",
+            )
+        ],
+    )
+
+    assert _feature_audits_to_verdicts(spec, audit) == [
+        {
+            "feature_id": "f1",
+            "verdict": "partial",
+            "detail": "needs work",
+            "evidence_refs": [],
+        }
+    ]
+
+
 def _ok_build(spec: Spec, session_dir: Path) -> BuildResult:
     return BuildResult(
         spec_session_dir=session_dir,
@@ -98,6 +135,12 @@ def _ok_build(spec: Spec, session_dir: Path) -> BuildResult:
         total_cost_usd=0.05,
         total_wall_s=1.0,
     )
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
 
 
 class _Order:
@@ -141,6 +184,7 @@ def _wire_stubs(
 
     async def _merge(spec, build_result, *, project_dir, session_dir, **kwargs):
         captured["merge_calls"] += 1
+        captured["merge_kwargs"] = kwargs
         order.add("merge")
         return MergeQueueResult(landed_ids=["g"])
 
@@ -238,6 +282,45 @@ def test_run_pipeline_phases_run_in_order(tmp_path: Path, monkeypatch) -> None:
     assert result.html_path is not None
     assert result.json_path is not None
     assert result.build_result is not None
+
+
+def test_run_pipeline_writes_resume_checkpoint_and_clears_pointer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Real i2p runs must write the checkpoint/pointer consumed by --resume."""
+    spec = _spec()
+    session_id = "2026-05-04-120000-abc123"
+    session_dir = paths.session_dir(tmp_path, session_id)
+    spec_path = session_dir / "spec" / "spec.json"
+    persist_spec(spec, spec_path, allow_initial=True)
+    original_hash = _sha256(spec_path)
+    order = _Order()
+    _wire_stubs(monkeypatch, audit=_passing_audit(spec), order=order)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x",
+            tmp_path,
+            session_dir,
+            project_kind="webapp",
+            brownfield=False,
+            base_url=None,
+            config={},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=None,
+            spec=spec,
+            command="build",
+        )
+    )
+
+    checkpoint = json.loads((session_dir / "checkpoint.json").read_text())
+    assert checkpoint["status"] == "completed"
+    assert checkpoint["command"] == "build"
+    assert checkpoint["phase"] == "i2p"
+    assert checkpoint["spec_hash"] == original_hash
+    assert result.verdict == AuditVerdict.PASSED
+    assert paths.resolve_pointer(tmp_path, paths.PAUSED_POINTER) is None
     assert result.merge_result is not None
     assert result.audit_result is not None
 
@@ -359,6 +442,91 @@ def test_repair_called_on_non_pass_with_fix_agent(
     fvs = captured["repair_feature_verdicts"]
     assert any(v["feature_id"] == "f1" for v in fvs)
     assert result.repair_result is not None
+
+
+def test_layer2_repair_reaudits_and_updates_final_verdict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Feature-level repair must close the loop with a real re-audit."""
+    spec = _spec(with_features=True)
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured: dict[str, Any] = {"audit_calls": 0, "fix_calls": 0}
+
+    def _seed(spec, project_dir, session_dir=None):
+        order.add("seed")
+        return SeedResult(succeeded=True, detail="ok")
+
+    async def _build(spec, *, project_dir, session_dir, **kwargs):
+        order.add("build")
+        return _ok_build(spec, session_dir)
+
+    async def _merge(spec, build_result, *, project_dir, session_dir, **kwargs):
+        order.add("merge")
+        return MergeQueueResult(landed_ids=["g"])
+
+    async def _audit(spec, **kwargs):
+        captured["audit_calls"] += 1
+        order.add("audit")
+        if captured["audit_calls"] == 1:
+            return _partial_audit_with_failing_feature(spec)
+        from otto.audit import FeatureAudit
+
+        passed = _passing_audit(spec)
+        passed.feature_audits = [
+            FeatureAudit(name="f1", status="passed", detail="ok")
+        ]
+        return passed
+
+    def _render(spec, *, session_dir, audit_result, cost_usd, **kwargs):
+        order.add("render")
+        html = session_dir / "proof-packet.html"
+        json_ = session_dir / "proof-packet.json"
+        html.write_text("<html/>")
+        json_.write_text("{}")
+        assert audit_result.verdict == AuditVerdict.PASSED
+        assert cost_usd >= 0.25
+        return html, json_
+
+    async def _fix(agent_input):
+        captured["fix_calls"] += 1
+        assert agent_input.feature_id == "f1"
+        return BuildAgentOutput(
+            succeeded=True,
+            cost_usd=0.05,
+            wall_s=0.5,
+            detail="fixed feature",
+        )
+
+    monkeypatch.setattr("otto.runner.seed_fixtures", _seed)
+    monkeypatch.setattr("otto.runner.run_build", _build)
+    monkeypatch.setattr("otto.runner.run_merge_queue", _merge)
+    monkeypatch.setattr("otto.runner.run_audit", _audit)
+    monkeypatch.setattr("otto.runner.render_run", _render)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x",
+            tmp_path,
+            session_dir,
+            project_kind="webapp",
+            brownfield=False,
+            base_url=None,
+            config={},
+            build_agent=_fix,
+            audit_agent=_stub_agent,
+            fix_agent=_fix,
+            spec=spec,
+        )
+    )
+
+    assert captured["audit_calls"] == 2
+    assert captured["fix_calls"] == 1
+    assert result.verdict == AuditVerdict.PASSED
+    assert result.repair_result is not None
+    assert result.repair_result.attempts[0].new_verdict == "passed"
+    assert order.events == ["seed", "build", "merge", "audit", "audit", "render"]
 
 
 def test_repair_skipped_on_passed_verdict(
@@ -557,6 +725,9 @@ def test_resume_plan_skips_landed_components_and_short_circuits_audit(
     build_kwargs = captured["build_kwargs"]
     assert "skip_components" in build_kwargs
     assert "g" in set(build_kwargs["skip_components"])
+    merge_kwargs = captured["merge_kwargs"]
+    assert "skip_components" in merge_kwargs
+    assert "g" in set(merge_kwargs["skip_components"])
     # Synthesised AuditResult records the skip in narrative.
     assert result.audit_result is not None
     assert result.verdict == AuditVerdict.PASSED
@@ -767,6 +938,26 @@ def test_spec_edit_invalidation_no_op_when_no_event(
     )
 
     assert captured["build_calls"] == 1
+
+
+def test_spec_edit_invalidation_clears_after_user_abort(tmp_path: Path) -> None:
+    """A Group invalidated by spec edit but then aborted by the operator is
+    terminal; the runner must not re-dispatch it.
+    """
+    from otto.spec_state import emit
+
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    emit(
+        session_dir,
+        "group.invalidated_by_spec_edit",
+        group_id="g",
+        detail="feature_ids changed",
+    )
+    assert _invalidated_group_ids(session_dir) == {"g"}
+
+    emit(session_dir, "group.aborted_by_user", group_id="g", detail="abort")
+    assert _invalidated_group_ids(session_dir) == set()
 
 
 # ---------------------------------------------------------------------------

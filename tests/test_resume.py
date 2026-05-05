@@ -14,12 +14,14 @@ No LLM cost; no real subprocess calls beyond the git invocations
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from otto.checkpoint import write_checkpoint
 from otto.resume import (
     ResumeError,
     plan_resume,
@@ -67,6 +69,12 @@ def _seed_session(tmp_path: Path) -> tuple[Path, Spec]:
     spec_path = spec_dir / "spec.json"
     persist_spec(spec, spec_path, allow_initial=True)
     return session_dir, spec
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +180,33 @@ def test_verify_spec_hash_matches_raises_on_mutation(tmp_path: Path) -> None:
     plan = plan_resume(session_dir)
     spec_path = session_dir / "spec" / "spec.json"
     spec_path.write_text(spec_path.read_text() + "\n# tampered\n")
+    with pytest.raises(ResumeError, match="modified after the run paused"):
+        verify_spec_hash_matches(plan, spec_path)
+
+
+def test_plan_resume_uses_checkpoint_spec_hash_for_paused_drift(
+    tmp_path: Path,
+) -> None:
+    """Edits made before invoking --resume must not become the baseline."""
+    session_dir, _ = _seed_session(tmp_path)
+    spec_path = session_dir / "spec" / "spec.json"
+    original_hash = _sha256(spec_path)
+    write_checkpoint(
+        tmp_path,
+        run_id=session_dir.name,
+        command="build",
+        status="paused",
+        phase="i2p",
+        spec_path=str(spec_path),
+        spec_hash=original_hash,
+    )
+
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    payload["intent"] = "tampered while paused"
+    spec_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    plan = plan_resume(session_dir)
+    assert plan.spec_hash == original_hash
     with pytest.raises(ResumeError, match="modified after the run paused"):
         verify_spec_hash_matches(plan, spec_path)
 

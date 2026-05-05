@@ -5,9 +5,9 @@ Coverage:
 - render_json: round-trips through JSON, schema_version present
 - render_html: contains required sections, escapes user input,
   thumbnails for image artifacts, video tag for video artifacts,
-  blocked slices rendered with narrative not omitted
+  blocked groups rendered with narrative not omitted
 - write_proof_packet: writes both files, returns paths
-- render_run: end-to-end with passing + blocked + landed slices
+- render_run: end-to-end with passing + blocked + landed groups
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ from otto.render import (
     PROOF_PACKET_JSON,
     PROOF_PACKET_SCHEMA_VERSION,
     compose_proof_packet,
+    proof_packet_from_dict,
+    rerender_proof_packet,
     render_html,
     render_json,
     render_run,
@@ -272,7 +274,7 @@ def test_render_html_contains_required_sections(tmp_path: Path) -> None:
     assert "Non-goals" in html
     assert "Done means" in html
     # Group sections
-    assert "<h2>Slices</h2>" in html
+    assert "<h2>Groups</h2>" in html
     assert "shell" in html
     assert "counter" in html
     # Audit
@@ -339,6 +341,7 @@ def test_render_html_image_artifacts_become_thumbnails(tmp_path: Path) -> None:
     html = render_html(packet, session_dir=tmp_path)
     # Image rendered as thumbnail (relative path expected)
     assert '<img src="evidence/shot.png"' in html
+    assert "grid-template-columns" in html
 
 
 def test_render_html_video_walkthrough_artifact(tmp_path: Path) -> None:
@@ -431,3 +434,56 @@ def test_render_run_end_to_end(tmp_path: Path) -> None:
     assert parsed["wall_s"] == 180.0
     assert parsed["cost_usd"] == 0.72
     assert len(parsed["groups"]) == 2
+
+
+def test_proof_packet_from_dict_accepts_legacy_slice_keys() -> None:
+    packet = proof_packet_from_dict(
+        {
+            "schema_version": 1,
+            "intent": "legacy packet",
+            "project_kind": "webapp",
+            "verdict": "passed",
+            "slices": [
+                {
+                    "slice_id": "shell",
+                    "title": "App shell",
+                    "status": "landed",
+                    "landed": True,
+                    "landed_commit": "abc",
+                }
+            ],
+            "landed_slice_ids": ["shell"],
+            "blocked_slice_ids": [],
+            "capability_verdicts": [
+                {"name": "App shell", "status": "passed", "detail": "ok"}
+            ],
+        }
+    )
+
+    assert packet.groups[0].group_id == "shell"
+    assert packet.groups[0].name == "App shell"
+    assert packet.landed_group_ids == ["shell"]
+    assert packet.feature_audits[0]["name"] == "App shell"
+
+
+def test_rerender_proof_packet_refreshes_html_without_rewriting_json(tmp_path: Path) -> None:
+    spec = _two_slice_spec(tmp_path)
+    packet = compose_proof_packet(
+        spec,
+        _build_result_passing(tmp_path),
+        _merge_result_landed(tmp_path),
+        _audit_passed(),
+        wall_s=10.0,
+        cost_usd=0.5,
+    )
+    _, json_path = write_proof_packet(packet, tmp_path)
+    original_json = json_path.read_text(encoding="utf-8")
+    (tmp_path / PROOF_PACKET_HTML).write_text("stale", encoding="utf-8")
+
+    html_path, returned_json_path = rerender_proof_packet(tmp_path)
+
+    assert html_path == tmp_path / PROOF_PACKET_HTML
+    assert returned_json_path == json_path
+    assert "stale" not in html_path.read_text(encoding="utf-8")
+    assert "<h2>Groups</h2>" in html_path.read_text(encoding="utf-8")
+    assert json_path.read_text(encoding="utf-8") == original_json

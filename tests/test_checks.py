@@ -15,6 +15,7 @@ Coverage per Check kind:
 from __future__ import annotations
 
 import http.server
+import os
 import socket
 import threading
 from contextlib import contextmanager
@@ -111,6 +112,48 @@ def test_repo_test_writes_raw_log_when_path_given(tmp_path: Path) -> None:
     contents = log_path.read_text(encoding="utf-8")
     assert "hello-raw" in contents
     assert "exit_code=0" in contents
+
+
+def test_repo_test_npm_run_bootstraps_locked_dependencies(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_npm = bin_dir / "npm"
+    fake_npm.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo \"$*\" >> npm.log\n"
+        "if [ \"$1\" = \"ci\" ]; then mkdir -p node_modules; exit 0; fi\n"
+        "if [ \"$1\" = \"run\" ] && [ \"$2\" = \"build\" ]; then\n"
+        "  test -d node_modules || exit 127\n"
+        "  echo built\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 9\n",
+        encoding="utf-8",
+    )
+    fake_npm.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    (tmp_path / "package.json").write_text('{"scripts":{"build":"vite build"}}\n', encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text("{}\n", encoding="utf-8")
+
+    check = RepoTestCheck(command=("npm", "run", "build"), timeout_s=10)
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+
+    assert evidence.passed is True
+    assert evidence.raw["bootstrap_command"] == [
+        "npm",
+        "ci",
+        "--prefer-offline",
+        "--no-audit",
+        "--no-fund",
+    ]
+    assert evidence.raw["exit_code"] == 0
+    assert (tmp_path / "npm.log").read_text(encoding="utf-8").splitlines() == [
+        "ci --prefer-offline --no-audit --no-fund",
+        "run build",
+    ]
 
 
 # ---------------------------------------------------------------------------

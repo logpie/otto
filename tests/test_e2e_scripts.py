@@ -92,6 +92,19 @@ def test_autopilot_real_e2e_cleanup_removes_synthetic_audit_rows(tmp_path: Path)
     assert rows[0]["details"]["decision"]["id"] == "keep"
 
 
+def test_todo_cli_i2p_bench_writes_requested_provider(tmp_path: Path) -> None:
+    script = _load_script(
+        "tests._bench_todo_cli_i2p_provider_script",
+        SCRIPTS_DIR / "bench_todo_cli_i2p.py",
+    )
+
+    project_dir = script._setup_repo(tmp_path, provider="codex")
+
+    config = (project_dir / "otto.yaml").read_text(encoding="utf-8")
+    assert "provider: codex" in config
+    assert "project_kind: cli" in config
+
+
 def test_benchmark_merge_cost_parser_dedupes_repeated_outcome_notes(tmp_path: Path) -> None:
     bench_costs = _load_script("tests._bench_costs_script", SCRIPTS_DIR / "bench_costs.py")
     state_dir = tmp_path / "otto_logs" / "merge" / "merge-1"

@@ -107,8 +107,10 @@ def test_prompt_uses_feature_audits_wire_format(tmp_path: Path) -> None:
     prompt = _audit_prompt(_make_input(tmp_path))
     # Canonical key requested in the JSON schema block.
     assert "feature_audits:" in prompt
+    assert "feature_id" in prompt
     # Legacy key must be entirely gone from the prompt.
     assert "capability_verdicts" not in prompt
+    assert "Per-capability" not in prompt
 
 
 def test_prompt_contract_block_unconditional_on_walkthrough_artifacts(

@@ -44,9 +44,9 @@ def test_full_coverage(tmp_path: Path) -> None:
     _write_jsonl(
         tmp_path / "walkthrough.jsonl",
         [
-            {"t": "0:01", "action_kind": "click", "feature_ids": ["login"]},
-            {"t": "0:02", "action_kind": "assert", "feature_ids": ["login"]},
-            {"t": "0:03", "action_kind": "click", "feature_ids": ["logout"]},
+            {"t": "0:01", "action_kind": "browser_navigation", "feature_ids": ["login"]},
+            {"t": "0:02", "action_kind": "api_request", "feature_ids": ["login"]},
+            {"t": "0:03", "action_kind": "browser_navigation", "feature_ids": ["logout"]},
         ],
     )
     _, out = _validate_walkthrough_jsonl(tmp_path, spec)
@@ -65,10 +65,10 @@ def test_below_threshold(tmp_path: Path) -> None:
     spec = _spec_with_features("login")
     # 8 non-exploration entries, only 7 tagged → 7/8 = 87.5% < 90%
     entries = [
-        {"t": f"0:{i:02d}", "action_kind": "click", "feature_ids": ["login"]}
+        {"t": f"0:{i:02d}", "action_kind": "browser_navigation", "feature_ids": ["login"]}
         for i in range(7)
     ]
-    entries.append({"t": "0:99", "action_kind": "click", "feature_ids": []})
+    entries.append({"t": "0:99", "action_kind": "browser_navigation", "feature_ids": []})
     _write_jsonl(tmp_path / "walkthrough.jsonl", entries)
     _, out = _validate_walkthrough_jsonl(tmp_path, spec)
     assert out is not None
@@ -86,7 +86,7 @@ def test_exploration_entries_excluded_from_threshold(tmp_path: Path) -> None:
         [
             {"t": "0:01", "action_kind": "exploration"},  # no feature_ids ok
             {"t": "0:02", "action_kind": "exploration"},
-            {"t": "0:03", "action_kind": "click", "feature_ids": ["login"]},
+            {"t": "0:03", "action_kind": "browser_navigation", "feature_ids": ["login"]},
         ],
     )
     _, out = _validate_walkthrough_jsonl(tmp_path, spec)
@@ -114,12 +114,15 @@ def test_unknown_feature_id_surfaces(tmp_path: Path) -> None:
     _write_jsonl(
         tmp_path / "walkthrough.jsonl",
         [
-            {"t": "0:01", "action_kind": "click", "feature_ids": ["typo-id"]},
+            {"t": "0:01", "action_kind": "browser_navigation", "feature_ids": ["typo-id"]},
         ],
     )
     _, out = _validate_walkthrough_jsonl(tmp_path, spec)
     assert out is not None
+    assert out["total_entries"] == 1
+    assert out["meets_threshold"] is False
     assert "typo-id" in out["unknown_feature_id_refs"]
+    assert any("typo-id" in err for err in out["parse_errors"])
 
 
 def test_malformed_json_line_recorded(tmp_path: Path) -> None:
@@ -127,9 +130,9 @@ def test_malformed_json_line_recorded(tmp_path: Path) -> None:
     p = tmp_path / "walkthrough.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
-        '{"t":"0:01","action_kind":"click","feature_ids":["login"]}\n'
+        '{"t":"0:01","action_kind":"browser_navigation","feature_ids":["login"]}\n'
         "this is not json\n"
-        '{"t":"0:02","action_kind":"click","feature_ids":["login"]}\n',
+        '{"t":"0:02","action_kind":"browser_navigation","feature_ids":["login"]}\n',
     )
     _, out = _validate_walkthrough_jsonl(tmp_path, spec)
     assert out is not None
@@ -144,10 +147,10 @@ def test_blank_lines_skipped(tmp_path: Path) -> None:
     p = tmp_path / "walkthrough.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
-        '{"t":"0:01","action_kind":"click","feature_ids":["login"]}\n'
+        '{"t":"0:01","action_kind":"browser_navigation","feature_ids":["login"]}\n'
         "\n"
         "   \n"
-        '{"t":"0:02","action_kind":"click","feature_ids":["login"]}\n',
+        '{"t":"0:02","action_kind":"browser_navigation","feature_ids":["login"]}\n',
     )
     _, out = _validate_walkthrough_jsonl(tmp_path, spec)
     assert out is not None

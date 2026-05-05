@@ -1,10 +1,8 @@
 """Otto CLI — entrypoint for all otto commands."""
 
-import asyncio
 from contextlib import contextmanager
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -20,7 +18,6 @@ os.environ.pop("CLAUDECODE", None)
 
 import click
 
-from otto.agent import AgentCallError
 from otto.config import (
     ConfigError,
     _normalize_intent,
@@ -30,11 +27,9 @@ from otto.config import (
     load_config,
     require_git,
     resolve_project_dir,
-    resolve_certifier_mode,
 )
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
-from otto.token_usage import format_token_spend
 
 
 def _check_venv_guard(
@@ -1117,7 +1112,6 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
     """
     require_git()
     project_dir = resolve_project_dir(Path.cwd())
-    from otto import paths as _paths
 
     from otto.cli_run import resolve_pipeline_choice
     pipeline_choice = resolve_pipeline_choice(
@@ -1252,7 +1246,6 @@ def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model,
     """
     require_git()
     project_dir = resolve_project_dir(Path.cwd())
-    from otto import paths as _paths
 
     if sum(bool(x) for x in (fast, standard_, thorough)) > 1:
         error_console.print(
@@ -1308,6 +1301,68 @@ def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model,
     # above is the legacy ``--legacy`` path — surface the migration
     # message and exit. Mirrors ``--legacy`` handling in cli_improve.
     _exit_legacy_certify_removed()
+
+
+@main.command("render", context_settings=CONTEXT_SETTINGS)
+@click.argument("session", type=click.Path(exists=False, path_type=Path))
+@click.option(
+    "--project-dir",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help=(
+        "Project root used when SESSION is a session id. Defaults to the "
+        "current git worktree root."
+    ),
+)
+@click.option(
+    "--rewrite-json",
+    is_flag=True,
+    help=(
+        "Also rewrite proof-packet.json in canonical current format. "
+        "By default only proof-packet.html is regenerated."
+    ),
+)
+def render_command(session: Path, project_dir: Path | None, rewrite_json: bool) -> None:
+    """Re-render proof-packet.html for an existing i2p session without LLM cost."""
+    try:
+        session_dir = _resolve_render_session_dir(session, project_dir=project_dir)
+        from otto.render import rerender_proof_packet
+
+        html_path, json_path = rerender_proof_packet(
+            session_dir,
+            rewrite_json=rewrite_json,
+        )
+    except (ConfigError, FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    console.print(f"  Rendered proof packet: {html_path}")
+    if rewrite_json:
+        console.print(f"  Rewrote JSON packet: {json_path}")
+
+
+def _resolve_render_session_dir(
+    session: Path,
+    *,
+    project_dir: Path | None = None,
+) -> Path:
+    """Resolve a CLI render argument to an i2p session directory."""
+    expanded = session.expanduser()
+    if expanded.exists():
+        if not expanded.is_dir():
+            raise ValueError(f"render target is not a directory: {expanded}")
+        return expanded.resolve()
+    if any(part in ("..", "") for part in expanded.parts):
+        raise ValueError(f"invalid session id: {session}")
+    root = project_dir.expanduser().resolve() if project_dir is not None else resolve_project_dir(Path.cwd())
+    candidate = (root / "otto_logs" / "sessions" / str(session)).resolve()
+    sessions_root = (root / "otto_logs" / "sessions").resolve()
+    try:
+        candidate.relative_to(sessions_root)
+    except ValueError as exc:
+        raise ValueError(f"invalid session id: {session}") from exc
+    if not candidate.exists() or not candidate.is_dir():
+        raise FileNotFoundError(f"session not found: {candidate}")
+    return candidate
 
 
 # Setup command (registered from otto/cli_setup.py)

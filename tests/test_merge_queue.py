@@ -681,7 +681,7 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
         (input_.worktree / "shared.txt").write_text("A", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
 
-    result = asyncio.run(
+    asyncio.run(
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
             build_agent=repair_agent,
@@ -694,6 +694,94 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
     assert all(b == "i2p/_session/s1" for b in seen_branches), (
         f"repair must run on slice branch; saw {seen_branches}"
     )
+
+
+def test_merge_repair_blocks_out_of_scope_changes(tmp_path: Path) -> None:
+    """A12: merge repair is hard-scoped after the agent returns."""
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    (tmp_path / "owned.txt").write_text("main\n", encoding="utf-8")
+    (tmp_path / "peer.txt").write_text("main\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "owned.txt", "peer.txt"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "main", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    branch = "i2p/_session/s1"
+    subprocess.run(["git", "checkout", "-b", branch, "main~1"],
+                   cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "owned.txt").write_text("branch\n", encoding="utf-8")
+    subprocess.run(["git", "add", "owned.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(s1): conflicting owned", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="owner",
+                dependencies=[],
+                owned_paths=["owned.txt"],
+                feature_ids=["f1"],
+                checks=[_passing_check()],
+            ),
+            Group(
+                id="s2",
+                name="peer",
+                dependencies=[],
+                owned_paths=["peer.txt"],
+                feature_ids=["f2"],
+                checks=[],
+            ),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="s1",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=branch,
+                worktree=tmp_path,
+            ),
+        ],
+    )
+
+    async def overreaching_repair(input_: BuildAgentInput) -> BuildAgentOutput:
+        (input_.worktree / "owned.txt").write_text("main\n", encoding="utf-8")
+        (input_.worktree / "peer.txt").write_text("overreach\n", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=overreaching_repair,
+            branch_for_group=lambda s: branch,
+            budget=MergeBudget(per_slice_repair_retries=1),
+        )
+    )
+
+    assert result.landed_ids == []
+    assert result.blocked_ids == ["s1"]
+    assert "merge repair scope violation" in result.results[0].failure_narrative
+    assert "peer.txt" in result.results[0].failure_narrative
 
 
 # ---------------------------------------------------------------------------
@@ -878,3 +966,73 @@ def test_merge_handles_dirty_worktree_from_prior_check(tmp_path: Path) -> None:
         f"merge with dirty worktree should reset+clean before checkout; "
         f"got blocked={result.blocked_ids}, results[0]={result.results[0]}"
     )
+
+
+def test_run_merge_queue_resume_skip_seeds_landed_ids(tmp_path: Path) -> None:
+    """Resume must not re-merge units already landed by the prior attempt.
+
+    A skipped dependency should count as landed for eligibility, allowing
+    downstream work to merge without calling the skipped branch.
+    """
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    branch = "i2p/_session/downstream"
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "downstream.txt").write_text("ok", encoding="utf-8")
+    subprocess.run(["git", "add", "downstream.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "downstream", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec(
+        [
+            Group(id="already_landed", name="a", dependencies=[], owned_paths=[], feature_ids=[]),
+            Group(
+                id="downstream",
+                name="b",
+                dependencies=["already_landed"],
+                owned_paths=["downstream.txt"],
+                feature_ids=["add downstream"],
+                checks=[_passing_check()],
+            ),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="already_landed",
+                status=GroupStatus.PASSING,
+                attempts=0,
+                branch="",
+                worktree=tmp_path,
+                failure_narrative="resume: skipped",
+            ),
+            GroupResult(
+                group_id="downstream",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=branch,
+                worktree=tmp_path,
+            ),
+        ],
+    )
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            branch_for_group=lambda s: "" if s.id == "already_landed" else branch,
+            skip_components={"already_landed"},
+        )
+    )
+
+    assert result.landed_ids == ["already_landed", "downstream"]
+    assert [r.group_id for r in result.results] == ["downstream"]

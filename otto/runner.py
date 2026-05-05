@@ -37,13 +37,15 @@ Design notes (honest gaps):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from otto import paths as _paths
 from otto.audit import (
     AuditBudget,
     AuditResult,
@@ -142,6 +144,7 @@ async def run_pipeline(
     gate_timeout_s: float = 24 * 60 * 60.0,  # 24h default; A13
     gate_poll_s: float = 1.0,
     gate_announce: "Callable[[str], None] | None" = None,
+    command: str = "run",
 ) -> RunResult:
     """Drive the full intent-to-product pipeline.
 
@@ -257,6 +260,12 @@ async def run_pipeline(
         )
 
     result = RunResult(spec=spec)
+    _mark_i2p_run_active(
+        project_dir=project_dir,
+        session_dir=session_dir,
+        command=command,
+        intent=spec.intent or intent,
+    )
 
     # ---- 1.5. Review gate (A13, optional) ----
     # When the operator passes ``--review-gate`` (default off), pause here
@@ -324,6 +333,12 @@ async def run_pipeline(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("emit run.finished failed: %s", exc)
+        _mark_i2p_run_complete(
+            project_dir=project_dir,
+            session_dir=session_dir,
+            total_cost=result.cost_usd,
+            total_duration=result.wall_s,
+        )
         return result
 
     # Shared budget threaded across build, merge, audit so the documented
@@ -411,6 +426,7 @@ async def run_pipeline(
             build_agent=build_agent,
             budget=MergeBudget(),
             shared_budget=shared_budget,
+            skip_components=skip_components,
         )
     result.merge_result = merge_result
 
@@ -440,6 +456,8 @@ async def run_pipeline(
             base_branch=base_branch,
         )
     result.audit_result = audit_result
+    audit_cost_total = float(audit_result.cost_usd or 0.0)
+    repair_cost_total = 0.0
 
     # ---- 6. Layer 2 repair (research §4 retry layers) ----
     # Triggered only on non-PASS verdicts and only when a fix_agent is
@@ -459,13 +477,51 @@ async def run_pipeline(
                 project_dir=project_dir,
                 session_dir=session_dir,
                 base_url=base_url,
+                shared_budget=shared_budget,
             )
+            audit_budget_for_recheck = audit_budget or AuditBudget()
+
+            async def _re_audit_feature_subset(
+                feature_ids: list[str],
+            ) -> list[dict[str, Any]]:
+                # The current audit API is whole-product; the narrowed
+                # feature id list is still useful for repair-loop events,
+                # but verification must re-judge the integrated product.
+                _ = feature_ids
+                nonlocal audit_result, audit_cost_total
+                recheck = await run_audit(
+                    spec,
+                    project_dir=project_dir,
+                    session_dir=session_dir,
+                    build_result=build_result,
+                    merge_result=merge_result,
+                    audit_agent=audit_agent,
+                    base_url=base_url,
+                    walkthrough=walk,
+                    fix_agent=None,
+                    budget=AuditBudget(
+                        audit_retries=0,
+                        walk_timeout_s=audit_budget_for_recheck.walk_timeout_s,
+                        judge_timeout_s=audit_budget_for_recheck.judge_timeout_s,
+                    ),
+                    shared_budget=shared_budget,
+                    base_branch=base_branch,
+                    feature_scope_ids=feature_ids,
+                )
+                audit_cost_total += float(recheck.cost_usd or 0.0)
+                audit_result = replace(recheck, cost_usd=audit_cost_total)
+                result.audit_result = audit_result
+                return _feature_audits_to_verdicts(spec, audit_result)
+
             try:
                 repair_result = await repair_failing_features(
                     spec=spec,
                     feature_verdicts=feature_verdicts,
                     fix_agent=bridge,
-                    re_audit=None,  # re-audit is the audit module's responsibility
+                    re_audit=_re_audit_feature_subset,
+                )
+                repair_cost_total = sum(
+                    float(a.cost_usd or 0.0) for a in repair_result.attempts
                 )
                 result.repair_result = repair_result
             except Exception as exc:  # noqa: BLE001
@@ -482,6 +538,7 @@ async def run_pipeline(
         build_result.total_cost_usd
         + merge_result.total_cost_usd
         + audit_result.cost_usd
+        + repair_cost_total
     )
     html_path, json_path = render_run(
         spec,
@@ -506,6 +563,12 @@ async def run_pipeline(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("emit run.finished failed: %s", exc)
+    _mark_i2p_run_complete(
+        project_dir=project_dir,
+        session_dir=session_dir,
+        total_cost=result.cost_usd,
+        total_duration=result.wall_s,
+    )
 
     return result
 
@@ -558,7 +621,8 @@ def _invalidated_group_ids(session_dir: Path) -> set[str]:
 
     A6: a Group whose LAST relevant journal event is
     `group.invalidated_by_spec_edit` needs re-dispatch. If the build
-    loop already wrote a `group.merge.landed` or `group.blocked`
+    loop already wrote a `group.merge.landed`, `group.blocked`, or
+    `group.aborted_by_user`
     AFTER the invalidation, the signal was acted on (or made moot)
     and we skip it.
     """
@@ -571,7 +635,11 @@ def _invalidated_group_ids(session_dir: Path) -> set[str]:
             if event.kind == "group.invalidated_by_spec_edit":
                 invalidated.add(event.group_id)
                 last_kind_for_group[event.group_id] = event.kind
-            elif event.kind in ("group.merge.landed", "group.blocked"):
+            elif event.kind in (
+                "group.merge.landed",
+                "group.blocked",
+                "group.aborted_by_user",
+            ):
                 last_kind_for_group[event.group_id] = event.kind
     except OSError as exc:
         logger.warning("scan invalidated groups failed: %s", exc)
@@ -609,7 +677,7 @@ async def _redispatch_invalidated_groups(
     ids, Component results are preserved from the prior pass.
     """
     from otto.spec_compile import load_spec
-    from otto.build import GroupResult, GroupStatus
+    from otto.build import GroupResult
 
     spec_path = session_dir / "spec" / "spec.json"
     try:
@@ -693,6 +761,88 @@ def _wait_while_paused(session_dir: Path) -> None:
     logger.info("runner: pause cleared; resuming (session=%s)", session_dir.name)
 
 
+def _managed_session_id(project_dir: Path, session_dir: Path) -> str | None:
+    """Return the session id when ``session_dir`` uses Otto's log layout.
+
+    Unit tests sometimes pass an arbitrary temp directory as ``session_dir``.
+    The pointer/checkpoint helpers operate on
+    ``<project>/otto_logs/sessions/<id>``, so skip unmanaged dirs instead
+    of writing a misleading pointer to a sibling path.
+    """
+    try:
+        resolved_session = Path(session_dir).resolve()
+        resolved_root = _paths.sessions_root(project_dir).resolve()
+    except OSError:
+        return None
+    if resolved_session.parent != resolved_root:
+        return None
+    if not resolved_session.name:
+        return None
+    return resolved_session.name
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _mark_i2p_run_active(
+    *,
+    project_dir: Path,
+    session_dir: Path,
+    command: str,
+    intent: str,
+) -> None:
+    """Persist the paused pointer/checkpoint consumed by i2p ``--resume``."""
+    session_id = _managed_session_id(project_dir, session_dir)
+    if session_id is None:
+        return
+    spec_path = Path(session_dir) / "spec" / "spec.json"
+    spec_hash = _file_sha256(spec_path) if spec_path.exists() else ""
+    try:
+        from otto.checkpoint import write_checkpoint
+
+        write_checkpoint(
+            project_dir,
+            run_id=session_id,
+            command=command,
+            status="in_progress",
+            phase="i2p",
+            intent=intent,
+            spec_path=str(spec_path) if spec_path.exists() else "",
+            spec_hash=spec_hash,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("i2p checkpoint write failed for %s: %s", session_id, exc)
+
+
+def _mark_i2p_run_complete(
+    *,
+    project_dir: Path,
+    session_dir: Path,
+    total_cost: float,
+    total_duration: float,
+) -> None:
+    """Mark the i2p checkpoint terminal and clear the paused pointer."""
+    session_id = _managed_session_id(project_dir, session_dir)
+    if session_id is None:
+        return
+    try:
+        from otto.checkpoint import complete_checkpoint
+
+        complete_checkpoint(
+            project_dir,
+            run_id=session_id,
+            total_cost=total_cost,
+            total_duration=total_duration,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("i2p checkpoint completion failed for %s: %s", session_id, exc)
+
+
 def _feature_audits_to_verdicts(
     spec: Spec, audit_result: AuditResult
 ) -> list[dict[str, Any]]:
@@ -706,10 +856,12 @@ def _feature_audits_to_verdicts(
         return []
     audits_by_key: dict[str, Any] = {}
     for fa in audit_result.feature_audits:
+        if fa.feature_id:
+            audits_by_key[fa.feature_id] = fa
         audits_by_key[fa.name] = fa
     out: list[dict[str, Any]] = []
     for feature in spec.features:
-        fa = audits_by_key.get(feature.name) or audits_by_key.get(feature.id)
+        fa = audits_by_key.get(feature.id) or audits_by_key.get(feature.name)
         if fa is None:
             continue
         out.append(
@@ -730,6 +882,7 @@ def _make_layer2_fix_agent(
     project_dir: Path,
     session_dir: Path,
     base_url: str | None,
+    shared_budget: BuildBudget | None = None,
 ):
     """Adapt a ``BuildAgentCallable`` to the ``FixAgentCallable`` contract.
 
@@ -761,6 +914,17 @@ def _make_layer2_fix_agent(
     _ = (session_dir, base_url)  # reserved for future per-feature log routing
 
     async def bridge(failing: FailingFeature, group: Group) -> RepairAttempt:
+        if shared_budget is not None and shared_budget.remaining_total_cost_usd() <= 0:
+            return RepairAttempt(
+                feature_id=failing.feature_id,
+                group_id=group.id,
+                attempt_number=1,
+                succeeded=False,
+                new_verdict=None,
+                detail="layer 2 repair skipped: shared cost budget exhausted",
+                cost_usd=0.0,
+                wall_s=0.0,
+            )
         agent_input = BuildAgentInput(
             spec=spec,
             group=group,
@@ -789,13 +953,37 @@ def _make_layer2_fix_agent(
                 cost_usd=0.0,
                 wall_s=time.monotonic() - t0,
             )
+        if shared_budget is not None:
+            shared_budget.charge_cost(float(output.cost_usd or 0.0))
+        succeeded = bool(output.succeeded)
+        detail = output.detail
+        if succeeded:
+            try:
+                from otto.build import _commit_group_work, _is_git_repo
+
+                if _is_git_repo(project_dir):
+                    committed = _commit_group_work(
+                        project_dir,
+                        group_id=group.id,
+                        branch=f"layer2/{failing.feature_id}",
+                    )
+                    if not committed:
+                        succeeded = False
+                        detail = (
+                            (detail + "\n\n") if detail else ""
+                        ) + "layer 2 repair failed to commit integrated changes"
+            except Exception as exc:  # noqa: BLE001
+                succeeded = False
+                detail = (
+                    (detail + "\n\n") if detail else ""
+                ) + f"layer 2 repair commit failed: {type(exc).__name__}: {exc}"
         return RepairAttempt(
             feature_id=failing.feature_id,
             group_id=group.id,
             attempt_number=1,
-            succeeded=bool(output.succeeded),
+            succeeded=succeeded,
             new_verdict=None,
-            detail=output.detail,
+            detail=detail,
             cost_usd=float(output.cost_usd or 0.0),
             wall_s=float(output.wall_s or 0.0),
         )

@@ -166,7 +166,7 @@ def test_render_html_emits_features_section_with_one_block_per_feature(
     assert "partial" in html
 
 
-def test_render_html_features_section_appears_before_slices(tmp_path: Path) -> None:
+def test_render_html_features_section_appears_before_groups(tmp_path: Path) -> None:
     spec = _two_feature_spec()
     packet = compose_proof_packet(
         spec,
@@ -178,11 +178,11 @@ def test_render_html_features_section_appears_before_slices(tmp_path: Path) -> N
     )
     html = render_html(packet, session_dir=tmp_path)
     feature_pos = html.find("<h2>Features</h2>")
-    slice_pos = html.find("<h2>Slices</h2>")
+    group_pos = html.find("<h2>Groups</h2>")
     assert feature_pos > 0, "Features section missing"
-    assert slice_pos > 0, "Slices section missing"
-    assert feature_pos < slice_pos, (
-        "Features section must precede Slices (research §3 — Features lead)"
+    assert group_pos > 0, "Groups section missing"
+    assert feature_pos < group_pos, (
+        "Features section must precede Groups (research §3 — Features lead)"
     )
 
 
@@ -217,8 +217,7 @@ def test_render_html_no_features_section_for_legacy_packet(tmp_path: Path) -> No
     audit = AuditResult(verdict=AuditVerdict.PASSED, narrative="ok")
     packet = compose_proof_packet(spec, build, merge, audit, wall_s=1.0, cost_usd=0.0)
     html = render_html(packet, session_dir=tmp_path)
-    # Legacy compatibility — Slices section still rendered
-    assert "<h2>Slices</h2>" in html
+    assert "<h2>Groups</h2>" in html
     # No Features section since spec.features is empty
     assert "<h2>Features</h2>" not in html
 
@@ -250,6 +249,34 @@ def test_render_json_includes_features_array(tmp_path: Path) -> None:
     # Back-compat: legacy slices array still present
     assert "groups" in data
     assert len(data["groups"]) == 1
+
+
+def test_feature_audit_feature_id_wins_over_display_name(tmp_path: Path) -> None:
+    """Per-Feature proof joins on feature_id, not fragile display names."""
+    spec = _two_feature_spec()
+    audit = AuditResult(
+        verdict=AuditVerdict.PASSED,
+        narrative="ok",
+        feature_audits=[
+            FeatureAudit(
+                feature_id="signup",
+                name="Renamed by audit agent",
+                status="passed",
+                detail="matched by id",
+            )
+        ],
+    )
+    packet = compose_proof_packet(
+        spec,
+        _passing_build(tmp_path),
+        _landed_merge(),
+        audit,
+        wall_s=1.0,
+        cost_usd=0.0,
+    )
+    by_id = {f["feature_id"]: f for f in packet.features}
+    assert by_id["signup"]["verdict"] == "passed"
+    assert by_id["signup"]["detail"] == "matched by id"
 
 
 # ---------------------------------------------------------------------------

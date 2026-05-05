@@ -187,8 +187,8 @@ def test_parse_audit_output_accepts_feature_audits_key() -> None:
   "narrative": "all good",
   "group_verdicts": [],
   "feature_audits": [
-    {"name": "signup", "status": "passed", "detail": "ok", "evidence_refs": ["a:1"]},
-    {"name": "login", "status": "partial", "detail": "meh", "evidence_refs": []}
+    {"feature_id": "signup", "name": "signup", "status": "passed", "detail": "ok", "evidence_refs": ["a:1"]},
+    {"feature_id": "login", "name": "login", "status": "partial", "detail": "meh", "evidence_refs": []}
   ],
   "quality_score": 4,
   "quality_findings": ["small thing"]
@@ -199,6 +199,7 @@ def test_parse_audit_output_accepts_feature_audits_key() -> None:
     assert len(out.feature_audits) == 2
     names = [fa.name for fa in out.feature_audits]
     assert names == ["signup", "login"]
+    assert [fa.feature_id for fa in out.feature_audits] == ["signup", "login"]
     assert out.feature_audits[0].evidence_refs == ["a:1"]
 
 

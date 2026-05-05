@@ -336,9 +336,10 @@ if __name__ == "__main__":
 '''
 
 
-OTTO_YAML = '''\
+OTTO_YAML_TEMPLATE = '''\
 test_command: "python tests/run_acceptance.py"
 project_kind: cli
+provider: {provider}
 '''
 
 
@@ -357,11 +358,11 @@ class BenchResult:
     verdict: str = "unknown"
 
 
-def _setup_repo(run_root: Path) -> Path:
+def _setup_repo(run_root: Path, *, provider: str) -> Path:
     project_dir = run_root / "i2p"
     project_dir.mkdir(parents=True, exist_ok=True)
 
-    (project_dir / "otto.yaml").write_text(OTTO_YAML)
+    (project_dir / "otto.yaml").write_text(OTTO_YAML_TEMPLATE.format(provider=provider))
 
     tests_dir = project_dir / "tests"
     tests_dir.mkdir(exist_ok=True)
@@ -467,8 +468,8 @@ def _summarize(
 ) -> tuple[dict[str, Any], list[be.EvalResult]]:
     session_dir = _latest_session_dir(project_dir)
     events = _read_journal(session_dir) if session_dir else []
-    landed = [e.get("slice_id") for e in events if e.get("kind") == "slice.merge.landed"]
-    blocked = [e.get("slice_id") for e in events if e.get("kind") == "slice.blocked"]
+    landed = [e.get("group_id") for e in events if e.get("kind") == "group.merge.landed"]
+    blocked = [e.get("group_id") for e in events if e.get("kind") == "group.blocked"]
     run_finished = [e for e in events if e.get("kind") == "run.finished"]
     audit_verdict = ""
     if run_finished:
@@ -495,8 +496,8 @@ def _summarize(
         "cli_timeout": cli_timeout,
         "wall_s": round(wall_s, 1),
         "session_dir": str(session_dir) if session_dir else None,
-        "slices_landed": landed,
-        "slices_blocked": blocked,
+        "groups_landed": landed,
+        "groups_blocked": blocked,
         "audit_verdict": audit_verdict,
         "quality_score": quality_score,
         "quality_findings": quality_findings,
@@ -511,10 +512,10 @@ def _verdict(summary: dict[str, Any]) -> str:
         return "timeout"
     if not summary.get("session_dir"):
         return "no_session_produced"
-    if summary.get("slices_blocked"):
-        return "slices_did_not_land"
-    if not summary.get("slices_landed"):
-        return "no_slices_landed"
+    if summary.get("groups_blocked"):
+        return "groups_did_not_land"
+    if not summary.get("groups_landed"):
+        return "no_groups_landed"
     if summary.get("audit_verdict") not in ("passed", "partial"):
         return f"unexpected_audit_verdict_{summary.get('audit_verdict','')}"
     qs = summary.get("quality_score") or 0
@@ -533,7 +534,7 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR)
     parser.add_argument("--run-root", type=Path, default=None)
     parser.add_argument("--timeout-s", type=int, default=1800)
-    parser.add_argument("--provider", default="claude")
+    parser.add_argument("--provider", default="claude", choices=["claude", "codex"])
     args = parser.parse_args()
 
     require_real_cost_opt_in()
@@ -557,7 +558,7 @@ def main() -> int:
     )
 
     print(f"[todo-cli] run_root={run_root}")
-    project_dir = _setup_repo(run_root)
+    project_dir = _setup_repo(run_root, provider=args.provider)
     cli_exit, cli_timeout, wall_s = _drive_otto(
         project_dir, artifacts_dir, args.timeout_s, args.provider,
     )
@@ -584,8 +585,8 @@ def main() -> int:
         "",
         f"- wall_s: {wall_s:.0f}",
         f"- cli_exit_code: {cli_exit}",
-        f"- slices landed: {summary.get('slices_landed')}",
-        f"- slices blocked: {summary.get('slices_blocked')}",
+        f"- groups landed: {summary.get('groups_landed')}",
+        f"- groups blocked: {summary.get('groups_blocked')}",
         f"- audit verdict: {summary.get('audit_verdict')}",
         f"- quality_score: {summary.get('quality_score', 0)}/5",
         f"- evaluator_aggregate: {summary.get('evaluator_aggregate')}",

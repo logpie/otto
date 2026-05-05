@@ -44,6 +44,7 @@ from otto.build import (
     BuildBudget,
     BuildResult,
     GroupStatus,
+    detect_scope_violations,
 )
 from otto.checks import Evidence, run_checks
 from otto.spec_compile import Group, Spec
@@ -261,6 +262,7 @@ async def run_merge_queue(
     shared_budget: BuildBudget | None = None,
     branch_for_group: Callable[[Group], str] | None = None,
     git_runner: Callable[[list[str], Path], subprocess.CompletedProcess[str]] | None = None,
+    skip_components: Iterable[str] | None = None,
 ) -> MergeQueueResult:
     """Process all merge candidates from a BuildResult.
 
@@ -278,6 +280,9 @@ async def run_merge_queue(
         budget: Per-slice repair bounds.
         branch_for_group: Branch naming. Default mirrors build.py.
         git_runner: Subprocess hook for tests. Default uses real git.
+        skip_components: ids already landed in a prior attempt during
+            resume. They seed the merge queue's landed set so dependent
+            units can proceed without re-merging prior work.
     """
     budget = budget or MergeBudget()
     branch_for_group = branch_for_group or (lambda s: f"i2p/{session_dir.name}/{s.id}")
@@ -291,14 +296,19 @@ async def run_merge_queue(
     passing_component_ids: list[str] = list(
         getattr(build_result, "passing_component_ids", []) or []
     )
-    landed_ids: list[str] = []
+    skip_set = {str(s) for s in (skip_components or ())}
+    ordered_unit_ids = [g.id for g in spec.groups] + [
+        c.id for c in (getattr(spec, "components", None) or [])
+    ]
+    landed_ids: list[str] = [unit_id for unit_id in ordered_unit_ids if unit_id in skip_set]
     # A7: pre-populate blocked_ids with operator-aborted groups so the
     # eligibility check skips them. The build phase already returns
     # BLOCKED for aborted groups (see otto/build.py `_run_slice`), so
     # they shouldn't appear in `passing_ids`; this is a defense-in-depth
     # belt-and-suspenders for cases where a group passed build but the
     # operator aborted before merge could pick it up.
-    blocked_ids: list[str] = list(aborted_group_ids(session_dir))
+    aborted_ids = set(aborted_group_ids(session_dir))
+    blocked_ids: list[str] = [unit_id for unit_id in ordered_unit_ids if unit_id in aborted_ids]
     redundant_ids: list[str] = []
     results: list[MergeResult] = []
     total_t0 = time.monotonic()
@@ -633,8 +643,56 @@ async def _process_candidate(
                 # Loop back to retry verification (which will fail again
                 # and either re-invoke the agent or block).
                 continue
-            # Agent succeeded — commit the repair to the slice branch
-            # so the next merge attempt sees the fix.
+            # Agent succeeded. Before committing, enforce the repair
+            # write-scope that the design promised for conflict/failure
+            # repair. Build-time scope crossings are warnings because a
+            # user may intentionally broaden work during initial build;
+            # merge repair is narrower: it should only touch this unit's
+            # owned/dependency/shared paths while fixing the merge/check
+            # failure.
+            if on_slice_branch:
+                modified = _modified_paths_for_repair(git, candidate.worktree)
+                scope_violations = detect_scope_violations(
+                    group_obj,
+                    spec,
+                    modified,
+                    project_root=candidate.worktree,
+                )
+                if scope_violations:
+                    last_failure = (
+                        "merge repair scope violation: modified "
+                        + ", ".join(scope_violations[:5])
+                    )
+                    emit(
+                        session_dir,
+                        "scope.warning",
+                        group_id=group_obj.id,
+                        attempt=repair_attempts,
+                        detail=last_failure,
+                        paths=list(scope_violations),
+                    )
+                    emit(
+                        session_dir,
+                        "group.attempt.failed",
+                        group_id=group_obj.id,
+                        attempt=repair_attempts,
+                        detail=last_failure,
+                    )
+                    _discard_uncommitted_repair(git, candidate.worktree)
+                    git(["checkout", candidate.base_branch], candidate.worktree)
+                    return MergeResult(
+                        group_id=group_obj.id,
+                        status=MergeStatus.BLOCKED,
+                        cross_slice_evidence=cross_evidence,
+                        group_recheck_evidence=group_evidence,
+                        failure_narrative=last_failure,
+                        repair_attempts=repair_attempts,
+                        cost_usd=cost_total,
+                        wall_s=time.monotonic() - t0,
+                    )
+
+            # Commit the repair to the slice branch so the next merge
+            # attempt sees the fix.
             if on_slice_branch:
                 add = git(["add", "-A"], candidate.worktree)
                 if add.returncode == 0:
@@ -681,6 +739,54 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
+    )
+
+
+def _modified_paths_for_repair(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+) -> list[str]:
+    """Return uncommitted paths a merge-repair attempt changed."""
+    paths: list[str] = []
+    for args in (
+        ["diff", "--name-only"],
+        ["diff", "--name-only", "--cached"],
+        ["ls-files", "--others", "--exclude-standard"],
+    ):
+        proc = git(args, worktree)
+        if proc.returncode != 0:
+            continue
+        for line in (proc.stdout or "").splitlines():
+            path = line.strip()
+            if path and path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _discard_uncommitted_repair(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+) -> None:
+    """Discard a rejected repair attempt while preserving Otto/session files."""
+    git(["reset", "--hard", "HEAD"], worktree)
+    git(
+        [
+            "clean",
+            "-fdx",
+            "-e",
+            ".otto/",
+            "-e",
+            "_otto_*",
+            "-e",
+            "_session/",
+            "-e",
+            "otto_logs/",
+            "-e",
+            "otto.yaml",
+            "-e",
+            "intent.md",
+        ],
+        worktree,
     )
 
 

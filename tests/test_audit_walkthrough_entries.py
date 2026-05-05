@@ -129,8 +129,8 @@ def test_validate_returns_entries_and_coverage(tmp_path: Path) -> None:
     _write_jsonl(
         tmp_path / "walkthrough.jsonl",
         [
-            {"t": "0:01", "action_kind": "click", "feature_ids": ["login"]},
-            {"t": "0:02", "action_kind": "assert", "feature_ids": ["logout"]},
+            {"t": "0:01", "action_kind": "browser_navigation", "feature_ids": ["login"]},
+            {"t": "0:02", "action_kind": "api_request", "feature_ids": ["logout"]},
         ],
     )
     entries, coverage = _validate_walkthrough_jsonl(tmp_path, spec)
@@ -139,7 +139,7 @@ def test_validate_returns_entries_and_coverage(tmp_path: Path) -> None:
     assert len(entries) == 2
     assert all(isinstance(e, WalkthroughEntry) for e in entries)
     assert entries[0].feature_ids == ["login"]
-    assert entries[0].action_kind == "click"
+    assert entries[0].action_kind == "browser_navigation"
     assert entries[1].feature_ids == ["logout"]
 
     # Coverage dict shape unchanged.
@@ -162,9 +162,9 @@ def test_validate_drops_unparseable_lines_from_entries(tmp_path: Path) -> None:
     p = tmp_path / "walkthrough.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
-        '{"t":"0:01","action_kind":"click","feature_ids":["login"]}\n'
+        '{"t":"0:01","action_kind":"browser_navigation","feature_ids":["login"]}\n'
         "this is not json\n"
-        '{"t":"0:02","action_kind":"click","feature_ids":["login"]}\n',
+        '{"t":"0:02","action_kind":"browser_navigation","feature_ids":["login"]}\n',
     )
     entries, coverage = _validate_walkthrough_jsonl(tmp_path, spec)
     assert len(entries) == 2
@@ -185,8 +185,10 @@ def test_audit_result_walkthrough_entries_default_empty() -> None:
 
 def test_audit_result_walkthrough_entries_carries_parsed_objects() -> None:
     """AuditResult holds the parsed WalkthroughEntry list verbatim."""
-    e1 = WalkthroughEntry(t="0:01", feature_ids=["login"], action_kind="click")
-    e2 = WalkthroughEntry(t="0:02", feature_ids=["login"], action_kind="assert")
+    e1 = WalkthroughEntry(
+        t="0:01", feature_ids=["login"], action_kind="browser_navigation"
+    )
+    e2 = WalkthroughEntry(t="0:02", feature_ids=["login"], action_kind="api_request")
     r = AuditResult(
         verdict=AuditVerdict.PASSED,
         narrative="ok",
@@ -216,7 +218,7 @@ def test_compose_proof_packet_threads_walkthrough_entries_into_feature_blocks(
     logout_entry = WalkthroughEntry(
         t="0:02",
         feature_ids=["logout"],
-        action_kind="click",
+        action_kind="browser_navigation",
         narrative="user logs out",
     )
     audit = AuditResult(

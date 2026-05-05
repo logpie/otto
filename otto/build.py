@@ -515,6 +515,41 @@ def detect_scope_violations(
     return violations
 
 
+def detect_dependency_scope_extensions(
+    group_obj: Group,
+    spec: Spec,
+    modified_paths: Iterable[str],
+) -> list[str]:
+    """Return modified paths owned by transitive deps, not this Group.
+
+    These edits are allowed by ``detect_scope_violations`` because
+    downstream Groups often need to extend foundations. They are still
+    important operator evidence: the Group modified more than its own
+    declared ``owned_paths``.
+    """
+    own_globs = list(group_obj.owned_paths or [])
+    shared_globs = list(spec.shared_scaffold or []) + list(spec.shared_paths or [])
+    transitive_dep_ids = _transitive_deps(group_obj.id, spec)
+    dep_globs: list[str] = []
+    for s in spec.groups:
+        if s.id in transitive_dep_ids:
+            dep_globs.extend(s.owned_paths or [])
+    for c in (spec.components or []):
+        if c.id in transitive_dep_ids:
+            dep_globs.extend(c.owned_paths or [])
+
+    extensions: list[str] = []
+    for raw in modified_paths:
+        path = str(raw or "").strip()
+        if not path:
+            continue
+        if _matches_any(path, own_globs) or _matches_any(path, shared_globs):
+            continue
+        if _matches_any(path, dep_globs):
+            extensions.append(path)
+    return extensions
+
+
 def _transitive_deps(group_id: str, spec: Spec) -> set[str]:
     """Return all units `group_id` depends on, transitively (excluding self).
 
@@ -992,7 +1027,7 @@ def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
     )
     if add.returncode != 0:
         return False
-    for runtime_path in ("_session", "otto_logs", ".otto"):
+    for runtime_path in ("_session", "otto_logs", ".otto", ".playwright-cli"):
         subprocess.run(
             ["git", "reset", "HEAD", "--", runtime_path],
             cwd=worktree, capture_output=True, text=True, check=False,
@@ -1779,9 +1814,12 @@ async def _run_slice(
         scope_warnings = detect_scope_violations(
             group_obj, spec, modified, project_root=worktree
         )
+        for path in detect_dependency_scope_extensions(group_obj, spec, modified):
+            if path not in scope_warnings:
+                scope_warnings.append(path)
         if scope_warnings:
             logger.info(
-                "slice %s: scope warnings (%d path(s) outside declared scope): %s",
+                "group %s: scope warnings (%d path(s) outside own scope): %s",
                 group_obj.id,
                 len(scope_warnings),
                 ", ".join(scope_warnings[:5]),
@@ -1797,7 +1835,8 @@ async def _run_slice(
                 attempt=attempt,
                 detail=(
                     f"scope warning (non-blocking): modified {len(scope_warnings)} "
-                    f"path(s) outside owned_paths: {', '.join(scope_warnings[:5])}"
+                    f"path(s) outside the slice's own owned_paths: "
+                    f"{', '.join(scope_warnings[:5])}"
                 ),
                 paths=list(scope_warnings),
             )
@@ -2168,7 +2207,7 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     lines.append("")
 
     # Original intent — collapsed under context.
-    lines.append(f"### Original intent (whole product)")
+    lines.append("### Original intent (whole product)")
     lines.append(f"> {spec.intent}")
     lines.append("")
     lines.append(f"`project_kind`: {spec.project_kind}")
@@ -2402,10 +2441,9 @@ __all__ = [
     "build_groups",
     "build_slices",
     "default_build_agent",
+    "detect_dependency_scope_extensions",
     "detect_scope_violations",
     "ready_components",
     "ready_groups",
     "run_build",
 ]
-
-

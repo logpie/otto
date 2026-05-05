@@ -8,7 +8,7 @@ per-slice deterministic checks because:
 * **Method**: end-to-end user journeys, cross-slice navigation; can
   invoke a "walkthrough" subprocess (Playwright runner, etc.) to capture
   screenshots and video.
-* **Output**: per-slice verdict, narrative report, artifact paths
+* **Output**: per-Group/per-Feature verdicts, narrative report, artifact paths
   (screenshots, video, raw transcripts) for the proof packet.
 * **Role**: produces the human-trustable evidence. Deterministic checks
   proved correctness; the audit produces what a human can scan.
@@ -113,6 +113,11 @@ class FeatureAudit:
       - "partial": works but with caveats (specific in `narrative`).
       - "blocked": doesn't work or unverified.
 
+    `feature_id` is the canonical join key back to ``Spec.features``.
+    It is optional for one compatibility cycle because older audit agents
+    emitted name-only entries; downstream consumers still fall back to
+    name matching when the id is empty.
+
     `evidence_refs` are paths or URLs the audit consulted (rendered
     HTML, screenshots, contract-test logs) — empty list is allowed
     when the verdict is from code-reading alone, but paths anchor the
@@ -123,6 +128,7 @@ class FeatureAudit:
     status: Literal["passed", "partial", "blocked"]
     detail: str = ""  # 1-2 sentence rationale
     evidence_refs: list[str] = field(default_factory=list)
+    feature_id: str = ""
 
 
 @dataclass
@@ -197,6 +203,8 @@ class AuditAgentInput:
     cross_slice_evidence: list[Evidence]
     walkthrough_artifacts: list[Path]
     log_dir: Path | None = None
+    walkthrough_jsonl_path: Path | None = None
+    feature_scope_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -292,7 +300,8 @@ def _validate_walkthrough_jsonl(
     if not jsonl_path.exists():
         return [], None
 
-    entries: list[Any] = []  # list[WalkthroughEntry]
+    entries: list[Any] = []  # strict survivors for proof rendering
+    coverage_entries: list[Any] = []  # permissive entries for honest coverage stats
     parse_errors: list[str] = []
     parse_warnings: list[str] = []
     for i, line in enumerate(jsonl_path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -303,14 +312,18 @@ def _validate_walkthrough_jsonl(
         except json.JSONDecodeError as exc:
             parse_errors.append(f"line {i}: {exc}")
             continue
-        entry, line_warnings = parse_walkthrough_entry(payload, spec)
-        if entry is None:
-            parse_errors.append(f"line {i}: " + "; ".join(line_warnings))
+        permissive_entry, permissive_warnings = parse_walkthrough_entry(payload, spec)
+        if permissive_entry is not None:
+            coverage_entries.append(permissive_entry)
+        strict_entry, strict_messages = parse_walkthrough_entry(payload, spec, strict=True)
+        if strict_entry is None:
+            parse_errors.append(f"line {i}: " + "; ".join(strict_messages))
             continue
-        entries.append(entry)
-        parse_warnings.extend(f"line {i}: {w}" for w in line_warnings)
+        entries.append(strict_entry)
+        parse_warnings.extend(f"line {i}: {w}" for w in permissive_warnings)
 
-    report = validate_walkthrough_coverage(entries, spec)
+    report = validate_walkthrough_coverage(coverage_entries, spec)
+    meets_threshold = report.meets_threshold() and not parse_errors
     coverage = {
         "total_entries": report.total_entries,
         "exploration_entries": report.exploration_entries,
@@ -318,7 +331,7 @@ def _validate_walkthrough_jsonl(
         "untagged_entries": report.untagged_entries,
         "non_exploration_total": report.non_exploration_total,
         "coverage_ratio": report.coverage_ratio,
-        "meets_threshold": report.meets_threshold(),
+        "meets_threshold": meets_threshold,
         "unknown_feature_id_refs": list(report.unknown_feature_id_refs),
         "per_feature_evidence_count": dict(report.per_feature_evidence_count),
         "parse_errors": parse_errors,
@@ -551,6 +564,7 @@ async def run_audit(
     budget: AuditBudget | None = None,
     shared_budget: BuildBudget | None = None,
     base_branch: str = "main",
+    feature_scope_ids: Iterable[str] | None = None,
 ) -> AuditResult:
     """Run the end-of-run audit.
 
@@ -585,6 +599,7 @@ async def run_audit(
     """
     budget = budget or AuditBudget()
     walk = walkthrough or no_op_walkthrough
+    scoped_feature_ids = tuple(str(fid) for fid in (feature_scope_ids or ()) if str(fid))
     t0 = time.monotonic()
     cost_total = 0.0
     retries = 0
@@ -624,20 +639,11 @@ async def run_audit(
         walk_log_dir.mkdir(parents=True, exist_ok=True)
         walk_result = walk(project_dir, walk_log_dir, budget.walk_timeout_s)
 
-        # 2b (A2.1): Feature-tag coverage validation. The audit walkthrough
-        # is contracted to emit `walkthrough.jsonl` with `feature_ids[]` per
-        # action (research §A2 honesty). We compute coverage now so the
-        # AuditResult surfaces tagging health — verdict cap on threshold
-        # failure is a follow-up tick.
+        # 2b (A2.1): Feature-tag coverage validation. We validate before
+        # the judge for project-supplied BrowserJourney output and again
+        # after the judge because the audit-agent prompt also permits the
+        # agent to write the same JSONL artifact during inspection.
         walk_entries, walk_coverage = _validate_walkthrough_jsonl(walk_log_dir, spec)
-        if walk_coverage is not None and not walk_coverage["meets_threshold"]:
-            logger.warning(
-                "audit walkthrough Feature-tagging coverage %.1f%% below "
-                "90%% threshold (%d/%d non-exploration entries tagged)",
-                walk_coverage["coverage_ratio"] * 100.0,
-                walk_coverage["tagged_entries"],
-                walk_coverage["non_exploration_total"],
-            )
 
         # 3: LLM judge
         agent_input = AuditAgentInput(
@@ -649,6 +655,8 @@ async def run_audit(
             cross_slice_evidence=cross_evidence,
             walkthrough_artifacts=list(walk_result.artifacts),
             log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "judge",
+            walkthrough_jsonl_path=walk_log_dir / "walkthrough.jsonl",
+            feature_scope_ids=scoped_feature_ids,
         )
         # C1 fix: bail out before invoking the audit agent if the
         # shared cost pool is exhausted. Prevents an audit retry
@@ -691,9 +699,29 @@ async def run_audit(
                 walkthrough_entries=list(walk_entries),
             )
         agent_output = await audit_agent(agent_input)
+        if scoped_feature_ids:
+            agent_output = dataclasses.replace(
+                agent_output,
+                feature_audits=_filter_feature_audits_for_scope(
+                    spec,
+                    agent_output.feature_audits,
+                    scoped_feature_ids,
+                ),
+            )
         cost_total += agent_output.cost_usd
         if shared_budget is not None:
             shared_budget.charge_cost(agent_output.cost_usd)
+
+        walk_entries, walk_coverage = _validate_walkthrough_jsonl(walk_log_dir, spec)
+        if walk_coverage is not None and not walk_coverage["meets_threshold"]:
+            logger.warning(
+                "audit walkthrough Feature-tagging coverage %.1f%% below "
+                "90%% threshold (%d/%d non-exploration entries tagged; %d parse errors)",
+                walk_coverage["coverage_ratio"] * 100.0,
+                walk_coverage["tagged_entries"],
+                walk_coverage["non_exploration_total"],
+                len(walk_coverage.get("parse_errors") or []),
+            )
 
         # Pattern B fix: caps compose order-independent. Collect ALL
         # caps as records first, then compute final verdict + narrative
@@ -852,10 +880,14 @@ async def run_audit(
         # cannot silently return PASSED on the next pass when the
         # underlying repair didn't actually land.
         any_fix_failed = False
+        landed_after_repair = set(getattr(merge_result, "landed_ids", []) or [])
+        unavailable_for_repair = set(getattr(merge_result, "blocked_ids", []) or [])
+        deps_by_group = {s.id: set(s.dependencies or []) for s in spec.groups}
         for group_id in failing_ids:
             # C1 fix: check shared budget before each fix dispatch too.
             if shared_budget is not None and shared_budget.remaining_total_cost_usd() <= 0:
                 any_fix_failed = True
+                unavailable_for_repair.add(group_id)
                 emit(
                     session_dir, "group.attempt.failed",
                     group_id=group_id, attempt=retries + 1,
@@ -865,12 +897,31 @@ async def run_audit(
             group_obj = next((s for s in spec.groups if s.id == group_id), None)
             if group_obj is None:
                 continue
+            blocked_deps = sorted(
+                dep for dep in deps_by_group.get(group_id, set())
+                if dep in unavailable_for_repair and dep not in landed_after_repair
+            )
+            if blocked_deps:
+                any_fix_failed = True
+                unavailable_for_repair.add(group_id)
+                emit(
+                    session_dir,
+                    "group.attempt.failed",
+                    group_id=group_id,
+                    attempt=retries + 1,
+                    detail=(
+                        "repair skipped because dependency group(s) are blocked: "
+                        + ", ".join(blocked_deps)
+                    ),
+                )
+                continue
             # Find the slice's build branch from build_result.
             sresult = next(
                 (r for r in build_result.group_results if r.group_id == group_id),
                 None,
             )
-            branch = sresult.branch if sresult else f"i2p/{session_dir.name}/{group_id}"
+            has_group_branch = sresult is not None and bool(sresult.branch)
+            branch = sresult.branch if has_group_branch else base_branch
             worktree = sresult.worktree if sresult else project_dir
             agent_input_fix = BuildAgentInput(
                 spec=spec,
@@ -880,40 +931,41 @@ async def run_audit(
                 branch=branch,
                 attempt=retries + 1,
                 last_failure_narrative=(
-                    f"audit attempt {retries + 1} flagged slice "
+                    f"audit attempt {retries + 1} flagged group "
                     f"{group_id}: {next((v.detail for v in agent_output.group_verdicts if v.group_id == group_id), '')}"
                 ),
                 log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "fix" / group_id,
             )
-            # V3 fix: checkout the slice's branch before invoking the
-            # fix-agent so its edits accumulate on the slice branch, NOT
-            # on base_branch. After the agent runs, commit the diff to
-            # the slice branch and attempt a real merge into base via
-            # _merge_group_branch — so blocked slices can be landed
-            # through the same path as build-phase slices, never as
-            # rogue commits on main. Without this, fix-agents bypass
-            # branch isolation entirely (observed in P1: fix-agent ran
-            # `git commit` directly on main, audit then declared PASSED
-            # while merge_queue still recorded the slice as BLOCKED).
+            # V3 fix: for greenfield runs with a real build-phase Group
+            # branch, checkout that branch before invoking the fix-agent
+            # so edits do not bypass merge isolation. Brownfield
+            # certify/improve skips build/merge, so there is no Group
+            # branch; in that case repair the integrated worktree
+            # directly and commit the resulting fix on the current base
+            # branch.
             from otto.build import (
                 _is_git_repo as _build_is_git_repo,
-                _setup_group_branch as _build_setup_slice_branch,
-                _commit_group_work as _build_commit_slice_work,
+                _setup_group_branch as _build_setup_group_branch,
+                _commit_group_work as _build_commit_group_work,
             )
             from otto.merge_queue import _merge_group_branch, _git as _merge_git, MergeStatus as _MergeStatus
-            on_slice_branch = False
-            if _build_is_git_repo(worktree):
-                on_slice_branch = _build_setup_slice_branch(
+            on_group_branch = False
+            direct_integrated_fix = False
+            if _build_is_git_repo(worktree) and has_group_branch:
+                on_group_branch = _build_setup_group_branch(
                     worktree, branch=branch, parent_ref=branch,
                 )
-                if not on_slice_branch:
+                if not on_group_branch:
                     any_fix_failed = True
+                    unavailable_for_repair.add(group_id)
                     emit(
                         session_dir, "group.attempt.failed",
                         group_id=group_id, attempt=retries + 1,
-                        detail=f"could not checkout slice branch {branch} for fix",
+                        detail=f"could not checkout group branch {branch} for fix",
                     )
                     continue
+            elif _build_is_git_repo(worktree):
+                direct_integrated_fix = True
             try:
                 fix_output = await fix_agent(agent_input_fix)
                 cost_total += fix_output.cost_usd
@@ -921,18 +973,20 @@ async def run_audit(
                     shared_budget.charge_cost(fix_output.cost_usd)
                 if not fix_output.succeeded:
                     any_fix_failed = True
-                    if on_slice_branch:
-                        _build_commit_slice_work(worktree, group_id=group_id, branch=branch)
+                    unavailable_for_repair.add(group_id)
+                    if on_group_branch:
+                        _build_commit_group_work(worktree, group_id=group_id, branch=branch)
                 else:
-                    if on_slice_branch:
-                        committed = _build_commit_slice_work(
+                    if on_group_branch:
+                        committed = _build_commit_group_work(
                             worktree, group_id=group_id, branch=branch,
                         )
                         if not committed:
                             any_fix_failed = True
+                            unavailable_for_repair.add(group_id)
                         else:
-                            # Re-merge the fixed slice through the canonical
-                            # merge path. If the merge succeeds the slice
+                            # Re-merge the fixed Group through the canonical
+                            # merge path. If the merge succeeds the Group
                             # finally lands; if it conflicts or no diff, the
                             # next audit cycle will see it.
                             merge_outcome = _merge_group_branch(
@@ -941,6 +995,8 @@ async def run_audit(
                                 base_branch=audit_base_branch,
                             )
                             if merge_outcome.status == _MergeStatus.LANDED:
+                                landed_after_repair.add(group_id)
+                                unavailable_for_repair.discard(group_id)
                                 emit(
                                     session_dir, "group.merge.landed",
                                     group_id=group_id, attempt=retries + 1,
@@ -948,6 +1004,25 @@ async def run_audit(
                                 )
                             else:
                                 any_fix_failed = True
+                                unavailable_for_repair.add(group_id)
+                    elif direct_integrated_fix:
+                        committed = _build_commit_group_work(
+                            worktree, group_id=group_id, branch=base_branch,
+                        )
+                        if not committed:
+                            any_fix_failed = True
+                            unavailable_for_repair.add(group_id)
+                        else:
+                            landed_after_repair.add(group_id)
+                            unavailable_for_repair.discard(group_id)
+                            head = _merge_git(["rev-parse", "--short", "HEAD"], worktree)
+                            emit(
+                                session_dir,
+                                "group.merge.landed",
+                                group_id=group_id,
+                                attempt=retries + 1,
+                                detail=(head.stdout or "").strip(),
+                            )
                 emit(
                     session_dir,
                     "group.attempt.failed" if not fix_output.succeeded else "group.merge.eligible",
@@ -957,11 +1032,12 @@ async def run_audit(
                 )
                 # Return to base_branch so the next audit pass judges
                 # the integrated state.
-                if on_slice_branch:
+                if on_group_branch:
                     _merge_git(["checkout", audit_base_branch], worktree)
             except Exception as exc:
                 any_fix_failed = True
-                if on_slice_branch:
+                unavailable_for_repair.add(group_id)
+                if on_group_branch:
                     _merge_git(["checkout", audit_base_branch], worktree)
                 emit(
                     session_dir,
@@ -1078,8 +1154,8 @@ def _build_summary(build_result: BuildResult) -> dict:
         "blocked_ids": list(build_result.blocked_ids),
         "total_cost_usd": build_result.total_cost_usd,
         "total_wall_s": build_result.total_wall_s,
-        "slice_count": len(build_result.group_results),
-        "per_slice": [
+        "group_count": len(build_result.group_results),
+        "per_group": [
             {
                 "group_id": r.group_id,
                 "status": r.status.value,
@@ -1099,7 +1175,7 @@ def _merge_summary(merge_result: MergeQueueResult) -> dict:
         "blocked_ids": list(merge_result.blocked_ids),
         "total_cost_usd": merge_result.total_cost_usd,
         "total_wall_s": merge_result.total_wall_s,
-        "per_slice": [
+        "per_group": [
             {
                 "group_id": r.group_id,
                 "status": r.status.value,
@@ -1112,6 +1188,24 @@ def _merge_summary(merge_result: MergeQueueResult) -> dict:
             for r in merge_result.results
         ],
     }
+
+
+def _filter_feature_audits_for_scope(
+    spec: Spec,
+    feature_audits: Iterable[FeatureAudit],
+    feature_scope_ids: Iterable[str],
+) -> list[FeatureAudit]:
+    """Keep only FeatureAudit rows in the requested re-audit scope."""
+    scope = {str(fid) for fid in feature_scope_ids if str(fid)}
+    if not scope:
+        return list(feature_audits)
+    id_by_name = {feature.name: feature.id for feature in spec.features}
+    out: list[FeatureAudit] = []
+    for audit in feature_audits:
+        resolved_id = audit.feature_id or id_by_name.get(audit.name, "")
+        if resolved_id in scope:
+            out.append(audit if audit.feature_id else dataclasses.replace(audit, feature_id=resolved_id))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1154,7 +1248,7 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     Walks: spec → integrated worktree state → build summary → merge
     summary → cross-slice check verdicts → walkthrough artifacts →
     Feature-tagging contract (audit-feature-tagging.md) → ask
-    for a per-slice verdict + a narrative.
+    for per-Group and per-Feature verdicts + a narrative.
     """
     import json as _json
 
@@ -1169,10 +1263,24 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     lines.append(f"Project kind: {spec.project_kind}")
     lines.append(f"Integrated worktree: {agent_input.integrated_worktree}")
     lines.append("")
-    lines.append("## Spec slices")
+    lines.append("## Spec Groups")
     for s in spec.groups:
         lines.append(f"- {s.id}: {s.name}")
     lines.append("")
+    if spec.features:
+        lines.append("## Spec Features")
+        for feature in spec.features:
+            suffix = f" (group {feature.group_id})" if feature.group_id else ""
+            lines.append(f"- {feature.id}: {feature.name}{suffix}")
+        lines.append("")
+    if agent_input.feature_scope_ids:
+        scoped = ", ".join(agent_input.feature_scope_ids)
+        lines.append("## Re-audit scope")
+        lines.append(
+            "This is a repair re-audit. Return `feature_audits` only for "
+            f"these Feature ids: {scoped}."
+        )
+        lines.append("")
     lines.append("## Build summary")
     lines.append("```json")
     lines.append(_json.dumps(agent_input.build_summary, indent=2, default=str))
@@ -1202,9 +1310,15 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     # tagging.md) rather than scattered string literals.
     lines.append("## Walkthrough Feature-tagging contract (REQUIRED)")
     lines.append("")
+    if agent_input.walkthrough_jsonl_path is not None:
+        lines.append(
+            "Write or update the walkthrough JSONL at this exact path: "
+            f"{agent_input.walkthrough_jsonl_path}"
+        )
+        lines.append("")
     lines.append(
         "Before recording your verdicts, you must walk the integrated "
-        "product and emit `audit/attempt-NN/walkthrough.jsonl` per the "
+        "product and emit `walkthrough.jsonl` per the "
         "contract below. Per-Feature evidence is derived from these "
         "tagged actions; untagged or weakly-tagged walkthroughs cause "
         "the audit pass to be rejected."
@@ -1222,23 +1336,24 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "  1. A short narrative of what works and what doesn't."
     )
     lines.append(
-        "  2. A per-slice verdict: for each slice id, pass or fail with reason."
+        "  2. A per-Group verdict: for each group_id, pass or fail with reason."
     )
     lines.append(
-        "  3. **Per-capability verdicts (REQUIRED, v2.6)**: one verdict per "
-        "user-observable feature listed in `done_means` above. Each entry "
-        "MUST cite specific evidence — what file/page/log you inspected to "
-        "reach the verdict. Format:"
+        "  3. **Per-Feature audits (REQUIRED)**: one verdict per Feature "
+        "listed in the spec above. Use the exact `feature_id`; `name` is "
+        "display text only. Each entry MUST cite specific evidence — what "
+        "file/page/log you inspected to reach the verdict. Format:"
     )
     lines.append(
-        "       {name: \"<capability name, ideally matching a done_means line>\", "
+        "       {feature_id: \"<exact Feature.id>\", "
+        "name: \"<Feature.name>\", "
         "status: \"passed\"|\"partial\"|\"blocked\", "
         "detail: \"1-2 sentence rationale\", "
         "evidence_refs: [\"path/to/file:line\" or URL or screenshot path]}"
     )
     lines.append(
-        "       Aim for one capability per `done_means` item. If a "
-        "capability is implemented but with caveats, mark partial and "
+        "       Emit one entry per Feature. If a Feature is implemented "
+        "but with caveats, mark partial and "
         "explain. Empty list is NOT acceptable when done_means has items."
     )
     lines.append("  4. A final verdict: 'passed', 'partial', or 'blocked'.")
@@ -1331,7 +1446,8 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "  verdict: passed|partial|blocked,\n"
         "  narrative: str,\n"
         "  group_verdicts: [{group_id, passed: bool, detail: str}, ...],\n"
-        "  feature_audits: [{name: str, status: passed|partial|blocked,\n"
+        "  feature_audits: [{feature_id: str, name: str,\n"
+        "                    status: passed|partial|blocked,\n"
         "                    detail: str, evidence_refs: [str, ...]}, ...],\n"
         "  quality_score: int (1-5),\n"
         "  quality_findings: [str, ...]\n"
@@ -1398,13 +1514,13 @@ def _compose_verdict(
             + "\n".join(f"  - {f}" for f in chain_review.findings)
         )
 
-    # V4 fix: merge-blocked cap. If any slice was BLOCKED at merge time,
-    # the integrated product is missing that slice's contribution. The
+    # V4 fix: merge-blocked cap. If any Group was BLOCKED at merge time,
+    # the integrated product is missing that Group's contribution. The
     # audit MUST NOT silently declare PASSED while merge_result.blocked_ids
     # is non-empty (the false-positive class observed in P1, where audit
     # said PASSED while home_page never landed). Cap at PARTIAL when any
-    # slice blocked; cap at BLOCKED when more than half of expected
-    # passing slices were blocked.
+    # Group blocked; cap at BLOCKED when more than half of expected
+    # passing Groups were blocked.
     blocked_ids = list(merge_blocked_ids or [])
     if blocked_ids:
         if total_passing_groups and len(blocked_ids) * 2 > total_passing_groups:
@@ -1412,7 +1528,7 @@ def _compose_verdict(
         else:
             verdict = _strictest(verdict, AuditVerdict.PARTIAL)
         sections.append(
-            f"[merge: {len(blocked_ids)} slice(s) blocked at merge time]\n"
+            f"[merge: {len(blocked_ids)} group(s) blocked at merge time]\n"
             + "\n".join(f"  - {sid} did not land via merge_queue" for sid in blocked_ids)
         )
 
@@ -1433,7 +1549,7 @@ def _compose_verdict(
     if caps:
         blocked = [c for c in caps if c.status == "blocked"]
         partial = [c for c in caps if c.status == "partial"]
-        # Pattern B fix #3: capability cap CAN escalate to BLOCKED when
+        # Pattern B fix #3: feature cap CAN escalate to BLOCKED when
         # MORE THAN HALF of capabilities are blocked (catastrophic).
         # 50/50 stays at PARTIAL — partial damage, not catastrophic.
         # Previously the cap could only downgrade PASSED→PARTIAL.
@@ -1447,11 +1563,11 @@ def _compose_verdict(
         if blocked or (len(partial) * 2 > len(caps) and partial):
             section_lines = []
             if blocked:
-                section_lines.append(f"[capability cap: {len(blocked)}/{len(caps)} blocked]")
+                section_lines.append(f"[feature cap: {len(blocked)}/{len(caps)} blocked]")
                 for c in blocked[:10]:
                     section_lines.append(f"  - {c.name}: {(c.detail or '')[:120]}")
             if partial and (len(partial) * 2 > len(caps)):
-                section_lines.append(f"[capability cap: {len(partial)}/{len(caps)} partial]")
+                section_lines.append(f"[feature cap: {len(partial)}/{len(caps)} partial]")
             sections.append("\n".join(section_lines))
 
     if sections:
@@ -1512,7 +1628,8 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
         for entry in raw_feats:
             if not isinstance(entry, dict):
                 continue
-            name = str(entry.get("name") or "").strip()
+            feature_id = str(entry.get("feature_id") or "").strip()
+            name = str(entry.get("name") or feature_id).strip()
             if not name:
                 continue
             status_raw = str(entry.get("status") or "").strip().lower()
@@ -1533,6 +1650,7 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
                 status=status,
                 detail=str(entry.get("detail") or ""),
                 evidence_refs=evidence_refs,
+                feature_id=feature_id,
             ))
 
     return AuditAgentOutput(

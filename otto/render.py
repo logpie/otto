@@ -10,14 +10,14 @@ The HTML is self-contained except for asset links to the per-check
 evidence directory. Layout (top to bottom):
 
     Header           intent, project_kind, verdict, wall, cost
-    Spec summary     structure decisions, slices (collapsed),
+    Spec summary     structure decisions, groups (collapsed),
                      non_goals, done_means
-    Per slice        status, owned_paths, check results table with
+    Per group        status, owned_paths, check results table with
                      evidence thumbnails (clickable for full size),
                      branch + landed commit
     Audit            walkthrough video (if any), screenshot grid,
-                     narrative report, per-slice verdicts
-    Known limits     blocked slices, deferred items
+                     narrative report, per-group verdicts
+    Known limits     blocked groups, deferred items
     Merge state      what landed, what was rejected and why
 
 JSON is the same content, structured. Schema versioned.
@@ -244,6 +244,7 @@ def compose_proof_packet(
     # A0.4: render per-Feature audits as a feature checklist.
     feature_audit_render = [
         {
+            "feature_id": fa.feature_id,
             "name": fa.name,
             "status": fa.status,
             "detail": fa.detail,
@@ -253,22 +254,22 @@ def compose_proof_packet(
     ]
 
     # A3: per-Feature proof blocks (research §7). Best-effort population:
-    # we map FeatureAudit entries (by name → Feature.id, falling back to
-    # name → name) into the verdict-dict shape `build_feature_proof_blocks`
-    # expects. Walkthrough entries flow in from
+    # we map FeatureAudit entries (by feature_id first, then name/id
+    # compatibility fallback) into the verdict-dict shape
+    # `build_feature_proof_blocks` expects. Walkthrough entries flow in from
     # `audit_result.walkthrough_entries` (parsed during run_audit by
     # `_validate_walkthrough_jsonl`) so per-Feature blocks carry their
     # walkthrough trace. Empty list → helper's "no entries tagged"
     # empty-state per research §4 honesty rule.
     feature_verdict_dicts: list[dict[str, Any]] = []
     if spec.features:
-        # Map FeatureAudit by name (and fallback id) so we can attach
-        # status/detail/evidence_refs to the matching Feature.id.
         audits_by_key: dict[str, Any] = {}
         for fa in audit_result.feature_audits:
+            if fa.feature_id:
+                audits_by_key[fa.feature_id] = fa
             audits_by_key[fa.name] = fa
         for feature in spec.features:
-            fa = audits_by_key.get(feature.name) or audits_by_key.get(feature.id)
+            fa = audits_by_key.get(feature.id) or audits_by_key.get(feature.name)
             if fa is None:
                 continue
             feature_verdict_dicts.append({
@@ -359,6 +360,120 @@ def _packet_to_dict(packet: ProofPacket) -> dict[str, Any]:
     }
 
 
+def proof_packet_from_dict(payload: dict[str, Any]) -> ProofPacket:
+    """Reconstruct a ProofPacket from a saved proof-packet.json payload.
+
+    This is intentionally tolerant for one compatibility cycle: canonical
+    `groups` / `*_group_ids` keys win, with legacy `slices` /
+    `*_slice_ids` read fallback so `otto render <session>` can refresh old
+    packets without invoking agents.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("proof-packet payload must be a JSON object")
+    raw_groups = payload.get("groups")
+    if not isinstance(raw_groups, list):
+        raw_groups = payload.get("slices") if isinstance(payload.get("slices"), list) else []
+    groups: list[GroupPacket] = []
+    for raw in raw_groups:
+        if not isinstance(raw, dict):
+            continue
+        audit_verdict = raw.get("audit_verdict")
+        groups.append(
+            GroupPacket(
+                group_id=_string_value(raw.get("group_id") or raw.get("slice_id") or raw.get("id")),
+                name=_string_value(raw.get("name") or raw.get("title")),
+                status=_string_value(raw.get("status") or "pending"),
+                landed=bool(raw.get("landed", False)),
+                landed_commit=_string_value(raw.get("landed_commit")),
+                branch=_string_value(raw.get("branch")),
+                owned_paths=_string_list(raw.get("owned_paths")),
+                check_evidence=_dict_list(raw.get("check_evidence")),
+                audit_verdict=dict(audit_verdict) if isinstance(audit_verdict, dict) else None,
+                failure_narrative=_string_value(raw.get("failure_narrative")),
+                repair_attempts=_int_value(raw.get("repair_attempts")),
+            )
+        )
+    return ProofPacket(
+        schema_version=_int_value(payload.get("schema_version"), default=PROOF_PACKET_SCHEMA_VERSION),
+        intent=_string_value(payload.get("intent")),
+        project_kind=_string_value(payload.get("project_kind") or "webapp"),
+        verdict=_string_value(payload.get("verdict") or "blocked"),
+        wall_s=_float_value(payload.get("wall_s")),
+        cost_usd=_float_value(payload.get("cost_usd")),
+        structure=dict(payload.get("structure") or {}) if isinstance(payload.get("structure"), dict) else {},
+        non_goals=_string_list(payload.get("non_goals")),
+        done_means=_string_list(payload.get("done_means")),
+        groups=groups,
+        audit_narrative=_string_value(payload.get("audit_narrative")),
+        walkthrough_artifacts=_string_list(payload.get("walkthrough_artifacts")),
+        blocked_group_ids=_string_list(payload.get("blocked_group_ids") or payload.get("blocked_slice_ids")),
+        landed_group_ids=_string_list(payload.get("landed_group_ids") or payload.get("landed_slice_ids")),
+        amendments=_dict_list(payload.get("amendments")),
+        quality_score=_int_value(payload.get("quality_score")),
+        quality_findings=_string_list(payload.get("quality_findings")),
+        feature_audits=_dict_list(payload.get("feature_audits") or payload.get("capability_verdicts")),
+        features=_dict_list(payload.get("features")),
+    )
+
+
+def load_proof_packet(path: Path) -> ProofPacket:
+    """Load a ProofPacket from a proof JSON file or a session directory."""
+    json_path = path / PROOF_PACKET_JSON if path.is_dir() else path
+    if not json_path.exists():
+        raise FileNotFoundError(f"proof packet JSON not found: {json_path}")
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid proof packet JSON: {json_path}: {exc}") from exc
+    return proof_packet_from_dict(payload)
+
+
+def rerender_proof_packet(
+    session_dir: Path,
+    *,
+    rewrite_json: bool = False,
+) -> tuple[Path, Path]:
+    """Re-render proof-packet.html from proof-packet.json without LLM work."""
+    session_dir = Path(session_dir)
+    packet = load_proof_packet(session_dir)
+    html_path = session_dir / PROOF_PACKET_HTML
+    json_path = session_dir / PROOF_PACKET_JSON
+    html_path.write_text(render_html(packet, session_dir=session_dir), encoding="utf-8")
+    if rewrite_json:
+        json_path.write_text(render_json(packet), encoding="utf-8")
+    return html_path, json_path
+
+
+def _string_value(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None]
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _int_value(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_value(value: Any, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # ---------------------------------------------------------------------------
 # HTML rendering
 # ---------------------------------------------------------------------------
@@ -388,20 +503,20 @@ h3 { font-size: 1.05em; }
 .kpi { display: inline-block; margin-right: 18px; }
 .kpi .label { color: #57606a; font-size: 0.8em; }
 .kpi .value { font-weight: 600; }
-.slice {
+.group {
   border: 1px solid #d0d7de;
   border-radius: 6px;
   padding: 14px 18px;
   margin: 12px 0;
   background: #f6f8fa;
 }
-.slice.landed  { border-left: 4px solid #1a7f37; }
-.slice.blocked { border-left: 4px solid #cf222e; }
-.slice.failed_scope { border-left: 4px solid #9a6700; }
-.slice.passing { border-left: 4px solid #0969da; }
-.slice header { display: flex; justify-content: space-between; align-items: center; }
-.slice h3 { margin: 0; }
-.slice .meta { color: #57606a; font-size: 0.85em; }
+.group.landed  { border-left: 4px solid #1a7f37; }
+.group.blocked { border-left: 4px solid #cf222e; }
+.group.failed_scope { border-left: 4px solid #9a6700; }
+.group.passing { border-left: 4px solid #0969da; }
+.group header { display: flex; justify-content: space-between; align-items: center; }
+.group h3 { margin: 0; }
+.group .meta { color: #57606a; font-size: 0.85em; }
 table.checks { width: 100%; border-collapse: collapse; margin-top: 10px; }
 .checks th, .checks td {
   text-align: left; padding: 6px 8px; border-bottom: 1px solid #d0d7de;
@@ -409,8 +524,9 @@ table.checks { width: 100%; border-collapse: collapse; margin-top: 10px; }
 }
 .checks .pass { color: #1a7f37; font-weight: 600; }
 .checks .fail { color: #cf222e; font-weight: 600; }
-.thumbs img { max-width: 160px; max-height: 100px; margin: 4px; border: 1px solid #d0d7de; }
-.thumbs a { display: inline-block; }
+.thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; align-items: start; }
+.thumbs a { display: block; min-width: 0; }
+.thumbs img { width: 100%; max-width: 180px; max-height: 120px; object-fit: contain; border: 1px solid #d0d7de; background: #fff; }
 .narrative { background: #fff; border: 1px solid #d0d7de; padding: 12px;
              border-radius: 6px; white-space: pre-wrap; font-family: ui-monospace,
              SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
@@ -446,13 +562,13 @@ def render_html(packet: ProofPacket, *, session_dir: Path | None = None) -> str:
     parts.append(_render_spec_summary(packet))
 
     # Per-Feature sections (A3 — research §3 atomic units, primary surface).
-    # Emitted before per-Slice (legacy back-compat) so Features lead the
-    # human review path. Empty `features` is a no-op section; legacy
+    # Emitted before per-Group dispatch details so Features lead the human
+    # review path. Empty `features` is a no-op section; legacy
     # packets without per-Feature blocks render unchanged below.
     parts.append(_render_feature_section(packet, session_dir=session_dir))
 
-    # Per-slice sections (back-compat for legacy proof-of-work readers)
-    parts.append("<h2>Slices</h2>")
+    # Per-Group dispatch sections.
+    parts.append("<h2>Groups</h2>")
     for s in packet.groups:
         parts.append(_render_group(s, session_dir=session_dir))
 
@@ -476,7 +592,7 @@ def _render_header(packet: ProofPacket) -> str:
   <span class="kpi"><span class="label">project_kind</span> <span class="value">{escape(packet.project_kind)}</span></span>
   <span class="kpi"><span class="label">wall</span> <span class="value">{packet.wall_s:.0f} s</span></span>
   <span class="kpi"><span class="label">cost</span> <span class="value">${packet.cost_usd:.2f}</span></span>
-  <span class="kpi"><span class="label">slices</span>
+  <span class="kpi"><span class="label">groups</span>
     <span class="value">{len(packet.landed_group_ids)} landed / {len(packet.groups)} total</span>
   </span>
 </p>"""
@@ -581,7 +697,7 @@ def _render_feature_section(packet: ProofPacket, *, session_dir: Path | None) ->
 
 
 def _render_group(s: GroupPacket, *, session_dir: Path | None) -> str:
-    parts = [f'<section class="slice {escape(s.status)}">']
+    parts = [f'<section class="group {escape(s.status)}">']
     landed_tag = (
         f'<span class="muted">landed @ {escape(s.landed_commit)}</span>'
         if s.landed_commit else ""
@@ -694,7 +810,7 @@ def _render_audit_section(packet: ProofPacket, *, session_dir: Path | None) -> s
 def _render_limitations(packet: ProofPacket) -> str:
     if not packet.blocked_group_ids:
         return ""
-    parts = ["<h2>Known limitations</h2>", "<p>The following slices did not land:</p><ul>"]
+    parts = ["<h2>Known limitations</h2>", "<p>The following groups did not land:</p><ul>"]
     blocked = [s for s in packet.groups if s.group_id in set(packet.blocked_group_ids)]
     for s in blocked:
         narrative = s.failure_narrative or "blocked"
@@ -773,6 +889,9 @@ __all__ = [
     "ProofPacket",
     "GroupPacket",
     "compose_proof_packet",
+    "load_proof_packet",
+    "proof_packet_from_dict",
+    "rerender_proof_packet",
     "render_html",
     "render_json",
     "render_run",

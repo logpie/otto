@@ -333,7 +333,10 @@ kinds.
       now treats `Spec.shared_paths` as globally writeable (in addition to
       legacy `shared_scaffold`); Component owned_paths participate in the
       peer-vs-dep partition. shared_paths overrides peer ownership.
-- [ ] A1b.5 — `otto/checks.py:Evidence` gets `feature_id` field
+- [✓] A1b.5 — `otto/checks.py:Evidence` gets `feature_id` field.
+      Verified in the current build/audit/render path: check evidence carries
+      `feature_id`, audit/render prefer Feature ids over display names, and
+      scoped Layer 2 re-audit uses Feature ids as the stable join key.
 - [x] A1b.6 — Add `CLIProbe`, `ImportCheck`, `TypeCheck` kinds
       (research §2.7) · dataclasses live in `spec_compile.py`; executors
       `_run_cli_probe`, `_run_import_check`, `_run_type_check` wired in
@@ -548,7 +551,10 @@ versions. Do not work from it; use the split sub-phases above.
         `tests/test_audit_walkthrough_entries.py` cover the helper
         signature, the field default, and the end-to-end render flow.
         Closes the A3.1 gap surfaced by the A3 sub-agent (tick 60).
-  - [ ] Untagged actions outside "exploration" allowlist rejected by parser
+  - [✓] Untagged actions outside "exploration" allowlist rejected by parser.
+        `_validate_walkthrough_jsonl` now keeps permissive coverage stats but
+        only strict entries enter proof evidence; strict parse errors cap
+        `walkthrough_coverage.meets_threshold` to false.
 
 - [~] A2.2 — `otto/audit_loop.py`
   - [✓] `repair_failing_features(...)` — Layer 2 loop (orchestration
@@ -560,7 +566,10 @@ versions. Do not work from it; use the split sub-phases above.
         prompt's Layer 2 preamble names the feature and surfaces the
         audit detail so the agent fixes only the failing feature, not
         the whole group. Tests: `tests/test_runner_layer2_fix.py`.
-  - [ ] Re-audit narrows to affected Features
+  - [✓] Re-audit narrows to affected Features. `runner.run_pipeline` passes
+        the failing Feature ids into `run_audit(feature_scope_ids=...)`; the
+        audit prompt names the scoped ids, and the returned FeatureAudit list
+        is filtered by Feature id with display-name fallback for old judges.
   - [✓] Caps respected from `defaults`
         (`retries.audit_loop.max_repair_attempts_per_run`,
         `max_audit_passes_per_run`).
@@ -571,7 +580,7 @@ versions. Do not work from it; use the split sub-phases above.
         `_audit_prompt`. 5 new tests in
         tests/test_audit_prompt_feature_tagging.py pin the markers
         (feature_ids[], action_kind, ≥90%, per-kind examples,
-        capability_verdicts wire-format unchanged).
+        `feature_audits` wire-format).
   - [✓] Explicit Feature-tagging requirement (contract markdown reads
         "every walkthrough action carries `feature_ids: list[str]`")
   - [✓] Examples of tagged vs exploration actions (per-kind JSONL
@@ -606,8 +615,8 @@ session dir; deterministic; re-runnable.
         `build_feature_proof_blocks`)
   - [✓] Writes whole-product packet with `<h2>Features</h2>` block
         (one `<section class="feature-proof">` per Feature, ordered
-        by spec) — emitted before per-Slice for primacy (research §3
-        atomic units). Legacy slice section preserved for back-compat.
+        by spec) — emitted before per-Group dispatch details for primacy
+        (research §3 atomic units).
         8 new tests in `tests/test_render_per_feature.py` cover the
         section, JSON `features[]` array, multi-Feature cross-link,
         per-Feature finding filter, escape, and legacy-pass-through.
@@ -621,9 +630,11 @@ session dir; deterministic; re-runnable.
   - [ ] `otto/web/templates/proof-packet.html.j2`
   - [ ] `otto/web/templates/feature-proof.html.j2`
 
-- [ ] A3.3 — `otto render <session-id>` CLI
-  - [ ] Re-renders without LLM cost
-  - [ ] Idempotent
+- [✓] A3.3 — `otto render <session-id>` CLI
+  - [✓] Re-renders without LLM cost by loading `proof-packet.json` and
+        regenerating `proof-packet.html`.
+  - [✓] Idempotent by default: JSON is left untouched unless
+        `--rewrite-json` is passed.
 
 ### Exit criteria (Loop 2 gate)
 

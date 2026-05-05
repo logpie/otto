@@ -162,25 +162,59 @@ def _run_repo_test(
         return _malformed_check_evidence(
             started, t0, "RepoTestCheck.command is empty (informational; nothing to run)"
         )
+    bootstrap = _run_node_bootstrap_if_needed(
+        list(check.command), cwd=cwd, timeout_s=check.timeout_s,
+        extra_pythonpath=[project_dir, cwd],
+    )
+    if bootstrap is not None and bootstrap.returncode != 0:
+        output = _format_subprocess_output(bootstrap.args, bootstrap)
+        if raw_log_path is not None:
+            _write_raw(raw_log_path, output)
+        return Evidence(
+            passed=False,
+            started_at=started,
+            duration_s=time.monotonic() - t0,
+            detail=f"dependency install failed exit={bootstrap.returncode}",
+            raw={
+                "bootstrap_command": list(bootstrap.args),
+                "bootstrap_exit_code": bootstrap.returncode,
+                "bootstrap_stdout": bootstrap.stdout or "",
+                "bootstrap_stderr": bootstrap.stderr or "",
+            },
+        )
     completed = _run_command(
         list(check.command), cwd=cwd, timeout_s=check.timeout_s,
         extra_pythonpath=[project_dir, cwd],
     )
     output = _format_subprocess_output(check.command, completed)
+    if bootstrap is not None:
+        output = (
+            _format_subprocess_output(bootstrap.args, bootstrap).rstrip()
+            + "\n\n"
+            + output
+        )
     if raw_log_path is not None:
         _write_raw(raw_log_path, output)
     passed = completed.returncode == 0
+    raw = {
+        "command": list(check.command),
+        "exit_code": completed.returncode,
+        "stdout": completed.stdout or "",
+        "stderr": completed.stderr or "",
+    }
+    if bootstrap is not None:
+        raw.update({
+            "bootstrap_command": list(bootstrap.args),
+            "bootstrap_exit_code": bootstrap.returncode,
+            "bootstrap_stdout": bootstrap.stdout or "",
+            "bootstrap_stderr": bootstrap.stderr or "",
+        })
     return Evidence(
         passed=passed,
         started_at=started,
         duration_s=time.monotonic() - t0,
         detail=f"exit={completed.returncode}",
-        raw={
-            "command": list(check.command),
-            "exit_code": completed.returncode,
-            "stdout": completed.stdout or "",
-            "stderr": completed.stderr or "",
-        },
+        raw=raw,
     )
 
 
@@ -281,28 +315,64 @@ def _run_browser_journey(
         return _malformed_check_evidence(
             started, t0, "BrowserJourney.command is empty (informational; nothing to run)"
         )
+    bootstrap = _run_node_bootstrap_if_needed(
+        list(check.command), cwd=cwd, timeout_s=check.timeout_s,
+        extra_pythonpath=[project_dir, cwd],
+    )
+    if bootstrap is not None and bootstrap.returncode != 0:
+        output = _format_subprocess_output(bootstrap.args, bootstrap)
+        if raw_log_path is not None:
+            _write_raw(raw_log_path, output)
+        return Evidence(
+            passed=False,
+            started_at=started,
+            duration_s=time.monotonic() - t0,
+            detail=f"dependency install failed exit={bootstrap.returncode} artifacts=0",
+            artifacts=[],
+            raw={
+                "bootstrap_command": list(bootstrap.args),
+                "bootstrap_exit_code": bootstrap.returncode,
+                "bootstrap_stdout": bootstrap.stdout or "",
+                "bootstrap_stderr": bootstrap.stderr or "",
+                "evidence_globs": list(check.evidence_globs),
+            },
+        )
     completed = _run_command(
         list(check.command), cwd=cwd, timeout_s=check.timeout_s,
         extra_pythonpath=[project_dir, cwd],
     )
     output = _format_subprocess_output(check.command, completed)
+    if bootstrap is not None:
+        output = (
+            _format_subprocess_output(bootstrap.args, bootstrap).rstrip()
+            + "\n\n"
+            + output
+        )
     if raw_log_path is not None:
         _write_raw(raw_log_path, output)
     artifacts = _collect_evidence_artifacts(cwd, project_dir, check.evidence_globs)
     passed = completed.returncode == 0
+    raw = {
+        "command": list(check.command),
+        "exit_code": completed.returncode,
+        "stdout": completed.stdout or "",
+        "stderr": completed.stderr or "",
+        "evidence_globs": list(check.evidence_globs),
+    }
+    if bootstrap is not None:
+        raw.update({
+            "bootstrap_command": list(bootstrap.args),
+            "bootstrap_exit_code": bootstrap.returncode,
+            "bootstrap_stdout": bootstrap.stdout or "",
+            "bootstrap_stderr": bootstrap.stderr or "",
+        })
     return Evidence(
         passed=passed,
         started_at=started,
         duration_s=time.monotonic() - t0,
         detail=f"exit={completed.returncode} artifacts={len(artifacts)}",
         artifacts=artifacts,
-        raw={
-            "command": list(check.command),
-            "exit_code": completed.returncode,
-            "stdout": completed.stdout or "",
-            "stderr": completed.stderr or "",
-            "evidence_globs": list(check.evidence_globs),
-        },
+        raw=raw,
     )
 
 
@@ -734,6 +804,41 @@ def _run_command(
         text=True,
         timeout=timeout_s,
         check=False,
+    )
+
+
+def _run_node_bootstrap_if_needed(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_s: int,
+    extra_pythonpath: list[Path] | None = None,
+) -> subprocess.CompletedProcess[str] | None:
+    """Install locked npm deps before npm checks in a clean worktree.
+
+    Slice branches commit package metadata, not ``node_modules``. Merge
+    verification runs after ``git clean -fdx``, so commands like
+    ``npm run build`` otherwise fail with ``vite: command not found``
+    even though the branch has a valid ``package-lock.json``. Keep this
+    deliberately narrow: only npm commands with a lockfile get implicit
+    bootstrap, and only when ``node_modules`` is absent.
+    """
+    if not command:
+        return None
+    if Path(command[0]).name != "npm":
+        return None
+    if not (cwd / "package.json").exists():
+        return None
+    if not (cwd / "package-lock.json").exists():
+        return None
+    if (cwd / "node_modules").exists():
+        return None
+    bootstrap_cmd = ["npm", "ci", "--prefer-offline", "--no-audit", "--no-fund"]
+    return _run_command(
+        bootstrap_cmd,
+        cwd=cwd,
+        timeout_s=max(timeout_s, 60),
+        extra_pythonpath=extra_pythonpath,
     )
 
 

@@ -10,10 +10,10 @@ Design contract (see ``docs/i2p-resume-design.md`` for the full picture):
   artifacts (spec-state.jsonl + summary.json + spec.json).
 * ``plan_resume`` does NOT mutate disk. It is safe to call from the
   read-only inspection path.
-* Spec-hash validation is split: ``plan_resume`` records the on-disk
-  hash; ``verify_spec_hash_matches`` is the gate that the CLI calls
-  with the freshly-loaded current spec. Splitting lets the CLI surface
-  a friendly diff message before raising.
+* Spec-hash validation is split: ``plan_resume`` records the hash from
+  the run checkpoint when available; ``verify_spec_hash_matches`` is
+  the gate that compares that original hash to the current spec file.
+  Splitting lets the CLI surface a friendly diff message before raising.
 
 Mid-merge git recovery is exposed here as a thin re-export of
 ``otto.spec_state.recover_mid_merge_state`` plus a higher-level
@@ -34,7 +34,6 @@ from otto import paths as _paths
 from otto.spec_compile import Spec, load_spec
 from otto.spec_state import (
     BLOCKED,
-    ELIGIBLE,
     LANDED,
     MidMergeRecovery,
     REDUNDANT,
@@ -90,8 +89,9 @@ class ResumePlan:
       ``summary.json`` (or ``checkpoint.json`` as a fallback). The
       runner adds these into the shared BuildBudget so the documented
       total cost cap counts both attempts honestly.
-    * ``spec_hash``: sha256 of the on-disk ``spec.json``. Compared at
-      resume time against the spec the runner is about to operate on.
+    * ``spec_hash``: sha256 of the spec the paused run was using.
+      Prefer the checkpoint's persisted value; fall back to the current
+      on-disk bytes only for pre-checkpoint sessions.
     * ``halted_reason``: the prior run's ``run.finished`` detail field,
       surfaced in the CLI banner. Empty if the run was paused without a
       ``run.finished`` event.
@@ -183,9 +183,13 @@ def plan_resume(
             "cannot resume — re-run fresh."
         )
 
-    # Spec hash is computed against bytes on disk so we capture exactly
-    # what the prior run worked from — independent of canonicalization.
-    spec_hash = _hash_file(spec_path)
+    current_spec_hash = _hash_file(spec_path)
+    # The checkpoint stores the spec hash captured when the i2p runner
+    # entered the resumable phase. This is the only way to detect edits
+    # that happened while the run was paused. Falling back to the current
+    # hash keeps older sessions resumable, but those sessions cannot prove
+    # whether the spec changed before this resume attempt.
+    spec_hash = _read_checkpoint_spec_hash(session_dir) or current_spec_hash
 
     # Pull the id set the runner cares about. The spec is the source of
     # truth for "what should this run produce"; the journal is the source
@@ -296,6 +300,26 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _read_checkpoint_spec_hash(session_dir: Path) -> str:
+    """Read the original spec hash persisted by the i2p runner.
+
+    Empty string means no trustworthy stored hash exists, usually because
+    the session predates the i2p checkpoint writer.
+    """
+    checkpoint_path = session_dir / "checkpoint.json"
+    if not checkpoint_path.exists():
+        return ""
+    try:
+        data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resume: cannot read %s: %s", checkpoint_path, exc)
+        return ""
+    value = str(data.get("spec_hash") or "").strip()
+    if len(value) == 64:
+        return value
+    return ""
 
 
 def _all_unit_ids(spec: Spec) -> frozenset[str]:

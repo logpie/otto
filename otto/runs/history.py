@@ -263,6 +263,16 @@ def _load_i2p_session_history_rows(project_dir: Path) -> list[dict[str, Any]]:
             datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         )
         intent_text = str(proof.get("intent") or "").splitlines()[0][:200]
+        landed_ids = proof.get("landed_group_ids")
+        if not isinstance(landed_ids, list):
+            landed_ids = proof.get("landed_slice_ids") if isinstance(proof.get("landed_slice_ids"), list) else []
+        blocked_ids = proof.get("blocked_group_ids")
+        if not isinstance(blocked_ids, list):
+            blocked_ids = proof.get("blocked_slice_ids") if isinstance(proof.get("blocked_slice_ids"), list) else []
+        groups = proof.get("groups")
+        if not isinstance(groups, list):
+            groups = proof.get("slices") if isinstance(proof.get("slices"), list) else []
+
         out.append({
             "run_id": entry.name,
             "build_id": entry.name,
@@ -302,9 +312,11 @@ def _load_i2p_session_history_rows(project_dir: Path) -> list[dict[str, Any]]:
             "cost_usd": _float_or_none(proof.get("cost_usd")),
             "duration_s": _float_or_none(proof.get("wall_s")),
             "i2p_verdict": verdict,
-            "i2p_landed_count": len(proof.get("landed_slice_ids") or []),
-            "i2p_blocked_count": len(proof.get("blocked_slice_ids") or []),
-            "i2p_slice_count": len(proof.get("slices") or []),
+            "i2p_landed_count": len(landed_ids),
+            "i2p_blocked_count": len(blocked_ids),
+            "i2p_group_count": len(groups),
+            # One-cycle compatibility for older frontend/history consumers.
+            "i2p_slice_count": len(groups),
         })
     return out
 

@@ -21,7 +21,6 @@ import asyncio
 import logging
 import os
 import sys
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -56,7 +55,6 @@ from otto.merge_queue import (
     MergeQueueResult,
     run_merge_queue,
 )
-from otto.render import render_run
 from otto.resume import (
     ResumeError,
     ResumePlan,
@@ -167,7 +165,7 @@ async def _run_compile_phase(
     )
     written = spec_dir / "spec.json"
     console.print(
-        f"  [bold]Compile complete[/bold] — {len(spec.groups)} slice(s), "
+        f"  [bold]Compile complete[/bold] — {len(spec.groups)} group(s), "
         f"project_kind={spec.project_kind}"
     )
     console.print(f"  Spec: {written}")
@@ -201,7 +199,7 @@ async def _drive_full_pipeline(
     # exceed the documented "$30 total" ceiling because nobody owns
     # the shared accounting.
     shared_budget = BuildBudget()
-    console.print("  [bold]Build phase[/bold] — dispatching slice agents")
+    console.print("  [bold]Build phase[/bold] — dispatching group agents")
     build_result = await run_build(
         spec,
         project_dir=project_dir,
@@ -212,16 +210,16 @@ async def _drive_full_pipeline(
     )
     console.print(
         f"  Build: {len(build_result.passing_ids)}/{len(build_result.group_results)} "
-        f"slices passing, ${build_result.total_cost_usd:.2f}, "
+        f"groups passing, ${build_result.total_cost_usd:.2f}, "
         f"{build_result.total_wall_s:.0f}s"
     )
     if build_result.blocked_ids:
         console.print(
-            f"  [yellow]Blocked slices:[/yellow] {', '.join(build_result.blocked_ids)}"
+            f"  [yellow]Blocked groups:[/yellow] {', '.join(build_result.blocked_ids)}"
         )
 
     console.print()
-    console.print("  [bold]Merge phase[/bold] — landing slices in dep order")
+    console.print("  [bold]Merge phase[/bold] — landing groups in dep order")
     merge_result = await run_merge_queue(
         spec,
         build_result,
@@ -397,8 +395,8 @@ def register_run_command(main: click.Group) -> None:
 _PHASE_HEADINGS = {
     "compile": "  [bold]Compile phase[/bold] — running compile agent",
     "seed": "  [bold]Seed phase[/bold] — applying audit fixtures",
-    "build": "  [bold]Build phase[/bold] — dispatching slice agents",
-    "merge": "  [bold]Merge phase[/bold] — landing slices in dep order",
+    "build": "  [bold]Build phase[/bold] — dispatching group agents",
+    "merge": "  [bold]Merge phase[/bold] — landing groups in dep order",
     "audit": "  [bold]Audit phase[/bold] — final integrated review",
     "repair": "  [bold]Repair phase[/bold] — Layer 2 feature retry",
     "render": "  [bold]Render phase[/bold] — assembling proof packet",
@@ -699,6 +697,7 @@ def orchestrate_run(
                 review_gate=review_gate,
                 gate_timeout_s=gate_timeout_s,
                 gate_announce=_default_gate_announce,
+                command="build",
             )
         )
     except Exception as exc:
@@ -740,12 +739,12 @@ def _print_run_result(run_result: RunResult) -> None:
         br = run_result.build_result
         console.print(
             f"  Build: {len(br.passing_ids)}/{len(br.group_results)} "
-            f"slices passing, ${br.total_cost_usd:.2f}, "
+            f"groups passing, ${br.total_cost_usd:.2f}, "
             f"{br.total_wall_s:.0f}s"
         )
         if br.blocked_ids:
             console.print(
-                f"  [yellow]Blocked slices:[/yellow] {', '.join(br.blocked_ids)}"
+                f"  [yellow]Blocked groups:[/yellow] {', '.join(br.blocked_ids)}"
             )
     if run_result.merge_result is not None:
         mr = run_result.merge_result
@@ -929,6 +928,7 @@ def _drive_brownfield_pipeline(
                 audit_budget=audit_budget,
                 on_phase=on_phase,
                 resume_plan=resume_plan,
+                command=command,
             )
         )
     except Exception as exc:
