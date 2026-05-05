@@ -912,3 +912,125 @@ Decision:
 - Fix and escalate to Tier 5. Tier 4 found two generic Otto defects and one
   documented spec-normalization gap; the target product change itself passed
   native, external, and recovery certify checks.
+
+## 2026-05-05 Pressure Test Tier 5 - Complex Product Workflow
+
+Project:
+- Tier: 5, complex product workflow.
+- Source/path: fresh Healthchecks clone at
+  `/tmp/otto-i2p-pressure-20260505/tier5/healthchecks`, starting from
+  `39a2fb7 Fix double escaping in "Monthly Call Limit Reached" message`.
+- Why this is harder than Tier 4: the task crossed Django model persistence,
+  migrations, authenticated web UI, readonly team authorization, API
+  create/update/list/get semantics, query-state preservation, native test
+  discovery, and durable database state.
+
+Otto run:
+- Exact command:
+  `/usr/bin/time -p uv --project /Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2 run --extra dev python -m otto.cli improve feature "Add a favorite-check workflow to Healthchecks: authenticated read-write users can mark and unmark individual checks as favorites from both the My Checks list and the check details page; the favorite state persists on the Check model; read-only team members can see favorite state but cannot change it; My Checks supports a favorite=1 query filter that composes with existing tag, search, status, and sort filters and preserves that query state in sort/filter URLs; API create, update, list, and get responses include a boolean favorite field with validation, and invalid non-boolean favorite input returns 400 without saving. Controls must have accessible labels and aria-pressed state. Add focused tests and keep the native Django test suite passing." --i2p --provider codex --budget 4500 --max-turns 180 --break-lock --verbose`
+- Provider/model: Codex provider requested and verified by child process tree;
+  concrete model name was not surfaced in Otto artifacts.
+- Session id: `2026-05-05-204653-da65ea`.
+- Wall time: `/usr/bin/time` `real 3010.59s`; `summary.json`
+  `duration_s=2623.3898103339598`.
+- Cost: `summary.json cost_usd=0.0`; Codex token usage was recorded in logs
+  but no USD cost was surfaced by the provider adapter.
+- Final Otto verdict: `passed`; `summary.json` reports `stories_passed=12`,
+  `stories_tested=12`, `rounds=1`.
+- Proof packet:
+  `/tmp/otto-i2p-pressure-20260505/tier5/healthchecks/otto_logs/sessions/2026-05-05-204653-da65ea/proof-packet.html`
+  and
+  `/tmp/otto-i2p-pressure-20260505/tier5/healthchecks/otto_logs/sessions/2026-05-05-204653-da65ea/proof-packet.json`.
+- Browser/video/screenshot artifacts: no screenshot/video artifact for this
+  tier. The synthesized webapp walkthrough logged `shape=not-applicable`
+  because it only recognizes Flask/static entrypoints, then the audit judge
+  compensated with direct Django test-client HTML and API walkthrough artifacts
+  under `audit/attempt-01/walkthrough/`.
+
+Run behavior and evidence:
+- Baseline setup installed Healthchecks in a project `.venv` on Python 3.12.
+  Full `requirements-dev.txt` initially failed on optional `mysqlclient`
+  system headers, so the local SQLite pressure environment installed dev
+  requirements excluding MySQL-only support.
+- Baseline focused native tests before Otto:
+  `.venv/bin/python manage.py test hc.front.tests.test_my_checks hc.front.tests.test_add_check hc.front.tests.test_details hc.api.tests.test_create_check hc.api.tests.test_update_check --verbosity 1`
+  -> `Ran 151 tests`, OK.
+- Baseline full native suite before Otto:
+  `.venv/bin/python manage.py test --verbosity 1`
+  -> `Ran 1701 tests in 5.518s`, OK.
+- Initial audit correctly blocked the missing favorite workflow while preserving
+  existing My Checks, details, ping/status, readonly, and API behavior.
+- Otto repaired the target repo with five commits:
+  `5366616 i2p(front-checks-ui): build slice on layer2/favorite-web-toggle`,
+  `111550b i2p(front-checks-ui): build slice on layer2/favorite-filter-url-state`,
+  `de1e459 i2p(front-checks-ui): build slice on layer2/favorite-accessible-controls`,
+  `40a4693 i2p(api-check-core): build slice on layer2/check-model-persistence-preserved`,
+  and
+  `18e93f1 i2p(api-check-core): build slice on layer2/checks-api-favorite-field-validation`.
+- Final audit marked all 12 features passed and selected the project
+  `.venv/bin/python manage.py test` command, which ran `1716 tests` OK.
+- Walkthrough evidence includes direct HTML/API artifacts for My Checks,
+  details, readonly views, favorite filter URLs, API CRUD, invalid input
+  denial, readonly key denial, and status polling.
+
+External verifier:
+- Full native suite outside Otto:
+  `.venv/bin/python manage.py test --verbosity 1`
+  -> `Ran 1716 tests in 5.556s`, OK.
+- Independent durable-state verifier outside Otto:
+  used a fresh SQLite database and Django test client, migrated from scratch,
+  created read-write and read-only users/API keys, toggled favorite state from
+  My Checks and Details, asserted query-state preservation and accessible
+  labels/`aria-pressed`, validated API create/update/list/get favorite
+  behavior, asserted invalid values return 400 without mutation, asserted
+  read-only team writes are denied, and asserted read-only API write attempts
+  are denied without mutation. Result:
+  `healthchecks favorite workflow oracle passed db=/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/otto-healthchecks-tier5-jearrren/verify.sqlite3`.
+
+Bugs found and classification:
+- Otto bug fixed before the run: `detect_test_command` did not recognize
+  Django `manage.py` projects, so a large Django app could fall back to generic
+  or missing test commands. Generic fix committed in `c4adcd50e`.
+- Design gap documented: the Healthchecks spec compiled into multiple groups
+  with `cross_group_checks: []`; the run still passed because audit artifacts
+  checked the integrated product, but spec generation should require meaningful
+  cross-group checks for multi-group product workflows.
+- Design gap documented: synthesized webapp capture currently handles static
+  and Flask-style app shapes but skipped this Django app. The audit judge made
+  a correct Django client walkthrough, so product verification passed, but A8
+  browser/video capture remains incomplete for non-Flask dynamic webapps.
+- Project setup issue: optional MySQL client headers were unavailable locally;
+  SQLite-focused Healthchecks native tests still provided valid pressure
+  coverage.
+- Oracle brittleness fixed during external verification: the outside checker
+  needed Django setup before importing Healthchecks models, needed to preserve
+  query state through `Referer` rather than assuming URL-param ordering, and
+  needed to accept read-only API write denial as either 401 or 403 while
+  asserting no mutation. Classified as verifier brittleness, not an Otto bug.
+
+Root cause:
+- Otto's default test-command detector needed framework-aware handling for
+  Django projects with a local project venv.
+- The audit browser/screenshot surface is still entrypoint-shape limited; for
+  Django, it falls back to judge-authored direct client evidence instead of
+  launching the app for browser artifacts.
+
+Generic fixes made in this worktree:
+- `otto/config.py` now detects `manage.py` and uses the project venv Python to
+  run `manage.py test` when no stronger pytest signal exists.
+
+Regression tests added:
+- `tests/test_config.py::TestDetectTestCommand::test_detects_django_manage_py_test_with_project_venv`
+
+Gates run for this entry:
+- Worktree Django detector regression:
+  `uv run pytest -q tests/test_config.py::TestDetectTestCommand` -> `19 passed`.
+- Touched-file lint:
+  `uv run ruff check otto/config.py tests/test_config.py` -> passed.
+- Target repo full native suite and independent durable-state oracle -> passed
+  as listed above.
+
+Decision:
+- Escalate to Tier 6. Tier 5 passed after one generic Otto detector fix and
+  exposed two documented design gaps: multi-group cross-check weakness and
+  incomplete dynamic webapp screenshot/video capture.
