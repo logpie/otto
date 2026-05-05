@@ -10,7 +10,7 @@ import subprocess
 from typing import Any, AsyncIterator
 
 from fastapi import Body, FastAPI, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
@@ -226,77 +226,13 @@ def create_app(
         )
         return _service().state(filters)
 
-    @app.get("/api/runs/{run_id}")
-    def run_detail(
-        run_id: str,
-        type_filter: str = Query("all", alias="type"),
-        outcome_filter: str = Query("all", alias="outcome"),
-        query: str = "",
-        history_page: int = 0,
-        history_page_size: int | None = None,
-    ) -> dict[str, Any]:
-        filters = filters_from_params(
-            type_filter=type_filter,
-            outcome_filter=outcome_filter,
-            query=query,
-            history_page=history_page,
-            history_page_size=history_page_size,
-        )
-        return _service().detail(run_id, filters)
-
-    @app.get("/api/runs/{run_id}/logs")
-    def run_logs(run_id: str, log_index: int = 0, offset: int = 0) -> dict[str, Any]:
-        return _service().logs(run_id, log_index=log_index, offset=offset)
-
-    @app.get("/api/runs/{run_id}/artifacts")
-    def run_artifacts(run_id: str) -> dict[str, Any]:
-        return _service().artifacts(run_id)
-
-    @app.get("/api/runs/{run_id}/artifacts/{artifact_index}/content")
-    def run_artifact_content(run_id: str, artifact_index: int) -> dict[str, Any]:
-        return _service().artifact_content(run_id, artifact_index)
-
-    @app.get("/api/runs/{run_id}/artifacts/{artifact_index}/raw")
-    def run_artifact_raw(run_id: str, artifact_index: int) -> FileResponse:
-        # cluster-evidence-trustworthiness #6: image/video/PDF artifacts
-        # are served as raw bytes here so the SPA can ``<img src=...>``
-        # them instead of decoding through JSON.
-        path, mime = _service().artifact_raw_path(run_id, artifact_index)
-        return FileResponse(path, media_type=mime)
-
-    @app.get("/api/runs/{run_id}/proof-report")
-    def run_proof_report(run_id: str) -> HTMLResponse:
-        return HTMLResponse(_service().proof_report_html(run_id))
-
-    @app.get("/api/runs/{run_id}/proof-assets/{asset_path:path}")
-    def run_proof_asset(run_id: str, asset_path: str) -> FileResponse:
-        return FileResponse(_service().proof_report_asset_path(run_id, asset_path))
-
-    @app.get("/api/runs/{run_id}/evidence/{asset_path:path}")
-    def run_legacy_proof_evidence_asset(run_id: str, asset_path: str) -> FileResponse:
-        return FileResponse(_service().proof_report_asset_path(run_id, f"evidence/{asset_path}"))
-
-    @app.get("/api/runs/{run_id}/proof-of-work.{extension}")
-    def run_legacy_proof_file(run_id: str, extension: str) -> FileResponse:
-        return FileResponse(_service().proof_report_asset_path(run_id, f"proof-of-work.{extension}"))
-
-    @app.get("/api/runs/{run_id}/diff")
-    def run_diff(run_id: str) -> dict[str, Any]:
-        return _service().diff(run_id)
-
-    @app.post("/api/runs/{run_id}/actions/{action}")
-    def run_action(run_id: str, action: str, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
-        expected_target = payload.get("expected_target_sha")
-        expected_branch = payload.get("expected_branch_sha")
-        return _service().execute(
-            run_id,
-            action,
-            selected_queue_task_ids=payload.get("selected_queue_task_ids"),
-            artifact_index=payload.get("artifact_index"),
-            action_payload=payload,
-            expected_target_sha=str(expected_target) if isinstance(expected_target, str) and expected_target.strip() else None,
-            expected_branch_sha=str(expected_branch) if isinstance(expected_branch, str) and expected_branch.strip() else None,
-        )
+    # Phase C.4 (tick 65): legacy `/api/runs/<run_id>/...` route surface
+    # (11 GET/POST endpoints — detail, logs, artifacts, artifact_content,
+    # artifact_raw, proof-report, proof-assets, evidence, proof-of-work,
+    # diff, actions) deleted. Replaced by `/api/run-view/<session_id>`
+    # (mounted via `install_run_view_routes`) and `/api/specs/<id>/...`
+    # (mounted via `install_spec_review_routes`). Frontend default switched
+    # from legacy <App/> to <RunViewPage/> simultaneously — see main.tsx.
 
     @app.post("/api/actions/merge-all")
     def merge_all(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
@@ -376,6 +312,23 @@ def create_app(
     # mission-control/events.jsonl.
     from otto.web.i2p_routes import install_i2p_routes
     install_i2p_routes(
+        app,
+        project_dir_provider=lambda: getattr(app.state, "project_dir", None),
+    )
+
+    # A4: mount the new design's RunView route alongside i2p_routes.
+    # Provides GET /api/runs and GET /api/runs/<session_id> consumed by
+    # the new RunDrawer frontend component (otto/web/client/src/components/run/).
+    from otto.web.run_view_routes import install_run_view_routes
+    install_run_view_routes(
+        app,
+        project_dir_provider=lambda: getattr(app.state, "project_dir", None),
+    )
+
+    # A5: spec-review surface — GET markdown / POST edit / POST approve.
+    # Consumed by SpecReviewPage (otto/web/client/src/components/spec/).
+    from otto.web.spec_review_routes import install_spec_review_routes
+    install_spec_review_routes(
         app,
         project_dir_provider=lambda: getattr(app.state, "project_dir", None),
     )

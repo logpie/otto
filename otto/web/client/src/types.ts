@@ -459,6 +459,12 @@ export interface HistoryItem {
   token_usage: TokenUsage;
   resumable: boolean;
   adapter_key: string;
+  // i2p-domain rows expose slice counts via the existing stories columns
+  // (stories_tested = total slices, stories_passed = landed slices). Optional
+  // because legacy queue rows omit them.
+  stories_tested?: number | null;
+  stories_passed?: number | null;
+  i2p_verdict?: string | null;
 }
 
 export interface ActionState {
