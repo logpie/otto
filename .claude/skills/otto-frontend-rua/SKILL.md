@@ -64,6 +64,37 @@ it correctly?" Everything below is in service of that.
   confirm or auto-save.
 - **Wireframe fidelity on core screens** — landing, run drawer, spec
   review, spec diff, feature drilldown. The load-bearing screens.
+- **Layout coherence** — looks like a designed product, not a
+  debugging dump. Two-column drawer (sidebar + body) where wireframed.
+  Content hierarchy obvious (verdict before count before timestamp).
+  No "wall of text" sections. Cards/sections have breathing room
+  (whitespace tokens, not flush). Lists use sane row heights via
+  `min-height`, not whatever-the-content-is.
+- **UI / text clarity** — copy is plain English, not jargon-laden
+  (`feature_id`, `proxy_only`, `multi-actor` are token strings —
+  surface as "Feature ID", "Proxy-only", "Requires multi-actor").
+  Heading hierarchy obvious. Body text size ≥14px, not microcopy.
+  Numbers have units (`5m 13s` not `313`). Timestamps relativized.
+  Empty states say what would be there + how to make it appear,
+  not just "Nothing here".
+- **De-duplication** — same action doesn't appear in two places
+  (header + footer + sidebar all expose `Approve`?). Same info
+  doesn't render twice (status pill in header + status word in body
+  + status icon next to verdict + status in URL crumb). Pick one
+  primary site per surface; remove the rest.
+- **Cross-screen consistency** — Run drawer + Spec review + Spec
+  diff feel like the same app. Same button style (filled primary,
+  outlined secondary, link tertiary — pick & honor). Same card
+  chrome (border, radius, padding, shadow). Same typography (one
+  body size, one mono size, one heading scale). Same color tokens
+  for status (green=passed identically across all screens). Same
+  spacing rhythm.
+- **Button / text style discipline** — no two button styles on the
+  same screen ("Save" looks different from "Approve" without a
+  reason). Disabled state visibly distinct (lower contrast, no
+  hover). Primary actions filled, secondary outlined, never both
+  filled in the same row. Links underlined or distinctly colored
+  with hover state. No `<div>` styled as a button.
 - **Readability at 5 seconds** — text NOT concatenated (B1); status
   pills VISUALLY distinguishable (color + icon + label, NOT raw text);
   KPI rows have visible separators; severity badges have contrast.
@@ -76,25 +107,42 @@ it correctly?" Everything below is in service of that.
   destroy debugging when they pile up.
 
 **Skip (defer until public release):**
+
+Audience-scale concerns:
 - Colorblind simulation (Otto's user knows their pills work; ~5%
   protan/deutan/tritan audience matters at scale, not now).
-- Full WCAG AA screen-reader audit (important but not urgent for
-  small known audience).
+- Full WCAG AA screen-reader audit.
 - i18n / RTL / Unicode stress (Otto's UI is en-US for now).
 - Browser compat beyond Chrome (Otto runs locally; user picks one).
 - Mobile / tablet viewports (Otto is a desktop dev tool; 1440×900 is
   the target).
+
+Performance budget:
 - Lighthouse Performance score / bundle-size budget < 250kB.
 - LCP/CLS/INP performance metrics.
 - `prefers-reduced-motion` / `prefers-reduced-data`.
 - Print stylesheet.
+
+Aesthetic micro-tuning:
 - Brand voice through typography (functional > aspirational).
-- Iconography family consistency (✓/✗/⊘ emoji is fine for now).
+- Iconography family consistency (✓/✗/⊘ emoji is fine for now —
+  but DO ensure they render at consistent size, see "button/text
+  style discipline" above).
 - Type scale ratio (1.25 vs 1.333) micro-tuning.
-- Radius/shadow scale token rigor (good practice, not blocking).
+- Radius/shadow scale token rigor (the values can be ad-hoc as long
+  as they're consistent across screens — see "cross-screen
+  consistency" above).
 - Microinteraction polish (200ms transitions, ease curves).
-- Empty-state illustrations (text empty states are fine).
-- Skeleton loaders (spinner or "Loading…" is fine).
+- Empty-state illustrations (text empty states are fine; but copy
+  must be clear — see "UI / text clarity" above).
+- Skeleton loaders (spinner or "Loading…" is fine; just don't show
+  blank).
+
+**Important — what stays IN the pre-release tier**: layout coherence,
+UI/text clarity, dedup, cross-screen consistency, button/text style
+discipline. These are NOT "polish" — they're whether the user can
+understand and use the tool confidently every day. Confusing layout
+or duplicated controls cost daily friction even on an audience of one.
 
 **Concrete budget:** 1.5–2 hours of audit, 60% on Rounds 2–3 (visual +
 interaction), 40% on truthfulness probes against the API + console.
