@@ -77,6 +77,7 @@ SPEC_FILENAME = "spec.json"
 COMPILE_PROMPT = "compile-spec.md"
 COMPILE_PROMPT_BROWNFIELD = "compile-spec-brownfield.md"
 PROJECT_KINDS: tuple[str, ...] = ("webapp", "cli", "library", "api")
+BROWNFIELD_MODES: tuple[str, ...] = ("baseline", "target")
 AUDIT_FIXTURE_KINDS: tuple[str, ...] = ("user", "channel", "follow", "data")
 SCHEMAS_DIR = Path(__file__).parent / "spec_schemas"
 
@@ -3506,6 +3507,29 @@ def _extract_spec_json(text: str) -> dict[str, Any]:
         raise SpecValidationError(f"compile agent emitted invalid JSON: {exc}") from exc
 
 
+def _brownfield_mode_guidance(mode: str) -> str:
+    if mode == "baseline":
+        return (
+            "You are compiling a **baseline verification Spec** for an existing "
+            "product. Your job is NOT to design new work; it is to document what "
+            "is already there as a structured Spec so the audit pipeline has "
+            "concrete current-state behavior to verify."
+        )
+    if mode == "target":
+        return (
+            "You are compiling a **target repair Spec** for an existing product. "
+            "Read the current project, then turn the user's requested improvement "
+            "into the desired post-run product contract. Include existing behavior "
+            "that must be preserved, and include requested additions or fixes as "
+            "Features/acceptance criteria even when the current code is missing "
+            "them. A missing requested behavior is a target Feature, not a "
+            "non_goal."
+        )
+    raise ValueError(
+        f"brownfield_mode must be one of {BROWNFIELD_MODES}; got {mode!r}"
+    )
+
+
 async def compile_spec(
     intent: str,
     project_dir: Path,
@@ -3516,6 +3540,7 @@ async def compile_spec(
     budget: "RunBudget | None" = None,
     brownfield: bool = False,
     base_spec: Spec | None = None,
+    brownfield_mode: Literal["baseline", "target"] = "baseline",
 ) -> Spec:
     """Run the compile agent once and return the structured `Spec`.
 
@@ -3543,6 +3568,10 @@ async def compile_spec(
 
     if project_kind not in PROJECT_KINDS:
         raise ValueError(f"project_kind must be one of {PROJECT_KINDS}; got {project_kind!r}")
+    if brownfield_mode not in BROWNFIELD_MODES:
+        raise ValueError(
+            f"brownfield_mode must be one of {BROWNFIELD_MODES}; got {brownfield_mode!r}"
+        )
 
     # A6.5: out-of-scope guard runs BEFORE LLM cost. Greenfield AND
     # brownfield share this check — the intent is what's out of scope,
@@ -3568,6 +3597,7 @@ async def compile_spec(
             spec_path=str(spec_path),
             project_context=f"project_kind={project_kind}",
             project_preamble=build_project_preamble(project_dir),
+            brownfield_mode_guidance=_brownfield_mode_guidance(brownfield_mode),
         )
     else:
         prompt_template = COMPILE_PROMPT

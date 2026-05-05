@@ -985,6 +985,7 @@ def _brownfield_compile_locked(
     lock_label: str,
     cli_heading: str,
     break_lock: bool,
+    brownfield_mode: str = "baseline",
 ) -> tuple[Path, Spec]:
     """Acquire the project lock, allocate a session, brownfield-compile a spec.
 
@@ -1017,6 +1018,7 @@ def _brownfield_compile_locked(
                         config,
                         project_kind=project_kind,
                         brownfield=True,
+                        brownfield_mode=brownfield_mode,
                     )
                 )
             except SpecValidationError as exc:
@@ -1194,6 +1196,7 @@ def orchestrate_improve(
         lock_label="improve",
         cli_heading="otto improve --i2p",
         break_lock=break_lock,
+        brownfield_mode="target",
     )
 
     # --rounds maps to AuditBudget.audit_retries. None = library default.

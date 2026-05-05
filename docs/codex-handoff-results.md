@@ -563,3 +563,107 @@ Checkpoint gate before commit:
 - Note: full `uv run ruff check otto tests` currently reports unrelated
   pre-existing unused imports in files outside this patch set
   (`otto/logstream.py`, `otto/spec_amend.py`, and several untouched tests).
+
+## 2026-05-05 Pressure Test Tier 2 - Brownfield Webapp
+
+Project:
+- Tier: 2, brownfield webapp.
+- Source/path: official Flask tutorial app copied from a fresh
+  `pallets/flask` clone into
+  `/tmp/otto-i2p-pressure-20260505/flaskr-tier2`.
+- Why this is harder than Tier 1: the task required preserving an existing
+  server-rendered app, authentication, SQLite-backed blog CRUD, native tests,
+  and browser-visible behavior while adding a new query-driven user workflow.
+
+Otto run:
+- Exact command:
+  `/usr/bin/time -p uv --project /Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2 run --extra dev python -m otto.cli improve feature "Add search to the existing Flaskr blog index: the home page should include a search form using query parameter q, filter posts case-insensitively by title or body when q is non-empty, preserve existing login/register/auth behavior, show all posts when q is blank, and show a clear no-results message when no posts match. Add focused tests and keep the existing tutorial test suite passing." --i2p --provider codex --budget 2200 --max-turns 140 --break-lock --verbose`
+- Provider/model: Codex provider requested and verified by live child process
+  tree; concrete model name was not surfaced in Otto artifacts.
+- Session id: `2026-05-05-190842-6c7b0d`.
+- Wall time: `/usr/bin/time` `real 1019.39s`; proof packet
+  `wall_s=799.997081999667`.
+- Cost: `proof-packet.json cost_usd=0.0`; Codex token usage was recorded but no
+  USD cost was surfaced by the provider adapter.
+- Final Otto verdict: `passed`.
+- Proof packet:
+  `/tmp/otto-i2p-pressure-20260505/flaskr-tier2/otto_logs/sessions/2026-05-05-190842-6c7b0d/proof-packet.html`
+  and
+  `/tmp/otto-i2p-pressure-20260505/flaskr-tier2/otto_logs/sessions/2026-05-05-190842-6c7b0d/proof-packet.json`.
+
+Run behavior and evidence:
+- Baseline external test before Otto: `uv run --extra test pytest -q` ->
+  `24 passed`.
+- Initial audit correctly blocked: native tests passed, but direct Flask
+  test-client probes showed `/?q=ALPHA`, `/?q=banana`, and `/?q=nomatch` still
+  returned all posts, no search form existed, and no no-results message existed.
+- Layer 2 repair changed only `flaskr/blog.py`,
+  `flaskr/templates/blog/index.html`, and `tests/test_blog.py`, then passed
+  `python -m pytest tests/test_blog.py` with `13 passed`.
+- Final audit corrected a bad intermediate CLI artifact, ran the full suite,
+  exercised title/body/blank/no-result/wildcard search cases, and passed.
+- Target repo repair commit: `63f591c i2p(blog): build slice on
+  layer2/blog-index-list-posts`.
+
+External verifier:
+- `uv run --extra test pytest -q` from the target repo:
+  `25 passed in 0.25s`.
+- HTTP verifier:
+  `curl http://127.0.0.1:5123/?q=ALPHA` returned only `Alpha Release`;
+  `curl http://127.0.0.1:5123/?q=nomatch` returned the search form and
+  `No posts found.` with no posts.
+- Browser evidence:
+  Playwright snapshot at
+  `/tmp/otto-i2p-pressure-20260505/flaskr-tier2/otto_logs/external-browser/.playwright-cli/page-2026-05-05T19-27-01-247Z.yml`
+  showed textbox `Search posts` with value `banana` and only `Lunch Plans`.
+  Screenshot:
+  `/tmp/otto-i2p-pressure-20260505/flaskr-tier2/otto_logs/external-browser/.playwright-cli/page-2026-05-05T19-27-17-371Z.png`.
+
+Bugs found and classification:
+- Otto bug fixed: `otto improve --i2p` reused the baseline brownfield compile
+  prompt, which told the spec agent to document only current behavior and not
+  include missing requested features. In this run, the requested search feature
+  appeared in `non_goals` as `search-not-currently-implemented`. Audit still
+  blocked because it used the user intent, but the spec contract was wrong.
+- Otto bug fixed: Flask apps with templates/static were inferred as `api`,
+  degrading project-kind-specific proof rendering and default browser evidence.
+
+Root cause:
+- Brownfield compile had only one mode. `certify` needs a current-state
+  baseline contract, but `improve` needs a desired post-run target contract.
+  Treating both the same contradicts the redesign's "intent becomes product
+  contract" promise.
+- Python project-kind inference treated any Flask/Django dependency as API
+  without checking whether the repo had server-rendered templates/static assets.
+
+Generic fixes made in this worktree:
+- `compile_spec(..., brownfield_mode="baseline"|"target")` now renders
+  mode-specific guidance.
+- `otto improve --i2p` routes brownfield compile through target mode, while
+  `otto certify --i2p` keeps baseline mode.
+- `detect_project_kind` now classifies Flask/Django projects with top-level or
+  package-level `templates/` or `static/` directories as `webapp`; FastAPI
+  remains `api`.
+
+Regression tests added:
+- `tests/test_brownfield_compile.py::test_brownfield_target_mode_treats_intent_as_future_contract`
+- `tests/test_cli_run.py::test_orchestrate_improve_uses_target_brownfield_compile`
+- `tests/test_config.py::TestDetectProjectKind::test_detects_flask_template_app_as_webapp`
+
+Gates run for this entry:
+- Target repo external verifier: `uv run --extra test pytest -q` ->
+  `25 passed`.
+- Target repo HTTP and Playwright browser checks -> passed.
+- Focused worktree regressions:
+  `uv run pytest -q tests/test_brownfield_compile.py::test_brownfield_compile_uses_brownfield_prompt tests/test_brownfield_compile.py::test_brownfield_target_mode_treats_intent_as_future_contract tests/test_config.py::TestDetectProjectKind tests/test_cli_run.py::test_orchestrate_improve_uses_target_brownfield_compile`
+  -> `9 passed`.
+- Touched-file lint:
+  `uv run ruff check otto/spec_compile.py otto/config.py otto/cli_run.py otto/prompts/__init__.py tests/test_brownfield_compile.py tests/test_config.py tests/test_cli_run.py`
+  -> passed.
+- Prompt smoke on the Flaskr repo confirmed `detect_project_kind(...) ==
+  "webapp"` and target-mode prompt includes
+  `A missing requested behavior is a target Feature, not a non_goal`.
+
+Decision:
+- Escalate to Tier 3. Tier 2 passed after one real repair cycle and two
+  generic Otto fixes; no Tier 2 beyond-current-capability finding.

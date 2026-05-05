@@ -173,6 +173,56 @@ def test_brownfield_compile_uses_brownfield_prompt(
     assert "Do not paste the JSON" in rendered
     assert '"feature_ids": ["feature-id"]' in rendered
     assert "do not leave the target project to inspect" in rendered
+    assert "baseline verification Spec" in rendered
+    assert "current-state behavior" in rendered
+
+
+def test_brownfield_target_mode_treats_intent_as_future_contract(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project = tmp_path / "proj"
+    _seed_python_project(project)
+    run_dir = tmp_path / "session" / "spec"
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "otto.agent.run_agent_with_timeout",
+        _capturing_agent(captured, _minimal_spec_dict()),
+    )
+    monkeypatch.setattr(
+        "otto.agent.make_agent_options",
+        lambda *_a, **_kw: object(),
+    )
+    monkeypatch.setattr("otto.config.get_spec_timeout", lambda _c: 30)
+    monkeypatch.setattr(
+        "otto.observability.save_rendered_prompt",
+        lambda *_a, **_kw: {"sha256": "x", "path": "x"},
+    )
+    monkeypatch.setattr(
+        "otto.observability.update_input_provenance",
+        lambda *_a, **_kw: None,
+    )
+
+    asyncio.run(
+        compile_spec(
+            "add q search and keep auth working",
+            project,
+            run_dir,
+            _minimal_config(),
+            project_kind="cli",
+            brownfield=True,
+            brownfield_mode="target",
+        )
+    )
+
+    rendered = captured["prompt"]
+    assert isinstance(rendered, str)
+    assert "target repair Spec" in rendered
+    assert "desired post-run product contract" in rendered
+    assert "A missing requested behavior is a target Feature, not a non_goal" in rendered
+    assert "must become Features" in rendered
+    assert "acceptance criteria" in rendered
+    assert "Never put a requested addition or fix in `non_goals`" in rendered
 
 
 def test_brownfield_compile_prefers_written_spec_file(

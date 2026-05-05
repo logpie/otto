@@ -488,6 +488,16 @@ class TestDetectProjectKind:
 
         assert detect_project_kind(tmp_bare_git_repo) == "api"
 
+    def test_detects_flask_template_app_as_webapp(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "pyproject.toml").write_text(
+            "[project]\nname = 'flaskr'\ndependencies = ['flask']\n",
+            encoding="utf-8",
+        )
+        (tmp_bare_git_repo / "flaskr" / "templates").mkdir(parents=True)
+        (tmp_bare_git_repo / "flaskr" / "static").mkdir()
+
+        assert detect_project_kind(tmp_bare_git_repo) == "webapp"
+
     def test_detects_node_webapp(self, tmp_bare_git_repo):
         pkg = {
             "scripts": {"dev": "vite --host 0.0.0.0"},

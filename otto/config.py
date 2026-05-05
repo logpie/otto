@@ -1309,7 +1309,28 @@ def detect_project_kind(project_dir: Path) -> str:
             or "[tool.poetry.scripts]" in combined
         ):
             return "cli"
-        if any(marker in combined for marker in ("fastapi", "flask", "django")):
+        has_template_or_static = any(
+            path.exists()
+            for path in (
+                project_dir / "templates",
+                project_dir / "static",
+            )
+        )
+        if not has_template_or_static:
+            try:
+                has_template_or_static = any(
+                    child.is_dir()
+                    and (
+                        (child / "templates").exists()
+                        or (child / "static").exists()
+                    )
+                    for child in project_dir.iterdir()
+                )
+            except OSError:
+                has_template_or_static = False
+        if any(marker in combined for marker in ("flask", "django")):
+            return "webapp" if has_template_or_static else "api"
+        if "fastapi" in combined:
             return "api"
         return "library"
 

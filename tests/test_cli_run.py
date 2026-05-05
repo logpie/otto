@@ -461,6 +461,56 @@ def test_improve_feature_i2p_dispatches_to_orchestrate_improve(
     assert captured["focus"] == "search UX"
 
 
+def test_orchestrate_improve_uses_target_brownfield_compile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Improve mode compiles the desired post-run contract, not a baseline."""
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    async def fake_compile_spec(
+        intent,
+        project_dir,
+        run_dir,
+        config,
+        *,
+        project_kind,
+        brownfield,
+        brownfield_mode,
+        **_kwargs,
+    ):
+        captured["intent"] = intent
+        captured["project_dir"] = project_dir
+        captured["run_dir"] = run_dir
+        captured["project_kind"] = project_kind
+        captured["brownfield"] = brownfield
+        captured["brownfield_mode"] = brownfield_mode
+        return _fixture_spec(intent)
+
+    def fake_drive_brownfield_pipeline(**kwargs):
+        captured["pipeline_command"] = kwargs["command"]
+        import sys
+
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.compile_spec", fake_compile_spec)
+    monkeypatch.setattr(
+        "otto.cli_run._drive_brownfield_pipeline",
+        fake_drive_brownfield_pipeline,
+    )
+
+    code, out = _run(
+        ["improve", "feature", "--i2p", "add search"],
+        cwd=tmp_path,
+        env={"OTTO_RUN_ID": "2026-05-05-120000-target"},
+    )
+
+    assert code == 0, out
+    assert captured["brownfield"] is True
+    assert captured["brownfield_mode"] == "target"
+    assert captured["pipeline_command"] == "improve"
+
+
 def test_improve_feature_i2p_threads_runtime_overrides(
     tmp_path: Path, monkeypatch
 ) -> None:

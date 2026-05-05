@@ -30,6 +30,7 @@ _KNOWN_PLACEHOLDERS = frozenset({
     "story_evidence_scope",
     # A6.2 — brownfield compile preamble (research §9.4)
     "project_preamble",
+    "brownfield_mode_guidance",
 })
 
 _PLACEHOLDER_PATTERN = re.compile(
