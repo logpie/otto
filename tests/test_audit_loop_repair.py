@@ -27,9 +27,18 @@ def _spec(*feature_ids: str, group_id: str = "g") -> Spec:
     )
 
 
-def _verdict(feature_id: str, verdict: str = "partial",
-             detail: str = "") -> dict[str, Any]:
-    return {"feature_id": feature_id, "verdict": verdict, "detail": detail}
+def _verdict(
+    feature_id: str,
+    verdict: str = "partial",
+    detail: str = "",
+    evidence_refs: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "feature_id": feature_id,
+        "verdict": verdict,
+        "detail": detail,
+        "evidence_refs": evidence_refs or [],
+    }
 
 
 def _make_fix_agent(*, succeed: bool = True):
@@ -58,6 +67,24 @@ def _make_re_audit(updates: dict[str, str]):
 
     async def stub(feature_ids: list[str]) -> list[dict[str, Any]]:
         calls.append(list(feature_ids))
+        return [
+            _verdict(fid, updates.get(fid, "partial"))
+            for fid in feature_ids
+        ]
+
+    return stub, calls
+
+
+def _make_re_audit_sequence(
+    verdicts_by_call: list[dict[str, str]],
+):
+    """Build a re_audit that returns different verdicts on each pass."""
+    calls: list[list[str]] = []
+
+    async def stub(feature_ids: list[str]) -> list[dict[str, Any]]:
+        calls.append(list(feature_ids))
+        index = min(len(calls) - 1, len(verdicts_by_call) - 1)
+        updates = verdicts_by_call[index]
         return [
             _verdict(fid, updates.get(fid, "partial"))
             for fid in feature_ids
@@ -107,6 +134,34 @@ def test_features_without_group_skipped() -> None:
     assert result.attempts == []
     assert result.halted_reason == "no_failing_features"
     assert fix_calls == []
+
+
+def test_out_of_scope_missing_features_do_not_consume_repair_cap() -> None:
+    spec = _spec("target-1", "unrelated", "target-2")
+    fix_agent, fix_calls = _make_fix_agent()
+
+    result = asyncio.run(
+        repair_failing_features(
+            spec=spec,
+            feature_verdicts=[
+                _verdict("target-1", "blocked", evidence_refs=["walkthrough#1"]),
+                _verdict(
+                    "unrelated",
+                    "missing",
+                    detail="No changes were needed as the user intent does not mention this function.",
+                ),
+                _verdict("target-2", "blocked", evidence_refs=["walkthrough#2"]),
+            ],
+            fix_agent=fix_agent,
+            max_attempts_per_run=3,
+        )
+    )
+
+    assert [attempt.feature_id for attempt in result.attempts] == [
+        "target-1",
+        "target-2",
+    ]
+    assert fix_calls == [("target-1", "g"), ("target-2", "g")]
 
 
 # ---------------------------------------------------------------------------
@@ -159,20 +214,84 @@ def test_re_audit_still_partial_does_not_flip_succeeded() -> None:
             feature_verdicts=[_verdict("f1", "partial")],
             fix_agent=fix_agent,
             re_audit=re_audit,
-            max_attempts_per_run=10,
+            max_attempts_per_run=1,
             max_audit_passes=10,
         )
     )
     assert len(result.attempts) == 1
     a = result.attempts[0]
     assert a.new_verdict == "partial"
-    # fix_agent reported succeeded=True; re-audit said partial — we
-    # honor re-audit (the truthy verdict) by NOT flipping succeeded
-    # to True (it stays at whatever fix_agent reported, in this case
-    # True). The semantics: succeeded == "fix_agent's claim", new_verdict
-    # == "ground truth from re-audit". Caller decides what to do with
-    # the discrepancy.
-    assert a.succeeded is True
+    # Once re-audit exists, it is the source of truth. A fix-agent claim
+    # is not enough to mark the repair succeeded when audit still says
+    # partial.
+    assert a.succeeded is False
+    assert result.halted_reason == "repair_attempts_cap_exhausted"
+
+
+def test_repair_loop_retries_feature_that_reaudit_keeps_partial() -> None:
+    spec = _spec("f1", "f2")
+    fix_agent, fix_calls = _make_fix_agent(succeed=True)
+    re_audit, re_audit_calls = _make_re_audit_sequence([
+        {"f1": "passed", "f2": "partial"},
+        {"f2": "passed"},
+    ])
+
+    result = asyncio.run(
+        repair_failing_features(
+            spec=spec,
+            feature_verdicts=[
+                _verdict("f1", "partial"),
+                _verdict("f2", "partial"),
+            ],
+            fix_agent=fix_agent,
+            re_audit=re_audit,
+            max_attempts_per_run=3,
+            max_audit_passes=4,
+        )
+    )
+
+    assert [feature_id for feature_id, _ in fix_calls] == ["f1", "f2", "f2"]
+    assert re_audit_calls == [["f1", "f2"], ["f2"]]
+    assert result.audit_passes_run == 3
+    assert len(result.attempts) == 3
+    f2_attempts = [a for a in result.attempts if a.feature_id == "f2"]
+    assert [a.attempt_number for a in f2_attempts] == [1, 2]
+    assert f2_attempts[0].succeeded is False
+    assert f2_attempts[0].new_verdict == "partial"
+    assert f2_attempts[1].succeeded is True
+    assert f2_attempts[1].new_verdict == "passed"
+    assert result.halted_reason == ""
+
+
+def test_repair_loop_preserves_unattempted_failures_when_reaudit_is_scoped() -> None:
+    spec = _spec("f1", "f2")
+    fix_agent, fix_calls = _make_fix_agent(succeed=True)
+    re_audit, re_audit_calls = _make_re_audit_sequence([
+        {"f1": "partial", "f2": "partial"},
+        {"f1": "passed"},
+    ])
+
+    result = asyncio.run(
+        repair_failing_features(
+            spec=spec,
+            feature_verdicts=[
+                _verdict("f1", "partial"),
+                _verdict("f2", "partial"),
+            ],
+            fix_agent=fix_agent,
+            re_audit=re_audit,
+            max_attempts_per_run=3,
+            max_audit_passes=4,
+        )
+    )
+
+    assert [feature_id for feature_id, _ in fix_calls] == ["f1", "f2", "f1"]
+    assert re_audit_calls == [["f1", "f2"], ["f1"]]
+    assert result.audit_passes_run == 3
+    assert result.halted_reason == "repair_attempts_cap_exhausted"
+    by_feature = {a.feature_id: a for a in result.attempts}
+    assert by_feature["f2"].new_verdict == "partial"
+    assert by_feature["f2"].succeeded is False
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +346,53 @@ def test_max_attempts_per_run_caps_selection() -> None:
     # Order is the input verdict order
     assert fix_calls[0][0] == "f1"
     assert fix_calls[1][0] == "f2"
+
+
+def test_unactionable_blocked_verdicts_do_not_crowd_out_real_repairs() -> None:
+    spec = _spec("not_seen", "crashing_api", "wrong_output")
+    fix_agent, fix_calls = _make_fix_agent()
+    re_audit, re_audit_calls = _make_re_audit({
+        "crashing_api": "passed",
+        "wrong_output": "passed",
+    })
+
+    result = asyncio.run(
+        repair_failing_features(
+            spec=spec,
+            feature_verdicts=[
+                _verdict(
+                    "not_seen",
+                    "blocked",
+                    "No direct test evidence collected; not evaluated in this audit.",
+                ),
+                _verdict(
+                    "crashing_api",
+                    "blocked",
+                    "raises ValueError for the required input",
+                    evidence_refs=["walkthrough.jsonl#L4"],
+                ),
+                _verdict(
+                    "wrong_output",
+                    "partial",
+                    "returns the old value instead of the required value",
+                ),
+            ],
+            fix_agent=fix_agent,
+            re_audit=re_audit,
+            max_attempts_per_run=10,
+            max_audit_passes=10,
+        )
+    )
+
+    assert [feature_id for feature_id, _ in fix_calls] == [
+        "crashing_api",
+        "wrong_output",
+    ]
+    assert re_audit_calls == [["crashing_api", "wrong_output"]]
+    assert [a.feature_id for a in result.attempts] == [
+        "crashing_api",
+        "wrong_output",
+    ]
 
 
 # ---------------------------------------------------------------------------

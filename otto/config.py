@@ -1253,6 +1253,73 @@ def detect_test_command(project_dir: Path) -> str | None:
     return " && ".join(candidates)
 
 
+def detect_project_kind(project_dir: Path) -> str:
+    """Infer the closest i2p project kind from existing brownfield files.
+
+    This is intentionally conservative. `webapp` remains the fallback for
+    empty/new projects, while existing Python/Node/Rust projects with clear
+    library or CLI markers avoid being compiled against the webapp schema.
+    """
+    pkg_json = project_dir / "package.json"
+    if pkg_json.exists():
+        try:
+            pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pkg = {}
+        if isinstance(pkg, dict):
+            if pkg.get("bin"):
+                return "cli"
+            deps: dict[str, Any] = {}
+            for key in ("dependencies", "devDependencies", "peerDependencies"):
+                raw = pkg.get(key)
+                if isinstance(raw, dict):
+                    deps.update(raw)
+            scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+            web_markers = {
+                "react", "vue", "svelte", "next", "nuxt", "vite",
+                "@angular/core", "astro", "webpack",
+            }
+            if web_markers.intersection(deps) or any(
+                name in scripts for name in ("dev", "start", "preview")
+            ):
+                return "webapp"
+            return "library"
+
+    pyproject = project_dir / "pyproject.toml"
+    setup_py = project_dir / "setup.py"
+    setup_cfg = project_dir / "setup.cfg"
+    if pyproject.exists() or setup_py.exists() or setup_cfg.exists():
+        py_text = ""
+        if pyproject.exists():
+            try:
+                py_text = pyproject.read_text(encoding="utf-8").casefold()
+            except OSError:
+                py_text = ""
+        setup_text = ""
+        for path in (setup_py, setup_cfg):
+            if path.exists():
+                try:
+                    setup_text += "\n" + path.read_text(encoding="utf-8").casefold()
+                except OSError:
+                    pass
+        combined = f"{py_text}\n{setup_text}"
+        if (
+            "[project.scripts]" in combined
+            or "console_scripts" in combined
+            or "[tool.poetry.scripts]" in combined
+        ):
+            return "cli"
+        if any(marker in combined for marker in ("fastapi", "flask", "django")):
+            return "api"
+        return "library"
+
+    if (project_dir / "go.mod").exists() or (project_dir / "Cargo.toml").exists():
+        return "cli"
+    if (project_dir / "index.html").exists() or (project_dir / "src" / "App.tsx").exists():
+        return "webapp"
+    return "webapp"
+
+
 def detect_default_branch(project_dir: Path) -> str:
     """Detect the default branch name. Fallback to 'main'."""
     try:

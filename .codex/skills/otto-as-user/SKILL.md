@@ -1,6 +1,6 @@
 ---
 name: otto-as-user
-description: "Run Otto's CLI and web Mission Control as a real user would, against throwaway repos and real Claude or Codex providers when needed. Use for user-level regression passes over build, certify, resume, queue, merge, cancel, cleanup, and Mission Control behavior. Default to the smallest focused web/E2E harness unless the user explicitly asks for live provider, nightly, weekly, seeded, hidden-oracle, or real-cost coverage."
+description: "Run Otto's redesigned intent-to-product flow as a real user would, against throwaway repos or real projects with real Claude or Codex providers when needed. Use for user-level regression passes over compile, build, audit, proof, resume, queue, merge, cancel, cleanup, and Mission Control behavior. Default to the smallest real user-level harness that answers the question, but use real provider/project runs when the user asks for live, paid, redesign, pressure-test, or end-to-end proof."
 ---
 
 # Otto As User
@@ -13,6 +13,17 @@ Use this when ordinary tests are not enough and the user wants evidence that
 Otto works through real commands, real subprocesses, real provider calls, real
 web servers, browser automation, or web Mission Control interactions.
 
+For the redesigned i2p stack, the user-facing product path is:
+
+```text
+intent -> compile spec -> build Groups -> audit integrated product -> render proof
+```
+
+Treat that product path, the live CLI, and `otto_logs/sessions/<session-id>/`
+as authority. Historical scenario harnesses below are useful for Mission
+Control coverage, but they are not a substitute for real i2p runs on real
+projects when the task is about redesign readiness.
+
 ## Ground Rules
 
 - Run from the active worktree. Start with `pwd`, `git branch --show-current`,
@@ -23,11 +34,60 @@ web servers, browser automation, or web Mission Control interactions.
   - "test with Codex" means add `--provider codex`.
   - "test with Claude" means add `--provider claude`.
   - "compare providers" means run the same scenario set with both providers.
+- For i2p runs, verify the provider actually propagated into compile, build,
+  audit, repair, and merge-repair agents. If a run requested Codex but a
+  run-owned Claude child appears, stop and classify the run as an Otto bug.
 - Treat real provider runs as paid/slow. `scripts/web_as_user.py` requires
   `OTTO_ALLOW_REAL_COST=1`; choose the smallest scenario set that answers the
   question unless the user asks for broad coverage.
 - After failures, inspect artifacts before classifying them. Do not call a run
   successful from exit code alone.
+- External verification must run outside Otto before claiming success. Use the
+  target repo's native tests/builds and direct product assertions, not only
+  Otto's final verdict.
+
+## Redesigned i2p Runs
+
+Use the live CLI entrypoints and force i2p when testing redesign behavior:
+
+```bash
+uv run --extra dev python -m otto.cli build "build a product..." --i2p --provider codex --budget 1800 --max-turns 120 --verbose
+uv run --extra dev python -m otto.cli improve feature "add/fix behavior..." --i2p --provider codex --budget 1800 --max-turns 120 --verbose
+uv run --extra dev python -m otto.cli certify --i2p --provider codex --budget 1200 --max-turns 80 --verbose
+```
+
+Useful i2p flags:
+
+- `--resume`: continue an interrupted i2p checkpoint.
+- `--reset-budget`: do not count prior attempt spend on resume.
+- `--review-gate`: pause after compile until spec review approves.
+- `--auto-approve`: make scripted runs explicit about skipping review gate.
+- `--break-lock`: clear a stale project lock before starting.
+- `--allow-dirty`: run in a repo with local changes when the test requires it.
+
+For real project pressure tests, record at minimum:
+
+- exact Otto command, provider/model if visible, session id, wall time, cost,
+  and Otto verdict
+- project path/source and why it is a real/non-toy workload
+- external verifier command/result
+- proof packet path and relevant browser/video/screenshot artifacts
+- bugs found, logs inspected, root cause, generic fix, regression tests, gates
+  run, and decision to escalate/retry/fix/defer/stop
+
+Primary i2p artifacts:
+
+```text
+otto_logs/sessions/<session-id>/summary.json
+otto_logs/sessions/<session-id>/spec/spec.json
+otto_logs/sessions/<session-id>/spec-state.jsonl
+otto_logs/sessions/<session-id>/proof-packet.html
+otto_logs/sessions/<session-id>/proof-packet.json
+otto_logs/sessions/<session-id>/**/narrative.log
+otto_logs/sessions/<session-id>/audit/**/feature-verdicts.json
+otto_logs/sessions/<session-id>/audit/**/screenshots/
+otto_logs/sessions/<session-id>/audit/**/videos/
+```
 
 ## Harnesses
 

@@ -13,8 +13,8 @@ def test_baked_in_only_when_no_yaml_no_cli(tmp_path: Path) -> None:
     snap = defaults.snapshot_for(project_dir=tmp_path)
     assert snap.check_loop_max_attempts_per_group == 3
     assert snap.check_loop_timeout_per_attempt_s == 30 * 60
-    assert snap.audit_loop_max_repair_attempts_per_run == 1
-    assert snap.audit_loop_max_audit_passes_per_run == 2
+    assert snap.audit_loop_max_repair_attempts_per_run == 6
+    assert snap.audit_loop_max_audit_passes_per_run == 4
     assert snap.total_repair_wall_s == 90 * 60
     assert snap.total_cost_usd is None  # uncapped per user directive
     assert snap.per_group_cost_usd == 5.0
@@ -43,7 +43,7 @@ audit:
     assert snap.total_cost_usd == 25.0
     assert snap.audit_walkthrough_per_feature is True
     # untouched fields stay baked
-    assert snap.audit_loop_max_repair_attempts_per_run == 1
+    assert snap.audit_loop_max_repair_attempts_per_run == 6
 
 
 def test_cli_overrides_yaml(tmp_path: Path) -> None:

@@ -492,8 +492,7 @@ def test_type_check_pyright_default() -> None:
 def test_check_kind_union_includes_new_kinds() -> None:
     """CheckKind union must include all 8 kinds (5 legacy + 3 A1b)."""
     from otto.spec_compile import (
-        ApiProbe, BrowserJourney, CLIProbe, ImportCheck, PytestCheck,
-        RepoTestCheck, StateInvariant, TypeCheck, _CHECK_TYPES,
+        CLIProbe, ImportCheck, TypeCheck, _CHECK_TYPES,
     )
     expected_keys = {
         "pytest", "repo_test", "api_probe", "browser_journey",
@@ -1167,10 +1166,17 @@ def test_features_to_repair_caps_at_default() -> None:
         {"feature_id": f"f{i}", "verdict": "failed", "detail": "x"}
         for i in range(10)
     ]
-    # default max_repair_attempts_per_run is 1
+    # default max_repair_attempts_per_run is 6
     candidates = features_to_repair(spec, verdicts)
-    assert len(candidates) == 1
-    assert candidates[0].feature_id == "f0"
+    assert len(candidates) == 6
+    assert [c.feature_id for c in candidates] == [
+        "f0",
+        "f1",
+        "f2",
+        "f3",
+        "f4",
+        "f5",
+    ]
 
 
 def test_features_to_repair_respects_explicit_cap() -> None:
@@ -1222,9 +1228,10 @@ def test_features_to_repair_excludes_orphans() -> None:
 def test_can_run_another_audit_pass_within_cap() -> None:
     from otto.audit_loop import can_run_another_audit_pass
 
-    # Default max_audit_passes = 2; original counts as 1
+    # Default max_audit_passes = 4; original counts as 1
     assert can_run_another_audit_pass(audit_passes_run=1) is True
-    assert can_run_another_audit_pass(audit_passes_run=2) is False
+    assert can_run_another_audit_pass(audit_passes_run=3) is True
+    assert can_run_another_audit_pass(audit_passes_run=4) is False
 
 
 def test_can_run_another_audit_pass_explicit_cap() -> None:
@@ -1497,7 +1504,7 @@ def test_build_feature_proof_blocks_multi_feature_cross_link() -> None:
 
 def test_walkthrough_entry_to_dict_round_trip() -> None:
     from otto.spec_compile import (
-        WalkthroughEntry, parse_walkthrough_entry, walkthrough_entry_to_dict,
+        parse_walkthrough_entry, walkthrough_entry_to_dict,
     )
     spec = Spec(intent="webapp", features=[Feature(id="auth", name="Auth")])
     payload = {

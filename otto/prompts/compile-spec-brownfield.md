@@ -74,14 +74,77 @@ compile or hand-author Features.
 
 ## What you produce
 
-A single JSON object describing the product. Wrap the JSON in
-`<spec_json>...</spec_json>` so it can be parsed deterministically.
+A single JSON object describing the product, written to `{spec_path}`.
+Do not paste the JSON back in your final response; Otto reads the file
+directly. If writing the file is impossible, then and only then emit the
+JSON wrapped in `<spec_json>...</spec_json>` as a fallback.
 
-The schema is the same as greenfield compile (see `otto/spec_schemas/`):
-`schema_version`, `intent`, `project_kind`, `structure`, `groups`,
-`features`, `components`, `guardrails`, `shared_paths`. For brownfield,
-`tasks` on each Group should describe the **already-completed** work
-(useful for audit context), or be empty — Groups don't need re-doing.
+Use this schema shape directly; do not leave the target project to inspect
+Otto's own source code:
+
+```json
+{
+  "schema_version": 2,
+  "intent": "<verbatim intent>",
+  "project_kind": "<project_context kind>",
+  "structure": {"payload": {}},
+  "groups": [
+    {
+      "id": "stable-dispatch-id",
+      "name": "Human readable dispatch name",
+      "feature_ids": ["feature-id"],
+      "dependencies": [],
+      "owned_paths": ["real/path/or/glob"],
+      "checks": [
+        {"kind": "repo_test", "command": ["python", "-m", "pytest", "tests/test_example.py"], "timeout_s": 300}
+      ]
+    }
+  ],
+  "features": [
+    {
+      "id": "feature-id",
+      "name": "User-facing capability",
+      "description": "Observable behavior already present in the project",
+      "acceptance_detail": "How audit can recognize it",
+      "evidence_kinds": ["ImportCheck", "RepoTestCheck"],
+      "group_id": "stable-dispatch-id",
+      "evidence_completeness": "full",
+      "coverage_confidence": "high",
+      "multi_actor_required": false,
+      "audit_pre_merge": false
+    }
+  ],
+  "components": [],
+  "guardrails": [],
+  "shared_paths": [],
+  "audit_fixtures": [],
+  "non_goals": [],
+  "done_means": [],
+  "amendments": []
+}
+```
+
+`checks` must always contain typed check objects, never raw command strings.
+Use `repo_test` for native test/build commands, `pytest` only when a selector
+is enough, `import_check` for Python import smoke checks, `cli_probe` for CLI
+commands, `api_probe` for HTTP APIs, and `browser_journey` for browser-backed
+walkthroughs with evidence files.
+
+`structure.payload` must use the schema for `project_kind`:
+- `library`: `{"package_name": "...", "public_api": [{"symbol": "...", "kind": "function|class|module|constant", "summary": "...", "signature": "..."}]}`
+- `cli`: `{"entrypoint": "...", "commands": [{"name": "...", "summary": "...", "args": []}]}`
+- `webapp`: `{"routes": [{"path": "...", "component": "...", "key_text": "..."}], "components": [{"name": "...", "key_text": "..."}]}`
+- `api`: `{"base_path": "...", "endpoints": [{"method": "...", "path": "...", "summary": "...", "response_shape": "..."}]}`
+
+`feature.group_id` must be the owning Group id, and each Group's
+`feature_ids` should list its Features. For brownfield, `feature_ids`
+describe the **already-implemented** capabilities that live in the
+Group; Groups do not need re-doing.
+
+`audit_fixtures` is only for existing project-owned seed scripts under
+`scripts/otto/seed_user.py`, `seed_channel.py`, `seed_follow.py`, or
+`seed_data.py`. If those scripts are absent or no fixture is needed, use
+`"audit_fixtures": []`. Never emit placeholder fixture objects.
 
 Per-Feature `evidence_kinds` should reflect the most natural verification:
 - webapp routes → `BrowserJourney`, `ApiProbe`
@@ -105,9 +168,9 @@ Per-Feature `evidence_kinds` should reflect the most natural verification:
    multiple Groups.
 9. Decide Guardrails from explicit "this is not for X" signals in
    README, intent, or comments.
-10. Write the spec JSON to `{spec_path}` AND emit it inside
-    `<spec_json>...</spec_json>` in your final message. Do NOT add
-    markdown fences inside the tags.
+10. Write the spec JSON to `{spec_path}`. In your final message, do NOT
+    paste the JSON; include only `SPEC_PATH: {spec_path}` and a short
+    summary.
 
 After writing, your final message must include:
 

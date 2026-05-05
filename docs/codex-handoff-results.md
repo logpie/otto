@@ -435,3 +435,131 @@ Verification after fixes:
   -> 1395 passed, 531 deselected.
 - `git diff --check`
   -> passed.
+
+## 2026-05-05 Pressure Test Tier 1 - Brownfield CLI/Library
+
+Project:
+- Tier: 1, medium existing CLI/library project.
+- Source/path: fresh clone of `python-humanize/humanize` at
+  `/tmp/otto-i2p-pressure-20260505/humanize-rerun15`.
+- Why this is harder than prior tiny webapp runs: real public library with
+  mature tests, tox env matrix, docs/lint/mypy gates, locale-sensitive parsing,
+  and multiple public APIs that needed consistent behavior.
+
+Otto run:
+- Exact command:
+  `/usr/bin/time -p uv --project /Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2 run --extra dev python -m otto.cli improve feature "Support comma-separated numeric strings consistently for existing numeric string APIs: humanize.intword('1,200,000') should return '1.2 million', humanize.naturalsize('1,024', binary=True) should return '1.0 KiB', and invalid strings should still be returned unchanged. Preserve existing public behavior and existing test suite." --i2p --provider codex --budget 1800 --max-turns 120 --break-lock --verbose`
+- Provider/model: Codex provider requested and verified by child process tree;
+  concrete model name was not surfaced in Otto artifacts.
+- Session id: `2026-05-05-183958-4c7fea`.
+- Wall time: `/usr/bin/time` `real 1332.28s`; proof packet `wall_s=1063.99s`.
+- Cost: `proof-packet.json cost_usd=0.0`; Codex token usage was recorded but no
+  USD cost was surfaced by the provider adapter.
+- Final Otto verdict: `passed`.
+- Proof packet:
+  `/tmp/otto-i2p-pressure-20260505/humanize-rerun15/otto_logs/sessions/2026-05-05-183958-4c7fea/proof-packet.html`
+  and
+  `/tmp/otto-i2p-pressure-20260505/humanize-rerun15/otto_logs/sessions/2026-05-05-183958-4c7fea/proof-packet.json`.
+- Browser/video/screenshot artifacts: not applicable for this library tier.
+
+Run behavior and evidence:
+- Compile produced 5 Groups/Features: number, filesize, time, list, and i18n.
+- Initial audit correctly blocked: `intword('1,200,000')` returned the original
+  string and `naturalsize('1,024', binary=True)` raised `ValueError`.
+- First repair fixed valid comma parsing for `intword`; second repair fixed
+  `naturalsize` with grouping validation.
+- Product-wide re-audit correctly found a remaining invalid-string bug:
+  `intword('1,20,000')` normalized to `120.0 thousand` instead of remaining
+  unchanged.
+- The repair loop retried the still-partial number Feature and landed
+  `e22d1e8`, adding structural grouping validation and a native regression.
+- Final audit ran exact API probes, focused tests, full pytest, and native
+  `uvx --with tox-uv tox`; all passed.
+
+External verifier:
+- `uv run --extra tests pytest -q` from the target repo:
+  `693 passed, 69 skipped in 0.51s`.
+- Independent API oracle:
+  `intword('1,200,000') == '1.2 million'`,
+  malformed/alpha comma strings remain unchanged, and
+  `naturalsize('1,024', binary=True) == '1.0 KiB'`; all assertions passed.
+
+Bugs found and classification:
+- Otto bug fixed: scoped or stale re-audit results could previously mask still
+  failing Features and allow a false pass. The real run exercised the fix by
+  retrying `number-formatting-and-wording` after a partial re-audit.
+- Otto bug fixed: default repair cap of 3 was too low for a real two-feature
+  brownfield repair. Raised default Layer 2 cap to 6 with tests.
+- Otto bug fixed: i2p CLI/provider/config propagation previously allowed deeper
+  build/audit/repair agents to drift from the requested provider. This run kept
+  Codex subprocesses under the live Otto process.
+- Project bugs fixed by Otto in target repo: `intword` and `naturalsize`
+  comma-separated numeric string behavior and invalid-string preservation.
+
+Root cause:
+- Otto needed product-wide final re-audit semantics plus retry-loop state that
+  preserves unresolved/unreturned failures across scoped repair attempts.
+- Brownfield spec/CLI/provider plumbing had several weak seams: group aliases,
+  raw string checks, placeholder fixtures, project kind inference, and explicit
+  intent/provider overrides were not robust enough for real library repos.
+
+Generic fixes made in this worktree:
+- Brownfield spec parser/routing hardening in `otto/spec_compile.py`.
+- Project-kind inference and i2p CLI override propagation in
+  `otto/config.py`, `otto/cli.py`, `otto/cli_run.py`, and
+  `otto/cli_improve.py`.
+- Build/audit config propagation into spawned provider agents.
+- Audit repair loop state merge, product-wide final re-audit, unactionable
+  failure filtering, and default repair cap increase.
+- Build/audit prompt hardening requiring exact acceptance and invalid-path
+  executable evidence.
+- Target-provider environment propagation for project `.venv/bin` and `src/`.
+- `otto-as-user` skill refreshed for the redesigned i2p flow.
+
+Regression tests added:
+- Focused unit coverage across
+  `tests/test_spec_compile.py`, `tests/test_brownfield_compile.py`,
+  `tests/test_config.py`, `tests/test_cli_run.py`, `tests/test_agent.py`,
+  `tests/test_build.py`, `tests/test_audit.py`,
+  `tests/test_audit_prompt_feature_tagging.py`,
+  `tests/test_audit_loop_repair.py`, `tests/test_runner.py`,
+  `tests/test_merge_queue.py`, `tests/test_defaults.py`, and
+  `tests/test_a1a_dataclasses.py`.
+
+Gates run for this entry:
+- Target repo external verifier:
+  `uv run --extra tests pytest -q` -> `693 passed, 69 skipped`.
+- Target repo external API oracle -> passed.
+- Current worktree focused gates were run before the paid rerun; final expanded
+  worktree gates still pending after this documentation update.
+
+Decision:
+- Escalate to Tier 2. Tier 1 passed after generic Otto fixes and a real retry
+  path; no Tier 1 beyond-current-capability finding.
+
+Follow-up fix from Tier 1 evidence inspection:
+- Finding: separate audit calls in the same i2p session reused
+  `audit/attempt-00`, overwriting walkthrough and feature-verdict artifacts.
+  Tier 1 still had enough final proof evidence, but historical blocked/partial
+  artifacts were not durable.
+- Generic fix: `run_audit` now allocates the next available
+  `audit/attempt-NN` directory at call start and uses absolute attempt indexes
+  for log dirs and journal events.
+- Regression:
+  `uv run pytest -q tests/test_audit.py::test_run_audit_allocates_new_attempt_dir_across_calls`
+  -> 1 passed.
+- Additional checks:
+  `uv run python -m py_compile otto/audit.py tests/test_audit.py` -> passed;
+  `uv run ruff check otto/audit.py tests/test_audit.py` -> passed.
+
+Checkpoint gate before commit:
+- Focused affected suite:
+  `uv run pytest -q tests/test_spec_compile.py tests/test_brownfield_compile.py tests/test_runner.py tests/test_build.py tests/test_audit_loop_repair.py tests/test_a1a_dataclasses.py::test_features_to_repair_caps_at_default tests/test_a1a_dataclasses.py::test_can_run_another_audit_pass_within_cap tests/test_defaults.py tests/test_audit.py tests/test_config.py tests/test_cli_run.py tests/test_agent.py tests/test_merge_queue.py tests/test_audit_prompt_feature_tagging.py`
+  -> 375 passed.
+- Touched-file lint:
+  `uv run ruff check otto/agent.py otto/audit.py otto/audit_loop.py otto/build.py otto/cli.py otto/cli_improve.py otto/cli_run.py otto/config.py otto/defaults.py otto/merge_queue.py otto/runner.py otto/spec_compile.py tests/test_a1a_dataclasses.py tests/test_agent.py tests/test_audit.py tests/test_audit_loop_repair.py tests/test_audit_prompt_feature_tagging.py tests/test_brownfield_compile.py tests/test_build.py tests/test_cli_run.py tests/test_config.py tests/test_defaults.py tests/test_merge_queue.py tests/test_runner.py tests/test_spec_compile.py`
+  -> passed.
+- `git diff --check` -> passed.
+- Note: full `uv run ruff check otto tests` currently reports unrelated
+  pre-existing unused imports in files outside this patch set
+  (`otto/logstream.py`, `otto/spec_amend.py`, and several untouched tests).

@@ -41,6 +41,7 @@ import hashlib
 import json
 import logging
 import re
+import shlex
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -76,6 +77,7 @@ SPEC_FILENAME = "spec.json"
 COMPILE_PROMPT = "compile-spec.md"
 COMPILE_PROMPT_BROWNFIELD = "compile-spec-brownfield.md"
 PROJECT_KINDS: tuple[str, ...] = ("webapp", "cli", "library", "api")
+AUDIT_FIXTURE_KINDS: tuple[str, ...] = ("user", "channel", "follow", "data")
 SCHEMAS_DIR = Path(__file__).parent / "spec_schemas"
 
 
@@ -1611,7 +1613,7 @@ def _check_to_dict(check: CheckKind) -> dict[str, Any]:
 
 
 def _check_from_dict(
-    payload: dict[str, Any],
+    payload: Any,
     *,
     collector: WarningCollector | None = None,
     path: str = "",
@@ -1624,6 +1626,34 @@ def _check_from_dict(
         (e.g., test_unknown_check_kind_raises), use the legacy
         `_check_from_dict_strict` wrapper.
     """
+    if isinstance(payload, str):
+        command_text = payload.strip()
+        if not command_text:
+            if collector is not None:
+                collector.add(
+                    code="spec.coerce.check",
+                    path=path,
+                    message="check string is empty; dropped",
+                )
+            return None
+        try:
+            command = tuple(shlex.split(command_text))
+        except ValueError as exc:
+            if collector is not None:
+                collector.add(
+                    code="spec.coerce.check",
+                    path=path,
+                    message=f"check string could not be parsed as a shell command ({exc}); dropped",
+                )
+            return None
+        if collector is not None:
+            collector.add(
+                code="spec.coerce.check_string",
+                path=path,
+                message="check string coerced to repo_test command; prefer an explicit typed check object",
+                coerced_to="RepoTestCheck",
+            )
+        return RepoTestCheck(command=command)
     if not isinstance(payload, dict):
         if collector is not None:
             collector.add(
@@ -1779,13 +1809,273 @@ def _feature_from_dict(payload: dict[str, Any]) -> Feature:
         description=str(payload.get("description") or ""),
         acceptance_detail=str(payload.get("acceptance_detail") or ""),
         evidence_kinds=[str(e) for e in (payload.get("evidence_kinds") or [])],
-        group_id=str(payload.get("group_id") or ""),
+        group_id=str(
+            payload.get("group_id")
+            or payload.get("group")
+            or payload.get("group_name")
+            or payload.get("module")
+            or ""
+        ),
         verdict=payload.get("verdict"),
         evidence_completeness=str(payload.get("evidence_completeness") or "full"),
         coverage_confidence=str(payload.get("coverage_confidence") or "high"),
         multi_actor_required=bool(payload.get("multi_actor_required", False)),
         audit_pre_merge=bool(payload.get("audit_pre_merge", False)),
     )
+
+
+def _normalize_feature_group_ids(
+    features: list[Feature],
+    groups: list[Group],
+    collector: WarningCollector,
+) -> None:
+    """Repair common compile-agent Feature→Group linking drift in-place.
+
+    The canonical wire shape is ``feature.group_id = <Group.id>``. In
+    real brownfield compiles, agents sometimes emit a human label such
+    as ``module: "Number"`` or ``group_name: "Frontend"`` instead.
+    Without normalization, Layer 2 repair sees orphan Features and
+    silently has no Group agent to route to.
+    """
+    if not features or not groups:
+        return
+    groups_by_id = {g.id: g for g in groups}
+    groups_by_name = {
+        g.name.strip().casefold(): g
+        for g in groups
+        if g.name.strip()
+    }
+    feature_ids_by_group: dict[str, set[str]] = {
+        g.id: {fid.strip() for fid in g.feature_ids if fid.strip()}
+        for g in groups
+    }
+
+    for index, feature in enumerate(features):
+        raw_group_id = feature.group_id.strip()
+        resolved_group = False
+        if raw_group_id:
+            if raw_group_id in groups_by_id:
+                resolved_group = True
+            else:
+                group_by_name = groups_by_name.get(raw_group_id.casefold())
+                if group_by_name is not None:
+                    collector.add(
+                        code="spec.coerce.feature_group_id",
+                        path=f"features[{index}].group_id",
+                        message=(
+                            f"feature {feature.id!r} group reference "
+                            f"{raw_group_id!r} matched group name; using "
+                            f"group id {group_by_name.id!r}"
+                        ),
+                        coerced_to=group_by_name.id,
+                    )
+                    feature.group_id = group_by_name.id
+                    resolved_group = True
+                else:
+                    collector.add(
+                        code="spec.warning.feature_group_id",
+                        path=f"features[{index}].group_id",
+                        message=(
+                            f"feature {feature.id!r} references unknown group "
+                            f"{raw_group_id!r}; Layer 2 repair cannot route it"
+                        ),
+                    )
+        else:
+            candidates = [
+                gid
+                for gid, ids in feature_ids_by_group.items()
+                if feature.id in ids or feature.name in ids
+            ]
+            if len(candidates) == 1:
+                collector.add(
+                    code="spec.coerce.feature_group_id",
+                    path=f"features[{index}].group_id",
+                    message=(
+                        f"feature {feature.id!r} had no group_id but was "
+                        f"listed by group {candidates[0]!r}; using that "
+                        "group for repair routing"
+                    ),
+                    coerced_to=candidates[0],
+                )
+                feature.group_id = candidates[0]
+                resolved_group = True
+            else:
+                collector.add(
+                    code="spec.warning.feature_group_id",
+                    path=f"features[{index}].group_id",
+                    message=(
+                        f"feature {feature.id!r} has no group_id; Layer 2 "
+                        "repair cannot route it"
+                    ),
+                )
+
+        if not resolved_group:
+            continue
+        group = groups_by_id.get(feature.group_id)
+        if group is None or not feature.id.strip():
+            continue
+        group_feature_ids = {fid.strip() for fid in group.feature_ids if fid.strip()}
+        if feature.id not in group_feature_ids:
+            collector.add(
+                code="spec.coerce.group_feature_ids",
+                path=f"groups[{feature.group_id}].feature_ids",
+                message=(
+                    f"feature {feature.id!r} is assigned to group "
+                    f"{feature.group_id!r}; adding it to group.feature_ids"
+                ),
+                coerced_to=feature.id,
+            )
+            group.feature_ids.append(feature.id)
+
+
+_FEATURE_ROUTE_MAX_FILE_BYTES = 1_000_000
+_IDENTIFIER_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
+
+
+def infer_feature_group_routes_from_owned_paths(
+    spec: Spec,
+    project_dir: Path,
+) -> list[str]:
+    """Infer missing Feature->Group links from brownfield owned paths.
+
+    Compile agents occasionally describe a real project well enough to
+    identify Groups and Features, but omit the routing link between them.
+    Layer 2 cannot repair a Feature without knowing which Group owns it.
+    For brownfield projects, the most reliable fallback is the spec's
+    own ownership data: if a Feature id/API symbol appears in exactly one
+    Group's owned source files, route that Feature to that Group.
+    """
+    if not spec.features or not spec.groups:
+        return []
+    groups_by_id = {group.id: group for group in spec.groups}
+    messages: list[str] = []
+
+    for feature in spec.features:
+        if feature.group_id and feature.group_id in groups_by_id:
+            _backfill_group_feature_id(groups_by_id[feature.group_id], feature.id)
+            continue
+        identifiers = _feature_route_identifiers(feature)
+        if not identifiers:
+            continue
+        scored_matches = [
+            (score, group)
+            for group in spec.groups
+            if (score := _group_owned_paths_identifier_score(project_dir, group, identifiers))
+            > 0
+        ]
+        if scored_matches:
+            best_score = max(score for score, _group in scored_matches)
+            matches = [
+                group
+                for score, group in scored_matches
+                if score == best_score
+            ]
+        else:
+            matches = []
+        if len(matches) != 1:
+            continue
+        group = matches[0]
+        feature.group_id = group.id
+        _backfill_group_feature_id(group, feature.id)
+        messages.append(
+            "feature "
+            f"{feature.id!r}: inferred group_id {group.id!r} from owned_paths "
+            "symbol match"
+        )
+
+    return messages
+
+
+def _backfill_group_feature_id(group: Group, feature_id: str) -> None:
+    feature_id = feature_id.strip()
+    if not feature_id:
+        return
+    existing = {fid.strip() for fid in group.feature_ids if fid.strip()}
+    if feature_id not in existing:
+        group.feature_ids.append(feature_id)
+
+
+def _feature_route_identifiers(feature: Feature) -> tuple[str, ...]:
+    feature_id = feature.id.strip()
+    raw_candidates = [
+        feature_id,
+        feature_id.replace("-", "_"),
+        feature_id.replace("-", ""),
+    ]
+    for separator in ("_", "-"):
+        parts = [part for part in feature_id.split(separator) if part]
+        if len(parts) > 1:
+            raw_candidates.extend(separator.join(parts[index:]) for index in range(1, len(parts)))
+    found: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_candidates:
+        for identifier in _IDENTIFIER_RE.findall(raw or ""):
+            lowered = identifier.casefold()
+            if len(lowered) < 3 or lowered in seen:
+                continue
+            seen.add(lowered)
+            found.append(lowered)
+    return tuple(found)
+
+
+def _group_owned_paths_identifier_score(
+    project_dir: Path,
+    group: Group,
+    identifiers: tuple[str, ...],
+) -> int:
+    best_score = 0
+    for path in _iter_group_owned_files(project_dir, group.owned_paths):
+        try:
+            if path.stat().st_size > _FEATURE_ROUTE_MAX_FILE_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore").casefold()
+        except OSError:
+            continue
+        for identifier in identifiers:
+            if _text_has_identifier_definition(text, identifier):
+                best_score = max(best_score, 2)
+                continue
+            pattern = rf"(?<![a-z0-9_]){re.escape(identifier)}(?![a-z0-9_])"
+            if re.search(pattern, text):
+                best_score = max(best_score, 1)
+    return best_score
+
+
+def _text_has_identifier_definition(text: str, identifier: str) -> bool:
+    escaped = re.escape(identifier)
+    definition_patterns = (
+        rf"(?m)^\s*async\s+def\s+{escaped}(?=\W)",
+        rf"(?m)^\s*def\s+{escaped}(?=\W)",
+        rf"(?m)^\s*class\s+{escaped}(?=\W)",
+        rf"(?m)^\s*function\s+{escaped}(?=\W)",
+        rf"(?m)^\s*(?:export\s+)?(?:const|let|var)\s+{escaped}(?=\W)",
+    )
+    return any(re.search(pattern, text) for pattern in definition_patterns)
+
+
+def _iter_group_owned_files(project_dir: Path, owned_paths: list[str]) -> list[Path]:
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for raw_path in owned_paths:
+        raw_path = raw_path.strip()
+        if not raw_path or raw_path.startswith("!"):
+            continue
+        path = Path(raw_path)
+        if path.is_absolute():
+            candidates = [path]
+        elif any(ch in raw_path for ch in "*?["):
+            try:
+                candidates = list(project_dir.glob(raw_path))
+            except ValueError:
+                candidates = []
+        else:
+            candidates = [project_dir / raw_path]
+        for candidate in candidates:
+            if candidate in seen or not candidate.is_file():
+                continue
+            seen.add(candidate)
+            files.append(candidate)
+    return files
 
 
 def _component_to_dict(component: Component) -> dict[str, Any]:
@@ -1835,7 +2125,7 @@ def _guardrail_from_dict(payload: dict[str, Any]) -> Guardrail:
 
 def _audit_fixture_from_dict(payload: dict[str, Any]) -> AuditFixture:
     return AuditFixture(
-        kind=str(payload.get("kind") or ""),
+        kind=str(payload.get("kind") or "").strip(),
         payload=dict(payload.get("payload") or {}),
     )
 
@@ -2016,7 +2306,7 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
         groups.append(Group(
             id=group_id,
             name=str(name_raw or ""),
-            feature_ids=_coerce_str_list("feature_ids", "tasks"),
+            feature_ids=_coerce_str_list("feature_ids", "features", "tasks"),
             dependencies=_coerce_str_list("dependencies", "deps"),
             owned_paths=_coerce_str_list("owned_paths"),
             checks=checks,
@@ -2121,15 +2411,49 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
     # A1a fields — permissively absent on legacy specs; default empty.
     raw_features = data.get("features") or []
     features_parsed: list[Feature] = []
+    seen_feature_ids: set[str] = set()
     for index, f_payload in enumerate(raw_features):
         if isinstance(f_payload, dict):
-            features_parsed.append(_feature_from_dict(f_payload))
+            feature = _feature_from_dict(f_payload)
+            if not feature.id.strip():
+                feature.id = _coerce_feature_id_from_name(
+                    feature.name,
+                    index=index,
+                    seen=seen_feature_ids,
+                    collector=collector,
+                )
+            elif feature.id in seen_feature_ids:
+                original_id = feature.id
+                feature.id = _dedupe_slug(feature.id, seen_feature_ids)
+                collector.add(
+                    code="spec.coerce.feature_id",
+                    path=f"features[{index}].id",
+                    message=(
+                        f"duplicate feature id {original_id!r}; using "
+                        f"{feature.id!r}"
+                    ),
+                    coerced_to=feature.id,
+                )
+            if not feature.name.strip() and feature.id.strip():
+                feature.name = feature.id
+                collector.add(
+                    code="spec.coerce.feature_name",
+                    path=f"features[{index}].name",
+                    message=(
+                        f"feature name missing; using feature id "
+                        f"{feature.id!r}"
+                    ),
+                    coerced_to=feature.name,
+                )
+            seen_feature_ids.add(feature.id)
+            features_parsed.append(feature)
         else:
             collector.add(
                 code="spec.coerce.field",
                 path=f"features[{index}]",
                 message=f"feature entry is {type(f_payload).__name__}, not dict; skipped",
             )
+    _normalize_feature_group_ids(features_parsed, groups, collector)
 
     raw_components = data.get("components") or []
     components_parsed: list[Component] = []
@@ -2163,7 +2487,15 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
     audit_fixtures_parsed: list[AuditFixture] = []
     for index, fx_payload in enumerate(raw_audit_fixtures):
         if isinstance(fx_payload, dict):
-            audit_fixtures_parsed.append(_audit_fixture_from_dict(fx_payload))
+            fixture = _audit_fixture_from_dict(fx_payload)
+            if fixture.kind:
+                audit_fixtures_parsed.append(fixture)
+            else:
+                collector.add(
+                    code="spec.coerce.field",
+                    path=f"audit_fixtures[{index}]",
+                    message="audit_fixture kind is empty; skipped",
+                )
         else:
             collector.add(
                 code="spec.coerce.field",
@@ -2280,6 +2612,37 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9_-]+")
+
+
+def _dedupe_slug(slug: str, seen: set[str]) -> str:
+    if slug not in seen:
+        return slug
+    base = slug or "feature"
+    index = 2
+    while f"{base}-{index}" in seen:
+        index += 1
+    return f"{base}-{index}"
+
+
+def _coerce_feature_id_from_name(
+    name: str,
+    *,
+    index: int,
+    seen: set[str],
+    collector: WarningCollector,
+) -> str:
+    slug = _SLUG_RE.sub("-", name.lower()).strip("-_") or f"feature-{index}"
+    slug = _dedupe_slug(slug, seen)
+    collector.add(
+        code="spec.coerce.feature_id",
+        path=f"features[{index}].id",
+        message=(
+            f"feature id missing; synthesized {slug!r} from feature name "
+            f"{name!r}"
+        ),
+        coerced_to=slug,
+    )
+    return slug
 
 
 def _coerce_group_id(
@@ -2492,6 +2855,35 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
         for dep in group_.dependencies:
             if dep not in seen_ids:
                 warnings.append(f"group {group_.id!r}: dep {dep!r} not in spec")
+
+    feature_ids_seen: set[str] = set()
+    for feature in spec.features:
+        if not feature.id.strip():
+            warnings.append("feature id is empty")
+        elif feature.id in feature_ids_seen:
+            warnings.append(f"duplicate feature id: {feature.id!r}")
+        feature_ids_seen.add(feature.id)
+        if not feature.name.strip():
+            warnings.append(f"feature {feature.id!r}: name is empty")
+        if not feature.group_id:
+            warnings.append(
+                f"feature {feature.id!r}: group_id is empty "
+                "(Layer 2 repair cannot route this Feature)"
+            )
+        elif feature.group_id not in seen_ids:
+            warnings.append(
+                f"feature {feature.id!r}: group_id {feature.group_id!r} "
+                "not in spec groups"
+            )
+
+    for index, fixture in enumerate(spec.audit_fixtures):
+        if not fixture.kind:
+            warnings.append(f"audit_fixtures[{index}]: kind is empty")
+        elif fixture.kind not in AUDIT_FIXTURE_KINDS:
+            warnings.append(
+                f"audit_fixtures[{index}]: kind {fixture.kind!r} not in "
+                f"{AUDIT_FIXTURE_KINDS}"
+            )
 
     schema = _load_kind_schema(spec.project_kind)
     if schema is not None:
@@ -3219,7 +3611,15 @@ async def compile_spec(
         project_dir=project_dir,
     )
 
-    payload = _extract_spec_json(text)
+    if spec_path.exists():
+        try:
+            payload = json.loads(spec_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SpecValidationError(
+                f"compile agent wrote invalid spec.json at {spec_path}: {exc}"
+            ) from exc
+    else:
+        payload = _extract_spec_json(text)
     if "intent" not in payload or not str(payload["intent"]).strip():
         payload["intent"] = intent
     if "project_kind" not in payload:
@@ -3233,6 +3633,12 @@ async def compile_spec(
     # amendments, structure, etc.).
     if brownfield and base_spec is not None:
         spec = _reconcile_brownfield(spec, base_spec)
+    routing_warnings: list[str] = []
+    if brownfield:
+        routing_warnings = infer_feature_group_routes_from_owned_paths(
+            spec,
+            project_dir,
+        )
 
     result = validate_spec(spec)
     if not result.valid:
@@ -3244,9 +3650,10 @@ async def compile_spec(
     # cross_group_checks" alerts that the validator emitted. Surface
     # them via the standard logger so they hit narrative.log AND
     # attach to the spec object so callers can render them.
-    for warning in result.warnings:
+    all_warnings = [*routing_warnings, *result.warnings]
+    for warning in all_warnings:
         logger.warning("spec validator: %s", warning)
-    setattr(spec, "_validator_warnings", list(result.warnings))
+    setattr(spec, "_validator_warnings", all_warnings)
 
     persist_spec(spec, spec_path, allow_initial=True)
     return spec

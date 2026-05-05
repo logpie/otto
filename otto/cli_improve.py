@@ -16,7 +16,7 @@ from pathlib import Path
 import click
 
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
-from otto.config import ConfigError, require_git, resolve_project_dir
+from otto.config import detect_project_kind, require_git, resolve_project_dir
 from otto.theme import error_console
 
 
@@ -138,12 +138,16 @@ def _require_intent(
     *,
     fallback: str | None = None,
     fallback_label: str = "argument",
+    prefer_fallback: bool = False,
 ) -> str:
     """Resolve intent or exit with error. Normalizes whitespace so multiline
     intent files don't leak embedded line-wraps into resolved_intent."""
     from otto.config import ConfigError, _normalize_intent, resolve_intent
 
     fallback_intent = _normalize_intent(fallback or "")
+    if prefer_fallback and fallback_intent:
+        console.print(f"  [dim]Intent from {fallback_label}[/dim]")
+        return fallback_intent
     try:
         intent = _normalize_intent(resolve_intent(project_dir) or "")
     except ConfigError as exc:
@@ -256,7 +260,12 @@ def register_improve_commands(main: click.Group) -> None:
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
-        intent = _require_intent(project_dir, fallback=focus, fallback_label="focus")
+        intent = _require_intent(
+            project_dir,
+            fallback=focus,
+            fallback_label="focus",
+            prefer_fallback=True,
+        )
 
         from otto.cli_run import resolve_pipeline_choice
         pipeline_choice = resolve_pipeline_choice(
@@ -288,11 +297,27 @@ def register_improve_commands(main: click.Group) -> None:
         from otto.cli_run import orchestrate_improve
         orchestrate_improve(
             intent=intent,
-            project_kind="webapp",
+            project_kind=detect_project_kind(project_dir),
             break_lock=break_lock,
             project_dir=project_dir,
             rounds=rounds,
             focus=focus,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            build_provider=build_provider,
+            build_model=build_model,
+            build_effort=build_effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
+            fix_provider=fix_provider,
+            fix_model=fix_model,
+            fix_effort=fix_effort,
+            verbose=verbose,
+            debug_unredacted=debug_unredacted,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
@@ -362,7 +387,12 @@ def register_improve_commands(main: click.Group) -> None:
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
-        intent = _require_intent(project_dir, fallback=focus, fallback_label="focus")
+        intent = _require_intent(
+            project_dir,
+            fallback=focus,
+            fallback_label="focus",
+            prefer_fallback=True,
+        )
 
         from otto.cli_run import resolve_pipeline_choice
         pipeline_choice = resolve_pipeline_choice(
@@ -390,11 +420,27 @@ def register_improve_commands(main: click.Group) -> None:
         from otto.cli_run import orchestrate_improve
         orchestrate_improve(
             intent=intent,
-            project_kind="webapp",
+            project_kind=detect_project_kind(project_dir),
             break_lock=break_lock,
             project_dir=project_dir,
             rounds=rounds,
             focus=focus,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            build_provider=build_provider,
+            build_model=build_model,
+            build_effort=build_effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
+            fix_provider=fix_provider,
+            fix_model=fix_model,
+            fix_effort=fix_effort,
+            verbose=verbose,
+            debug_unredacted=debug_unredacted,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
@@ -493,11 +539,30 @@ def register_improve_commands(main: click.Group) -> None:
         # `target` uses `goal` as the focus equivalent.
         orchestrate_improve(
             intent=_require_intent(
-                project_dir, fallback=goal, fallback_label="goal"
+                project_dir,
+                fallback=goal,
+                fallback_label="goal",
+                prefer_fallback=True,
             ),
-            project_kind="webapp",
+            project_kind=detect_project_kind(project_dir),
             break_lock=break_lock,
             project_dir=project_dir,
             rounds=rounds,
             focus=goal,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            build_provider=build_provider,
+            build_model=build_model,
+            build_effort=build_effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
+            fix_provider=fix_provider,
+            fix_model=fix_model,
+            fix_effort=fix_effort,
+            verbose=verbose,
+            debug_unredacted=debug_unredacted,
         )

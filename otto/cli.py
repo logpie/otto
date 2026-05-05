@@ -23,6 +23,7 @@ from otto.config import (
     _normalize_intent,
     agent_effort,
     agent_provider,
+    detect_project_kind,
     effective_agent_model,
     load_config,
     require_git,
@@ -1162,7 +1163,7 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
         from otto.cli_run import orchestrate_run
         orchestrate_run(
             intent=intent,
-            project_kind="webapp",
+            project_kind=detect_project_kind(project_dir),
             break_lock=break_lock,
             no_build=False,
             base_url=None,
@@ -1173,6 +1174,22 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
             force=force,
             review_gate=review_gate,
             gate_timeout_s=gate_timeout_s,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            build_provider=build_provider,
+            build_model=build_model,
+            build_effort=build_effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
+            fix_provider=fix_provider,
+            fix_model=fix_model,
+            fix_effort=fix_effort,
+            verbose=verbose,
+            debug_unredacted=debug_unredacted,
         )
         return  # orchestrate_run sys.exit's on its own; defensive return
 
@@ -1287,12 +1304,20 @@ def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model,
         from otto.cli_run import orchestrate_certify
         orchestrate_certify(
             intent=intent,
-            project_kind="webapp",
+            project_kind=detect_project_kind(project_dir),
             break_lock=break_lock,
             project_dir=project_dir,
             resume=resume,
             reset_budget=reset_budget,
             force=force,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
         )
         return  # orchestrate_certify sys.exit's; defensive return
 

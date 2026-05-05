@@ -23,6 +23,7 @@ from otto.build import (
     BuildBudget,
     GroupStatus,
     _build_agent_prompt,
+    _commit_group_work,
     default_build_agent,
     detect_dependency_scope_extensions,
     detect_scope_violations,
@@ -30,6 +31,7 @@ from otto.build import (
     run_build,
 )
 from otto.spec_compile import (
+    Feature,
     RepoTestCheck,
     Group,
     Spec,
@@ -536,6 +538,48 @@ def test_default_build_agent_passes_resume_session_to_provider(tmp_path: Path, m
     assert seen["resume"] == "provider-session-1"
 
 
+def test_default_build_agent_uses_input_config_for_provider_options(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """CLI/runtime provider overrides must reach spawned build agents."""
+    from otto.agent import AgentOptions
+
+    group = Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[])
+    spec = _spec([group])
+    seen: dict[str, object] = {}
+
+    def fake_make_options(_project_dir, config, *, agent_type, **_kwargs) -> AgentOptions:
+        seen["config"] = dict(config)
+        seen["agent_type"] = agent_type
+        return AgentOptions()
+
+    async def fake_run_agent(_prompt, options, **_kwargs):
+        return "done", 0.0, "provider-session", {}
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent)
+
+    asyncio.run(
+        default_build_agent(
+            BuildAgentInput(
+                spec=spec,
+                group=group,
+                project_dir=tmp_path,
+                worktree=tmp_path,
+                branch="i2p/test/s1",
+                attempt=1,
+                config={"provider": "codex", "_cli_overrides": {"provider": "codex"}},
+            )
+        )
+    )
+
+    assert seen["agent_type"] == "build"
+    assert seen["config"] == {
+        "provider": "codex",
+        "_cli_overrides": {"provider": "codex"},
+    }
+
+
 def test_run_build_blocks_after_retry_exhaustion(tmp_path: Path) -> None:
     _init_git(tmp_path)
     session_dir = tmp_path / "_session"
@@ -839,6 +883,43 @@ def test_build_agent_prompt_includes_last_failure_on_retry(tmp_path: Path) -> No
     assert "do NOT widen scope" in prompt.lower() or "do not widen scope" in prompt.lower()
 
 
+def test_layer2_build_prompt_requires_regression_tests(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    s = Group(id="number", name="Number", owned_paths=["src/number.py"])
+    spec = _spec([s])
+    spec.intent = "invalid comma strings should be returned unchanged"
+    spec.features = [
+        Feature(
+            id="intword",
+            name="intword",
+            group_id="number",
+            description="parse comma-separated numeric strings",
+        )
+    ]
+    inp = BuildAgentInput(
+        spec=spec,
+        group=s,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="",
+        attempt=1,
+        feature_id="intword",
+        last_failure_narrative="intword('not,a,number') returned 'notanumber'",
+    )
+
+    prompt = _build_agent_prompt(inp)
+
+    assert "Regression-test requirement" in prompt
+    assert "repo-native regression test" in prompt
+    assert "exact acceptance examples" in prompt
+    assert "invalid/error input" in prompt
+    assert "same changed path" in prompt
+    assert "Do NOT change expected test values" in prompt
+    assert "exactly equal to the original input" in prompt
+    assert "including punctuation/separators" in prompt
+    assert "docstring examples are not a substitute" in prompt
+
+
 # ---------------------------------------------------------------------------
 # Project contract surface in build prompt (Microfeed bench learning)
 # ---------------------------------------------------------------------------
@@ -1038,6 +1119,56 @@ def test_run_build_falls_back_when_not_a_git_repo(tmp_path: Path) -> None:
 # B2/B4: commit-failure handling — branch_by_group not populated, slice BLOCKED,
 #        journal records BLOCKED instead of PASSING
 # ---------------------------------------------------------------------------
+
+
+def test_commit_group_work_ignores_otto_build_logs_only(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    initial_count = int(subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip())
+
+    log_dir = tmp_path / "_otto_build_logs" / "attempt-01"
+    log_dir.mkdir(parents=True)
+    (log_dir / "messages.jsonl").write_text("provider transcript\n", encoding="utf-8")
+
+    assert _commit_group_work(tmp_path, group_id="g", branch="layer2/g")
+
+    final_count = int(subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip())
+    assert final_count == initial_count
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout
+    assert "?? _otto_build_logs/" in status
+
+
+def test_commit_group_work_excludes_otto_build_logs_from_product_commit(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('real change')\n", encoding="utf-8")
+    log_dir = tmp_path / "_otto_build_logs" / "attempt-01"
+    log_dir.mkdir(parents=True)
+    (log_dir / "messages.jsonl").write_text("provider transcript\n", encoding="utf-8")
+
+    assert _commit_group_work(tmp_path, group_id="g", branch="layer2/g")
+
+    committed_paths = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    assert "src/app.py" in committed_paths
+    assert not any(path.startswith("_otto_build_logs/") for path in committed_paths)
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout
+    assert "?? _otto_build_logs/" in status
 
 
 def test_run_build_marks_blocked_on_commit_failure(tmp_path: Path) -> None:

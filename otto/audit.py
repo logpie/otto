@@ -200,6 +200,7 @@ class AuditAgentInput:
     log_dir: Path | None = None
     walkthrough_jsonl_path: Path | None = None
     feature_scope_ids: tuple[str, ...] = ()
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -416,6 +417,21 @@ def _spec_with_group_fallback_features(
     if not features:
         return spec
     return dataclasses.replace(spec, features=features)
+
+
+def _next_audit_attempt_index(session_dir: Path) -> int:
+    """Return the next unused audit attempt index for this session."""
+    audit_dir = session_dir / "audit"
+    if not audit_dir.exists():
+        return 0
+    max_seen = -1
+    for path in audit_dir.iterdir():
+        if not path.is_dir():
+            continue
+        match = re.fullmatch(r"attempt-(\d+)", path.name)
+        if match:
+            max_seen = max(max_seen, int(match.group(1)))
+    return max_seen + 1
 
 
 def default_walkthrough_from_spec(
@@ -852,6 +868,7 @@ async def run_audit(
     build_result: BuildResult,
     merge_result: MergeQueueResult,
     audit_agent: AuditAgentCallable,
+    config: dict[str, Any] | None = None,
     base_url: str | None = None,
     walkthrough: WalkthroughCallable | None = None,
     fix_agent: BuildAgentCallable | None = None,
@@ -891,6 +908,7 @@ async def run_audit(
         AuditResult with verdict + narrative + slice verdicts +
         cross-slice evidence + walkthrough artifacts.
     """
+    config = dict(config or {})
     budget = budget or AuditBudget()
     walk = walkthrough or no_op_walkthrough
     scoped_feature_ids = tuple(str(fid) for fid in (feature_scope_ids or ()) if str(fid))
@@ -905,18 +923,22 @@ async def run_audit(
     # PASSED on a later attempt while real repair work never landed.
     fix_loop_failed_attempts: list[int] = []
     fix_session_by_group: dict[str, str] = {}
+    attempt_start = _next_audit_attempt_index(session_dir)
 
     emit(session_dir, "audit.started")
 
     while retries <= budget.audit_retries:
         retries_this_pass = retries
+        attempt_index = attempt_start + retries
+        attempt_dir = session_dir / "audit" / f"attempt-{attempt_index:02d}"
+        repair_attempt_number = attempt_index + 1
         # 1: cross-slice checks against integrated worktree
         cross_pairs = run_checks(
             list(spec.cross_group_checks),
             project_dir=project_dir,
             cwd=project_dir,
             base_url=base_url,
-            raw_log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "cross-slice",
+            raw_log_dir=attempt_dir / "cross-slice",
         )
         cross_evidence = [ev for _check, ev in cross_pairs]
 
@@ -926,11 +948,11 @@ async def run_audit(
         # contract the project declared" check, distinct from per-slice
         # tests the build agents wrote themselves.
         contract_passed, contract_detail = _run_project_contract_test(
-            project_dir, log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "contract"
+            project_dir, log_dir=attempt_dir / "contract"
         )
 
         # 2: walkthrough subprocess
-        walk_log_dir = session_dir / "audit" / f"attempt-{retries:02d}" / "walkthrough"
+        walk_log_dir = attempt_dir / "walkthrough"
         walk_log_dir.mkdir(parents=True, exist_ok=True)
         walk_result = walk(project_dir, walk_log_dir, budget.walk_timeout_s)
 
@@ -949,9 +971,10 @@ async def run_audit(
             merge_summary=_merge_summary(merge_result),
             cross_slice_evidence=cross_evidence,
             walkthrough_artifacts=list(walk_result.artifacts),
-            log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "judge",
+            log_dir=attempt_dir / "judge",
             walkthrough_jsonl_path=walk_log_dir / "walkthrough.jsonl",
             feature_scope_ids=scoped_feature_ids,
+            config=config,
         )
         # C1 fix: bail out before invoking the audit agent if the
         # shared cost pool is exhausted. Prevents an audit retry
@@ -1111,7 +1134,7 @@ async def run_audit(
         emit(
             session_dir,
             "audit.attempt.finished",
-            attempt=retries,
+            attempt=attempt_index,
             detail=narrative[:200],
             verdict=verdict.value,
             quality_score=agent_output.quality_score,
@@ -1185,7 +1208,7 @@ async def run_audit(
                 unavailable_for_repair.add(group_id)
                 emit(
                     session_dir, "group.attempt.failed",
-                    group_id=group_id, attempt=retries + 1,
+                    group_id=group_id, attempt=repair_attempt_number,
                     detail="shared cost budget exhausted; fix skipped",
                 )
                 break
@@ -1203,7 +1226,7 @@ async def run_audit(
                     session_dir,
                     "group.attempt.failed",
                     group_id=group_id,
-                    attempt=retries + 1,
+                    attempt=repair_attempt_number,
                     detail=(
                         "repair skipped because dependency group(s) are blocked: "
                         + ", ".join(blocked_deps)
@@ -1224,13 +1247,14 @@ async def run_audit(
                 project_dir=project_dir,
                 worktree=worktree,
                 branch=branch,
-                attempt=retries + 1,
+                attempt=repair_attempt_number,
                 last_failure_narrative=(
-                    f"audit attempt {retries + 1} flagged group "
+                    f"audit attempt {repair_attempt_number} flagged group "
                     f"{group_id}: {next((v.detail for v in agent_output.group_verdicts if v.group_id == group_id), '')}"
                 ),
-                log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "fix" / group_id,
+                log_dir=attempt_dir / "fix" / group_id,
                 agent_session_id=fix_session_by_group.get(group_id, ""),
+                config=agent_input.config,
             )
             # V3 fix: for greenfield runs with a real build-phase Group
             # branch, checkout that branch before invoking the fix-agent
@@ -1256,7 +1280,7 @@ async def run_audit(
                     unavailable_for_repair.add(group_id)
                     emit(
                         session_dir, "group.attempt.failed",
-                        group_id=group_id, attempt=retries + 1,
+                        group_id=group_id, attempt=repair_attempt_number,
                         detail=f"could not checkout group branch {branch} for fix",
                     )
                     continue
@@ -1297,7 +1321,7 @@ async def run_audit(
                                 unavailable_for_repair.discard(group_id)
                                 emit(
                                     session_dir, "group.merge.landed",
-                                    group_id=group_id, attempt=retries + 1,
+                                    group_id=group_id, attempt=repair_attempt_number,
                                     detail=merge_outcome.head_after,
                                 )
                             else:
@@ -1318,14 +1342,14 @@ async def run_audit(
                                 session_dir,
                                 "group.merge.landed",
                                 group_id=group_id,
-                                attempt=retries + 1,
+                                attempt=repair_attempt_number,
                                 detail=(head.stdout or "").strip(),
                             )
                 emit(
                     session_dir,
                     "group.attempt.failed" if not fix_output.succeeded else "group.merge.eligible",
                     group_id=group_id,
-                    attempt=retries + 1,
+                    attempt=repair_attempt_number,
                     detail=fix_output.detail or "",
                 )
                 # Return to base_branch so the next audit pass judges
@@ -1341,14 +1365,14 @@ async def run_audit(
                     session_dir,
                     "group.attempt.failed",
                     group_id=group_id,
-                    attempt=retries + 1,
+                    attempt=repair_attempt_number,
                     detail=f"audit-routed fix crashed: {type(exc).__name__}: {exc}",
                 )
         # C4 fix: if any fix in this cycle failed, the next audit pass
         # must NOT silently upgrade to PASSED. Track in a flag the
         # next iteration of `_compose_verdict` consults.
         if any_fix_failed:
-            fix_loop_failed_attempts.append(retries + 1)
+            fix_loop_failed_attempts.append(repair_attempt_number)
         retries += 1
 
     # Out of retries; return the latest result we have.
@@ -1390,6 +1414,7 @@ def _run_project_contract_test(
     LLM sees and what a downstream consumer sees.
     """
     import shlex
+    import shutil
     import subprocess as _sp
 
     try:
@@ -1412,6 +1437,13 @@ def _run_project_contract_test(
         return None, "test_command parsed to empty argv"
 
     env = _subprocess_env(extra_pythonpath=[project_dir])
+    command_for_output = test_command
+    fallback_note = ""
+    fallback_argv = _fallback_contract_test_argv(argv, env=env, which=shutil.which)
+    if fallback_argv is not None:
+        argv = fallback_argv
+        command_for_output = shlex.join(argv)
+        fallback_note = f"; fallback from {test_command!r}"
     try:
         completed = _sp.run(
             argv,
@@ -1423,12 +1455,12 @@ def _run_project_contract_test(
             check=False,
         )
     except _sp.TimeoutExpired:
-        return False, f"test_command timed out: {test_command}"
+        return False, f"test_command timed out: {command_for_output}"
     except Exception as exc:  # noqa: BLE001 — surface any subprocess failure
         return False, f"test_command launch failed: {type(exc).__name__}: {exc}"
 
     output = (
-        f"$ {test_command}\nexit_code={completed.returncode}\n\n"
+        f"$ {command_for_output}\nexit_code={completed.returncode}\n\n"
         f"STDOUT:\n{completed.stdout or ''}\n\nSTDERR:\n{completed.stderr or ''}"
     )
     if log_dir is not None:
@@ -1439,10 +1471,35 @@ def _run_project_contract_test(
             pass
 
     detail = (
-        f"test_command={test_command!r} exit={completed.returncode}; "
+        f"test_command={command_for_output!r} exit={completed.returncode}"
+        f"{fallback_note}; "
         + ((completed.stdout or "")[-400:].strip() or "(no stdout)")
     )
     return completed.returncode == 0, detail
+
+
+def _fallback_contract_test_argv(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    which: Any,
+) -> list[str] | None:
+    """Return a portable launcher for known project test commands.
+
+    Many Python projects declare tox as their native test orchestrator
+    but rely on CI to bootstrap it through uvx. If Otto records `tox` in
+    `otto.yaml` and `tox` is not installed in the local environment, the
+    contract gate should still run the project's native tox contract when
+    uvx is available.
+    """
+    if not argv or argv[0] != "tox":
+        return None
+    path = env.get("PATH") or None
+    if which("tox", path=path) is not None:
+        return None
+    if which("uvx", path=path) is None:
+        return None
+    return ["uvx", "--with", "tox-uv", "tox", *argv[1:]]
 
 
 def _build_summary(build_result: BuildResult) -> dict:
@@ -1653,6 +1710,34 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "       Emit one entry per Feature. If a Feature is implemented "
         "but with caveats, mark partial and "
         "explain. Empty list is NOT acceptable when done_means has items."
+    )
+    lines.append(
+        "       For repaired or newly implemented behavior, a `passed` "
+        "Feature needs direct executable evidence for the exact acceptance "
+        "examples and edge/error cases in the intent or audit detail. Do "
+        "NOT infer that an error-preservation requirement works from a "
+        "different invalid value; test an invalid input that exercises the "
+        "same changed parser/normalizer/validation path. If the repo has a "
+        "test suite and no focused regression test was added for the new "
+        "behavior, mark the Feature `partial` unless your walkthrough "
+        "directly executes every named success and failure case."
+    )
+    lines.append(
+        "       The user's intent and acceptance text are the product "
+        "contract. Tests, docstrings, or comments added by the repair agent "
+        "are evidence only; they are NOT allowed to redefine that contract. "
+        "If a newly added test expects behavior that contradicts the user's "
+        "intent, mark the Feature `partial` or `blocked` and call out the "
+        "bad test. In particular, if the contract says an invalid string is "
+        "`unchanged`, verify exact string equality with the original input, "
+        "including punctuation/separators."
+    )
+    lines.append(
+        "       A docstring example counts as regression coverage only when "
+        "the repo's native test/lint command actually runs doctests. If a "
+        "normal editable test file exists and no repo-native focused test was "
+        "added for the changed behavior, do not treat the Feature as fully "
+        "tested merely because a docstring example or manual command passed."
     )
     lines.append("  4. A final verdict: 'passed', 'partial', or 'blocked'.")
     lines.append(
@@ -1977,8 +2062,8 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
 
     config_path = agent_input.project_dir / "otto.yaml"
     # Pattern F: distinguish missing (fine) from unreadable (fail).
-    config: dict = {}
-    if config_path.exists():
+    config: dict = dict(agent_input.config or {})
+    if not config and config_path.exists():
         try:
             config = load_config(config_path)
         except Exception as exc:

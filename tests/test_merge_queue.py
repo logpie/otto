@@ -346,7 +346,10 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
         ],
     )
 
+    seen_configs: list[dict] = []
+
     async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        seen_configs.append(dict(input_.config))
         # Repair by creating the missing marker.
         (input_.worktree / "marker.txt").write_text("ok", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.05)
@@ -355,11 +358,15 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
             build_agent=repair_agent,
+            config={"provider": "codex", "_cli_overrides": {"provider": "codex"}},
         )
     )
     assert result.landed_ids == ["s1"]
     assert result.results[0].repair_attempts == 1
     assert result.results[0].cost_usd > 0
+    assert seen_configs == [
+        {"provider": "codex", "_cli_overrides": {"provider": "codex"}}
+    ]
 
 
 def test_run_merge_queue_blocks_when_repair_retries_exhausted(tmp_path: Path) -> None:

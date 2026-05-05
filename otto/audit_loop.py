@@ -1,9 +1,11 @@
 """Layer 2 retry loop for failing Features (research §4 retry layers).
 
 Per research §4: when audit's LLM judge flags a Feature as failing or
-partial, the failing Feature is routed back to its Group's agent for
-ONE repair attempt; audit re-runs only on the affected Features (not
-the whole product).
+partial, the failing Feature is routed back to its Group's agent for a
+bounded repair attempt; audit re-runs only on the affected Features
+(not the whole product). If the narrowed re-audit still reports an
+actionable failure and the run has repair/audit budget left, the loop
+continues instead of stopping after the first repair pass.
 
 Layer 1 (Build's check loop) handles deterministic Check failures
 inside a Group. Layer 2 (this module) handles LLM-judged Feature
@@ -11,8 +13,9 @@ failures across Groups. No Layer 3 — after Layer 2 cap exhaustion,
 the Run lands honestly with `verdict=partial` or `blocked`.
 
 Caps come from `otto/defaults.py`:
-- `retries.audit_loop.max_repair_attempts_per_run`: per-Feature repair cap (default 1)
-- `retries.audit_loop.max_audit_passes_per_run`: total audit passes including original (default 2)
+- `retries.audit_loop.max_repair_attempts_per_run`: maximum actionable Feature
+  repairs in one run
+- `retries.audit_loop.max_audit_passes_per_run`: total audit passes including original
 
 Quality findings with severity `critical` flip a Feature verdict to
 `partial` and trigger Layer 2 repair. `important`/`polish` findings
@@ -21,10 +24,12 @@ do NOT trigger repair (research §4 severity ladder).
 
 from __future__ import annotations
 
+import time as _time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from otto.spec_compile import Feature, Group, Spec
+from otto.spec_compile import Group, Spec
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +107,8 @@ def select_failing_features(
         verdict = str(v.get("verdict") or "").strip().lower()
         if verdict not in {"failed", "partial", "blocked", "missing"}:
             continue
+        if not _is_actionable_repair_verdict(v, verdict=verdict):
+            continue
         failing.append(
             FailingFeature(
                 feature_id=str(v.get("feature_id") or ""),
@@ -113,6 +120,56 @@ def select_failing_features(
             )
         )
     return failing
+
+
+_UNACTIONABLE_BLOCKED_DETAIL_MARKERS: tuple[str, ...] = (
+    "not evaluated",
+    "not audited",
+    "not tested",
+    "not verified",
+    "not in scope",
+    "out of scope",
+    "no direct test evidence",
+    "no test evidence",
+    "no evidence collected",
+    "tests were not audited",
+)
+_UNACTIONABLE_REPAIR_DETAIL_MARKERS: tuple[str, ...] = (
+    *_UNACTIONABLE_BLOCKED_DETAIL_MARKERS,
+    "no changes were needed",
+    "no changes needed",
+    "not affected",
+    "does not mention this function",
+    "not mention this function",
+    "outside the requested scope",
+    "outside of the requested scope",
+)
+
+
+def _is_actionable_repair_verdict(
+    verdict_payload: dict[str, Any],
+    *,
+    verdict: str,
+) -> bool:
+    """Return whether a verdict should be routed to a repair agent.
+
+    Audit agents sometimes mark unrelated or uninspected Features as
+    ``blocked`` simply because they did not gather evidence. Those are
+    audit-coverage gaps, not implementation bugs. Sending them to repair
+    burns provider budget and can crowd out the real failing features in
+    the same audit pass.
+    """
+    detail = str(verdict_payload.get("detail") or "").casefold()
+    if any(marker in detail for marker in _UNACTIONABLE_REPAIR_DETAIL_MARKERS):
+        return False
+    if verdict != "blocked":
+        return True
+    evidence_refs = verdict_payload.get("evidence_refs") or []
+    if isinstance(evidence_refs, list) and any(str(ref).strip() for ref in evidence_refs):
+        return True
+    if not detail:
+        return True
+    return not any(marker in detail for marker in _UNACTIONABLE_BLOCKED_DETAIL_MARKERS)
 
 
 def group_for_feature(spec: Spec, feature_id: str) -> Group | None:
@@ -180,17 +237,15 @@ def can_run_another_audit_pass(
 #      RepairAttempt). Production wires this to a build-agent invocation
 #      narrowed to that Group + Feature.
 #   3. After all attempts in the pass, if the audit-passes cap allows,
-#      invoke `re_audit` (callback) narrowed to the attempted feature ids.
-#      Update each RepairAttempt.new_verdict from the re-audit's result.
+#      invoke `re_audit` (callback) with the attempted feature ids as focus.
+#      The callback may return either product-wide verdicts or only the
+#      focused subset. Update each RepairAttempt.new_verdict from the
+#      re-audit result and carry any unresolved/unreturned failures forward.
 #   4. Loop until the audit-passes cap is exhausted or no failing
 #      features remain.
 #
 # The function is generic across fix-agent and re-audit shapes — both
 # are passed as callbacks so tests can stub them deterministically.
-
-
-import time as _time
-from collections.abc import Awaitable, Callable
 
 # A FixAgentCallable accepts (failing_feature, group) and returns a
 # RepairAttempt-shaped result describing what it tried.
@@ -254,97 +309,174 @@ async def repair_failing_features(
             except Exception:  # noqa: BLE001 — never let observability crash the loop
                 pass
 
-    selected = features_to_repair(
-        spec,
-        feature_verdicts,
-        max_attempts_per_run=max_attempts_per_run,
+    cap = (
+        max_attempts_per_run
+        if max_attempts_per_run is not None
+        else _repair_cap_default()
     )
-    if not selected:
-        result.halted_reason = "no_failing_features"
-        return result
+    remaining_attempts = max(0, int(cap))
+    current_verdicts = feature_verdicts
+    attempt_numbers_by_feature: dict[str, int] = {}
 
-    if not can_run_another_audit_pass(
-        audit_passes_run=audit_passes_so_far,
-        max_audit_passes=max_audit_passes,
-    ):
-        # No budget for re-audit: still attempt the fixes but record
-        # honestly that we cannot verify them.
-        result.halted_reason = "audit_passes_cap_exhausted"
+    while remaining_attempts > 0:
+        selected = features_to_repair(
+            spec,
+            current_verdicts,
+            max_attempts_per_run=remaining_attempts,
+        )
+        if not selected:
+            if not result.attempts:
+                result.halted_reason = "no_failing_features"
+            return result
 
-    # ---- Phase 1: dispatch fix attempts ----
-    for failing in selected:
-        group = group_for_feature(spec, failing.feature_id)
-        if group is None:
-            # Should be filtered by features_to_repair, but defensive.
-            continue
-        emit("audit.feature_repair.started", {
-            "feature_id": failing.feature_id,
-            "group_id": group.id,
-            "verdict_before": failing.verdict,
-        })
-        t0 = _time.monotonic()
+        if not can_run_another_audit_pass(
+            audit_passes_run=result.audit_passes_run,
+            max_audit_passes=max_audit_passes,
+        ):
+            # No budget for re-audit: still attempt the fixes but record
+            # honestly that we cannot verify them.
+            result.halted_reason = "audit_passes_cap_exhausted"
+
+        # ---- Phase 1: dispatch fix attempts ----
+        pass_attempts: list[RepairAttempt] = []
+        for failing in selected:
+            group = group_for_feature(spec, failing.feature_id)
+            if group is None:
+                # Should be filtered by features_to_repair, but defensive.
+                continue
+            next_attempt_number = attempt_numbers_by_feature.get(
+                failing.feature_id, 0
+            ) + 1
+            attempt_numbers_by_feature[failing.feature_id] = next_attempt_number
+            emit("audit.feature_repair.started", {
+                "feature_id": failing.feature_id,
+                "group_id": group.id,
+                "attempt_number": next_attempt_number,
+                "verdict_before": failing.verdict,
+            })
+            t0 = _time.monotonic()
+            try:
+                attempt = await fix_agent(failing, group)
+            except Exception as exc:  # noqa: BLE001
+                attempt = RepairAttempt(
+                    feature_id=failing.feature_id,
+                    group_id=group.id,
+                    attempt_number=next_attempt_number,
+                    succeeded=False,
+                    new_verdict=None,
+                    detail=f"fix_agent raised {type(exc).__name__}: {exc}",
+                    cost_usd=0.0,
+                    wall_s=_time.monotonic() - t0,
+                )
+            # Defensive: ensure feature_id + group_id are correct on the
+            # returned attempt regardless of what the fix_agent populated.
+            attempt.feature_id = failing.feature_id
+            attempt.group_id = group.id
+            attempt.attempt_number = next_attempt_number
+            result.attempts.append(attempt)
+            pass_attempts.append(attempt)
+            emit("audit.feature_repair.finished", {
+                "feature_id": failing.feature_id,
+                "group_id": group.id,
+                "attempt_number": next_attempt_number,
+                "succeeded": attempt.succeeded,
+                "wall_s": attempt.wall_s,
+                "cost_usd": attempt.cost_usd,
+            })
+
+        remaining_attempts -= len(pass_attempts)
+        if not pass_attempts:
+            return result
+
+        # ---- Phase 2: re-audit narrowed to this pass's attempted features ----
+        if re_audit is None or result.halted_reason == "audit_passes_cap_exhausted":
+            return result
+
+        attempted_ids = [a.feature_id for a in pass_attempts]
+        succeeded_before_reaudit = {
+            a.feature_id: bool(a.succeeded) for a in pass_attempts
+        }
+        emit("audit.re_audit.started", {"feature_ids": attempted_ids})
         try:
-            attempt = await fix_agent(failing, group)
+            new_verdicts = await re_audit(attempted_ids)
         except Exception as exc:  # noqa: BLE001
-            attempt = RepairAttempt(
-                feature_id=failing.feature_id,
-                group_id=group.id,
-                attempt_number=1,
-                succeeded=False,
-                new_verdict=None,
-                detail=f"fix_agent raised {type(exc).__name__}: {exc}",
-                cost_usd=0.0,
-                wall_s=_time.monotonic() - t0,
-            )
-        # Defensive: ensure feature_id + group_id are correct on the
-        # returned attempt regardless of what the fix_agent populated.
-        attempt.feature_id = failing.feature_id
-        attempt.group_id = group.id
-        result.attempts.append(attempt)
-        emit("audit.feature_repair.finished", {
-            "feature_id": failing.feature_id,
-            "group_id": group.id,
-            "succeeded": attempt.succeeded,
-            "wall_s": attempt.wall_s,
-            "cost_usd": attempt.cost_usd,
+            result.halted_reason = f"re_audit_raised: {type(exc).__name__}: {exc}"
+            emit("audit.repair_loop.halted", {"reason": result.halted_reason})
+            return result
+        result.audit_passes_run += 1
+        emit("audit.re_audit.finished", {
+            "feature_ids": attempted_ids,
+            "verdict_count": len(new_verdicts),
         })
 
-    # ---- Phase 2: re-audit narrowed to attempted features ----
-    if re_audit is None or result.halted_reason == "audit_passes_cap_exhausted":
-        return result
+        # Backfill each RepairAttempt.new_verdict from the re-audit output.
+        by_id: dict[str, str] = {}
+        for v in new_verdicts:
+            if not isinstance(v, dict):
+                continue
+            fid = str(v.get("feature_id") or "")
+            verdict = str(v.get("verdict") or "")
+            if fid and verdict:
+                by_id[fid] = verdict
+        for a in pass_attempts:
+            if a.feature_id in by_id:
+                a.new_verdict = by_id[a.feature_id]
+                # Once re-audit exists, it is the source of truth for
+                # whether the repair actually succeeded.
+                a.succeeded = a.new_verdict == "passed"
+            else:
+                a.succeeded = False
 
-    attempted_ids = [a.feature_id for a in result.attempts]
-    if not attempted_ids:
-        return result
+        # Merge re-audit payloads back into the latest known verdict set.
+        # A re-audit callback is allowed to return only the attempted
+        # feature subset. In that case, still-failing features that were
+        # not selected in this pass must remain visible to the loop; losing
+        # them can turn a partial product into a false pass when the retry
+        # cap is exhausted.
+        merged_payload_by_id: dict[str, dict[str, Any]] = {}
+        ordered_ids: list[str] = []
+        for v in current_verdicts:
+            if not isinstance(v, dict):
+                continue
+            fid = str(v.get("feature_id") or "")
+            if not fid:
+                continue
+            if fid not in merged_payload_by_id:
+                ordered_ids.append(fid)
+            merged_payload_by_id[fid] = v
+        for v in new_verdicts:
+            if not isinstance(v, dict):
+                continue
+            fid = str(v.get("feature_id") or "")
+            if not fid:
+                continue
+            if fid not in merged_payload_by_id:
+                ordered_ids.append(fid)
+            merged_payload_by_id[fid] = v
 
-    emit("audit.re_audit.started", {"feature_ids": attempted_ids})
-    try:
-        new_verdicts = await re_audit(attempted_ids)
-    except Exception as exc:  # noqa: BLE001
-        result.halted_reason = f"re_audit_raised: {type(exc).__name__}: {exc}"
-        emit("audit.repair_loop.halted", {"reason": result.halted_reason})
-        return result
-    result.audit_passes_run += 1
-    emit("audit.re_audit.finished", {
-        "feature_ids": attempted_ids,
-        "verdict_count": len(new_verdicts),
-    })
-
-    # Backfill each RepairAttempt.new_verdict from the re-audit output.
-    by_id: dict[str, str] = {}
-    for v in new_verdicts:
-        if not isinstance(v, dict):
-            continue
-        fid = str(v.get("feature_id") or "")
-        verdict = str(v.get("verdict") or "")
-        if fid and verdict:
-            by_id[fid] = verdict
-    for a in result.attempts:
-        if a.feature_id in by_id:
-            a.new_verdict = by_id[a.feature_id]
-            # If re-audit says it's now passed, mark the attempt succeeded.
-            if a.new_verdict == "passed":
-                a.succeeded = True
+        # Retry only:
+        # - features that were not selected in this pass, and still fail, or
+        # - attempted features where the repair agent produced a successful
+        #   attempt and the re-audit still found a gap.
+        #
+        # If the fix agent crashed or returned failure, immediately asking
+        # the same agent again usually repeats the same runtime failure and
+        # burns the whole cap without new evidence.
+        attempted_id_set = {a.feature_id for a in pass_attempts}
+        current_verdicts = [
+            merged_payload_by_id[fid]
+            for fid in ordered_ids
+            if (
+                fid not in attempted_id_set
+                or succeeded_before_reaudit.get(fid, False)
+            )
+        ]
+        if not features_to_repair(spec, current_verdicts, max_attempts_per_run=1):
+            return result
+        if remaining_attempts <= 0:
+            result.halted_reason = "repair_attempts_cap_exhausted"
+            emit("audit.repair_loop.halted", {"reason": result.halted_reason})
+            return result
 
     return result
 

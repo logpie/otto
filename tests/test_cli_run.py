@@ -216,6 +216,27 @@ def test_certify_i2p_dispatches_to_orchestrate_certify(
     assert Path(captured["project_dir"]).resolve() == tmp_path.resolve()
 
 
+def test_certify_i2p_infers_brownfield_library_project_kind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _init_project(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'lib'\n")
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_certify(*, intent, project_kind, break_lock,
+                                  project_dir, **_extra):
+        captured["project_kind"] = project_kind
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_certify", fake_orchestrate_certify)
+
+    code, out = _run(["certify", "--i2p", "audit this library"], cwd=tmp_path)
+
+    assert code == 0, out
+    assert captured["project_kind"] == "library"
+
+
 def test_certify_i2p_warns_about_ignored_legacy_flags(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -294,7 +315,7 @@ def test_improve_bugs_i2p_dispatches_to_orchestrate_improve(
     captured: dict[str, object] = {}
 
     def fake_orchestrate_improve(*, intent, project_kind, break_lock,
-                                  project_dir, rounds, focus):
+                                  project_dir, rounds, focus, **_extra):
         captured["intent"] = intent
         captured["project_kind"] = project_kind
         captured["break_lock"] = break_lock
@@ -315,6 +336,28 @@ def test_improve_bugs_i2p_dispatches_to_orchestrate_improve(
     assert captured["rounds"] == 3
     assert captured["focus"] == "error handling"
     assert Path(captured["project_dir"]).resolve() == tmp_path.resolve()
+
+
+def test_improve_bugs_i2p_infers_brownfield_library_project_kind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _init_project(tmp_path)
+    (tmp_path / "intent.md").write_text("test intent\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'lib'\n")
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_improve(*, intent, project_kind, break_lock,
+                                  project_dir, rounds, focus, **_extra):
+        captured["project_kind"] = project_kind
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_improve", fake_orchestrate_improve)
+
+    code, out = _run(["improve", "bugs", "--i2p", "error handling"], cwd=tmp_path)
+
+    assert code == 0, out
+    assert captured["project_kind"] == "library"
 
 
 def test_improve_bugs_i2p_warns_about_ignored_legacy_flags(
@@ -400,7 +443,8 @@ def test_improve_feature_i2p_dispatches_to_orchestrate_improve(
     captured: dict[str, object] = {}
 
     def fake_orchestrate_improve(*, intent, project_kind, break_lock,
-                                  project_dir, rounds, focus):
+                                  project_dir, rounds, focus, **_extra):
+        captured["intent"] = intent
         captured["focus"] = focus
         captured["rounds"] = rounds
         import sys
@@ -413,7 +457,61 @@ def test_improve_feature_i2p_dispatches_to_orchestrate_improve(
         cwd=tmp_path,
     )
     assert code == 0
+    assert captured["intent"] == "search UX"
     assert captured["focus"] == "search UX"
+
+
+def test_improve_feature_i2p_threads_runtime_overrides(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _init_project(tmp_path)
+    (tmp_path / "intent.md").write_text("test intent\n")
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_improve(**kwargs):
+        captured.update(kwargs)
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_improve", fake_orchestrate_improve)
+
+    code, out = _run(
+        [
+            "improve",
+            "feature",
+            "--i2p",
+            "--provider",
+            "codex",
+            "--budget",
+            "1800",
+            "--max-turns",
+            "120",
+            "--effort",
+            "high",
+            "search UX",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert code == 0, out
+    assert captured["provider"] == "codex"
+    assert captured["budget"] == 1800
+    assert captured["max_turns"] == 120
+    assert captured["effort"] == "high"
+
+
+def test_i2p_cli_provider_override_beats_per_agent_config() -> None:
+    from otto.cli_run import apply_i2p_cli_overrides
+    from otto.config import agent_provider
+
+    config = {"provider": "claude", "agents": {"build": {"provider": "claude"}}}
+
+    apply_i2p_cli_overrides(config, provider="codex")
+
+    assert config["_cli_overrides"]["provider"] == "codex"
+    assert agent_provider(config, "spec") == "codex"
+    assert agent_provider(config, "build") == "codex"
+    assert agent_provider(config, "certifier") == "codex"
 
 
 def test_improve_target_i2p_dispatches_to_orchestrate_improve(
@@ -424,7 +522,7 @@ def test_improve_target_i2p_dispatches_to_orchestrate_improve(
     captured: dict[str, object] = {}
 
     def fake_orchestrate_improve(*, intent, project_kind, break_lock,
-                                  project_dir, rounds, focus):
+                                  project_dir, rounds, focus, **_extra):
         # `target`'s goal arg is forwarded as `focus` — the legacy
         # improve loop treated them differently, but for the i2p path
         # they collapse to "scope hint".

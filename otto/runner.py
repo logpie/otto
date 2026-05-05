@@ -376,6 +376,7 @@ async def run_pipeline(
                 project_dir=project_dir,
                 session_dir=session_dir,
                 build_agent=build_agent,
+                config=config,
                 base_url=base_url,
                 budget=shared_budget,
                 base_branch=base_branch,
@@ -400,6 +401,7 @@ async def run_pipeline(
                     project_dir=project_dir,
                     session_dir=session_dir,
                     build_agent=build_agent,
+                    config=config,
                     base_url=base_url,
                     shared_budget=shared_budget,
                     base_branch=base_branch,
@@ -423,6 +425,7 @@ async def run_pipeline(
             base_url=base_url,
             base_branch=base_branch,
             build_agent=build_agent,
+            config=config,
             budget=MergeBudget(),
             shared_budget=shared_budget,
             skip_components=skip_components,
@@ -447,6 +450,7 @@ async def run_pipeline(
             build_result=build_result,
             merge_result=merge_result,
             audit_agent=audit_agent,
+            config=config,
             base_url=base_url,
             walkthrough=walk,
             # The live i2p runner uses only the Feature-scoped Layer 2
@@ -479,6 +483,7 @@ async def run_pipeline(
                 project_dir=project_dir,
                 session_dir=session_dir,
                 base_url=base_url,
+                config=config,
                 shared_budget=shared_budget,
             )
             audit_budget_for_recheck = audit_budget or AuditBudget()
@@ -486,9 +491,11 @@ async def run_pipeline(
             async def _re_audit_feature_subset(
                 feature_ids: list[str],
             ) -> list[dict[str, Any]]:
-                # The current audit API is whole-product; the narrowed
-                # feature id list is still useful for repair-loop events,
-                # but verification must re-judge the integrated product.
+                # The feature id list is useful as repair-loop focus, but
+                # the final verdict must remain product-wide. A scoped
+                # re-audit can prove the just-repaired Feature while
+                # omitting older failures that did not fit in the retry
+                # cap, which turns a partial product into a false pass.
                 _ = feature_ids
                 nonlocal audit_result, audit_cost_total
                 recheck = await run_audit(
@@ -498,6 +505,7 @@ async def run_pipeline(
                     build_result=build_result,
                     merge_result=merge_result,
                     audit_agent=audit_agent,
+                    config=config,
                     base_url=base_url,
                     walkthrough=walk,
                     fix_agent=None,
@@ -508,7 +516,6 @@ async def run_pipeline(
                     ),
                     shared_budget=shared_budget,
                     base_branch=base_branch,
-                    feature_scope_ids=feature_ids,
                 )
                 audit_cost_total += float(recheck.cost_usd or 0.0)
                 audit_result = replace(recheck, cost_usd=audit_cost_total)
@@ -660,6 +667,7 @@ async def _redispatch_invalidated_groups(
     project_dir: Path,
     session_dir: Path,
     build_agent: BuildAgentCallable,
+    config: dict[str, Any],
     base_url: str | None,
     shared_budget: BuildBudget,
     base_branch: str,
@@ -706,6 +714,7 @@ async def _redispatch_invalidated_groups(
             project_dir=project_dir,
             session_dir=session_dir,
             build_agent=build_agent,
+            config=config,
             base_url=base_url,
             budget=shared_budget,
             base_branch=base_branch,
@@ -888,6 +897,7 @@ def _make_layer2_fix_agent(
     project_dir: Path,
     session_dir: Path,
     base_url: str | None,
+    config: dict[str, Any] | None = None,
     shared_budget: BuildBudget | None = None,
 ):
     """Adapt a ``BuildAgentCallable`` to the ``FixAgentCallable`` contract.
@@ -943,6 +953,7 @@ def _make_layer2_fix_agent(
             log_dir=None,
             feature_id=failing.feature_id,
             agent_session_id=session_by_feature.get(failing.feature_id, ""),
+            config=dict(config or {}),
         )
         t0 = time.monotonic()
         try:

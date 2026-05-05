@@ -13,6 +13,7 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 from pathlib import Path
 
@@ -24,7 +25,9 @@ from otto.audit import (
     FeatureAudit,
     GroupVerdict,
     WalkthroughResult,
+    _fallback_contract_test_argv,
     _parse_audit_output,
+    _run_project_contract_test,
     default_walkthrough_from_spec,
     run_audit,
 )
@@ -124,6 +127,53 @@ def test_run_audit_passed_in_one_pass(tmp_path: Path) -> None:
     assert result.retries == 0
     assert result.cost_usd == 0.10
     assert len(result.group_verdicts) == 2
+
+
+def test_run_audit_allocates_new_attempt_dir_across_calls(tmp_path: Path) -> None:
+    """Separate re-audit calls in one session must not overwrite artifacts."""
+    spec = _spec(["s1"])
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    seen_log_dirs: list[str] = []
+
+    async def passing_agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        assert input_.log_dir is not None
+        input_.log_dir.mkdir(parents=True, exist_ok=True)
+        (input_.log_dir / "marker.txt").write_text("ok", encoding="utf-8")
+        seen_log_dirs.append(input_.log_dir.relative_to(session_dir).as_posix())
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="all good",
+            group_verdicts=[GroupVerdict(group_id="s1", passed=True)],
+        )
+
+    for _ in range(2):
+        result = asyncio.run(
+            run_audit(
+                spec,
+                project_dir=tmp_path,
+                session_dir=session_dir,
+                build_result=_build_result(["s1"], tmp_path),
+                merge_result=_merge_result(["s1"]),
+                audit_agent=passing_agent,
+            )
+        )
+        assert result.verdict == AuditVerdict.PASSED
+
+    assert seen_log_dirs == ["audit/attempt-00/judge", "audit/attempt-01/judge"]
+    assert (session_dir / "audit" / "attempt-00" / "judge" / "marker.txt").exists()
+    assert (session_dir / "audit" / "attempt-01" / "judge" / "marker.txt").exists()
+    events = [
+        json.loads(line)
+        for line in (session_dir / "spec-state.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    attempts = [
+        event["attempt"]
+        for event in events
+        if event.get("kind") == "audit.attempt.finished"
+    ]
+    assert attempts == [0, 1]
 
 
 def test_run_audit_feature_scope_filters_feature_audits(tmp_path: Path) -> None:
@@ -657,6 +707,61 @@ def test_audit_writes_contract_test_log(tmp_path: Path) -> None:
     assert result.verdict == AuditVerdict.PASSED
 
 
+def test_contract_test_tox_falls_back_to_uvx_when_tox_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import shutil
+    original_which = shutil.which
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    args_path = tmp_path / "uvx.args"
+    uvx = fake_bin / "uvx"
+    uvx.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" > '{args_path}'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    uvx.chmod(0o755)
+
+    def fake_which(cmd: str, path: str | None = None) -> str | None:
+        if cmd == "tox":
+            return None
+        if cmd == "uvx":
+            return str(uvx)
+        return original_which(cmd, path=path)
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setenv("PATH", str(fake_bin))
+    _seed_otto_yaml(tmp_path, "tox -e py")
+
+    passed, detail = _run_project_contract_test(
+        tmp_path,
+        log_dir=tmp_path / "contract",
+    )
+
+    assert passed is True
+    assert "uvx --with tox-uv tox -e py" in detail
+    assert "fallback from 'tox -e py'" in detail
+    assert args_path.read_text(encoding="utf-8").strip() == "--with tox-uv tox -e py"
+
+
+def test_contract_test_tox_fallback_not_used_when_tox_exists() -> None:
+    def fake_which(cmd: str, path: str | None = None) -> str | None:
+        if cmd == "tox":
+            return "/usr/bin/tox"
+        if cmd == "uvx":
+            return "/usr/bin/uvx"
+        return None
+
+    assert _fallback_contract_test_argv(
+        ["tox"],
+        env={"PATH": "/usr/bin"},
+        which=fake_which,
+    ) is None
+
+
 # ---------------------------------------------------------------------------
 # default_walkthrough_from_spec — production wiring
 # ---------------------------------------------------------------------------
@@ -696,6 +801,47 @@ def test_audit_prompt_requests_quality_assessment(tmp_path: Path) -> None:
     assert "3/5" in prompt or "3 = MVP" in prompt or "3=MVP" in prompt
     # Required minimum-2-findings rule.
     assert "at least 2" in prompt or "Empty list is NOT" in prompt
+
+
+def test_audit_prompt_requires_exact_edge_case_evidence(tmp_path: Path) -> None:
+    from otto.audit import _audit_prompt
+
+    spec = Spec(
+        intent="invalid comma strings should be returned unchanged",
+        project_kind="library",
+        groups=[Group(id="number", name="Number")],
+        features=[
+            Feature(
+                id="intword",
+                name="intword",
+                group_id="number",
+                description="parse comma-separated numeric strings",
+            )
+        ],
+    )
+    inp = AuditAgentInput(
+        spec=spec,
+        project_dir=tmp_path,
+        integrated_worktree=tmp_path,
+        build_summary={},
+        merge_summary={},
+        cross_slice_evidence=[],
+        walkthrough_artifacts=[],
+    )
+
+    prompt = _audit_prompt(inp)
+
+    assert "exact acceptance examples" in prompt
+    assert "edge/error cases" in prompt
+    assert "different invalid value" in prompt
+    assert "same changed parser/normalizer/validation path" in prompt
+    assert "focused regression test" in prompt
+    assert "Tests, docstrings, or comments added by the repair agent" in prompt
+    assert "NOT allowed to redefine that contract" in prompt
+    assert "contradicts the user's intent" in prompt
+    assert "exact string equality with the original input" in prompt
+    assert "including punctuation/separators" in prompt
+    assert "native test/lint command actually runs doctests" in prompt
 
 
 def test_audit_parser_reads_quality_fields() -> None:

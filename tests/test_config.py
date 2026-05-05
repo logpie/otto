@@ -14,6 +14,7 @@ from otto.config import (
     agent_provider,
     create_config,
     detect_default_branch,
+    detect_project_kind,
     detect_test_command,
     get_max_rounds,
     get_max_turns_per_call,
@@ -458,6 +459,49 @@ class TestDetectTestCommand:
         (tmp_bare_git_repo / "Makefile").write_text("test:\n\ttox\n")
         result = detect_test_command(tmp_bare_git_repo)
         assert result == "tox"
+
+
+class TestDetectProjectKind:
+    def test_detects_python_library(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "pyproject.toml").write_text(
+            "[project]\nname = 'humanize-like'\n"
+            "[project.optional-dependencies]\ntests = ['pytest']\n",
+            encoding="utf-8",
+        )
+
+        assert detect_project_kind(tmp_bare_git_repo) == "library"
+
+    def test_detects_python_cli(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "pyproject.toml").write_text(
+            "[project]\nname = 'cli-tool'\n"
+            "[project.scripts]\nthing = 'thing.cli:main'\n",
+            encoding="utf-8",
+        )
+
+        assert detect_project_kind(tmp_bare_git_repo) == "cli"
+
+    def test_detects_python_api(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "pyproject.toml").write_text(
+            "[project]\nname = 'api'\ndependencies = ['fastapi']\n",
+            encoding="utf-8",
+        )
+
+        assert detect_project_kind(tmp_bare_git_repo) == "api"
+
+    def test_detects_node_webapp(self, tmp_bare_git_repo):
+        pkg = {
+            "scripts": {"dev": "vite --host 0.0.0.0"},
+            "dependencies": {"react": "^19.0.0"},
+        }
+        (tmp_bare_git_repo / "package.json").write_text(json.dumps(pkg))
+
+        assert detect_project_kind(tmp_bare_git_repo) == "webapp"
+
+    def test_detects_node_cli(self, tmp_bare_git_repo):
+        pkg = {"bin": {"tool": "./bin/tool.js"}}
+        (tmp_bare_git_repo / "package.json").write_text(json.dumps(pkg))
+
+        assert detect_project_kind(tmp_bare_git_repo) == "cli"
 
 
 class TestDetectDefaultBranch:

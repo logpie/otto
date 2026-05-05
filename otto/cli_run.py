@@ -133,6 +133,93 @@ def _resolve_intent_or_exit(intent: str | None, project_dir: Path) -> str:
     return resolved
 
 
+def _record_cli_override(
+    config: dict[str, Any],
+    key: str,
+    value: Any,
+    *,
+    agent_type: str | None = None,
+) -> None:
+    overrides = config.setdefault("_cli_overrides", {})
+    if not isinstance(overrides, dict):
+        return
+    if agent_type:
+        agents = overrides.setdefault("agents", {})
+        if isinstance(agents, dict):
+            agent_overrides = agents.setdefault(agent_type, {})
+            if isinstance(agent_overrides, dict):
+                agent_overrides[key] = value
+        return
+    overrides[key] = value
+
+
+def apply_i2p_cli_overrides(
+    config: dict[str, Any],
+    *,
+    budget: int | None = None,
+    max_turns: int | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    effort: str | None = None,
+    build_provider: str | None = None,
+    build_model: str | None = None,
+    build_effort: str | None = None,
+    certifier_provider: str | None = None,
+    certifier_model: str | None = None,
+    certifier_effort: str | None = None,
+    fix_provider: str | None = None,
+    fix_model: str | None = None,
+    fix_effort: str | None = None,
+    verbose: bool = False,
+    debug_unredacted: bool = False,
+) -> None:
+    """Apply CLI runtime overrides consumed by the i2p orchestrators."""
+    if budget is not None:
+        config["run_budget_seconds"] = budget
+    if max_turns is not None:
+        config["max_turns_per_call"] = max_turns
+    if model:
+        config["model"] = model
+        _record_cli_override(config, "model", model)
+    if provider:
+        config["provider"] = provider
+        _record_cli_override(config, "provider", provider)
+    if effort:
+        config["effort"] = effort
+        _record_cli_override(config, "effort", effort)
+
+    phase_values = {
+        "build": {
+            "provider": build_provider,
+            "model": build_model,
+            "effort": build_effort,
+        },
+        "certifier": {
+            "provider": certifier_provider,
+            "model": certifier_model,
+            "effort": certifier_effort,
+        },
+        "fix": {
+            "provider": fix_provider,
+            "model": fix_model,
+            "effort": fix_effort,
+        },
+    }
+    for agent_type, overrides in phase_values.items():
+        agent_config = config.setdefault("agents", {}).setdefault(agent_type, {})
+        if not isinstance(agent_config, dict):
+            continue
+        for key, value in overrides.items():
+            if not value:
+                continue
+            agent_config[key] = value
+            _record_cli_override(config, key, value, agent_type=agent_type)
+
+    if debug_unredacted:
+        config["debug_unredacted"] = True
+    config["_verbose"] = bool(verbose)
+
+
 def _new_session_id(project_dir: Path) -> str:
     """Allocate a session id, honouring `OTTO_RUN_ID` for testability."""
     injected = os.environ.get("OTTO_RUN_ID", "").strip()
@@ -533,6 +620,22 @@ def orchestrate_run(
     force: bool = False,
     review_gate: bool = False,
     gate_timeout_s: float = 24 * 60 * 60.0,
+    budget: int | None = None,
+    max_turns: int | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    effort: str | None = None,
+    build_provider: str | None = None,
+    build_model: str | None = None,
+    build_effort: str | None = None,
+    certifier_provider: str | None = None,
+    certifier_model: str | None = None,
+    certifier_effort: str | None = None,
+    fix_provider: str | None = None,
+    fix_model: str | None = None,
+    fix_effort: str | None = None,
+    verbose: bool = False,
+    debug_unredacted: bool = False,
 ) -> None:
     """Drive the intent-to-product pipeline.
 
@@ -579,6 +682,25 @@ def orchestrate_run(
         except ConfigError as exc:
             error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
             sys.exit(2)
+        apply_i2p_cli_overrides(
+            config,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            build_provider=build_provider,
+            build_model=build_model,
+            build_effort=build_effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
+            fix_provider=fix_provider,
+            fix_model=fix_model,
+            fix_effort=fix_effort,
+            verbose=verbose,
+            debug_unredacted=debug_unredacted,
+        )
         compiled_inline = True
         # Mid-merge git recovery before we start dispatching anything.
         rec = recover_mid_merge_state_for_project(project_dir)
@@ -616,6 +738,25 @@ def orchestrate_run(
         except ConfigError as exc:
             error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
             sys.exit(2)
+        apply_i2p_cli_overrides(
+            config,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            build_provider=build_provider,
+            build_model=build_model,
+            build_effort=build_effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
+            fix_provider=fix_provider,
+            fix_model=fix_model,
+            fix_effort=fix_effort,
+            verbose=verbose,
+            debug_unredacted=debug_unredacted,
+        )
 
         # When `--no-build` is set, we still need the compile to run inside
         # the lock and exit early with the spec path. Keep that behaviour
@@ -988,6 +1129,22 @@ def orchestrate_improve(
     project_dir: Path,
     rounds: int | None = None,
     focus: str | None = None,
+    budget: int | None = None,
+    max_turns: int | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    effort: str | None = None,
+    build_provider: str | None = None,
+    build_model: str | None = None,
+    build_effort: str | None = None,
+    certifier_provider: str | None = None,
+    certifier_model: str | None = None,
+    certifier_effort: str | None = None,
+    fix_provider: str | None = None,
+    fix_model: str | None = None,
+    fix_effort: str | None = None,
+    verbose: bool = False,
+    debug_unredacted: bool = False,
 ) -> None:
     """Drive the new-stack `otto improve` flow (Phase B.2).
 
@@ -1009,6 +1166,25 @@ def orchestrate_improve(
     except ConfigError as exc:
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(2)
+    apply_i2p_cli_overrides(
+        config,
+        budget=budget,
+        max_turns=max_turns,
+        model=model,
+        provider=provider,
+        effort=effort,
+        build_provider=build_provider,
+        build_model=build_model,
+        build_effort=build_effort,
+        certifier_provider=certifier_provider,
+        certifier_model=certifier_model,
+        certifier_effort=certifier_effort,
+        fix_provider=fix_provider,
+        fix_model=fix_model,
+        fix_effort=fix_effort,
+        verbose=verbose,
+        debug_unredacted=debug_unredacted,
+    )
 
     session_dir, spec = _brownfield_compile_locked(
         intent_text=intent_text,
@@ -1056,6 +1232,16 @@ def orchestrate_certify(
     resume: bool = False,
     reset_budget: bool = False,
     force: bool = False,
+    budget: int | None = None,
+    max_turns: int | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    effort: str | None = None,
+    certifier_provider: str | None = None,
+    certifier_model: str | None = None,
+    certifier_effort: str | None = None,
+    verbose: bool = False,
+    debug_unredacted: bool = False,
 ) -> None:
     """Drive the new-stack `otto certify` flow (Phase B.1).
 
@@ -1092,6 +1278,19 @@ def orchestrate_certify(
         except ConfigError as exc:
             error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
             sys.exit(2)
+        apply_i2p_cli_overrides(
+            config,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
+            verbose=verbose,
+            debug_unredacted=debug_unredacted,
+        )
         _print_resume_banner(resume_plan)
         on_phase = _make_phase_callback({
             "compile": "",
@@ -1119,6 +1318,19 @@ def orchestrate_certify(
     except ConfigError as exc:
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(2)
+    apply_i2p_cli_overrides(
+        config,
+        budget=budget,
+        max_turns=max_turns,
+        model=model,
+        provider=provider,
+        effort=effort,
+        certifier_provider=certifier_provider,
+        certifier_model=certifier_model,
+        certifier_effort=certifier_effort,
+        verbose=verbose,
+        debug_unredacted=debug_unredacted,
+    )
 
     session_dir, spec = _brownfield_compile_locked(
         intent_text=intent_text,

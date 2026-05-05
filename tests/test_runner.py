@@ -533,6 +533,402 @@ def test_layer2_repair_reaudits_and_updates_final_verdict(
     assert order.events == ["seed", "build", "merge", "audit", "audit", "render"]
 
 
+def test_brownfield_layer2_repairs_features_with_group_name_alias(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Brownfield compile aliases must still give Layer 2 a Group route."""
+    from otto.audit import FeatureAudit
+    from otto.spec_compile import parse_spec
+
+    spec, warnings = parse_spec(
+        {
+            "intent": "library improvement",
+            "project_kind": "library",
+            "structure": {"payload": {}},
+            "groups": [
+                {
+                    "id": "group_0",
+                    "name": "Number",
+                    "features": ["intword"],
+                    "owned_paths": ["src/humanize/number.py"],
+                }
+            ],
+            "features": [
+                {
+                    "name": "intword",
+                    "module": "Number",
+                }
+            ],
+        }
+    )
+    assert spec.features[0].id == "intword"
+    assert spec.features[0].group_id == "group_0"
+    assert any(w.code == "spec.coerce.feature_group_id" for w in warnings)
+
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    captured: dict[str, Any] = {
+        "audit_calls": 0,
+        "audit_configs": [],
+        "fix_inputs": [],
+    }
+
+    def _seed(spec, project_dir, session_dir=None):
+        return SeedResult(succeeded=True, detail="ok")
+
+    async def _audit(spec, **kwargs):
+        captured["audit_calls"] += 1
+        captured["audit_configs"].append(dict(kwargs.get("config") or {}))
+        if captured["audit_calls"] == 1:
+            return AuditResult(
+                verdict=AuditVerdict.BLOCKED,
+                narrative="missing comma support",
+                feature_audits=[
+                    FeatureAudit(
+                        feature_id="intword",
+                        name="intword",
+                        status="blocked",
+                        detail="intword does not parse comma strings",
+                    )
+                ],
+            )
+        return AuditResult(
+            verdict=AuditVerdict.PASSED,
+            narrative="fixed",
+            feature_audits=[
+                FeatureAudit(
+                    feature_id="intword",
+                    name="intword",
+                    status="passed",
+                    detail="ok",
+                )
+            ],
+        )
+
+    async def _fix(agent_input):
+        captured["fix_inputs"].append(agent_input)
+        return BuildAgentOutput(
+            succeeded=True,
+            cost_usd=0.05,
+            wall_s=0.5,
+            detail="fixed feature",
+        )
+
+    def _render(spec, *, session_dir, audit_result, **kwargs):
+        html = session_dir / "proof-packet.html"
+        json_ = session_dir / "proof-packet.json"
+        html.write_text("<html/>")
+        json_.write_text("{}")
+        assert audit_result.verdict == AuditVerdict.PASSED
+        return html, json_
+
+    monkeypatch.setattr("otto.runner.seed_fixtures", _seed)
+    monkeypatch.setattr("otto.runner.run_audit", _audit)
+    monkeypatch.setattr("otto.runner.render_run", _render)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x",
+            tmp_path,
+            session_dir,
+            project_kind="library",
+            brownfield=True,
+            base_url=None,
+            config={"provider": "codex", "_cli_overrides": {"provider": "codex"}},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_fix,
+            spec=spec,
+        )
+    )
+
+    assert captured["audit_calls"] == 2
+    assert captured["audit_configs"] == [
+        {"provider": "codex", "_cli_overrides": {"provider": "codex"}},
+        {"provider": "codex", "_cli_overrides": {"provider": "codex"}},
+    ]
+    assert len(captured["fix_inputs"]) == 1
+    assert captured["fix_inputs"][0].group.id == "group_0"
+    assert captured["fix_inputs"][0].feature_id == "intword"
+    assert captured["fix_inputs"][0].config == {
+        "provider": "codex",
+        "_cli_overrides": {"provider": "codex"},
+    }
+    assert result.verdict == AuditVerdict.PASSED
+
+
+def test_layer2_repairs_multiple_actionable_features_by_default(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from otto.audit import FeatureAudit
+
+    spec = Spec(
+        intent="comma numeric strings",
+        project_kind="library",
+        groups=[
+            Group(id="number-module", name="Number", owned_paths=["src/number.py"]),
+            Group(id="filesize-module", name="Filesize", owned_paths=["src/filesize.py"]),
+        ],
+        features=[
+            Feature(id="intword", name="intword", group_id="number-module"),
+            Feature(id="clamp", name="clamp", group_id="number-module"),
+            Feature(id="naturalsize", name="naturalsize", group_id="filesize-module"),
+        ],
+    )
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    captured: dict[str, Any] = {"audit_calls": 0, "fix_inputs": []}
+
+    def _seed(spec, project_dir, session_dir=None):
+        return SeedResult(succeeded=True, detail="ok")
+
+    async def _audit(spec, **kwargs):
+        captured["audit_calls"] += 1
+        if captured["audit_calls"] == 1:
+            return AuditResult(
+                verdict=AuditVerdict.BLOCKED,
+                narrative="two actionable failures",
+                feature_audits=[
+                    FeatureAudit(
+                        feature_id="intword",
+                        name="intword",
+                        status="partial",
+                        detail="returns the old value",
+                        evidence_refs=["walkthrough.jsonl#L2"],
+                    ),
+                    FeatureAudit(
+                        feature_id="clamp",
+                        name="clamp",
+                        status="blocked",
+                        detail="No direct test evidence collected; not evaluated.",
+                    ),
+                    FeatureAudit(
+                        feature_id="naturalsize",
+                        name="naturalsize",
+                        status="blocked",
+                        detail="raises ValueError for comma strings",
+                        evidence_refs=["walkthrough.jsonl#L4"],
+                    ),
+                ],
+            )
+        return AuditResult(
+            verdict=AuditVerdict.PASSED,
+            narrative="fixed",
+            feature_audits=[
+                FeatureAudit(
+                    feature_id="intword",
+                    name="intword",
+                    status="passed",
+                    detail="ok",
+                ),
+                FeatureAudit(
+                    feature_id="naturalsize",
+                    name="naturalsize",
+                    status="passed",
+                    detail="ok",
+                ),
+            ],
+        )
+
+    async def _fix(agent_input):
+        captured["fix_inputs"].append(agent_input)
+        return BuildAgentOutput(
+            succeeded=True,
+            cost_usd=0.05,
+            wall_s=0.5,
+            detail=f"fixed {agent_input.feature_id}",
+        )
+
+    def _render(spec, *, session_dir, audit_result, **kwargs):
+        html = session_dir / "proof-packet.html"
+        json_ = session_dir / "proof-packet.json"
+        html.write_text("<html/>")
+        json_.write_text("{}")
+        assert audit_result.verdict == AuditVerdict.PASSED
+        return html, json_
+
+    monkeypatch.setattr("otto.runner.seed_fixtures", _seed)
+    monkeypatch.setattr("otto.runner.run_audit", _audit)
+    monkeypatch.setattr("otto.runner.render_run", _render)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x",
+            tmp_path,
+            session_dir,
+            project_kind="library",
+            brownfield=True,
+            base_url=None,
+            config={},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_fix,
+            spec=spec,
+        )
+    )
+
+    assert captured["audit_calls"] == 2
+    assert [i.feature_id for i in captured["fix_inputs"]] == ["intword", "naturalsize"]
+    assert [i.group.id for i in captured["fix_inputs"]] == [
+        "number-module",
+        "filesize-module",
+    ]
+    assert result.verdict == AuditVerdict.PASSED
+
+
+def test_layer2_reaudits_product_wide_when_retry_cap_leaves_failures(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from otto.audit import FeatureAudit
+
+    spec = Spec(
+        intent="comma numeric strings",
+        project_kind="library",
+        groups=[
+            Group(id="number-module", name="Number", owned_paths=["src/number.py"]),
+            Group(id="filesize-module", name="Filesize", owned_paths=["src/filesize.py"]),
+        ],
+        features=[
+            Feature(id="intword", name="intword", group_id="number-module"),
+            Feature(id="naturalsize", name="naturalsize", group_id="filesize-module"),
+        ],
+    )
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    captured: dict[str, Any] = {
+        "audit_calls": 0,
+        "audit_scopes": [],
+        "fix_inputs": [],
+        "render_verdict": None,
+    }
+
+    def _seed(spec, project_dir, session_dir=None):
+        return SeedResult(succeeded=True, detail="ok")
+
+    async def _audit(spec, **kwargs):
+        captured["audit_calls"] += 1
+        scope = tuple(kwargs.get("feature_scope_ids") or ())
+        captured["audit_scopes"].append(scope)
+        if scope:
+            return AuditResult(
+                verdict=AuditVerdict.PASSED,
+                narrative="scoped false pass",
+                feature_audits=[
+                    FeatureAudit(
+                        feature_id=scope[0],
+                        name=scope[0],
+                        status="passed",
+                        detail="scoped repair passed",
+                    )
+                ],
+            )
+        if captured["audit_calls"] == 1:
+            audits = [
+                FeatureAudit(
+                    feature_id="intword",
+                    name="intword",
+                    status="partial",
+                    detail="malformed grouped input accepted",
+                    evidence_refs=["walkthrough.jsonl#L4"],
+                ),
+                FeatureAudit(
+                    feature_id="naturalsize",
+                    name="naturalsize",
+                    status="partial",
+                    detail="malformed grouped input accepted",
+                    evidence_refs=["walkthrough.jsonl#L5"],
+                ),
+            ]
+        elif captured["audit_calls"] == 2:
+            audits = [
+                FeatureAudit(
+                    feature_id="intword",
+                    name="intword",
+                    status="partial",
+                    detail="still accepts malformed grouping",
+                    evidence_refs=["walkthrough.jsonl#L4"],
+                ),
+                FeatureAudit(
+                    feature_id="naturalsize",
+                    name="naturalsize",
+                    status="partial",
+                    detail="still accepts malformed grouping",
+                    evidence_refs=["walkthrough.jsonl#L5"],
+                ),
+            ]
+        else:
+            audits = [
+                FeatureAudit(
+                    feature_id="intword",
+                    name="intword",
+                    status="passed",
+                    detail="fixed",
+                    evidence_refs=["walkthrough.jsonl#L4"],
+                ),
+                FeatureAudit(
+                    feature_id="naturalsize",
+                    name="naturalsize",
+                    status="partial",
+                    detail="not fixed before repair cap exhausted",
+                    evidence_refs=["walkthrough.jsonl#L5"],
+                ),
+            ]
+        return AuditResult(
+            verdict=AuditVerdict.PARTIAL,
+            narrative="product still has unresolved feature failures",
+            feature_audits=audits,
+        )
+
+    async def _fix(agent_input):
+        captured["fix_inputs"].append(agent_input)
+        return BuildAgentOutput(
+            succeeded=True,
+            cost_usd=0.05,
+            wall_s=0.5,
+            detail=f"fixed {agent_input.feature_id}",
+        )
+
+    def _render(spec, *, session_dir, audit_result, **kwargs):
+        captured["render_verdict"] = audit_result.verdict
+        html = session_dir / "proof-packet.html"
+        json_ = session_dir / "proof-packet.json"
+        html.write_text("<html/>")
+        json_.write_text("{}")
+        return html, json_
+
+    monkeypatch.setattr("otto.runner.seed_fixtures", _seed)
+    monkeypatch.setattr("otto.runner.run_audit", _audit)
+    monkeypatch.setattr("otto.runner.render_run", _render)
+    monkeypatch.setattr("otto.audit_loop._repair_cap_default", lambda: 3)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x",
+            tmp_path,
+            session_dir,
+            project_kind="library",
+            brownfield=True,
+            base_url=None,
+            config={},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_fix,
+            spec=spec,
+        )
+    )
+
+    assert captured["audit_scopes"] == [(), (), ()]
+    assert [i.feature_id for i in captured["fix_inputs"]] == [
+        "intword",
+        "naturalsize",
+        "intword",
+    ]
+    assert result.verdict == AuditVerdict.PARTIAL
+    assert captured["render_verdict"] == AuditVerdict.PARTIAL
+    assert result.repair_result is not None
+    assert result.repair_result.halted_reason == "repair_attempts_cap_exhausted"
+
+
 def test_repair_skipped_on_passed_verdict(
     tmp_path: Path, monkeypatch
 ) -> None:

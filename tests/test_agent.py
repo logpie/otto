@@ -373,6 +373,19 @@ def test_make_agent_options_uses_safe_claude_defaults_when_model_omitted(tmp_pat
     assert codex_options.model is None
 
 
+def test_make_agent_options_env_prefers_target_project_src(tmp_path, monkeypatch):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    stale_src = "/tmp/stale-project/src"
+    monkeypatch.setenv("PYTHONPATH", stale_src)
+
+    options = make_agent_options(tmp_path, {"provider": "codex"}, agent_type="build")
+
+    assert options.env is not None
+    pythonpath = options.env.get("PYTHONPATH", "").split(os.pathsep)
+    assert pythonpath[:2] == [str(src_dir), stale_src]
+
+
 def test_make_agent_options_sets_default_max_turns(tmp_path):
     options = make_agent_options(tmp_path, {})
 

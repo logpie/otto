@@ -165,6 +165,60 @@ def test_brownfield_compile_uses_brownfield_prompt(
     assert "pyproject.toml" in rendered
     # Anti-derivation guidance present
     assert "scope hint" in rendered.lower() or "scope hint" in rendered
+    # Regression: Codex should not burn turns reverse-engineering Otto's
+    # schema from source files.
+    assert "Use this schema shape directly" in rendered
+    assert '"public_api"' in rendered
+    assert "Never emit placeholder fixture objects" in rendered
+    assert "Do not paste the JSON" in rendered
+    assert '"feature_ids": ["feature-id"]' in rendered
+    assert "do not leave the target project to inspect" in rendered
+
+
+def test_brownfield_compile_prefers_written_spec_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Brownfield compile is file-backed; final agent text can stay small."""
+    project = tmp_path / "proj"
+    _seed_python_project(project)
+    run_dir = tmp_path / "session" / "spec"
+
+    async def _write_file_agent(*_args: object, **_kwargs: object):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "spec.json").write_text(
+            json.dumps(_minimal_spec_dict()),
+            encoding="utf-8",
+        )
+        return f"SPEC_PATH: {run_dir / 'spec.json'}\n", 0.0, "stub-session", {}
+
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", _write_file_agent)
+    monkeypatch.setattr(
+        "otto.agent.make_agent_options",
+        lambda *_a, **_kw: object(),
+    )
+    monkeypatch.setattr("otto.config.get_spec_timeout", lambda _c: 30)
+    monkeypatch.setattr(
+        "otto.observability.save_rendered_prompt",
+        lambda *_a, **_kw: {"sha256": "x", "path": "x"},
+    )
+    monkeypatch.setattr(
+        "otto.observability.update_input_provenance",
+        lambda *_a, **_kw: None,
+    )
+
+    spec = asyncio.run(
+        compile_spec(
+            "document this CLI tool",
+            project,
+            run_dir,
+            _minimal_config(),
+            project_kind="cli",
+            brownfield=True,
+        )
+    )
+
+    assert spec.project_kind == "cli"
+    assert [feature.id for feature in spec.features] == ["lint-main"]
 
 
 def test_greenfield_compile_unchanged(tmp_path: Path, monkeypatch) -> None:

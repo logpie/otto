@@ -10,14 +10,18 @@ import pytest
 from otto.spec_compile import (
     ApiProbe,
     BrowserJourney,
+    Feature,
     PROJECT_KINDS,
     PytestCheck,
+    RepoTestCheck,
     Group,
     Spec,
     SpecValidationError,
     StructureDecisions,
     append_amendment,
+    infer_feature_group_routes_from_owned_paths,
     load_spec,
+    parse_spec,
     persist_spec,
     spec_content_sha256,
     spec_from_dict,
@@ -138,6 +142,78 @@ def test_unknown_check_kind_is_dropped_with_warning() -> None:
     assert spec.groups[0].checks == []
     assert any(w.code == "spec.coerce.unknown_kind" for w in warnings)
     assert any("rumor" in w.message for w in warnings)
+
+
+def test_parse_spec_coerces_raw_check_strings_to_repo_test() -> None:
+    spec, warnings = parse_spec(
+        {
+            "intent": "fix numeric parsing",
+            "project_kind": "library",
+            "structure": {
+                "payload": {
+                    "package_name": "demo",
+                    "public_api": [
+                        {"symbol": "demo.parse", "kind": "function", "summary": "Parse"}
+                    ],
+                }
+            },
+            "groups": [
+                {
+                    "id": "numeric",
+                    "name": "Numeric parsing",
+                    "feature_ids": ["parse-numeric"],
+                    "owned_paths": ["demo.py", "tests/test_demo.py"],
+                    "checks": ["python -m pytest tests/test_demo.py -q"],
+                }
+            ],
+        }
+    )
+
+    assert spec.groups[0].checks == [
+        RepoTestCheck(command=("python", "-m", "pytest", "tests/test_demo.py", "-q"))
+    ]
+    assert any(w.code == "spec.coerce.check_string" for w in warnings)
+
+
+def test_parse_spec_drops_empty_audit_fixture_placeholders() -> None:
+    spec, warnings = parse_spec(
+        {
+            "intent": "document library",
+            "project_kind": "library",
+            "structure": {
+                "payload": {
+                    "package_name": "demo",
+                    "public_api": [
+                        {"symbol": "demo.run", "kind": "function", "summary": "Runs demo"}
+                    ],
+                }
+            },
+            "groups": [
+                {
+                    "id": "core",
+                    "name": "Core",
+                    "feature_ids": ["demo-run"],
+                    "owned_paths": ["demo.py"],
+                }
+            ],
+            "features": [
+                {"id": "demo-run", "name": "Demo run", "group_id": "core"}
+            ],
+            "audit_fixtures": [
+                {"kind": "", "payload": {}},
+                {"payload": {}},
+                {"kind": "data", "payload": {"fixture": "kept"}},
+            ],
+        }
+    )
+
+    assert [(fixture.kind, fixture.payload) for fixture in spec.audit_fixtures] == [
+        ("data", {"fixture": "kept"})
+    ]
+    assert [warning.path for warning in warnings if "audit_fixture" in warning.message] == [
+        "audit_fixtures[0]",
+        "audit_fixtures[1]",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +679,151 @@ def test_parse_v2_spec_with_no_legacy_keys_has_no_deprecation_warning() -> None:
     assert not any(c.startswith("spec.deprecated.schema_") for c in codes)
     assert spec.schema_version == SCHEMA_VERSION
     assert len(spec.groups) == 1
+
+
+def test_parse_feature_group_alias_resolves_to_group_id() -> None:
+    """Compile agents often emit module/group labels instead of Group ids."""
+    from otto.spec_compile import parse_spec
+
+    payload = {
+        "intent": "library improvement",
+        "project_kind": "library",
+        "structure": {"payload": {}},
+        "groups": [
+            {
+                "id": "group_0",
+                "name": "Number",
+                "features": ["intword"],
+                "owned_paths": ["src/humanize/number.py"],
+            }
+        ],
+        "features": [
+            {
+                "name": "intword",
+                "module": "Number",
+            }
+        ],
+    }
+
+    spec, warnings = parse_spec(payload)
+
+    assert spec.features[0].id == "intword"
+    assert spec.features[0].group_id == "group_0"
+    codes = {w.code for w in warnings}
+    assert "spec.coerce.feature_id" in codes
+    assert "spec.coerce.feature_group_id" in codes
+    assert "spec.deprecated.group_field" in codes
+
+
+def test_parse_feature_ids_backfill_names_and_group_feature_ids() -> None:
+    from otto.spec_compile import parse_spec
+
+    payload = {
+        "intent": "library improvement",
+        "project_kind": "library",
+        "structure": {"payload": {}},
+        "groups": [
+            {
+                "id": "number",
+                "name": "Number",
+                "owned_paths": ["src/humanize/number.py"],
+            }
+        ],
+        "features": [
+            {
+                "id": "intword",
+                "group_id": "number",
+                "description": "parse comma strings",
+            }
+        ],
+    }
+
+    spec, warnings = parse_spec(payload)
+
+    assert spec.features[0].name == "intword"
+    assert spec.groups[0].feature_ids == ["intword"]
+    codes = {w.code for w in warnings}
+    assert "spec.coerce.feature_name" in codes
+    assert "spec.coerce.group_feature_ids" in codes
+
+
+def test_validate_spec_warns_for_unroutable_feature_group() -> None:
+    """Layer 2 cannot repair Features without a real owning Group."""
+    spec = Spec(
+        intent="x",
+        groups=[Group(id="g", name="G", feature_ids=["build feature"])],
+        features=[Feature(id="f", name="F", group_id="missing")],
+    )
+
+    result = validate_spec(spec)
+
+    assert any("group_id 'missing' not in spec groups" in w for w in result.warnings)
+
+
+def test_infer_feature_group_routes_from_owned_paths(tmp_path: Path) -> None:
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "number.py").write_text(
+        "def intword(value):\n    return value\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "pkg" / "filesize.py").write_text(
+        "def naturalsize(value):\n    return value\n",
+        encoding="utf-8",
+    )
+    spec = Spec(
+        intent="support numeric strings",
+        project_kind="library",
+        groups=[
+            Group(
+                id="number",
+                name="Number",
+                feature_ids=[],
+                owned_paths=["src/pkg/number.py"],
+            ),
+            Group(
+                id="filesize",
+                name="File Size",
+                feature_ids=[],
+                owned_paths=["src/pkg/filesize.py"],
+            ),
+        ],
+        features=[
+            Feature(id="intword", name="Intword"),
+            Feature(id="naturalsize", name="Natural size"),
+        ],
+    )
+
+    warnings = infer_feature_group_routes_from_owned_paths(spec, tmp_path)
+
+    assert spec.features[0].group_id == "number"
+    assert spec.features[1].group_id == "filesize"
+    assert spec.groups[0].feature_ids == ["intword"]
+    assert spec.groups[1].feature_ids == ["naturalsize"]
+    assert len(warnings) == 2
+
+
+def test_infer_feature_group_routes_leaves_ambiguous_symbol_unrouted(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def search():\n    pass\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("def search():\n    pass\n", encoding="utf-8")
+    spec = Spec(
+        intent="x",
+        project_kind="library",
+        groups=[
+            Group(id="a", name="A", owned_paths=["src/a.py"]),
+            Group(id="b", name="B", owned_paths=["src/b.py"]),
+        ],
+        features=[Feature(id="search", name="Search")],
+    )
+
+    warnings = infer_feature_group_routes_from_owned_paths(spec, tmp_path)
+
+    assert spec.features[0].group_id == ""
+    assert spec.groups[0].feature_ids == []
+    assert spec.groups[1].feature_ids == []
+    assert warnings == []
 
 
 def test_parse_v2_spec_with_leftover_legacy_top_keys_warns_loudly() -> None:

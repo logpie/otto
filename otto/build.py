@@ -357,6 +357,7 @@ class BuildAgentInput:
     log_dir: Path | None = None  # if set, agent writes narrative there
     feature_id: str = ""  # Layer 2 narrowing: fix only this feature in the slice
     agent_session_id: str = ""  # resume same provider conversation across attempts
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -628,6 +629,7 @@ _HASH_NOISE_DIRS: frozenset[str] = frozenset({
     "instance",
     ".otto",                # v2.2 amendment side-channel files
     "otto_logs",            # production session dir
+    "_otto_build_logs",     # per-agent provider transcripts
     "_session",             # test session dir
     "_s",                   # alt test session dir
 })
@@ -1029,7 +1031,13 @@ def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
     )
     if add.returncode != 0:
         return False
-    for runtime_path in ("_session", "otto_logs", ".otto", ".playwright-cli"):
+    for runtime_path in (
+        "_session",
+        "otto_logs",
+        "_otto_build_logs",
+        ".otto",
+        ".playwright-cli",
+    ):
         subprocess.run(
             ["git", "reset", "HEAD", "--", runtime_path],
             cwd=worktree, capture_output=True, text=True, check=False,
@@ -1074,6 +1082,7 @@ async def run_build(
     project_dir: Path,
     session_dir: Path,
     build_agent: BuildAgentCallable,
+    config: dict[str, Any] | None = None,
     base_url: str | None = None,
     budget: BuildBudget | None = None,
     base_branch: str = "main",
@@ -1106,6 +1115,7 @@ async def run_build(
     ready run one at a time, in dep-topological order. Concurrency is a
     follow-up; the readiness logic is structured to support it.
     """
+    config = dict(config or {})
     budget = budget or BuildBudget()
     branch_for_group = branch_for_group or (
         lambda s: f"i2p/{session_dir.name}/{s.id}"
@@ -1264,6 +1274,7 @@ async def run_build(
                 branch=comp_branch,
                 session_dir=session_dir,
                 build_agent=build_agent,
+                config=config,
                 base_url=base_url,
                 budget=budget,
             )
@@ -1377,6 +1388,7 @@ async def run_build(
             branch=group_branch,
             session_dir=session_dir,
             build_agent=build_agent,
+            config=config,
             base_url=base_url,
             budget=budget,
         )
@@ -1521,6 +1533,7 @@ async def _run_slice(
     branch: str,
     session_dir: Path,
     build_agent: BuildAgentCallable,
+    config: dict[str, Any],
     base_url: str | None,
     budget: BuildBudget,
 ) -> GroupResult:
@@ -1701,6 +1714,7 @@ async def _run_slice(
             last_failure_narrative=last_failure,
             log_dir=raw_log_dir,
             agent_session_id=agent_session_id,
+            config=config,
         )
 
         # v2 phase 4 (observability): archive the rendered prompt
@@ -1953,6 +1967,7 @@ async def _run_component(
     branch: str,
     session_dir: Path,
     build_agent: BuildAgentCallable,
+    config: dict[str, Any],
     base_url: str | None,
     budget: BuildBudget,
 ) -> ComponentResult:
@@ -1971,6 +1986,7 @@ async def _run_component(
         branch=branch,
         session_dir=session_dir,
         build_agent=build_agent,
+        config=config,
         base_url=base_url,
         budget=budget,
     )
@@ -2051,6 +2067,29 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
                 lines.append("")
                 lines.append("**Previous audit detail (why it failed)**:")
                 lines.append(agent_input.last_failure_narrative)
+            lines.append("")
+            lines.append("**Regression-test requirement**:")
+            lines.append(
+                "If this repo has a test suite or contract test surface, add "
+                "the smallest repo-native regression test that would fail "
+                "before your repair and pass after it, unless doing so is "
+                "genuinely impossible. Cover the exact acceptance examples "
+                "and edge/error cases named in the audit detail or original "
+                "intent. If you touch parsing, normalization, validation, or "
+                "error handling, include an invalid/error input that exercises "
+                "the same changed path, not only a generic invalid value. Run "
+                "the targeted test or explain why it could not be run."
+            )
+            lines.append(
+                "Do NOT change expected test values to match your current "
+                "implementation when that would contradict the user intent or "
+                "audit detail. If the contract says an invalid string is "
+                "`unchanged`, that means exactly equal to the original input, "
+                "including punctuation/separators. Existing repo test files are "
+                "in scope for focused regression tests unless the repository "
+                "itself forbids editing tests; docstring examples are not a "
+                "substitute unless the native test command runs doctests."
+            )
             lines.append("")
 
     # === SLICE FRAMING (primary, slice-narrow) ===
@@ -2381,8 +2420,8 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
     # silently becomes {} causes the build agent to run with default
     # options instead of the project's configured venv/test_command —
     # the run "succeeds" but produces wrong output.
-    config: dict = {}
-    if config_path.exists():
+    config: dict = dict(agent_input.config or {})
+    if not config and config_path.exists():
         try:
             config = load_config(config_path)
         except Exception as exc:

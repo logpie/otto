@@ -311,6 +311,7 @@ async def run_merge_queue(
     base_branch: str = "main",
     base_url: str | None = None,
     build_agent: BuildAgentCallable | None = None,
+    config: dict[str, Any] | None = None,
     budget: MergeBudget | None = None,
     shared_budget: BuildBudget | None = None,
     branch_for_group: Callable[[Group], str] | None = None,
@@ -337,6 +338,7 @@ async def run_merge_queue(
             resume. They seed the merge queue's landed set so dependent
             units can proceed without re-merging prior work.
     """
+    config = dict(config or {})
     budget = budget or MergeBudget()
     branch_for_group = branch_for_group or (lambda s: f"i2p/{session_dir.name}/{s.id}")
     git = git_runner or _git
@@ -443,6 +445,7 @@ async def run_merge_queue(
             session_dir=session_dir,
             base_url=base_url,
             build_agent=build_agent,
+            config=config,
             budget=budget,
             shared_budget=shared_budget,
             git=git,
@@ -502,6 +505,7 @@ async def _process_candidate(
     session_dir: Path,
     base_url: str | None,
     build_agent: BuildAgentCallable | None,
+    config: dict[str, Any],
     budget: MergeBudget,
     shared_budget: BuildBudget | None,
     git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
@@ -683,6 +687,7 @@ async def _process_candidate(
             last_failure_narrative=last_failure,
             log_dir=raw_log_dir / f"repair-attempt-{repair_attempts:02d}",
             agent_session_id=repair_session_id,
+            config=config,
         )
         # C1 fix: bail out if the shared cost pool is exhausted.
         # Without this, repair retries can drain past the global cap.

@@ -173,3 +173,43 @@ def test_default_audit_agent_renders_feature_tagging_prompt(tmp_path: Path) -> N
     # Per-kind examples reach the agent too.
     for kind in ("webapp", "api", "library", "cli"):
         assert kind in prompt
+
+
+def test_default_audit_agent_uses_input_config_for_provider_options(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """CLI/runtime provider overrides must reach spawned audit agents."""
+    inp = _make_input(tmp_path, kind="library")
+    inp.config = {"provider": "codex", "_cli_overrides": {"provider": "codex"}}
+
+    captured: dict[str, object] = {}
+
+    def fake_make_options(_project_dir, config, *, agent_type, **_kwargs):
+        from otto.agent import AgentOptions
+
+        captured["config"] = dict(config)
+        captured["agent_type"] = agent_type
+        return AgentOptions()
+
+    async def fake_runner(prompt, options, *, log_dir, phase_name,
+                          phase_label, timeout, project_dir):
+        body = (
+            "```json\n"
+            "{\"verdict\": \"passed\", \"narrative\": \"stub\", "
+            "\"group_verdicts\": [], \"feature_audits\": [], "
+            "\"quality_score\": 3, \"quality_findings\": []}\n"
+            "```"
+        )
+        return body, 0.0, "session-stub", {}
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_runner)
+
+    out = asyncio.run(default_audit_agent(inp))
+
+    assert out.verdict == AuditVerdict.PASSED
+    assert captured["agent_type"] == "certifier"
+    assert captured["config"] == {
+        "provider": "codex",
+        "_cli_overrides": {"provider": "codex"},
+    }

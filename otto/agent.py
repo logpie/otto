@@ -176,7 +176,7 @@ def make_agent_options(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         system_prompt={"type": "preset", "preset": "claude_code"},
-        env=_subprocess_env(),
+        env=_subprocess_env(project_dir),
         setting_sources=["project"],
         **overrides,
     )
