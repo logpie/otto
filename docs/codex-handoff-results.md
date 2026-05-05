@@ -341,3 +341,97 @@ Pending:
 - Full fast gate after documentation updates.
 - Real-cost Codex-provider E2E on tiny webapp, small CLI, and brownfield
   projects after this implementation pass is committed/validated.
+
+## 2026-05-05 A8 Browser Capture Closure
+
+Scope: close the remaining A8 environment and static-webapp blind spots after
+the user explicitly pointed out that screenshot/video capture should use
+Playwright or agent-browser.
+
+This supersedes the A8/browser-binary pending note above. The paid
+Codex-provider tiny webapp, small CLI, brownfield, and resume runs are recorded
+earlier in this file.
+
+Findings fixed:
+- Playwright Chromium is installed and launchable in this worktree. A direct
+  `sync_playwright()` smoke opened a page and read `body=ok`.
+- The synthesized static-webapp detector skipped plain root-level
+  `index.html`. That would miss many tiny vanilla webapps and would leave
+  screenshot/video capture unused even though the product was web-shaped.
+
+Fix:
+- `_synthesized_webapp_walkthrough` now detects root `index.html` after
+  generated output directories.
+- Added a regression proving the root static index path emits screenshot and
+  video artifacts through the default walkthrough.
+- Fixed `tests/integration/test_intent_to_proof.py` to run the subprocess via
+  `uv --project <repo> run --extra dev python -m otto.cli ...`; the old
+  `uv run otto` invocation happened from inside the throwaway project and was
+  not pinned to this checkout.
+- Updated handoff/progress docs so A8 no longer claims browser binaries are
+  unconfirmed.
+
+Verification:
+- Direct Playwright root-index smoke returned `succeeded=True` with
+  `screenshot-home.png` (9344 bytes), `dom-home.html` (96 bytes),
+  `walkthrough.webm` (5648 bytes), `walkthrough.jsonl`, and
+  `browser-capture.log`.
+- `uv run pytest -q tests/test_audit.py::test_synthesized_walkthrough_static_site_branch tests/test_audit.py::test_synthesized_walkthrough_root_index_static_site tests/test_audit.py::test_synthesized_walkthrough_not_applicable_returns_succeeded tests/test_audit.py::test_default_walkthrough_no_browser_journey_webapp_synthesizes`
+  -> 4 passed.
+
+## 2026-05-05 Real-Codex Paid E2E Follow-up
+
+Scope: reran the gated real-Codex intent-to-proof test after the A8/harness
+changes. This exposed three deeper bugs and one over-narrow test assertion.
+
+Paid run 1:
+- Session: `2026-05-05-082246-ebd913`
+- Wall/cost/verdict: `302.7s`, `$0.7640907`, `partial`
+- Finding: i2p wrote a valid session but no `otto_logs/latest`, so the harness
+  could not resolve the session. The audit also capped to partial because a
+  group-only spec had `features: []` while walkthrough lines used Group ids.
+
+Paid run 2:
+- Session: `2026-05-05-083348-196420`
+- Wall/cost/verdict: `706.3s`, `$1.27068095`, `partial`
+- Finding: `otto_logs/latest` was fixed and pointed to the session. The run
+  still capped to partial because the group-only spec's walkthrough used
+  Group `feature_ids` prose (`"create Counter component"`, etc.), not Group ids.
+
+Paid run 3:
+- Session: `2026-05-05-084813-e3a2d8`
+- Wall/cost/verdict: `516.6s`, `$1.0733032`, `passed`
+- Shape: tiny real webapp, one Group, real retry. Attempt 1 failed because the
+  BrowserJourney file did not exist; attempt 2 reused context, created the
+  journey, passed checks, merged, audited, and rendered.
+- Evidence: `otto_logs/latest -> sessions/2026-05-05-084813-e3a2d8`;
+  `summary.json verdict=passed`; `proof-packet.json verdict=passed`;
+  6 screenshot artifacts under `tests/evidence/`.
+- Harness note: the pytest command still failed at the old screenshot assertion
+  because it only counted `audit/` + `otto_artifacts/`, while the generated
+  BrowserJourney wrote screenshots under `tests/evidence/`. The assertion is
+  now broadened, and the saved session passes the updated checks.
+
+Fixes from these runs:
+- i2p runner now writes `otto_logs/latest` when it marks a managed session
+  active; completion still clears only the `paused` pointer.
+- Audit coverage validation now builds an audit-only fallback Feature map from
+  observed Group ids and Group `feature_ids` for legacy/group-only specs. It
+  does not mutate or repersist the spec, so spec hashes remain stable.
+- BrowserJourney check execution now recovers existing screenshot/video paths
+  printed by the harness when `evidence_globs` are wrong or stale.
+- The real-Codex integration test now pins `uv --project <repo>`, accepts
+  screenshots from actual BrowserJourney locations, and still requires a
+  strict product verdict of `passed`.
+
+Verification after fixes:
+- Saved-session assertion for `2026-05-05-084813-e3a2d8`: latest pointer valid,
+  `summary_verdict=passed`, `proof_verdict=passed`, screenshot count `6`.
+- `uv run pytest -q tests/test_checks.py::test_browser_journey_subprocess_and_globs_collect_artifacts tests/test_checks.py::test_browser_journey_collects_printed_artifacts_when_glob_misses tests/test_audit_walkthrough_coverage.py tests/test_audit_coverage_cap.py tests/test_runner.py::test_run_pipeline_writes_resume_checkpoint_and_clears_pointer`
+  -> 19 passed.
+- `uv run ruff check otto/checks.py otto/audit.py otto/runner.py tests/test_checks.py tests/test_audit_walkthrough_coverage.py tests/integration/test_intent_to_proof.py tests/test_runner.py`
+  -> passed.
+- `uv run python scripts/test_tiers.py fast`
+  -> 1395 passed, 531 deselected.
+- `git diff --check`
+  -> passed.

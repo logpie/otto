@@ -322,6 +322,7 @@ def test_run_pipeline_writes_resume_checkpoint_and_clears_pointer(
     assert checkpoint["spec_hash"] == original_hash
     assert result.verdict == AuditVerdict.PASSED
     assert paths.resolve_pointer(tmp_path, paths.PAUSED_POINTER) is None
+    assert paths.resolve_pointer(tmp_path, paths.LATEST_POINTER) == session_dir.resolve()
     assert result.merge_result is not None
     assert result.audit_result is not None
 

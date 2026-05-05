@@ -273,6 +273,30 @@ def test_browser_journey_subprocess_failure_keeps_partial_artifacts(tmp_path: Pa
     assert evidence.artifacts[0].name == "partial.png"
 
 
+def test_browser_journey_collects_printed_artifacts_when_glob_misses(tmp_path: Path) -> None:
+    script = tmp_path / "fake_browser.py"
+    screenshot = tmp_path / "tests" / "evidence" / "initial.png"
+    script.write_text(
+        "from pathlib import Path\n"
+        f"p = Path({str(screenshot)!r})\n"
+        "p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "p.write_bytes(b'png')\n"
+        "print(f'Screenshot saved: {p}')\n",
+        encoding="utf-8",
+    )
+    check = BrowserJourney(
+        command=("python", str(script)),
+        evidence_globs=("otto_artifacts/browser/*.png",),
+        timeout_s=15,
+    )
+
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+
+    assert evidence.passed is True
+    assert evidence.artifacts == [screenshot]
+    assert evidence.detail == "exit=0 artifacts=1"
+
+
 def test_browser_journey_empty_command_is_informational(tmp_path: Path) -> None:
     """v2.1: empty browser command → informational PASS."""
     check = BrowserJourney(command=(), evidence_globs=(), timeout_s=10)

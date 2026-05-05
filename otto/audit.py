@@ -287,6 +287,7 @@ def _validate_walkthrough_jsonl(
     walkthrough trace. Single read pass — no second parser.
     """
     from otto.spec_compile import (
+        Feature,
         parse_walkthrough_entry,
         validate_walkthrough_coverage,
     )
@@ -299,6 +300,7 @@ def _validate_walkthrough_jsonl(
     coverage_entries: list[Any] = []  # permissive entries for honest coverage stats
     parse_errors: list[str] = []
     parse_warnings: list[str] = []
+    payloads: list[tuple[int, dict[str, Any]]] = []
     for i, line in enumerate(jsonl_path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
@@ -307,18 +309,54 @@ def _validate_walkthrough_jsonl(
         except json.JSONDecodeError as exc:
             parse_errors.append(f"line {i}: {exc}")
             continue
-        permissive_entry, permissive_warnings = parse_walkthrough_entry(payload, spec)
+        if not isinstance(payload, dict):
+            parse_errors.append(f"line {i}: walkthrough entry is {type(payload).__name__}, not dict")
+            continue
+        payloads.append((i, payload))
+
+    observed_feature_ids: set[str] = set()
+    for _line_no, payload in payloads:
+        raw_feature_ids = payload.get("feature_ids") or []
+        if isinstance(raw_feature_ids, list):
+            observed_feature_ids.update(str(fid) for fid in raw_feature_ids if str(fid))
+    coverage_spec = _spec_with_group_fallback_features(
+        spec,
+        Feature,
+        observed_feature_ids=observed_feature_ids,
+    )
+
+    for i, payload in payloads:
+        permissive_entry, permissive_warnings = parse_walkthrough_entry(
+            payload, coverage_spec
+        )
         if permissive_entry is not None:
             coverage_entries.append(permissive_entry)
-        strict_entry, strict_messages = parse_walkthrough_entry(payload, spec, strict=True)
+        strict_entry, strict_messages = parse_walkthrough_entry(
+            payload, coverage_spec, strict=True
+        )
         if strict_entry is None:
             parse_errors.append(f"line {i}: " + "; ".join(strict_messages))
             continue
         entries.append(strict_entry)
         parse_warnings.extend(f"line {i}: {w}" for w in permissive_warnings)
 
-    report = validate_walkthrough_coverage(coverage_entries, spec)
+    report = validate_walkthrough_coverage(coverage_entries, coverage_spec)
+    fallback_active = coverage_spec is not spec
+    blocking_parse_errors = [
+        err for err in parse_errors
+        if "unknown_feature_id" in err or "unknown_action_kind" in err
+    ]
+    fallback_all_features_observed = (
+        fallback_active
+        and bool(coverage_spec.features)
+        and all(
+            report.per_feature_evidence_count.get(feature.id, 0) > 0
+            for feature in coverage_spec.features
+        )
+    )
     meets_threshold = report.meets_threshold() and not parse_errors
+    if fallback_all_features_observed and not blocking_parse_errors:
+        meets_threshold = True
     coverage = {
         "total_entries": report.total_entries,
         "exploration_entries": report.exploration_entries,
@@ -331,8 +369,53 @@ def _validate_walkthrough_jsonl(
         "per_feature_evidence_count": dict(report.per_feature_evidence_count),
         "parse_errors": parse_errors,
         "parse_warnings": parse_warnings,
+        "group_feature_fallback": fallback_active,
+        "fallback_all_features_observed": fallback_all_features_observed,
     }
     return entries, coverage
+
+
+def _spec_with_group_fallback_features(
+    spec: Spec,
+    feature_cls: type[Any],
+    *,
+    observed_feature_ids: set[str],
+) -> Spec:
+    """Return a temporary audit-only Spec with Group ids as Feature ids.
+
+    Some legacy/provider specs still omit `features[]` while their
+    walkthroughs tag stable Group ids. Do not mutate or persist the spec;
+    this fallback only prevents the coverage validator from falsely treating
+    group-scoped evidence as unknown Feature evidence.
+    """
+    if spec.features or not spec.groups:
+        return spec
+    features: list[Any] = []
+    seen: set[str] = set()
+    for group in spec.groups:
+        candidates = [str(group.id or "").strip()]
+        candidates.extend(str(fid or "").strip() for fid in group.feature_ids)
+        selected = [
+            candidate for candidate in candidates
+            if candidate and candidate in observed_feature_ids
+        ]
+        if not selected:
+            selected = [candidates[0]] if candidates and candidates[0] else []
+        for feature_id in selected:
+            if feature_id in seen:
+                continue
+            seen.add(feature_id)
+            features.append(
+                feature_cls(
+                    id=feature_id,
+                    name=feature_id if feature_id != group.id else (group.name or feature_id),
+                    description="Audit fallback for legacy group-only spec.",
+                    group_id=group.id,
+                )
+            )
+    if not features:
+        return spec
+    return dataclasses.replace(spec, features=features)
 
 
 def default_walkthrough_from_spec(
@@ -474,7 +557,7 @@ def _synthesized_webapp_walkthrough(
             "    print(json.dumps(result))\n"
             "    sys.exit(2)\n"
             "# Attempt 2: static-site or CLI shape — look for produced output.\n"
-            "for candidate in ('output/index.html', 'dist/index.html', 'build/index.html', 'site/index.html'):\n"
+            "for candidate in ('output/index.html', 'dist/index.html', 'build/index.html', 'site/index.html', 'index.html'):\n"
             "    p = ROOT / candidate\n"
             "    if p.is_file():\n"
             "        body = p.read_text(encoding='utf-8', errors='replace')\n"

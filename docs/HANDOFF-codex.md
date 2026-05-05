@@ -178,8 +178,10 @@ and merge eligibility ignores superseded older BuildResult entries.
 
 Honest deferrals you SHOULD know about:
 
-- A8: screenshot/video capture now exists, but real E2E still needs to
-  confirm the execution environment has Playwright browser binaries.
+- A8: screenshot/video capture now exists. Codex verified on 2026-05-05
+  that Playwright Chromium launches in this worktree; the synthesized
+  static-site detector now covers both generated output dirs and a plain
+  root `index.html`.
 - A9: session-pinned continuity is wired through `AgentOptions.resume`;
   this is not PID reuse, and providers that ignore resume will still
   behave as fresh subprocess calls.
@@ -237,23 +239,23 @@ block delivery. All are explicitly enumerated in `progress.md`.
 The smoke proved the happy path. Less-tested paths:
 
 1. **Brownfield compile** (`otto/spec_compile.py:_reconcile_brownfield`)
-   — only smoke-tested via `tests/integration/test_brownfield_compile_real.py`,
-   no real-cost validation against a non-trivial existing repo.
-2. **`--resume` on real interrupted runs** — unit tests cover
-   `plan_resume` classification; no real-cost test of "kill mid-build,
-   restart, complete". Worth a real run.
-3. **Multi-Group merge ordering with shared scaffolds** — i2p
-   merge_queue logic has unit coverage but the dep-graph + shared_paths
-   interaction is subtle. Real bench has only run on 1- and 4-Group
-   intents.
-4. **MC live polling under high event volume** — useRunView polls
-   every 3s; no stress test of long runs (50+ events/sec backend).
-5. **Layer 2 audit→repair loop** (`otto/audit_loop.py`) — unit tests
-   cover the orchestrator but real fix-cycle behavior on a failing
-   feature has not been smoked end-to-end.
-6. **Spec-edit during in-flight run** — research.md design says
-   recompile invalidates dependent in-flight slices wholesale; not
-   tested live.
+   — real Codex brownfield counter-repair run passed; see
+   `docs/codex-handoff-results.md`.
+2. **`--resume` on real interrupted runs** — real Codex kill/resume run
+   passed after checkpoint and merge-skip fixes; see
+   `docs/codex-handoff-results.md`.
+3. **Multi-Group merge ordering with shared scaffolds** — tiny webapp and
+   TODO-CLI runs landed multiple Groups in dependency order. TODO-CLI
+   exposed dep-owned path expansion, now surfaced as `scope.warning`.
+4. **MC live polling under high event volume** — synthetic backend stress
+   read completed; frontend component harness remains deferred because
+   vitest+RTL is not set up in this repo.
+5. **Layer 2 audit→repair loop** (`otto/audit_loop.py`) — covered by
+   runner tests plus real brownfield repair pass; repair re-audits and
+   integrates successful fixes.
+6. **Spec-edit during in-flight run** — unit/integration coverage exists
+   for invalidation and route preconditions. A browser RUA for editing
+   during a live paused build is still deferred.
 
 ## Process expectations
 
@@ -268,15 +270,15 @@ Per project `CLAUDE.md`:
   changed across the entire `otto/` + `tests/` tree before moving on.
 - Codex fixes Codex-found bugs: standard practice — when you find a
   bug while reviewing, you write the fix.
-- Worktree discipline: stay on `cc-i2p-2`. Don't switch to `main`,
-  don't run git writes against another branch without confirmation.
+- Worktree discipline: stay on the active handoff worktree branch. For
+  this Codex pass that is `codex-i2p-v2`; don't switch to `main` or
+  run git writes against another branch without confirmation.
 
 ## What I want from you
 
 See the prompt at the end of this conversation. In short:
 
-1. Merge `cc-i2p-2` into `main` cleanly (rebase or merge — your call,
-   document the choice).
+1. Keep this branch self-contained and do not switch to `main`.
 2. Hunt + fix bugs across the surfaces enumerated above ("known live
    areas where bugs could hide"). Real-cost runs are approved.
 3. Run end-to-end tests against representative project types: a tiny

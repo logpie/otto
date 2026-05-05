@@ -1066,8 +1066,34 @@ def test_synthesized_walkthrough_static_site_branch(tmp_path: Path, monkeypatch)
     assert "static-site" in log_text or "Static site index" in log_text
 
 
+def test_synthesized_walkthrough_root_index_static_site(tmp_path: Path, monkeypatch) -> None:
+    """Vanilla static apps often serve index.html directly from the repo root."""
+    from otto.spec_compile import PytestCheck
+
+    spec = Spec(
+        intent="x",
+        project_kind="webapp",
+        groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])],
+    )
+
+    (tmp_path / "index.html").write_text(
+        "<html><body><h1>Root static index</h1></body></html>"
+    )
+    monkeypatch.setattr("otto.audit._capture_playwright_page", _fake_playwright_capture)
+
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(tmp_path, tmp_path / "log", 60)
+
+    assert result.succeeded is True
+    log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
+    assert '"index_path": "index.html"' in log_text
+    artifact_names = {path.name for path in result.artifacts}
+    assert "screenshot-home.png" in artifact_names
+    assert "walkthrough.webm" in artifact_names
+
+
 def test_synthesized_walkthrough_not_applicable_returns_succeeded(tmp_path: Path) -> None:
-    """No create_app AND no output/index.html → not a webapp shape.
+    """No create_app AND no static index.html → not a webapp shape.
     Walkthrough returns succeeded=True with 'not-applicable' diagnostic.
     Audit verdict shouldn't be penalized for non-webapp projects.
     """

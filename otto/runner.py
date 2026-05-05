@@ -819,6 +819,10 @@ def _mark_i2p_run_active(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("i2p checkpoint write failed for %s: %s", session_id, exc)
+    try:
+        _paths.set_pointer(project_dir, _paths.LATEST_POINTER, session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("i2p latest pointer write failed for %s: %s", session_id, exc)
 
 
 def _mark_i2p_run_complete(

@@ -25,6 +25,7 @@ import builtins
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -351,6 +352,10 @@ def _run_browser_journey(
     if raw_log_path is not None:
         _write_raw(raw_log_path, output)
     artifacts = _collect_evidence_artifacts(cwd, project_dir, check.evidence_globs)
+    artifacts = _merge_artifacts(
+        artifacts,
+        _collect_output_artifacts(completed.stdout or "", cwd=cwd, project_dir=project_dir),
+    )
     passed = completed.returncode == 0
     raw = {
         "command": list(check.command),
@@ -932,6 +937,45 @@ def _collect_evidence_artifacts(
                 artifacts.append(candidate)
                 seen.add(resolved)
     return artifacts
+
+
+_OUTPUT_ARTIFACT_RE = re.compile(
+    r"(?P<path>(?:/|\.{1,2}/|[A-Za-z0-9_.-]+/)[^\s'\"<>:]+"
+    r"\.(?:png|jpg|jpeg|webp|gif|webm|mp4|har|html))"
+)
+
+
+def _collect_output_artifacts(output: str, *, cwd: Path, project_dir: Path) -> list[Path]:
+    """Recover evidence files printed by browser journeys.
+
+    Agents sometimes emit a wrong `evidence_globs` value but their harness
+    prints concrete screenshot/video paths. Treat existing printed paths as
+    artifacts so proof packets do not lose browser evidence solely because
+    the glob was stale.
+    """
+    artifacts: list[Path] = []
+    for match in _OUTPUT_ARTIFACT_RE.finditer(output or ""):
+        raw = match.group("path").rstrip(").,;]")
+        path = Path(raw)
+        candidates = [path] if path.is_absolute() else [cwd / path, project_dir / path]
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                artifacts.append(candidate)
+                break
+    return _merge_artifacts([], artifacts)
+
+
+def _merge_artifacts(existing: list[Path], extra: list[Path]) -> list[Path]:
+    merged: list[Path] = []
+    seen: set[str] = set()
+    for artifact in [*existing, *extra]:
+        key = str(artifact)
+        if key in seen:
+            continue
+        if artifact.exists() and artifact.is_file():
+            merged.append(artifact)
+            seen.add(key)
+    return merged
 
 
 def _err_evidence(started: str, t0: float, detail: str) -> Evidence:

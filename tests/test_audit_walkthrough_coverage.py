@@ -125,6 +125,104 @@ def test_unknown_feature_id_surfaces(tmp_path: Path) -> None:
     assert any("typo-id" in err for err in out["parse_errors"])
 
 
+def test_group_only_spec_synthesizes_features_for_walkthrough_tags(tmp_path: Path) -> None:
+    """Legacy provider specs may tag walkthrough lines with Group ids only."""
+    from otto.spec_compile import SCHEMA_VERSION, parse_spec
+
+    spec, _warnings = parse_spec({
+        "schema_version": SCHEMA_VERSION,
+        "intent": "tiny webapp",
+        "project_kind": "webapp",
+        "features": [],
+        "groups": [
+            {
+                "id": "home",
+                "name": "Home page",
+                "feature_ids": [
+                    "render hello world text",
+                    "increment counter on click",
+                ],
+            },
+        ],
+    })
+    assert spec.features == []
+
+    _write_jsonl(
+        tmp_path / "walkthrough.jsonl",
+        [
+            {
+                "t": "0:01",
+                "action_kind": "browser_navigation",
+                "feature_ids": ["home"],
+            },
+        ],
+    )
+    _, out = _validate_walkthrough_jsonl(tmp_path, spec)
+
+    assert out is not None
+    assert out["meets_threshold"] is True
+    assert out["unknown_feature_id_refs"] == []
+    assert out["parse_errors"] == []
+    assert out["group_feature_fallback"] is True
+    assert out["fallback_all_features_observed"] is True
+
+
+def test_group_only_spec_fallback_accepts_group_feature_ids_with_supporting_checks(
+    tmp_path: Path,
+) -> None:
+    """Cross-cutting untagged checks should not cap legacy group-only specs
+    once every observed group feature has evidence.
+    """
+    from otto.spec_compile import SCHEMA_VERSION, parse_spec
+
+    spec, _warnings = parse_spec({
+        "schema_version": SCHEMA_VERSION,
+        "intent": "tiny webapp",
+        "project_kind": "webapp",
+        "features": [],
+        "groups": [
+            {
+                "id": "counter",
+                "name": "Counter",
+                "feature_ids": [
+                    "create Counter component",
+                    "add increment button with click handler",
+                ],
+            },
+        ],
+    })
+    _write_jsonl(
+        tmp_path / "walkthrough.jsonl",
+        [
+            {
+                "t": "0:01",
+                "action_kind": "cli_invoke",
+                "feature_ids": ["create Counter component"],
+            },
+            {
+                "t": "0:02",
+                "action_kind": "cli_invoke",
+                "feature_ids": ["add increment button with click handler"],
+            },
+            {
+                "t": "0:03",
+                "action_kind": "cli_invoke",
+                "feature_ids": [],
+                "narrative": "Reviewed shared CSS focus styling",
+            },
+        ],
+    )
+
+    _entries, out = _validate_walkthrough_jsonl(tmp_path, spec)
+
+    assert out is not None
+    assert out["coverage_ratio"] == 2 / 3
+    assert out["meets_threshold"] is True
+    assert out["group_feature_fallback"] is True
+    assert out["fallback_all_features_observed"] is True
+    assert any("untagged_non_exploration" in err for err in out["parse_errors"])
+
+
 def test_malformed_json_line_recorded(tmp_path: Path) -> None:
     spec = _spec_with_features("login")
     p = tmp_path / "walkthrough.jsonl"
