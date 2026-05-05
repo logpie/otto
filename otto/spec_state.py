@@ -153,6 +153,14 @@ class Event:
     `event_id` is stable per-session and assigned at append time
     (`ev-NNNNNN` based on the journal's line count). Amendments
     reference these IDs in `Amendment.trigger_event_id`.
+
+    `feature_id` (round-3 audit gap 5): optional per-Feature attribution
+    for events that scope to a single Feature within a Group (e.g. an
+    audit walkthrough action, a per-Feature check result). Mirrors
+    ``otto.checks.Evidence.feature_id`` so journal events can join
+    cleanly with evidence rows. Empty = "unattributed / Group-level".
+    The field is optional and defaults to empty for back-compat with
+    existing replay() consumers that ignore it.
     """
     ts: str                                   # ISO-8601 UTC, e.g. 2026-05-03T12:34:56Z
     kind: str                                 # one of EVENT_KINDS
@@ -161,6 +169,7 @@ class Event:
     check_id: str = ""                        # blank unless group.check.*
     attempt: int = 0                          # 0 unless retry-aware event
     detail: str = ""                          # short human-readable detail
+    feature_id: str = ""                      # optional per-Feature attribution
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -203,7 +212,30 @@ _PHASE_FOR_KIND: dict[str, str] = {
     "group.merge.redundant": REDUNDANT,
     "group.blocked": BLOCKED,
     "group.invalidated_by_spec_edit": INVALIDATED,
+    # A7 — operator abort is terminal for the Group; treat like BLOCKED so
+    # replay()-derived RunState matches the side-channel `aborted_group_ids()`
+    # accounting (otherwise an aborted Group's phase stays at whatever it
+    # was last — typically BUILDING — and `landed_components` /
+    # `pending_components` classify it incorrectly on resume).
+    "group.aborted_by_user": BLOCKED,
 }
+
+# Run-scoped events that are intentionally NOT phase-affecting. They mutate
+# session-level state (lifecycle, review-gate, spec versions) but do NOT
+# transition any single Group's phase. Listed here so future maintainers
+# don't have to re-derive intent from absence; replay() simply ignores them.
+# Mapping check is `_PHASE_FOR_KIND.get(event.kind)` → no entry → no-op.
+_RUN_SCOPED_NO_PHASE_KINDS: frozenset[str] = frozenset({
+    "run.paused_by_user",       # session pause flag (poll predicate, not phase)
+    "run.resumed_by_user",      # clears pause flag (poll predicate, not phase)
+    "spec.review.opened",       # operator opened the review surface
+    "spec.review_pending",      # A13 review-gate engaged
+    "spec.review_approved",     # A13 review-gate cleared
+    "spec.edited",              # spec markdown edited (Group invalidations
+                                # come via separate `group.invalidated_by_spec_edit`)
+    "spec.approved",            # lifecycle flip (draft → approved)
+    "spec.regenerated",         # spec recompiled post-edit
+})
 
 
 @dataclass
@@ -309,12 +341,15 @@ def emit(
     check_id: str = "",
     attempt: int = 0,
     detail: str = "",
+    feature_id: str = "",
     **extra: Any,
 ) -> Event:
     """Convenience wrapper around `append_event` with `ts=_iso_now()`.
 
     Returns the persisted Event with `event_id` populated; amendment
     callers store this id in `Amendment.trigger_event_id`.
+
+    `feature_id` is optional per-Feature attribution (see Event docstring).
     """
     event = Event(
         ts=_iso_now(),
@@ -323,6 +358,7 @@ def emit(
         check_id=check_id,
         attempt=attempt,
         detail=detail,
+        feature_id=feature_id,
         extra=dict(extra),
     )
     return append_event(session_dir, event)
@@ -423,6 +459,7 @@ def iter_events(session_dir: Path) -> Iterator[Event]:
                 check_id=str(payload.get("check_id") or ""),
                 attempt=int(payload.get("attempt") or 0),
                 detail=str(payload.get("detail") or ""),
+                feature_id=str(payload.get("feature_id") or ""),
                 extra=dict(payload.get("extra") or {}),
             )
 

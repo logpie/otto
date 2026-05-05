@@ -16,12 +16,15 @@ from otto.spec_state import (
     EVENT_KINDS,
     Event,
     FAILED,
+    INVALIDATED,
     LANDED,
     MERGING,
     MidMergeRecovery,
     PENDING,
     append_event,
+    aborted_group_ids,
     emit,
+    is_run_paused_by_user,
     iter_events,
     journal_path,
     recover_mid_merge_state,
@@ -175,6 +178,86 @@ def test_replay_resume_with_one_slice_per_phase(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Joint A6 (mid-build spec edit) + A7 (operator pause/abort) coexistence
+# ---------------------------------------------------------------------------
+#
+# A6 and A7 emit different event kinds into the same spec-state.jsonl
+# journal. They don't share state, but the journal must compose them
+# correctly: a single run can be paused, have a group aborted, accept
+# a spec edit that invalidates another group, and then resume — and
+# replay() must derive a sane RunState from the merged stream.
+#
+# Round-3 audit gap-2: no test exercised both event families in one
+# journal. This test does.
+
+
+def test_replay_composes_a6_spec_edit_and_a7_pause_abort_in_same_journal(
+    tmp_path: Path,
+) -> None:
+    # Both groups start building.
+    emit(tmp_path, "group.started", group_id="G1")
+    emit(tmp_path, "group.started", group_id="G2")
+
+    # A7: operator pauses the run, aborts G1.
+    emit(tmp_path, "run.paused_by_user", detail="operator paused")
+    emit(tmp_path, "group.aborted_by_user", group_id="G1", detail="operator abort")
+
+    # A6: while paused, operator edits the spec; G2's contributions
+    # change so the runner emits an invalidation event for G2.
+    emit(tmp_path, "spec.edited", detail="user trimmed feature F2")
+    emit(
+        tmp_path,
+        "group.invalidated_by_spec_edit",
+        group_id="G2",
+        detail="F2 dropped",
+    )
+
+    # A7: operator resumes the run.
+    emit(tmp_path, "run.resumed_by_user", detail="operator resumed")
+
+    # All five non-trivial events plus the two `group.started` should be
+    # preserved, in order, with no exceptions raised during replay.
+    kinds = [e.kind for e in iter_events(tmp_path)]
+    assert kinds == [
+        "group.started",
+        "group.started",
+        "run.paused_by_user",
+        "group.aborted_by_user",
+        "spec.edited",
+        "group.invalidated_by_spec_edit",
+        "run.resumed_by_user",
+    ]
+
+    state = replay(tmp_path, group_ids=["G1", "G2"])
+    # A7 — group abort should land G1 in BLOCKED (operator-terminal).
+    assert state.group_state("G1").phase == BLOCKED
+    # A6 — spec-edit invalidation should land G2 in INVALIDATED so the
+    # runner re-dispatches it under the new spec.
+    assert state.group_state("G2").phase == INVALIDATED
+    # A7 — pause then resume: pause flag should be cleared.
+    assert is_run_paused_by_user(tmp_path) is False
+    # A7 — the side-channel set used by the merge queue should still
+    # see G1 as aborted (sticky for the rest of the run).
+    assert "G1" in aborted_group_ids(tmp_path)
+    # Run isn't finished — no run.finished event was emitted.
+    assert not state.run_finished
+
+
+def test_replay_a7_pause_without_resume_leaves_run_paused(tmp_path: Path) -> None:
+    # Sanity check that the pause predicate is honestly derived from the
+    # journal in the joint scenario above; if Resume were never emitted,
+    # the run should still register as paused.
+    emit(tmp_path, "group.started", group_id="G1")
+    emit(tmp_path, "run.paused_by_user", detail="operator paused")
+    emit(tmp_path, "group.aborted_by_user", group_id="G1", detail="operator abort")
+    emit(tmp_path, "spec.edited", detail="user trimmed feature F2")
+
+    state = replay(tmp_path, group_ids=["G1"])
+    assert state.group_state("G1").phase == BLOCKED
+    assert is_run_paused_by_user(tmp_path) is True
+
+
+# ---------------------------------------------------------------------------
 # Mid-merge git recovery
 # ---------------------------------------------------------------------------
 
@@ -244,3 +327,72 @@ def test_recover_mid_merge_state_handles_non_git_dir(tmp_path: Path) -> None:
     recovery = recover_mid_merge_state(tmp_path)
     assert isinstance(recovery, MidMergeRecovery)
     assert recovery.kind == ""
+
+
+# ---------------------------------------------------------------------------
+# Round-3 audit gaps 1 + 5 — phase mapping + Event.feature_id field
+# ---------------------------------------------------------------------------
+
+
+def test_replay_marks_aborted_group_as_blocked(tmp_path: Path) -> None:
+    """Round-3 gap 1: `group.aborted_by_user` must transition the
+    Group's phase to BLOCKED. Before the fix, the kind had no entry in
+    `_PHASE_FOR_KIND`, so an aborted Group's phase stayed at whatever
+    it was last (typically BUILDING) and replay()-derived RunState
+    misclassified it.
+    """
+    emit(tmp_path, "group.started", group_id="g-a")
+    emit(
+        tmp_path, "group.aborted_by_user", group_id="g-a",
+        detail="operator clicked Abort",
+    )
+
+    state = replay(tmp_path)
+    assert state.group_state("g-a").phase == BLOCKED
+
+
+def test_replay_ignores_run_scoped_events_without_changing_phase(
+    tmp_path: Path,
+) -> None:
+    """Run-scoped events (run.paused_by_user, spec.review_pending, etc.)
+    must not transition any single Group's phase.
+    """
+    emit(tmp_path, "group.started", group_id="g-a")
+    # Sprinkle every documented run-scoped event between Group events.
+    emit(tmp_path, "run.paused_by_user", detail="operator paused")
+    emit(tmp_path, "run.resumed_by_user", detail="operator resumed")
+    emit(tmp_path, "spec.review.opened")
+    emit(tmp_path, "spec.review_pending")
+    emit(tmp_path, "spec.review_approved")
+    emit(tmp_path, "spec.edited")
+    emit(tmp_path, "spec.approved")
+    emit(tmp_path, "spec.regenerated")
+
+    state = replay(tmp_path)
+    # Group is still BUILDING; the run-scoped events did not move it.
+    assert state.group_state("g-a").phase == BUILDING
+
+
+def test_event_feature_id_round_trips_through_emit_and_replay(
+    tmp_path: Path,
+) -> None:
+    """Round-3 gap 5: Event.feature_id is optional but persists across
+    emit + iter_events. Existing replay() consumers ignore the field.
+    """
+    emit(
+        tmp_path,
+        "group.check.finished",
+        group_id="g-a",
+        check_id="c1",
+        detail="passed",
+        feature_id="md-render",
+    )
+    events = list(iter_events(tmp_path))
+    assert len(events) == 1
+    assert events[0].feature_id == "md-render"
+
+    # Default empty for events without explicit feature_id.
+    emit(tmp_path, "group.merge.landed", group_id="g-a", detail="abcd")
+    events = list(iter_events(tmp_path))
+    landed = [e for e in events if e.kind == "group.merge.landed"]
+    assert landed[0].feature_id == ""

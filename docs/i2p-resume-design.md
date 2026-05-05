@@ -285,6 +285,40 @@ is the right escape hatch — already supported.
 a prior crash between commit and journal flush — or a force-push
 since). Re-running the merge is safe.
 
+### 7.7 Composing with A6 (mid-build spec edits)
+
+A6 introduces `group.invalidated_by_spec_edit` events that the runner
+re-dispatches against the post-edit spec at the end of the build phase.
+If the run paused or crashed AFTER an edit invalidated some Groups but
+BEFORE the runner's `_redispatch_invalidated_groups` ran (or completed),
+those events are still on the journal with no terminal phase event
+following them.
+
+`plan_resume` now scans the journal for these (
+`ResumePlan.prior_invalidated_group_ids`) and surfaces them in the
+banner. The runner's existing `_invalidated_group_ids` predicate sees
+the same trailing events on resume, so the post-build re-dispatch loop
+picks them up automatically — no separate code path needed.
+
+`--force` semantics: when the resumed spec hash mismatches (e.g. an
+edit landed during the pause), `verify_spec_hash_matches` raises and
+the CLI requires `--force`. With `--force`, the runner now logs the
+prior invalidations explicitly (one warn-level line per resume) so
+operators see what's about to be re-dispatched, instead of letting the
+re-dispatch happen silently.
+
+### 7.8 Composing with A7 (operator pause)
+
+`plan_resume` reads `is_run_paused_by_user(session_dir)` and stores
+the answer on `ResumePlan.paused_by_user`. The runner does NOT refuse
+to resume on this flag — it's a survivable, documented state:
+`_wait_while_paused` will trip on the first phase boundary and sleep
+until a `run.resumed_by_user` event lands. The runner emits one
+warn-level log on resume start so the operator understands why the
+phase progress meter is stuck. Operators who want a true non-blocking
+resume should clear the pause first (Mission Control "Resume" button
+or a manual journal append) before re-invoking `--resume`.
+
 ---
 
 ## 8. Out of scope for v1

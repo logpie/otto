@@ -218,6 +218,29 @@ async def run_pipeline(
     except Exception as exc:  # noqa: BLE001 — observability is best-effort
         logger.warning("emit run start failed: %s", exc)
 
+    # Round-3 audit gap 3 — surface A7 pause + A6 prior invalidations.
+    # We don't refuse: the operator may have explicitly invoked
+    # `otto build --resume` knowing they paused, and the same poll-flag
+    # design that powers `_wait_while_paused` will trip on the first
+    # phase boundary anyway. A loud one-line log is the right contract.
+    if resume_plan is not None:
+        if resume_plan.paused_by_user:
+            logger.warning(
+                "resume: prior session was paused by user; runner will sleep "
+                "at the first phase boundary until a resume event is appended "
+                "(session=%s)", session_dir.name,
+            )
+        if resume_plan.prior_invalidated_group_ids:
+            logger.warning(
+                "resume: %d Group(s) carry prior `group.invalidated_by_spec_edit` "
+                "events with no terminal phase since (ids=%s); they will flow "
+                "through the post-build re-dispatch path along with any new "
+                "invalidations (session=%s)",
+                len(resume_plan.prior_invalidated_group_ids),
+                sorted(resume_plan.prior_invalidated_group_ids),
+                session_dir.name,
+            )
+
     # ---- 1. Compile ----
     if spec is None:
         _phase("compile")

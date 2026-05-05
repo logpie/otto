@@ -553,3 +553,98 @@ def test_append_amendment_defaults_remain_for_back_compat() -> None:
     amended = append_amendment(spec, reason="x", actor="user")
     assert amended.amendments[0].trigger_event_id == ""
     assert amended.amendments[0].tier == 0
+
+
+# ---------------------------------------------------------------------------
+# Round-3 audit gap 4 — schema_version bump v1 → v2 + deprecation window
+# ---------------------------------------------------------------------------
+
+
+def test_parse_v1_spec_emits_legacy_read_warning() -> None:
+    """A v1 spec.json (schema_version=1, legacy `slices` key) reads
+    cleanly under the v2 parser but emits one
+    `spec.deprecated.schema_v1_read` advisory warning.
+    """
+    from otto.spec_compile import parse_spec
+    v1_payload = {
+        "intent": "tiny webapp",
+        "project_kind": "webapp",
+        "structure": {"payload": {}},
+        "schema_version": 1,
+        # Legacy v1 top-level key — read-fallback active for one cycle.
+        "slices": [
+            {"id": "s1", "title": "Shell", "tasks": ["scaffold"], "deps": []},
+        ],
+    }
+    spec, warnings = parse_spec(v1_payload)
+    codes = {w.code for w in warnings}
+    assert "spec.deprecated.schema_v1_read" in codes
+    # The legacy `slices` key was consumed into `spec.groups`.
+    assert len(spec.groups) == 1
+    assert spec.groups[0].id == "s1"
+
+
+def test_parse_v2_spec_with_no_legacy_keys_has_no_deprecation_warning() -> None:
+    """A clean v2 spec.json should not emit any deprecation warning."""
+    from otto.spec_compile import parse_spec, SCHEMA_VERSION
+    assert SCHEMA_VERSION >= 2
+    v2_payload = {
+        "intent": "tiny webapp",
+        "project_kind": "webapp",
+        "structure": {"payload": {}},
+        "schema_version": SCHEMA_VERSION,
+        "groups": [
+            {"id": "s1", "name": "Shell", "feature_ids": ["scaffold"],
+             "dependencies": []},
+        ],
+    }
+    spec, warnings = parse_spec(v2_payload)
+    codes = {w.code for w in warnings}
+    assert not any(c.startswith("spec.deprecated.schema_") for c in codes)
+    assert spec.schema_version == SCHEMA_VERSION
+    assert len(spec.groups) == 1
+
+
+def test_parse_v2_spec_with_leftover_legacy_top_keys_warns_loudly() -> None:
+    """A v2 spec that still carries legacy v1 top-level keys must emit
+    `spec.deprecated.schema_v2_legacy_top_keys` so operators clean up
+    before the next bump drops the read-fallback.
+    """
+    from otto.spec_compile import parse_spec, SCHEMA_VERSION
+    payload = {
+        "intent": "tiny webapp",
+        "project_kind": "webapp",
+        "structure": {"payload": {}},
+        "schema_version": SCHEMA_VERSION,
+        "groups": [
+            {"id": "s1", "name": "Shell", "feature_ids": ["scaffold"]},
+        ],
+        # Leftover legacy key while schema_version says v2 — loud warning.
+        "cross_slice_checks": [],
+    }
+    _spec, warnings = parse_spec(payload)
+    codes = {w.code for w in warnings}
+    assert "spec.deprecated.schema_v2_legacy_top_keys" in codes
+
+
+def test_parse_v2_spec_with_leftover_legacy_group_fields_warns() -> None:
+    """Leftover per-group legacy fields (title, tasks, deps) on a v2
+    spec also emit a louder `schema_v2_legacy_group_fields` warning."""
+    from otto.spec_compile import parse_spec, SCHEMA_VERSION
+    payload = {
+        "intent": "tiny webapp",
+        "project_kind": "webapp",
+        "structure": {"payload": {}},
+        "schema_version": SCHEMA_VERSION,
+        "groups": [
+            {
+                "id": "s1", "name": "Shell",
+                "feature_ids": ["scaffold"],
+                # Leftover legacy field on a v2 spec.
+                "tasks": ["scaffold"],
+            },
+        ],
+    }
+    _spec, warnings = parse_spec(payload)
+    codes = {w.code for w in warnings}
+    assert "spec.deprecated.schema_v2_legacy_group_fields" in codes

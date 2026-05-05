@@ -41,7 +41,7 @@ from otto.spec_compile import (
     render_spec_md,
     spec_to_dict,
 )
-from otto.spec_state import emit as emit_state_event
+from otto.spec_state import emit as emit_state_event, is_run_paused_by_user
 
 logger = logging.getLogger("otto.web.spec_review")
 
@@ -130,6 +130,20 @@ def install_spec_review_routes(
                     "the amendment flow, not this endpoint"
                 ),
             )
+        # Round-3 audit gap 2: if the underlying run is operator-paused
+        # (`run.paused_by_user` not yet cleared), refuse edits — the
+        # invariant is "edit lands in the journal between phase boundaries
+        # while the runner is awake to act on it". Emitting
+        # `group.invalidated_by_spec_edit` against a paused runner just
+        # accumulates dead invalidations that the operator must then
+        # disentangle on resume.
+        if is_run_paused_by_user(session_dir(project, session_id)):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "session is paused — resume the run before editing the spec"
+                ),
+            )
 
         try:
             edited, warnings = parse_spec_md(payload.markdown, base=spec)
@@ -179,7 +193,39 @@ def install_spec_review_routes(
         project = _resolve_project_dir()
         sd = _resolve_spec_dir(project, session_id)
         spec = _load_or_404(sd)
-        was_already_approved = _read_lifecycle(sd) == "approved"
+        # Round-3 audit gap 2: lifecycle precondition.
+        # Approval is only valid from `draft` (initial gate) or `approved`
+        # (idempotent re-confirm — the A13 review-gate may need a second
+        # `spec.review_approved` event after a runner restart). All other
+        # lifecycles indicate concurrent surgery that should not be
+        # rubber-stamped via /approve:
+        #   - `editing_in_flight`: a build is running and the spec is
+        #     mid-edit window. Approving from this state would race the
+        #     runner's `_set_lifecycle_best_effort("approved")` finally
+        #     branch.
+        #   - `amended`: amendment flow owns the lifecycle transition.
+        current_lifecycle = _read_lifecycle(sd)
+        if current_lifecycle not in ("draft", "approved"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"cannot approve from lifecycle={current_lifecycle!r}; "
+                    "approve is allowed only from draft or approved"
+                ),
+            )
+        # Refuse approval while the run is paused — the runner is asleep
+        # at a phase boundary; emitting `spec.review_approved` will be
+        # delivered eventually but the operator's expectation that
+        # approve unblocks "now" is broken. Force them to resume first.
+        if is_run_paused_by_user(session_dir(project, session_id)):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "session is paused — resume the run before approving "
+                    "the spec"
+                ),
+            )
+        was_already_approved = current_lifecycle == "approved"
         _write_lifecycle(sd, "approved")
         # Only emit spec.approved on the lifecycle transition. Repeated
         # approve calls are idempotent at the data layer; we don't want

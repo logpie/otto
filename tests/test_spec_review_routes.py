@@ -452,3 +452,78 @@ def test_post_edit_during_approved_still_blocks(
         json={"intent_hash": spec.intent_hash, "markdown": "# nope\n"},
     )
     assert edit_resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Round-3 audit gap 2 — lifecycle preconditions on /edit and /approve
+# ---------------------------------------------------------------------------
+
+
+def _emit_pause(project: Path, session_id: str) -> None:
+    """Append a `run.paused_by_user` journal event for the session."""
+    from otto.spec_state import emit as emit_state_event
+    sd_journal = project / "otto_logs" / "sessions" / session_id
+    emit_state_event(sd_journal, "run.paused_by_user", detail="test paused")
+
+
+def test_post_edit_refuses_when_run_is_paused(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    """An edit while the run is paused must be rejected — the runner is
+    asleep at a phase boundary and would not see the invalidation
+    events between phases.
+    """
+    project, sid, spec = project_with_spec
+    _emit_pause(project, sid)
+
+    client = _client(project)
+    edit_resp = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": "# nope\n"},
+    )
+    assert edit_resp.status_code == 409
+    assert "paused" in edit_resp.json()["detail"]
+
+
+def test_post_approve_refuses_when_run_is_paused(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    """Approve while paused must 409 so the operator resumes first."""
+    project, sid, _spec = project_with_spec
+    _emit_pause(project, sid)
+
+    client = _client(project)
+    resp = client.post(f"/api/specs/{sid}/approve")
+    assert resp.status_code == 409
+    assert "paused" in resp.json()["detail"]
+
+
+def test_post_approve_refuses_when_lifecycle_not_in_allowed_set(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    """Approve from `editing_in_flight` or `amended` must be rejected —
+    those lifecycles indicate concurrent surgery the runner / amendment
+    flow owns.
+    """
+    project, sid, _spec = project_with_spec
+    sd = project / "otto_logs" / "sessions" / sid / "spec"
+    (sd / "lifecycle.json").write_text(
+        json.dumps({"lifecycle": "editing_in_flight"}, indent=2) + "\n"
+    )
+
+    client = _client(project)
+    resp = client.post(f"/api/specs/{sid}/approve")
+    assert resp.status_code == 409
+    assert "lifecycle" in resp.json()["detail"]
+
+
+def test_post_approve_normal_flow_still_works(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    """Sanity: the new guard does not block the canonical
+    draft → approved transition."""
+    project, sid, _spec = project_with_spec
+    client = _client(project)
+    resp = client.post(f"/api/specs/{sid}/approve")
+    assert resp.status_code == 200
+    assert resp.json()["view"]["lifecycle"] == "approved"

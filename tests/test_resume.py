@@ -206,3 +206,58 @@ def test_recover_mid_merge_state_clean_repo_returns_no_op(tmp_path: Path) -> Non
     rec = recover_mid_merge_state_for_project(repo)
     assert rec.cleaned is False
     assert rec.kind == ""
+
+
+# ---------------------------------------------------------------------------
+# Round-3 audit gap 3 — A6/A7 composition with resume
+# ---------------------------------------------------------------------------
+
+
+def test_plan_resume_picks_up_paused_by_user(tmp_path: Path) -> None:
+    """A7: a session with a trailing `run.paused_by_user` event surfaces
+    on `ResumePlan.paused_by_user`. Resume of an explicitly resumed
+    session does not (the resume event clears the flag)."""
+    session_dir, _ = _seed_session(tmp_path)
+    emit(session_dir, "run.paused_by_user", detail="operator clicked Pause")
+
+    plan = plan_resume(session_dir)
+    assert plan.paused_by_user is True
+
+    # After a `run.resumed_by_user`, the flag clears.
+    emit(session_dir, "run.resumed_by_user", detail="operator clicked Resume")
+    plan2 = plan_resume(session_dir)
+    assert plan2.paused_by_user is False
+
+
+def test_plan_resume_picks_up_prior_invalidations(tmp_path: Path) -> None:
+    """A6: trailing `group.invalidated_by_spec_edit` events with no
+    terminal phase event after them surface on
+    `ResumePlan.prior_invalidated_group_ids`. A subsequent
+    `group.merge.landed` clears that Group from the set."""
+    session_dir, _ = _seed_session(tmp_path)
+    emit(session_dir, "group.started", group_id="g-a")
+    emit(session_dir, "group.invalidated_by_spec_edit", group_id="g-a",
+         detail="feature_ids changed")
+    emit(session_dir, "group.invalidated_by_spec_edit", group_id="g-b",
+         detail="feature_ids changed")
+
+    plan = plan_resume(session_dir)
+    assert plan.prior_invalidated_group_ids == frozenset({"g-a", "g-b"})
+
+    # Once g-a lands, it falls out of the set; g-b stays.
+    emit(session_dir, "group.merge.landed", group_id="g-a", detail="abcd1234")
+    plan2 = plan_resume(session_dir)
+    assert plan2.prior_invalidated_group_ids == frozenset({"g-b"})
+
+
+def test_plan_resume_invalidations_default_empty_when_clean(
+    tmp_path: Path,
+) -> None:
+    """No invalidation events → empty frozenset, paused flag False."""
+    session_dir, _ = _seed_session(tmp_path)
+    emit(session_dir, "group.started", group_id="g-a")
+    emit(session_dir, "group.merge.landed", group_id="g-a", detail="ff00")
+
+    plan = plan_resume(session_dir)
+    assert plan.prior_invalidated_group_ids == frozenset()
+    assert plan.paused_by_user is False

@@ -39,6 +39,8 @@ from otto.spec_state import (
     MidMergeRecovery,
     REDUNDANT,
     RunState,
+    is_run_paused_by_user,
+    iter_events,
     recover_mid_merge_state,
     replay,
 )
@@ -97,6 +99,19 @@ class ResumePlan:
       so the CLI can warn the operator. These are LANDED claims whose
       commit hash is missing from git history — almost certainly a
       crash between commit and journal flush.
+    * ``paused_by_user``: A7 — the prior run's last pause/resume signal
+      was ``run.paused_by_user`` (no later ``run.resumed_by_user``). The
+      runner does NOT refuse to resume on this flag (operator may
+      explicitly want to ``--resume`` knowing they paused) but the CLI
+      surfaces it as a banner so operators understand the
+      ``_wait_while_paused`` poll will trip on the first phase
+      boundary unless they clear the pause separately.
+    * ``prior_invalidated_group_ids``: A6 — Group ids whose last
+      relevant journal event is ``group.invalidated_by_spec_edit``
+      with no terminal phase event after it. On resume these need
+      to flow through the runner's re-dispatch path so their work
+      composes correctly with mid-build edits applied during the
+      prior run.
     """
 
     session_id: str
@@ -110,6 +125,8 @@ class ResumePlan:
     prior_wall_s: float = 0.0
     halted_reason: str = ""
     unreconciled_landed_ids: tuple[str, ...] = field(default_factory=tuple)
+    paused_by_user: bool = False
+    prior_invalidated_group_ids: frozenset[str] = field(default_factory=frozenset)
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +206,11 @@ def plan_resume(
 
     prior_cost, prior_wall, halted_reason = _read_prior_accounting(session_dir)
 
+    # Round-3 audit gap 3: surface A7 pause + A6 invalidations to the
+    # runner so resume composes correctly with mid-flight state.
+    paused = is_run_paused_by_user(session_dir)
+    prior_invalidated = _scan_prior_invalidations(session_dir)
+
     session_id = session_dir.name
 
     return ResumePlan(
@@ -205,6 +227,8 @@ def plan_resume(
         prior_wall_s=prior_wall,
         halted_reason=halted_reason,
         unreconciled_landed_ids=tuple(state.unreconciled_landed_ids),
+        paused_by_user=paused,
+        prior_invalidated_group_ids=frozenset(prior_invalidated),
     )
 
 
@@ -327,6 +351,38 @@ def _classify_components(
             # PENDING / BUILDING / CHECKING / FAILED / ELIGIBLE / MERGING
             pending.add(cid)
     return landed, pending
+
+
+def _scan_prior_invalidations(session_dir: Path) -> set[str]:
+    """Return Group ids whose last relevant journal event is
+    ``group.invalidated_by_spec_edit`` with no terminal phase event after.
+
+    Mirrors the runner's ``_invalidated_group_ids`` predicate: a Group is
+    considered "still invalidated" only if neither ``group.merge.landed``
+    nor ``group.blocked`` has been recorded since the invalidation was
+    emitted. Used to populate ``ResumePlan.prior_invalidated_group_ids``
+    so a ``--force`` resume after an A6 mid-build edit can re-dispatch
+    them honestly.
+    """
+    invalidated: set[str] = set()
+    last_kind_for_group: dict[str, str] = {}
+    try:
+        for event in iter_events(session_dir):
+            if not event.group_id:
+                continue
+            if event.kind == "group.invalidated_by_spec_edit":
+                invalidated.add(event.group_id)
+                last_kind_for_group[event.group_id] = event.kind
+            elif event.kind in ("group.merge.landed", "group.blocked",
+                                "group.aborted_by_user"):
+                last_kind_for_group[event.group_id] = event.kind
+    except OSError as exc:
+        logger.warning("scan prior invalidations failed: %s", exc)
+        return set()
+    return {
+        gid for gid in invalidated
+        if last_kind_for_group.get(gid) == "group.invalidated_by_spec_edit"
+    }
 
 
 def _read_prior_accounting(session_dir: Path) -> tuple[float, float, str]:

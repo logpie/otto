@@ -53,7 +53,25 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("otto.spec_compile")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Schema v1 → v2 (round-3 audit gap 4): the redesign added Feature,
+# Component, Guardrail, dispatch_plan, audit_fixtures, shared_paths,
+# non_goals, done_means, amendments + 3 new CheckKinds, plus the
+# Slice→Group rename. The parser still reads legacy v1 keys with a
+# deprecation warning (see `_warn_legacy_keys_for_v2`); v2 specs that
+# carry leftover legacy keys are flagged loudly so they get cleaned up
+# before the next bump removes the read-fallback entirely.
+SCHEMA_LEGACY_KEYS_V1: tuple[str, ...] = (
+    "slices",
+    "cross_slice_checks",
+)
+# Per-group legacy keys (v1 → v2 rename map). Read-fallback handled in
+# `_coerce_str_list` already; this tuple is the canonical reference set.
+SCHEMA_LEGACY_GROUP_FIELDS_V1: tuple[str, ...] = (
+    "title",   # → name
+    "tasks",   # → feature_ids
+    "deps",    # → dependencies
+)
 SPEC_FILENAME = "spec.json"
 COMPILE_PROMPT = "compile-spec.md"
 COMPILE_PROMPT_BROWNFIELD = "compile-spec-brownfield.md"
@@ -2126,7 +2144,13 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
 
     raw_schema_version = data.get("schema_version")
     if raw_schema_version is None or raw_schema_version == "":
-        coerced_schema_version = SCHEMA_VERSION
+        # Absent schema_version on disk — treat as v1 because every spec
+        # written before the round-3 bump omitted the field. The parser
+        # has already accepted any legacy keys present (with deprecation
+        # warnings); recording v1 here makes the on-disk lineage honest.
+        coerced_schema_version = 1 if any(
+            k in data for k in SCHEMA_LEGACY_KEYS_V1
+        ) else SCHEMA_VERSION
     else:
         try:
             coerced_schema_version = int(raw_schema_version)
@@ -2141,6 +2165,57 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
                 coerced_to=str(SCHEMA_VERSION),
             )
             coerced_schema_version = SCHEMA_VERSION
+
+    # Round-3 audit gap 4: time-bound the deprecation window.
+    # v1 specs read with a single advisory warning; v2 specs that carry
+    # leftover legacy keys get a louder warning so the next bump can
+    # safely drop the read-fallback entirely.
+    if coerced_schema_version < 2:
+        if any(k in data for k in SCHEMA_LEGACY_KEYS_V1):
+            collector.add(
+                code="spec.deprecated.schema_v1_read",
+                path="schema_version",
+                message=(
+                    "spec.json was written under schema v1 (legacy keys "
+                    f"{[k for k in SCHEMA_LEGACY_KEYS_V1 if k in data]}); "
+                    "read-fallback active for one more cycle. Re-persist "
+                    "to migrate to v2."
+                ),
+            )
+    elif coerced_schema_version >= 2:
+        leftover_top = [k for k in SCHEMA_LEGACY_KEYS_V1 if k in data]
+        if leftover_top:
+            collector.add(
+                code="spec.deprecated.schema_v2_legacy_top_keys",
+                path="schema_version",
+                message=(
+                    f"spec declares schema_version={coerced_schema_version} "
+                    f"but still carries legacy v1 top-level keys "
+                    f"{leftover_top}; these will be dropped on the next "
+                    "schema bump. Remove them from on-disk specs."
+                ),
+            )
+        # Per-group legacy fields too: same deal at field granularity.
+        leftover_group: list[str] = []
+        if isinstance(data.get("groups"), list):
+            for index, entry in enumerate(data.get("groups") or []):
+                if not isinstance(entry, dict):
+                    continue
+                for legacy_field in SCHEMA_LEGACY_GROUP_FIELDS_V1:
+                    if legacy_field in entry:
+                        leftover_group.append(f"groups[{index}].{legacy_field}")
+        if leftover_group:
+            collector.add(
+                code="spec.deprecated.schema_v2_legacy_group_fields",
+                path="groups",
+                message=(
+                    f"spec declares schema_version={coerced_schema_version} "
+                    f"but still carries legacy v1 per-group fields "
+                    f"{leftover_group}; these will be dropped on the next "
+                    "schema bump. Re-persist via the spec-review edit flow "
+                    "to migrate."
+                ),
+            )
 
     spec = Spec(
         schema_version=coerced_schema_version,
