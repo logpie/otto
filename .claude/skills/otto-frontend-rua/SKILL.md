@@ -105,15 +105,6 @@ it correctly?" Everything below is in service of that.
 - **Console + network sanity** — no React hydration warnings, no
   unmounted-setState, no duplicate API calls per drawer open. These
   destroy debugging when they pile up.
-- **Keyboard navigation basics** — Otto's user is a developer who
-  lives in keyboards. Tab order through form fields makes sense
-  (visual order matches DOM order). `Enter` submits the focused
-  form. `Escape` closes a modal. Focus returns to the trigger
-  button when the modal closes. (NOT a full WCAG audit; just the
-  power-user shortcuts.)
-- **Focus indicators visible** — when Tab moves focus, you can SEE
-  where it is. Use `:focus-visible` (don't strip with `outline:
-  none`). Mouse users won't see focus rings; keyboard users will.
 - **No-blank loading state** — never show a blank screen during
   fetch. Minimum: a spinner, "Loading…" text, or a single-line
   skeleton. (Full skeleton matching final layout = polish; defer.)
@@ -147,6 +138,10 @@ Audience-scale concerns:
 - Colorblind simulation (Otto's user knows their pills work; ~5%
   protan/deutan/tritan audience matters at scale, not now).
 - Full WCAG AA screen-reader audit.
+- Keyboard navigation polish (Tab/Enter/Escape consistency, focus
+  trap in modals, focus return on close, `:focus-visible` instead
+  of `outline: none`). Otto's audience is small + uses mouse; can
+  defer until broader release.
 - i18n / RTL / Unicode stress (Otto's UI is en-US for now).
 - Browser compat beyond Chrome (Otto runs locally; user picks one).
 - Mobile / tablet viewports (Otto is a desktop dev tool; 1440×900 is
