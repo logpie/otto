@@ -41,6 +41,73 @@ When in doubt: do another round. They keep paying off.
 - Periodically as the codebase evolves (regressions creep in via
   data-class renames, removed CSS utilities, etc.).
 
+## Tiered rigor — calibrate effort to product stage
+
+Otto is a developer tool used by a small known audience pre-release.
+Don't waste compute on production-grade public-release polish until
+the audience expands. **Default to the pre-release tier unless the
+user explicitly asks for broader rigor.**
+
+### Pre-release tier (Otto today — use this)
+
+The 5-second test is "can the user read what's on screen and act on
+it correctly?" Everything below is in service of that.
+
+**MUST verify:**
+- **Truthfulness of UI vs backend state** — UI must not lie. Examples
+  from real Otto bugs: `versions.length < 2` hid v1 forever (B27);
+  history sidebar didn't refetch after save (B26); approve silently
+  flipped state (B30); 404 page showed `HTTP 404 Not Found + Retry`
+  with no recovery (B19).
+- **Don't lose user work** — destructive actions (Cancel with unsaved
+  edits B31, navigate-away with dirty form, double-click submit) must
+  confirm or auto-save.
+- **Wireframe fidelity on core screens** — landing, run drawer, spec
+  review, spec diff, feature drilldown. The load-bearing screens.
+- **Readability at 5 seconds** — text NOT concatenated (B1); status
+  pills VISUALLY distinguishable (color + icon + label, NOT raw text);
+  KPI rows have visible separators; severity badges have contrast.
+- **Live polling reflects state** — running runs visibly update; the
+  3s `useRunView` poll cadence works.
+- **Every documented flow completes end-to-end** — edit→save→approve,
+  pause→resume, abort, view diff. Use Round 3 interaction simulation.
+- **Console + network sanity** — no React hydration warnings, no
+  unmounted-setState, no duplicate API calls per drawer open. These
+  destroy debugging when they pile up.
+
+**Skip (defer until public release):**
+- Colorblind simulation (Otto's user knows their pills work; ~5%
+  protan/deutan/tritan audience matters at scale, not now).
+- Full WCAG AA screen-reader audit (important but not urgent for
+  small known audience).
+- i18n / RTL / Unicode stress (Otto's UI is en-US for now).
+- Browser compat beyond Chrome (Otto runs locally; user picks one).
+- Mobile / tablet viewports (Otto is a desktop dev tool; 1440×900 is
+  the target).
+- Lighthouse Performance score / bundle-size budget < 250kB.
+- LCP/CLS/INP performance metrics.
+- `prefers-reduced-motion` / `prefers-reduced-data`.
+- Print stylesheet.
+- Brand voice through typography (functional > aspirational).
+- Iconography family consistency (✓/✗/⊘ emoji is fine for now).
+- Type scale ratio (1.25 vs 1.333) micro-tuning.
+- Radius/shadow scale token rigor (good practice, not blocking).
+- Microinteraction polish (200ms transitions, ease curves).
+- Empty-state illustrations (text empty states are fine).
+- Skeleton loaders (spinner or "Loading…" is fine).
+
+**Concrete budget:** 1.5–2 hours of audit, 60% on Rounds 2–3 (visual +
+interaction), 40% on truthfulness probes against the API + console.
+
+### Public-release tier (when audience expands — defer)
+
+Add Rounds 4 + 5 (perf + a11y + colorblind + i18n + browser compat),
+plus full design-system aesthetics deep-dive (Pass 6 with all 17
+axes). Budget: 2.5–4 hours.
+
+This tier is documented below for reference but **don't run it on
+pre-release Otto** unless explicitly asked.
+
 ## Tools required
 
 - `chrome-devtools` MCP:
@@ -82,7 +149,7 @@ Kill at end (`kill $(pgrep -f serve_fixture)`).
 
 ## Audit protocol — 5 rounds
 
-### Round 1 — static screenshots (~10 min)
+### Round 1 — static screenshots (~10 min) [PRE-RELEASE TIER]
 
 Goal: macro layout vs wireframe.
 
@@ -93,7 +160,16 @@ Goal: macro layout vs wireframe.
 3. Read each screenshot once, compare to wireframe, list visible
    problems.
 
-### Round 2 — multi-pass per screenshot (~30–45 min)
+### Round 2 — multi-pass per screenshot (~30–45 min) [PRE-RELEASE TIER, passes 1/3/4/5 only; pass 2 partial; pass 6 SKIP]
+
+For pre-release Otto: do passes 1 (layout/spacing), 3 (color
+distinguishability — NOT contrast), 4 (info completeness vs
+wireframe), 5 (edge cases). Skip the typography-rhythm and
+design-system axes — those are public-release polish.
+
+For passes 2 + 6 (typography rhythm + full design-system aesthetics)
+— these are the public-release tier. They're documented below for
+reference; only run them when audience expands.
 
 Goal: exhaustive bug-mining per surface.
 
@@ -158,7 +234,7 @@ engineer scans for these:
    - `DisclosureTriangle` without an `aria-label`.
    - Lists rendered as raw `StaticText`.
 
-### Round 3 — multi-step interaction simulation (~30–45 min)
+### Round 3 — multi-step interaction simulation (~30–45 min) [PRE-RELEASE TIER — highest leverage; do this]
 
 Goal: catch state-machine bugs that screenshots can't see.
 
@@ -224,7 +300,13 @@ with an a11y snapshot between every step:
    - Browser autofill — does it work on email/password fields?
    - Password manager — visible affordance?
 
-### Round 4 — performance + network + console (~20–30 min)
+### Round 4 — performance + network + console (~20–30 min) [PUBLIC-RELEASE TIER — defer for Otto today]
+
+For pre-release Otto, do ONLY a quick smoke of the console + network
+panel: skim for **React errors / warnings** (hydration mismatch, key
+missing, unmounted-setState) and **duplicate API calls per drawer
+open**. Skip Lighthouse perf, bundle budget, LCP/CLS/INP, memory
+snapshots, throttling — those are public-release-tier.
 
 Goal: find runtime cost, error budget, network anti-patterns.
 
@@ -268,7 +350,13 @@ Goal: find runtime cost, error budget, network anti-patterns.
      `Intl.DateTimeFormat` would do)?
    - Source maps present in dev, stripped in prod.
 
-### Round 5 — accessibility + colorblind + i18n + browser compat (~30 min)
+### Round 5 — accessibility + colorblind + i18n + browser compat (~30 min) [PUBLIC-RELEASE TIER — defer for Otto today]
+
+For pre-release Otto, **skip this entire round.** Document as a
+follow-up gate to run before broader release. Reasoning: Otto's
+audience is ~1 user who picks the browser, runs locally, and reads
+en-US. WCAG / colorblind / RTL / Safari quirks matter when audience
+expands.
 
 Goal: the parts of "it works" that production-quality tools need.
 
