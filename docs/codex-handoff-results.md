@@ -784,3 +784,131 @@ Gates run for this entry:
 Decision:
 - Escalate to Tier 4. Tier 3 passed after one real repair cycle; no Tier 3
   beyond-current-capability finding.
+
+## 2026-05-05 Pressure Test Tier 4 - Nontrivial Open-Source Repo
+
+Project:
+- Tier: 4, nontrivial open-source repo.
+- Source/path: fresh Rich clone at
+  `/tmp/otto-i2p-pressure-20260505/tier4/rich`, starting from
+  `46cebbb fix changelog`.
+- Why this is harder than Tier 3: the task changed a mature terminal rendering
+  library with a broad native test suite, docs, CLI entrypoint behavior, inline
+  Markdown rendering semantics, nested layout behavior, and a tox-based CI
+  matrix that is broader than a local product contract gate.
+
+Otto run:
+- Exact command:
+  `/usr/bin/time -p uv --project /Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2 run --extra dev python -m otto.cli improve feature "Add GitHub-style Markdown task list rendering to Rich: unordered list items that begin with [x] or [X] should render as checked task items, items that begin with [ ] should render as unchecked task items, the raw marker should not appear in rendered output, nested task lists should still indent correctly, ordinary list items and inline Markdown styling should keep existing behavior, and focused tests plus docs should cover the behavior." --i2p --provider codex --budget 3000 --max-turns 160 --break-lock --verbose`
+- Provider/model: Codex provider requested and verified by child process tree;
+  concrete model name was not surfaced in Otto artifacts.
+- Session id: `2026-05-05-200518-e12466`.
+- Wall time: `/usr/bin/time` `real 1374.44s`; `summary.json`
+  `duration_s=1118.111467416864`.
+- Cost: `summary.json cost_usd=0.0`; Codex token usage was recorded in logs
+  but no USD cost was surfaced by the provider adapter.
+- Final Otto verdict: `partial`; product/features passed, but the contract gate
+  selected Rich's broad tox matrix and failed locally.
+- Proof packet:
+  `/tmp/otto-i2p-pressure-20260505/tier4/rich/otto_logs/sessions/2026-05-05-200518-e12466/proof-packet.html`
+  and
+  `/tmp/otto-i2p-pressure-20260505/tier4/rich/otto_logs/sessions/2026-05-05-200518-e12466/proof-packet.json`.
+- Browser/video/screenshot artifacts: not applicable for this terminal
+  library/CLI tier.
+
+Run behavior and evidence:
+- Baseline prep installed Rich editable into a project `.venv`, installed
+  missing native test deps (`attrs`, `pytest-cov`, `typing-extensions`), and
+  removed a generated `uv.lock` so the target repo state stayed focused.
+- Baseline focused Markdown tests before Otto:
+  `.venv/bin/python -m pytest -q tests/test_markdown.py tests/test_markdown_no_hyperlinks.py`
+  -> `9 passed`.
+- Baseline full native suite before Otto:
+  `.venv/bin/python -m pytest -q` -> `957 passed, 24 skipped`.
+- Initial audit correctly blocked the missing feature: task markers remained
+  visible in both API and `python -m rich.markdown` probes.
+- Otto repaired the target repo with two commits:
+  `3155903 i2p(markdown-rendering): build slice on layer2/markdown-task-list-rendering`
+  and
+  `da9eba0 i2p(markdown-rendering): build slice on layer2/markdown-module-cli`.
+- Attempt-01 audit marked all 11 features passed and repeatedly showed the full
+  direct pytest suite passing: `961 passed, 24 skipped`.
+- The final `partial` verdict came from the integrated contract gate, not the
+  requested product behavior. The proof packet shows:
+  `test_command='uvx --with tox-uv tox' exit=1`, while the same packet includes
+  `961 passed, 24 skipped` for direct pytest.
+
+Recovery/certify run:
+- Exact command:
+  `/usr/bin/time -p uv --project /Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2 run --extra dev python -m otto.cli certify "Verify Rich Markdown renders GitHub-style task lists: unordered items beginning [x] or [X] render checked tasks, [ ] renders unchecked tasks, raw markers are removed, nested indentation and ordinary/ordered lists are preserved, inline Markdown styling still works, and the module CLI renders the same behavior." --i2p --provider codex --budget 1600 --max-turns 120 --break-lock`
+- Session id: `2026-05-05-203108-49d4d9`.
+- Wall time: `/usr/bin/time` `real 523.90s`; `summary.json`
+  `duration_s=320.643324916251`.
+- Cost: `summary.json cost_usd=0.0`.
+- Final Otto verdict: `passed`; `summary.json` reports `stories_passed=3`,
+  `stories_tested=3`, `rounds=1`.
+- Proof packet:
+  `/tmp/otto-i2p-pressure-20260505/tier4/rich/otto_logs/sessions/2026-05-05-203108-49d4d9/proof-packet.html`
+  and
+  `/tmp/otto-i2p-pressure-20260505/tier4/rich/otto_logs/sessions/2026-05-05-203108-49d4d9/proof-packet.json`.
+- Recovery evidence after the detector fix: audit selected the project venv's
+  pytest (`/private/tmp/otto-i2p-pressure-20260505/tier4/rich/.venv/bin/pytest`)
+  as the contract command and passed with `961 passed, 24 skipped`.
+
+External verifier:
+- Full native suite outside Otto:
+  `.venv/bin/python -m pytest -q` -> `961 passed, 24 skipped in 3.51s`.
+- Independent render oracle outside Otto:
+  rendered checked, uppercase checked, unchecked, nested, ordinary bullet,
+  ordered-list literal, and inline-styled Markdown through `rich.markdown.Markdown`
+  and through `python -m rich.markdown --width 44`; asserted task glyphs are
+  present, raw task markers are stripped, ordinary/ordered content is preserved,
+  and CLI behavior matches. Result: `rich task-list oracle passed`.
+
+Bugs found and classification:
+- Otto bug fixed: contract-command detection preferred `tox` whenever
+  `tox.ini` existed, even after the project had a prepared `.venv/bin/pytest`
+  that represented the native local product contract. Rich's tox envlist is a
+  broad CI matrix with lint/docs/multiple Python versions, so this produced a
+  false `partial` despite all requested product checks passing.
+- Otto bug fixed: `otto certify --i2p --budget ... --max-turns ...` warned that
+  budget and max-turns were ignored even though the CLI forwarded them to
+  `orchestrate_certify`. This made logs-first triage misleading.
+- Design gap documented: the Rich compile emitted a spec-validator warning for
+  a group dependency that was not present in the final spec. The run still
+  completed correctly, but unknown dependency handling should be hardened in a
+  later spec-normalization pass instead of hidden by this pressure test.
+
+Root cause:
+- `detect_test_command` treated tox/nox as a better signal than a ready project
+  venv pytest command. For real projects, tox/nox often encode CI matrix
+  concerns that are not the same as Otto's local user-facing contract gate.
+- The i2p certify ignored-flag list was stale after budget/max-turn forwarding
+  was added.
+
+Generic fixes made in this worktree:
+- `otto/config.py` now lets a prepared project `.venv/bin/pytest` beat tox/nox
+  orchestration for the default test command.
+- `otto/cli.py` no longer reports `--budget` or `--max-turns` as ignored for
+  `certify --i2p`.
+
+Regression tests added:
+- `tests/test_config.py::TestDetectTestCommand::test_project_venv_pytest_beats_tox_matrix`
+- `tests/test_cli_run.py::test_certify_i2p_budget_and_max_turns_are_not_ignored`
+
+Gates run for this entry:
+- Target repo full native suite and independent render oracle -> passed as
+  listed above.
+- Recovery certify run through Otto -> passed.
+- Focused worktree regressions:
+  `uv run pytest -q tests/test_cli_run.py::test_certify_i2p_warns_about_ignored_legacy_flags tests/test_cli_run.py::test_certify_i2p_budget_and_max_turns_are_not_ignored tests/test_config.py::TestDetectTestCommand`
+  -> `20 passed`.
+- Touched-file lint:
+  `uv run ruff check otto/config.py otto/cli.py tests/test_config.py tests/test_cli_run.py`
+  -> passed.
+- `git diff --check` -> passed.
+
+Decision:
+- Fix and escalate to Tier 5. Tier 4 found two generic Otto defects and one
+  documented spec-normalization gap; the target product change itself passed
+  native, external, and recovery certify checks.

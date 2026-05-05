@@ -432,6 +432,20 @@ class TestDetectTestCommand:
         assert result == "tox"
         assert "pytest" not in result
 
+    def test_project_venv_pytest_beats_tox_matrix(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "tests").mkdir()
+        (tmp_bare_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
+        venv_pytest = tmp_bare_git_repo / ".venv" / "bin" / "pytest"
+        venv_pytest.parent.mkdir(parents=True)
+        venv_pytest.write_text("#!/bin/sh\n")
+        (tmp_bare_git_repo / "tox.ini").write_text(
+            "[tox]\n"
+            "envlist = lint,docs,py{38,39,310,311,312,313}\n"
+        )
+        result = detect_test_command(tmp_bare_git_repo)
+        assert result == str(venv_pytest)
+        assert "tox" not in result
+
     def test_detects_nox(self, tmp_bare_git_repo):
         (tmp_bare_git_repo / "tests").mkdir()
         (tmp_bare_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")

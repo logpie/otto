@@ -1291,8 +1291,6 @@ def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model,
                 ("--thorough", thorough),
                 ("--rounds (n/a in i2p)", False),
                 ("--strict", strict),
-                ("--max-turns", max_turns is not None),
-                ("--budget", budget is not None),
             )
             if val
         ]

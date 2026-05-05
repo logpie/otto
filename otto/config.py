@@ -1199,17 +1199,32 @@ def detect_test_command(project_dir: Path) -> str | None:
         else:
             candidates.append("pytest")
 
-    # tox (Python test runner — prefer over bare pytest when present)
+    has_project_pytest = any(
+        c.endswith("/.venv/bin/pytest") or c.endswith("\\.venv\\Scripts\\pytest.exe")
+        for c in candidates
+    )
+
+    # tox (Python test runner). Prefer a prepared project venv's pytest when it
+    # exists: tox often encodes a CI matrix (multiple Python versions, docs,
+    # lint, packaging) that is too broad for Otto's local product contract gate.
     if (project_dir / "tox.ini").exists():
-        # tox already detected — don't also add pytest (tox runs it)
-        candidates = [c for c in candidates if c not in ("pytest",) and not c.endswith("/pytest")]
-        candidates.append("tox")
+        if not has_project_pytest:
+            # tox already detected — don't also add bare pytest (tox runs it)
+            candidates = [
+                c for c in candidates
+                if c not in ("pytest",) and not c.endswith("/pytest")
+            ]
+            candidates.append("tox")
         has_orchestrator = True
 
     # nox (Python test runner — similar to tox)
     if (project_dir / "noxfile.py").exists():
-        candidates = [c for c in candidates if c not in ("pytest",) and not c.endswith("/pytest")]
-        candidates.append("nox")
+        if not has_project_pytest:
+            candidates = [
+                c for c in candidates
+                if c not in ("pytest",) and not c.endswith("/pytest")
+            ]
+            candidates.append("nox")
         has_orchestrator = True
 
     # go test

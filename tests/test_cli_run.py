@@ -258,6 +258,42 @@ def test_certify_i2p_warns_about_ignored_legacy_flags(
     assert "--strict" in out
 
 
+def test_certify_i2p_budget_and_max_turns_are_not_ignored(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_certify(**kwargs):
+        captured.update(kwargs)
+        import sys
+
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_certify", fake_orchestrate_certify)
+
+    code, out = _run(
+        [
+            "certify",
+            "--i2p",
+            "--provider",
+            "codex",
+            "--budget",
+            "1200",
+            "--max-turns",
+            "80",
+            "intent text",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert code == 0, out
+    assert "ignored" not in out
+    assert captured["provider"] == "codex"
+    assert captured["budget"] == 1200
+    assert captured["max_turns"] == 80
+
+
 def test_certify_without_i2p_hard_errors_after_phase_c2(
     tmp_path: Path, monkeypatch
 ) -> None:
