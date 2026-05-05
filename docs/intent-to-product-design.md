@@ -259,6 +259,31 @@ Merge queue (per target branch):
   post-land: verify resolved target state
 ```
 
+### Phase A simplification (gaps A11, A12, B9, B10)
+
+The shipping merge queue is single-worktree mode (default per-slice
+worktree = `lambda _s: project_dir`). The full design above applies
+to the eventual multi-worktree extension; what shipped:
+
+- **No `git rebase`, no remote refresh.** Replaced with merge-first-then-
+  verify-with-rollback against current HEAD. See `merge_queue.py:8-22`
+  docstring.
+- **Eligibility checks "base not stale" + "not superseded" are
+  unimplemented.** Single-worktree mode makes them trivially satisfied;
+  multi-worktree mode needs them and is deferred.
+- **"Edit scope = owned_paths + conflict regions" during repair is
+  enforced by prompt instruction only**, not by `detect_scope_violations`
+  on the post-repair diff. Prompt-only enforcement is honest leakage —
+  a strict scope check on repair output is a real follow-up.
+- **Repair-time counter is split**: cost is shared across build/audit/
+  merge_queue; repair wall-time is build-only (audit/merge don't call
+  `charge_repair`). The design implied a single shared time counter;
+  reality is unified-cost + build-only-time.
+
+These are explicit Phase A simplifications acknowledged in code
+comments. Multi-worktree mode is the v2 priority where they all
+become load-bearing.
+
 ### Bounds and budgets
 
 Defaults (per-run overridable):
@@ -319,6 +344,60 @@ Certifier runs **once** at end. Distinct from per-slice checks because:
   narrative report, per-slice verdict.
 - **Role**: produces the human-trustable proof. Deterministic checks
   proved correctness; the certifier produces evidence a human can scan.
+
+### Implementation reality vs design (post-Phase-A)
+
+Three honest deviations from the doc-as-written:
+
+**1. "Walkthrough video, screenshot set" is BYO** (gap A8).
+Otto's default walkthrough lives at `otto/audit.py` in
+`_synthesized_webapp_walkthrough`: it constructs a Flask `test_client`
+and issues GETs against routes named in the spec, saving the rendered
+HTML body as the walkthrough artifact. **No video. No screenshots.**
+
+To get video and screenshots into the audit packet, the project's spec
+must declare a `BrowserJourney` check (with `evidence_globs` pointing
+at recording outputs) AND ship a Playwright/Cypress runner that
+captures them. The audit infrastructure SUPPORTS embedding
+`<video controls>` and screenshot links via the proof-packet renderer
+(`otto/render.py:684-686`), but the capture itself is the project's
+responsibility.
+
+This is intentional in v1: bundling Playwright + a headed browser into
+Otto would balloon dependencies and runtime cost. v2 may re-evaluate;
+until then, the doc-as-written promise is BYO. The integration test
+`tests/integration/test_intent_to_proof.py` reflects this with a
+lenient `>=0` screenshot assertion.
+
+**2. "One LLM pass at end" is actually multi-pass** (gap A10).
+Three retry layers stack:
+
+- `run_audit` itself loops up to `audit_retries+1` times
+  (`audit.py:585,677`).
+- `audit_loop.repair_failing_features` (Layer 2) wraps `run_audit`
+  with a separate retry budget for failure-driven re-audits
+  (`audit_loop.py:211`).
+- `run_audit` also has its own internal fix-agent slice-repair loop
+  (`audit.py:805,870`) — undocumented in the original design.
+
+Total ceiling per run: ~4 LLM judge calls. Defensible (bounded
+overall), but the design wording is stricter than what shipped. Worth
+collapsing to two layers (audit + repair) in v2; documented here so
+future work doesn't re-litigate.
+
+**3. "Long-lived agent process per slice" is actually
+"persistent worktree+branch, fresh subprocess per attempt"** (gap A9).
+Each retry constructs a new `BuildAgentInput` and invokes
+`run_agent_with_timeout`, spawning a fresh SDK subprocess. The
+worktree path and branch persist across retries; the LLM conversation
+context does not. The "fresh prompt on retry = clear conversation"
+property is satisfied incidentally by this fresh-subprocess model.
+
+True process continuity (PID reuse, conversation attach) would
+require SDK session pinning that the current `claude_agent_sdk`
+doesn't expose. Listed as a v2 candidate.
+
+### Cross-slice fix loop
 
 If certifier finds an issue deterministic checks missed (cross-slice
 coherence bug), it routes to fix loop: relevant slice's build agent
