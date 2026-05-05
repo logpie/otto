@@ -109,6 +109,10 @@ class I2pSummary:
     hidden_result: str = "not_run"
     browser_result: str = "not_run"
     visible_result: str = "not_run"
+    # Per-criterion parity decomposition (plan.md Step 11). Populated in
+    # _verdict() so result.json carries an explicit pass/fail per criterion
+    # rather than collapsing everything into one verdict string.
+    parity: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
 
@@ -290,21 +294,69 @@ def _run_i2p(
     return summary
 
 
+_WALL_CEILING_S = 1500.0  # plan.md Step 11: ≤ 1.5× mono baseline (~25 min)
+
+
 def _verdict(summary: I2pSummary) -> str:
-    must_functional = (
-        summary.audit_verdict == "passed"
-        and summary.hidden_result == "pass"
-        and summary.browser_result == "pass"
-        and summary.slices_blocked == 0
+    """Compute parity verdict per plan.md Step 11.
+
+    Honors ALL parity criteria (functional + non-functional). Wall-time
+    excess is reported as `i2p_partial_wall_exceeded` rather than a hard
+    `i2p_failed` so reviewers can distinguish "code wrong" from "code
+    right but slow". The decomposition is also written to
+    `summary.parity` so result.json carries every criterion's verdict
+    independently.
+    """
+    parity = {
+        "audit_verdict_passed": {
+            "passed": summary.audit_verdict == "passed",
+            "value": summary.audit_verdict,
+            "expected": "passed",
+        },
+        "hidden_passed": {
+            "passed": summary.hidden_result == "pass",
+            "value": summary.hidden_result,
+        },
+        "browser_passed": {
+            "passed": summary.browser_result == "pass",
+            "value": summary.browser_result,
+        },
+        "zero_slices_blocked": {
+            "passed": summary.slices_blocked == 0,
+            "value": summary.slices_blocked,
+        },
+        "wall_s": {
+            "passed": summary.wall_s <= _WALL_CEILING_S,
+            "value": summary.wall_s,
+            "ceiling": _WALL_CEILING_S,
+        },
+        "quality_score": {
+            # 0 = audit didn't assess (treated as "no signal", not fail).
+            # 1-2 = audit flagged real quality issues → fail.
+            "passed": summary.quality_score == 0 or summary.quality_score >= 3,
+            "value": summary.quality_score,
+        },
+    }
+    summary.parity = parity
+
+    must_functional = all(
+        parity[k]["passed"]
+        for k in (
+            "audit_verdict_passed",
+            "hidden_passed",
+            "browser_passed",
+            "zero_slices_blocked",
+        )
     )
     if not must_functional:
         return "i2p_failed"
-    # Audit-final-quality (added per /loop check). Score 0 = audit didn't
-    # assess; treat as "no quality signal" not failure. Score 1-2 means
-    # the audit actively flagged quality issues — that's a separate-from-
-    # functional fail dimension.
-    if 0 < summary.quality_score < 3:
+    if not parity["quality_score"]["passed"]:
         return "i2p_quality_low"
+    if not parity["wall_s"]["passed"]:
+        # Functional parity met, but wall-time ceiling blown. Distinguish
+        # from i2p_passed so reviewers don't promote slow runs as parity
+        # wins.
+        return "i2p_partial_wall_exceeded"
     return "i2p_passed"
 
 
@@ -454,7 +506,7 @@ def _format_report(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"- provider: `{s['provider']}`")
     lines.append(f"- session_id: `{s.get('session_id', '')}`")
-    lines.append(f"- wall_s: {s['wall_s']:.1f} (ceiling target: 1500.0)")
+    lines.append(f"- wall_s: {s['wall_s']:.1f} (ceiling target: {_WALL_CEILING_S:.1f})")
     lines.append(f"- cost_usd: {s['cost_usd']:.2f}")
     lines.append(f"- spec slices: {s['spec_slices']}")
     lines.append(f"- slices landed: {s['slices_landed']}")
@@ -497,7 +549,7 @@ def _format_report(report: dict[str, Any]) -> str:
         ("hidden == pass", s["hidden_result"] == "pass"),
         ("browser == pass", s["browser_result"] == "pass"),
         ("0 slices blocked", s["slices_blocked"] == 0),
-        ("wall_s <= 1500", s["wall_s"] <= 1500),
+        (f"wall_s <= {_WALL_CEILING_S:.0f}", s["wall_s"] <= _WALL_CEILING_S),
         ("audit verdict == passed", s["audit_verdict"] == "passed"),
         ("quality_score >= 3", s.get("quality_score", 0) >= 3),
     ]

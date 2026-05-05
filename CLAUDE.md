@@ -6,6 +6,7 @@ When debugging otto runs, ALWAYS read real logs. Never guess.
 
 ### Quick diagnosis
 ```bash
+otto run "<intent>"                                   # Unified i2p entrypoint: compile → build → merge → audit → render
 otto history                                          # Build history with results
 otto pow                                              # Open latest proof-of-work report
 cat otto_logs/cross-sessions/history.jsonl            # Machine-readable history
@@ -15,7 +16,7 @@ readlink otto_logs/paused                             # Resumable session (if an
 
 ### Per-session layout (`otto_logs/sessions/<session-id>/`)
 
-Every `otto build | certify | improve` invocation creates one session dir.
+Every `otto run | build | certify | improve` invocation creates one session dir.
 Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 
 | File / dir | What it tells you |
@@ -34,6 +35,10 @@ Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 | `certify/proof-of-work.md` | Markdown summary |
 | `certify/evidence/*.png` | Browser screenshots |
 | `certify/evidence/recording.webm` | Browser walkthrough video |
+| `proof-packet.html` | i2p path: rendered Proof packet from `otto run` (audit verdict, Feature audits, screenshot grid, audit narrative) |
+| `proof-packet.json` | i2p path: machine-readable Proof packet (verdict, landed/blocked slice ids, cost_usd, quality_score, feature_audits) |
+| `spec/spec.json` | i2p path: compiled spec (validator-passed) consumed by build/audit/merge |
+| `spec-state.jsonl` | i2p path: append-only event journal of slice/group lifecycle |
 | `improve/improvement-report.md` | Final `otto improve` summary + merge instructions |
 | `improve/session-report.md` | Detailed per-run summary from the certify/fix loop |
 | `improve/build-journal.md` | Round-by-round index: action, result, cost |
