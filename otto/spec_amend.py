@@ -6,7 +6,7 @@ they cannot be allowed to escape:
 
 - Tier 1 (BEDROCK): intent + intent_hash. Immutable. Agents cannot
   amend; user override required.
-- Tier 2 (LOCKED): project_kind, done_means, non_goals, cross_slice_checks,
+- Tier 2 (LOCKED): project_kind, done_means, non_goals, cross_group_checks,
   slice.id. User-only edits via the spec-review gate. Agents cannot
   amend.
 - Tier 3 (SLICE-LOCAL): slice.deps, slice.owned_paths, slice.tasks,
@@ -61,13 +61,13 @@ TIER_1_FIELDS: frozenset[str] = frozenset({
     "intent", "intent_hash",
 })
 TIER_2_FIELDS: frozenset[str] = frozenset({
-    "project_kind", "done_means", "non_goals", "cross_slice_checks",
+    "project_kind", "done_means", "non_goals", "cross_group_checks",
 })
 
 # Slice-level fields by tier. Slice.id is tier-2 (locked once set).
 SLICE_TIER_2_FIELDS: frozenset[str] = frozenset({"id"})
 SLICE_TIER_3_FIELDS: frozenset[str] = frozenset({
-    "title", "tasks", "deps", "owned_paths", "checks",
+    "name", "feature_ids", "dependencies", "owned_paths", "checks",
 })
 
 
@@ -83,7 +83,7 @@ class AmendmentRejection:
         "tier_1_violation",
         "tier_2_violation",
         "scope_violation",
-        "unknown_slice",
+        "unknown_group",
         "checks_weakened",
         "missing_trigger",
         "trigger_not_found",
@@ -120,20 +120,20 @@ def request_amendment(
     spec: Spec,
     *,
     actor: str,
-    slice_id: str,
+    group_id: str,
     changes: dict[str, Any],
     reason: str,
     trigger_event_id: str = "",
     session_dir: Path | None = None,
 ) -> AmendmentResult:
-    """Request a tier-3 amendment on `slice_id`'s fields.
+    """Request a tier-3 amendment on `group_id`'s fields.
 
     Args:
         spec: Current Spec.
         actor: Who is making the request (e.g., build agent's slice id,
             or the literal string "user" for review-gate edits).
-        slice_id: Slice to amend. Must exist in `spec.groups`. For agent
-            requests, `actor` and `slice_id` should match (scope rule).
+        group_id: Slice to amend. Must exist in `spec.groups`. For agent
+            requests, `actor` and `group_id` should match (scope rule).
         changes: Mapping of field name → new value, restricted to
             SLICE_TIER_3_FIELDS. `checks` may only be a SUPERSET of the
             current list (append-only).
@@ -150,16 +150,16 @@ def request_amendment(
         amended Spec with a new Amendment in its chain.
     """
     # ---- find the slice ----
-    target = next((s for s in spec.groups if s.id == slice_id), None)
+    target = next((s for s in spec.groups if s.id == group_id), None)
     if target is None:
-        return _reject("unknown_slice", f"slice {slice_id!r} not found in spec")
+        return _reject("unknown_group", f"slice {group_id!r} not found in spec")
 
     # ---- scope rule: agents amend their own slice ----
     is_user = actor.strip().lower() == "user"
-    if not is_user and actor != slice_id:
+    if not is_user and actor != group_id:
         return _reject(
             "scope_violation",
-            f"actor {actor!r} cannot amend slice {slice_id!r} (own-slice rule)",
+            f"actor {actor!r} cannot amend slice {group_id!r} (own-slice rule)",
         )
 
     # ---- trigger event linkage: optional, validated if present ----
@@ -209,7 +209,7 @@ def request_amendment(
     if new_target == target:
         return _reject("no_change", "no field changed")
 
-    new_groups = [new_target if s.id == slice_id else s for s in spec.groups]
+    new_groups = [new_target if s.id == group_id else s for s in spec.groups]
     # `dataclasses.replace` uses the canonical field name (`groups`), not the
     # `slices` back-compat property — passing `slices=` would silently no-op
     # because `groups=` from the original spec already takes precedence in
@@ -402,7 +402,7 @@ def consume_amendment_request(
     worktree: Path,
     spec: Spec,
     *,
-    slice_id: str,
+    group_id: str,
     session_dir: Path,
 ) -> tuple[Spec, AmendmentResult | None]:
     """Process a build-agent's amendment request from the worktree side-channel.
@@ -411,7 +411,7 @@ def consume_amendment_request(
     `<worktree>/.otto/amendment_request.json` during its turn:
 
       {
-        "changes": {"deps": ["shell", "auth"], "tasks": ["..."]},
+        "changes": {"dependencies": ["shell", "auth"], "feature_ids": ["..."]},
         "reason": "needs auth helper to render timeline metadata",
         "trigger_event_id": "ev-000007"
       }
@@ -467,8 +467,8 @@ def consume_amendment_request(
 
     result = request_amendment(
         spec,
-        actor=slice_id,
-        slice_id=slice_id,
+        actor=group_id,
+        group_id=group_id,
         changes=changes,
         reason=str(payload.get("reason") or ""),
         trigger_event_id=str(payload.get("trigger_event_id") or ""),
@@ -517,6 +517,9 @@ __all__ = [
     "AmendmentRejection",
     "AmendmentResult",
     "ChainVerification",
+    "InvalidationEntry",
+    "InvalidationPlan",
+    "compute_invalidation",
     "consume_amendment_request",
     "request_amendment",
     "verify_amendment_chain",
@@ -525,3 +528,165 @@ __all__ = [
     "SLICE_TIER_2_FIELDS",
     "SLICE_TIER_3_FIELDS",
 ]
+
+
+# ---------------------------------------------------------------------------
+# A6 — mid-build spec edit invalidation
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InvalidationEntry:
+    """One Group's invalidation verdict against a new spec.
+
+    `direct=True` means the Group's own Spec contributions changed
+    (name, feature_ids, dependencies, owned_paths, or checks). `direct=False`
+    means the Group is invalidated transitively — one of its declared
+    dependencies is itself invalidated, so its previously-built work is
+    no longer integrating against the same upstream surface.
+
+    `reason` is a short human-readable string for the journal event.
+    """
+    group_id: str
+    reason: str
+    direct: bool
+
+
+@dataclass(frozen=True)
+class InvalidationPlan:
+    """Output of `compute_invalidation(old_spec, new_spec)`.
+
+    `entries` is sorted: direct invalidations first, then cascading,
+    each block sorted by group_id for stable journal ordering.
+
+    `removed_group_ids` lists Groups whose id disappeared in `new_spec`.
+    These are reported as direct invalidations (with reason="removed
+    from spec") AND surfaced separately so the runner can decide
+    whether to abort or simply drop them. Added Groups are NOT
+    invalidations — they're new dispatches handled by `run_build`'s
+    normal readiness loop.
+    """
+    entries: tuple[InvalidationEntry, ...] = ()
+    removed_group_ids: tuple[str, ...] = ()
+    added_group_ids: tuple[str, ...] = ()
+
+    @property
+    def invalidated_ids(self) -> tuple[str, ...]:
+        return tuple(e.group_id for e in self.entries)
+
+    def __bool__(self) -> bool:
+        return bool(self.entries) or bool(self.added_group_ids)
+
+
+def _group_signature(group: Group) -> tuple[Any, ...]:
+    """Stable, comparison-friendly signature of a Group's build-relevant shape.
+
+    Two Groups with equal signatures are treated as "no edit needed".
+    The signature deliberately covers the fields the build agent
+    consumes and ignores `dispatch_plan` (free-form, advisory). Order
+    of `dependencies` matters because the build orchestrator branches
+    off the LAST dep (see `otto/build.py:run_build`); reordering
+    deps is a real shape change.
+    """
+    return (
+        group.name,
+        tuple(group.feature_ids),
+        tuple(group.dependencies),
+        tuple(sorted(group.owned_paths)),
+        tuple(group.checks),
+    )
+
+
+def compute_invalidation(old_spec: Spec, new_spec: Spec) -> InvalidationPlan:
+    """Diff two specs and return the set of Groups that must re-dispatch.
+
+    Direct invalidation criteria — a Group `g_new` is invalidated vs
+    `g_old` if its `_group_signature` differs. Removed Groups (id
+    present in `old_spec.groups` but missing from `new_spec.groups`)
+    are also reported as direct invalidations.
+
+    Cascading invalidation — any Group whose `dependencies` (in the
+    NEW spec) overlap the directly-invalidated set is also invalidated.
+    This propagates transitively until a fixed point.
+
+    Stable across calls: the returned tuple ordering is deterministic
+    (by group id) so the journal's `group.invalidated_by_spec_edit`
+    events appear in a predictable sequence.
+
+    No-op edits (signature unchanged, deps closure unchanged) yield
+    an empty plan — the caller should NOT emit any events in that
+    case.
+    """
+    old_by_id: dict[str, Group] = {g.id: g for g in old_spec.groups}
+    new_by_id: dict[str, Group] = {g.id: g for g in new_spec.groups}
+
+    direct_reasons: dict[str, str] = {}
+    removed_ids: list[str] = []
+    added_ids: list[str] = []
+
+    for gid, old in old_by_id.items():
+        if gid not in new_by_id:
+            direct_reasons[gid] = "removed from spec"
+            removed_ids.append(gid)
+            continue
+        new = new_by_id[gid]
+        if _group_signature(old) != _group_signature(new):
+            direct_reasons[gid] = _diff_reason(old, new)
+
+    for gid in new_by_id:
+        if gid not in old_by_id:
+            added_ids.append(gid)
+
+    # Cascading: any Group in the NEW spec whose deps include an
+    # already-invalidated id (direct or cascaded) is invalidated too.
+    cascaded: dict[str, str] = {}
+    invalidated_set: set[str] = set(direct_reasons)
+    changed = True
+    while changed:
+        changed = False
+        for gid, group in new_by_id.items():
+            if gid in invalidated_set:
+                continue
+            hits = [d for d in group.dependencies if d in invalidated_set]
+            if hits:
+                cascaded[gid] = (
+                    f"depends on invalidated group(s): {', '.join(hits)}"
+                )
+                invalidated_set.add(gid)
+                changed = True
+
+    entries: list[InvalidationEntry] = []
+    for gid in sorted(direct_reasons):
+        entries.append(
+            InvalidationEntry(
+                group_id=gid, reason=direct_reasons[gid], direct=True,
+            )
+        )
+    for gid in sorted(cascaded):
+        entries.append(
+            InvalidationEntry(
+                group_id=gid, reason=cascaded[gid], direct=False,
+            )
+        )
+
+    return InvalidationPlan(
+        entries=tuple(entries),
+        removed_group_ids=tuple(sorted(removed_ids)),
+        added_group_ids=tuple(sorted(added_ids)),
+    )
+
+
+def _diff_reason(old: Group, new: Group) -> str:
+    """Short human-readable summary of WHICH fields changed."""
+    deltas: list[str] = []
+    if old.name != new.name:
+        deltas.append("name")
+    if list(old.feature_ids) != list(new.feature_ids):
+        deltas.append("feature_ids")
+    if list(old.dependencies) != list(new.dependencies):
+        deltas.append("dependencies")
+    if sorted(old.owned_paths) != sorted(new.owned_paths):
+        deltas.append("owned_paths")
+    if list(old.checks) != list(new.checks):
+        deltas.append("checks")
+    return "spec edit changed " + ", ".join(deltas) if deltas else "spec edit"

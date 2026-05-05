@@ -89,7 +89,7 @@ def _minimal_spec_dict() -> dict[str, object]:
     spec = Spec(
         intent="document this CLI tool",
         project_kind="cli",
-        groups=[Group(id="lint", title="Lint")],
+        groups=[Group(id="lint", name="Lint")],
         features=[
             Feature(
                 id="lint-main",
@@ -250,8 +250,8 @@ def test_reconcile_carries_forward_unchanged_groups(
         intent="document this CLI tool",
         project_kind="cli",
         groups=[
-            Group(id="lint", title="Lint", owned_paths=["lint/**"]),
-            Group(id="format", title="Format", owned_paths=["fmt/**"]),
+            Group(id="lint", name="Lint", owned_paths=["lint/**"]),
+            Group(id="format", name="Format", owned_paths=["fmt/**"]),
         ],
     )
     base.intent_hash = "deadbeef"
@@ -261,7 +261,7 @@ def test_reconcile_carries_forward_unchanged_groups(
         Spec(
             intent="document this CLI tool",
             project_kind="cli",
-            groups=[Group(id="lint", title="Lint (refined)")],
+            groups=[Group(id="lint", name="Lint (refined)")],
         )
     )
     captured: dict[str, object] = {}
@@ -277,7 +277,7 @@ def test_reconcile_carries_forward_unchanged_groups(
     assert "lint" in group_ids and "format" in group_ids
     # Agent's view wins on title for re-emitted group
     lint = next(g for g in spec.groups if g.id == "lint")
-    assert lint.title == "Lint (refined)"
+    assert lint.name == "Lint (refined)"
     # Base group untouched
     fmt = next(g for g in spec.groups if g.id == "format")
     assert fmt.owned_paths == ["fmt/**"]
@@ -310,7 +310,7 @@ def test_reconcile_preserves_feature_audit_state(
     base = Spec(
         intent="x",
         project_kind="cli",
-        groups=[Group(id="lint", title="Lint")],
+        groups=[Group(id="lint", name="Lint")],
         features=[base_feature],
     )
     base.intent_hash = "h"
@@ -320,7 +320,7 @@ def test_reconcile_preserves_feature_audit_state(
         Spec(
             intent="x",
             project_kind="cli",
-            groups=[Group(id="lint", title="Lint")],
+            groups=[Group(id="lint", name="Lint")],
             features=[
                 Feature(
                     id="lint-main",
@@ -362,7 +362,7 @@ def test_reconcile_appends_new_features(tmp_path: Path, monkeypatch) -> None:
 
     base = Spec(
         intent="x", project_kind="cli",
-        groups=[Group(id="lint", title="Lint")],
+        groups=[Group(id="lint", name="Lint")],
         features=[
             Feature(id="lint-main", name="Lint", group_id="lint"),
         ],
@@ -372,7 +372,7 @@ def test_reconcile_appends_new_features(tmp_path: Path, monkeypatch) -> None:
     new_dict = spec_to_dict(
         Spec(
             intent="x", project_kind="cli",
-            groups=[Group(id="lint", title="Lint")],
+            groups=[Group(id="lint", name="Lint")],
             features=[
                 Feature(id="lint-main", name="Lint", group_id="lint"),
                 Feature(id="format-main", name="Format", group_id="lint"),
@@ -401,14 +401,14 @@ def test_reconcile_warns_on_conflicting_group_title(
 
     base = Spec(
         intent="x", project_kind="cli",
-        groups=[Group(id="lint", title="Lint")],
+        groups=[Group(id="lint", name="Lint")],
     )
     base.intent_hash = "h"
 
     new_dict = spec_to_dict(
         Spec(
             intent="x", project_kind="cli",
-            groups=[Group(id="lint", title="Lint completely renamed")],
+            groups=[Group(id="lint", name="Lint completely renamed")],
         )
     )
     captured: dict[str, object] = {}
@@ -427,7 +427,7 @@ def test_reconcile_warns_on_conflicting_group_title(
         for r in caplog.records
     )
     # Agent's title wins
-    assert spec.groups[0].title == "Lint completely renamed"
+    assert spec.groups[0].name == "Lint completely renamed"
 
 
 def test_reconcile_dedupes_guardrails_by_text(

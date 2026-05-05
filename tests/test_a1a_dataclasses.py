@@ -172,7 +172,7 @@ def test_spec_with_features() -> None:
             Feature(id="md-render", name="Markdown rendering", group_id="editor"),
             Feature(id="image-upload", name="Image upload", group_id="editor"),
         ],
-        groups=[Group(id="editor", title="Editor surface")],
+        groups=[Group(id="editor", name="Editor surface")],
     )
     assert len(s.features) == 2
     assert s.features[0].id == "md-render"
@@ -235,13 +235,11 @@ def test_spec_extended_fields_independent_of_groups() -> None:
     """Group remains dispatch unit; Feature is value unit. They're orthogonal."""
     s = Spec(
         intent="webapp",
-        groups=[Group(id="g1", title="G1")],
+        groups=[Group(id="g1", name="G1")],
         features=[Feature(id="f1", name="F1", group_id="g1")],
     )
     assert s.groups[0].id == "g1"
     assert s.features[0].group_id == "g1"
-    # Backward compat: legacy `slices` still accessible via property
-    assert s.slices is s.groups
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +252,7 @@ def test_round_trip_with_features() -> None:
 
     original = Spec(
         intent="doc editor",
-        groups=[Group(id="editor", title="Editor surface")],
+        groups=[Group(id="editor", name="Editor surface")],
         features=[
             Feature(
                 id="md-render",
@@ -289,7 +287,7 @@ def test_round_trip_with_components() -> None:
 
     original = Spec(
         intent="slack-clone",
-        groups=[Group(id="messages", title="Messages")],
+        groups=[Group(id="messages", name="Messages")],
         components=[
             Component(
                 id="websocket-hub",
@@ -315,7 +313,7 @@ def test_round_trip_with_guardrails_and_shared_paths() -> None:
 
     original = Spec(
         intent="webapp",
-        groups=[Group(id="g1", title="G1")],
+        groups=[Group(id="g1", name="G1")],
         guardrails=[
             Guardrail(id="no-video", text="No video upload", applies_to="*"),
             Guardrail(id="no-cdn", text="No external CDN", applies_to="g1"),
@@ -335,7 +333,7 @@ def test_round_trip_with_audit_fixtures() -> None:
 
     original = Spec(
         intent="multi-user IM",
-        groups=[Group(id="g", title="g")],
+        groups=[Group(id="g", name="g")],
         audit_fixtures=[
             AuditFixture(kind="user", payload={"username": "alice", "role": "admin"}),
             AuditFixture(
@@ -361,7 +359,7 @@ def test_legacy_spec_without_new_fields_parses_clean() -> None:
         "intent": "legacy webapp",
         "project_kind": "webapp",
         "structure": {"payload": {"framework": "flask"}},
-        "slices": [{"id": "g1", "title": "G1", "tasks": [], "deps": [], "owned_paths": [], "checks": []}],
+        "groups": [{"id": "g1", "title": "G1", "tasks": [], "deps": [], "owned_paths": [], "checks": []}],
         # NO features, components, guardrails, shared_paths, audit_fixtures keys
     }
     parsed, warnings = parse_spec(legacy_payload)
@@ -539,7 +537,7 @@ def test_check_round_trip_serialization_includes_new_kinds() -> None:
         groups=[
             Group(
                 id="cli-bin",
-                title="CLI",
+                name="CLI",
                 checks=[
                     CLIProbe(command=("./bin", "list"), expect_exit_code=0),
                     ImportCheck(package_name="my_lib"),
@@ -663,16 +661,16 @@ def test_build_result_slices_and_components_independent() -> None:
     """Slices and components are orthogonal — research §2.6."""
     from pathlib import Path
     from otto.build import (
-        BuildResult, ComponentResult, ComponentStatus, SliceResult,
-        SliceStatus,
+        BuildResult, ComponentResult, ComponentStatus, GroupResult,
+        GroupStatus,
     )
 
     result = BuildResult(
         spec_session_dir=Path("/tmp/session"),
-        slice_results=[
-            SliceResult(
-                slice_id="g1",
-                status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(
+                group_id="g1",
+                status=GroupStatus.PASSING,
                 attempts=1,
                 branch="g1",
                 worktree=Path("/tmp/g1"),
@@ -706,7 +704,7 @@ def test_eligible_components_basic() -> None:
 
     s = Spec(
         intent="multi-component",
-        groups=[Group(id="g1", title="G1")],
+        groups=[Group(id="g1", name="G1")],
         components=[
             Component(id="ws-hub", name="WebSocket hub"),
             Component(id="search", name="Search index"),
@@ -780,7 +778,7 @@ def test_eligible_components_cross_kind_dependency() -> None:
 
     s = Spec(
         intent="cross-kind deps",
-        groups=[Group(id="auth-group", title="Auth")],
+        groups=[Group(id="auth-group", name="Auth")],
         components=[
             # search-index depends on auth-group landing first
             Component(id="search", name="Search", dependencies=["auth-group"]),
@@ -819,7 +817,7 @@ def test_shared_paths_set() -> None:
 
     s = Spec(
         intent="shared scaffold",
-        groups=[Group(id="g1", title="G1")],
+        groups=[Group(id="g1", name="G1")],
         shared_paths=["models.py", "app.py", "requirements.txt"],
     )
     paths = shared_paths_set(s)
@@ -829,7 +827,7 @@ def test_shared_paths_set() -> None:
 def test_shared_paths_empty_when_unset() -> None:
     from otto.merge_queue import shared_paths_set
 
-    s = Spec(intent="no shared", groups=[Group(id="g", title="g")])
+    s = Spec(intent="no shared", groups=[Group(id="g", name="g")])
     assert shared_paths_set(s) == set()
 
 
@@ -841,8 +839,8 @@ def test_eligible_groups_unchanged_by_component_addition() -> None:
     s = Spec(
         intent="orthogonality",
         groups=[
-            Group(id="g1", title="G1"),
-            Group(id="g2", title="G2", deps=["g1"]),
+            Group(id="g1", name="G1"),
+            Group(id="g2", name="G2", dependencies=["g1"]),
         ],
         components=[
             Component(id="c1", name="C1"),
@@ -1135,7 +1133,7 @@ def test_group_for_feature_finds_owner() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="auth-group", title="Auth")],
+        groups=[Group(id="auth-group", name="Auth")],
         features=[Feature(id="auth", name="Auth", group_id="auth-group")],
     )
     g = group_for_feature(spec, "auth")
@@ -1148,7 +1146,7 @@ def test_group_for_feature_returns_none_for_orphan() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="g1", title="G1")],
+        groups=[Group(id="g1", name="G1")],
         features=[Feature(id="orphan", name="Orphan", group_id="")],
     )
     assert group_for_feature(spec, "orphan") is None
@@ -1160,7 +1158,7 @@ def test_features_to_repair_caps_at_default() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="g1", title="G1")],
+        groups=[Group(id="g1", name="G1")],
         features=[
             Feature(id=f"f{i}", name=f"F{i}", group_id="g1") for i in range(10)
         ],
@@ -1180,7 +1178,7 @@ def test_features_to_repair_respects_explicit_cap() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="g1", title="G1")],
+        groups=[Group(id="g1", name="G1")],
         features=[
             Feature(id=f"f{i}", name=f"F{i}", group_id="g1") for i in range(5)
         ],
@@ -1198,7 +1196,7 @@ def test_features_to_repair_excludes_orphans() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="g1", title="G1")],
+        groups=[Group(id="g1", name="G1")],
         features=[
             Feature(id="owned", name="Owned", group_id="g1"),
             Feature(id="orphan", name="Orphan", group_id=""),
@@ -1267,31 +1265,31 @@ def test_repair_result_accessors() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_slice_walkthrough_by_feature_basic() -> None:
-    from otto.spec_compile import slice_walkthrough_by_feature, WalkthroughEntry
+def test_filter_walkthrough_by_feature_basic() -> None:
+    from otto.spec_compile import filter_walkthrough_by_feature, WalkthroughEntry
 
     entries = [
         WalkthroughEntry(t="0", feature_ids=["auth"], action_kind="api_request"),
         WalkthroughEntry(t="1", feature_ids=["profile"], action_kind="api_request"),
         WalkthroughEntry(t="2", feature_ids=["auth"], action_kind="browser_navigation"),
     ]
-    auth_slice = slice_walkthrough_by_feature(entries, "auth")
+    auth_slice = filter_walkthrough_by_feature(entries, "auth")
     assert len(auth_slice) == 2
     assert auth_slice[0].t == "0"
     assert auth_slice[1].t == "2"
 
-    profile_slice = slice_walkthrough_by_feature(entries, "profile")
+    profile_slice = filter_walkthrough_by_feature(entries, "profile")
     assert len(profile_slice) == 1
 
 
-def test_slice_walkthrough_by_feature_excludes_exploration() -> None:
-    from otto.spec_compile import slice_walkthrough_by_feature, WalkthroughEntry
+def test_filter_walkthrough_by_feature_excludes_exploration() -> None:
+    from otto.spec_compile import filter_walkthrough_by_feature, WalkthroughEntry
 
     entries = [
         WalkthroughEntry(t="0", action_kind="exploration"),
         WalkthroughEntry(t="1", feature_ids=["auth"], action_kind="api_request"),
     ]
-    auth_slice = slice_walkthrough_by_feature(entries, "auth")
+    auth_slice = filter_walkthrough_by_feature(entries, "auth")
     assert len(auth_slice) == 1
     assert auth_slice[0].t == "1"
 
@@ -1299,7 +1297,7 @@ def test_slice_walkthrough_by_feature_excludes_exploration() -> None:
 def test_slice_walkthrough_multi_feature_cross_link() -> None:
     """Research §7: multi-Feature entries appear in EACH relevant
     Feature's slice — don't double-store, cross-link."""
-    from otto.spec_compile import slice_walkthrough_by_feature, WalkthroughEntry
+    from otto.spec_compile import filter_walkthrough_by_feature, WalkthroughEntry
 
     entries = [
         # This entry evidences both upload AND comment
@@ -1316,8 +1314,8 @@ def test_slice_walkthrough_multi_feature_cross_link() -> None:
             narrative="user posts comment text",
         ),
     ]
-    upload_slice = slice_walkthrough_by_feature(entries, "image-upload")
-    comment_slice = slice_walkthrough_by_feature(entries, "comment")
+    upload_slice = filter_walkthrough_by_feature(entries, "image-upload")
+    comment_slice = filter_walkthrough_by_feature(entries, "comment")
     # Multi-Feature entry appears in both slices (cross-link)
     assert len(upload_slice) == 1
     assert len(comment_slice) == 2  # multi-Feature entry + comment-only entry
@@ -1352,7 +1350,7 @@ def test_build_feature_proof_blocks_basic() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="auth-group", title="Auth", owned_paths=["routes/auth.py"])],
+        groups=[Group(id="auth-group", name="Auth", owned_paths=["routes/auth.py"])],
         features=[
             Feature(
                 id="auth", name="Auth", description="register+login",
@@ -1387,7 +1385,7 @@ def test_build_feature_proof_blocks_includes_files_per_group() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="auth", title="Auth")],
+        groups=[Group(id="auth", name="Auth")],
         features=[Feature(id="login", name="Login", group_id="auth")],
     )
     blocks = build_feature_proof_blocks(
@@ -1406,7 +1404,7 @@ def test_build_feature_proof_blocks_attaches_findings_by_feature_id() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="g", title="g")],
+        groups=[Group(id="g", name="g")],
         features=[
             Feature(id="home", name="Home", group_id="g"),
             Feature(id="auth", name="Auth", group_id="g"),
@@ -1440,7 +1438,7 @@ def test_build_feature_proof_blocks_missing_walkthrough_for_feature() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="g", title="g")],
+        groups=[Group(id="g", name="g")],
         features=[
             Feature(id="audited", name="Audited", group_id="g"),
             Feature(id="unaudited", name="Unaudited", group_id="g"),
@@ -1469,7 +1467,7 @@ def test_build_feature_proof_blocks_multi_feature_cross_link() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="g", title="g")],
+        groups=[Group(id="g", name="g")],
         features=[
             Feature(id="a", name="A", group_id="g"),
             Feature(id="b", name="B", group_id="g"),
@@ -1604,7 +1602,7 @@ def test_build_and_serialise_per_feature_proof_end_to_end() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="auth-group", title="Auth", owned_paths=["routes/auth.py"])],
+        groups=[Group(id="auth-group", name="Auth", owned_paths=["routes/auth.py"])],
         features=[
             Feature(
                 id="auth",
@@ -1670,8 +1668,8 @@ def test_proof_packet_has_features_field() -> None:
         groups=[],
         audit_narrative="",
         walkthrough_artifacts=[],
-        blocked_slice_ids=[],
-        landed_slice_ids=[],
+        blocked_group_ids=[],
+        landed_group_ids=[],
     )
     assert p.features == []
 
@@ -1694,8 +1692,8 @@ def test_proof_packet_with_features_serialises() -> None:
         groups=[],
         audit_narrative="",
         walkthrough_artifacts=[],
-        blocked_slice_ids=[],
-        landed_slice_ids=[],
+        blocked_group_ids=[],
+        landed_group_ids=[],
         features=[
             {
                 "feature_id": "auth",
@@ -1729,8 +1727,8 @@ def test_proof_packet_legacy_emission_includes_empty_features() -> None:
         groups=[],
         audit_narrative="",
         walkthrough_artifacts=[],
-        blocked_slice_ids=[],
-        landed_slice_ids=[],
+        blocked_group_ids=[],
+        landed_group_ids=[],
     )
     data = json.loads(render_json(p))
     assert data.get("features") == []
@@ -1747,7 +1745,7 @@ def test_proof_packet_features_round_trip_with_block_serializer() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="auth-group", title="Auth")],
+        groups=[Group(id="auth-group", name="Auth")],
         features=[
             Feature(id="auth", name="Auth", group_id="auth-group"),
         ],
@@ -1777,8 +1775,8 @@ def test_proof_packet_features_round_trip_with_block_serializer() -> None:
         groups=[],
         audit_narrative="",
         walkthrough_artifacts=[],
-        blocked_slice_ids=[],
-        landed_slice_ids=[],
+        blocked_group_ids=[],
+        landed_group_ids=[],
         features=feature_dicts,
     )
     data = json.loads(render_json(p))
@@ -2065,8 +2063,8 @@ def test_render_spec_md_features_grouped() -> None:
         intent="A webapp",
         project_kind="webapp",
         groups=[
-            Group(id="editor", title="Editor surface"),
-            Group(id="comments", title="Comments"),
+            Group(id="editor", name="Editor surface"),
+            Group(id="comments", name="Comments"),
         ],
         features=[
             Feature(
@@ -2102,7 +2100,7 @@ def test_render_spec_md_acceptance_detail_emitted() -> None:
 
     s = Spec(
         intent="webapp",
-        groups=[Group(id="g", title="G")],
+        groups=[Group(id="g", name="G")],
         features=[
             Feature(
                 id="f",
@@ -2121,7 +2119,7 @@ def test_render_spec_md_omits_empty_optional_fields() -> None:
 
     s = Spec(
         intent="webapp",
-        groups=[Group(id="g", title="G")],
+        groups=[Group(id="g", name="G")],
         features=[Feature(id="f", name="F", group_id="g")],  # no description, no acceptance
     )
     md = render_spec_md(s)
@@ -2135,7 +2133,7 @@ def test_render_spec_md_evidence_kinds_optional() -> None:
 
     s = Spec(
         intent="webapp",
-        groups=[Group(id="g", title="G")],
+        groups=[Group(id="g", name="G")],
         features=[
             Feature(id="f1", name="F1", group_id="g"),  # no evidence_kinds
             Feature(id="f2", name="F2", group_id="g", evidence_kinds=["RepoTestCheck"]),
@@ -2168,7 +2166,7 @@ def test_render_spec_md_orphan_features_render_under_ungrouped() -> None:
 
     s = Spec(
         intent="webapp",
-        groups=[Group(id="g", title="G")],
+        groups=[Group(id="g", name="G")],
         features=[
             Feature(id="grouped", name="Grouped", group_id="g"),
             Feature(id="orphan", name="Orphan feature", group_id=""),
@@ -2196,8 +2194,8 @@ def test_render_spec_md_multiple_groups_preserves_spec_order() -> None:
     s = Spec(
         intent="x",
         groups=[
-            Group(id="z", title="Z first"),
-            Group(id="a", title="A second"),
+            Group(id="z", name="Z first"),
+            Group(id="a", name="A second"),
         ],
         features=[
             Feature(id="fa", name="FA", group_id="a"),
@@ -2255,7 +2253,7 @@ Persist drafts.
     spec, _ = parse_spec_md(md)
     assert len(spec.groups) == 1
     assert spec.groups[0].id == "editor-surface"
-    assert spec.groups[0].title == "Editor surface"
+    assert spec.groups[0].name == "Editor surface"
     assert len(spec.features) == 2
     f1 = spec.features[0]
     assert f1.id == "md-render"
@@ -2309,8 +2307,8 @@ def test_round_trip_render_parse_full() -> None:
         intent="Doc editor for engineering teams",
         project_kind="webapp",
         groups=[
-            Group(id="editor-surface", title="Editor surface"),
-            Group(id="comments", title="Comments"),
+            Group(id="editor-surface", name="Editor surface"),
+            Group(id="comments", name="Comments"),
         ],
         features=[
             Feature(
@@ -2362,7 +2360,7 @@ def test_round_trip_preserves_id_stability_after_rename() -> None:
 
     original = Spec(
         intent="x",
-        groups=[Group(id="g1", title="G1")],
+        groups=[Group(id="g1", name="G1")],
         features=[Feature(id="auth", name="Auth (register/login)", group_id="g1")],
     )
     md = render_spec_md(original)
@@ -2384,9 +2382,9 @@ def test_round_trip_preserves_mechanical_fields_via_base() -> None:
         groups=[
             Group(
                 id="g1",
-                title="G1",
+                name="G1",
                 owned_paths=["routes/g1.py", "templates/g1.html"],
-                deps=["foundation"],
+                dependencies=["foundation"],
             ),
         ],
     )
@@ -2394,7 +2392,7 @@ def test_round_trip_preserves_mechanical_fields_via_base() -> None:
     parsed, _ = parse_spec_md(md, base=original)
     # Mechanical fields survive
     assert parsed.groups[0].owned_paths == ["routes/g1.py", "templates/g1.html"]
-    assert parsed.groups[0].deps == ["foundation"]
+    assert parsed.groups[0].dependencies == ["foundation"]
 
 
 def test_parse_spec_md_orphan_features_under_ungrouped() -> None:
@@ -2402,7 +2400,7 @@ def test_parse_spec_md_orphan_features_under_ungrouped() -> None:
 
     original = Spec(
         intent="x",
-        groups=[Group(id="g", title="G")],
+        groups=[Group(id="g", name="G")],
         features=[
             Feature(id="grouped", name="Grouped", group_id="g"),
             Feature(id="orphan", name="Orphan", group_id=""),
@@ -2445,7 +2443,7 @@ def test_round_trip_idempotent() -> None:
 
     original = Spec(
         intent="full spec",
-        groups=[Group(id="g", title="G")],
+        groups=[Group(id="g", name="G")],
         features=[Feature(id="f1", name="F1", group_id="g")],
         components=[Component(id="c1", name="C1")],
         guardrails=[Guardrail(id="r1", text="r1")],

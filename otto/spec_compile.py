@@ -11,7 +11,7 @@ deliberately separate modules:
 * `otto/spec.py` — markdown `spec.md` for `otto build --spec`. Sections
   Intent / Must Have / Must NOT Have Yet / Success Criteria.
 * `otto/spec_compile.py` (this file) — structured `Spec` JSON for
-  `otto run`. Slices, typed checks, structure decisions, amendments.
+  `otto run`. Groups, typed checks, structure decisions, amendments.
 
 The two converge in Phase C once the bench validates the new pipeline.
 
@@ -28,9 +28,10 @@ Key invariants:
   schema-pass.
 * `BrowserJourney` v1 = `command: list[str]` + `evidence_globs:
   list[str]`. Defer structured `steps: list[BrowserStep]` to a follow-up
-  after Microfeed bench validation (matches today's
-  `codex-i2p/otto/oracles.py` pattern — no Playwright session in
-  checks).
+  after Microfeed bench validation. The runtime lives in
+  `otto/checks.py` (browser_journey executor); the check shells out to
+  a runner — no Playwright session lifecycle owned by the check
+  executor.
 """
 
 from __future__ import annotations
@@ -120,10 +121,10 @@ class ApiProbe:
 class BrowserJourney:
     """v1 contract: subprocess + evidence-glob.
 
-    Mirrors `codex-i2p/otto/oracles.py`'s browser_journey: we shell out
-    to a runner (typically a Playwright pytest), then glob the configured
-    artifact paths. The check executor does not own the Playwright
-    session lifecycle; the runner does.
+    Implemented in `otto/checks.py` as the `browser_journey` executor:
+    we shell out to a runner (typically a Playwright pytest), then glob
+    the configured artifact paths. The check executor does not own the
+    Playwright session lifecycle; the runner does.
     """
     kind: Literal["browser_journey"] = "browser_journey"
     command: tuple[str, ...] = ()                   # e.g. ("pytest", "tests/browser/test_x.py")
@@ -217,37 +218,27 @@ class Group:
     """One vertical product surface — a build agent owns it end-to-end.
 
     A Group bundles related Features that share files or sequencing.
-    `tasks` is the agent's plain-language todo list inside the Group;
-    field-name renames (`tasks`→`feature_ids`, `title`→`name`) are
-    deferred to A1a where the data-model semantics also change.
+    `feature_ids` is the canonical reference to the Features the Group
+    builds (research §2 vocabulary). `name` is the user-facing title.
+    `dependencies` lists other Group/Component ids that must land first;
+    the merge queue resolves the kind by looking up the id in the spec.
 
-    `deps` is the legacy field name; A1c.1 introduces `dependencies`
-    as the canonical new-design name (research §2 vocabulary). Both
-    names point at the same underlying list — `dependencies` is a
-    read+write property proxy on `deps`. This avoids a hard rename
-    while letting new callers use the canonical vocabulary. The list
-    may contain Group ids OR Component ids; the merge queue resolves
-    the kind by looking up the id in the spec.
+    `dispatch_plan` is reserved (research §2.6) for an optional
+    structured plan describing how the build agent should sequence
+    sub-tasks within the Group. The shape is intentionally
+    underspecified at this stage — plan.md only mentions it as a
+    placeholder. We accept a free-form ``str`` so callers can stash a
+    markdown plan today; if/when the new design pins down a structured
+    shape, this field tightens. Until then, treat it as optional
+    metadata. Persisted to JSON only when non-empty.
     """
     id: str
-    title: str
-    tasks: list[str] = field(default_factory=list)      # plain-language task list
-    deps: list[str] = field(default_factory=list)       # other group/component ids (legacy name)
+    name: str
+    feature_ids: list[str] = field(default_factory=list)  # Features this Group builds
+    dependencies: list[str] = field(default_factory=list)  # other group/component ids
     owned_paths: list[str] = field(default_factory=list)  # globs the agent may *modify*
     checks: list[CheckKind] = field(default_factory=list)
-
-    @property
-    def dependencies(self) -> list[str]:
-        """Canonical new-design alias for `deps` (research §2 vocabulary).
-
-        Reads return the live `deps` list; writes replace it in-place
-        so existing references to `group.deps` keep observing edits.
-        """
-        return self.deps
-
-    @dependencies.setter
-    def dependencies(self, value: list[str]) -> None:
-        self.deps = list(value)
+    dispatch_plan: str = ""  # optional free-form plan; see docstring
 
 
 # ===========================================================================
@@ -561,7 +552,7 @@ def parse_walkthrough_entry(
     return entry, messages
 
 
-def slice_walkthrough_by_feature(
+def filter_walkthrough_by_feature(
     entries: list[WalkthroughEntry],
     feature_id: str,
 ) -> list[WalkthroughEntry]:
@@ -570,12 +561,12 @@ def slice_walkthrough_by_feature(
     An entry evidences the Feature iff `feature_id in entry.feature_ids`.
     Multi-Feature entries (entries that evidence multiple Features at
     once — e.g. "user uploads image AND comments on it") appear in
-    each relevant Feature's slice. This is research §7's
+    each relevant Feature's filtered subset. This is research §7's
     "multi-Feature evidence cross-linking" rule: don't double-store,
     cross-link.
 
     Empty `feature_ids` (exploration entries) never appear in any
-    Feature's slice.
+    Feature's filtered subset.
     """
     return [
         entry for entry in entries
@@ -594,7 +585,7 @@ class FeatureProofBlock:
     decision produced this Feature).
 
     Multi-Feature entries appear in this block AND in any other
-    Features they tagged — see `slice_walkthrough_by_feature` for the
+    Features they tagged — see `filter_walkthrough_by_feature` for the
     rule.
 
     Fields:
@@ -666,7 +657,7 @@ def build_feature_proof_blocks(
 
     blocks: list[FeatureProofBlock] = []
     for feature in spec.features:
-        feature_entries = slice_walkthrough_by_feature(
+        feature_entries = filter_walkthrough_by_feature(
             walkthrough_entries, feature.id
         )
         # Multi-Feature cross-link: collect other Feature ids whose
@@ -926,7 +917,7 @@ def render_spec_md(spec: Spec) -> str:
 
         ## Features
 
-        ### <Group.title>
+        ### <Group.name>
         <!-- group: <group_id> -->
 
         #### <Feature.name>
@@ -972,9 +963,9 @@ def render_spec_md(spec: Spec) -> str:
         # Render in spec.groups order
         for group in spec.groups:
             group_features = features_by_group.get(group.id, [])
-            if not group_features and not group.title:
+            if not group_features and not group.name:
                 continue
-            parts.append(f"\n### {group.title or group.id}\n")
+            parts.append(f"\n### {group.name or group.id}\n")
             parts.append(f"<!-- group: {group.id} -->\n")
             for feature in group_features:
                 parts.append(f"\n#### {feature.name}\n")
@@ -1028,7 +1019,7 @@ def parse_spec_md(
     Args:
         md_text: full Markdown source as produced by render_spec_md.
         base: optional Spec to inherit mechanical fields from when
-            re-parsing edited Markdown. Group.owned_paths / .deps and
+            re-parsing edited Markdown. Group.owned_paths / .dependencies and
             Feature.audit_pre_merge / .multi_actor_required come from
             base (matched by id). Same shape rule for Component
             owned_paths / dependencies.
@@ -1164,9 +1155,9 @@ def parse_spec_md(
         groups_out.append(
             Group(
                 id=current_group_id,
-                title=current_group_title or current_group_id,
-                tasks=list(base_grp.tasks) if base_grp else [],
-                deps=list(base_grp.deps) if base_grp else [],
+                name=current_group_title or current_group_id,
+                feature_ids=list(base_grp.feature_ids) if base_grp else [],
+                dependencies=list(base_grp.dependencies) if base_grp else [],
                 owned_paths=list(base_grp.owned_paths) if base_grp else [],
                 checks=list(base_grp.checks) if base_grp else [],
             )
@@ -1532,8 +1523,6 @@ class Spec:
         project_kind: str = "webapp",
         structure: StructureDecisions | None = None,
         groups: list[Group] | None = None,
-        slices: list[Group] | None = None,  # back-compat alias for groups
-        cross_slice_checks: list[CheckKind] | None = None,  # legacy kwarg alias
         cross_group_checks: list[CheckKind] | None = None,
         shared_scaffold: list[str] | None = None,
         non_goals: list[str] | None = None,
@@ -1546,25 +1535,12 @@ class Spec:
         shared_paths: list[str] | None = None,
         audit_fixtures: list[AuditFixture] | None = None,
     ) -> None:
-        # Back-compat: `slices=` is a deprecated alias for `groups=`.
-        # When `dataclasses.replace(spec, slices=[...])` is called, the
-        # original spec's `groups=...` is also passed in via field
-        # introspection — so we prefer the explicit `slices=` override
-        # whenever it is present. The user-passed alias must win over
-        # the default-populated canonical field, otherwise the legacy
-        # call site silently no-ops.
-        if slices is not None:
-            groups = slices
         self.schema_version = schema_version
         self.intent = intent
         self.intent_hash = intent_hash
         self.project_kind = project_kind
         self.structure = structure if structure is not None else StructureDecisions()
         self.groups = groups if groups is not None else []
-        # Back-compat: accept both `cross_slice_checks` (legacy) and
-        # `cross_group_checks` (canonical) kwargs. Latter wins on conflict.
-        if cross_group_checks is None and cross_slice_checks is not None:
-            cross_group_checks = cross_slice_checks
         self.cross_group_checks = cross_group_checks if cross_group_checks is not None else []
         self.shared_scaffold = shared_scaffold if shared_scaffold is not None else []
         self.non_goals = non_goals if non_goals is not None else []
@@ -1576,27 +1552,6 @@ class Spec:
         self.guardrails = guardrails if guardrails is not None else []
         self.shared_paths = shared_paths if shared_paths is not None else []
         self.audit_fixtures = audit_fixtures if audit_fixtures is not None else []
-
-    # Backward-compat read+write proxy — every existing `.slices` reference
-    # works during incremental A0.3 migration. Removed at A0.3.4 final
-    # cleanup once all callers reference `.groups` directly.
-    @property
-    def slices(self) -> list[Group]:
-        return self.groups
-
-    @slices.setter
-    def slices(self, value: list[Group]) -> None:
-        self.groups = value
-
-    # Back-compat property for cross_slice_checks → cross_group_checks rename.
-    # Removed at A0.3.4 final cleanup.
-    @property
-    def cross_slice_checks(self) -> list[CheckKind]:
-        return self.cross_group_checks
-
-    @cross_slice_checks.setter
-    def cross_slice_checks(self, value: list[CheckKind]) -> None:
-        self.cross_group_checks = value
 
 
 # ---------------------------------------------------------------------------
@@ -1712,19 +1667,19 @@ def lock_intent(spec: Spec) -> Spec:
 
 def spec_to_dict(spec: Spec) -> dict[str, Any]:
     """Convert a `Spec` to a plain dict for JSON serialisation."""
-    # Group-shaped entries — emitted under both "groups" (canonical) and
-    # "slices" (legacy back-compat) keys until A0.3.4 final cleanup.
-    group_entries = [
-        {
+    group_entries = []
+    for s in spec.groups:
+        entry: dict[str, Any] = {
             "id": s.id,
-            "title": s.title,
-            "tasks": list(s.tasks),
-            "deps": list(s.deps),
+            "name": s.name,
+            "feature_ids": list(s.feature_ids),
+            "dependencies": list(s.dependencies),
             "owned_paths": list(s.owned_paths),
             "checks": [_check_to_dict(c) for c in s.checks],
         }
-        for s in spec.groups
-    ]
+        if s.dispatch_plan:
+            entry["dispatch_plan"] = s.dispatch_plan
+        group_entries.append(entry)
     return {
         "schema_version": spec.schema_version,
         "intent": spec.intent,
@@ -1732,9 +1687,7 @@ def spec_to_dict(spec: Spec) -> dict[str, Any]:
         "project_kind": spec.project_kind,
         "structure": {"payload": dict(spec.structure.payload)},
         "groups": group_entries,
-        "slices": group_entries,  # back-compat duplicate; remove at A0.3.4
         "cross_group_checks": [_check_to_dict(c) for c in spec.cross_group_checks],
-        "cross_slice_checks": [_check_to_dict(c) for c in spec.cross_group_checks],  # back-compat duplicate; remove at A0.3.4
         "shared_scaffold": list(spec.shared_scaffold),
         "non_goals": list(spec.non_goals),
         "done_means": list(spec.done_means),
@@ -1845,17 +1798,17 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
 
     v2.1 design (docs/intent-to-product-v2-plan.md):
 
-    - **Coerces** obvious mistakes (non-list slices wrapped, non-dict
+    - **Coerces** obvious mistakes (non-list groups wrapped, non-dict
       amendments synthesized, unknown check kinds dropped).
     - **Warns** for departures from recommended shape. Warnings are
       returned alongside the Spec so callers can surface them in the
       journal/proof packet.
     - **Hard-rejects** ONLY on truly unusable input: not a dict, or no
-      slices AND no intent AND no structure (literally nothing to do).
+      groups AND no intent AND no structure (literally nothing to do).
 
     The compile-stage cheap-fail class (R3, R5, R8, R17, R22, R26) is
     closed by this function: malformed agent output now produces a
-    workable Spec + warnings instead of slice-blocking exceptions.
+    workable Spec + warnings instead of group-blocking exceptions.
     """
     collector = WarningCollector()
 
@@ -1886,67 +1839,74 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
             )
         structure_payload = {}
 
-    # ---- slices ----
-    # Prefer "groups" (canonical post-A0.3); fall back to "slices" (legacy).
-    raw_slices = data.get("groups")
-    if raw_slices is None:
-        raw_slices = data.get("slices")
-    if raw_slices is None:
-        slices_data: list[Any] = []
-    elif isinstance(raw_slices, list):
-        slices_data = raw_slices
-    elif isinstance(raw_slices, dict):
-        # Single slice declared at top level → wrap.
+    # ---- groups ----
+    # Canonical key is "groups". One-cycle deprecation: still read
+    # "slices" if "groups" is absent so legacy on-disk specs round-trip,
+    # but emit a deprecation warning so callers migrate.
+    raw_groups = data.get("groups")
+    if raw_groups is None and "slices" in data:
+        collector.add(
+            code="spec.deprecated.slices_key",
+            path="slices",
+            message="'slices' JSON key is deprecated; use 'groups'",
+        )
+        raw_groups = data.get("slices")
+    if raw_groups is None:
+        groups_data: list[Any] = []
+    elif isinstance(raw_groups, list):
+        groups_data = raw_groups
+    elif isinstance(raw_groups, dict):
+        # Single group declared at top level → wrap.
         collector.add(
             code="spec.coerce.field",
-            path="slices",
-            message="slices was a dict; wrapped in a single-element list",
+            path="groups",
+            message="groups was a dict; wrapped in a single-element list",
             coerced_to="[<dict>]",
         )
-        slices_data = [raw_slices]
+        groups_data = [raw_groups]
     else:
         collector.add(
             code="spec.coerce.field",
-            path="slices",
-            message=f"slices should be a list, got {type(raw_slices).__name__}; using empty list",
+            path="groups",
+            message=f"groups should be a list, got {type(raw_groups).__name__}; using empty list",
             coerced_to="[]",
         )
-        slices_data = []
+        groups_data = []
 
-    slices: list[Group] = []
+    groups: list[Group] = []
     seen_ids: set[str] = set()
-    for index, entry in enumerate(slices_data):
+    for index, entry in enumerate(groups_data):
         if not isinstance(entry, dict):
             collector.add(
-                code="spec.coerce.slice",
-                path=f"slices[{index}]",
-                message=f"slice entry is {type(entry).__name__}, not dict; dropped",
+                code="spec.coerce.group",
+                path=f"groups[{index}]",
+                message=f"group entry is {type(entry).__name__}, not dict; dropped",
             )
             continue
 
-        slice_id = _coerce_slice_id(
+        group_id = _coerce_group_id(
             entry.get("id"), index=index, seen=seen_ids, collector=collector
         )
-        seen_ids.add(slice_id)
+        seen_ids.add(group_id)
 
         checks: list[CheckKind] = []
         # Pattern E: warn explicitly when checks is missing or wrong-typed,
-        # rather than silently coercing to []. A slice with no checks
+        # rather than silently coercing to []. A group with no checks
         # vacuously passes — operators must see this in the validator
         # report, not have it hidden by a permissive `or []`.
         raw_checks = entry.get("checks")
         if raw_checks is None:
             collector.add(
                 code="spec.coerce.field",
-                path=f"slices[{index}].checks",
-                message="checks field missing on slice; using []",
+                path=f"groups[{index}].checks",
+                message="checks field missing on group; using []",
                 coerced_to="[]",
             )
             raw_checks = []
         elif not isinstance(raw_checks, list):
             collector.add(
                 code="spec.coerce.field",
-                path=f"slices[{index}].checks",
+                path=f"groups[{index}].checks",
                 message=f"checks should be a list, got {type(raw_checks).__name__}; using []",
                 coerced_to="[]",
             )
@@ -1955,43 +1915,65 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
             check = _check_from_dict(
                 c_payload,
                 collector=collector,
-                path=f"slices[{index}].checks[{c_index}]",
+                path=f"groups[{index}].checks[{c_index}]",
             )
             if check is not None:
                 checks.append(check)
 
-        # S5 fix: warn on silent coercion of tasks/deps/owned_paths.
+        # S5 fix: warn on silent coercion of feature_ids/dependencies/owned_paths.
         # Pattern E already did this for `checks`; the same hole exists
-        # for the other list fields. Under-specified slices that look
+        # for the other list fields. Under-specified groups that look
         # valid because the parser swallowed the gap are exactly the
         # bugs the validator should catch.
-        def _coerce_str_list(field_name: str) -> list[str]:
+        def _coerce_str_list(field_name: str, *legacy_aliases: str) -> list[str]:
             raw = entry.get(field_name)
+            used = field_name
+            if raw is None:
+                for alias in legacy_aliases:
+                    if alias in entry:
+                        raw = entry.get(alias)
+                        used = alias
+                        collector.add(
+                            code="spec.deprecated.group_field",
+                            path=f"groups[{index}].{alias}",
+                            message=f"'{alias}' is deprecated; use '{field_name}'",
+                        )
+                        break
             if raw is None:
                 collector.add(
                     code="spec.coerce.field",
-                    path=f"slices[{index}].{field_name}",
-                    message=f"{field_name} field missing on slice; using []",
+                    path=f"groups[{index}].{field_name}",
+                    message=f"{field_name} field missing on group; using []",
                     coerced_to="[]",
                 )
                 return []
             if not isinstance(raw, list):
                 collector.add(
                     code="spec.coerce.field",
-                    path=f"slices[{index}].{field_name}",
-                    message=f"{field_name} should be a list, got {type(raw).__name__}; using []",
+                    path=f"groups[{index}].{used}",
+                    message=f"{used} should be a list, got {type(raw).__name__}; using []",
                     coerced_to="[]",
                 )
                 return []
             return [str(item) for item in raw]
 
-        slices.append(Group(
-            id=slice_id,
-            title=str(entry.get("title") or ""),
-            tasks=_coerce_str_list("tasks"),
-            deps=_coerce_str_list("deps"),
+        # Accept legacy "title" key for "name" (one-cycle deprecation).
+        name_raw = entry.get("name")
+        if name_raw is None and "title" in entry:
+            collector.add(
+                code="spec.deprecated.group_field",
+                path=f"groups[{index}].name",
+                message="'title' is deprecated; use 'name'",
+            )
+            name_raw = entry.get("title")
+        groups.append(Group(
+            id=group_id,
+            name=str(name_raw or ""),
+            feature_ids=_coerce_str_list("feature_ids", "tasks"),
+            dependencies=_coerce_str_list("dependencies", "deps"),
             owned_paths=_coerce_str_list("owned_paths"),
             checks=checks,
+            dispatch_plan=str(entry.get("dispatch_plan") or ""),
         ))
 
     # ---- amendments (coerce non-dict to synthesized record) ----
@@ -2031,32 +2013,36 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
                 diff_sha256_after="",
             ))
 
-    # ---- cross-slice checks ----
-    # Pattern E: same as per-slice checks — warn on missing/wrong-typed
+    # ---- cross-group checks ----
+    # Pattern E: same as per-group checks — warn on missing/wrong-typed
     # field rather than silently defaulting to [].
-    cross_slice_checks: list[CheckKind] = []
-    # Prefer canonical cross_group_checks; fall back to cross_slice_checks legacy.
+    cross_group_checks: list[CheckKind] = []
     raw_cross = data.get("cross_group_checks")
-    if raw_cross is None:
+    if raw_cross is None and "cross_slice_checks" in data:
+        collector.add(
+            code="spec.deprecated.cross_slice_checks_key",
+            path="cross_slice_checks",
+            message="'cross_slice_checks' JSON key is deprecated; use 'cross_group_checks'",
+        )
         raw_cross = data.get("cross_slice_checks")
     if raw_cross is None:
-        # Field absent is fine — many specs have no cross-slice checks.
+        # Field absent is fine — many specs have no cross-group checks.
         # Don't warn for this case; only warn when present-but-wrong-type.
         raw_cross = []
     elif not isinstance(raw_cross, list):
         collector.add(
             code="spec.coerce.field",
-            path="cross_slice_checks",
-            message=f"cross_slice_checks should be a list, got {type(raw_cross).__name__}; using []",
+            path="cross_group_checks",
+            message=f"cross_group_checks should be a list, got {type(raw_cross).__name__}; using []",
             coerced_to="[]",
         )
         raw_cross = []
     for index, c_payload in enumerate(raw_cross):
         check = _check_from_dict(
-            c_payload, collector=collector, path=f"cross_slice_checks[{index}]"
+            c_payload, collector=collector, path=f"cross_group_checks[{index}]"
         )
         if check is not None:
-            cross_slice_checks.append(check)
+            cross_group_checks.append(check)
 
     # ---- project_kind: open enum (warn but accept) ----
     project_kind_raw = data.get("project_kind")
@@ -2074,9 +2060,9 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
     intent = str(data.get("intent") or "")
 
     # ---- hard reject: truly unusable input ----
-    if not intent.strip() and not slices and not structure_payload:
+    if not intent.strip() and not groups and not structure_payload:
         raise SpecValidationError(
-            "spec is empty: no intent, no slices, no structure — nothing to build"
+            "spec is empty: no intent, no groups, no structure — nothing to build"
         )
 
     # intent_hash: preserve what's on disk verbatim. If absent, leave
@@ -2162,8 +2148,8 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
         intent_hash=intent_hash,
         project_kind=project_kind,
         structure=StructureDecisions(payload=dict(structure_payload)),
-        groups=slices,  # local var name kept as `slices` for transition; field is `groups`
-        cross_slice_checks=cross_slice_checks,
+        groups=groups,
+        cross_group_checks=cross_group_checks,
         shared_scaffold=[str(p) for p in (data.get("shared_scaffold") or [])],
         non_goals=[str(g) for g in (data.get("non_goals") or [])],
         done_means=[str(g) for g in (data.get("done_means") or [])],
@@ -2192,36 +2178,36 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
 _SLUG_RE = re.compile(r"[^a-z0-9_-]+")
 
 
-def _coerce_slice_id(
+def _coerce_group_id(
     raw: Any,
     *,
     index: int,
     seen: set[str],
     collector: WarningCollector,
 ) -> str:
-    """Slugify and disambiguate a slice id.
+    """Slugify and disambiguate a group id.
 
     v2.1: accept any non-empty unique string. Internally slugify for
     path-safe use. Empty / non-string values get a synthesized id.
     """
     text = str(raw or "").strip()
     if not text:
-        new_id = f"slice_{index}"
+        new_id = f"group_{index}"
         collector.add(
-            code="spec.coerce.slice_id",
-            path=f"slices[{index}].id",
-            message=f"slice id missing; synthesized {new_id!r}",
+            code="spec.coerce.group_id",
+            path=f"groups[{index}].id",
+            message=f"group id missing; synthesized {new_id!r}",
             coerced_to=new_id,
         )
         return new_id
     slug = _SLUG_RE.sub("-", text.lower()).strip("-_")
     if not slug:
-        slug = f"slice_{index}"
+        slug = f"group_{index}"
     if slug != text:
         collector.add(
-            code="spec.coerce.slice_id",
-            path=f"slices[{index}].id",
-            message=f"slice id {text!r} slugified to {slug!r}",
+            code="spec.coerce.group_id",
+            path=f"groups[{index}].id",
+            message=f"group id {text!r} slugified to {slug!r}",
             coerced_to=slug,
         )
     candidate = slug
@@ -2232,8 +2218,8 @@ def _coerce_slice_id(
     if candidate != slug:
         collector.add(
             code="spec.coerce.duplicate_id",
-            path=f"slices[{index}].id",
-            message=f"duplicate slice id {slug!r}; renamed to {candidate!r}",
+            path=f"groups[{index}].id",
+            message=f"duplicate group id {slug!r}; renamed to {candidate!r}",
             coerced_to=candidate,
         )
     return candidate
@@ -2274,7 +2260,7 @@ class SpecValidationError(ValueError):
     """Raised when a Spec is malformed (parse-time)."""
 
 
-_SLICE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+_GROUP_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 def _load_kind_schema(project_kind: str) -> dict[str, Any] | None:
@@ -2355,53 +2341,53 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
         warnings.append("intent is empty")
 
     if not spec.groups:
-        warnings.append("spec declares no slices")
-    elif len(spec.groups) > 1 and not spec.cross_slice_checks:
-        # S4 fix: a multi-slice product without integration tests means
-        # each slice passes in isolation but their composition is
+        warnings.append("spec declares no groups")
+    elif len(spec.groups) > 1 and not spec.cross_group_checks:
+        # S4 fix: a multi-group product without integration tests means
+        # each group passes in isolation but their composition is
         # unverified. Surface as a warning so the spec author can
         # decide whether to add checks or accept the gap.
         warnings.append(
-            "multi-slice spec declares no cross_slice_checks "
-            "(integration testing is missing — slices may pass in "
+            "multi-group spec declares no cross_group_checks "
+            "(integration testing is missing — groups may pass in "
             "isolation while their composition is broken)"
         )
 
     seen_ids: set[str] = set()
-    for slice_ in spec.groups:
-        if not _SLICE_ID_RE.match(slice_.id):
-            warnings.append(f"slice id {slice_.id!r} does not match recommended pattern {_SLICE_ID_RE.pattern}")
-        if slice_.id in seen_ids:
-            warnings.append(f"duplicate slice id: {slice_.id!r}")
-        seen_ids.add(slice_.id)
-        if not slice_.title.strip():
-            warnings.append(f"slice {slice_.id!r}: title is empty")
-        if not slice_.checks:
-            warnings.append(f"slice {slice_.id!r}: no checks declared (vacuously passes)")
-        # S1 fix: tasks must be present and concrete enough that two
-        # independent build agents cannot drift on what to do. Empty
-        # tasks → vacuous slice (BLOCKED downstream is unhelpful;
-        # better to surface at validate). Single-word/very-short tasks
+    for group_ in spec.groups:
+        if not _GROUP_ID_RE.match(group_.id):
+            warnings.append(f"group id {group_.id!r} does not match recommended pattern {_GROUP_ID_RE.pattern}")
+        if group_.id in seen_ids:
+            warnings.append(f"duplicate group id: {group_.id!r}")
+        seen_ids.add(group_.id)
+        if not group_.name.strip():
+            warnings.append(f"group {group_.id!r}: name is empty")
+        if not group_.checks:
+            warnings.append(f"group {group_.id!r}: no checks declared (vacuously passes)")
+        # S1 fix: feature_ids must be present and concrete enough that
+        # two independent build agents cannot drift on what to do. Empty
+        # feature_ids → vacuous group (BLOCKED downstream is unhelpful;
+        # better to surface at validate). Single-word/very-short entries
         # → likely vague prose (e.g. "implement", "build it") rather
         # than actionable steps tied to file paths or API shapes.
-        if not slice_.tasks:
+        if not group_.feature_ids:
             warnings.append(
-                f"slice {slice_.id!r}: tasks field empty (no concrete work declared)"
+                f"group {group_.id!r}: feature_ids field empty (no concrete work declared)"
             )
         else:
-            for t_idx, task in enumerate(slice_.tasks):
-                stripped = task.strip()
+            for t_idx, fid in enumerate(group_.feature_ids):
+                stripped = fid.strip()
                 if len(stripped) < 10:
                     warnings.append(
-                        f"slice {slice_.id!r}.tasks[{t_idx}]: task too vague "
+                        f"group {group_.id!r}.feature_ids[{t_idx}]: entry too vague "
                         f"({stripped!r}); needs a concrete action tied to file "
                         f"paths, API shapes, or behaviors"
                     )
 
-    for slice_ in spec.groups:
-        for dep in slice_.deps:
+    for group_ in spec.groups:
+        for dep in group_.dependencies:
             if dep not in seen_ids:
-                warnings.append(f"slice {slice_.id!r}: dep {dep!r} not in spec")
+                warnings.append(f"group {group_.id!r}: dep {dep!r} not in spec")
 
     schema = _load_kind_schema(spec.project_kind)
     if schema is not None:
@@ -2415,9 +2401,9 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
     return ValidationResult(valid=not errors, errors=errors, warnings=warnings)
 
 
-def _detect_dep_cycles(slices: list[Group]) -> list[str]:
+def _detect_dep_cycles(groups: list[Group]) -> list[str]:
     """Return human-readable cycle errors; empty when DAG."""
-    by_id = {s.id: s for s in slices}
+    by_id = {s.id: s for s in groups}
     visiting: set[str] = set()
     visited: set[str] = set()
     errors: list[str] = []
@@ -2425,18 +2411,18 @@ def _detect_dep_cycles(slices: list[Group]) -> list[str]:
     def walk(node: str, path: list[str]) -> None:
         if node in visiting:
             cycle = path[path.index(node):] + [node]
-            errors.append(f"slice dep cycle: {' -> '.join(cycle)}")
+            errors.append(f"group dep cycle: {' -> '.join(cycle)}")
             return
         if node in visited or node not in by_id:
             return
         visiting.add(node)
-        for dep in by_id[node].deps:
+        for dep in by_id[node].dependencies:
             walk(dep, path + [node])
         visiting.discard(node)
         visited.add(node)
 
-    for slice_ in slices:
-        walk(slice_.id, [])
+    for group_ in groups:
+        walk(group_.id, [])
     return errors
 
 
@@ -2904,13 +2890,13 @@ def _reconcile_brownfield(new_spec: Spec, base_spec: Spec) -> Spec:
     for new_group in new_spec.groups:
         seen_group_ids.add(new_group.id)
         base_group = base_groups_by_id.get(new_group.id)
-        if base_group is not None and base_group.title != new_group.title:
+        if base_group is not None and base_group.name != new_group.name:
             logger.warning(
                 "brownfield reconcile: group %r title changed %r → %r "
                 "(accepting agent's title)",
                 new_group.id,
-                base_group.title,
-                new_group.title,
+                base_group.name,
+                new_group.name,
             )
         merged_groups.append(new_group)
     # Carry forward base groups not re-emitted by the agent
@@ -3151,8 +3137,8 @@ async def compile_spec(
             "compiled spec failed validation:\n  - " + "\n  - ".join(result.errors)
         )
     # E2E rubric finding: validator warnings used to be discarded
-    # silently — operators never saw "tasks too vague" or "no
-    # cross_slice_checks" alerts that the validator emitted. Surface
+    # silently — operators never saw "feature_ids too vague" or "no
+    # cross_group_checks" alerts that the validator emitted. Surface
     # them via the standard logger so they hit narrative.log AND
     # attach to the spec object so callers can render them.
     for warning in result.warnings:

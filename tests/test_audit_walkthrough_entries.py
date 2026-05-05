@@ -23,7 +23,7 @@ from otto.audit import (
     FeatureAudit,
     _validate_walkthrough_jsonl,
 )
-from otto.build import BuildResult, SliceResult, SliceStatus
+from otto.build import BuildResult, GroupResult, GroupStatus
 from otto.checks import Evidence
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.render import compose_proof_packet
@@ -51,10 +51,10 @@ def _spec_with_features(*ids: str) -> Spec:
         groups=[
             Group(
                 id="g",
-                title="G",
-                deps=[],
+                name="G",
+                dependencies=[],
                 owned_paths=["src/**"],
-                tasks=["build"],
+                feature_ids=["build"],
                 checks=[RepoTestCheck(command=("true",), timeout_s=30)],
             ),
         ],
@@ -91,10 +91,10 @@ def _evidence(passed: bool = True) -> Evidence:
 def _passing_build(tmp_path: Path) -> BuildResult:
     return BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(
-                slice_id="g",
-                status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(
+                group_id="g",
+                status=GroupStatus.PASSING,
                 attempts=1,
                 branch="i2p/x/g",
                 worktree=tmp_path,
@@ -109,10 +109,10 @@ def _landed_merge() -> MergeQueueResult:
         landed_ids=["g"],
         results=[
             MergeResult(
-                slice_id="g",
+                group_id="g",
                 status=MergeStatus.LANDED,
                 landed_commit="abc1234",
-                slice_recheck_evidence=[_evidence(True)],
+                group_recheck_evidence=[_evidence(True)],
             ),
         ],
     )

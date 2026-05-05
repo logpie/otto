@@ -459,8 +459,8 @@ export interface HistoryItem {
   token_usage: TokenUsage;
   resumable: boolean;
   adapter_key: string;
-  // i2p-domain rows expose slice counts via the existing stories columns
-  // (stories_tested = total slices, stories_passed = landed slices). Optional
+  // i2p-domain rows expose group counts via the existing stories columns
+  // (stories_tested = total groups, stories_passed = landed groups). Optional
   // because legacy queue rows omit them.
   stories_tested?: number | null;
   stories_passed?: number | null;

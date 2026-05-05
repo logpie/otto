@@ -57,8 +57,8 @@ def _seed_session(tmp_path: Path) -> tuple[Path, Spec]:
     spec = Spec(
         intent="tiny webapp",
         groups=[
-            Group(id="g-a", title="A"),
-            Group(id="g-b", title="B"),
+            Group(id="g-a", name="A"),
+            Group(id="g-b", name="B"),
         ],
         components=[
             Component(id="c-x", name="Comp X"),
@@ -78,12 +78,12 @@ def test_plan_resume_classifies_landed_pending(tmp_path: Path) -> None:
     """g-a is LANDED, g-b is FAILED (mid-flight), c-x untouched (PENDING)."""
     session_dir, spec = _seed_session(tmp_path)
     # g-a → built and landed.
-    emit(session_dir, "slice.started", slice_id="g-a")
-    emit(session_dir, "slice.merge.eligible", slice_id="g-a")
-    emit(session_dir, "slice.merge.landed", slice_id="g-a")
+    emit(session_dir, "group.started", group_id="g-a")
+    emit(session_dir, "group.merge.eligible", group_id="g-a")
+    emit(session_dir, "group.merge.landed", group_id="g-a")
     # g-b → started + failed; never landed.
-    emit(session_dir, "slice.started", slice_id="g-b")
-    emit(session_dir, "slice.attempt.failed", slice_id="g-b", detail="oops")
+    emit(session_dir, "group.started", group_id="g-b")
+    emit(session_dir, "group.attempt.failed", group_id="g-b", detail="oops")
     # c-x has no events.
 
     plan = plan_resume(session_dir)
@@ -102,9 +102,9 @@ def test_plan_resume_classifies_landed_pending(tmp_path: Path) -> None:
 def test_plan_resume_treats_redundant_as_landed(tmp_path: Path) -> None:
     """REDUNDANT (Pattern A: no diff) counts as landed — do not re-dispatch."""
     session_dir, _ = _seed_session(tmp_path)
-    emit(session_dir, "slice.started", slice_id="g-a")
-    emit(session_dir, "slice.merge.eligible", slice_id="g-a")
-    emit(session_dir, "slice.merge.redundant", slice_id="g-a")
+    emit(session_dir, "group.started", group_id="g-a")
+    emit(session_dir, "group.merge.eligible", group_id="g-a")
+    emit(session_dir, "group.merge.redundant", group_id="g-a")
 
     plan = plan_resume(session_dir)
     assert "g-a" in plan.landed_components
@@ -124,8 +124,8 @@ def test_plan_resume_audit_finished_with_verdict(tmp_path: Path) -> None:
 def test_plan_resume_blocked_components_not_in_either_set(tmp_path: Path) -> None:
     """BLOCKED is terminal — neither auto-rebuilt nor counted as landed."""
     session_dir, _ = _seed_session(tmp_path)
-    emit(session_dir, "slice.started", slice_id="g-a")
-    emit(session_dir, "slice.blocked", slice_id="g-a", detail="exhausted retries")
+    emit(session_dir, "group.started", group_id="g-a")
+    emit(session_dir, "group.blocked", group_id="g-a", detail="exhausted retries")
 
     plan = plan_resume(session_dir)
     assert "g-a" not in plan.landed_components

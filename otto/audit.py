@@ -45,7 +45,7 @@ from otto.build import (
     BuildAgentInput,
     BuildBudget,
     BuildResult,
-    SliceStatus,
+    GroupStatus,
 )
 from otto.checks import Evidence, run_checks
 from otto.merge_queue import MergeQueueResult
@@ -67,10 +67,10 @@ class AuditVerdict(str, Enum):
 
 
 @dataclass
-class SliceVerdict:
+class GroupVerdict:
     """Per-slice judgment from the audit."""
 
-    slice_id: str
+    group_id: str
     passed: bool
     detail: str = ""
     artifacts: list[Path] = field(default_factory=list)
@@ -119,7 +119,7 @@ class AuditResult:
 
     verdict: AuditVerdict
     narrative: str
-    slice_verdicts: list[SliceVerdict] = field(default_factory=list)
+    group_verdicts: list[GroupVerdict] = field(default_factory=list)
     feature_audits: list[FeatureAudit] = field(default_factory=list)
     cross_slice_evidence: list[Evidence] = field(default_factory=list)
     walkthrough_artifacts: list[Path] = field(default_factory=list)
@@ -193,7 +193,7 @@ class AuditAgentOutput:
 
     verdict: AuditVerdict
     narrative: str
-    slice_verdicts: list[SliceVerdict] = field(default_factory=list)
+    group_verdicts: list[GroupVerdict] = field(default_factory=list)
     # v2.6 per-feature verdicts: one entry per done_means item
     # (or per derived feature). Lets the proof packet show a feature
     # checklist instead of one global verdict.
@@ -660,7 +660,7 @@ async def run_audit(
             return AuditResult(
                 verdict=AuditVerdict.PARTIAL,
                 narrative=halt_msg,
-                slice_verdicts=[],
+                group_verdicts=[],
                 feature_audits=[],
                 cross_slice_evidence=cross_evidence,
                 walkthrough_artifacts=list(walk_result.artifacts),
@@ -700,7 +700,7 @@ async def run_audit(
             contract_detail=contract_detail,
             chain_review=chain_review,
             merge_blocked_ids=list(merge_result.blocked_ids or []),
-            total_passing_slices=len(getattr(merge_result, "landed_ids", []) or [])
+            total_passing_groups=len(getattr(merge_result, "landed_ids", []) or [])
                 + len(merge_result.blocked_ids or []),
         )
         # C4 fix: if a prior round's fix loop failed, the agent's
@@ -744,7 +744,7 @@ async def run_audit(
         last_result = AuditResult(
             verdict=verdict,
             narrative=narrative,
-            slice_verdicts=list(agent_output.slice_verdicts),
+            group_verdicts=list(agent_output.group_verdicts),
             feature_audits=list(agent_output.feature_audits),
             cross_slice_evidence=cross_evidence,
             walkthrough_artifacts=list(walk_result.artifacts),
@@ -813,7 +813,7 @@ async def run_audit(
 
         # 4: route findings to fix loop. For each slice with a failing
         # verdict, re-engage the build agent ONCE per audit cycle.
-        failing_ids = [v.slice_id for v in agent_output.slice_verdicts if not v.passed]
+        failing_ids = [v.group_id for v in agent_output.group_verdicts if not v.passed]
         if not failing_ids:
             # Verdict says partial/blocked but no specific slice flagged
             # — nothing actionable. Return as-is.
@@ -836,44 +836,44 @@ async def run_audit(
         # cannot silently return PASSED on the next pass when the
         # underlying repair didn't actually land.
         any_fix_failed = False
-        for slice_id in failing_ids:
+        for group_id in failing_ids:
             # C1 fix: check shared budget before each fix dispatch too.
             if shared_budget is not None and shared_budget.remaining_total_cost_usd() <= 0:
                 any_fix_failed = True
                 emit(
-                    session_dir, "slice.attempt.failed",
-                    slice_id=slice_id, attempt=retries + 1,
+                    session_dir, "group.attempt.failed",
+                    group_id=group_id, attempt=retries + 1,
                     detail="shared cost budget exhausted; fix skipped",
                 )
                 break
-            slice_obj = next((s for s in spec.groups if s.id == slice_id), None)
-            if slice_obj is None:
+            group_obj = next((s for s in spec.groups if s.id == group_id), None)
+            if group_obj is None:
                 continue
             # Find the slice's build branch from build_result.
             sresult = next(
-                (r for r in build_result.slice_results if r.slice_id == slice_id),
+                (r for r in build_result.group_results if r.group_id == group_id),
                 None,
             )
-            branch = sresult.branch if sresult else f"i2p/{session_dir.name}/{slice_id}"
+            branch = sresult.branch if sresult else f"i2p/{session_dir.name}/{group_id}"
             worktree = sresult.worktree if sresult else project_dir
             agent_input_fix = BuildAgentInput(
                 spec=spec,
-                slice=slice_obj,
+                group=group_obj,
                 project_dir=project_dir,
                 worktree=worktree,
                 branch=branch,
                 attempt=retries + 1,
                 last_failure_narrative=(
                     f"audit attempt {retries + 1} flagged slice "
-                    f"{slice_id}: {next((v.detail for v in agent_output.slice_verdicts if v.slice_id == slice_id), '')}"
+                    f"{group_id}: {next((v.detail for v in agent_output.group_verdicts if v.group_id == group_id), '')}"
                 ),
-                log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "fix" / slice_id,
+                log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "fix" / group_id,
             )
             # V3 fix: checkout the slice's branch before invoking the
             # fix-agent so its edits accumulate on the slice branch, NOT
             # on base_branch. After the agent runs, commit the diff to
             # the slice branch and attempt a real merge into base via
-            # _merge_slice_branch — so blocked slices can be landed
+            # _merge_group_branch — so blocked slices can be landed
             # through the same path as build-phase slices, never as
             # rogue commits on main. Without this, fix-agents bypass
             # branch isolation entirely (observed in P1: fix-agent ran
@@ -881,10 +881,10 @@ async def run_audit(
             # while merge_queue still recorded the slice as BLOCKED).
             from otto.build import (
                 _is_git_repo as _build_is_git_repo,
-                _setup_slice_branch as _build_setup_slice_branch,
-                _commit_slice_work as _build_commit_slice_work,
+                _setup_group_branch as _build_setup_slice_branch,
+                _commit_group_work as _build_commit_slice_work,
             )
-            from otto.merge_queue import _merge_slice_branch, _git as _merge_git, MergeStatus as _MergeStatus
+            from otto.merge_queue import _merge_group_branch, _git as _merge_git, MergeStatus as _MergeStatus
             on_slice_branch = False
             if _build_is_git_repo(worktree):
                 on_slice_branch = _build_setup_slice_branch(
@@ -893,8 +893,8 @@ async def run_audit(
                 if not on_slice_branch:
                     any_fix_failed = True
                     emit(
-                        session_dir, "slice.attempt.failed",
-                        slice_id=slice_id, attempt=retries + 1,
+                        session_dir, "group.attempt.failed",
+                        group_id=group_id, attempt=retries + 1,
                         detail=f"could not checkout slice branch {branch} for fix",
                     )
                     continue
@@ -906,11 +906,11 @@ async def run_audit(
                 if not fix_output.succeeded:
                     any_fix_failed = True
                     if on_slice_branch:
-                        _build_commit_slice_work(worktree, slice_id=slice_id, branch=branch)
+                        _build_commit_slice_work(worktree, group_id=group_id, branch=branch)
                 else:
                     if on_slice_branch:
                         committed = _build_commit_slice_work(
-                            worktree, slice_id=slice_id, branch=branch,
+                            worktree, group_id=group_id, branch=branch,
                         )
                         if not committed:
                             any_fix_failed = True
@@ -919,23 +919,23 @@ async def run_audit(
                             # merge path. If the merge succeeds the slice
                             # finally lands; if it conflicts or no diff, the
                             # next audit cycle will see it.
-                            merge_outcome = _merge_slice_branch(
+                            merge_outcome = _merge_group_branch(
                                 _merge_git, worktree,
-                                slice_id=slice_id, branch=branch,
+                                group_id=group_id, branch=branch,
                                 base_branch=audit_base_branch,
                             )
                             if merge_outcome.status == _MergeStatus.LANDED:
                                 emit(
-                                    session_dir, "slice.merge.landed",
-                                    slice_id=slice_id, attempt=retries + 1,
+                                    session_dir, "group.merge.landed",
+                                    group_id=group_id, attempt=retries + 1,
                                     detail=merge_outcome.head_after,
                                 )
                             else:
                                 any_fix_failed = True
                 emit(
                     session_dir,
-                    "slice.attempt.failed" if not fix_output.succeeded else "slice.merge.eligible",
-                    slice_id=slice_id,
+                    "group.attempt.failed" if not fix_output.succeeded else "group.merge.eligible",
+                    group_id=group_id,
                     attempt=retries + 1,
                     detail=fix_output.detail or "",
                 )
@@ -949,8 +949,8 @@ async def run_audit(
                     _merge_git(["checkout", audit_base_branch], worktree)
                 emit(
                     session_dir,
-                    "slice.attempt.failed",
-                    slice_id=slice_id,
+                    "group.attempt.failed",
+                    group_id=group_id,
                     attempt=retries + 1,
                     detail=f"audit-routed fix crashed: {type(exc).__name__}: {exc}",
                 )
@@ -1062,17 +1062,17 @@ def _build_summary(build_result: BuildResult) -> dict:
         "blocked_ids": list(build_result.blocked_ids),
         "total_cost_usd": build_result.total_cost_usd,
         "total_wall_s": build_result.total_wall_s,
-        "slice_count": len(build_result.slice_results),
+        "slice_count": len(build_result.group_results),
         "per_slice": [
             {
-                "slice_id": r.slice_id,
+                "group_id": r.group_id,
                 "status": r.status.value,
                 "attempts": r.attempts,
                 "wall_s": r.wall_s,
                 "cost_usd": r.cost_usd,
                 "narrative": r.failure_narrative,
             }
-            for r in build_result.slice_results
+            for r in build_result.group_results
         ],
     }
 
@@ -1085,7 +1085,7 @@ def _merge_summary(merge_result: MergeQueueResult) -> dict:
         "total_wall_s": merge_result.total_wall_s,
         "per_slice": [
             {
-                "slice_id": r.slice_id,
+                "group_id": r.group_id,
                 "status": r.status.value,
                 "landed_commit": r.landed_commit,
                 "repair_attempts": r.repair_attempts,
@@ -1155,7 +1155,7 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     lines.append("")
     lines.append("## Spec slices")
     for s in spec.groups:
-        lines.append(f"- {s.id}: {s.title}")
+        lines.append(f"- {s.id}: {s.name}")
     lines.append("")
     lines.append("## Build summary")
     lines.append("```json")
@@ -1314,7 +1314,7 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "{\n"
         "  verdict: passed|partial|blocked,\n"
         "  narrative: str,\n"
-        "  slice_verdicts: [{slice_id, passed: bool, detail: str}, ...],\n"
+        "  group_verdicts: [{group_id, passed: bool, detail: str}, ...],\n"
         "  feature_audits: [{name: str, status: passed|partial|blocked,\n"
         "                    detail: str, evidence_refs: [str, ...]}, ...],\n"
         "  quality_score: int (1-5),\n"
@@ -1343,7 +1343,7 @@ def _compose_verdict(
     contract_detail: str,
     chain_review,  # ChainVerification, but spec_amend imports audit so avoid cycle
     merge_blocked_ids: list[str] | None = None,
-    total_passing_slices: int = 0,
+    total_passing_groups: int = 0,
 ) -> tuple[AuditVerdict, str]:
     """Compose final verdict + narrative from all caps, order-independent.
 
@@ -1391,7 +1391,7 @@ def _compose_verdict(
     # passing slices were blocked.
     blocked_ids = list(merge_blocked_ids or [])
     if blocked_ids:
-        if total_passing_slices and len(blocked_ids) * 2 > total_passing_slices:
+        if total_passing_groups and len(blocked_ids) * 2 > total_passing_groups:
             verdict = _strictest(verdict, AuditVerdict.BLOCKED)
         else:
             verdict = _strictest(verdict, AuditVerdict.PARTIAL)
@@ -1463,13 +1463,13 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
         else AuditVerdict.PARTIAL if verdict_str == "partial"
         else AuditVerdict.BLOCKED
     )
-    slice_verdicts = []
-    for entry in data.get("slice_verdicts") or []:
+    group_verdicts = []
+    for entry in data.get("group_verdicts") or []:
         if not isinstance(entry, dict):
             continue
-        slice_verdicts.append(
-            SliceVerdict(
-                slice_id=str(entry.get("slice_id") or ""),
+        group_verdicts.append(
+            GroupVerdict(
+                group_id=str(entry.get("group_id") or ""),
                 passed=bool(entry.get("passed")),
                 detail=str(entry.get("detail") or ""),
             )
@@ -1522,7 +1522,7 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
     return AuditAgentOutput(
         verdict=verdict,
         narrative=str(data.get("narrative") or ""),
-        slice_verdicts=slice_verdicts,
+        group_verdicts=group_verdicts,
         feature_audits=feature_audits,
         quality_score=quality_score,
         quality_findings=quality_findings,
@@ -1592,7 +1592,7 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
 
 
 # Suppress unused-import warning — these are part of the public flow.
-_ = (Iterable, SliceStatus)
+_ = (Iterable, GroupStatus)
 
 
 __all__ = [
@@ -1603,7 +1603,7 @@ __all__ = [
     "AuditResult",
     "AuditVerdict",
     "FeatureAudit",
-    "SliceVerdict",
+    "GroupVerdict",
     "WalkthroughCallable",
     "WalkthroughResult",
     "default_audit_agent",

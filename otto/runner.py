@@ -36,6 +36,7 @@ Design notes (honest gaps):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -74,7 +75,7 @@ from otto.render import render_run
 from otto.resume import ResumePlan
 from otto.seed import SeedResult, seed_fixtures
 from otto.spec_compile import Group, Spec, compile_spec
-from otto.spec_state import emit
+from otto.spec_state import emit, is_run_paused_by_user, iter_events
 
 logger = logging.getLogger("otto.runner")
 
@@ -137,6 +138,10 @@ async def run_pipeline(
     audit_budget: AuditBudget | None = None,
     on_phase: "Callable[[str], None] | None" = None,
     resume_plan: ResumePlan | None = None,
+    review_gate: bool = False,
+    gate_timeout_s: float = 24 * 60 * 60.0,  # 24h default; A13
+    gate_poll_s: float = 1.0,
+    gate_announce: "Callable[[str], None] | None" = None,
 ) -> RunResult:
     """Drive the full intent-to-product pipeline.
 
@@ -190,6 +195,18 @@ async def run_pipeline(
     run_t0 = time.monotonic()
 
     def _phase(name: str) -> None:
+        # A7: between phases, honor an operator-initiated pause. We poll
+        # the spec-state journal here (rather than SIGSTOP-ing the
+        # process) because phases may hold async I/O (LLM calls,
+        # subprocesses, file handles); freezing them mid-IO is unsafe.
+        # The runner enters a passive sleep until either a
+        # `run.resumed_by_user` event is appended or the operator cancels
+        # via the existing cancel path (cancel terminates the process,
+        # so the loop will be unblocked by SIGTERM). On the first call
+        # this is a near no-op (no events yet). The poll cadence is 1s,
+        # which is fast enough to feel responsive without hammering the
+        # filesystem during a paused run.
+        _wait_while_paused(session_dir)
         if on_phase is not None:
             try:
                 on_phase(name)
@@ -217,6 +234,45 @@ async def run_pipeline(
         )
 
     result = RunResult(spec=spec)
+
+    # ---- 1.5. Review gate (A13, optional) ----
+    # When the operator passes ``--review-gate`` (default off), pause here
+    # between compile and build so the spec can be reviewed / edited via
+    # Mission Control before any agent runs against it. The gate is
+    # implemented as a journal-event poll: emit ``spec.review_pending``,
+    # surface a URL via ``gate_announce``, then wait for a
+    # ``spec.review_approved`` event (written by the operator's POST to
+    # ``/api/specs/<session>/approve`` — see ``otto/web/spec_review_routes.py``).
+    # On timeout the run halts with verdict=BLOCKED honestly.
+    if review_gate and resume_plan is None:
+        approved = await _wait_for_review_approval(
+            session_dir=session_dir,
+            timeout_s=gate_timeout_s,
+            poll_s=gate_poll_s,
+            announce=gate_announce,
+        )
+        if not approved:
+            result.halted_reason = (
+                f"review_gate_timeout: no approval within {gate_timeout_s:.0f}s"
+            )
+            result.audit_result = AuditResult(
+                verdict=AuditVerdict.BLOCKED,
+                narrative=(
+                    "Run halted before build: review gate timed out waiting "
+                    "for spec.review_approved."
+                ),
+            )
+            result.wall_s = time.monotonic() - run_t0
+            try:
+                emit(
+                    session_dir,
+                    "run.finished",
+                    detail=result.halted_reason,
+                    verdict=AuditVerdict.BLOCKED.value,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("emit run.finished failed: %s", exc)
+            return result
 
     # ---- 2. Seed (research §4 audit fixtures) ----
     # Empty audit_fixtures is a no-op success (SeedResult.detail says so).
@@ -271,16 +327,50 @@ async def run_pipeline(
         skip_components: set[str] = (
             set(resume_plan.landed_components) if resume_plan is not None else set()
         )
-        build_result = await run_build(
-            spec,
-            project_dir=project_dir,
-            session_dir=session_dir,
-            build_agent=build_agent,
-            base_url=base_url,
-            budget=shared_budget,
-            base_branch=base_branch,
-            skip_components=skip_components,
-        )
+        # A6: open the mid-build edit window. Spec-review's POST /edit
+        # accepts edits while lifecycle == "editing_in_flight"; after
+        # build (and any re-dispatch) returns we revert to "approved"
+        # so downstream amendment-flow promises hold. Best-effort:
+        # write failures are logged, never fatal.
+        _set_lifecycle_best_effort(session_dir, "editing_in_flight")
+        try:
+            build_result = await run_build(
+                spec,
+                project_dir=project_dir,
+                session_dir=session_dir,
+                build_agent=build_agent,
+                base_url=base_url,
+                budget=shared_budget,
+                base_branch=base_branch,
+                skip_components=skip_components,
+            )
+            # A6: if mid-build spec edits invalidated any Groups, re-dispatch
+            # the affected Groups against the (now persisted) post-edit Spec.
+            # We re-load from disk because the edit endpoint persisted the
+            # canonical post-edit Spec there. One pass: a second edit during
+            # re-dispatch is observable in the journal but doesn't trigger
+            # a third dispatch (operator runs `otto build --resume`).
+            redispatch_ids = _invalidated_group_ids(session_dir)
+            if redispatch_ids:
+                logger.info(
+                    "spec edit invalidation: re-dispatching groups %s",
+                    sorted(redispatch_ids),
+                )
+                spec, build_result = await _redispatch_invalidated_groups(
+                    redispatch_ids=redispatch_ids,
+                    spec=spec,
+                    prior_build_result=build_result,
+                    project_dir=project_dir,
+                    session_dir=session_dir,
+                    build_agent=build_agent,
+                    base_url=base_url,
+                    shared_budget=shared_budget,
+                    base_branch=base_branch,
+                    skip_components=skip_components,
+                )
+                result.spec = spec
+        finally:
+            _set_lifecycle_best_effort(session_dir, "approved")
     result.build_result = build_result
 
     # ---- 4. Merge (greenfield only) ----
@@ -402,6 +492,184 @@ async def run_pipeline(
 # ---------------------------------------------------------------------------
 
 
+# Pause poll cadence. 1s feels responsive without hammering the
+# filesystem during a long pause. Tests monkeypatch this to 0 to make
+# pause-resume cycles deterministic.
+PAUSE_POLL_INTERVAL_S = 1.0
+
+
+def _set_lifecycle_best_effort(session_dir: Path, lifecycle: str) -> None:
+    """Write the spec lifecycle state file. Logs and swallows IO errors.
+
+    A6: the runner doesn't own the spec-review HTTP endpoint, but it
+    does own the lifecycle window for in-flight edits. Writing
+    `lifecycle.json` directly avoids a circular dependency on
+    `otto.web.spec_review_routes`.
+    """
+    spec_subdir = session_dir / "spec"
+    if not spec_subdir.exists():
+        return
+    try:
+        import json as _json
+        from datetime import datetime as _dt, timezone as _tz
+        (spec_subdir / "lifecycle.json").write_text(
+            _json.dumps(
+                {
+                    "lifecycle": lifecycle,
+                    "updated_at": _dt.now(tz=_tz.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("set_lifecycle(%s) failed: %s", lifecycle, exc)
+
+
+def _invalidated_group_ids(session_dir: Path) -> set[str]:
+    """Return Group IDs flagged invalidated by spec edit AND not yet
+    superseded by a terminal phase event.
+
+    A6: a Group whose LAST relevant journal event is
+    `group.invalidated_by_spec_edit` needs re-dispatch. If the build
+    loop already wrote a `group.merge.landed` or `group.blocked`
+    AFTER the invalidation, the signal was acted on (or made moot)
+    and we skip it.
+    """
+    invalidated: set[str] = set()
+    last_kind_for_group: dict[str, str] = {}
+    try:
+        for event in iter_events(session_dir):
+            if not event.group_id:
+                continue
+            if event.kind == "group.invalidated_by_spec_edit":
+                invalidated.add(event.group_id)
+                last_kind_for_group[event.group_id] = event.kind
+            elif event.kind in ("group.merge.landed", "group.blocked"):
+                last_kind_for_group[event.group_id] = event.kind
+    except OSError as exc:
+        logger.warning("scan invalidated groups failed: %s", exc)
+        return set()
+    return {
+        gid for gid in invalidated
+        if last_kind_for_group.get(gid) == "group.invalidated_by_spec_edit"
+    }
+
+
+async def _redispatch_invalidated_groups(
+    *,
+    redispatch_ids: set[str],
+    spec: Spec,
+    prior_build_result: BuildResult,
+    project_dir: Path,
+    session_dir: Path,
+    build_agent: BuildAgentCallable,
+    base_url: str | None,
+    shared_budget: BuildBudget,
+    base_branch: str,
+    skip_components: set[str],
+) -> tuple[Spec, BuildResult]:
+    """Re-load the post-edit spec, re-build invalidated Groups,
+    and merge the new GroupResult entries into the prior BuildResult.
+
+    A6: the spec-review edit endpoint persisted the post-edit Spec to
+    disk, so we re-load from there. We then run a second `run_build`
+    pass with everything EXCEPT the invalidated Groups added to
+    skip_components — the readiness gate inside `run_build` will then
+    dispatch only the invalidated set in dep-topological order.
+
+    The returned BuildResult merges: prior GroupResults survive for
+    non-invalidated ids, second-pass GroupResults replace invalidated
+    ids, Component results are preserved from the prior pass.
+    """
+    from otto.spec_compile import load_spec
+    from otto.build import GroupResult, GroupStatus
+
+    spec_path = session_dir / "spec" / "spec.json"
+    try:
+        post_edit_spec = load_spec(spec_path)
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "re-dispatch: failed to re-load post-edit spec from %s: %s — "
+            "keeping prior build result", spec_path, exc,
+        )
+        return spec, prior_build_result
+
+    # Build the second-pass skip set: every Group/Component except
+    # those flagged for re-dispatch.
+    second_skip: set[str] = set(skip_components)
+    for g in post_edit_spec.groups:
+        if g.id not in redispatch_ids:
+            second_skip.add(g.id)
+    for c in (post_edit_spec.components or []):
+        second_skip.add(c.id)
+
+    try:
+        second_result = await run_build(
+            post_edit_spec,
+            project_dir=project_dir,
+            session_dir=session_dir,
+            build_agent=build_agent,
+            base_url=base_url,
+            budget=shared_budget,
+            base_branch=base_branch,
+            skip_components=second_skip,
+        )
+    except Exception as exc:  # noqa: BLE001 — never crash the runner here
+        logger.warning(
+            "re-dispatch: run_build raised %s: %s — keeping prior build result",
+            type(exc).__name__, exc,
+        )
+        return post_edit_spec, prior_build_result
+
+    # Merge results.
+    merged_groups: list[GroupResult] = []
+    seen_ids: set[str] = set()
+    for sr in second_result.group_results:
+        if sr.group_id in redispatch_ids:
+            merged_groups.append(sr)
+            seen_ids.add(sr.group_id)
+    for pr in prior_build_result.group_results:
+        if pr.group_id in seen_ids:
+            continue
+        merged_groups.append(pr)
+
+    merged = BuildResult(
+        spec_session_dir=prior_build_result.spec_session_dir,
+        group_results=merged_groups,
+        component_results=list(prior_build_result.component_results),
+        total_cost_usd=(
+            prior_build_result.total_cost_usd + second_result.total_cost_usd
+        ),
+        total_wall_s=(
+            prior_build_result.total_wall_s + second_result.total_wall_s
+        ),
+    )
+    return post_edit_spec, merged
+
+
+def _wait_while_paused(session_dir: Path) -> None:
+    """Block until the run is no longer in the paused-by-user state.
+
+    Reads the spec-state journal each tick — append-only ensures we
+    will see a `run.resumed_by_user` event written from the web layer.
+    The loop is a simple polling sleep; no condition variables or
+    inotify because operator-driven pauses are rare and the cost of a
+    1s tick is negligible compared to a build phase. Cancellation is
+    NOT handled here: cancel sends SIGTERM to the runner process, which
+    terminates the sleep and the surrounding asyncio task naturally.
+    """
+    if not is_run_paused_by_user(session_dir):
+        return
+    logger.info("runner: pause detected; sleeping until resumed (session=%s)", session_dir.name)
+    while is_run_paused_by_user(session_dir):
+        time.sleep(PAUSE_POLL_INTERVAL_S)
+    logger.info("runner: pause cleared; resuming (session=%s)", session_dir.name)
+
+
 def _feature_audits_to_verdicts(
     spec: Spec, audit_result: AuditResult
 ) -> list[dict[str, Any]]:
@@ -472,7 +740,7 @@ def _make_layer2_fix_agent(
     async def bridge(failing: FailingFeature, group: Group) -> RepairAttempt:
         agent_input = BuildAgentInput(
             spec=spec,
-            slice=group,
+            group=group,
             project_dir=project_dir,
             worktree=project_dir,
             branch="",
@@ -540,7 +808,65 @@ def _audit_result_from_resume_plan(plan: ResumePlan) -> AuditResult:
     )
 
 
+async def _wait_for_review_approval(
+    *,
+    session_dir: Path,
+    timeout_s: float,
+    poll_s: float,
+    announce: "Callable[[str], None] | None",
+) -> bool:
+    """Block until a ``spec.review_approved`` event lands on the journal,
+    or until ``timeout_s`` elapses.
+
+    Implementation note (A13): this is a journal-event poll, NOT an
+    inotify / queue watcher. The journal is append-only and small (one
+    line per event), so re-scanning the whole file each tick is cheap
+    even at 1Hz; the upper bound is ``timeout_s`` (default 24h).
+
+    Returns:
+        ``True`` on approval, ``False`` on timeout. Caller is responsible
+        for halting the run honestly on ``False``.
+
+    Side effects:
+        Emits one ``spec.review_pending`` event when the wait starts so
+        Mission Control / log readers can see the gate is active. Calls
+        ``announce(message)`` once with the operator-facing instructions
+        before entering the polling loop.
+    """
+    try:
+        emit(session_dir, "spec.review_pending", detail="awaiting approval")
+    except Exception as exc:  # noqa: BLE001 — observability is best-effort
+        logger.warning("emit spec.review_pending failed: %s", exc)
+    if announce is not None:
+        try:
+            announce(session_dir.name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("review-gate announce raised: %s", exc)
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    sleep_s = max(0.05, float(poll_s))
+    while True:
+        if _has_review_approved_event(session_dir):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(sleep_s)
+
+
+def _has_review_approved_event(session_dir: Path) -> bool:
+    """True when the journal contains at least one ``spec.review_approved``."""
+    try:
+        for event in iter_events(session_dir):
+            if event.kind == "spec.review_approved":
+                return True
+    except Exception as exc:  # noqa: BLE001 — defensive
+        logger.warning("review-gate journal read failed: %s", exc)
+        return False
+    return False
+
+
 __all__ = [
     "RunResult",
     "run_pipeline",
+    "_wait_for_review_approval",
+    "_has_review_approved_event",
 ]

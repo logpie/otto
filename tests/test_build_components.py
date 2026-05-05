@@ -24,7 +24,7 @@ from otto.build import (
     BuildAgentOutput,
     BuildBudget,
     ComponentStatus,
-    SliceStatus,
+    GroupStatus,
     ready_components,
     run_build,
 )
@@ -44,7 +44,7 @@ from otto.spec_compile import (
 
 def _spec(
     *,
-    slices: list[Group] | None = None,
+    groups: list[Group] | None = None,
     components: list[Component] | None = None,
     shared_paths: list[str] | None = None,
 ) -> Spec:
@@ -52,7 +52,7 @@ def _spec(
         intent="test intent",
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=slices or [],
+        groups=groups or [],
         components=components or [],
         shared_paths=shared_paths or [],
     )
@@ -104,7 +104,7 @@ def test_ready_components_with_satisfied_dep() -> None:
 
 def test_ready_components_can_depend_on_group() -> None:
     spec = _spec(
-        slices=[Group(id="g1", title="grp")],
+        groups=[Group(id="g1", name="grp")],
         components=[Component(id="c1", name="C1", dependencies=["g1"])],
     )
     # Before group lands: not ready.
@@ -125,14 +125,14 @@ def test_run_build_dispatches_group_and_component(tmp_path: Path) -> None:
     session_dir.mkdir()
 
     spec = _spec(
-        slices=[Group(id="g1", title="group", checks=[_passing()])],
+        groups=[Group(id="g1", name="group", checks=[_passing()])],
         components=[Component(id="ws-hub", name="WS hub", checks=[_passing()])],
     )
 
     seen: list[str] = []
 
     async def fake_agent(inp: BuildAgentInput) -> BuildAgentOutput:
-        seen.append(inp.slice.id)
+        seen.append(inp.group.id)
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
 
     result = asyncio.run(
@@ -192,7 +192,7 @@ def test_run_build_component_runs_after_group_dep(tmp_path: Path) -> None:
     session_dir.mkdir()
 
     spec = _spec(
-        slices=[Group(id="g1", title="grp", checks=[_passing()])],
+        groups=[Group(id="g1", name="grp", checks=[_passing()])],
         components=[
             Component(
                 id="c1",
@@ -206,7 +206,7 @@ def test_run_build_component_runs_after_group_dep(tmp_path: Path) -> None:
     order: list[str] = []
 
     async def fake_agent(inp: BuildAgentInput) -> BuildAgentOutput:
-        order.append(inp.slice.id)
+        order.append(inp.group.id)
         return BuildAgentOutput(succeeded=True)
 
     result = asyncio.run(
@@ -229,7 +229,7 @@ def test_run_build_component_blocked_when_dep_blocks(tmp_path: Path) -> None:
     session_dir.mkdir()
 
     spec = _spec(
-        slices=[Group(id="g1", title="grp", checks=[_failing()])],
+        groups=[Group(id="g1", name="grp", checks=[_failing()])],
         components=[
             Component(
                 id="c1",
@@ -253,8 +253,8 @@ def test_run_build_component_blocked_when_dep_blocks(tmp_path: Path) -> None:
         )
     )
 
-    by_id = {r.slice_id: r for r in result.slice_results}
-    assert by_id["g1"].status == SliceStatus.BLOCKED
+    by_id = {r.group_id: r for r in result.group_results}
+    assert by_id["g1"].status == GroupStatus.BLOCKED
     assert len(result.component_results) == 1
     cr = result.component_results[0]
     assert cr.status == ComponentStatus.BLOCKED

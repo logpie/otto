@@ -1,7 +1,7 @@
 """Append-only state journal for the intent-to-product pipeline.
 
 Step 3 of the unified intent-to-product plan. The journal is the single
-source of truth for slice progress; it coexists with `otto/checkpoint.py`
+source of truth for group progress; it coexists with `otto/checkpoint.py`
 (which still owns session-level metadata: intent, costs, agent session
 ids, spec phase).
 
@@ -16,14 +16,14 @@ Each line is a JSON object with shape:
 
 Event kinds (mirror the design doc):
 
-  slice.started           — build agent for slice <id> dispatched
-  slice.check.started     — a Check began running on slice <id>
-  slice.check.finished    — a Check completed on slice <id> (passed/failed)
-  slice.attempt.failed    — slice's check round failed; retry counter ticks
-  slice.merge.eligible    — slice cleared deps + freshness checks; queued
-  slice.merge.started     — merge runner started landing this slice
-  slice.merge.landed      — slice merged into target
-  slice.blocked           — slice exhausted retries / merge repair budget
+  group.started           — build agent for group <id> dispatched
+  group.check.started     — a Check began running on group <id>
+  group.check.finished    — a Check completed on group <id> (passed/failed)
+  group.attempt.failed    — group's check round failed; retry counter ticks
+  group.merge.eligible    — group cleared deps + freshness checks; queued
+  group.merge.started     — merge runner started landing this group
+  group.merge.landed      — group merged into target
+  group.blocked           — group exhausted retries / merge repair budget
   audit.started           — final audit pass began
   audit.finished          — final audit pass produced verdict
   run.finished            — entire run reached a terminal state
@@ -44,7 +44,7 @@ If the host process dies mid-rebase, the worktree's `.git/REBASE_HEAD`
 or `.git/MERGE_HEAD` will exist. `recover_mid_merge_state(worktree_dir)`
 detects this, runs `git rebase --abort` / `git merge --abort` to clear
 the intermediate state, and returns a `MidMergeRecovery` describing
-what was found. Callers then emit a fresh `slice.merge.eligible` event
+what was found. Callers then emit a fresh `group.merge.eligible` event
 to restart the merge from a clean base.
 """
 
@@ -68,15 +68,15 @@ JOURNAL_FILENAME = "spec-state.jsonl"
 # Allowed event kinds. Keeping this as a tuple (not Enum) so JSON values
 # are plain strings and tests can read them literally.
 EVENT_KINDS: tuple[str, ...] = (
-    "slice.started",
-    "slice.check.started",
-    "slice.check.finished",
-    "slice.attempt.failed",
-    "slice.merge.eligible",
-    "slice.merge.started",
-    "slice.merge.landed",
-    "slice.merge.redundant",   # Pattern A: slice produced no new diff (over-reach symptom)
-    "slice.blocked",
+    "group.started",
+    "group.check.started",
+    "group.check.finished",
+    "group.attempt.failed",
+    "group.merge.eligible",
+    "group.merge.started",
+    "group.merge.landed",
+    "group.merge.redundant",   # Pattern A: group produced no new diff (over-reach symptom)
+    "group.blocked",
     "audit.started",
     "audit.finished",
     "audit.attempt.finished",  # Pattern A: per-attempt audit verdict in retry loop
@@ -92,21 +92,36 @@ EVENT_KINDS: tuple[str, ...] = (
     "spec.edited",              # user posted edited markdown via /api/specs/.../edit
     "spec.approved",            # user approved the spec via /api/specs/.../approve
     "spec.regenerated",         # spec re-emitted by the compile agent (post-edit recompile)
+    # A6 — mid-build spec edit invalidation ----------------------------
+    "group.invalidated_by_spec_edit",  # group's spec contributions changed mid-build
+    # A13 — review-gate (compile → review-gate → build) ----------------
+    # `spec.review_pending` is the runner's signal "compile finished, gate is
+    # holding the build phase". `spec.review_approved` is the resume signal
+    # the runner polls for. Distinct from `spec.approved` so the existing
+    # spec lifecycle state machine and the build-gate state machine stay
+    # independent — approving the spec for a non-gated run already emits
+    # `spec.approved`; the gate adds a separate "may proceed to build" signal.
+    "spec.review_pending",      # runner paused after compile, waiting for approval
+    "spec.review_approved",     # operator approved (build phase may proceed)
     # Seed stage lifecycle (RunView stage timeline; RUA W6-C fix) -------
     "seed.started",             # seed_fixtures() entered (one per Run)
     "seed.finished",            # seed_fixtures() returning; extra.succeeded=bool
+    # A7 — user-initiated pause / resume / abort verbs (Mission Control) -
+    "run.paused_by_user",       # operator clicked Pause; runner sleeps between phases
+    "run.resumed_by_user",      # operator clicked Resume after a paused_by_user
+    "group.aborted_by_user",    # operator aborted a single Group; build loop exits
 )
 
 EventKind = Literal[
-    "slice.started",
-    "slice.check.started",
-    "slice.check.finished",
-    "slice.attempt.failed",
-    "slice.merge.eligible",
-    "slice.merge.started",
-    "slice.merge.landed",
-    "slice.merge.redundant",   # Pattern A — slice produced no diff
-    "slice.blocked",
+    "group.started",
+    "group.check.started",
+    "group.check.finished",
+    "group.attempt.failed",
+    "group.merge.eligible",
+    "group.merge.started",
+    "group.merge.landed",
+    "group.merge.redundant",   # Pattern A — group produced no diff
+    "group.blocked",
     "audit.started",
     "audit.finished",
     "audit.attempt.finished",  # Pattern A — per-attempt audit verdict in retry loop
@@ -120,8 +135,14 @@ EventKind = Literal[
     "spec.edited",
     "spec.approved",
     "spec.regenerated",
+    "group.invalidated_by_spec_edit",
+    "spec.review_pending",
+    "spec.review_approved",
     "seed.started",
     "seed.finished",
+    "run.paused_by_user",
+    "run.resumed_by_user",
+    "group.aborted_by_user",
 ]
 
 
@@ -136,29 +157,29 @@ class Event:
     ts: str                                   # ISO-8601 UTC, e.g. 2026-05-03T12:34:56Z
     kind: str                                 # one of EVENT_KINDS
     event_id: str = ""                        # set at append time, never changes
-    slice_id: str = ""                        # blank for audit.* and run.*
-    check_id: str = ""                        # blank unless slice.check.*
+    group_id: str = ""                        # blank for audit.* and run.*
+    check_id: str = ""                        # blank unless group.check.*
     attempt: int = 0                          # 0 unless retry-aware event
     detail: str = ""                          # short human-readable detail
     extra: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
-# Slice phases derived from the journal
+# Group phases derived from the journal
 # ---------------------------------------------------------------------------
 
-# Slice lifecycle (DAG; events transition forward only):
+# Group lifecycle (DAG; events transition forward only):
 #
-#   PENDING                       (slice in spec, no events yet)
-#   BUILDING   ← slice.started
-#   CHECKING   ← slice.check.started
-#   FAILED     ← slice.attempt.failed         (retry counter advances)
-#   ELIGIBLE   ← slice.merge.eligible
-#   MERGING    ← slice.merge.started
-#   LANDED     ← slice.merge.landed
-#   BLOCKED    ← slice.blocked                (terminal failure)
+#   PENDING                       (group in spec, no events yet)
+#   BUILDING   ← group.started
+#   CHECKING   ← group.check.started
+#   FAILED     ← group.attempt.failed         (retry counter advances)
+#   ELIGIBLE   ← group.merge.eligible
+#   MERGING    ← group.merge.started
+#   LANDED     ← group.merge.landed
+#   BLOCKED    ← group.blocked                (terminal failure)
 #
-# `replay()` walks the journal and returns the final phase per slice.
+# `replay()` walks the journal and returns the final phase per group.
 
 PENDING = "pending"
 BUILDING = "building"
@@ -167,25 +188,27 @@ FAILED = "failed"
 ELIGIBLE = "eligible"
 MERGING = "merging"
 LANDED = "landed"
-REDUNDANT = "redundant"  # Pattern A: slice's checks passed but no new commit
+REDUNDANT = "redundant"  # Pattern A: group's checks passed but no new commit
 BLOCKED = "blocked"
+INVALIDATED = "invalidated"  # A6: spec edit landed mid-build; group must re-dispatch
 
 _PHASE_FOR_KIND: dict[str, str] = {
-    "slice.started": BUILDING,
-    "slice.check.started": CHECKING,
-    "slice.check.finished": CHECKING,
-    "slice.attempt.failed": FAILED,
-    "slice.merge.eligible": ELIGIBLE,
-    "slice.merge.started": MERGING,
-    "slice.merge.landed": LANDED,
-    "slice.merge.redundant": REDUNDANT,
-    "slice.blocked": BLOCKED,
+    "group.started": BUILDING,
+    "group.check.started": CHECKING,
+    "group.check.finished": CHECKING,
+    "group.attempt.failed": FAILED,
+    "group.merge.eligible": ELIGIBLE,
+    "group.merge.started": MERGING,
+    "group.merge.landed": LANDED,
+    "group.merge.redundant": REDUNDANT,
+    "group.blocked": BLOCKED,
+    "group.invalidated_by_spec_edit": INVALIDATED,
 }
 
 
 @dataclass
-class SliceState:
-    slice_id: str
+class GroupState:
+    group_id: str
     phase: str = PENDING
     last_event_ts: str = ""
     attempts: int = 0
@@ -195,7 +218,7 @@ class SliceState:
 @dataclass
 class RunState:
     """Snapshot of run progress derived from the journal."""
-    slices: dict[str, SliceState] = field(default_factory=dict)
+    groups: dict[str, GroupState] = field(default_factory=dict)
     audit_started: bool = False
     audit_finished: bool = False
     # Pattern G: count audit retries from journal so resume reports
@@ -208,18 +231,18 @@ class RunState:
     run_finished: bool = False
     run_verdict: str = ""
     # Pattern A reconciliation: when replay() is given a project_dir,
-    # it cross-checks LANDED events against `git log`. Slices whose
+    # it cross-checks LANDED events against `git log`. Groups whose
     # claimed commit hash isn't in the actual git history land here.
     unreconciled_landed_ids: list[str] = field(default_factory=list)
-    # Slices whose LANDED hash matches a real commit, BUT >1 slice
+    # Groups whose LANDED hash matches a real commit, BUT >1 group
     # claimed the same hash (only the first contributed; the rest are
-    # bookkeeping echoes of an over-reaching slice).
+    # bookkeeping echoes of an over-reaching group).
     duplicate_hash_landed_ids: list[str] = field(default_factory=list)
 
-    def slice_state(self, slice_id: str) -> SliceState:
-        if slice_id not in self.slices:
-            self.slices[slice_id] = SliceState(slice_id=slice_id)
-        return self.slices[slice_id]
+    def group_state(self, group_id: str) -> GroupState:
+        if group_id not in self.groups:
+            self.groups[group_id] = GroupState(group_id=group_id)
+        return self.groups[group_id]
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +305,7 @@ def emit(
     session_dir: Path,
     kind: str,
     *,
-    slice_id: str = "",
+    group_id: str = "",
     check_id: str = "",
     attempt: int = 0,
     detail: str = "",
@@ -296,7 +319,7 @@ def emit(
     event = Event(
         ts=_iso_now(),
         kind=kind,
-        slice_id=slice_id,
+        group_id=group_id,
         check_id=check_id,
         attempt=attempt,
         detail=detail,
@@ -316,6 +339,61 @@ def find_event(session_dir: Path, event_id: str) -> Event | None:
         if event.event_id == event_id:
             return event
     return None
+
+
+# ---------------------------------------------------------------------------
+# A7 — pause + abort flag predicates (Mission Control verbs)
+# ---------------------------------------------------------------------------
+
+
+def is_run_paused_by_user(session_dir: Path) -> bool:
+    """Return True if the most-recent pause/resume event for this session
+    is `run.paused_by_user` (i.e. the operator hit Pause and has not yet
+    resumed).
+
+    Implementation: scan the journal in order and remember the last
+    `run.paused_by_user` / `run.resumed_by_user` we saw. If the trailing
+    event is `run.paused_by_user`, the run is currently paused. If we
+    saw a resume after the most recent pause (or never saw a pause at
+    all), it is not paused.
+
+    The runner polls this between phases to decide whether to sleep.
+    """
+    state: str = ""  # "" | "paused" | "resumed"
+    for event in iter_events(session_dir):
+        if event.kind == "run.paused_by_user":
+            state = "paused"
+        elif event.kind == "run.resumed_by_user":
+            state = "resumed"
+    return state == "paused"
+
+
+def is_group_aborted_by_user(session_dir: Path, group_id: str) -> bool:
+    """Return True if the journal contains a `group.aborted_by_user`
+    event for `group_id`. Once aborted, the flag is sticky for the rest
+    of the run — the build loop checks this before each retry attempt
+    and bails out as BLOCKED with reason="aborted_by_user" when set.
+    """
+    if not group_id:
+        return False
+    target_id = str(group_id).strip()
+    for event in iter_events(session_dir):
+        if event.kind == "group.aborted_by_user" and event.group_id == target_id:
+            return True
+    return False
+
+
+def aborted_group_ids(session_dir: Path) -> set[str]:
+    """Return the set of all `group.aborted_by_user` ids in the journal.
+
+    Used by the merge queue to skip aborted groups (treat as BLOCKED)
+    so they never become merge candidates.
+    """
+    out: set[str] = set()
+    for event in iter_events(session_dir):
+        if event.kind == "group.aborted_by_user" and event.group_id:
+            out.add(event.group_id)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +419,7 @@ def iter_events(session_dir: Path) -> Iterator[Event]:
                 ts=str(payload.get("ts") or ""),
                 kind=str(payload.get("kind") or ""),
                 event_id=str(payload.get("event_id") or ""),
-                slice_id=str(payload.get("slice_id") or ""),
+                group_id=str(payload.get("group_id") or ""),
                 check_id=str(payload.get("check_id") or ""),
                 attempt=int(payload.get("attempt") or 0),
                 detail=str(payload.get("detail") or ""),
@@ -351,34 +429,34 @@ def iter_events(session_dir: Path) -> Iterator[Event]:
 
 def replay(
     session_dir: Path,
-    slice_ids: Iterable[str] = (),
+    group_ids: Iterable[str] = (),
     *,
     project_dir: Path | None = None,
 ) -> RunState:
-    """Derive per-slice state by scanning the journal in order.
+    """Derive per-group state by scanning the journal in order.
 
-    Pre-seeds slice entries from `slice_ids` so the caller's spec slice
-    set is reflected even if no events have fired yet (slices in PENDING
-    show up in `state.slices`).
+    Pre-seeds group entries from `group_ids` so the caller's spec group
+    set is reflected even if no events have fired yet (groups in PENDING
+    show up in `state.groups`).
 
     Pattern A fix: when `project_dir` is provided, cross-checks every
     `LANDED` event's commit hash against `git log --oneline` on the
-    project repo. If a slice claims LANDED but its commit isn't in
+    project repo. If a group claims LANDED but its commit isn't in
     the actual git history, downgrade to a special UNRECONCILED phase
     in `state.unreconciled_landed_ids` (and leave the journal phase
     intact for backward compat). This catches the bookkeeping-vs-reality
-    bug where multiple slices reported the same hash.
+    bug where multiple groups reported the same hash.
     """
     state = RunState()
-    for sid in slice_ids:
-        state.slice_state(sid)
+    for sid in group_ids:
+        state.group_state(sid)
 
-    attempts_by_slice: dict[str, int] = defaultdict(int)
-    landed_events: list[tuple[str, str]] = []  # (slice_id, commit_hash)
+    attempts_by_group: dict[str, int] = defaultdict(int)
+    landed_events: list[tuple[str, str]] = []  # (group_id, commit_hash)
 
     for event in iter_events(session_dir):
-        if event.kind == "slice.merge.landed" and event.slice_id and event.detail:
-            landed_events.append((event.slice_id, event.detail.strip().split()[0] if event.detail.strip() else ""))
+        if event.kind == "group.merge.landed" and event.group_id and event.detail:
+            landed_events.append((event.group_id, event.detail.strip().split()[0] if event.detail.strip() else ""))
         if event.kind in {"audit.started", "audit.finished", "audit.attempt.finished", "run.finished"}:
             if event.kind == "audit.started":
                 state.audit_started = True
@@ -400,22 +478,22 @@ def replay(
                     state.run_verdict = verdict
             continue
 
-        if not event.slice_id:
-            # Slice-scoped event without a slice_id is a programming error
+        if not event.group_id:
+            # Group-scoped event without a group_id is a programming error
             # but we don't drop it — surface in extra debugging if needed.
             continue
 
-        slice_state = state.slice_state(event.slice_id)
-        slice_state.last_event_ts = event.ts
+        group_state = state.group_state(event.group_id)
+        group_state.last_event_ts = event.ts
 
-        if event.kind == "slice.attempt.failed":
-            attempts_by_slice[event.slice_id] += 1
-            slice_state.attempts = attempts_by_slice[event.slice_id]
-            slice_state.last_failure = event.detail
+        if event.kind == "group.attempt.failed":
+            attempts_by_group[event.group_id] += 1
+            group_state.attempts = attempts_by_group[event.group_id]
+            group_state.last_failure = event.detail
 
         new_phase = _PHASE_FOR_KIND.get(event.kind)
         if new_phase is not None:
-            slice_state.phase = new_phase
+            group_state.phase = new_phase
 
     # Pattern A: cross-check LANDED against git history.
     if project_dir is not None and landed_events:
@@ -432,7 +510,7 @@ def replay(
                     for p in parts:
                         if p:
                             known_hashes.add(p)
-                # Detect duplicates: multiple slices claiming the same hash.
+                # Detect duplicates: multiple groups claiming the same hash.
                 hash_counts: dict[str, int] = defaultdict(int)
                 for _sid, h in landed_events:
                     if h:
@@ -441,7 +519,7 @@ def replay(
                     if not h or h not in known_hashes:
                         state.unreconciled_landed_ids.append(sid)
                     elif hash_counts.get(h, 0) > 1:
-                        # >1 slice claims the same commit — only the first
+                        # >1 group claims the same commit — only the first
                         # one possibly contributed; the rest are duplicates.
                         state.duplicate_hash_landed_ids.append(sid)
         except (FileNotFoundError, OSError):
@@ -462,7 +540,7 @@ class MidMergeRecovery:
     `kind` is `""` for "nothing was stuck", or one of `rebase` / `merge` /
     `unmerged` describing what we cleaned up. `restart_required` is
     `True` whenever we ran any abort — callers should emit a fresh
-    `slice.merge.eligible` event.
+    `group.merge.eligible` event.
     """
     kind: str = ""
     restart_required: bool = False

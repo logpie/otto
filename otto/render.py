@@ -40,8 +40,8 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from otto.audit import AuditResult, AuditVerdict, SliceVerdict
-from otto.build import BuildResult, SliceResult, SliceStatus
+from otto.audit import AuditResult, AuditVerdict, GroupVerdict
+from otto.build import BuildResult, GroupResult, GroupStatus
 from otto.checks import Evidence
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.spec_compile import (
@@ -70,12 +70,12 @@ PROOF_PACKET_SCHEMA_VERSION = 1
 
 
 @dataclass
-class SlicePacket:
-    """Per-slice data shaped for rendering."""
+class GroupPacket:
+    """Per-group data shaped for rendering."""
 
-    slice_id: str
-    title: str
-    status: str  # SliceStatus.value or "landed" / "blocked"
+    group_id: str
+    name: str
+    status: str  # GroupStatus.value or "landed" / "blocked"
     landed: bool
     landed_commit: str
     branch: str
@@ -100,11 +100,11 @@ class ProofPacket:
     structure: dict[str, Any]
     non_goals: list[str]
     done_means: list[str]
-    groups: list[SlicePacket]
+    groups: list[GroupPacket]
     audit_narrative: str
     walkthrough_artifacts: list[str]  # absolute paths
-    blocked_slice_ids: list[str]
-    landed_slice_ids: list[str]
+    blocked_group_ids: list[str]
+    landed_group_ids: list[str]
     # v2.2 + phase 4: amendment chain rendered for human review
     amendments: list[dict[str, Any]] = field(default_factory=list)
     # Audit-final-quality: human-facing quality score 1-5 (0 = not assessed)
@@ -124,16 +124,6 @@ class ProofPacket:
     # carries this list; render layer emits per-Feature mini-pages
     # from it.
     features: list[dict[str, Any]] = field(default_factory=list)
-
-    # Backward-compat: every existing `.slices` reference works during
-    # incremental A0.3 migration. Removed at A0.3.4 final cleanup.
-    @property
-    def slices(self) -> list[SlicePacket]:
-        return self.groups
-
-    @slices.setter
-    def slices(self, value: list[SlicePacket]) -> None:
-        self.groups = value
 
 
 # ---------------------------------------------------------------------------
@@ -178,51 +168,51 @@ def compose_proof_packet(
     cost_usd: float,
 ) -> ProofPacket:
     """Build a ProofPacket from the four pipeline outputs."""
-    audit_by_slice: dict[str, SliceVerdict] = {
-        v.slice_id: v for v in audit_result.slice_verdicts
+    audit_by_group: dict[str, GroupVerdict] = {
+        v.group_id: v for v in audit_result.group_verdicts
     }
-    merge_by_slice: dict[str, MergeResult] = {
-        r.slice_id: r for r in merge_result.results
+    merge_by_group: dict[str, MergeResult] = {
+        r.group_id: r for r in merge_result.results
     }
-    build_by_slice: dict[str, SliceResult] = {
-        r.slice_id: r for r in build_result.slice_results
+    build_by_group: dict[str, GroupResult] = {
+        r.group_id: r for r in build_result.group_results
     }
 
-    slice_packets: list[SlicePacket] = []
+    group_packets: list[GroupPacket] = []
     for s in spec.groups:
-        bres = build_by_slice.get(s.id)
-        mres = merge_by_slice.get(s.id)
-        averdict = audit_by_slice.get(s.id)
+        bres = build_by_group.get(s.id)
+        mres = merge_by_group.get(s.id)
+        averdict = audit_by_group.get(s.id)
 
         check_evidence: list[dict[str, Any]] = []
         # Prefer merge-time evidence (most recent) over build-time, but
         # fall back to build-time if merge didn't run for this slice.
-        evidence_source = mres.slice_recheck_evidence if mres else (bres.last_evidence if bres else [])
+        evidence_source = mres.group_recheck_evidence if mres else (bres.last_evidence if bres else [])
         for c, ev in zip(s.checks, evidence_source, strict=False):
             kind = type(c).__name__
             check_evidence.append(_evidence_to_dict(kind, ev))
 
         landed = bool(mres and mres.status == MergeStatus.LANDED)
         if landed:
-            slice_status = "landed"
-        elif bres and bres.status == SliceStatus.PASSING:
-            slice_status = "passing"  # passed build but did not land
+            group_status = "landed"
+        elif bres and bres.status == GroupStatus.PASSING:
+            group_status = "passing"  # passed build but did not land
         elif bres:
-            slice_status = bres.status.value
+            group_status = bres.status.value
         else:
-            slice_status = "pending"
+            group_status = "pending"
 
         failure = ""
         if mres and mres.status == MergeStatus.BLOCKED:
             failure = mres.failure_narrative
-        elif bres and bres.status in (SliceStatus.BLOCKED, SliceStatus.FAILED_SCOPE):
+        elif bres and bres.status in (GroupStatus.BLOCKED, GroupStatus.FAILED_SCOPE):
             failure = bres.failure_narrative
 
-        slice_packets.append(
-            SlicePacket(
-                slice_id=s.id,
-                title=s.title,
-                status=slice_status,
+        group_packets.append(
+            GroupPacket(
+                group_id=s.id,
+                name=s.name,
+                status=group_status,
                 landed=landed,
                 landed_commit=mres.landed_commit if mres else "",
                 branch=bres.branch if bres else "",
@@ -306,11 +296,11 @@ def compose_proof_packet(
         structure=dict(spec.structure.payload or {}),
         non_goals=list(spec.non_goals),
         done_means=list(spec.done_means),
-        groups=slice_packets,
+        groups=group_packets,
         audit_narrative=audit_result.narrative,
         walkthrough_artifacts=[_path_to_str(p) for p in audit_result.walkthrough_artifacts],
-        blocked_slice_ids=list(merge_result.blocked_ids) + list(build_result.blocked_ids),
-        landed_slice_ids=list(merge_result.landed_ids),
+        blocked_group_ids=list(merge_result.blocked_ids) + list(build_result.blocked_ids),
+        landed_group_ids=list(merge_result.landed_ids),
         amendments=amendments_render,
         quality_score=audit_result.quality_score,
         quality_findings=list(audit_result.quality_findings),
@@ -341,8 +331,8 @@ def _packet_to_dict(packet: ProofPacket) -> dict[str, Any]:
         "done_means": packet.done_means,
         "audit_narrative": packet.audit_narrative,
         "walkthrough_artifacts": packet.walkthrough_artifacts,
-        "blocked_slice_ids": packet.blocked_slice_ids,
-        "landed_slice_ids": packet.landed_slice_ids,
+        "blocked_group_ids": packet.blocked_group_ids,
+        "landed_group_ids": packet.landed_group_ids,
         "amendments": packet.amendments,
         "quality_score": packet.quality_score,
         "quality_findings": packet.quality_findings,
@@ -350,10 +340,10 @@ def _packet_to_dict(packet: ProofPacket) -> dict[str, Any]:
         # (formerly `capability_verdicts`, dropped post-cutover).
         "feature_audits": packet.feature_audits,
         "features": list(packet.features),  # A3: per-Feature proof blocks
-        "slices": [
+        "groups": [
             {
-                "slice_id": s.slice_id,
-                "title": s.title,
+                "group_id": s.group_id,
+                "name": s.name,
                 "status": s.status,
                 "landed": s.landed,
                 "landed_commit": s.landed_commit,
@@ -464,7 +454,7 @@ def render_html(packet: ProofPacket, *, session_dir: Path | None = None) -> str:
     # Per-slice sections (back-compat for legacy proof-of-work readers)
     parts.append("<h2>Slices</h2>")
     for s in packet.groups:
-        parts.append(_render_slice(s, session_dir=session_dir))
+        parts.append(_render_group(s, session_dir=session_dir))
 
     # Audit section
     parts.append(_render_audit_section(packet, session_dir=session_dir))
@@ -487,7 +477,7 @@ def _render_header(packet: ProofPacket) -> str:
   <span class="kpi"><span class="label">wall</span> <span class="value">{packet.wall_s:.0f} s</span></span>
   <span class="kpi"><span class="label">cost</span> <span class="value">${packet.cost_usd:.2f}</span></span>
   <span class="kpi"><span class="label">slices</span>
-    <span class="value">{len(packet.landed_slice_ids)} landed / {len(packet.groups)} total</span>
+    <span class="value">{len(packet.landed_group_ids)} landed / {len(packet.groups)} total</span>
   </span>
 </p>"""
 
@@ -590,14 +580,14 @@ def _render_feature_section(packet: ProofPacket, *, session_dir: Path | None) ->
     return "\n".join(parts)
 
 
-def _render_slice(s: SlicePacket, *, session_dir: Path | None) -> str:
+def _render_group(s: GroupPacket, *, session_dir: Path | None) -> str:
     parts = [f'<section class="slice {escape(s.status)}">']
     landed_tag = (
         f'<span class="muted">landed @ {escape(s.landed_commit)}</span>'
         if s.landed_commit else ""
     )
     parts.append(
-        f'<header><h3>{escape(s.slice_id)} — {escape(s.title)}</h3>'
+        f'<header><h3>{escape(s.group_id)} — {escape(s.name)}</h3>'
         f'<span class="meta">{escape(s.status)}{" · " + landed_tag if landed_tag else ""}</span></header>'
     )
     if s.branch:
@@ -702,13 +692,13 @@ def _render_audit_section(packet: ProofPacket, *, session_dir: Path | None) -> s
 
 
 def _render_limitations(packet: ProofPacket) -> str:
-    if not packet.blocked_slice_ids:
+    if not packet.blocked_group_ids:
         return ""
     parts = ["<h2>Known limitations</h2>", "<p>The following slices did not land:</p><ul>"]
-    blocked = [s for s in packet.groups if s.slice_id in set(packet.blocked_slice_ids)]
+    blocked = [s for s in packet.groups if s.group_id in set(packet.blocked_group_ids)]
     for s in blocked:
         narrative = s.failure_narrative or "blocked"
-        parts.append(f"<li><code>{escape(s.slice_id)}</code> — {escape(narrative)}</li>")
+        parts.append(f"<li><code>{escape(s.group_id)}</code> — {escape(narrative)}</li>")
     parts.append("</ul>")
     return "\n".join(parts)
 
@@ -718,12 +708,12 @@ def _render_merge_state(packet: ProofPacket) -> str:
     for s in packet.groups:
         if s.landed:
             parts.append(
-                f"<li>✅ <code>{escape(s.slice_id)}</code> landed @ "
+                f"<li>✅ <code>{escape(s.group_id)}</code> landed @ "
                 f"<code>{escape(s.landed_commit)}</code></li>"
             )
         else:
             parts.append(
-                f"<li>❌ <code>{escape(s.slice_id)}</code> not landed "
+                f"<li>❌ <code>{escape(s.group_id)}</code> not landed "
                 f'<span class="muted">— {escape(s.failure_narrative or s.status)}</span></li>'
             )
     parts.append("</ul>")
@@ -781,7 +771,7 @@ __all__ = [
     "PROOF_PACKET_JSON",
     "PROOF_PACKET_SCHEMA_VERSION",
     "ProofPacket",
-    "SlicePacket",
+    "GroupPacket",
     "compose_proof_packet",
     "render_html",
     "render_json",

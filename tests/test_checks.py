@@ -26,9 +26,12 @@ from otto.checks import run_check, run_checks
 from otto.spec_compile import (
     ApiProbe,
     BrowserJourney,
+    CLIProbe,
+    ImportCheck,
     PytestCheck,
     RepoTestCheck,
     StateInvariant,
+    TypeCheck,
 )
 
 
@@ -477,6 +480,186 @@ def test_pytest_selector_with_or_uses_k_expression(tmp_path: Path) -> None:
     assert evidence.passed, f"V11: -k expression should match both tests; detail={evidence.detail}"
     cmd = evidence.raw.get("command") or []
     assert "-k" in cmd, f"-k flag missing; got cmd={cmd}"
+
+
+# ---------------------------------------------------------------------------
+# CLIProbe
+# ---------------------------------------------------------------------------
+
+
+def test_cli_probe_happy_path(tmp_path: Path) -> None:
+    check = CLIProbe(
+        command=("python", "-c", "print('hello-cli')"),
+        expect_exit_code=0,
+        expect_stdout_substring="hello-cli",
+        timeout_s=10,
+    )
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is True, evidence.raw
+    assert evidence.raw["exit_code"] == 0
+    assert evidence.raw["stdout_match"] is True
+
+
+def test_cli_probe_exit_code_mismatch_fails(tmp_path: Path) -> None:
+    check = CLIProbe(
+        command=("python", "-c", "import sys; sys.exit(2)"),
+        expect_exit_code=0,
+        timeout_s=10,
+    )
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is False
+    assert evidence.raw["exit_code"] == 2
+    assert "expected=0" in evidence.detail
+
+
+def test_cli_probe_stdout_substring_miss_fails(tmp_path: Path) -> None:
+    check = CLIProbe(
+        command=("python", "-c", "print('actual')"),
+        expect_exit_code=0,
+        expect_stdout_substring="nope",
+        timeout_s=10,
+    )
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is False
+    assert evidence.raw["stdout_match"] is False
+
+
+def test_cli_probe_empty_command_is_informational(tmp_path: Path) -> None:
+    check = CLIProbe(command=(), timeout_s=10)
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is True
+    assert "command is empty" in evidence.detail
+    assert evidence.raw["malformed_check"] is True
+
+
+# ---------------------------------------------------------------------------
+# ImportCheck
+# ---------------------------------------------------------------------------
+
+
+def test_import_check_happy_path(tmp_path: Path) -> None:
+    # `json` is in stdlib — always importable.
+    check = ImportCheck(package_name="json", timeout_s=10)
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is True, evidence.raw
+    assert evidence.raw["exit_code"] == 0
+    assert evidence.raw["package_name"] == "json"
+
+
+def test_import_check_missing_package_fails(tmp_path: Path) -> None:
+    check = ImportCheck(package_name="this_package_does_not_exist_xyz_42", timeout_s=10)
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is False
+    assert evidence.raw["exit_code"] != 0
+    # The traceback ends up on stderr.
+    assert "ModuleNotFoundError" in evidence.raw["stderr"] or "ImportError" in evidence.raw["stderr"]
+
+
+def test_import_check_imports_local_module(tmp_path: Path) -> None:
+    """ImportCheck sees project_dir on PYTHONPATH (same convention as PytestCheck)."""
+    (tmp_path / "mylib.py").write_text("__version__ = '1.2.3'\n", encoding="utf-8")
+    check = ImportCheck(package_name="mylib", expect_version="1.2.3", timeout_s=10)
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+    assert evidence.passed is True, evidence.raw
+
+
+def test_import_check_version_mismatch_fails(tmp_path: Path) -> None:
+    (tmp_path / "mylib.py").write_text("__version__ = '0.0.1'\n", encoding="utf-8")
+    check = ImportCheck(package_name="mylib", expect_version="9.9.9", timeout_s=10)
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+    assert evidence.passed is False
+    assert evidence.raw["exit_code"] != 0
+
+
+def test_import_check_empty_package_is_informational(tmp_path: Path) -> None:
+    check = ImportCheck(package_name="", timeout_s=10)
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is True
+    assert "package_name is empty" in evidence.detail
+    assert evidence.raw["malformed_check"] is True
+
+
+# ---------------------------------------------------------------------------
+# TypeCheck
+# ---------------------------------------------------------------------------
+
+
+def test_type_check_empty_paths_is_informational(tmp_path: Path) -> None:
+    check = TypeCheck(paths=(), tool="mypy", timeout_s=30)
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is True
+    assert "paths is empty" in evidence.detail
+    assert evidence.raw["malformed_check"] is True
+
+
+def test_type_check_unsupported_tool_fails(tmp_path: Path) -> None:
+    check = TypeCheck(paths=("src/",), tool="not-a-real-checker", timeout_s=30)
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is False
+    assert "unsupported type-checker" in evidence.detail
+
+
+def test_type_check_tool_unavailable_fails_cleanly(tmp_path: Path, monkeypatch) -> None:
+    """When the type-checker isn't on PATH, return passed=False with a
+    clean 'tool not available' detail — don't fabricate success.
+    """
+    import otto.checks as checks_mod
+
+    def _fake_which(name: str) -> str | None:
+        return None
+
+    monkeypatch.setattr(checks_mod, "_which", _fake_which)
+    check = TypeCheck(paths=("src/",), tool="mypy", timeout_s=30)
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is False
+    assert "not available" in evidence.detail
+    assert evidence.raw["tool_available"] is False
+
+
+def test_type_check_happy_path(tmp_path: Path, monkeypatch) -> None:
+    """Stub out _which + _run_command so the test is hermetic — we don't
+    require mypy/pyright to be installed for unit tests."""
+    import subprocess as sp
+    import otto.checks as checks_mod
+
+    monkeypatch.setattr(checks_mod, "_which", lambda name: f"/usr/bin/{name}")
+
+    def _fake_run(cmd, *, cwd, timeout_s, extra_pythonpath=None):  # type: ignore[no-untyped-def]
+        return sp.CompletedProcess(args=cmd, returncode=0, stdout="Success: no issues found\n", stderr="")
+
+    monkeypatch.setattr(checks_mod, "_run_command", _fake_run)
+    check = TypeCheck(paths=("src/",), tool="mypy", timeout_s=30)
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is True, evidence.raw
+    assert evidence.raw["exit_code"] == 0
+    assert evidence.raw["tool"] == "mypy"
+
+
+def test_type_check_failure_reports_errors(tmp_path: Path, monkeypatch) -> None:
+    import subprocess as sp
+    import otto.checks as checks_mod
+
+    monkeypatch.setattr(checks_mod, "_which", lambda name: f"/usr/bin/{name}")
+
+    def _fake_run(cmd, *, cwd, timeout_s, extra_pythonpath=None):  # type: ignore[no-untyped-def]
+        return sp.CompletedProcess(
+            args=cmd,
+            returncode=1,
+            stdout="src/x.py:10: error: Incompatible return value type\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(checks_mod, "_run_command", _fake_run)
+    check = TypeCheck(paths=("src/",), tool="mypy", timeout_s=30)
+    evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is False
+    assert evidence.raw["exit_code"] == 1
+    assert "Incompatible return value type" in evidence.raw["stdout"]
+
+
+# ---------------------------------------------------------------------------
+# V11 follow-up tests
+# ---------------------------------------------------------------------------
 
 
 def test_pytest_selector_single_node_id_unchanged(tmp_path: Path) -> None:

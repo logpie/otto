@@ -211,7 +211,7 @@ async def _drive_full_pipeline(
         budget=shared_budget,
     )
     console.print(
-        f"  Build: {len(build_result.passing_ids)}/{len(build_result.slice_results)} "
+        f"  Build: {len(build_result.passing_ids)}/{len(build_result.group_results)} "
         f"slices passing, ${build_result.total_cost_usd:.2f}, "
         f"{build_result.total_wall_s:.0f}s"
     )
@@ -318,6 +318,35 @@ def register_run_command(main: click.Group) -> None:
         is_flag=True,
         help="On --resume, bypass the spec-hash check.",
     )
+    @click.option(
+        "--review-gate",
+        "review_gate",
+        is_flag=True,
+        help=(
+            "Pause after compile and wait for spec.review_approved before "
+            "running build. Approve via Mission Control or by re-running "
+            "with --resume --auto-approve. Opt-in (off by default to "
+            "preserve CI/script automation)."
+        ),
+    )
+    @click.option(
+        "--auto-approve",
+        "auto_approve",
+        is_flag=True,
+        help=(
+            "Explicitly opt out of --review-gate; the build phase runs "
+            "immediately after compile. This is the default behaviour — "
+            "the flag exists so scripts can be unambiguous."
+        ),
+    )
+    @click.option(
+        "--gate-timeout",
+        "gate_timeout_s",
+        type=float,
+        default=24 * 60 * 60.0,
+        show_default=True,
+        help="Wall-clock cap (seconds) on --review-gate before timing out.",
+    )
     def run(
         intent: str | None,
         project_kind: str,
@@ -328,6 +357,9 @@ def register_run_command(main: click.Group) -> None:
         resume: bool,
         reset_budget: bool,
         force: bool,
+        review_gate: bool,
+        auto_approve: bool,
+        gate_timeout_s: float,
     ) -> None:
         """Run the intent-to-product pipeline.
 
@@ -342,6 +374,10 @@ def register_run_command(main: click.Group) -> None:
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
+        if review_gate and auto_approve:
+            raise click.UsageError(
+                "--review-gate and --auto-approve are mutually exclusive."
+            )
         orchestrate_run(
             intent=intent,
             project_kind=project_kind,
@@ -353,6 +389,8 @@ def register_run_command(main: click.Group) -> None:
             resume=resume,
             reset_budget=reset_budget,
             force=force,
+            review_gate=review_gate,
+            gate_timeout_s=gate_timeout_s,
         )
 
 
@@ -365,6 +403,25 @@ _PHASE_HEADINGS = {
     "repair": "  [bold]Repair phase[/bold] — Layer 2 feature retry",
     "render": "  [bold]Render phase[/bold] — assembling proof packet",
 }
+
+
+def _default_gate_announce(session_id: str) -> None:
+    """Emit operator-facing instructions when the review gate engages.
+
+    Mission Control's spec-review surface lives at
+    ``/runs/<session_id>/spec/review``. The default port (8765) is the
+    one ``otto web``/``otto mc`` bind to; we honour ``OTTO_WEB_PORT``
+    so contributors running on a custom port still see the right URL.
+    """
+    port = os.environ.get("OTTO_WEB_PORT", "8765").strip() or "8765"
+    url = f"http://localhost:{port}/runs/{session_id}/spec/review"
+    console.print()
+    console.print("  [bold yellow]Spec review gate active.[/bold yellow]")
+    console.print(f"  Open Mission Control at: [bold]{url}[/bold]")
+    console.print(
+        "  Edit and approve, or run: [dim]otto run --resume --auto-approve[/dim]"
+    )
+    console.print("  Waiting for approval (Ctrl-C to cancel)...")
 
 
 def _default_phase_callback(phase: str) -> None:
@@ -476,6 +533,8 @@ def orchestrate_run(
     resume: bool = False,
     reset_budget: bool = False,
     force: bool = False,
+    review_gate: bool = False,
+    gate_timeout_s: float = 24 * 60 * 60.0,
 ) -> None:
     """Drive the intent-to-product pipeline.
 
@@ -637,6 +696,9 @@ def orchestrate_run(
                 spec=spec,
                 on_phase=_default_phase_callback,
                 resume_plan=resume_plan,
+                review_gate=review_gate,
+                gate_timeout_s=gate_timeout_s,
+                gate_announce=_default_gate_announce,
             )
         )
     except Exception as exc:
@@ -677,7 +739,7 @@ def _print_run_result(run_result: RunResult) -> None:
     if run_result.build_result is not None:
         br = run_result.build_result
         console.print(
-            f"  Build: {len(br.passing_ids)}/{len(br.slice_results)} "
+            f"  Build: {len(br.passing_ids)}/{len(br.group_results)} "
             f"slices passing, ${br.total_cost_usd:.2f}, "
             f"{br.total_wall_s:.0f}s"
         )

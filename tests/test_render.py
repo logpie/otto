@@ -15,8 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from otto.audit import AuditResult, AuditVerdict, SliceVerdict
-from otto.build import BuildResult, SliceResult, SliceStatus
+from otto.audit import AuditResult, AuditVerdict, GroupVerdict
+from otto.build import BuildResult, GroupResult, GroupStatus
 from otto.checks import Evidence
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.render import (
@@ -65,21 +65,21 @@ def _two_slice_spec(tmp_path: Path) -> Spec:
                 "components": [{"name": "Home", "key_text": "Hi"}],
             }
         ),
-        slices=[
+        groups=[
             Group(
                 id="shell",
-                title="App shell",
-                deps=[],
+                name="App shell",
+                dependencies=[],
                 owned_paths=["src/App.*"],
-                tasks=["scaffold"],
+                feature_ids=["scaffold"],
                 checks=[RepoTestCheck(command=("npm", "run", "build"), timeout_s=60)],
             ),
             Group(
                 id="counter",
-                title="Counter widget",
-                deps=["shell"],
+                name="Counter widget",
+                dependencies=["shell"],
                 owned_paths=["src/components/Counter.*"],
-                tasks=["increment button"],
+                feature_ids=["increment button"],
                 checks=[
                     BrowserJourney(
                         command=("pytest", "tests/browser/test_counter.py"),
@@ -89,7 +89,7 @@ def _two_slice_spec(tmp_path: Path) -> Spec:
                 ],
             ),
         ],
-        cross_slice_checks=[StateInvariant(description="ok", expression="True")],
+        cross_group_checks=[StateInvariant(description="ok", expression="True")],
         non_goals=["multi-user support"],
         done_means=["counter increments and persists"],
     )
@@ -98,18 +98,18 @@ def _two_slice_spec(tmp_path: Path) -> Spec:
 def _build_result_passing(tmp_path: Path) -> BuildResult:
     return BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(
-                slice_id="shell",
-                status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(
+                group_id="shell",
+                status=GroupStatus.PASSING,
                 attempts=1,
                 branch="i2p/x/shell",
                 worktree=tmp_path,
                 last_evidence=[_evidence(True, "exit=0")],
             ),
-            SliceResult(
-                slice_id="counter",
-                status=SliceStatus.PASSING,
+            GroupResult(
+                group_id="counter",
+                status=GroupStatus.PASSING,
                 attempts=2,
                 branch="i2p/x/counter",
                 worktree=tmp_path,
@@ -126,17 +126,17 @@ def _merge_result_landed(tmp_path: Path) -> MergeQueueResult:
         landed_ids=["shell", "counter"],
         results=[
             MergeResult(
-                slice_id="shell",
+                group_id="shell",
                 status=MergeStatus.LANDED,
                 landed_commit="abc1234",
-                slice_recheck_evidence=[_evidence(True, "exit=0")],
+                group_recheck_evidence=[_evidence(True, "exit=0")],
                 cross_slice_evidence=[_evidence(True, "True")],
             ),
             MergeResult(
-                slice_id="counter",
+                group_id="counter",
                 status=MergeStatus.LANDED,
                 landed_commit="def5678",
-                slice_recheck_evidence=[
+                group_recheck_evidence=[
                     _evidence(True, "exit=0 artifacts=2", artifacts=["/tmp/x/shot1.png", "/tmp/x/shot2.png"])
                 ],
                 cross_slice_evidence=[_evidence(True, "True")],
@@ -151,9 +151,9 @@ def _audit_passed() -> AuditResult:
     return AuditResult(
         verdict=AuditVerdict.PASSED,
         narrative="Reviewed integrated app — all good.",
-        slice_verdicts=[
-            SliceVerdict(slice_id="shell", passed=True, detail="ok"),
-            SliceVerdict(slice_id="counter", passed=True, detail="works"),
+        group_verdicts=[
+            GroupVerdict(group_id="shell", passed=True, detail="ok"),
+            GroupVerdict(group_id="counter", passed=True, detail="works"),
         ],
         cost_usd=0.20,
     )
@@ -180,9 +180,9 @@ def test_compose_proof_packet_basic_shape(tmp_path: Path) -> None:
     assert packet.verdict == "passed"
     assert packet.wall_s == 180.0
     assert packet.cost_usd == 0.72
-    assert len(packet.slices) == 2
-    assert packet.landed_slice_ids == ["shell", "counter"]
-    assert packet.blocked_slice_ids == []
+    assert len(packet.groups) == 2
+    assert packet.landed_group_ids == ["shell", "counter"]
+    assert packet.blocked_group_ids == []
 
 
 def test_compose_proof_packet_includes_audit_verdicts(tmp_path: Path) -> None:
@@ -195,7 +195,7 @@ def test_compose_proof_packet_includes_audit_verdicts(tmp_path: Path) -> None:
         wall_s=1.0,
         cost_usd=0.0,
     )
-    shell_packet = next(s for s in packet.slices if s.slice_id == "shell")
+    shell_packet = next(s for s in packet.groups if s.group_id == "shell")
     assert shell_packet.audit_verdict == {"passed": True, "detail": "ok"}
 
 
@@ -206,29 +206,29 @@ def test_compose_proof_packet_blocked_slice_carries_narrative(tmp_path: Path) ->
         landed_ids=["shell"],
         blocked_ids=["counter"],
         results=[
-            MergeResult(slice_id="shell", status=MergeStatus.LANDED, landed_commit="abc1234"),
+            MergeResult(group_id="shell", status=MergeStatus.LANDED, landed_commit="abc1234"),
             MergeResult(
-                slice_id="counter",
+                group_id="counter",
                 status=MergeStatus.BLOCKED,
                 failure_narrative="cross-slice check failed: missing route",
-                slice_recheck_evidence=[_evidence(False, "exit=1")],
+                group_recheck_evidence=[_evidence(False, "exit=1")],
             ),
         ],
     )
     audit_result = AuditResult(
         verdict=AuditVerdict.PARTIAL,
         narrative="counter failed",
-        slice_verdicts=[SliceVerdict(slice_id="counter", passed=False, detail="missing route")],
+        group_verdicts=[GroupVerdict(group_id="counter", passed=False, detail="missing route")],
     )
     packet = compose_proof_packet(
         spec, build_result, merge_result, audit_result,
         wall_s=10.0, cost_usd=0.0,
     )
-    counter_packet = next(s for s in packet.slices if s.slice_id == "counter")
+    counter_packet = next(s for s in packet.groups if s.group_id == "counter")
     assert counter_packet.landed is False
     assert counter_packet.status == "passing"  # build was passing; merge blocked
     assert "cross-slice" in counter_packet.failure_narrative
-    assert packet.blocked_slice_ids == ["counter"]
+    assert packet.blocked_group_ids == ["counter"]
     assert packet.verdict == "partial"
 
 
@@ -248,8 +248,8 @@ def test_render_json_round_trip(tmp_path: Path) -> None:
     assert data["schema_version"] == PROOF_PACKET_SCHEMA_VERSION
     assert data["verdict"] == "passed"
     assert data["intent"] == "A demo todo app"
-    assert len(data["slices"]) == 2
-    assert data["landed_slice_ids"] == ["shell", "counter"]
+    assert len(data["groups"]) == 2
+    assert data["landed_group_ids"] == ["shell", "counter"]
 
 
 # ---------------------------------------------------------------------------
@@ -289,19 +289,19 @@ def test_render_html_escapes_user_input(tmp_path: Path) -> None:
         intent="<script>alert('xss')</script>",
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=[Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[])],
+        groups=[Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[])],
     )
     build_result = BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1, branch="b", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b", worktree=tmp_path),
         ],
     )
     merge_result = MergeQueueResult(
         landed_ids=["s1"],
-        results=[MergeResult(slice_id="s1", status=MergeStatus.LANDED, landed_commit="aaa")],
+        results=[MergeResult(group_id="s1", status=MergeStatus.LANDED, landed_commit="aaa")],
     )
-    audit = AuditResult(verdict=AuditVerdict.PASSED, narrative="<img onerror=alert(1)>", slice_verdicts=[])
+    audit = AuditResult(verdict=AuditVerdict.PASSED, narrative="<img onerror=alert(1)>", group_verdicts=[])
     packet = compose_proof_packet(spec, build_result, merge_result, audit, wall_s=1.0, cost_usd=0.0)
     html = render_html(packet, session_dir=tmp_path)
     # Script tag should be escaped, not present as raw HTML
@@ -320,16 +320,16 @@ def test_render_html_image_artifacts_become_thumbnails(tmp_path: Path) -> None:
     spec = _two_slice_spec(tmp_path)
     build_result = _build_result_passing(tmp_path)
     # Replace counter's evidence with one that points at our real PNG.
-    build_result.slice_results[1].last_evidence = [_evidence(True, "ok", artifacts=[str(art)])]
+    build_result.group_results[1].last_evidence = [_evidence(True, "ok", artifacts=[str(art)])]
     merge_result = MergeQueueResult(
         landed_ids=["shell", "counter"],
         results=[
-            MergeResult(slice_id="shell", status=MergeStatus.LANDED, landed_commit="abc1234"),
+            MergeResult(group_id="shell", status=MergeStatus.LANDED, landed_commit="abc1234"),
             MergeResult(
-                slice_id="counter",
+                group_id="counter",
                 status=MergeStatus.LANDED,
                 landed_commit="def5678",
-                slice_recheck_evidence=[_evidence(True, "ok", artifacts=[str(art)])],
+                group_recheck_evidence=[_evidence(True, "ok", artifacts=[str(art)])],
             ),
         ],
     )
@@ -363,11 +363,11 @@ def test_render_html_blocked_slice_renders_narrative(tmp_path: Path) -> None:
     spec = _two_slice_spec(tmp_path)
     build_result = BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(slice_id="shell", status=SliceStatus.PASSING, attempts=1, branch="b", worktree=tmp_path),
-            SliceResult(
-                slice_id="counter",
-                status=SliceStatus.BLOCKED,
+        group_results=[
+            GroupResult(group_id="shell", status=GroupStatus.PASSING, attempts=1, branch="b", worktree=tmp_path),
+            GroupResult(
+                group_id="counter",
+                status=GroupStatus.BLOCKED,
                 attempts=3,
                 branch="b2",
                 worktree=tmp_path,
@@ -379,7 +379,7 @@ def test_render_html_blocked_slice_renders_narrative(tmp_path: Path) -> None:
         landed_ids=["shell"],
         blocked_ids=["counter"],
         results=[
-            MergeResult(slice_id="shell", status=MergeStatus.LANDED, landed_commit="aaa"),
+            MergeResult(group_id="shell", status=MergeStatus.LANDED, landed_commit="aaa"),
         ],
     )
     audit = AuditResult(verdict=AuditVerdict.PARTIAL, narrative="counter blocked")
@@ -430,4 +430,4 @@ def test_render_run_end_to_end(tmp_path: Path) -> None:
     assert parsed["verdict"] == "passed"
     assert parsed["wall_s"] == 180.0
     assert parsed["cost_usd"] == 0.72
-    assert len(parsed["slices"]) == 2
+    assert len(parsed["groups"]) == 2

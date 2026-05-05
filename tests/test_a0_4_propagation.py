@@ -18,7 +18,7 @@ from otto.audit import (
     FeatureAudit,
     _parse_audit_output,
 )
-from otto.build import BuildResult, SliceResult, SliceStatus
+from otto.build import BuildResult, GroupResult, GroupStatus
 from otto.checks import Evidence
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.render import (
@@ -58,10 +58,10 @@ def _spec() -> Spec:
         groups=[
             Group(
                 id="core",
-                title="Core",
-                deps=[],
+                name="Core",
+                dependencies=[],
                 owned_paths=["src/**"],
-                tasks=["build"],
+                feature_ids=["build"],
                 checks=[RepoTestCheck(command=("true",), timeout_s=30)],
             ),
         ],
@@ -73,10 +73,10 @@ def _spec() -> Spec:
 def _build_result(tmp_path: Path) -> BuildResult:
     return BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(
-                slice_id="core",
-                status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(
+                group_id="core",
+                status=GroupStatus.PASSING,
                 attempts=1,
                 branch="i2p/x/core",
                 worktree=tmp_path,
@@ -91,10 +91,10 @@ def _merge_result() -> MergeQueueResult:
         landed_ids=["core"],
         results=[
             MergeResult(
-                slice_id="core",
+                group_id="core",
                 status=MergeStatus.LANDED,
                 landed_commit="abc1234",
-                slice_recheck_evidence=[_evidence()],
+                group_recheck_evidence=[_evidence()],
             ),
         ],
     )
@@ -144,8 +144,8 @@ def test_proof_packet_dataclass_has_feature_audits_only() -> None:
         groups=[],
         audit_narrative="",
         walkthrough_artifacts=[],
-        blocked_slice_ids=[],
-        landed_slice_ids=[],
+        blocked_group_ids=[],
+        landed_group_ids=[],
         feature_audits=list(fa),
     )
     assert packet.feature_audits == fa
@@ -185,7 +185,7 @@ def test_parse_audit_output_accepts_feature_audits_key() -> None:
 {
   "verdict": "passed",
   "narrative": "all good",
-  "slice_verdicts": [],
+  "group_verdicts": [],
   "feature_audits": [
     {"name": "signup", "status": "passed", "detail": "ok", "evidence_refs": ["a:1"]},
     {"name": "login", "status": "partial", "detail": "meh", "evidence_refs": []}
@@ -211,7 +211,7 @@ def test_parse_audit_output_ignores_legacy_capability_verdicts_key() -> None:
 {
   "verdict": "partial",
   "narrative": "old-format reply",
-  "slice_verdicts": [],
+  "group_verdicts": [],
   "capability_verdicts": [
     {"name": "legacy", "status": "blocked", "detail": "no good", "evidence_refs": []}
   ],
@@ -230,7 +230,7 @@ def test_parse_audit_output_empty_feature_audits_yields_empty() -> None:
 {
   "verdict": "passed",
   "narrative": "",
-  "slice_verdicts": [],
+  "group_verdicts": [],
   "feature_audits": [],
   "quality_score": 3,
   "quality_findings": []

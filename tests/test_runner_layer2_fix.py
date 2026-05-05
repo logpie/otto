@@ -39,7 +39,7 @@ from otto.spec_compile import Feature, Group, Spec
 
 
 def _spec_with_two_features() -> Spec:
-    group = Group(id="g1", title="G1")
+    group = Group(id="g1", name="G1")
     f1 = Feature(id="feat-a", name="Feature A", group_id="g1",
                  description="alpha")
     f2 = Feature(id="feat-b", name="Feature B", group_id="g1",
@@ -59,7 +59,7 @@ def test_layer2_passes_feature_id_to_build_agent(tmp_path: Path) -> None:
 
     async def recording_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
         captured["feature_id"] = agent_input.feature_id
-        captured["slice_id"] = agent_input.slice.id
+        captured["group_id"] = agent_input.group.id
         captured["last_failure_narrative"] = agent_input.last_failure_narrative
         captured["worktree"] = agent_input.worktree
         captured["project_dir"] = agent_input.project_dir
@@ -83,7 +83,7 @@ def test_layer2_passes_feature_id_to_build_agent(tmp_path: Path) -> None:
     attempt = asyncio.run(bridge(failing, group))
 
     assert captured["feature_id"] == "feat-a"
-    assert captured["slice_id"] == "g1"
+    assert captured["group_id"] == "g1"
     assert captured["last_failure_narrative"] == "login button does nothing"
     assert captured["project_dir"] == tmp_path
     assert captured["worktree"] == tmp_path
@@ -185,7 +185,7 @@ def test_layer2_prompt_narrowing_includes_feature_id(tmp_path: Path) -> None:
     spec = _spec_with_two_features()
     agent_input = BuildAgentInput(
         spec=spec,
-        slice=spec.groups[0],
+        group=spec.groups[0],
         project_dir=tmp_path,
         worktree=tmp_path,
         branch="",
@@ -207,7 +207,7 @@ def test_layer2_prompt_no_narrowing_when_feature_id_empty(tmp_path: Path) -> Non
     spec = _spec_with_two_features()
     agent_input = BuildAgentInput(
         spec=spec,
-        slice=spec.groups[0],
+        group=spec.groups[0],
         project_dir=tmp_path,
         worktree=tmp_path,
         branch="",

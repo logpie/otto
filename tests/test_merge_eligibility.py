@@ -1,7 +1,7 @@
 """Tests for A1c.1 / A1c.2 — eligibility ordering across Groups + Components.
 
 Coverage:
-- `Group.dependencies` is a working alias for `Group.deps` (back-compat).
+- `Group.dependencies` is a working alias for `Group.dependencies` (back-compat).
 - A Group whose `dependencies` references a Component id waits until the
   Component lands.
 - A Component whose `dependencies` references another Component id is
@@ -39,32 +39,32 @@ def _spec(
 
 
 # ---------------------------------------------------------------------------
-# A1c.1 — Group.dependencies / Group.deps back-compat
+# A1c.1 — Group.dependencies / Group.dependencies back-compat
 # ---------------------------------------------------------------------------
 
 
 def test_group_dependencies_alias_reads_deps() -> None:
-    g = Group(id="g1", title="x", deps=["g0"])
+    g = Group(id="g1", name="x", dependencies=["g0"])
     assert g.dependencies == ["g0"]
     # Same identity — no copy — so reads always reflect live edits.
-    assert g.dependencies is g.deps
+    assert g.dependencies is g.dependencies
 
 
 def test_group_dependencies_setter_replaces_deps() -> None:
-    g = Group(id="g1", title="x", deps=["g0"])
+    g = Group(id="g1", name="x", dependencies=["g0"])
     g.dependencies = ["gA", "gB"]
-    assert g.deps == ["gA", "gB"]
+    assert g.dependencies == ["gA", "gB"]
     # Reads still reflect the same list.
     assert g.dependencies == ["gA", "gB"]
 
 
 def test_eligible_candidates_reads_dependencies_alias() -> None:
-    """Constructing a Group via `deps=` and reading via `.dependencies`
+    """Constructing a Group via `dependencies=` and reading via `.dependencies`
     inside `eligible_candidates` produces the right ordering."""
     spec = _spec(
         groups=[
-            Group(id="g1", title="x", deps=[]),
-            Group(id="g2", title="y", deps=["g1"]),
+            Group(id="g1", name="x", dependencies=[]),
+            Group(id="g2", name="y", dependencies=["g1"]),
         ],
     )
     # g2 depends on g1 — g2 not eligible until g1 has landed.
@@ -88,7 +88,7 @@ def test_group_depends_on_component_waits_for_component_to_land() -> None:
     spec = _spec(
         groups=[
             # g1 depends on a Component (c1) — must wait until c1 lands.
-            Group(id="g1", title="feat", deps=["c1"]),
+            Group(id="g1", name="feat", dependencies=["c1"]),
         ],
         components=[
             Component(id="c1", name="ws-hub"),
@@ -128,7 +128,7 @@ def test_component_depends_on_component_topological_order() -> None:
 
 def test_component_depends_on_group_waits_for_group_to_land() -> None:
     spec = _spec(
-        groups=[Group(id="g1", title="auth", deps=[])],
+        groups=[Group(id="g1", name="auth", dependencies=[])],
         components=[
             Component(id="c1", name="search-index", dependencies=["g1"]),
         ],
@@ -148,8 +148,8 @@ def test_mixed_chain_group_component_group() -> None:
     """g1 -> c1 -> g2 — must land in order g1, c1, g2 even when all pass."""
     spec = _spec(
         groups=[
-            Group(id="g1", title="auth", deps=[]),
-            Group(id="g2", title="feed", deps=["c1"]),
+            Group(id="g1", name="auth", dependencies=[]),
+            Group(id="g2", name="feed", dependencies=["c1"]),
         ],
         components=[
             Component(id="c1", name="search", dependencies=["g1"]),

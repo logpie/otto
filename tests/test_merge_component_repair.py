@@ -82,7 +82,7 @@ def _build_result(
 ) -> BuildResult:
     return BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[],
+        group_results=[],
         component_results=[
             ComponentResult(
                 component_id=component_id,
@@ -115,10 +115,10 @@ def test_component_as_merge_slice_passes_through_owned_paths_and_deps() -> None:
     adapted = _component_as_merge_slice(component)
     assert adapted.id == "c1"
     assert adapted.owned_paths == ["server/ws/*", "shared/types.py"]
-    assert adapted.deps == ["g0"]
+    assert adapted.dependencies == ["g0"]
     # Description carried into a single synthetic task line so the build
     # agent has a concrete brief during repair.
-    assert adapted.tasks == ["WebSocket fan-out"]
+    assert adapted.feature_ids == ["WebSocket fan-out"]
     assert len(adapted.checks) == 1
 
 
@@ -159,7 +159,7 @@ def test_run_merge_queue_lands_passing_component(tmp_path: Path) -> None:
     result = asyncio.run(
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
-            branch_for_slice=lambda s: branch,
+            branch_for_group=lambda s: branch,
         )
     )
     assert result.landed_ids == ["c1"]
@@ -229,7 +229,7 @@ def test_component_merge_conflict_on_owned_paths_triggers_repair(tmp_path: Path)
             cwd=input_.worktree, capture_output=True, text=True, check=True,
         )
         seen_branches.append(proc.stdout.strip())
-        seen_owned_paths.append(list(input_.slice.owned_paths))
+        seen_owned_paths.append(list(input_.group.owned_paths))
         # Resolve the conflict by aligning with main.
         (input_.worktree / "shared" / "state.py").write_text("VERSION = 'A'\n", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.02)
@@ -238,7 +238,7 @@ def test_component_merge_conflict_on_owned_paths_triggers_repair(tmp_path: Path)
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
             build_agent=repair_agent,
-            branch_for_slice=lambda s: branch,
+            branch_for_group=lambda s: branch,
         )
     )
     # Repair fired and the Component landed.
@@ -305,7 +305,7 @@ def test_component_conflict_blocked_without_agent(tmp_path: Path) -> None:
     result = asyncio.run(
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
-            branch_for_slice=lambda s: branch,
+            branch_for_group=lambda s: branch,
         )
     )
     assert result.blocked_ids == ["c1"]
@@ -371,7 +371,7 @@ def test_component_repair_blocks_when_retries_exhausted(tmp_path: Path) -> None:
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
             build_agent=useless_agent,
-            branch_for_slice=lambda s: branch,
+            branch_for_group=lambda s: branch,
             budget=MergeBudget(per_slice_repair_retries=2),
         )
     )

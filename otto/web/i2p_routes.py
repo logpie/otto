@@ -120,11 +120,11 @@ def install_i2p_routes(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"spec load failed: {exc}") from exc
 
-        slice_ids = [s["id"] for s in spec_data["slices"]]
+        group_ids = [s["id"] for s in spec_data["groups"]]
         run_state = None
         if journal_path(session_dir).exists():
             try:
-                state = replay(session_dir, slice_ids=slice_ids)
+                state = replay(session_dir, group_ids=group_ids)
                 run_state = _state_to_dict(state)
             except Exception as exc:
                 logger.warning("replay failed for %s: %s", session_id, exc)
@@ -210,11 +210,11 @@ def _session_summary(session_dir: Path) -> dict[str, Any]:
         data = json.loads(spec_path.read_text(encoding="utf-8"))
         summary["intent"] = data.get("intent") or ""
         summary["project_kind"] = data.get("project_kind") or ""
-        summary["slice_count"] = len(data.get("slices") or [])
+        summary["group_count"] = len(data.get("groups") or [])
     except Exception:
         summary["intent"] = ""
         summary["project_kind"] = ""
-        summary["slice_count"] = 0
+        summary["group_count"] = 0
 
     proof_packet_path = session_dir / "proof-packet.json"
     if proof_packet_path.exists():
@@ -223,8 +223,8 @@ def _session_summary(session_dir: Path) -> dict[str, Any]:
             summary["verdict"] = packet.get("verdict")
             summary["wall_s"] = packet.get("wall_s")
             summary["cost_usd"] = packet.get("cost_usd")
-            summary["landed_count"] = len(packet.get("landed_slice_ids") or [])
-            summary["blocked_count"] = len(packet.get("blocked_slice_ids") or [])
+            summary["landed_count"] = len(packet.get("landed_group_ids") or [])
+            summary["blocked_count"] = len(packet.get("blocked_group_ids") or [])
         except Exception:
             pass
     return summary
@@ -238,15 +238,15 @@ def _state_to_dict(state: Any) -> dict[str, Any]:
         "audit_verdict": getattr(state, "audit_verdict", ""),
         "run_finished": getattr(state, "run_finished", False),
         "run_verdict": getattr(state, "run_verdict", ""),
-        "slices": [
+        "groups": [
             {
-                "slice_id": ss.slice_id,
+                "group_id": ss.group_id,
                 "phase": ss.phase,
                 "attempts": ss.attempts,
                 "last_failure": ss.last_failure,
                 "last_event_ts": ss.last_event_ts,
             }
-            for ss in getattr(state, "slices", {}).values()
+            for ss in getattr(state, "groups", {}).values()
         ],
     }
 
@@ -278,17 +278,17 @@ _I2P_INDEX_HTML = """<!DOCTYPE html>
   .actions a { margin-right: 8px; color: #0969da; text-decoration: none; }
   .detail { margin-top: 18px; }
   .detail .row { display: grid; grid-template-columns: 160px 1fr; gap: 8px 16px; align-items: baseline; padding: 4px 0; }
-  .slice {
+  .group {
     border: 1px solid #d0d7de; border-radius: 6px; padding: 10px 14px; margin: 8px 0;
     background: #f6f8fa;
   }
-  .slice.landed   { border-left: 4px solid #1a7f37; }
-  .slice.eligible { border-left: 4px solid #0969da; }
-  .slice.blocked  { border-left: 4px solid #cf222e; }
-  .slice.failed   { border-left: 4px solid #9a6700; }
-  .slice.building { border-left: 4px solid #6e7781; }
-  .slice.checking { border-left: 4px solid #0969da; }
-  .slice.pending  { border-left: 4px solid #d0d7de; }
+  .group.landed   { border-left: 4px solid #1a7f37; }
+  .group.eligible { border-left: 4px solid #0969da; }
+  .group.blocked  { border-left: 4px solid #cf222e; }
+  .group.failed   { border-left: 4px solid #9a6700; }
+  .group.building { border-left: 4px solid #6e7781; }
+  .group.checking { border-left: 4px solid #0969da; }
+  .group.pending  { border-left: 4px solid #d0d7de; }
   iframe { width: 100%; height: 78vh; border: 1px solid #d0d7de; border-radius: 6px; margin-top: 14px; }
   pre.code { background: #f6f8fa; border: 1px solid #d0d7de; padding: 10px; border-radius: 6px;
              overflow-x: auto; font-size: 0.85em; }
@@ -348,7 +348,7 @@ async function renderList() {
   }
   const head = el('thead', {}, el('tr', {}, [
     el('th',{},'session_id'), el('th',{},'verdict'), el('th',{},'intent'),
-    el('th',{},'kind'), el('th',{},'slices'), el('th',{},'wall (s)'),
+    el('th',{},'kind'), el('th',{},'groups'), el('th',{},'wall (s)'),
     el('th',{},'cost ($)'), el('th',{},'actions')
   ]));
   const rows = data.sessions.map(s => {
@@ -357,7 +357,7 @@ async function renderList() {
       el('td', {}, verdictBadge(s.verdict)),
       el('td', {}, escape(s.intent || '').slice(0, 80)),
       el('td', {}, s.project_kind || '—'),
-      el('td', {}, (s.landed_count||0) + ' / ' + (s.slice_count || 0)),
+      el('td', {}, (s.landed_count||0) + ' / ' + (s.group_count || 0)),
       el('td', {}, fmtNum(s.wall_s, 0)),
       el('td', {}, fmtNum(s.cost_usd, 2)),
       el('td', { class:'actions' }, [
@@ -389,13 +389,13 @@ async function renderDetail(sessionId) {
   ]);
   const intent = data.spec ? data.spec.intent : '';
   const meta = el('p', { class: 'muted' }, escape(intent));
-  // Slice list with state-derived phase
+  // Group list with state-derived phase
   const phaseBy = {};
-  if (data.state && data.state.slices) {
-    for (const ss of data.state.slices) phaseBy[ss.slice_id] = ss.phase;
+  if (data.state && data.state.groups) {
+    for (const ss of data.state.groups) phaseBy[ss.group_id] = ss.phase;
   }
-  const slices = (data.spec && data.spec.slices) || [];
-  const sliceCards = slices.map(s => {
+  const groups = (data.spec && data.spec.groups) || [];
+  const groupCards = groups.map(s => {
     const phase = phaseBy[s.id] || 'pending';
     const statusLine = el('div', { class: 'muted' },
       'phase: ' + phase + (s.deps && s.deps.length ? ' · deps: ' + s.deps.join(', ') : ''));
@@ -406,12 +406,12 @@ async function renderDetail(sessionId) {
       ? el('div', { class: 'muted' }, s.checks.length + ' check(s): ' +
           s.checks.map(c => c.kind).join(', '))
       : null;
-    return el('div', { class: 'slice ' + phase }, [
+    return el('div', { class: 'group ' + phase }, [
       el('strong', {}, s.id + ' — '), el('span', {}, escape(s.title || '')),
       statusLine, ownedLine, checksLine
     ]);
   });
-  const sliceSection = el('div', {}, [el('h3', {}, 'Slices'), ...sliceCards]);
+  const groupSection = el('div', {}, [el('h3', {}, 'Groups'), ...groupCards]);
 
   // Proof packet iframe (Step 8b: embedded view of the rendered proof packet)
   let proofSection = null;
@@ -433,7 +433,7 @@ async function renderDetail(sessionId) {
     el('pre', { class: 'code' }, data.spec ? JSON.stringify(data.spec, null, 2) : '(none)')
   ]);
 
-  root.replaceChildren(back, heading, meta, sliceSection, proofSection, specBlock);
+  root.replaceChildren(back, heading, meta, groupSection, proofSection, specBlock);
 }
 
 function route() {

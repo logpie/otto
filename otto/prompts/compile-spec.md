@@ -42,16 +42,16 @@ each owned end-to-end by one build agent. Wrap the JSON in
       ]
     }
   },
-  "slices": [
+  "groups": [
     {
       "id": "shell",
-      "title": "App shell with header and routing",
-      "tasks": [
+      "name": "App shell with header and routing",
+      "feature_ids": [
         "scaffold the SPA",
         "render the navbar with Home / About links",
         "add /, /about routes"
       ],
-      "deps": [],
+      "dependencies": [],
       "owned_paths": ["src/App.*", "src/index.*", "src/components/Navbar.*"],
       "checks": [
         {

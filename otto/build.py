@@ -42,7 +42,7 @@ from typing import Any, Callable, Protocol
 
 from otto.checks import Evidence, run_checks
 from otto.spec_compile import CheckKind, Component, Feature, Group, Spec
-from otto.spec_state import emit
+from otto.spec_state import emit, is_group_aborted_by_user
 
 logger = logging.getLogger("otto.build")
 
@@ -52,7 +52,7 @@ logger = logging.getLogger("otto.build")
 # ---------------------------------------------------------------------------
 
 
-class SliceStatus(str, Enum):
+class GroupStatus(str, Enum):
     PENDING = "pending"  # deps not yet met, OR not yet started
     IN_PROGRESS = "in_progress"
     PASSING = "passing"  # all checks pass; merge candidate
@@ -225,11 +225,11 @@ class BuildBudget:
 
 
 @dataclass
-class SliceResult:
+class GroupResult:
     """Per-slice outcome of the build loop."""
 
-    slice_id: str
-    status: SliceStatus
+    group_id: str
+    status: GroupStatus
     attempts: int
     branch: str
     worktree: Path
@@ -245,7 +245,7 @@ class ComponentStatus(str, Enum):
 
     Components are dispatched like Groups but produce no Feature verdict —
     they're shared infrastructure. Their lifecycle parallels Group's
-    SliceStatus minus the verdict-bearing distinction.
+    GroupStatus minus the verdict-bearing distinction.
     """
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
@@ -280,27 +280,27 @@ class BuildResult:
     """Aggregate result of run_build."""
 
     spec_session_dir: Path
-    slice_results: list[SliceResult] = field(default_factory=list)
+    group_results: list[GroupResult] = field(default_factory=list)
     component_results: list[ComponentResult] = field(default_factory=list)
     total_cost_usd: float = 0.0
     total_wall_s: float = 0.0
 
     @property
     def all_passing(self) -> bool:
-        return bool(self.slice_results) and all(
-            r.status == SliceStatus.PASSING for r in self.slice_results
+        return bool(self.group_results) and all(
+            r.status == GroupStatus.PASSING for r in self.group_results
         )
 
     @property
     def passing_ids(self) -> list[str]:
-        return [r.slice_id for r in self.slice_results if r.status == SliceStatus.PASSING]
+        return [r.group_id for r in self.group_results if r.status == GroupStatus.PASSING]
 
     @property
     def blocked_ids(self) -> list[str]:
         return [
-            r.slice_id
-            for r in self.slice_results
-            if r.status in (SliceStatus.BLOCKED, SliceStatus.FAILED_SCOPE)
+            r.group_id
+            for r in self.group_results
+            if r.status in (GroupStatus.BLOCKED, GroupStatus.FAILED_SCOPE)
         ]
 
     # A1b: Component accessors (research §2.6)
@@ -348,7 +348,7 @@ class BuildAgentInput:
     """
 
     spec: Spec
-    slice: Group
+    group: Group
     project_dir: Path
     worktree: Path
     branch: str
@@ -380,7 +380,7 @@ class BuildAgentCallable(Protocol):
 # ---------------------------------------------------------------------------
 
 
-def ready_slices(
+def ready_groups(
     spec: Spec,
     completed_ids: Iterable[str],
     in_progress_ids: Iterable[str] = (),
@@ -406,7 +406,7 @@ def ready_slices(
     for s in spec.groups:
         if s.id in completed or s.id in in_flight or s.id in skipped:
             continue
-        if all(dep in completed for dep in (s.deps or [])):
+        if all(dep in completed for dep in (s.dependencies or [])):
             ready.append(s)
     return ready
 
@@ -419,7 +419,7 @@ def ready_components(
 ) -> list[Component]:
     """Return Components whose deps are all in `completed_ids` and not in flight or skipped.
 
-    Mirrors `ready_slices` for Components (research §2.6, A1b.3).
+    Mirrors `ready_groups` for Components (research §2.6, A1b.3).
     `completed_ids` is the union of completed Group ids AND completed
     Component ids — a Component may depend on a Group or another
     Component (cross-deps are id-only; the caller resolves the kind).
@@ -437,7 +437,7 @@ def ready_components(
 
 
 def detect_scope_violations(
-    slice_obj: Group,
+    group_obj: Group,
     spec: Spec,
     modified_paths: Iterable[str],
     *,
@@ -464,25 +464,25 @@ def detect_scope_violations(
     callers pass `project_root=None` and we treat all paths as modifications
     (strictest).
     """
-    own_globs = list(slice_obj.owned_paths or [])
+    own_globs = list(group_obj.owned_paths or [])
     # A1b.4: both shared_scaffold (legacy) and shared_paths (new) are
     # globally writeable by any unit (Group or Component).
     shared_globs = list(spec.shared_scaffold or []) + list(spec.shared_paths or [])
     # Transitive deps: every unit (Group or Component) this slice depends
     # on, recursively. A1b.4: Component owned_paths participate in the
     # peer-vs-dep partition exactly like Group owned_paths.
-    transitive_dep_ids = _transitive_deps(slice_obj.id, spec)
+    transitive_dep_ids = _transitive_deps(group_obj.id, spec)
     dep_globs: list[str] = []
     peer_globs: list[str] = []
     for s in spec.groups:
-        if s.id == slice_obj.id:
+        if s.id == group_obj.id:
             continue
         if s.id in transitive_dep_ids:
             dep_globs.extend(s.owned_paths or [])
         else:
             peer_globs.extend(s.owned_paths or [])
     for c in (spec.components or []):
-        if c.id == slice_obj.id:
+        if c.id == group_obj.id:
             continue
         if c.id in transitive_dep_ids:
             dep_globs.extend(c.owned_paths or [])
@@ -515,8 +515,8 @@ def detect_scope_violations(
     return violations
 
 
-def _transitive_deps(slice_id: str, spec: Spec) -> set[str]:
-    """Return all units `slice_id` depends on, transitively (excluding self).
+def _transitive_deps(group_id: str, spec: Spec) -> set[str]:
+    """Return all units `group_id` depends on, transitively (excluding self).
 
     Considers both Groups and Components — A1c.2 wires cross-deps via
     a single id namespace, so `_transitive_deps("group-a")` may return
@@ -525,7 +525,7 @@ def _transitive_deps(slice_id: str, spec: Spec) -> set[str]:
     by_id: dict[str, object] = {s.id: s for s in spec.groups}
     for c in (spec.components or []):
         by_id.setdefault(c.id, c)
-    seed = by_id.get(slice_id)
+    seed = by_id.get(group_id)
     if seed is not None:
         seed_deps = list(getattr(seed, "deps", None) or getattr(seed, "dependencies", None) or [])
     else:
@@ -534,7 +534,7 @@ def _transitive_deps(slice_id: str, spec: Spec) -> set[str]:
     stack = list(seed_deps)
     while stack:
         dep = stack.pop()
-        if dep in visited or dep == slice_id:
+        if dep in visited or dep == group_id:
             continue
         visited.add(dep)
         upstream = by_id.get(dep)
@@ -836,7 +836,7 @@ def _ensure_clean_git_state(worktree: Path) -> bool:
     return True
 
 
-def _setup_slice_branch(worktree: Path, *, branch: str, parent_ref: str) -> bool:
+def _setup_group_branch(worktree: Path, *, branch: str, parent_ref: str) -> bool:
     """Create or reset `branch` off `parent_ref`, then check it out.
 
     `parent_ref` is the git ref this slice should base its work on:
@@ -898,7 +898,7 @@ def _setup_slice_branch(worktree: Path, *, branch: str, parent_ref: str) -> bool
     return co_slice.returncode == 0
 
 
-def _setup_slice_branch_with_deps(
+def _setup_group_branch_with_deps(
     worktree: Path,
     *,
     branch: str,
@@ -907,7 +907,7 @@ def _setup_slice_branch_with_deps(
 ) -> bool:
     """V12 fix: set up a slice branch with multiple deps.
 
-    Pattern D's original `_setup_slice_branch(parent_ref=last_dep)` only
+    Pattern D's original `_setup_group_branch(parent_ref=last_dep)` only
     follows ONE dep. For DAG specs where a slice has sibling deps from
     different branches (e.g. P5 SSG: `builder` depends on both
     `link_rewriting` and `feeds`, which are siblings off `rendering`),
@@ -923,14 +923,14 @@ def _setup_slice_branch_with_deps(
          `git merge --no-edit` it in.
       3. On any merge conflict during step 2: abort the merge cleanly
          and return False (caller should fall back to single-parent
-         setup via `_setup_slice_branch`, or surface a build-time
+         setup via `_setup_group_branch`, or surface a build-time
          error if even that fails).
 
     The slice's branch ends up containing the union of all deps'
     contributions — exactly the integrated state the slice's build
     agent needs to write code against.
     """
-    if not _setup_slice_branch(worktree, branch=branch, parent_ref=primary_parent_ref):
+    if not _setup_group_branch(worktree, branch=branch, parent_ref=primary_parent_ref):
         return False
     for dep_ref in additional_dep_refs:
         if not dep_ref or dep_ref == primary_parent_ref:
@@ -961,7 +961,7 @@ def _setup_slice_branch_with_deps(
     return True
 
 
-def _commit_slice_work(worktree: Path, *, slice_id: str, branch: str) -> bool:
+def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
     """Stage and commit the slice's work to its branch.
 
     Called at the END of a slice's successful build, so the slice
@@ -1018,7 +1018,7 @@ def _commit_slice_work(worktree: Path, *, slice_id: str, branch: str) -> bool:
         # Nothing to commit. Slice contributed no diff; merge_queue
         # will surface this as REDUNDANT.
         return True
-    msg = f"i2p({slice_id}): build slice on {branch}"
+    msg = f"i2p({group_id}): build slice on {branch}"
     commit = subprocess.run(
         ["git", "commit", "-q", "-m", msg, "--no-verify"],
         cwd=worktree, capture_output=True, text=True, check=False,
@@ -1040,8 +1040,8 @@ async def run_build(
     base_url: str | None = None,
     budget: BuildBudget | None = None,
     base_branch: str = "main",
-    branch_for_slice: Callable[[Group], str] | None = None,
-    worktree_for_slice: Callable[[Group], Path] | None = None,
+    branch_for_group: Callable[[Group], str] | None = None,
+    worktree_for_group: Callable[[Group], Path] | None = None,
     on_state_change: Callable[[str, str, dict[str, Any]], None] | None = None,
     skip_components: Iterable[str] | None = None,
 ) -> BuildResult:
@@ -1056,10 +1056,10 @@ async def run_build(
         base_url: If the slice's checks include ApiProbe / StateInvariant
             with HTTP, the build host's base URL.
         budget: Bounds; defaults to BuildBudget().
-        branch_for_slice: Branch naming. Default: ``i2p/<spec_session>/<slice_id>``.
-        worktree_for_slice: Worktree resolution. Default: project_dir
+        branch_for_group: Branch naming. Default: ``i2p/<spec_session>/<group_id>``.
+        worktree_for_group: Worktree resolution. Default: project_dir
             (single-worktree mode for v1; future: separate worktrees per slice).
-        on_state_change: Optional hook called as (slice_id, status, extra).
+        on_state_change: Optional hook called as (group_id, status, extra).
             Receives every status transition for testability and progress UI.
 
     Returns:
@@ -1070,14 +1070,14 @@ async def run_build(
     follow-up; the readiness logic is structured to support it.
     """
     budget = budget or BuildBudget()
-    branch_for_slice = branch_for_slice or (
+    branch_for_group = branch_for_group or (
         lambda s: f"i2p/{session_dir.name}/{s.id}"
     )
-    worktree_for_slice = worktree_for_slice or (lambda _s: project_dir)
+    worktree_for_group = worktree_for_group or (lambda _s: project_dir)
 
     completed_ids: set[str] = set()
     blocked_ids: set[str] = set()
-    results: list[SliceResult] = []
+    results: list[GroupResult] = []
     component_results: list[ComponentResult] = []
     total_t0 = time.monotonic()
     total_cost = 0.0
@@ -1096,9 +1096,9 @@ async def run_build(
         for sid in skip_set:
             if sid in spec_groups_by_id:
                 results.append(
-                    SliceResult(
-                        slice_id=sid,
-                        status=SliceStatus.PASSING,
+                    GroupResult(
+                        group_id=sid,
+                        status=GroupStatus.PASSING,
                         attempts=0,
                         branch="",
                         worktree=project_dir,
@@ -1125,16 +1125,16 @@ async def run_build(
                     sid,
                 )
 
-    def _emit_state(slice_id: str, status: SliceStatus, extra: dict[str, Any] | None = None) -> None:
-        # Map our SliceStatus to the journal's recognized event kinds.
+    def _emit_state(group_id: str, status: GroupStatus, extra: dict[str, Any] | None = None) -> None:
+        # Map our GroupStatus to the journal's recognized event kinds.
         # IN_PROGRESS → slice.started; PASSING → slice.merge.eligible
         # (slice is now a merge candidate); BLOCKED / FAILED_SCOPE → slice.blocked.
         # PENDING does not emit (no journal event before slice.started).
         kind_map = {
-            SliceStatus.IN_PROGRESS: "slice.started",
-            SliceStatus.PASSING: "slice.merge.eligible",
-            SliceStatus.BLOCKED: "slice.blocked",
-            SliceStatus.FAILED_SCOPE: "slice.blocked",
+            GroupStatus.IN_PROGRESS: "group.started",
+            GroupStatus.PASSING: "group.merge.eligible",
+            GroupStatus.BLOCKED: "group.blocked",
+            GroupStatus.FAILED_SCOPE: "group.blocked",
         }
         kind = kind_map.get(status)
         if kind is not None:
@@ -1142,11 +1142,11 @@ async def run_build(
             detail = str(payload.pop("narrative", ""))
             attempt = int(payload.pop("attempts", 0) or 0)
             try:
-                emit(session_dir, kind, slice_id=slice_id, attempt=attempt, detail=detail, **payload)
+                emit(session_dir, kind, group_id=group_id, attempt=attempt, detail=detail, **payload)
             except OSError as exc:
                 logger.warning("emit %s failed: %s", kind, exc)
         if on_state_change is not None:
-            on_state_change(slice_id, status.value, extra or {})
+            on_state_change(group_id, status.value, extra or {})
 
     def _emit_component_state(component_id: str, status: ComponentStatus, extra: dict[str, Any] | None = None) -> None:
         # Components reuse the slice.* event-kind vocabulary — the id
@@ -1155,9 +1155,9 @@ async def run_build(
         # by id. We tag the event with `component_id=` in extras so
         # consumers that care can distinguish.
         kind_map = {
-            ComponentStatus.IN_PROGRESS: "slice.started",
-            ComponentStatus.PASSING: "slice.merge.eligible",
-            ComponentStatus.BLOCKED: "slice.blocked",
+            ComponentStatus.IN_PROGRESS: "group.started",
+            ComponentStatus.PASSING: "group.merge.eligible",
+            ComponentStatus.BLOCKED: "group.blocked",
         }
         kind = kind_map.get(status)
         if kind is not None:
@@ -1166,7 +1166,7 @@ async def run_build(
             attempt = int(payload.pop("attempts", 0) or 0)
             payload.setdefault("component_id", component_id)
             try:
-                emit(session_dir, kind, slice_id=component_id, attempt=attempt, detail=detail, **payload)
+                emit(session_dir, kind, group_id=component_id, attempt=attempt, detail=detail, **payload)
             except OSError as exc:
                 logger.warning("emit %s failed: %s", kind, exc)
         if on_state_change is not None:
@@ -1174,10 +1174,10 @@ async def run_build(
 
     # Pattern D: track each completed slice's branch so dependent
     # slices can branch off them and see their work.
-    branch_by_slice: dict[str, str] = {}
+    branch_by_group: dict[str, str] = {}
 
     while True:
-        ready = ready_slices(spec, completed_ids, skipped_ids=blocked_ids)
+        ready = ready_groups(spec, completed_ids, skipped_ids=blocked_ids)
         ready_comps = ready_components(spec, completed_ids, skipped_ids=blocked_ids)
         if not ready and not ready_comps:
             break
@@ -1187,32 +1187,32 @@ async def run_build(
         # equivalent to a single-pick scheduler.
         if not ready and ready_comps:
             next_component = ready_comps[0]
-            comp_branch = branch_for_slice(_component_as_slice(next_component))
-            comp_worktree = worktree_for_slice(_component_as_slice(next_component))
+            comp_branch = branch_for_group(_component_as_slice(next_component))
+            comp_worktree = worktree_for_group(_component_as_slice(next_component))
             primary_parent_ref_c: str
             additional_dep_refs_c: list[str] = []
             comp_deps = list(next_component.dependencies or [])
             if comp_deps:
-                primary_parent_ref_c = branch_by_slice.get(comp_deps[-1], base_branch)
+                primary_parent_ref_c = branch_by_group.get(comp_deps[-1], base_branch)
                 additional_dep_refs_c = [
-                    branch_by_slice[d]
+                    branch_by_group[d]
                     for d in comp_deps[:-1]
-                    if d in branch_by_slice
+                    if d in branch_by_group
                 ]
             else:
                 primary_parent_ref_c = base_branch
             if additional_dep_refs_c:
-                branch_real_c = _setup_slice_branch_with_deps(
+                branch_real_c = _setup_group_branch_with_deps(
                     comp_worktree, branch=comp_branch,
                     primary_parent_ref=primary_parent_ref_c,
                     additional_dep_refs=additional_dep_refs_c,
                 )
                 if not branch_real_c:
-                    branch_real_c = _setup_slice_branch(
+                    branch_real_c = _setup_group_branch(
                         comp_worktree, branch=comp_branch, parent_ref=primary_parent_ref_c,
                     )
             else:
-                branch_real_c = _setup_slice_branch(
+                branch_real_c = _setup_group_branch(
                     comp_worktree, branch=comp_branch, parent_ref=primary_parent_ref_c,
                 )
             _emit_component_state(
@@ -1231,11 +1231,11 @@ async def run_build(
                 budget=budget,
             )
             if branch_real_c and comp_result.status == ComponentStatus.PASSING:
-                committed_c = _commit_slice_work(
-                    comp_worktree, slice_id=next_component.id, branch=comp_branch,
+                committed_c = _commit_group_work(
+                    comp_worktree, group_id=next_component.id, branch=comp_branch,
                 )
                 if committed_c:
-                    branch_by_slice[next_component.id] = comp_branch
+                    branch_by_group[next_component.id] = comp_branch
                 else:
                     logger.warning(
                         "component %s: failed to commit work to branch %s — marking BLOCKED",
@@ -1268,9 +1268,9 @@ async def run_build(
             )
             continue
         # Sequential v1: pick the first ready slice. Stable ordering = spec order.
-        next_slice = ready[0]
-        slice_branch = branch_for_slice(next_slice)
-        slice_worktree = worktree_for_slice(next_slice)
+        next_group = ready[0]
+        group_branch = branch_for_group(next_group)
+        group_worktree = worktree_for_group(next_group)
 
         # Pattern D: choose the parent ref based on deps. A slice with
         # no deps branches off `base_branch`. A slice with deps branches
@@ -1279,16 +1279,16 @@ async def run_build(
         # ancestry. V12 fix: when the slice has multiple deps that may
         # be siblings (DAG topology, not linear chain), the last-dep
         # primary parent doesn't include sibling deps. Merge the rest
-        # in via `_setup_slice_branch_with_deps` so the slice branch
+        # in via `_setup_group_branch_with_deps` so the slice branch
         # contains the integrated state of ALL its deps.
         primary_parent_ref: str
         additional_dep_refs: list[str] = []
-        if next_slice.deps:
-            primary_parent_ref = branch_by_slice.get(next_slice.deps[-1], base_branch)
+        if next_group.dependencies:
+            primary_parent_ref = branch_by_group.get(next_group.dependencies[-1], base_branch)
             additional_dep_refs = [
-                branch_by_slice[d]
-                for d in next_slice.deps[:-1]
-                if d in branch_by_slice
+                branch_by_group[d]
+                for d in next_group.dependencies[:-1]
+                if d in branch_by_group
             ]
         else:
             primary_parent_ref = base_branch
@@ -1299,8 +1299,8 @@ async def run_build(
         # isn't a git repo (tests, certain bench fixtures); the build
         # still works, just without branch isolation.
         if additional_dep_refs:
-            branch_real = _setup_slice_branch_with_deps(
-                slice_worktree, branch=slice_branch,
+            branch_real = _setup_group_branch_with_deps(
+                group_worktree, branch=group_branch,
                 primary_parent_ref=primary_parent_ref,
                 additional_dep_refs=additional_dep_refs,
             )
@@ -1312,32 +1312,32 @@ async def run_build(
                 logger.warning(
                     "slice %s: multi-dep branch setup failed (likely "
                     "sibling-dep conflict); falling back to single-parent",
-                    next_slice.id,
+                    next_group.id,
                 )
-                branch_real = _setup_slice_branch(
-                    slice_worktree, branch=slice_branch, parent_ref=primary_parent_ref,
+                branch_real = _setup_group_branch(
+                    group_worktree, branch=group_branch, parent_ref=primary_parent_ref,
                 )
         else:
-            branch_real = _setup_slice_branch(
-                slice_worktree, branch=slice_branch, parent_ref=primary_parent_ref,
+            branch_real = _setup_group_branch(
+                group_worktree, branch=group_branch, parent_ref=primary_parent_ref,
             )
         if not branch_real:
             logger.info(
                 "slice %s: per-slice branch setup skipped (not a git repo or "
                 "base branch missing); using single-worktree mode",
-                next_slice.id,
+                next_group.id,
             )
         _emit_state(
-            next_slice.id, SliceStatus.IN_PROGRESS,
-            {"branch": slice_branch, "branch_real": branch_real},
+            next_group.id, GroupStatus.IN_PROGRESS,
+            {"branch": group_branch, "branch_real": branch_real},
         )
 
         slice_result = await _run_slice(
             spec=spec,
-            slice_obj=next_slice,
+            group_obj=next_group,
             project_dir=project_dir,
-            worktree=slice_worktree,
-            branch=slice_branch,
+            worktree=group_worktree,
+            branch=group_branch,
             session_dir=session_dir,
             build_agent=build_agent,
             base_url=base_url,
@@ -1348,37 +1348,37 @@ async def run_build(
         # can do a real `git merge`. Only run when branch setup succeeded.
         # B2/B4 fix: if the commit fails, the slice branch may be empty
         # or dirty — downstream slices MUST NOT branch off it. Mark
-        # the slice BLOCKED, do NOT add to branch_by_slice, and emit
+        # the slice BLOCKED, do NOT add to branch_by_group, and emit
         # a blocked event so resume reconstructs reality.
-        if branch_real and slice_result.status == SliceStatus.PASSING:
-            committed = _commit_slice_work(
-                slice_worktree, slice_id=next_slice.id, branch=slice_branch,
+        if branch_real and slice_result.status == GroupStatus.PASSING:
+            committed = _commit_group_work(
+                group_worktree, group_id=next_group.id, branch=group_branch,
             )
             if committed:
-                branch_by_slice[next_slice.id] = slice_branch
+                branch_by_group[next_group.id] = group_branch
             else:
                 logger.warning(
                     "slice %s: failed to commit work to branch %s — marking BLOCKED",
-                    next_slice.id, slice_branch,
+                    next_group.id, group_branch,
                 )
                 import dataclasses as _dc
                 slice_result = _dc.replace(
                     slice_result,
-                    status=SliceStatus.BLOCKED,
+                    status=GroupStatus.BLOCKED,
                     failure_narrative=(
                         slice_result.failure_narrative
-                        or f"failed to commit work to slice branch {slice_branch}"
+                        or f"failed to commit work to slice branch {group_branch}"
                     ),
                 )
 
         total_cost += slice_result.cost_usd
         results.append(slice_result)
-        if slice_result.status == SliceStatus.PASSING:
-            completed_ids.add(next_slice.id)
+        if slice_result.status == GroupStatus.PASSING:
+            completed_ids.add(next_group.id)
         else:
-            blocked_ids.add(next_slice.id)
+            blocked_ids.add(next_group.id)
         _emit_state(
-            next_slice.id,
+            next_group.id,
             slice_result.status,
             {
                 "attempts": slice_result.attempts,
@@ -1396,16 +1396,16 @@ async def run_build(
     ]
     for s in pending_unreachable:
         results.append(
-            SliceResult(
-                slice_id=s.id,
-                status=SliceStatus.BLOCKED,
+            GroupResult(
+                group_id=s.id,
+                status=GroupStatus.BLOCKED,
                 attempts=0,
                 branch="",
                 worktree=project_dir,
                 failure_narrative="dep blocked",
             )
         )
-        _emit_state(s.id, SliceStatus.BLOCKED, {"narrative": "dep blocked"})
+        _emit_state(s.id, GroupStatus.BLOCKED, {"narrative": "dep blocked"})
 
     # A1b.3: Components that never ran (because a dep was blocked) are
     # also recorded as BLOCKED, mirroring Group dep-block propagation.
@@ -1430,17 +1430,55 @@ async def run_build(
 
     return BuildResult(
         spec_session_dir=session_dir,
-        slice_results=results,
+        group_results=results,
         component_results=component_results,
         total_cost_usd=total_cost,
         total_wall_s=time.monotonic() - total_t0,
     )
 
 
+def _spec_edit_invalidation_reason(session_dir: Path, group_id: str) -> str:
+    """Return the reason string from the most recent
+    `group.invalidated_by_spec_edit` event for ``group_id``, or "" if
+    none exist.
+
+    A6: read each attempt by streaming the journal — cheap, append-only.
+    Honest about silent failure: if the journal can't be read, we
+    return "" rather than erroring out (the build loop must keep going
+    on the agent's existing work).
+    """
+    journal = session_dir / "spec-state.jsonl"
+    if not journal.exists():
+        return ""
+    try:
+        with journal.open("r", encoding="utf-8") as fh:
+            lines = list(fh)
+    except OSError:
+        return ""
+    # Walk backwards: latest invalidation wins. We don't dedupe earlier
+    # ones — every emit is a fresh signal — but the latest reason is
+    # the most informative.
+    import json as _json
+    for raw in reversed(lines):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            payload = _json.loads(raw)
+        except _json.JSONDecodeError:
+            continue
+        if (
+            payload.get("kind") == "group.invalidated_by_spec_edit"
+            and str(payload.get("group_id") or "") == group_id
+        ):
+            return str(payload.get("detail") or "spec edit")
+    return ""
+
+
 async def _run_slice(
     *,
     spec: Spec,
-    slice_obj: Group,
+    group_obj: Group,
     project_dir: Path,
     worktree: Path,
     branch: str,
@@ -1448,10 +1486,10 @@ async def _run_slice(
     build_agent: BuildAgentCallable,
     base_url: str | None,
     budget: BuildBudget,
-) -> SliceResult:
+) -> GroupResult:
     """Run one slice through tasks→checks→fix retries.
 
-    Returns SliceResult with PASSING / BLOCKED / FAILED_SCOPE.
+    Returns GroupResult with PASSING / BLOCKED / FAILED_SCOPE.
     """
     slice_t0 = time.monotonic()
     last_failure = ""
@@ -1459,7 +1497,7 @@ async def _run_slice(
     accumulated_scope_warnings: list[str] = []
     cost_total = 0.0
     attempt = 0
-    raw_log_dir = session_dir / "build" / slice_obj.id
+    raw_log_dir = session_dir / "build" / group_obj.id
     # B3 fix: pre-slice snapshot of files for scope detection fallback.
     # When git is unavailable, we can't `git diff` to find modified
     # files, but a pre/post snapshot diff still gives us the truth.
@@ -1477,6 +1515,50 @@ async def _run_slice(
         attempt += 1
         elapsed = time.monotonic() - slice_t0
 
+        # A7: operator-initiated abort. If the journal carries a
+        # `group.aborted_by_user` event for THIS group, exit the retry
+        # loop early as BLOCKED. The merge queue treats aborted ids as
+        # BLOCKED (skipping merge), so the run continues with other
+        # groups. We check before issuing each attempt so an abort fired
+        # mid-retry cleanly stops on the next iteration.
+        if is_group_aborted_by_user(session_dir, group_obj.id):
+            return GroupResult(
+                group_id=group_obj.id,
+                status=GroupStatus.BLOCKED,
+                attempts=attempt - 1,
+                branch=branch,
+                worktree=worktree,
+                last_evidence=last_evidence,
+                failure_narrative="aborted_by_user",
+                scope_warnings=list(accumulated_scope_warnings),
+                cost_usd=cost_total,
+                wall_s=time.monotonic() - slice_t0,
+            )
+
+        # A6: mid-build spec edit invalidation. If the journal carries a
+        # `group.invalidated_by_spec_edit` event for THIS group, the
+        # spec the agent has been building against is stale. Abort the
+        # in-place attempt; do not commit the worktree. The runner
+        # decides whether to re-dispatch (currently: yes, once per run).
+        invalidation_reason = _spec_edit_invalidation_reason(
+            session_dir, group_obj.id
+        )
+        if invalidation_reason:
+            return GroupResult(
+                group_id=group_obj.id,
+                status=GroupStatus.BLOCKED,
+                attempts=attempt - 1,
+                branch=branch,
+                worktree=worktree,
+                last_evidence=last_evidence,
+                failure_narrative=(
+                    f"invalidated by spec edit: {invalidation_reason}"
+                ),
+                scope_warnings=list(accumulated_scope_warnings),
+                cost_usd=cost_total,
+                wall_s=time.monotonic() - slice_t0,
+            )
+
         # Bound 1: progress. If the agent's diff at end of attempt N
         # matches attempt N-1, the agent isn't producing any work →
         # stop. Strong signal: even an agent making partial progress
@@ -1486,9 +1568,9 @@ async def _run_slice(
             and current_diff_hash
             and current_diff_hash == prior_diff_hash
         ):
-            return SliceResult(
-                slice_id=slice_obj.id,
-                status=SliceStatus.BLOCKED,
+            return GroupResult(
+                group_id=group_obj.id,
+                status=GroupStatus.BLOCKED,
                 attempts=attempt - 1,
                 branch=branch,
                 worktree=worktree,
@@ -1504,9 +1586,9 @@ async def _run_slice(
 
         # Bound 2: per-group cost ceiling.
         if cost_total >= budget.per_group_cost_usd:
-            return SliceResult(
-                slice_id=slice_obj.id,
-                status=SliceStatus.BLOCKED,
+            return GroupResult(
+                group_id=group_obj.id,
+                status=GroupStatus.BLOCKED,
                 attempts=attempt - 1,
                 branch=branch,
                 worktree=worktree,
@@ -1522,9 +1604,9 @@ async def _run_slice(
 
         # Bound 3: total run cost (shared with audit).
         if budget.remaining_total_cost_usd() <= 0 and attempt > 1:
-            return SliceResult(
-                slice_id=slice_obj.id,
-                status=SliceStatus.BLOCKED,
+            return GroupResult(
+                group_id=group_obj.id,
+                status=GroupStatus.BLOCKED,
                 attempts=attempt - 1,
                 branch=branch,
                 worktree=worktree,
@@ -1540,9 +1622,9 @@ async def _run_slice(
 
         # Bound 4: per-group wall budget (backstop).
         if elapsed >= budget.per_group_wall_s:
-            return SliceResult(
-                slice_id=slice_obj.id,
-                status=SliceStatus.BLOCKED,
+            return GroupResult(
+                group_id=group_obj.id,
+                status=GroupStatus.BLOCKED,
                 attempts=attempt - 1,
                 branch=branch,
                 worktree=worktree,
@@ -1555,9 +1637,9 @@ async def _run_slice(
 
         # Bound 5: total repair budget (shared with audit).
         if budget.remaining_repair_s() <= 0 and attempt > 1:
-            return SliceResult(
-                slice_id=slice_obj.id,
-                status=SliceStatus.BLOCKED,
+            return GroupResult(
+                group_id=group_obj.id,
+                status=GroupStatus.BLOCKED,
                 attempts=attempt - 1,
                 branch=branch,
                 worktree=worktree,
@@ -1573,7 +1655,7 @@ async def _run_slice(
         attempt_t0 = time.monotonic()
         agent_input = BuildAgentInput(
             spec=spec,
-            slice=slice_obj,
+            group=group_obj,
             project_dir=project_dir,
             worktree=worktree,
             branch=branch,
@@ -1587,14 +1669,14 @@ async def _run_slice(
         # answer "did the agent see X instruction?" without parsing
         # messages.jsonl. Cheap; one file per attempt.
         try:
-            prompt_dir = session_dir / "build" / slice_obj.id / f"attempt-{attempt:02d}"
+            prompt_dir = session_dir / "build" / group_obj.id / f"attempt-{attempt:02d}"
             prompt_dir.mkdir(parents=True, exist_ok=True)
             (prompt_dir / "prompt.md").write_text(
                 _build_agent_prompt(agent_input), encoding="utf-8"
             )
         except OSError as exc:
             logger.warning("failed to archive prompt for %s attempt %d: %s",
-                           slice_obj.id, attempt, exc)
+                           group_obj.id, attempt, exc)
         try:
             agent_output = await build_agent(agent_input)
         except Exception as exc:
@@ -1604,8 +1686,8 @@ async def _run_slice(
                 budget.charge_repair(attempt_wall)
             emit(
                 session_dir,
-                "slice.attempt.failed",
-                slice_id=slice_obj.id,
+                "group.attempt.failed",
+                group_id=group_obj.id,
                 attempt=attempt,
                 detail=last_failure,
             )
@@ -1621,8 +1703,8 @@ async def _run_slice(
             last_failure = agent_output.detail or "agent reported failure"
             emit(
                 session_dir,
-                "slice.attempt.failed",
-                slice_id=slice_obj.id,
+                "group.attempt.failed",
+                group_id=group_obj.id,
                 attempt=attempt,
                 detail=last_failure,
             )
@@ -1635,25 +1717,25 @@ async def _run_slice(
         from otto.spec_amend import consume_amendment_request
 
         amended_spec, amendment_result = consume_amendment_request(
-            worktree, spec, slice_id=slice_obj.id, session_dir=session_dir
+            worktree, spec, group_id=group_obj.id, session_dir=session_dir
         )
         if amendment_result is not None:
             if amendment_result.accepted and amended_spec is not spec:
                 # Apply in place: replace the matching slice in spec.groups
                 # so subsequent slices in this build session see the change.
                 for index, s in enumerate(spec.groups):
-                    if s.id == slice_obj.id:
+                    if s.id == group_obj.id:
                         spec.groups[index] = amended_spec.groups[index]
                         break
                 spec.amendments.extend(
                     amended_spec.amendments[len(spec.amendments):]
                 )
-                # Refresh slice_obj for downstream use this attempt.
-                slice_obj = next(s for s in spec.groups if s.id == slice_obj.id)
+                # Refresh group_obj for downstream use this attempt.
+                group_obj = next(s for s in spec.groups if s.id == group_obj.id)
                 emit(
                     session_dir,
                     "amendment.applied",
-                    slice_id=slice_obj.id,
+                    group_id=group_obj.id,
                     attempt=attempt,
                     detail=(amendment_result.amendment.reason or "")[:200] if amendment_result.amendment else "",
                     trigger_event_id=amendment_result.amendment.trigger_event_id if amendment_result.amendment else "",
@@ -1662,7 +1744,7 @@ async def _run_slice(
                 emit(
                     session_dir,
                     "amendment.rejected",
-                    slice_id=slice_obj.id,
+                    group_id=group_obj.id,
                     attempt=attempt,
                     detail=amendment_result.rejection.message[:200],
                     code=amendment_result.rejection.code,
@@ -1684,7 +1766,7 @@ async def _run_slice(
             modified = _git_diff_modified_paths(worktree)
         except Exception as exc:
             modified = []
-            logger.warning("git diff failed for %s: %s", slice_obj.id, exc)
+            logger.warning("git diff failed for %s: %s", group_obj.id, exc)
         if not modified and not _is_git_repo(worktree):
             post_snapshot = _snapshot_worktree_files(worktree)
             modified = _diff_snapshots(pre_slice_snapshot, post_snapshot)
@@ -1692,15 +1774,15 @@ async def _run_slice(
                 logger.info(
                     "slice %s: scope detection via filesystem snapshot "
                     "(%d modified path(s))",
-                    slice_obj.id, len(modified),
+                    group_obj.id, len(modified),
                 )
         scope_warnings = detect_scope_violations(
-            slice_obj, spec, modified, project_root=worktree
+            group_obj, spec, modified, project_root=worktree
         )
         if scope_warnings:
             logger.info(
                 "slice %s: scope warnings (%d path(s) outside declared scope): %s",
-                slice_obj.id,
+                group_obj.id,
                 len(scope_warnings),
                 ", ".join(scope_warnings[:5]),
             )
@@ -1711,7 +1793,7 @@ async def _run_slice(
             emit(
                 session_dir,
                 "scope.warning",
-                slice_id=slice_obj.id,
+                group_id=group_obj.id,
                 attempt=attempt,
                 detail=(
                     f"scope warning (non-blocking): modified {len(scope_warnings)} "
@@ -1726,12 +1808,12 @@ async def _run_slice(
         # Run slice's deterministic checks.
         emit(
             session_dir,
-            "slice.check.started",
-            slice_id=slice_obj.id,
+            "group.check.started",
+            group_id=group_obj.id,
             attempt=attempt,
         )
         evidence_pairs = run_checks(
-            list(slice_obj.checks),
+            list(group_obj.checks),
             project_dir=project_dir,
             cwd=worktree,
             base_url=base_url,
@@ -1741,17 +1823,17 @@ async def _run_slice(
         all_pass = all(ev.passed for ev in last_evidence)
         emit(
             session_dir,
-            "slice.check.finished",
-            slice_id=slice_obj.id,
+            "group.check.finished",
+            group_id=group_obj.id,
             attempt=attempt,
             detail=("pass" if all_pass else "fail"),
             details=[ev.detail for ev in last_evidence],
         )
 
         if all_pass:
-            return SliceResult(
-                slice_id=slice_obj.id,
-                status=SliceStatus.PASSING,
+            return GroupResult(
+                group_id=group_obj.id,
+                status=GroupStatus.PASSING,
                 attempts=attempt,
                 branch=branch,
                 worktree=worktree,
@@ -1771,16 +1853,16 @@ async def _run_slice(
         current_diff_hash = _hash_worktree_diff(worktree)
         emit(
             session_dir,
-            "slice.attempt.failed",
-            slice_id=slice_obj.id,
+            "group.attempt.failed",
+            group_id=group_obj.id,
             attempt=attempt,
             detail=last_failure,
         )
 
     # Out of retries.
-    return SliceResult(
-        slice_id=slice_obj.id,
-        status=SliceStatus.BLOCKED,
+    return GroupResult(
+        group_id=group_obj.id,
+        status=GroupStatus.BLOCKED,
         attempts=attempt,
         branch=branch,
         worktree=worktree,
@@ -1799,7 +1881,7 @@ async def _run_slice(
 
 def _component_as_slice(component: Component) -> Group:
     """Adapt a Component to the Slice surface so existing helpers
-    (branch_for_slice, worktree_for_slice, BuildAgentInput) accept it.
+    (branch_for_group, worktree_for_group, BuildAgentInput) accept it.
 
     Components have no `tasks`; we synthesize a single task line from the
     component's description so the build agent has a concrete brief.
@@ -1809,9 +1891,9 @@ def _component_as_slice(component: Component) -> Group:
     description = component.description or component.name
     return Group(
         id=component.id,
-        title=component.name,
-        tasks=[description] if description else [],
-        deps=list(component.dependencies or []),
+        name=component.name,
+        feature_ids=[description] if description else [],
+        dependencies=list(component.dependencies or []),
         owned_paths=list(component.owned_paths or []),
         checks=list(component.checks or []),
     )
@@ -1838,7 +1920,7 @@ async def _run_component(
     adapter = _component_as_slice(component)
     slice_result = await _run_slice(
         spec=spec,
-        slice_obj=adapter,
+        group_obj=adapter,
         project_dir=project_dir,
         worktree=worktree,
         branch=branch,
@@ -1847,7 +1929,7 @@ async def _run_component(
         base_url=base_url,
         budget=budget,
     )
-    if slice_result.status == SliceStatus.PASSING:
+    if slice_result.status == GroupStatus.PASSING:
         comp_status = ComponentStatus.PASSING
     else:
         comp_status = ComponentStatus.BLOCKED
@@ -1884,10 +1966,10 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     checklist and built everything; subsequent slices found their work
     already done and no-op-merged.
     """
-    s = agent_input.slice
+    s = agent_input.group
     spec = agent_input.spec
     lines: list[str] = []
-    lines.append(f"# Build slice `{s.id}` — {s.title}")
+    lines.append(f"# Build slice `{s.id}` — {s.name}")
     lines.append("")
 
     # === LAYER 2 NARROWING (when feature_id is set) ===
@@ -1944,8 +2026,8 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
             f"don't see."
         )
     lines.append("")
-    if s.deps:
-        lines.append(f"This slice depends on (already landed): {', '.join(s.deps)}")
+    if s.dependencies:
+        lines.append(f"This slice depends on (already landed): {', '.join(s.dependencies)}")
     elif total > 1:
         lines.append(
             f"This is a slice with no deps — your worktree is empty "
@@ -1957,8 +2039,8 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
 
     # === TASKS (primary, the slice's job) ===
     lines.append("## What you must do (slice tasks — THIS is your job)")
-    if s.tasks:
-        for i, task in enumerate(s.tasks, 1):
+    if s.feature_ids:
+        for i, task in enumerate(s.feature_ids, 1):
             lines.append(f"  {i}. {task}")
     else:
         lines.append("  (no tasks declared — likely a structural slice; "
@@ -2275,7 +2357,7 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
             options,
             log_dir=log_subdir,
             phase_name="BUILD",
-            phase_label=f"slice/{agent_input.slice.id}/attempt-{agent_input.attempt}",
+            phase_label=f"slice/{agent_input.group.id}/attempt-{agent_input.attempt}",
             timeout=None,
             project_dir=agent_input.project_dir,
         )
@@ -2315,14 +2397,14 @@ __all__ = [
     "BuildResult",
     "ComponentResult",
     "ComponentStatus",
-    "SliceResult",
-    "SliceStatus",
+    "GroupResult",
+    "GroupStatus",
     "build_groups",
     "build_slices",
     "default_build_agent",
     "detect_scope_violations",
     "ready_components",
-    "ready_slices",
+    "ready_groups",
     "run_build",
 ]
 

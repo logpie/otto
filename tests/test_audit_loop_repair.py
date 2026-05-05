@@ -20,7 +20,7 @@ from otto.spec_compile import Feature, Group, Spec
 def _spec(*feature_ids: str, group_id: str = "g") -> Spec:
     return Spec(
         intent="x",
-        groups=[Group(id=group_id, title=group_id.title())],
+        groups=[Group(id=group_id, name=group_id.title())],
         features=[
             Feature(id=fid, name=fid, group_id=group_id) for fid in feature_ids
         ],
@@ -93,7 +93,7 @@ def test_features_without_group_skipped() -> None:
     excludes it, so repair_failing_features sees an empty selection."""
     spec = Spec(
         intent="x",
-        groups=[Group(id="g", title="G")],
+        groups=[Group(id="g", name="G")],
         features=[Feature(id="orphan", name="orphan", group_id="")],
     )
     fix_agent, fix_calls = _make_fix_agent()

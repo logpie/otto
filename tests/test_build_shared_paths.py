@@ -32,7 +32,7 @@ from otto.spec_compile import (
 
 def _spec(
     *,
-    slices: list[Group] | None = None,
+    groups: list[Group] | None = None,
     components: list[Component] | None = None,
     shared_paths: list[str] | None = None,
     shared_scaffold: list[str] | None = None,
@@ -41,7 +41,7 @@ def _spec(
         intent="t",
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=slices or [],
+        groups=groups or [],
         components=components or [],
         shared_paths=shared_paths or [],
         shared_scaffold=shared_scaffold or [],
@@ -54,9 +54,9 @@ def _spec(
 
 
 def test_shared_paths_allows_modification_no_warning(tmp_path: Path) -> None:
-    g1 = Group(id="g1", title="x", owned_paths=["src/a/**"])
-    g2 = Group(id="g2", title="y", owned_paths=["src/b/**"])
-    spec = _spec(slices=[g1, g2], shared_paths=["models.py", "app.py"])
+    g1 = Group(id="g1", name="x", owned_paths=["src/a/**"])
+    g2 = Group(id="g2", name="y", owned_paths=["src/b/**"])
+    spec = _spec(groups=[g1, g2], shared_paths=["models.py", "app.py"])
 
     # Pre-existing shared file. (models.py exists on disk → "modification".)
     (tmp_path / "models.py").write_text("# existing", encoding="utf-8")
@@ -68,8 +68,8 @@ def test_shared_paths_allows_modification_no_warning(tmp_path: Path) -> None:
 
 
 def test_shared_paths_glob_match(tmp_path: Path) -> None:
-    g1 = Group(id="g1", title="x", owned_paths=["src/a/**"])
-    spec = _spec(slices=[g1], shared_paths=["**/*.config.json"])
+    g1 = Group(id="g1", name="x", owned_paths=["src/a/**"])
+    spec = _spec(groups=[g1], shared_paths=["**/*.config.json"])
 
     (tmp_path / "x.config.json").write_text("{}", encoding="utf-8")
     violations = detect_scope_violations(
@@ -81,9 +81,9 @@ def test_shared_paths_glob_match(tmp_path: Path) -> None:
 def test_shared_paths_overrides_peer_ownership(tmp_path: Path) -> None:
     """If a path matches both a peer's owned_paths AND shared_paths,
     shared_paths wins — no scope warning."""
-    g1 = Group(id="g1", title="x", owned_paths=["src/a/**"])
-    g2 = Group(id="g2", title="y", owned_paths=["app.py"])
-    spec = _spec(slices=[g1, g2], shared_paths=["app.py"])
+    g1 = Group(id="g1", name="x", owned_paths=["src/a/**"])
+    g2 = Group(id="g2", name="y", owned_paths=["app.py"])
+    spec = _spec(groups=[g1, g2], shared_paths=["app.py"])
 
     (tmp_path / "app.py").write_text("# existing", encoding="utf-8")
     violations = detect_scope_violations(
@@ -98,9 +98,9 @@ def test_shared_paths_overrides_peer_ownership(tmp_path: Path) -> None:
 
 
 def test_peer_owned_path_still_flagged(tmp_path: Path) -> None:
-    g1 = Group(id="g1", title="x", owned_paths=["src/a/**"])
-    g2 = Group(id="g2", title="y", owned_paths=["src/b/**"])
-    spec = _spec(slices=[g1, g2])  # no shared_paths
+    g1 = Group(id="g1", name="x", owned_paths=["src/a/**"])
+    g2 = Group(id="g2", name="y", owned_paths=["src/b/**"])
+    spec = _spec(groups=[g1, g2])  # no shared_paths
 
     # Pre-existing peer file: g1 modifying it is a violation.
     (tmp_path / "src" / "b").mkdir(parents=True)
@@ -121,9 +121,9 @@ def test_peer_owned_path_still_flagged(tmp_path: Path) -> None:
 def test_component_owned_path_flagged_when_peer(tmp_path: Path) -> None:
     """A Group modifying a peer Component's owned path triggers a scope
     warning, just like a peer Group."""
-    g1 = Group(id="g1", title="x", owned_paths=["src/a/**"])
+    g1 = Group(id="g1", name="x", owned_paths=["src/a/**"])
     c1 = Component(id="ws-hub", name="WS hub", owned_paths=["src/ws/**"])
-    spec = _spec(slices=[g1], components=[c1])
+    spec = _spec(groups=[g1], components=[c1])
 
     (tmp_path / "src" / "ws").mkdir(parents=True)
     f = tmp_path / "src" / "ws" / "hub.py"
@@ -139,8 +139,8 @@ def test_component_dep_owned_path_allowed(tmp_path: Path) -> None:
     """If a Group declares a Component as a dependency, the Group may
     extend the Component's owned files (transitive-dep rule)."""
     c1 = Component(id="ws-hub", name="WS hub", owned_paths=["src/ws/**"])
-    g1 = Group(id="g1", title="x", deps=["ws-hub"], owned_paths=["src/a/**"])
-    spec = _spec(slices=[g1], components=[c1])
+    g1 = Group(id="g1", name="x", dependencies=["ws-hub"], owned_paths=["src/a/**"])
+    spec = _spec(groups=[g1], components=[c1])
 
     (tmp_path / "src" / "ws").mkdir(parents=True)
     f = tmp_path / "src" / "ws" / "hub.py"
@@ -155,9 +155,9 @@ def test_component_dep_owned_path_allowed(tmp_path: Path) -> None:
 def test_shared_paths_allows_component_to_modify(tmp_path: Path) -> None:
     """Components also benefit from shared_paths — they're units like
     Groups for scope-partition purposes."""
-    g1 = Group(id="g1", title="x", owned_paths=["src/a/**"])
+    g1 = Group(id="g1", name="x", owned_paths=["src/a/**"])
     c1 = Component(id="c1", name="C1", owned_paths=["src/c/**"])
-    spec = _spec(slices=[g1], components=[c1], shared_paths=["app.py"])
+    spec = _spec(groups=[g1], components=[c1], shared_paths=["app.py"])
 
     (tmp_path / "app.py").write_text("# existing", encoding="utf-8")
 

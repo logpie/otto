@@ -27,7 +27,7 @@ from otto.audit import (
     WalkthroughResult,
     run_audit,
 )
-from otto.build import BuildResult, SliceResult, SliceStatus
+from otto.build import BuildResult, GroupResult, GroupStatus
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.spec_compile import (
     Feature,
@@ -51,10 +51,10 @@ def _spec_with_features(*ids: str) -> Spec:
         groups=[
             Group(
                 id="g",
-                title="G",
-                deps=[],
+                name="G",
+                dependencies=[],
                 owned_paths=["src/**"],
-                tasks=["build"],
+                feature_ids=["build"],
                 checks=[RepoTestCheck(command=("true",), timeout_s=30)],
             ),
         ],
@@ -75,10 +75,10 @@ def _spec_with_features(*ids: str) -> Spec:
 def _build_result(tmp_path: Path) -> BuildResult:
     return BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(
-                slice_id="g",
-                status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(
+                group_id="g",
+                status=GroupStatus.PASSING,
                 attempts=1,
                 branch="i2p/x/g",
                 worktree=tmp_path,
@@ -91,7 +91,7 @@ def _merge_result() -> MergeQueueResult:
     return MergeQueueResult(
         landed_ids=["g"],
         results=[
-            MergeResult(slice_id="g", status=MergeStatus.LANDED, landed_commit="abc1234"),
+            MergeResult(group_id="g", status=MergeStatus.LANDED, landed_commit="abc1234"),
         ],
     )
 
@@ -103,7 +103,7 @@ def _agent_returning(verdict: AuditVerdict):
         return AuditAgentOutput(
             verdict=verdict,
             narrative=f"llm-judge says {verdict.value}",
-            slice_verdicts=[],
+            group_verdicts=[],
             cost_usd=0.0,
         )
 

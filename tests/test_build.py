@@ -1,7 +1,7 @@
 """Tests for otto/build.py — slice dispatch + retry + scope enforcement.
 
 Coverage:
-- ready_slices: dep-aware readiness, exclusion of in-flight, exclusion of completed
+- ready_groups: dep-aware readiness, exclusion of in-flight, exclusion of completed
 - detect_scope_violations: write-scope, allow-create-anywhere, allow-shared-scaffold
 - BuildBudget: per-slice retries, repair budget exhaustion
 - run_build: happy path (one slice passes first try), retry-then-pass,
@@ -21,10 +21,10 @@ from otto.build import (
     BuildAgentInput,
     BuildAgentOutput,
     BuildBudget,
-    SliceStatus,
+    GroupStatus,
     _build_agent_prompt,
     detect_scope_violations,
-    ready_slices,
+    ready_groups,
     run_build,
 )
 from otto.spec_compile import (
@@ -41,12 +41,12 @@ from otto.spec_compile import (
 # ---------------------------------------------------------------------------
 
 
-def _spec(slices: list[Group]) -> Spec:
+def _spec(groups: list[Group]) -> Spec:
     return Spec(
         intent="test intent",
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=slices,
+        groups=groups,
     )
 
 
@@ -69,40 +69,40 @@ def _no_op_failing_check() -> RepoTestCheck:
 
 
 # ---------------------------------------------------------------------------
-# ready_slices
+# ready_groups
 # ---------------------------------------------------------------------------
 
 
 def test_ready_slices_returns_no_dep_slices_first() -> None:
     spec = _spec(
         [
-            Group(id="s1", title="shell", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Group(id="s2", title="api", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", name="shell", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
+            Group(id="s2", name="api", dependencies=["s1"], owned_paths=[], feature_ids=[], checks=[]),
         ]
     )
-    assert [s.id for s in ready_slices(spec, completed_ids=set())] == ["s1"]
+    assert [s.id for s in ready_groups(spec, completed_ids=set())] == ["s1"]
 
 
 def test_ready_slices_unblocks_dependents_after_completion() -> None:
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Group(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
-            Group(id="s3", title="z", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
+            Group(id="s2", name="y", dependencies=["s1"], owned_paths=[], feature_ids=[], checks=[]),
+            Group(id="s3", name="z", dependencies=["s1"], owned_paths=[], feature_ids=[], checks=[]),
         ]
     )
-    ready = ready_slices(spec, completed_ids={"s1"})
+    ready = ready_groups(spec, completed_ids={"s1"})
     assert sorted(s.id for s in ready) == ["s2", "s3"]
 
 
 def test_ready_slices_excludes_in_progress() -> None:
     spec = _spec(
         [
-            Group(id="a", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Group(id="b", title="y", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="a", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
+            Group(id="b", name="y", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
         ]
     )
-    ready = ready_slices(spec, completed_ids=set(), in_progress_ids={"a"})
+    ready = ready_groups(spec, completed_ids=set(), in_progress_ids={"a"})
     assert [s.id for s in ready] == ["b"]
 
 
@@ -116,15 +116,15 @@ def test_scope_violations_allows_own_paths() -> None:
         [
             Group(
                 id="s1",
-                title="shell",
-                deps=[],
+                name="shell",
+                dependencies=[],
                 owned_paths=["app/main.py", "app/components/*"],
-                tasks=[],
+                feature_ids=[],
                 checks=[],
             ),
         ]
     )
-    s1 = spec.slices[0]
+    s1 = spec.groups[0]
     violations = detect_scope_violations(s1, spec, ["app/main.py", "app/components/Nav.tsx"])
     assert violations == []
 
@@ -133,11 +133,11 @@ def test_scope_violations_flags_modifications_to_peer_slice_paths(tmp_path: Path
     """Modifying a peer slice (no dep relation) IS a violation."""
     spec = _spec(
         [
-            Group(id="s1", title="shell", deps=[], owned_paths=["app/main.py"], tasks=[], checks=[]),
-            Group(id="s2", title="api", deps=[], owned_paths=["app/api.py"], tasks=[], checks=[]),
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app/main.py"], feature_ids=[], checks=[]),
+            Group(id="s2", name="api", dependencies=[], owned_paths=["app/api.py"], feature_ids=[], checks=[]),
         ]
     )
-    s2 = spec.slices[1]  # peer of s1, not a dep
+    s2 = spec.groups[1]  # peer of s1, not a dep
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "main.py").write_text("# existing", encoding="utf-8")
     violations = detect_scope_violations(s2, spec, ["app/main.py"], project_root=tmp_path)
@@ -148,11 +148,11 @@ def test_scope_violations_allows_create_in_other_slice_glob(tmp_path: Path) -> N
     """Newly created files are allowed even if they match another slice's glob."""
     spec = _spec(
         [
-            Group(id="s1", title="shell", deps=[], owned_paths=["app/components/*"], tasks=[], checks=[]),
-            Group(id="s2", title="api", deps=["s1"], owned_paths=["app/api/*"], tasks=[], checks=[]),
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app/components/*"], feature_ids=[], checks=[]),
+            Group(id="s2", name="api", dependencies=["s1"], owned_paths=["app/api/*"], feature_ids=[], checks=[]),
         ]
     )
-    s2 = spec.slices[1]
+    s2 = spec.groups[1]
     # path matches s1's glob but doesn't exist on disk → newly created → allowed
     violations = detect_scope_violations(
         s2, spec, ["app/components/PostCard.tsx"], project_root=tmp_path
@@ -164,11 +164,11 @@ def test_scope_violations_allows_shared_scaffold() -> None:
     """Files matching no slice's owned_paths are shared scaffold and allowed."""
     spec = _spec(
         [
-            Group(id="s1", title="shell", deps=[], owned_paths=["app/main.py"], tasks=[], checks=[]),
-            Group(id="s2", title="api", deps=["s1"], owned_paths=["app/api/*"], tasks=[], checks=[]),
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app/main.py"], feature_ids=[], checks=[]),
+            Group(id="s2", name="api", dependencies=["s1"], owned_paths=["app/api/*"], feature_ids=[], checks=[]),
         ]
     )
-    s2 = spec.slices[1]
+    s2 = spec.groups[1]
     violations = detect_scope_violations(s2, spec, ["package.json", "tsconfig.json"])
     assert violations == []
 
@@ -181,13 +181,13 @@ def test_scope_violations_allows_shared_scaffold_extension(tmp_path: Path) -> No
         intent="webapp",
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=[
-            Group(id="s1", title="shell", deps=[], owned_paths=["routes/auth.py"], tasks=[], checks=[]),
-            Group(id="s2", title="api", deps=["s1"], owned_paths=["routes/api.py"], tasks=[], checks=[]),
+        groups=[
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["routes/auth.py"], feature_ids=[], checks=[]),
+            Group(id="s2", name="api", dependencies=["s1"], owned_paths=["routes/api.py"], feature_ids=[], checks=[]),
         ],
         shared_scaffold=["models.py", "app.py", "database.py"],
     )
-    s2 = spec.slices[1]
+    s2 = spec.groups[1]
     # Pre-existing shared scaffold file; s2 extends it (would normally be
     # a "modify" violation if any slice owned it).
     (tmp_path / "models.py").write_text("# existing\n", encoding="utf-8")
@@ -201,12 +201,12 @@ def test_scope_violations_shared_scaffold_globs_match(tmp_path: Path) -> None:
         intent="webapp",
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=[
-            Group(id="s1", title="x", deps=[], owned_paths=["routes/x.py"], tasks=[], checks=[]),
+        groups=[
+            Group(id="s1", name="x", dependencies=[], owned_paths=["routes/x.py"], feature_ids=[], checks=[]),
         ],
         shared_scaffold=["config/*.py", "app/__init__.py"],
     )
-    s1 = spec.slices[0]
+    s1 = spec.groups[0]
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "settings.py").write_text("# ex\n", encoding="utf-8")
     violations = detect_scope_violations(
@@ -225,14 +225,14 @@ def test_scope_violations_allows_transitive_dep_modification(tmp_path: Path) -> 
     """
     spec = _spec(
         [
-            Group(id="shell", title="x", deps=[],
-                  owned_paths=["app.py", "models.py"], tasks=[], checks=[]),
-            Group(id="auth", title="y", deps=["shell"],
-                  owned_paths=["routes/auth.py"], tasks=[], checks=[]),
+            Group(id="shell", name="x", dependencies=[],
+                  owned_paths=["app.py", "models.py"], feature_ids=[], checks=[]),
+            Group(id="auth", name="y", dependencies=["shell"],
+                  owned_paths=["routes/auth.py"], feature_ids=[], checks=[]),
         ]
     )
-    auth = spec.slices[1]
-    # Pre-existing files owned by shell; auth (deps=[shell]) extends them.
+    auth = spec.groups[1]
+    # Pre-existing files owned by shell; auth (dependencies=[shell]) extends them.
     (tmp_path / "app.py").write_text("# shell\n", encoding="utf-8")
     (tmp_path / "models.py").write_text("# shell\n", encoding="utf-8")
     violations = detect_scope_violations(
@@ -245,15 +245,15 @@ def test_scope_violations_blocks_peer_slice_modification(tmp_path: Path) -> None
     """A slice may NOT modify a peer slice's owned files (no dep relation)."""
     spec = _spec(
         [
-            Group(id="shell", title="x", deps=[],
-                  owned_paths=["app.py"], tasks=[], checks=[]),
-            Group(id="posts", title="p", deps=["shell"],
-                  owned_paths=["routes/posts.py"], tasks=[], checks=[]),
-            Group(id="search", title="s", deps=["shell"],
-                  owned_paths=["routes/search.py"], tasks=[], checks=[]),
+            Group(id="shell", name="x", dependencies=[],
+                  owned_paths=["app.py"], feature_ids=[], checks=[]),
+            Group(id="posts", name="p", dependencies=["shell"],
+                  owned_paths=["routes/posts.py"], feature_ids=[], checks=[]),
+            Group(id="search", name="s", dependencies=["shell"],
+                  owned_paths=["routes/search.py"], feature_ids=[], checks=[]),
         ]
     )
-    search = spec.slices[2]
+    search = spec.groups[2]
     (tmp_path / "routes").mkdir()
     (tmp_path / "routes" / "posts.py").write_text("# posts\n", encoding="utf-8")
     # search wants to modify posts' file — should be blocked.
@@ -264,18 +264,18 @@ def test_scope_violations_blocks_peer_slice_modification(tmp_path: Path) -> None
 
 
 def test_scope_violations_transitive_dep_chain(tmp_path: Path) -> None:
-    """Dep transitivity: posts (deps=auth) (deps=shell) can modify shell's files."""
+    """Dep transitivity: posts (dependencies=auth) (dependencies=shell) can modify shell's files."""
     spec = _spec(
         [
-            Group(id="shell", title="x", deps=[],
-                  owned_paths=["app.py"], tasks=[], checks=[]),
-            Group(id="auth", title="y", deps=["shell"],
-                  owned_paths=["routes/auth.py"], tasks=[], checks=[]),
-            Group(id="posts", title="p", deps=["auth"],
-                  owned_paths=["routes/posts.py"], tasks=[], checks=[]),
+            Group(id="shell", name="x", dependencies=[],
+                  owned_paths=["app.py"], feature_ids=[], checks=[]),
+            Group(id="auth", name="y", dependencies=["shell"],
+                  owned_paths=["routes/auth.py"], feature_ids=[], checks=[]),
+            Group(id="posts", name="p", dependencies=["auth"],
+                  owned_paths=["routes/posts.py"], feature_ids=[], checks=[]),
         ]
     )
-    posts = spec.slices[2]
+    posts = spec.groups[2]
     (tmp_path / "app.py").write_text("# shell\n", encoding="utf-8")
     violations = detect_scope_violations(
         posts, spec, ["app.py"], project_root=tmp_path,
@@ -286,10 +286,10 @@ def test_scope_violations_transitive_dep_chain(tmp_path: Path) -> None:
 def test_scope_violations_recursive_glob() -> None:
     spec = _spec(
         [
-            Group(id="s1", title="shell", deps=[], owned_paths=["app/components/**"], tasks=[], checks=[]),
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app/components/**"], feature_ids=[], checks=[]),
         ]
     )
-    s1 = spec.slices[0]
+    s1 = spec.groups[0]
     # Both top-level and nested under app/components/ should match.
     violations = detect_scope_violations(s1, spec, ["app/components/Nav.tsx", "app/components/inner/Inner.tsx"])
     assert violations == []
@@ -337,10 +337,10 @@ def test_run_build_single_slice_passing_first_try(tmp_path: Path) -> None:
         [
             Group(
                 id="s1",
-                title="hello",
-                deps=[],
+                name="hello",
+                dependencies=[],
                 owned_paths=[],
-                tasks=["print hello"],
+                feature_ids=["print hello"],
                 checks=[_no_op_passing_check()],
             ),
         ]
@@ -359,7 +359,7 @@ def test_run_build_single_slice_passing_first_try(tmp_path: Path) -> None:
     )
     assert result.all_passing
     assert result.passing_ids == ["s1"]
-    assert result.slice_results[0].attempts == 1
+    assert result.group_results[0].attempts == 1
 
 
 def test_run_build_dep_aware_dispatch(tmp_path: Path) -> None:
@@ -368,16 +368,16 @@ def test_run_build_dep_aware_dispatch(tmp_path: Path) -> None:
     session_dir.mkdir()
     spec = _spec(
         [
-            Group(id="s1", title="a", deps=[], owned_paths=[], tasks=[], checks=[_no_op_passing_check()]),
-            Group(id="s2", title="b", deps=["s1"], owned_paths=[], tasks=[], checks=[_no_op_passing_check()]),
-            Group(id="s3", title="c", deps=["s2"], owned_paths=[], tasks=[], checks=[_no_op_passing_check()]),
+            Group(id="s1", name="a", dependencies=[], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
+            Group(id="s2", name="b", dependencies=["s1"], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
+            Group(id="s3", name="c", dependencies=["s2"], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
         ]
     )
 
     order: list[str] = []
 
     async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        order.append(input_.slice.id)
+        order.append(input_.group.id)
         return BuildAgentOutput(succeeded=True)
 
     result = asyncio.run(
@@ -420,7 +420,7 @@ def test_run_build_retries_on_failing_check_then_passes(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=["marker.txt"], tasks=[], checks=[inv]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=["marker.txt"], feature_ids=[], checks=[inv]),
         ]
     )
     result = asyncio.run(
@@ -432,7 +432,7 @@ def test_run_build_retries_on_failing_check_then_passes(tmp_path: Path) -> None:
         )
     )
     assert result.all_passing
-    assert result.slice_results[0].attempts == 3
+    assert result.group_results[0].attempts == 3
 
 
 def test_run_build_blocks_after_retry_exhaustion(tmp_path: Path) -> None:
@@ -444,10 +444,10 @@ def test_run_build_blocks_after_retry_exhaustion(tmp_path: Path) -> None:
         [
             Group(
                 id="s1",
-                title="hopeless",
-                deps=[],
+                name="hopeless",
+                dependencies=[],
                 owned_paths=[],
-                tasks=[],
+                feature_ids=[],
                 checks=[_no_op_failing_check()],
             ),
         ]
@@ -465,8 +465,8 @@ def test_run_build_blocks_after_retry_exhaustion(tmp_path: Path) -> None:
             budget=BuildBudget(per_slice_retries_hard_cap=8),
         )
     )
-    r = result.slice_results[0]
-    assert r.status == SliceStatus.BLOCKED
+    r = result.group_results[0]
+    assert r.status == GroupStatus.BLOCKED
     # v2 phase 2: bound by progress. Two consecutive identical failures
     # (after the first) trigger the no-progress bound, so attempts==2
     # by the time we exit. (Hard cap is 8 but rarely fires in practice.)
@@ -481,8 +481,8 @@ def test_run_build_propagates_block_to_dependent_slice(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_no_op_failing_check()]),
-            Group(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[_no_op_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[_no_op_failing_check()]),
+            Group(id="s2", name="y", dependencies=["s1"], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
         ]
     )
 
@@ -501,9 +501,9 @@ def test_run_build_propagates_block_to_dependent_slice(tmp_path: Path) -> None:
             budget=BuildBudget(per_slice_cost_usd=0.0, total_cost_usd=0.0),
         )
     )
-    by_id = {r.slice_id: r for r in result.slice_results}
-    assert by_id["s1"].status == SliceStatus.BLOCKED
-    assert by_id["s2"].status == SliceStatus.BLOCKED
+    by_id = {r.group_id: r for r in result.group_results}
+    assert by_id["s1"].status == GroupStatus.BLOCKED
+    assert by_id["s2"].status == GroupStatus.BLOCKED
     assert by_id["s2"].failure_narrative == "dep blocked"
 
 
@@ -526,13 +526,13 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Group(id="s1", title="shell", deps=[], owned_paths=["app/main.py"], tasks=[], checks=[]),
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app/main.py"], feature_ids=[], checks=[]),
             Group(
                 id="s2",
-                title="naughty-peer",
-                deps=[],  # peer of s1, NOT a dep — so it can't modify s1's files
+                name="naughty-peer",
+                dependencies=[],  # peer of s1, NOT a dep — so it can't modify s1's files
                 owned_paths=["app/api/*"],
-                tasks=[],
+                feature_ids=[],
                 checks=[_no_op_passing_check()],
             ),
         ]
@@ -540,7 +540,7 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
 
     # s2's agent illegally modifies s1's file (peer slice, no dep).
     async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        if input_.slice.id == "s2":
+        if input_.group.id == "s2":
             (input_.worktree / "app" / "main.py").write_text("# tampered\n", encoding="utf-8")
         return BuildAgentOutput(succeeded=True)
 
@@ -552,12 +552,12 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
             build_agent=fake_agent,
         )
     )
-    by_id = {r.slice_id: r for r in result.slice_results}
+    by_id = {r.group_id: r for r in result.group_results}
     # Soft-warning model: scope crossing does NOT block the slice. Both
     # slices still PASS (each has a no-op-passing check), and the
-    # warning is captured on s2's SliceResult for the proof packet.
-    assert by_id["s1"].status == SliceStatus.PASSING
-    assert by_id["s2"].status == SliceStatus.PASSING
+    # warning is captured on s2's GroupResult for the proof packet.
+    assert by_id["s1"].status == GroupStatus.PASSING
+    assert by_id["s2"].status == GroupStatus.PASSING
     assert "app/main.py" in by_id["s2"].scope_warnings
 
 
@@ -580,7 +580,7 @@ def test_run_build_handles_agent_crash_with_retry(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_no_op_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
         ]
     )
     result = asyncio.run(
@@ -592,7 +592,7 @@ def test_run_build_handles_agent_crash_with_retry(tmp_path: Path) -> None:
         )
     )
     assert result.all_passing
-    assert result.slice_results[0].attempts == 2
+    assert result.group_results[0].attempts == 2
 
 
 # ---------------------------------------------------------------------------
@@ -607,16 +607,16 @@ def test_build_agent_prompt_writeable_paths_only(tmp_path: Path) -> None:
     treated as 'fine, just a warning'). Soft-warning behavior remains
     in the runtime; the prompt no longer recites it.
     """
-    s_self = Group(id="auth", title="Auth", deps=["shell"],
-                   owned_paths=["routes/auth.py"], tasks=[], checks=[])
-    s_shell = Group(id="shell", title="Shell", deps=[],
-                    owned_paths=["app.py"], tasks=[], checks=[])
-    s_peer = Group(id="search", title="Search", deps=["shell"],
+    s_self = Group(id="auth", name="Auth", dependencies=["shell"],
+                   owned_paths=["routes/auth.py"], feature_ids=[], checks=[])
+    s_shell = Group(id="shell", name="Shell", dependencies=[],
+                    owned_paths=["app.py"], feature_ids=[], checks=[])
+    s_peer = Group(id="search", name="Search", dependencies=["shell"],
                    owned_paths=["routes/search.py", "templates/search.html"],
-                   tasks=[], checks=[])
+                   feature_ids=[], checks=[])
     spec = _spec([s_shell, s_self, s_peer])
     inp = BuildAgentInput(
-        spec=spec, slice=s_self, project_dir=tmp_path, worktree=tmp_path,
+        spec=spec, group=s_self, project_dir=tmp_path, worktree=tmp_path,
         branch="x", attempt=1,
     )
     prompt = _build_agent_prompt(inp)
@@ -640,17 +640,17 @@ def test_build_agent_prompt_writeable_paths_only(tmp_path: Path) -> None:
 def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:
     s = Group(
         id="s1",
-        title="Auth flow",
-        deps=["base"],
+        name="Auth flow",
+        dependencies=["base"],
         owned_paths=["app/auth/*"],
-        tasks=["build login form", "wire to API"],
+        feature_ids=["build login form", "wire to API"],
         checks=[_no_op_passing_check()],
     )
     spec = _spec([s])
     spec.intent = "social network MVP"
     inp = BuildAgentInput(
         spec=spec,
-        slice=s,
+        group=s,
         project_dir=tmp_path,
         worktree=tmp_path,
         branch="i2p/x/s1",
@@ -667,11 +667,11 @@ def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:
 
 
 def test_build_agent_prompt_includes_last_failure_on_retry(tmp_path: Path) -> None:
-    s = Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[])
+    s = Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[])
     spec = _spec([s])
     inp = BuildAgentInput(
         spec=spec,
-        slice=s,
+        group=s,
         project_dir=tmp_path,
         worktree=tmp_path,
         branch="x",
@@ -699,10 +699,10 @@ def test_build_agent_prompt_surfaces_otto_yaml_test_command(tmp_path: Path) -> N
         "default_branch: main\ntest_command: 'python tests/run_acceptance.py'\n",
         encoding="utf-8",
     )
-    s = Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[])
+    s = Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[])
     spec = _spec([s])
     inp = BuildAgentInput(
-        spec=spec, slice=s, project_dir=tmp_path, worktree=tmp_path,
+        spec=spec, group=s, project_dir=tmp_path, worktree=tmp_path,
         branch="x", attempt=1,
     )
     prompt = _build_agent_prompt(inp)
@@ -718,10 +718,10 @@ def test_build_agent_prompt_surfaces_seeded_test_files(tmp_path: Path) -> None:
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "run_acceptance.py").write_text("# contract\n", encoding="utf-8")
     (tmp_path / "tests" / "conftest.py").write_text("# fixtures\n", encoding="utf-8")
-    s = Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[])
+    s = Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[])
     spec = _spec([s])
     inp = BuildAgentInput(
-        spec=spec, slice=s, project_dir=tmp_path, worktree=tmp_path,
+        spec=spec, group=s, project_dir=tmp_path, worktree=tmp_path,
         branch="x", attempt=1,
     )
     prompt = _build_agent_prompt(inp)
@@ -732,10 +732,10 @@ def test_build_agent_prompt_surfaces_seeded_test_files(tmp_path: Path) -> None:
 def test_build_agent_prompt_omits_contract_section_when_no_contract(tmp_path: Path) -> None:
     """If there's no otto.yaml test_command and no seeded test files, skip
     the contract section entirely — don't push noise into the prompt."""
-    s = Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[])
+    s = Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[])
     spec = _spec([s])
     inp = BuildAgentInput(
-        spec=spec, slice=s, project_dir=tmp_path, worktree=tmp_path,
+        spec=spec, group=s, project_dir=tmp_path, worktree=tmp_path,
         branch="x", attempt=1,
     )
     prompt = _build_agent_prompt(inp)
@@ -768,14 +768,14 @@ def test_run_build_creates_real_per_slice_branch(tmp_path: Path) -> None:
     async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
         # Write to the slice's owned path so there's a real diff.
         path = input_.worktree / "slice-output.txt"
-        path.write_text(f"work from {input_.slice.id}", encoding="utf-8")
+        path.write_text(f"work from {input_.group.id}", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
 
     spec = _spec(
         [
-            Group(id="alpha", title="x", deps=[],
+            Group(id="alpha", name="x", dependencies=[],
                   owned_paths=["slice-output.txt"],
-                  tasks=["write slice-output.txt"],
+                  feature_ids=["write slice-output.txt"],
                   checks=[_no_op_passing_check()]),
         ]
     )
@@ -818,20 +818,20 @@ def test_run_build_dependent_slice_branches_off_dep_tip(tmp_path: Path) -> None:
 
     async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
         # Each slice writes its own file. Group b should see slice a's file.
-        out = input_.worktree / f"{input_.slice.id}.txt"
-        out.write_text(f"from {input_.slice.id}", encoding="utf-8")
+        out = input_.worktree / f"{input_.group.id}.txt"
+        out.write_text(f"from {input_.group.id}", encoding="utf-8")
         # Verify dep visibility for slice b.
-        if input_.slice.deps:
-            dep_file = input_.worktree / f"{input_.slice.deps[0]}.txt"
-            assert dep_file.exists(), f"dep file {dep_file} should be visible to slice {input_.slice.id}"
+        if input_.group.dependencies:
+            dep_file = input_.worktree / f"{input_.group.dependencies[0]}.txt"
+            assert dep_file.exists(), f"dep file {dep_file} should be visible to slice {input_.group.id}"
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
 
     spec = _spec(
         [
-            Group(id="a", title="A", deps=[], owned_paths=["a.txt"],
-                  tasks=["write a"], checks=[_no_op_passing_check()]),
-            Group(id="b", title="B", deps=["a"], owned_paths=["b.txt"],
-                  tasks=["write b"], checks=[_no_op_passing_check()]),
+            Group(id="a", name="A", dependencies=[], owned_paths=["a.txt"],
+                  feature_ids=["write a"], checks=[_no_op_passing_check()]),
+            Group(id="b", name="B", dependencies=["a"], owned_paths=["b.txt"],
+                  feature_ids=["write b"], checks=[_no_op_passing_check()]),
         ]
     )
     result = asyncio.run(
@@ -865,8 +865,8 @@ def test_run_build_falls_back_when_not_a_git_repo(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=["out.txt"],
-                  tasks=["write out.txt"], checks=[_no_op_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=["out.txt"],
+                  feature_ids=["write out.txt"], checks=[_no_op_passing_check()]),
         ]
     )
     result = asyncio.run(
@@ -882,14 +882,14 @@ def test_run_build_falls_back_when_not_a_git_repo(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# B2/B4: commit-failure handling — branch_by_slice not populated, slice BLOCKED,
+# B2/B4: commit-failure handling — branch_by_group not populated, slice BLOCKED,
 #        journal records BLOCKED instead of PASSING
 # ---------------------------------------------------------------------------
 
 
 def test_run_build_marks_blocked_on_commit_failure(tmp_path: Path) -> None:
-    """B2/B4: if _commit_slice_work fails (e.g., git not configured),
-    the slice is marked BLOCKED rather than PASSING. branch_by_slice is
+    """B2/B4: if _commit_group_work fails (e.g., git not configured),
+    the slice is marked BLOCKED rather than PASSING. branch_by_group is
     NOT populated, so a downstream dependent slice would not branch off
     a phantom commit.
     """
@@ -905,20 +905,20 @@ def test_run_build_marks_blocked_on_commit_failure(tmp_path: Path) -> None:
     session_dir.mkdir()
 
     async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        (input_.worktree / "a.txt").write_text(f"from {input_.slice.id}", encoding="utf-8")
+        (input_.worktree / "a.txt").write_text(f"from {input_.group.id}", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
 
     # Force commit to fail by clobbering git identity in the slice's branch.
     # Run build with the user.email config unset for *this* command — easiest
-    # is to monkeypatch _commit_slice_work to return False.
+    # is to monkeypatch _commit_group_work to return False.
     import otto.build as build_mod
-    orig = build_mod._commit_slice_work
-    build_mod._commit_slice_work = lambda *a, **k: False
+    orig = build_mod._commit_group_work
+    build_mod._commit_group_work = lambda *a, **k: False
     try:
         spec = _spec(
             [
-                Group(id="a", title="A", deps=[], owned_paths=["a.txt"],
-                      tasks=["write a"], checks=[_no_op_passing_check()]),
+                Group(id="a", name="A", dependencies=[], owned_paths=["a.txt"],
+                      feature_ids=["write a"], checks=[_no_op_passing_check()]),
             ]
         )
         result = asyncio.run(
@@ -928,11 +928,11 @@ def test_run_build_marks_blocked_on_commit_failure(tmp_path: Path) -> None:
             )
         )
     finally:
-        build_mod._commit_slice_work = orig
+        build_mod._commit_group_work = orig
 
     assert not result.all_passing
-    a_result = next(r for r in result.slice_results if r.slice_id == "a")
-    assert a_result.status == SliceStatus.BLOCKED
+    a_result = next(r for r in result.group_results if r.group_id == "a")
+    assert a_result.status == GroupStatus.BLOCKED
     assert "failed to commit work" in a_result.failure_narrative
 
 
@@ -958,7 +958,7 @@ def test_run_build_detects_scope_violation_without_git(tmp_path: Path) -> None:
     async def over_reaching_agent(input_: BuildAgentInput) -> BuildAgentOutput:
         # Group s1 owns only a.txt; the agent over-reaches and writes
         # peer.txt (owned by slice s2) — this is real over-reach.
-        if input_.slice.id == "s1":
+        if input_.group.id == "s1":
             (input_.worktree / "a.txt").write_text("ok", encoding="utf-8")
             (input_.worktree / "peer.txt").write_text("from s1 over-reach", encoding="utf-8")
         else:
@@ -967,10 +967,10 @@ def test_run_build_detects_scope_violation_without_git(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Group(id="s1", title="A", deps=[], owned_paths=["a.txt"],
-                  tasks=["write a.txt"], checks=[_no_op_passing_check()]),
-            Group(id="s2", title="B", deps=[], owned_paths=["peer.txt"],
-                  tasks=["write peer.txt"], checks=[_no_op_passing_check()]),
+            Group(id="s1", name="A", dependencies=[], owned_paths=["a.txt"],
+                  feature_ids=["write a.txt"], checks=[_no_op_passing_check()]),
+            Group(id="s2", name="B", dependencies=[], owned_paths=["peer.txt"],
+                  feature_ids=["write peer.txt"], checks=[_no_op_passing_check()]),
         ]
     )
     result = asyncio.run(
@@ -979,7 +979,7 @@ def test_run_build_detects_scope_violation_without_git(tmp_path: Path) -> None:
             build_agent=over_reaching_agent,
         )
     )
-    s1_result = next(r for r in result.slice_results if r.slice_id == "s1")
+    s1_result = next(r for r in result.group_results if r.group_id == "s1")
     # Scope detection must catch peer.txt write even without git.
     assert any("peer.txt" in w for w in s1_result.scope_warnings), (
         f"expected scope warning for peer.txt; got {s1_result.scope_warnings}"
@@ -1043,11 +1043,11 @@ def test_ensure_clean_git_state_aborts_inprogress_merge(tmp_path: Path) -> None:
 
 
 def test_setup_slice_branch_recovers_from_mid_merge(tmp_path: Path) -> None:
-    """V9: _setup_slice_branch used to silently skip when MERGE_HEAD was
+    """V9: _setup_group_branch used to silently skip when MERGE_HEAD was
     present. Now it calls _ensure_clean_git_state first to recover, so
     a leftover mid-merge from a prior phase doesn't trap the build.
     """
-    from otto.build import _setup_slice_branch
+    from otto.build import _setup_group_branch
     _init_git(tmp_path)
     # Setup conflicting state and trigger MERGE_HEAD same way as above.
     (tmp_path / "f.txt").write_text("base", encoding="utf-8")
@@ -1067,8 +1067,8 @@ def test_setup_slice_branch_recovers_from_mid_merge(tmp_path: Path) -> None:
     subprocess.run(["git", "merge", "--no-commit", "--no-ff", "branchA"],
                    cwd=tmp_path, capture_output=True, text=True, check=False)
 
-    # V9: _setup_slice_branch should now recover and succeed.
-    ok = _setup_slice_branch(tmp_path, branch="i2p/test/recovery", parent_ref="main")
+    # V9: _setup_group_branch should now recover and succeed.
+    ok = _setup_group_branch(tmp_path, branch="i2p/test/recovery", parent_ref="main")
     assert ok is True, "setup should recover from mid-merge state"
     head = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -1082,11 +1082,11 @@ def test_build_prompt_forbids_git_mutations(tmp_path: Path) -> None:
     Without this, agents have run `git merge other-slice-branch` to
     grab files from other slices, breaking branch isolation (P2).
     """
-    s = Group(id="s1", title="x", deps=[], owned_paths=["x.py"],
-              tasks=["build x.py"], checks=[_no_op_passing_check()])
+    s = Group(id="s1", name="x", dependencies=[], owned_paths=["x.py"],
+              feature_ids=["build x.py"], checks=[_no_op_passing_check()])
     spec = _spec([s])
     inp = BuildAgentInput(
-        spec=spec, slice=s, project_dir=tmp_path, worktree=tmp_path,
+        spec=spec, group=s, project_dir=tmp_path, worktree=tmp_path,
         branch="x", attempt=1,
     )
     prompt = _build_agent_prompt(inp)
@@ -1120,24 +1120,24 @@ def test_run_build_dag_slice_branch_contains_all_dep_work(tmp_path: Path) -> Non
 
     async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
         # Each slice writes its own owned file.
-        out = input_.worktree / f"{input_.slice.id}.txt"
-        out.write_text(f"from {input_.slice.id}", encoding="utf-8")
+        out = input_.worktree / f"{input_.group.id}.txt"
+        out.write_text(f"from {input_.group.id}", encoding="utf-8")
         # Group d MUST be able to see both b.txt and c.txt at build time.
-        if input_.slice.id == "d":
+        if input_.group.id == "d":
             assert (input_.worktree / "b.txt").exists(), "V12: b.txt missing"
             assert (input_.worktree / "c.txt").exists(), "V12: c.txt missing"
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
 
     spec = _spec(
         [
-            Group(id="a", title="A", deps=[], owned_paths=["a.txt"],
-                  tasks=["x"], checks=[_no_op_passing_check()]),
-            Group(id="b", title="B", deps=["a"], owned_paths=["b.txt"],
-                  tasks=["x"], checks=[_no_op_passing_check()]),
-            Group(id="c", title="C", deps=["a"], owned_paths=["c.txt"],
-                  tasks=["x"], checks=[_no_op_passing_check()]),
-            Group(id="d", title="D", deps=["b", "c"], owned_paths=["d.txt"],
-                  tasks=["x"], checks=[_no_op_passing_check()]),
+            Group(id="a", name="A", dependencies=[], owned_paths=["a.txt"],
+                  feature_ids=["x"], checks=[_no_op_passing_check()]),
+            Group(id="b", name="B", dependencies=["a"], owned_paths=["b.txt"],
+                  feature_ids=["x"], checks=[_no_op_passing_check()]),
+            Group(id="c", name="C", dependencies=["a"], owned_paths=["c.txt"],
+                  feature_ids=["x"], checks=[_no_op_passing_check()]),
+            Group(id="d", name="D", dependencies=["b", "c"], owned_paths=["d.txt"],
+                  feature_ids=["x"], checks=[_no_op_passing_check()]),
         ]
     )
     result = asyncio.run(
@@ -1148,7 +1148,7 @@ def test_run_build_dag_slice_branch_contains_all_dep_work(tmp_path: Path) -> Non
     )
     assert result.all_passing, (
         f"V12: d should see b.txt and c.txt; got: "
-        f"{[(r.slice_id, r.status, r.failure_narrative) for r in result.slice_results]}"
+        f"{[(r.group_id, r.status, r.failure_narrative) for r in result.group_results]}"
     )
     # Verify d's branch contains commits from BOTH b and c.
     log = subprocess.run(

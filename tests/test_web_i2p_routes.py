@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from otto.audit import AuditResult, AuditVerdict, SliceVerdict
-from otto.build import BuildResult, SliceResult, SliceStatus
+from otto.audit import AuditResult, AuditVerdict, GroupVerdict
+from otto.build import BuildResult, GroupResult, GroupStatus
 from otto.checks import Evidence
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.render import render_run
@@ -45,10 +45,10 @@ def _seed_session(project_dir: Path, session_id: str, *, with_proof: bool = Fals
         intent="A demo todo app",
         project_kind="webapp",
         structure=StructureDecisions(payload={"routes": [{"path": "/", "component": "Home", "key_text": "x"}], "components": [{"name": "Home", "key_text": "x"}]}),
-        slices=[
-            Group(id="shell", title="App shell", deps=[], owned_paths=["src/App.*"], tasks=["scaffold"],
+        groups=[
+            Group(id="shell", name="App shell", dependencies=[], owned_paths=["src/App.*"], feature_ids=["scaffold"],
                   checks=[RepoTestCheck(command=("npm", "run", "build"), timeout_s=60)]),
-            Group(id="counter", title="Counter widget", deps=["shell"], owned_paths=["src/Counter.*"], tasks=["increment"],
+            Group(id="counter", name="Counter widget", dependencies=["shell"], owned_paths=["src/Counter.*"], feature_ids=["increment"],
                   checks=[RepoTestCheck(command=("npm", "test"), timeout_s=120)]),
         ],
         non_goals=["multi-user"],
@@ -57,33 +57,33 @@ def _seed_session(project_dir: Path, session_id: str, *, with_proof: bool = Fals
     persist_spec(spec, spec_dir / "spec.json", allow_initial=True)
 
     # State journal — emit a few events
-    emit(session_dir, "slice.started", slice_id="shell")
-    emit(session_dir, "slice.check.finished", slice_id="shell", attempt=1, detail="pass")
-    emit(session_dir, "slice.merge.eligible", slice_id="shell")
-    emit(session_dir, "slice.started", slice_id="counter")
+    emit(session_dir, "group.started", group_id="shell")
+    emit(session_dir, "group.check.finished", group_id="shell", attempt=1, detail="pass")
+    emit(session_dir, "group.merge.eligible", group_id="shell")
+    emit(session_dir, "group.started", group_id="counter")
 
     if with_proof:
         # Render a real proof packet
         build_result = BuildResult(
             spec_session_dir=session_dir,
-            slice_results=[
-                SliceResult(slice_id="shell", status=SliceStatus.PASSING, attempts=1, branch="b", worktree=project_dir,
+            group_results=[
+                GroupResult(group_id="shell", status=GroupStatus.PASSING, attempts=1, branch="b", worktree=project_dir,
                             last_evidence=[Evidence(passed=True, started_at="x", duration_s=0.1, detail="exit=0")]),
-                SliceResult(slice_id="counter", status=SliceStatus.PASSING, attempts=1, branch="c", worktree=project_dir,
+                GroupResult(group_id="counter", status=GroupStatus.PASSING, attempts=1, branch="c", worktree=project_dir,
                             last_evidence=[Evidence(passed=True, started_at="x", duration_s=0.1, detail="exit=0")]),
             ],
         )
         merge_result = MergeQueueResult(
             landed_ids=["shell", "counter"],
             results=[
-                MergeResult(slice_id="shell", status=MergeStatus.LANDED, landed_commit="abc1234"),
-                MergeResult(slice_id="counter", status=MergeStatus.LANDED, landed_commit="def5678"),
+                MergeResult(group_id="shell", status=MergeStatus.LANDED, landed_commit="abc1234"),
+                MergeResult(group_id="counter", status=MergeStatus.LANDED, landed_commit="def5678"),
             ],
         )
         audit_result = AuditResult(
             verdict=AuditVerdict.PASSED,
             narrative="audit complete",
-            slice_verdicts=[SliceVerdict(slice_id="shell", passed=True), SliceVerdict(slice_id="counter", passed=True)],
+            group_verdicts=[GroupVerdict(group_id="shell", passed=True), GroupVerdict(group_id="counter", passed=True)],
         )
         render_run(
             spec, session_dir=session_dir,
@@ -126,7 +126,7 @@ def test_list_sessions_returns_seeded_session(tmp_path: Path) -> None:
     assert s["session_id"] == "2026-05-03-100000-aaa111"
     assert s["intent"] == "A demo todo app"
     assert s["project_kind"] == "webapp"
-    assert s["slice_count"] == 2
+    assert s["group_count"] == 2
     assert s["has_proof_packet_html"] is False
 
 
@@ -173,14 +173,14 @@ def test_get_session_returns_spec_and_state(tmp_path: Path) -> None:
     data = response.json()
     assert data["session_id"] == "s1"
     assert data["spec"]["intent"] == "A demo todo app"
-    assert len(data["spec"]["slices"]) == 2
+    assert len(data["spec"]["groups"]) == 2
     assert data["state"] is not None
     assert data["state"]["audit_started"] is False
-    slice_phases = {ss["slice_id"]: ss["phase"] for ss in data["state"]["slices"]}
-    # shell got slice.merge.eligible → ELIGIBLE phase
-    assert slice_phases["shell"] == "eligible"
-    # counter only got slice.started → BUILDING phase
-    assert slice_phases["counter"] == "building"
+    group_phases = {ss["group_id"]: ss["phase"] for ss in data["state"]["groups"]}
+    # shell got group.merge.eligible → ELIGIBLE phase
+    assert group_phases["shell"] == "eligible"
+    # counter only got group.started → BUILDING phase
+    assert group_phases["counter"] == "building"
 
 
 def test_get_session_includes_proof_packet_when_present(tmp_path: Path) -> None:

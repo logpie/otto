@@ -27,7 +27,7 @@ from otto.spec_compile import (
 def _spec(*feature_ids: str) -> Spec:
     return Spec(
         intent="x",
-        groups=[Group(id="g", title="G")],
+        groups=[Group(id="g", name="G")],
         features=[
             Feature(id=fid, name=fid.replace("-", " ").title(), group_id="g")
             for fid in feature_ids

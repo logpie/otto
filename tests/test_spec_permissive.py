@@ -33,12 +33,12 @@ def test_webapp_missing_routes_parses_with_warning() -> None:
         "intent": "x",
         "project_kind": "webapp",
         "structure": {"payload": {}},  # no routes, no components
-        "slices": [
+        "groups": [
             {"id": "s", "title": "t", "owned_paths": ["src/**"], "checks": []},
         ],
     })
     assert spec.intent == "x"
-    assert len(spec.slices) == 1
+    assert len(spec.groups) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ def test_state_invariant_prose_parses() -> None:
     spec, _warnings = parse_spec({
         "intent": "x",
         "project_kind": "webapp",
-        "slices": [{
+        "groups": [{
             "id": "s",
             "title": "t",
             "checks": [{
@@ -62,8 +62,8 @@ def test_state_invariant_prose_parses() -> None:
             }],
         }],
     })
-    assert len(spec.slices[0].checks) == 1
-    assert spec.slices[0].checks[0].kind == "state_invariant"
+    assert len(spec.groups[0].checks) == 1
+    assert spec.groups[0].checks[0].kind == "state_invariant"
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ def test_amendment_as_string_coerced_with_warning() -> None:
     spec, warnings = parse_spec({
         "intent": "x",
         "project_kind": "webapp",
-        "slices": [{"id": "s", "title": "t"}],
+        "groups": [{"id": "s", "title": "t"}],
         "amendments": ["initial review note"],
     })
     assert len(spec.amendments) == 1
@@ -90,7 +90,7 @@ def test_amendments_non_list_coerced() -> None:
     spec, warnings = parse_spec({
         "intent": "x",
         "project_kind": "webapp",
-        "slices": [{"id": "s", "title": "t"}],
+        "groups": [{"id": "s", "title": "t"}],
         "amendments": "not a list",
     })
     assert spec.amendments == []
@@ -106,30 +106,30 @@ def test_slice_id_slugified_with_warning() -> None:
     """v1: regex `^[a-z][a-z0-9_-]*$` rejected `Auth Slice`. v2.1: slugify."""
     spec, warnings = parse_spec({
         "intent": "x",
-        "slices": [{"id": "Auth Slice", "title": "t"}],
+        "groups": [{"id": "Auth Slice", "title": "t"}],
     })
-    assert spec.slices[0].id == "auth-slice"
-    assert any(w.code == "spec.coerce.slice_id" for w in warnings)
+    assert spec.groups[0].id == "auth-slice"
+    assert any(w.code == "spec.coerce.group_id" for w in warnings)
 
 
 def test_missing_slice_id_synthesized() -> None:
     spec, warnings = parse_spec({
         "intent": "x",
-        "slices": [{"title": "t"}],
+        "groups": [{"title": "t"}],
     })
-    assert spec.slices[0].id == "slice_0"
-    assert any(w.code == "spec.coerce.slice_id" for w in warnings)
+    assert spec.groups[0].id == "group_0"
+    assert any(w.code == "spec.coerce.group_id" for w in warnings)
 
 
 def test_duplicate_slice_id_auto_disambiguated() -> None:
     spec, warnings = parse_spec({
         "intent": "x",
-        "slices": [
+        "groups": [
             {"id": "auth", "title": "first"},
             {"id": "auth", "title": "second"},
         ],
     })
-    ids = [s.id for s in spec.slices]
+    ids = [s.id for s in spec.groups]
     assert ids[0] == "auth"
     assert ids[1] == "auth-2"
     assert any(w.code == "spec.coerce.duplicate_id" for w in warnings)
@@ -145,9 +145,9 @@ def test_slice_with_empty_checks_parses() -> None:
     list. Audit's contract gate verifies the integrated product."""
     spec, _warnings = parse_spec({
         "intent": "x",
-        "slices": [{"id": "structural-only", "title": "t", "checks": []}],
+        "groups": [{"id": "structural-only", "title": "t", "checks": []}],
     })
-    assert spec.slices[0].checks == []
+    assert spec.groups[0].checks == []
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +160,7 @@ def test_unknown_project_kind_parses_with_warning() -> None:
     spec, warnings = parse_spec({
         "intent": "an iOS app",
         "project_kind": "mobile",
-        "slices": [{"id": "s", "title": "t"}],
+        "groups": [{"id": "s", "title": "t"}],
     })
     assert spec.project_kind == "mobile"
     assert any(w.code == "spec.coerce.project_kind" for w in warnings)
@@ -169,7 +169,7 @@ def test_unknown_project_kind_parses_with_warning() -> None:
 def test_missing_project_kind_defaults_to_webapp() -> None:
     spec, _warnings = parse_spec({
         "intent": "x",
-        "slices": [{"id": "s", "title": "t"}],
+        "groups": [{"id": "s", "title": "t"}],
     })
     assert spec.project_kind == "webapp"
 
@@ -183,20 +183,20 @@ def test_slices_as_dict_wrapped_in_list() -> None:
     """v1: type-check failed. v2.1: the single dict is wrapped."""
     spec, warnings = parse_spec({
         "intent": "x",
-        "slices": {"id": "only", "title": "t"},
+        "groups": {"id": "only", "title": "t"},
     })
-    assert len(spec.slices) == 1
-    assert spec.slices[0].id == "only"
-    assert any(w.code == "spec.coerce.field" and w.path == "slices" for w in warnings)
+    assert len(spec.groups) == 1
+    assert spec.groups[0].id == "only"
+    assert any(w.code == "spec.coerce.field" and w.path == "groups" for w in warnings)
 
 
 def test_slice_entry_not_a_dict_dropped() -> None:
     spec, warnings = parse_spec({
         "intent": "x",
-        "slices": [{"id": "real", "title": "t"}, "garbage", 42],
+        "groups": [{"id": "real", "title": "t"}, "garbage", 42],
     })
-    assert [s.id for s in spec.slices] == ["real"]
-    coerce_warnings = [w for w in warnings if w.code == "spec.coerce.slice"]
+    assert [s.id for s in spec.groups] == ["real"]
+    coerce_warnings = [w for w in warnings if w.code == "spec.coerce.group"]
     assert len(coerce_warnings) == 2
 
 
@@ -208,7 +208,7 @@ def test_slice_entry_not_a_dict_dropped() -> None:
 def test_unknown_check_kind_drops_check_with_warning() -> None:
     spec, warnings = parse_spec({
         "intent": "x",
-        "slices": [{
+        "groups": [{
             "id": "s",
             "title": "t",
             "checks": [
@@ -217,7 +217,7 @@ def test_unknown_check_kind_drops_check_with_warning() -> None:
             ],
         }],
     })
-    kinds = [c.kind for c in spec.slices[0].checks]
+    kinds = [c.kind for c in spec.groups[0].checks]
     assert kinds == ["pytest"]
     assert any(w.code == "spec.coerce.unknown_kind" for w in warnings)
 
@@ -243,7 +243,7 @@ def test_only_intent_is_enough_to_parse() -> None:
     """Single non-empty signal is enough; the rest defaults."""
     spec, _warnings = parse_spec({"intent": "build something"})
     assert spec.intent == "build something"
-    assert spec.slices == []
+    assert spec.groups == []
 
 
 # ---------------------------------------------------------------------------
@@ -255,9 +255,9 @@ def test_spec_from_dict_drops_warnings_silently() -> None:
     """Callers that don't care about warnings still get a Spec back."""
     spec = spec_from_dict({
         "intent": "x",
-        "slices": [{"id": "s", "title": "t", "checks": [{"kind": "rumor"}]}],
+        "groups": [{"id": "s", "title": "t", "checks": [{"kind": "rumor"}]}],
     })
-    assert spec.slices[0].checks == []  # unknown kind dropped
+    assert spec.groups[0].checks == []  # unknown kind dropped
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +290,7 @@ def test_r26_cascade_fully_closed(tmp_path) -> None:  # type: ignore[no-untyped-
         "intent": "build microfeed-style social app",
         "project_kind": "webapp",
         "structure": {"payload": {}},
-        "slices": [
+        "groups": [
             {
                 "id": "shell",
                 "title": "App shell",
@@ -315,12 +315,12 @@ def test_r26_cascade_fully_closed(tmp_path) -> None:  # type: ignore[no-untyped-
     }
 
     spec, warnings = parse_spec(r26_shape)
-    assert len(spec.slices) == 2
+    assert len(spec.groups) == 2
     # Parser preserves the prose; runner is what handles it.
-    assert spec.slices[0].checks[0].expression.startswith("App shell")
+    assert spec.groups[0].checks[0].expression.startswith("App shell")
 
     # Now execute one of those checks — should be informational PASS.
-    check = spec.slices[0].checks[0]
+    check = spec.groups[0].checks[0]
     assert isinstance(check, StateInvariant)
     evidence = run_check(check, project_dir=tmp_path)
     assert evidence.passed is True
@@ -341,7 +341,7 @@ def test_coerced_spec_roundtrips_through_json() -> None:
     spec1, warnings1 = parse_spec({
         "intent": "x",
         "project_kind": "mobile",
-        "slices": [{"id": "Auth Slice", "title": "t"}],
+        "groups": [{"id": "Auth Slice", "title": "t"}],
         "amendments": ["initial note"],
     })
     assert warnings1  # first parse coerced things
@@ -350,12 +350,12 @@ def test_coerced_spec_roundtrips_through_json() -> None:
     spec2, warnings2 = parse_spec(json.loads(serialized))
 
     assert spec2.project_kind == "mobile"  # preserved
-    assert spec2.slices[0].id == "auth-slice"
+    assert spec2.groups[0].id == "auth-slice"
     assert len(spec2.amendments) == 1
     # The second parse SHOULD still warn about unknown project_kind because
     # `mobile` remains non-canonical. But slice id and amendment are now
     # canonical-shaped.
-    coerce_id_warnings = [w for w in warnings2 if w.code == "spec.coerce.slice_id"]
+    coerce_id_warnings = [w for w in warnings2 if w.code == "spec.coerce.group_id"]
     coerce_amend_warnings = [w for w in warnings2 if w.code == "spec.coerce.amendment"]
     assert not coerce_id_warnings
     assert not coerce_amend_warnings

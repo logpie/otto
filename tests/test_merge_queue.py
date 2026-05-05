@@ -7,7 +7,7 @@ Coverage:
   agent that fixes → LANDED via repair, agent that always fails →
   BLOCKED via repair retries exhausted, agent crash recovery
 - Integration commit semantics: idempotent re-run, no-op if no changes
-- Integration with build.py: passing_slice_ids feeds eligible_candidates
+- Integration with build.py: passing_group_ids feeds eligible_candidates
 """
 
 from __future__ import annotations
@@ -20,14 +20,14 @@ from otto.build import (
     BuildAgentInput,
     BuildAgentOutput,
     BuildResult,
-    SliceResult,
-    SliceStatus,
+    GroupResult,
+    GroupStatus,
 )
 from otto.merge_queue import (
     MergeBudget,
     MergeStatus,
     eligible_candidates,
-    passing_slice_ids,
+    passing_group_ids,
     run_merge_queue,
 )
 from otto.spec_compile import (
@@ -44,8 +44,8 @@ def _spec(slices: list[Group], cross_checks=None) -> Spec:
         intent="test intent",
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=slices,
-        cross_slice_checks=cross_checks or [],
+        groups=slices,
+        cross_group_checks=cross_checks or [],
     )
 
 
@@ -81,9 +81,9 @@ def _passing_state_invariant(predicate: str) -> StateInvariant:
 def test_eligible_candidates_returns_passing_with_satisfied_deps() -> None:
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Group(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
-            Group(id="s3", title="z", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
+            Group(id="s2", name="y", dependencies=["s1"], owned_paths=[], feature_ids=[], checks=[]),
+            Group(id="s3", name="z", dependencies=["s1"], owned_paths=[], feature_ids=[], checks=[]),
         ]
     )
     eligible = eligible_candidates(
@@ -95,7 +95,7 @@ def test_eligible_candidates_returns_passing_with_satisfied_deps() -> None:
 def test_eligible_candidates_excludes_already_landed() -> None:
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
         ]
     )
     eligible = eligible_candidates(
@@ -107,7 +107,7 @@ def test_eligible_candidates_excludes_already_landed() -> None:
 def test_eligible_candidates_excludes_blocked() -> None:
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
         ]
     )
     eligible = eligible_candidates(
@@ -119,8 +119,8 @@ def test_eligible_candidates_excludes_blocked() -> None:
 def test_eligible_candidates_holds_back_when_dep_unlanded() -> None:
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Group(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
+            Group(id="s2", name="y", dependencies=["s1"], owned_paths=[], feature_ids=[], checks=[]),
         ]
     )
     # s2 passing but s1 not landed → s2 not eligible
@@ -133,8 +133,8 @@ def test_eligible_candidates_holds_back_when_dep_unlanded() -> None:
 def test_eligible_candidates_fifo_within_eligible_per_spec_order() -> None:
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Group(id="s2", title="y", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
+            Group(id="s2", name="y", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
         ]
     )
     eligible = eligible_candidates(spec, passing_ids={"s1", "s2"}, landed_ids=set())
@@ -142,20 +142,20 @@ def test_eligible_candidates_fifo_within_eligible_per_spec_order() -> None:
 
 
 # ---------------------------------------------------------------------------
-# passing_slice_ids
+# passing_group_ids
 # ---------------------------------------------------------------------------
 
 
 def test_passing_slice_ids_extracts_passing_only(tmp_path: Path) -> None:
     build_result = BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(slice_id="a", status=SliceStatus.PASSING, attempts=1, branch="x", worktree=tmp_path),
-            SliceResult(slice_id="b", status=SliceStatus.BLOCKED, attempts=3, branch="y", worktree=tmp_path),
-            SliceResult(slice_id="c", status=SliceStatus.PASSING, attempts=2, branch="z", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="a", status=GroupStatus.PASSING, attempts=1, branch="x", worktree=tmp_path),
+            GroupResult(group_id="b", status=GroupStatus.BLOCKED, attempts=3, branch="y", worktree=tmp_path),
+            GroupResult(group_id="c", status=GroupStatus.PASSING, attempts=2, branch="z", worktree=tmp_path),
         ],
     )
-    assert passing_slice_ids(build_result) == ["a", "c"]
+    assert passing_group_ids(build_result) == ["a", "c"]
 
 
 # ---------------------------------------------------------------------------
@@ -170,16 +170,16 @@ def test_run_merge_queue_lands_single_slice_when_checks_pass(tmp_path: Path) -> 
     spec = _spec(
         [
             Group(
-                id="s1", title="hello", deps=[], owned_paths=[], tasks=[],
+                id="s1", name="hello", dependencies=[], owned_paths=[], feature_ids=[],
                 checks=[_passing_check()],
             ),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(
-                slice_id="s1", status=SliceStatus.PASSING, attempts=1,
+        group_results=[
+            GroupResult(
+                group_id="s1", status=GroupStatus.PASSING, attempts=1,
                 branch="i2p/x/s1", worktree=tmp_path,
             ),
         ],
@@ -199,17 +199,17 @@ def test_run_merge_queue_lands_in_dep_order(tmp_path: Path) -> None:
     session_dir.mkdir()
     spec = _spec(
         [
-            Group(id="s1", title="a", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
-            Group(id="s2", title="b", deps=["s1"], owned_paths=[], tasks=[], checks=[_passing_check()]),
-            Group(id="s3", title="c", deps=["s2"], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", name="a", dependencies=[], owned_paths=[], feature_ids=[], checks=[_passing_check()]),
+            Group(id="s2", name="b", dependencies=["s1"], owned_paths=[], feature_ids=[], checks=[_passing_check()]),
+            Group(id="s3", name="c", dependencies=["s2"], owned_paths=[], feature_ids=[], checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
-            SliceResult(slice_id="s2", status=SliceStatus.PASSING, attempts=1, branch="b2", worktree=tmp_path),
-            SliceResult(slice_id="s3", status=SliceStatus.PASSING, attempts=1, branch="b3", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
+            GroupResult(group_id="s2", status=GroupStatus.PASSING, attempts=1, branch="b2", worktree=tmp_path),
+            GroupResult(group_id="s3", status=GroupStatus.PASSING, attempts=1, branch="b3", worktree=tmp_path),
         ],
     )
     result = asyncio.run(
@@ -226,14 +226,14 @@ def test_run_merge_queue_runs_cross_slice_checks(tmp_path: Path) -> None:
     (tmp_path / "marker.txt").write_text("ok", encoding="utf-8")
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[_passing_check()]),
         ],
         cross_checks=[_passing_state_invariant("exists('marker.txt')")],
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
         ],
     )
     result = asyncio.run(
@@ -255,14 +255,14 @@ def test_run_merge_queue_blocks_on_cross_slice_failure_without_agent(tmp_path: P
     session_dir.mkdir()
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[_passing_check()]),
         ],
         cross_checks=[_passing_state_invariant("exists('does-not-exist.txt')")],
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
         ],
     )
     result = asyncio.run(
@@ -281,14 +281,14 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
     # Cross-slice check: needs marker.txt to exist. Initially absent.
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=["marker.txt"], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=["marker.txt"], feature_ids=[], checks=[_passing_check()]),
         ],
         cross_checks=[_passing_state_invariant("exists('marker.txt')")],
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
         ],
     )
 
@@ -314,14 +314,14 @@ def test_run_merge_queue_blocks_when_repair_retries_exhausted(tmp_path: Path) ->
     session_dir.mkdir()
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[_passing_check()]),
         ],
         cross_checks=[_passing_state_invariant("False")],  # always fails
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
         ],
     )
 
@@ -347,14 +347,14 @@ def test_run_merge_queue_handles_agent_crash_during_repair(tmp_path: Path) -> No
     session_dir.mkdir()
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[_passing_check()]),
         ],
         cross_checks=[_passing_state_invariant("exists('marker.txt')")],
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
         ],
     )
     counter = {"n": 0}
@@ -391,13 +391,13 @@ def test_run_merge_queue_commits_pending_changes(tmp_path: Path) -> None:
     (tmp_path / "new-file.txt").write_text("from build", encoding="utf-8")
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
         ],
     )
     result = asyncio.run(
@@ -419,13 +419,13 @@ def test_run_merge_queue_no_op_commit_when_no_changes(tmp_path: Path) -> None:
     session_dir.mkdir()
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
         ],
     )
     head_before = subprocess.run(
@@ -470,22 +470,22 @@ def test_run_merge_queue_real_merge_when_slice_branch_exists(tmp_path: Path) -> 
 
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=["slice-work.txt"],
-                  tasks=["write slice-work"], checks=[_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=["slice-work.txt"],
+                  feature_ids=["write slice-work"], checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1,
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1,
                         branch=branch, worktree=tmp_path),
         ],
     )
-    # Use the same branch_for_slice formula as the production default.
+    # Use the same branch_for_group formula as the production default.
     result = asyncio.run(
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
-            branch_for_slice=lambda s: branch,
+            branch_for_group=lambda s: branch,
         )
     )
     assert result.landed_ids == ["s1"]
@@ -513,23 +513,23 @@ def test_run_merge_queue_real_merge_redundant_when_branch_empty(tmp_path: Path) 
 
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[],
+            Group(id="s1", name="x", dependencies=[],
                   owned_paths=["expected.txt"],  # had declared work
-                  tasks=["write expected.txt"],
+                  feature_ids=["write expected.txt"],
                   checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1,
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1,
                         branch=branch, worktree=tmp_path),
         ],
     )
     result = asyncio.run(
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
-            branch_for_slice=lambda s: branch,
+            branch_for_group=lambda s: branch,
         )
     )
     # Group declared work but produced no diff — REDUNDANT, surfaced
@@ -568,21 +568,21 @@ def test_run_merge_queue_real_merge_blocks_on_conflict(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=["shared.txt"],
-                  tasks=["edit shared.txt"], checks=[_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=["shared.txt"],
+                  feature_ids=["edit shared.txt"], checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1,
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1,
                         branch="i2p/_session/s1", worktree=tmp_path),
         ],
     )
     result = asyncio.run(
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
-            branch_for_slice=lambda s: "i2p/_session/s1",
+            branch_for_group=lambda s: "i2p/_session/s1",
         )
     )
     assert result.blocked_ids == ["s1"]
@@ -603,19 +603,19 @@ def test_run_merge_queue_real_merge_blocks_on_conflict(tmp_path: Path) -> None:
 def test_passing_slice_ids_drives_eligible_candidates(tmp_path: Path) -> None:
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Group(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
+            Group(id="s2", name="y", dependencies=["s1"], owned_paths=[], feature_ids=[], checks=[]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
-            SliceResult(slice_id="s2", status=SliceStatus.BLOCKED, attempts=3, branch="b2", worktree=tmp_path),
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
+            GroupResult(group_id="s2", status=GroupStatus.BLOCKED, attempts=3, branch="b2", worktree=tmp_path),
         ],
     )
     eligible = eligible_candidates(
-        spec, passing_ids=passing_slice_ids(build_result), landed_ids=set()
+        spec, passing_ids=passing_group_ids(build_result), landed_ids=set()
     )
     assert [s.id for s in eligible] == ["s1"]
 
@@ -655,14 +655,14 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Group(id="s1", title="x", deps=[], owned_paths=["shared.txt"],
-                  tasks=["edit shared"], checks=[_passing_check()]),
+            Group(id="s1", name="x", dependencies=[], owned_paths=["shared.txt"],
+                  feature_ids=["edit shared"], checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="s1", status=SliceStatus.PASSING, attempts=1,
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1,
                         branch="i2p/_session/s1", worktree=tmp_path),
         ],
     )
@@ -685,7 +685,7 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
             build_agent=repair_agent,
-            branch_for_slice=lambda s: "i2p/_session/s1",
+            branch_for_group=lambda s: "i2p/_session/s1",
         )
     )
     # B1 assertion: when the agent runs, it MUST be on the slice's branch,
@@ -730,23 +730,23 @@ def test_merge_passes_check_against_post_merge_state(tmp_path: Path) -> None:
     # Group's check: a state invariant requiring templates/ to exist.
     spec = _spec(
         [
-            Group(id="templates_slice", title="x", deps=[],
+            Group(id="templates_slice", name="x", dependencies=[],
                   owned_paths=["templates/*"],
-                  tasks=["render index"],
+                  feature_ids=["render index"],
                   checks=[_passing_state_invariant("exists('templates')")]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="templates_slice", status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(group_id="templates_slice", status=GroupStatus.PASSING,
                         attempts=1, branch=branch, worktree=tmp_path),
         ],
     )
     result = asyncio.run(
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
-            branch_for_slice=lambda s: branch,
+            branch_for_group=lambda s: branch,
         )
     )
     # V2: with merge-first-then-verify, the check runs after the slice
@@ -783,24 +783,24 @@ def test_merge_rolls_back_when_post_merge_check_fails(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Group(id="bad_slice", title="x", deps=[],
+            Group(id="bad_slice", name="x", dependencies=[],
                   owned_paths=["broken.txt"],
-                  tasks=["create broken.txt"],
+                  feature_ids=["create broken.txt"],
                   # Check that will FAIL post-merge.
                   checks=[_passing_state_invariant("exists('not-there.txt')")]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="bad_slice", status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(group_id="bad_slice", status=GroupStatus.PASSING,
                         attempts=1, branch=branch, worktree=tmp_path),
         ],
     )
     result = asyncio.run(
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
-            branch_for_slice=lambda s: branch,
+            branch_for_group=lambda s: branch,
         )
     )
     assert result.blocked_ids == ["bad_slice"]
@@ -822,7 +822,7 @@ def test_merge_rolls_back_when_post_merge_check_fails(tmp_path: Path) -> None:
 def test_merge_handles_dirty_worktree_from_prior_check(tmp_path: Path) -> None:
     """V6: post-merge checks (V2) can leave runtime artifacts modified
     in the worktree (e.g., a Flask app's instance/db.sqlite3). The
-    next slice's `_merge_slice_branch` MUST hard-reset before its
+    next slice's `_merge_group_branch` MUST hard-reset before its
     checkout, otherwise git refuses with 'Your local changes would
     be overwritten by checkout' and the slice is spuriously BLOCKED.
     Observed in the P1 e2e re-run: 2 slices blocked back-to-back
@@ -855,22 +855,22 @@ def test_merge_handles_dirty_worktree_from_prior_check(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Group(id="clean_slice", title="x", deps=[],
-                  owned_paths=["feature.txt"], tasks=["add feature"],
+            Group(id="clean_slice", name="x", dependencies=[],
+                  owned_paths=["feature.txt"], feature_ids=["add feature"],
                   checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(slice_id="clean_slice", status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(group_id="clean_slice", status=GroupStatus.PASSING,
                         attempts=1, branch=branch, worktree=tmp_path),
         ],
     )
     result = asyncio.run(
         run_merge_queue(
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
-            branch_for_slice=lambda s: branch,
+            branch_for_group=lambda s: branch,
         )
     )
     # V6: merge should succeed despite the dirty worktree at start.

@@ -20,7 +20,7 @@ from otto.audit import (
     AuditAgentOutput,
     AuditBudget,
     AuditVerdict,
-    SliceVerdict,
+    GroupVerdict,
     WalkthroughResult,
     _parse_audit_output,
     default_walkthrough_from_spec,
@@ -30,8 +30,8 @@ from otto.build import (
     BuildAgentInput,
     BuildAgentOutput,
     BuildResult,
-    SliceResult,
-    SliceStatus,
+    GroupResult,
+    GroupStatus,
 )
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.spec_compile import (
@@ -47,26 +47,26 @@ from otto.spec_compile import (
 # ---------------------------------------------------------------------------
 
 
-def _spec(slice_ids: list[str], cross_checks=None) -> Spec:
+def _spec(group_ids: list[str], cross_checks=None) -> Spec:
     return Spec(
         intent="test intent",
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=[
-            Group(id=sid, title=sid.upper(), deps=[], owned_paths=[], tasks=[], checks=[])
-            for sid in slice_ids
+        groups=[
+            Group(id=sid, name=sid.upper(), dependencies=[], owned_paths=[], feature_ids=[], checks=[])
+            for sid in group_ids
         ],
-        cross_slice_checks=cross_checks or [],
+        cross_group_checks=cross_checks or [],
     )
 
 
 def _build_result(passing_ids: list[str], project_dir: Path) -> BuildResult:
     return BuildResult(
         spec_session_dir=project_dir,
-        slice_results=[
-            SliceResult(
-                slice_id=sid,
-                status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(
+                group_id=sid,
+                status=GroupStatus.PASSING,
                 attempts=1,
                 branch=f"i2p/x/{sid}",
                 worktree=project_dir,
@@ -80,7 +80,7 @@ def _merge_result(landed_ids: list[str]) -> MergeQueueResult:
     return MergeQueueResult(
         landed_ids=landed_ids,
         results=[
-            MergeResult(slice_id=sid, status=MergeStatus.LANDED, landed_commit="abc1234")
+            MergeResult(group_id=sid, status=MergeStatus.LANDED, landed_commit="abc1234")
             for sid in landed_ids
         ],
     )
@@ -100,9 +100,9 @@ def test_run_audit_passed_in_one_pass(tmp_path: Path) -> None:
         return AuditAgentOutput(
             verdict=AuditVerdict.PASSED,
             narrative="all good",
-            slice_verdicts=[
-                SliceVerdict(slice_id="s1", passed=True),
-                SliceVerdict(slice_id="s2", passed=True),
+            group_verdicts=[
+                GroupVerdict(group_id="s1", passed=True),
+                GroupVerdict(group_id="s2", passed=True),
             ],
             cost_usd=0.10,
         )
@@ -120,7 +120,7 @@ def test_run_audit_passed_in_one_pass(tmp_path: Path) -> None:
     assert result.verdict == AuditVerdict.PASSED
     assert result.retries == 0
     assert result.cost_usd == 0.10
-    assert len(result.slice_verdicts) == 2
+    assert len(result.group_verdicts) == 2
 
 
 def test_run_audit_runs_cross_slice_checks(tmp_path: Path) -> None:
@@ -168,22 +168,22 @@ def test_run_audit_routes_to_fix_loop_for_failing_slice(tmp_path: Path) -> None:
             return AuditAgentOutput(
                 verdict=AuditVerdict.PASSED,
                 narrative="repaired",
-                slice_verdicts=[
-                    SliceVerdict(slice_id="s1", passed=True),
-                    SliceVerdict(slice_id="s2", passed=True),
+                group_verdicts=[
+                    GroupVerdict(group_id="s1", passed=True),
+                    GroupVerdict(group_id="s2", passed=True),
                 ],
             )
         return AuditAgentOutput(
             verdict=AuditVerdict.PARTIAL,
             narrative="s1 broken",
-            slice_verdicts=[
-                SliceVerdict(slice_id="s1", passed=False, detail="missing route"),
-                SliceVerdict(slice_id="s2", passed=True),
+            group_verdicts=[
+                GroupVerdict(group_id="s1", passed=False, detail="missing route"),
+                GroupVerdict(group_id="s2", passed=True),
             ],
         )
 
     async def fix_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        fix_calls.append(input_.slice.id)
+        fix_calls.append(input_.group.id)
         pass_state["after_fix"] = True
         return BuildAgentOutput(succeeded=True, cost_usd=0.05, detail="fixed")
 
@@ -212,7 +212,7 @@ def test_run_audit_no_fix_agent_returns_first_verdict(tmp_path: Path) -> None:
         return AuditAgentOutput(
             verdict=AuditVerdict.PARTIAL,
             narrative="s1 has issues",
-            slice_verdicts=[SliceVerdict(slice_id="s1", passed=False, detail="x")],
+            group_verdicts=[GroupVerdict(group_id="s1", passed=False, detail="x")],
         )
 
     result = asyncio.run(
@@ -239,7 +239,7 @@ def test_run_audit_retries_exhausted_returns_last(tmp_path: Path) -> None:
         return AuditAgentOutput(
             verdict=AuditVerdict.PARTIAL,
             narrative="still failing",
-            slice_verdicts=[SliceVerdict(slice_id="s1", passed=False)],
+            group_verdicts=[GroupVerdict(group_id="s1", passed=False)],
         )
 
     async def useless_fix_agent(_input: BuildAgentInput) -> BuildAgentOutput:
@@ -262,7 +262,7 @@ def test_run_audit_retries_exhausted_returns_last(tmp_path: Path) -> None:
 
 
 def test_run_audit_with_blocked_verdict_and_no_failing_slices(tmp_path: Path) -> None:
-    """Verdict says blocked but slice_verdicts is empty → no actionable fix → return."""
+    """Verdict says blocked but group_verdicts is empty → no actionable fix → return."""
     spec = _spec(["s1"])
     session_dir = tmp_path / "sess"
     session_dir.mkdir()
@@ -271,7 +271,7 @@ def test_run_audit_with_blocked_verdict_and_no_failing_slices(tmp_path: Path) ->
         return AuditAgentOutput(
             verdict=AuditVerdict.BLOCKED,
             narrative="something is wrong but I can't say which slice",
-            slice_verdicts=[],
+            group_verdicts=[],
         )
 
     async def fix_agent(_input: BuildAgentInput) -> BuildAgentOutput:
@@ -343,9 +343,9 @@ def test_parse_audit_output_fenced_json() -> None:
 {
   "verdict": "passed",
   "narrative": "all good",
-  "slice_verdicts": [
-    {"slice_id": "s1", "passed": true, "detail": "ok"},
-    {"slice_id": "s2", "passed": false, "detail": "missing"}
+  "group_verdicts": [
+    {"group_id": "s1", "passed": true, "detail": "ok"},
+    {"group_id": "s2", "passed": false, "detail": "missing"}
   ]
 }
 ```
@@ -353,10 +353,10 @@ End."""
     parsed = _parse_audit_output(text)
     assert parsed.verdict == AuditVerdict.PASSED
     assert parsed.narrative == "all good"
-    assert len(parsed.slice_verdicts) == 2
-    assert parsed.slice_verdicts[0].slice_id == "s1"
-    assert parsed.slice_verdicts[0].passed is True
-    assert parsed.slice_verdicts[1].passed is False
+    assert len(parsed.group_verdicts) == 2
+    assert parsed.group_verdicts[0].group_id == "s1"
+    assert parsed.group_verdicts[0].passed is True
+    assert parsed.group_verdicts[1].passed is False
 
 
 def test_parse_audit_output_partial_verdict() -> None:
@@ -530,7 +530,7 @@ def test_audit_prompt_requests_quality_assessment(tmp_path: Path) -> None:
     from otto.audit import _audit_prompt
 
     spec = Spec(intent="x", project_kind="webapp",
-                slices=[Group(id="s", title="t")])
+                groups=[Group(id="s", name="t")])
     inp = AuditAgentInput(
         spec=spec, project_dir=tmp_path, integrated_worktree=tmp_path,
         build_summary={}, merge_summary={}, cross_slice_evidence=[],
@@ -560,7 +560,7 @@ def test_audit_parser_reads_quality_fields() -> None:
 {
   "verdict": "passed",
   "narrative": "all good",
-  "slice_verdicts": [],
+  "group_verdicts": [],
   "quality_score": 2,
   "quality_findings": [
     "home page has no nav bar",
@@ -595,7 +595,7 @@ def test_audit_prompt_requests_feature_audits(tmp_path: Path) -> None:
 
     spec = Spec(
         intent="x", project_kind="webapp",
-        slices=[Group(id="s", title="t")],
+        groups=[Group(id="s", name="t")],
         done_means=["users can sign up", "RSS feed is reachable from /"],
     )
     inp = AuditAgentInput(
@@ -621,7 +621,7 @@ def test_audit_parser_reads_feature_audits() -> None:
 {
   "verdict": "partial",
   "narrative": "mostly works",
-  "slice_verdicts": [],
+  "group_verdicts": [],
   "feature_audits": [
     {"name": "user signup", "status": "passed",
      "detail": "Signup form works",
@@ -660,7 +660,7 @@ def test_audit_blocked_capability_caps_passed_to_partial(tmp_path: Path) -> None
     session_dir.mkdir()
     spec = Spec(
         intent="x", project_kind="webapp",
-        slices=[Group(id="s1", title="t",
+        groups=[Group(id="s1", name="t",
                       checks=[StateInvariant(description="exists",
                                              expression="True")])],
         done_means=["users can sign up", "RSS reachable"],
@@ -670,7 +670,7 @@ def test_audit_blocked_capability_caps_passed_to_partial(tmp_path: Path) -> None
         return AuditAgentOutput(
             verdict=AuditVerdict.PASSED,
             narrative="functional",
-            slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
+            group_verdicts=[GroupVerdict(group_id="s1", passed=True, detail="ok")],
             feature_audits=[
                 FeatureAudit(name="users can sign up", status="passed", detail="ok"),
                 FeatureAudit(name="RSS reachable", status="blocked",
@@ -704,7 +704,7 @@ def test_audit_majority_partial_capabilities_caps_passed(tmp_path: Path) -> None
     session_dir.mkdir()
     spec = Spec(
         intent="x", project_kind="webapp",
-        slices=[Group(id="s1", title="t",
+        groups=[Group(id="s1", name="t",
                       checks=[StateInvariant(description="x", expression="True")])],
     )
 
@@ -712,7 +712,7 @@ def test_audit_majority_partial_capabilities_caps_passed(tmp_path: Path) -> None
         return AuditAgentOutput(
             verdict=AuditVerdict.PASSED,
             narrative="works",
-            slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
+            group_verdicts=[GroupVerdict(group_id="s1", passed=True, detail="ok")],
             feature_audits=[
                 FeatureAudit(name="a", status="passed", detail="ok"),
                 FeatureAudit(name="b", status="partial", detail="caveat"),
@@ -751,7 +751,7 @@ def test_caps_compose_order_independent(tmp_path: Path) -> None:
 
     spec = Spec(
         intent="x", project_kind="webapp",
-        slices=[Group(id="s1", title="t",
+        groups=[Group(id="s1", name="t",
                       checks=[StateInvariant(description="x", expression="True")])],
     )
 
@@ -759,7 +759,7 @@ def test_caps_compose_order_independent(tmp_path: Path) -> None:
         return AuditAgentOutput(
             verdict=AuditVerdict.PASSED,
             narrative="LLM thinks it works",
-            slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
+            group_verdicts=[GroupVerdict(group_id="s1", passed=True, detail="ok")],
             feature_audits=[
                 FeatureAudit(name="signup", status="passed", detail="ok"),
                 FeatureAudit(name="search", status="blocked", detail="not implemented"),
@@ -799,7 +799,7 @@ def test_capability_cap_can_escalate_to_blocked(tmp_path: Path) -> None:
     session_dir.mkdir()
     spec = Spec(
         intent="x", project_kind="webapp",
-        slices=[Group(id="s1", title="t",
+        groups=[Group(id="s1", name="t",
                       checks=[StateInvariant(description="x", expression="True")])],
     )
 
@@ -807,7 +807,7 @@ def test_capability_cap_can_escalate_to_blocked(tmp_path: Path) -> None:
         return AuditAgentOutput(
             verdict=AuditVerdict.PASSED,
             narrative="agent says ok",
-            slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
+            group_verdicts=[GroupVerdict(group_id="s1", passed=True, detail="ok")],
             feature_audits=[
                 FeatureAudit(name="a", status="blocked", detail="missing"),
                 FeatureAudit(name="b", status="blocked", detail="missing"),
@@ -836,7 +836,7 @@ def test_audit_quality_low_caps_verdict_at_partial(tmp_path: Path) -> None:
     session_dir = tmp_path / "_session"
     session_dir.mkdir()
     spec = Spec(intent="x", project_kind="webapp",
-                slices=[Group(id="s1", title="t",
+                groups=[Group(id="s1", name="t",
                               checks=[StateInvariant(description="exists",
                                                      expression="True")])])
 
@@ -844,7 +844,7 @@ def test_audit_quality_low_caps_verdict_at_partial(tmp_path: Path) -> None:
         return AuditAgentOutput(
             verdict=AuditVerdict.PASSED,
             narrative="functional",
-            slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
+            group_verdicts=[GroupVerdict(group_id="s1", passed=True, detail="ok")],
             quality_score=2,
             quality_findings=["bare-bones UI", "no nav"],
         )
@@ -874,7 +874,7 @@ def test_default_walkthrough_no_browser_journey_non_webapp_returns_no_op(tmp_pat
     spec = Spec(
         intent="x",
         project_kind="cli",
-        slices=[Group(id="s", title="t", checks=[PytestCheck(selector="x")])],
+        groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])],
     )
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
@@ -890,7 +890,7 @@ def test_synthesized_walkthrough_static_site_branch(tmp_path: Path) -> None:
     from otto.spec_compile import PytestCheck
 
     spec = Spec(intent="x", project_kind="webapp",
-                slices=[Group(id="s", title="t", checks=[PytestCheck(selector="x")])])
+                groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])])
 
     (tmp_path / "output").mkdir()
     (tmp_path / "output" / "index.html").write_text(
@@ -912,7 +912,7 @@ def test_synthesized_walkthrough_not_applicable_returns_succeeded(tmp_path: Path
     from otto.spec_compile import PytestCheck
 
     spec = Spec(intent="x", project_kind="webapp",
-                slices=[Group(id="s", title="t", checks=[PytestCheck(selector="x")])])
+                groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])])
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
     assert result.succeeded is True
@@ -930,7 +930,7 @@ def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Pat
     spec = Spec(
         intent="x",
         project_kind="webapp",
-        slices=[Group(id="s", title="t", checks=[PytestCheck(selector="x")])],
+        groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])],
     )
     # Seed a minimal Flask app at the project root.
     (tmp_path / "app.py").write_text(
@@ -960,8 +960,8 @@ def test_default_walkthrough_picks_cross_slice_journey_first(tmp_path: Path) -> 
     slice_journey = BrowserJourney(command=("echo", "slice"), evidence_globs=("s-*.png",))
     spec = Spec(
         intent="x",
-        cross_slice_checks=[cross],
-        slices=[Group(id="s", title="t", checks=[slice_journey])],
+        cross_group_checks=[cross],
+        groups=[Group(id="s", name="t", checks=[slice_journey])],
     )
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
@@ -979,7 +979,7 @@ def test_default_walkthrough_falls_back_to_slice_journey(tmp_path: Path) -> None
     slice_journey = BrowserJourney(command=("echo", "slice"), evidence_globs=("*.png",))
     spec = Spec(
         intent="x",
-        slices=[Group(id="s", title="t", checks=[slice_journey])],
+        groups=[Group(id="s", name="t", checks=[slice_journey])],
     )
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
@@ -1006,7 +1006,7 @@ def test_compose_verdict_caps_at_partial_when_merge_blocked() -> None:
     agent_output = AuditAgentOutput(
         verdict=AuditVerdict.PASSED,
         narrative="all good",
-        slice_verdicts=[],
+        group_verdicts=[],
         feature_audits=[],
         quality_score=4,
         quality_findings=[],
@@ -1019,7 +1019,7 @@ def test_compose_verdict_caps_at_partial_when_merge_blocked() -> None:
         contract_detail="",
         chain_review=chain,
         merge_blocked_ids=["home_page"],
-        total_passing_slices=3,
+        total_passing_groups=3,
     )
     assert verdict == AuditVerdict.PARTIAL, (
         f"PASSED with 1/3 blocked must downgrade to PARTIAL; got {verdict}"
@@ -1038,7 +1038,7 @@ def test_compose_verdict_caps_at_blocked_when_majority_blocked() -> None:
     agent_output = AuditAgentOutput(
         verdict=AuditVerdict.PASSED,
         narrative="",
-        slice_verdicts=[],
+        group_verdicts=[],
         feature_audits=[],
         quality_score=4,
         quality_findings=[],
@@ -1050,7 +1050,7 @@ def test_compose_verdict_caps_at_blocked_when_majority_blocked() -> None:
         contract_detail="",
         chain_review=chain,
         merge_blocked_ids=["a", "b"],
-        total_passing_slices=3,
+        total_passing_groups=3,
     )
     assert verdict == AuditVerdict.BLOCKED
 
@@ -1063,7 +1063,7 @@ def test_compose_verdict_passes_when_no_merge_blocked() -> None:
     agent_output = AuditAgentOutput(
         verdict=AuditVerdict.PASSED,
         narrative="ok",
-        slice_verdicts=[],
+        group_verdicts=[],
         feature_audits=[],
         quality_score=5,
         quality_findings=[],
@@ -1075,6 +1075,6 @@ def test_compose_verdict_passes_when_no_merge_blocked() -> None:
         contract_detail="",
         chain_review=chain,
         merge_blocked_ids=[],
-        total_passing_slices=3,
+        total_passing_groups=3,
     )
     assert verdict == AuditVerdict.PASSED

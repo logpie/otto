@@ -33,9 +33,9 @@ def _make_input(tmp_path: Path, *, kind: str = "webapp") -> AuditAgentInput:
         intent="ship something",
         project_kind=kind,
         structure=StructureDecisions(payload={}),
-        slices=[
-            Group(id="s1", title="Group One", deps=[], owned_paths=[],
-                  tasks=[], checks=[]),
+        groups=[
+            Group(id="s1", name="Group One", dependencies=[], owned_paths=[],
+                  feature_ids=[], checks=[]),
         ],
     )
     return AuditAgentInput(
@@ -142,7 +142,7 @@ def test_default_audit_agent_renders_feature_tagging_prompt(tmp_path: Path) -> N
         body = (
             "```json\n"
             "{\"verdict\": \"passed\", \"narrative\": \"stub\", "
-            "\"slice_verdicts\": [], \"feature_audits\": [], "
+            "\"group_verdicts\": [], \"feature_audits\": [], "
             "\"quality_score\": 3, \"quality_findings\": "
             "[\"a\", \"b\"]}\n"
             "```"

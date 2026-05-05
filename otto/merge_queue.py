@@ -43,11 +43,11 @@ from otto.build import (
     BuildAgentInput,
     BuildBudget,
     BuildResult,
-    SliceStatus,
+    GroupStatus,
 )
 from otto.checks import Evidence, run_checks
 from otto.spec_compile import Group, Spec
-from otto.spec_state import emit
+from otto.spec_state import aborted_group_ids, emit
 
 logger = logging.getLogger("otto.merge_queue")
 
@@ -69,7 +69,7 @@ class MergeStatus(str, Enum):
 class MergeCandidate:
     """A slice that build.py marked PASSING — eligible to land."""
 
-    slice_id: str
+    group_id: str
     branch: str
     base_branch: str  # the integration target (typically "main")
     worktree: Path
@@ -79,11 +79,11 @@ class MergeCandidate:
 class MergeResult:
     """Per-slice outcome of the merge queue."""
 
-    slice_id: str
+    group_id: str
     status: MergeStatus
     landed_commit: str = ""  # short hash of the landed integration commit
     cross_slice_evidence: list[Evidence] = field(default_factory=list)
-    slice_recheck_evidence: list[Evidence] = field(default_factory=list)
+    group_recheck_evidence: list[Evidence] = field(default_factory=list)
     failure_narrative: str = ""
     repair_attempts: int = 0
     cost_usd: float = 0.0
@@ -142,7 +142,7 @@ def eligible_candidates(
 
     Reads `group.dependencies` (canonical new-design name); the Group
     dataclass exposes `.dependencies` as an alias for the legacy
-    `.deps` field, so callers that still set `Group(deps=[...])`
+    `.dependencies` field, so callers that still set `Group(deps=[...])`
     continue to work.
     """
     passing = set(passing_ids)
@@ -221,9 +221,9 @@ def _component_as_merge_slice(component: Any) -> Group:
     description = getattr(component, "description", "") or component.name
     return Group(
         id=component.id,
-        title=component.name,
-        tasks=[description] if description else [],
-        deps=list(getattr(component, "dependencies", []) or []),
+        name=component.name,
+        feature_ids=[description] if description else [],
+        dependencies=list(getattr(component, "dependencies", []) or []),
         owned_paths=list(getattr(component, "owned_paths", []) or []),
         checks=list(getattr(component, "checks", []) or []),
     )
@@ -259,7 +259,7 @@ async def run_merge_queue(
     build_agent: BuildAgentCallable | None = None,
     budget: MergeBudget | None = None,
     shared_budget: BuildBudget | None = None,
-    branch_for_slice: Callable[[Group], str] | None = None,
+    branch_for_group: Callable[[Group], str] | None = None,
     git_runner: Callable[[list[str], Path], subprocess.CompletedProcess[str]] | None = None,
 ) -> MergeQueueResult:
     """Process all merge candidates from a BuildResult.
@@ -276,11 +276,11 @@ async def run_merge_queue(
             (no repair). This makes the merge queue testable without an
             agent and matches Phase A coexistence — repair lands later.
         budget: Per-slice repair bounds.
-        branch_for_slice: Branch naming. Default mirrors build.py.
+        branch_for_group: Branch naming. Default mirrors build.py.
         git_runner: Subprocess hook for tests. Default uses real git.
     """
     budget = budget or MergeBudget()
-    branch_for_slice = branch_for_slice or (lambda s: f"i2p/{session_dir.name}/{s.id}")
+    branch_for_group = branch_for_group or (lambda s: f"i2p/{session_dir.name}/{s.id}")
     git = git_runner or _git
 
     passing_ids = list(build_result.passing_ids)
@@ -292,7 +292,13 @@ async def run_merge_queue(
         getattr(build_result, "passing_component_ids", []) or []
     )
     landed_ids: list[str] = []
-    blocked_ids: list[str] = []
+    # A7: pre-populate blocked_ids with operator-aborted groups so the
+    # eligibility check skips them. The build phase already returns
+    # BLOCKED for aborted groups (see otto/build.py `_run_slice`), so
+    # they shouldn't appear in `passing_ids`; this is a defense-in-depth
+    # belt-and-suspenders for cases where a group passed build but the
+    # operator aborted before merge could pick it up.
+    blocked_ids: list[str] = list(aborted_group_ids(session_dir))
     redundant_ids: list[str] = []
     results: list[MergeResult] = []
     total_t0 = time.monotonic()
@@ -323,7 +329,7 @@ async def run_merge_queue(
         # until that Group has landed.
         if eligible:
             unit = eligible[0]
-            slice_obj = unit
+            group_obj = unit
             unit_kind = "group"
         else:
             unit = eligible_comps[0]
@@ -332,23 +338,23 @@ async def run_merge_queue(
             # works verbatim — Component.owned_paths / dependencies /
             # checks pass through exactly like Groups (mirroring the
             # build.py adapter `_component_as_slice`).
-            slice_obj = _component_as_merge_slice(unit)
+            group_obj = _component_as_merge_slice(unit)
             unit_kind = "component"
         candidate = MergeCandidate(
-            slice_id=slice_obj.id,
-            branch=branch_for_slice(slice_obj),
+            group_id=group_obj.id,
+            branch=branch_for_group(group_obj),
             base_branch=base_branch,
             worktree=project_dir,
         )
         emit(
             session_dir,
-            "slice.merge.started",
-            slice_id=slice_obj.id,
+            "group.merge.started",
+            group_id=group_obj.id,
             detail=f"branch={candidate.branch} base={base_branch} kind={unit_kind}",
         )
         result = await _process_candidate(
             spec=spec,
-            slice_obj=slice_obj,
+            group_obj=group_obj,
             candidate=candidate,
             project_dir=project_dir,
             session_dir=session_dir,
@@ -361,11 +367,11 @@ async def run_merge_queue(
         total_cost += result.cost_usd
         results.append(result)
         if result.status == MergeStatus.LANDED:
-            landed_ids.append(slice_obj.id)
+            landed_ids.append(group_obj.id)
             emit(
                 session_dir,
-                "slice.merge.landed",
-                slice_id=slice_obj.id,
+                "group.merge.landed",
+                group_id=group_obj.id,
                 detail=result.landed_commit,
             )
         elif result.status == MergeStatus.REDUNDANT:
@@ -377,20 +383,20 @@ async def run_merge_queue(
             # depending on this one can still proceed, since the
             # required state is in HEAD via the over-reaching slice).
             # `redundant_ids` is the diagnostic side-channel.
-            landed_ids.append(slice_obj.id)
-            redundant_ids.append(slice_obj.id)
+            landed_ids.append(group_obj.id)
+            redundant_ids.append(group_obj.id)
             emit(
                 session_dir,
-                "slice.merge.redundant",
-                slice_id=slice_obj.id,
+                "group.merge.redundant",
+                group_id=group_obj.id,
                 detail=result.failure_narrative or "no new diff",
             )
         else:
-            blocked_ids.append(slice_obj.id)
+            blocked_ids.append(group_obj.id)
             emit(
                 session_dir,
-                "slice.blocked",
-                slice_id=slice_obj.id,
+                "group.blocked",
+                group_id=group_obj.id,
                 detail=result.failure_narrative,
             )
 
@@ -407,7 +413,7 @@ async def run_merge_queue(
 async def _process_candidate(
     *,
     spec: Spec,
-    slice_obj: Group,
+    group_obj: Group,
     candidate: MergeCandidate,
     project_dir: Path,
     session_dir: Path,
@@ -429,13 +435,13 @@ async def _process_candidate(
     cost_total = 0.0
     repair_attempts = 0
     last_failure = ""
-    raw_log_dir = session_dir / "merge" / slice_obj.id
+    raw_log_dir = session_dir / "merge" / group_obj.id
 
     while True:
         wall = time.monotonic() - t0
         if wall >= budget.per_slice_wall_s:
             return MergeResult(
-                slice_id=slice_obj.id,
+                group_id=group_obj.id,
                 status=MergeStatus.BLOCKED,
                 cross_slice_evidence=[],
                 failure_narrative=f"merge wall budget exhausted after {wall:.0f}s",
@@ -452,17 +458,17 @@ async def _process_candidate(
         # tested its own deliverable (e.g., "Templates exist") failed
         # spuriously. New order: merge first → run all checks against
         # the integrated post-merge state → rollback if checks fail.
-        slice_evidence: list[Evidence] = []
+        group_evidence: list[Evidence] = []
         cross_evidence: list[Evidence] = []
-        outcome = _merge_slice_branch(
+        outcome = _merge_group_branch(
             git, candidate.worktree,
-            slice_id=slice_obj.id, branch=candidate.branch,
+            group_id=group_obj.id, branch=candidate.branch,
             base_branch=candidate.base_branch,
         )
 
         # REDUNDANT semantics (Pattern A): preserve.
         merge_status = outcome.status
-        if merge_status == MergeStatus.REDUNDANT and not (slice_obj.tasks or slice_obj.owned_paths):
+        if merge_status == MergeStatus.REDUNDANT and not (group_obj.feature_ids or group_obj.owned_paths):
             merge_status = MergeStatus.LANDED
 
         # Conflict → route to repair (B1 path).
@@ -474,17 +480,17 @@ async def _process_candidate(
             # Merge succeeded — worktree is now `base + this_slice`.
             # Run slice + cross-slice checks against this integrated state.
             slice_pairs = run_checks(
-                list(slice_obj.checks),
+                list(group_obj.checks),
                 project_dir=project_dir,
                 cwd=candidate.worktree,
                 base_url=base_url,
                 raw_log_dir=raw_log_dir / f"slice-attempt-{repair_attempts:02d}",
             )
-            slice_evidence = [ev for _check, ev in slice_pairs]
-            slice_pass = all(ev.passed for ev in slice_evidence)
+            group_evidence = [ev for _check, ev in slice_pairs]
+            slice_pass = all(ev.passed for ev in group_evidence)
 
             cross_pairs = run_checks(
-                list(spec.cross_slice_checks),
+                list(spec.cross_group_checks),
                 project_dir=project_dir,
                 cwd=candidate.worktree,
                 base_url=base_url,
@@ -495,11 +501,11 @@ async def _process_candidate(
 
             if slice_pass and cross_pass:
                 return MergeResult(
-                    slice_id=slice_obj.id,
+                    group_id=group_obj.id,
                     status=merge_status,
                     landed_commit=outcome.head_after,
                     cross_slice_evidence=cross_evidence,
-                    slice_recheck_evidence=slice_evidence,
+                    group_recheck_evidence=group_evidence,
                     repair_attempts=repair_attempts,
                     cost_usd=cost_total,
                     wall_s=time.monotonic() - t0,
@@ -526,7 +532,7 @@ async def _process_candidate(
         # If we fell through from post-merge check failure (rollback path),
         # both summaries are None and we compute them here.
         if slice_failed_summaries is None:
-            slice_failed_summaries = [ev.detail for ev in slice_evidence if not ev.passed]
+            slice_failed_summaries = [ev.detail for ev in group_evidence if not ev.passed]
         if cross_failed_summaries is None:
             cross_failed_summaries = [ev.detail for ev in cross_evidence if not ev.passed]
             last_failure = "post-merge verification failed"
@@ -538,10 +544,10 @@ async def _process_candidate(
         # If we have no agent or no repair retries left → BLOCKED.
         if build_agent is None:
             return MergeResult(
-                slice_id=slice_obj.id,
+                group_id=group_obj.id,
                 status=MergeStatus.BLOCKED,
                 cross_slice_evidence=cross_evidence,
-                slice_recheck_evidence=slice_evidence,
+                group_recheck_evidence=group_evidence,
                 failure_narrative=last_failure + " (no build_agent for repair)",
                 repair_attempts=repair_attempts,
                 cost_usd=cost_total,
@@ -549,10 +555,10 @@ async def _process_candidate(
             )
         if repair_attempts >= budget.per_slice_repair_retries:
             return MergeResult(
-                slice_id=slice_obj.id,
+                group_id=group_obj.id,
                 status=MergeStatus.BLOCKED,
                 cross_slice_evidence=cross_evidence,
-                slice_recheck_evidence=slice_evidence,
+                group_recheck_evidence=group_evidence,
                 failure_narrative=last_failure + " (repair retries exhausted)",
                 repair_attempts=repair_attempts,
                 cost_usd=cost_total,
@@ -562,7 +568,7 @@ async def _process_candidate(
         # 4: invoke the build agent for repair.
         # B1 fix: when a slice branch exists, the repair MUST happen on
         # the slice's branch — not on base_branch. After
-        # `_merge_slice_branch` aborts a conflict, the worktree is left
+        # `_merge_group_branch` aborts a conflict, the worktree is left
         # on base_branch; if the agent edits there, the slice branch
         # never gets the fix and the next merge attempt repeats the
         # same conflict. Checkout the slice's branch first, repair,
@@ -579,13 +585,13 @@ async def _process_candidate(
                     f"{co.stderr.strip()[:200]}"
                 )
                 emit(
-                    session_dir, "slice.attempt.failed",
-                    slice_id=slice_obj.id, attempt=repair_attempts, detail=last_failure,
+                    session_dir, "group.attempt.failed",
+                    group_id=group_obj.id, attempt=repair_attempts, detail=last_failure,
                 )
                 continue
         agent_input = BuildAgentInput(
             spec=spec,
-            slice=slice_obj,
+            group=group_obj,
             project_dir=project_dir,
             worktree=candidate.worktree,
             branch=candidate.branch,
@@ -602,8 +608,8 @@ async def _process_candidate(
                 f"${shared_budget.total_cost_usd:.2f})"
             )
             emit(
-                session_dir, "slice.attempt.failed",
-                slice_id=slice_obj.id, attempt=repair_attempts, detail=last_failure,
+                session_dir, "group.attempt.failed",
+                group_id=group_obj.id, attempt=repair_attempts, detail=last_failure,
             )
             if on_slice_branch:
                 git(["checkout", candidate.base_branch], candidate.worktree)
@@ -617,8 +623,8 @@ async def _process_candidate(
                 last_failure = agent_output.detail or "agent reported failure during merge repair"
                 emit(
                     session_dir,
-                    "slice.attempt.failed",
-                    slice_id=slice_obj.id,
+                    "group.attempt.failed",
+                    group_id=group_obj.id,
                     attempt=repair_attempts,
                     detail=last_failure,
                 )
@@ -634,7 +640,7 @@ async def _process_candidate(
                 if add.returncode == 0:
                     status = git(["status", "--porcelain"], candidate.worktree)
                     if (status.stdout or "").strip():
-                        msg = f"i2p({slice_obj.id}): repair on {candidate.branch} (attempt {repair_attempts})"
+                        msg = f"i2p({group_obj.id}): repair on {candidate.branch} (attempt {repair_attempts})"
                         commit = git(
                             ["commit", "-q", "-m", msg, "--no-verify"],
                             candidate.worktree,
@@ -642,7 +648,7 @@ async def _process_candidate(
                         if commit.returncode != 0:
                             logger.warning(
                                 "repair commit failed for slice %s: %s",
-                                slice_obj.id, commit.stderr,
+                                group_obj.id, commit.stderr,
                             )
                 git(["checkout", candidate.base_branch], candidate.worktree)
         except Exception as exc:
@@ -652,8 +658,8 @@ async def _process_candidate(
             )
             emit(
                 session_dir,
-                "slice.attempt.failed",
-                slice_id=slice_obj.id,
+                "group.attempt.failed",
+                group_id=group_obj.id,
                 attempt=repair_attempts,
                 detail=last_failure,
             )
@@ -707,11 +713,11 @@ def _branch_exists(
     return proc.returncode == 0 and bool((proc.stdout or "").strip())
 
 
-def _merge_slice_branch(
+def _merge_group_branch(
     git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
     worktree: Path,
     *,
-    slice_id: str,
+    group_id: str,
     branch: str,
     base_branch: str,
 ) -> CommitOutcome:
@@ -732,7 +738,7 @@ def _merge_slice_branch(
     """
     # 1. Verify slice branch exists. If not, fall back to commit-in-worktree.
     if not _branch_exists(git, worktree, branch):
-        return _commit_integration(git, worktree, slice_id=slice_id, branch=branch)
+        return _commit_integration(git, worktree, group_id=group_id, branch=branch)
 
     # V9 fix: abort any in-progress merge/rebase/cherry-pick BEFORE the
     # reset+clean. Without this, MERGE_HEAD persists and `git checkout
@@ -778,7 +784,7 @@ def _merge_slice_branch(
         )
 
     # 4. Real merge.
-    msg = f"i2p({slice_id}): merge slice branch {branch}"
+    msg = f"i2p({group_id}): merge slice branch {branch}"
     merge = git(["merge", "--no-ff", "-m", msg, branch], worktree)
     if merge.returncode != 0:
         # Conflict — abort cleanly.
@@ -804,7 +810,7 @@ def _commit_integration(
     git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
     worktree: Path,
     *,
-    slice_id: str,
+    group_id: str,
     branch: str,
 ) -> CommitOutcome:
     """Stage and commit current worktree state as a slice-tagged commit.
@@ -812,7 +818,7 @@ def _commit_integration(
     Phase A fallback path — used when the slice branch doesn't exist
     (no per-slice branches were set up, e.g., test fixtures without
     git, or non-git project_dir). When a slice branch DOES exist,
-    `_merge_slice_branch` is used instead.
+    `_merge_group_branch` is used instead.
 
     Honestly reports what happened. Captures HEAD before and after,
     distinguishes real commits from no-ops and from failures.
@@ -846,10 +852,10 @@ def _commit_integration(
             detail="no changes to commit (slice produced no diff)",
         )
 
-    msg = f"i2p({slice_id}): land slice from {branch}"
+    msg = f"i2p({group_id}): land slice from {branch}"
     commit = git(["commit", "-q", "-m", msg, "--no-verify"], worktree)
     if commit.returncode != 0:
-        logger.warning("git commit failed for slice %s: %s", slice_id, commit.stderr)
+        logger.warning("git commit failed for slice %s: %s", group_id, commit.stderr)
         return CommitOutcome(
             status=MergeStatus.BLOCKED,
             head_before=head_before,
@@ -887,9 +893,9 @@ def _commit_integration(
 # ---------------------------------------------------------------------------
 
 
-def passing_slice_ids(build_result: BuildResult) -> list[str]:
+def passing_group_ids(build_result: BuildResult) -> list[str]:
     """Return the slice ids the build loop marked PASSING (merge candidates)."""
-    return [r.slice_id for r in build_result.slice_results if r.status == SliceStatus.PASSING]
+    return [r.group_id for r in build_result.group_results if r.status == GroupStatus.PASSING]
 
 
 __all__ = [
@@ -900,7 +906,7 @@ __all__ = [
     "MergeStatus",
     "eligible_candidates",
     "eligible_components",
-    "passing_slice_ids",
+    "passing_group_ids",
     "run_merge_queue",
     "shared_paths_set",
 ]

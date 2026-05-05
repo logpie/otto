@@ -43,12 +43,12 @@ def _valid_webapp_spec() -> Spec:
         intent="a bookmark manager",
         project_kind="webapp",
         structure=StructureDecisions(payload=_valid_webapp_payload()),
-        slices=[
+        groups=[
             Group(
                 id="shell",
-                title="App shell",
-                tasks=["scaffold the SPA", "add Home route"],
-                deps=[],
+                name="App shell",
+                feature_ids=["scaffold the SPA", "add Home route"],
+                dependencies=[],
                 owned_paths=["src/App.*", "src/components/Home.*"],
                 checks=[
                     BrowserJourney(
@@ -77,10 +77,10 @@ def test_spec_roundtrip_through_json_preserves_structure() -> None:
     assert deserialized.intent == spec.intent
     assert deserialized.project_kind == spec.project_kind
     assert deserialized.structure.payload == spec.structure.payload
-    assert len(deserialized.slices) == 1
-    slice_a, slice_b = deserialized.slices[0], spec.slices[0]
+    assert len(deserialized.groups) == 1
+    slice_a, slice_b = deserialized.groups[0], spec.groups[0]
     assert slice_a.id == slice_b.id
-    assert slice_a.tasks == slice_b.tasks
+    assert slice_a.feature_ids == slice_b.feature_ids
     assert slice_a.owned_paths == slice_b.owned_paths
     # BrowserJourney command/evidence_globs should round-trip as tuples
     assert slice_a.checks[0].command == slice_b.checks[0].command
@@ -93,11 +93,11 @@ def test_spec_roundtrip_supports_all_check_kinds() -> None:
         intent="multi-check fixture",
         project_kind="webapp",
         structure=StructureDecisions(payload=_valid_webapp_payload()),
-        slices=[
+        groups=[
             Group(
                 id="kitchen-sink",
-                title="every check kind",
-                tasks=["t"],
+                name="every check kind",
+                feature_ids=["t"],
                 owned_paths=["src/**/*"],
                 checks=[
                     PytestCheck(selector="tests/test_x.py::test_y"),
@@ -108,7 +108,7 @@ def test_spec_roundtrip_supports_all_check_kinds() -> None:
         ],
     )
     rebuilt = spec_from_dict(spec_to_dict(spec))
-    kinds = [c.kind for c in rebuilt.slices[0].checks]
+    kinds = [c.kind for c in rebuilt.groups[0].checks]
     assert kinds == ["pytest", "api_probe", "browser_journey"]
 
 
@@ -123,10 +123,10 @@ def test_unknown_check_kind_is_dropped_with_warning() -> None:
         "intent": "x",
         "project_kind": "webapp",
         "structure": {"payload": _valid_webapp_payload()},
-        "slices": [
+        "groups": [
             {
                 "id": "s",
-                "title": "t",
+                "name": "t",
                 "tasks": [],
                 "deps": [],
                 "owned_paths": ["src/**"],
@@ -135,7 +135,7 @@ def test_unknown_check_kind_is_dropped_with_warning() -> None:
         ],
     }
     spec, warnings = parse_spec(bad)
-    assert spec.slices[0].checks == []
+    assert spec.groups[0].checks == []
     assert any(w.code == "spec.coerce.unknown_kind" for w in warnings)
     assert any("rumor" in w.message for w in warnings)
 
@@ -188,11 +188,11 @@ def test_validator_warns_cli_missing_entrypoint() -> None:
         structure=StructureDecisions(payload={
             "commands": [{"name": "build", "summary": "build the thing"}],
         }),
-        slices=[
+        groups=[
             Group(
                 id="root",
-                title="bootstrap",
-                tasks=["t"],
+                name="bootstrap",
+                feature_ids=["t"],
                 owned_paths=["src/**"],
                 checks=[PytestCheck(selector="tests/test_x.py")],
             ),
@@ -209,25 +209,25 @@ def test_validator_warns_duplicate_slice_ids() -> None:
     when callers construct a Spec by hand bypassing the parser.
     """
     spec = _valid_webapp_spec()
-    spec.slices.append(Group(
+    spec.groups.append(Group(
         id="shell",
-        title="dup",
-        tasks=["t"],
+        name="dup",
+        feature_ids=["t"],
         owned_paths=["src/**"],
         checks=[PytestCheck(selector="tests/test_x.py")],
     ))
     result = validate_spec(spec)
     assert result.valid
-    assert any("duplicate slice id" in w for w in result.warnings)
+    assert any("duplicate group id" in w for w in result.warnings)
 
 
 def test_validator_warns_unknown_dep() -> None:
     spec = _valid_webapp_spec()
-    spec.slices.append(Group(
+    spec.groups.append(Group(
         id="shell-extra",
-        title="bad dep",
-        tasks=["t"],
-        deps=["nope"],
+        name="bad dep",
+        feature_ids=["t"],
+        dependencies=["nope"],
         owned_paths=["src/**"],
         checks=[PytestCheck(selector="tests/test_x.py")],
     ))
@@ -239,10 +239,10 @@ def test_validator_warns_unknown_dep() -> None:
 def test_validator_flags_dep_cycle() -> None:
     """Dep cycles remain hard errors — they would loop the build forever."""
     spec = _valid_webapp_spec()
-    spec.slices = [
-        Group(id="a", title="a", tasks=["t"], deps=["b"], owned_paths=["a/**"],
+    spec.groups = [
+        Group(id="a", name="a", feature_ids=["t"], dependencies=["b"], owned_paths=["a/**"],
               checks=[PytestCheck(selector="x")]),
-        Group(id="b", title="b", tasks=["t"], deps=["a"], owned_paths=["b/**"],
+        Group(id="b", name="b", feature_ids=["t"], dependencies=["a"], owned_paths=["b/**"],
               checks=[PytestCheck(selector="x")]),
     ]
     result = validate_spec(spec)
@@ -263,7 +263,7 @@ def test_validator_allows_slice_with_no_checks() -> None:
     """v2.1 (F5): a slice with no checks vacuously passes. Audit's
     contract gate verifies the integrated product."""
     spec = _valid_webapp_spec()
-    spec.slices[0].checks = []
+    spec.groups[0].checks = []
     result = validate_spec(spec)
     assert result.valid
     assert any("no checks declared" in w for w in result.warnings)
@@ -276,7 +276,7 @@ def test_validator_allows_empty_owned_paths() -> None:
     the dep-transitivity scope rule landed.
     """
     spec = _valid_webapp_spec()
-    spec.slices[0].owned_paths = []
+    spec.groups[0].owned_paths = []
     result = validate_spec(spec)
     assert result.valid, result.errors
 
@@ -285,7 +285,7 @@ def test_validator_warns_unrecommended_slice_id_format() -> None:
     """v2.1 (F4): slice ID regex is advisory. The parser slugifies; the
     validator (when called on a hand-constructed Spec) warns."""
     spec = _valid_webapp_spec()
-    spec.slices[0].id = "BadID"
+    spec.groups[0].id = "BadID"
     result = validate_spec(spec)
     assert result.valid
     assert any("BadID" in w for w in result.warnings)
@@ -425,32 +425,32 @@ def test_persist_spec_rejects_amendment_with_wrong_prior_hash(tmp_path: Path) ->
 # ---------------------------------------------------------------------------
 
 
-def _slice_with_tasks(tasks: list[str], slice_id: str = "s1") -> Group:
+def _group_with_features(features: list[str], group_id: str = "s1") -> Group:
     return Group(
-        id=slice_id, title="x", deps=[],
-        owned_paths=["x.txt"], tasks=tasks,
+        id=group_id, name="x", dependencies=[],
+        owned_paths=["x.txt"], feature_ids=features,
         checks=[PytestCheck(selector="tests/")],
     )
 
 
-def _spec_with_slice(slice_: Group) -> Spec:
+def _spec_with_group(slice_: Group) -> Spec:
     return Spec(
         intent="test", project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=[slice_],
+        groups=[slice_],
     )
 
 
 def test_validator_warns_on_empty_tasks() -> None:
-    spec = _spec_with_slice(_slice_with_tasks([]))
+    spec = _spec_with_group(_group_with_features([]))
     result = validate_spec(spec)
     assert any(
-        "tasks field empty" in w for w in result.warnings
-    ), f"expected empty-tasks warning; got {result.warnings}"
+        "feature_ids field empty" in w for w in result.warnings
+    ), f"expected empty-feature_ids warning; got {result.warnings}"
 
 
 def test_validator_warns_on_vague_short_tasks() -> None:
-    spec = _spec_with_slice(_slice_with_tasks(["build it", "fix"]))
+    spec = _spec_with_group(_group_with_features(["build it", "fix"]))
     result = validate_spec(spec)
     vague_warnings = [w for w in result.warnings if "too vague" in w]
     assert len(vague_warnings) == 2, (
@@ -459,7 +459,7 @@ def test_validator_warns_on_vague_short_tasks() -> None:
 
 
 def test_validator_accepts_concrete_tasks() -> None:
-    spec = _spec_with_slice(_slice_with_tasks([
+    spec = _spec_with_group(_group_with_features([
         "Add GET /api/items returning [{id, name}]",
         "Wire register_blueprint(items_bp) in app.py",
     ]))
@@ -477,21 +477,21 @@ def test_validator_warns_multi_slice_without_cross_checks() -> None:
     spec = Spec(
         intent="test", project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=[
-            _slice_with_tasks(["Add foo to app.py"], slice_id="a"),
-            _slice_with_tasks(["Add bar to app.py"], slice_id="b"),
+        groups=[
+            _group_with_features(["Add foo to app.py"], group_id="a"),
+            _group_with_features(["Add bar to app.py"], group_id="b"),
         ],
-        cross_slice_checks=[],
+        cross_group_checks=[],
     )
     result = validate_spec(spec)
-    assert any("cross_slice_checks" in w for w in result.warnings)
+    assert any("cross_group_checks" in w for w in result.warnings)
 
 
 def test_validator_silent_on_single_slice_without_cross_checks() -> None:
-    spec = _spec_with_slice(_slice_with_tasks(["Add /api/foo endpoint"]))
+    spec = _spec_with_group(_group_with_features(["Add /api/foo endpoint"]))
     result = validate_spec(spec)
     # Single-slice spec shouldn't trigger the multi-slice integration warning.
-    assert not any("cross_slice_checks" in w for w in result.warnings)
+    assert not any("cross_group_checks" in w for w in result.warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -504,15 +504,15 @@ def test_parse_warns_on_missing_tasks_field() -> None:
     bad = {
         "intent": "x", "project_kind": "webapp",
         "structure": {"payload": {}},
-        "slices": [{"id": "s1", "title": "x"}],  # NO tasks/deps/owned_paths
+        "groups": [{"id": "s1", "name": "x"}],  # NO tasks/deps/owned_paths
     }
     spec, warnings = parse_spec(bad)
     codes = [w.code for w in warnings]
     paths = [w.path for w in warnings]
     assert "spec.coerce.field" in codes
-    assert "slices[0].tasks" in paths
-    assert "slices[0].deps" in paths
-    assert "slices[0].owned_paths" in paths
+    assert "groups[0].feature_ids" in paths
+    assert "groups[0].dependencies" in paths
+    assert "groups[0].owned_paths" in paths
 
 
 def test_parse_warns_on_wrong_type_tasks() -> None:
@@ -520,11 +520,11 @@ def test_parse_warns_on_wrong_type_tasks() -> None:
     bad = {
         "intent": "x", "project_kind": "webapp",
         "structure": {"payload": {}},
-        "slices": [{"id": "s1", "title": "x", "tasks": "build it"}],  # str instead of list
+        "groups": [{"id": "s1", "name": "x", "feature_ids": "build it"}],  # str instead of list
     }
     spec, warnings = parse_spec(bad)
     assert any(
-        w.path == "slices[0].tasks" and "should be a list" in w.message
+        w.path == "groups[0].feature_ids" and "should be a list" in w.message
         for w in warnings
     )
 
@@ -535,7 +535,7 @@ def test_parse_warns_on_wrong_type_tasks() -> None:
 
 
 def test_append_amendment_records_trigger_event_id_and_tier() -> None:
-    spec = _spec_with_slice(_slice_with_tasks(["Add /api/foo endpoint"]))
+    spec = _spec_with_group(_group_with_features(["Add /api/foo endpoint"]))
     amended = append_amendment(
         spec,
         reason="user fixed a typo",
@@ -549,7 +549,7 @@ def test_append_amendment_records_trigger_event_id_and_tier() -> None:
 
 
 def test_append_amendment_defaults_remain_for_back_compat() -> None:
-    spec = _spec_with_slice(_slice_with_tasks(["Add /api/foo endpoint"]))
+    spec = _spec_with_group(_group_with_features(["Add /api/foo endpoint"]))
     amended = append_amendment(spec, reason="x", actor="user")
     assert amended.amendments[0].trigger_event_id == ""
     assert amended.amendments[0].tier == 0

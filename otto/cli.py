@@ -1066,7 +1066,34 @@ def _exit_legacy_certify_removed() -> None:
         "to the i2p default but hit a regression."
     ),
 )
-def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budget, max_turns, model, provider, effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, resume, reset_budget, force_cross_command_resume, spec, spec_file, yes, spec_review_mode, force, in_worktree, allow_dirty, break_lock, i2p, legacy):
+@click.option(
+    "--review-gate",
+    "review_gate",
+    is_flag=True,
+    help=(
+        "Pause after compile and wait for spec.review_approved before "
+        "running build. Approve via Mission Control or by re-running "
+        "with --resume --auto-approve. Opt-in (off by default) — A13."
+    ),
+)
+@click.option(
+    "--auto-approve",
+    "auto_approve",
+    is_flag=True,
+    help=(
+        "Explicitly opt out of --review-gate (default behaviour). The "
+        "flag exists so scripts can be unambiguous."
+    ),
+)
+@click.option(
+    "--gate-timeout",
+    "gate_timeout_s",
+    type=float,
+    default=24 * 60 * 60.0,
+    show_default=True,
+    help="Wall-clock cap (seconds) on --review-gate before timing out.",
+)
+def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budget, max_turns, model, provider, effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, resume, reset_budget, force_cross_command_resume, spec, spec_file, yes, spec_review_mode, force, in_worktree, allow_dirty, break_lock, i2p, legacy, review_gate, auto_approve, gate_timeout_s):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -1134,6 +1161,10 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
                 "  [yellow]i2p mode: these flags are ignored: "
                 f"{', '.join(_ignored)}[/yellow]"
             )
+        if review_gate and auto_approve:
+            raise click.UsageError(
+                "--review-gate and --auto-approve are mutually exclusive."
+            )
         from otto.cli_run import orchestrate_run
         orchestrate_run(
             intent=intent,
@@ -1146,6 +1177,8 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
             resume=resume,
             reset_budget=reset_budget,
             force=force,
+            review_gate=review_gate,
+            gate_timeout_s=gate_timeout_s,
         )
         return  # orchestrate_run sys.exit's on its own; defensive return
 

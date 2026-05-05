@@ -17,6 +17,9 @@ from otto.spec_amend import (
     AMENDMENT_REQUEST_PATH,
     AMENDMENT_RESPONSE_PATH,
     AmendmentRejection,
+    InvalidationEntry,
+    InvalidationPlan,
+    compute_invalidation,
     consume_amendment_request,
     request_amendment,
     verify_amendment_chain,
@@ -36,10 +39,10 @@ from otto.spec_state import emit
 def _seed_spec() -> Spec:
     spec = Spec(
         intent="build a microfeed-style social app",
-        slices=[
-            Group(id="shell", title="App shell", tasks=["t"]),
-            Group(id="auth", title="User auth", deps=["shell"], tasks=["t"]),
-            Group(id="posts", title="Posts feed", deps=["shell"], tasks=["t"]),
+        groups=[
+            Group(id="shell", name="App shell", feature_ids=["t"]),
+            Group(id="auth", name="User auth", dependencies=["shell"], feature_ids=["t"]),
+            Group(id="posts", name="Posts feed", dependencies=["shell"], feature_ids=["t"]),
         ],
     )
     return lock_intent(spec)
@@ -76,7 +79,7 @@ def test_request_amendment_rejects_intent_field() -> None:
     result = request_amendment(
         spec,
         actor="shell",
-        slice_id="shell",
+        group_id="shell",
         changes={"intent": "agent attempted to amend intent"},
         reason="trying",
         trigger_event_id="ev-000001",
@@ -97,7 +100,7 @@ def test_request_amendment_rejects_tier_2_fields() -> None:
     result = request_amendment(
         spec,
         actor="shell",
-        slice_id="shell",
+        group_id="shell",
         changes={"project_kind": "cli"},
         reason="trying",
         trigger_event_id="ev-000001",
@@ -113,7 +116,7 @@ def test_request_amendment_rejects_slice_id_change() -> None:
     result = request_amendment(
         spec,
         actor="shell",
-        slice_id="shell",
+        group_id="shell",
         changes={"id": "renamed-shell"},
         reason="trying",
         trigger_event_id="ev-000001",
@@ -133,21 +136,21 @@ def test_agent_can_amend_own_slice_deps(tmp_path: Path) -> None:
     spec = _seed_spec()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    event = emit(session_dir, "scope.warning", slice_id="posts", detail="touched social/")
+    event = emit(session_dir, "scope.warning", group_id="posts", detail="touched social/")
 
     result = request_amendment(
         spec,
         actor="posts",
-        slice_id="posts",
-        changes={"deps": ["shell", "auth"]},
+        group_id="posts",
+        changes={"dependencies": ["shell", "auth"]},
         reason="needs auth helper for timeline rendering",
         trigger_event_id=event.event_id,
         session_dir=session_dir,
     )
     assert result.accepted
     assert result.spec is not None
-    posts_slice = next(s for s in result.spec.slices if s.id == "posts")
-    assert posts_slice.deps == ["shell", "auth"]
+    posts_slice = next(s for s in result.spec.groups if s.id == "posts")
+    assert posts_slice.dependencies == ["shell", "auth"]
     # Amendment recorded
     assert len(result.spec.amendments) == 1
     amendment = result.spec.amendments[0]
@@ -161,13 +164,13 @@ def test_agent_cannot_amend_another_slice(tmp_path: Path) -> None:
     spec = _seed_spec()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    event = emit(session_dir, "scope.warning", slice_id="posts", detail="x")
+    event = emit(session_dir, "scope.warning", group_id="posts", detail="x")
 
     result = request_amendment(
         spec,
         actor="posts",
-        slice_id="auth",
-        changes={"deps": ["shell"]},
+        group_id="auth",
+        changes={"dependencies": ["shell"]},
         reason="trying to expand peer",
         trigger_event_id=event.event_id,
         session_dir=session_dir,
@@ -183,8 +186,8 @@ def test_user_can_amend_any_slice(tmp_path: Path) -> None:
     result = request_amendment(
         spec,
         actor="user",
-        slice_id="auth",
-        changes={"tasks": ["new task from review"]},
+        group_id="auth",
+        changes={"feature_ids": ["new task from review"]},
         reason="adding task during review",
     )
     assert result.accepted
@@ -197,16 +200,16 @@ def test_user_can_amend_any_slice(tmp_path: Path) -> None:
 
 def test_checks_can_be_appended(tmp_path: Path) -> None:
     spec = _seed_spec()
-    spec.slices[0].checks = [PytestCheck(selector="tests/test_a.py::test_x")]
+    spec.groups[0].checks = [PytestCheck(selector="tests/test_a.py::test_x")]
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    event = emit(session_dir, "scope.warning", slice_id="shell", detail="x")
+    event = emit(session_dir, "scope.warning", group_id="shell", detail="x")
 
     result = request_amendment(
         spec,
         actor="shell",
-        slice_id="shell",
+        group_id="shell",
         changes={"checks": [
             PytestCheck(selector="tests/test_a.py::test_x"),
             PytestCheck(selector="tests/test_a.py::test_y"),
@@ -217,24 +220,24 @@ def test_checks_can_be_appended(tmp_path: Path) -> None:
     )
     assert result.accepted
     assert result.spec is not None
-    assert len(result.spec.slices[0].checks) == 2
+    assert len(result.spec.groups[0].checks) == 2
 
 
 def test_checks_cannot_be_removed(tmp_path: Path) -> None:
     spec = _seed_spec()
-    spec.slices[0].checks = [
+    spec.groups[0].checks = [
         PytestCheck(selector="tests/test_a.py::test_x"),
         PytestCheck(selector="tests/test_a.py::test_y"),
     ]
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    event = emit(session_dir, "scope.warning", slice_id="shell", detail="x")
+    event = emit(session_dir, "scope.warning", group_id="shell", detail="x")
 
     result = request_amendment(
         spec,
         actor="shell",
-        slice_id="shell",
+        group_id="shell",
         changes={"checks": [PytestCheck(selector="tests/test_a.py::test_x")]},
         reason="trying to drop a check",
         trigger_event_id=event.event_id,
@@ -259,8 +262,8 @@ def test_agent_amendment_without_trigger_accepted() -> None:
     result = request_amendment(
         spec,
         actor="posts",
-        slice_id="posts",
-        changes={"deps": ["shell", "auth"]},
+        group_id="posts",
+        changes={"dependencies": ["shell", "auth"]},
         reason="needs auth helper for timeline",
     )
     assert result.accepted
@@ -278,8 +281,8 @@ def test_agent_amendment_with_fake_trigger_rejected(tmp_path: Path) -> None:
     result = request_amendment(
         spec,
         actor="posts",
-        slice_id="posts",
-        changes={"deps": ["shell", "auth"]},
+        group_id="posts",
+        changes={"dependencies": ["shell", "auth"]},
         reason="trying with bogus id",
         trigger_event_id="ev-999999",
         session_dir=session_dir,
@@ -299,14 +302,14 @@ def test_amendment_extends_hash_chain(tmp_path: Path) -> None:
     spec = _seed_spec()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    e1 = emit(session_dir, "scope.warning", slice_id="posts", detail="r1")
-    e2 = emit(session_dir, "scope.warning", slice_id="posts", detail="r2")
+    e1 = emit(session_dir, "scope.warning", group_id="posts", detail="r1")
+    e2 = emit(session_dir, "scope.warning", group_id="posts", detail="r2")
 
     r1 = request_amendment(
         spec,
         actor="posts",
-        slice_id="posts",
-        changes={"deps": ["shell", "auth"]},
+        group_id="posts",
+        changes={"dependencies": ["shell", "auth"]},
         reason="add auth dep",
         trigger_event_id=e1.event_id,
         session_dir=session_dir,
@@ -317,8 +320,8 @@ def test_amendment_extends_hash_chain(tmp_path: Path) -> None:
     r2 = request_amendment(
         r1.spec,
         actor="posts",
-        slice_id="posts",
-        changes={"tasks": ["t", "t2"]},
+        group_id="posts",
+        changes={"feature_ids": ["t", "t2"]},
         reason="add a task",
         trigger_event_id=e2.event_id,
         session_dir=session_dir,
@@ -340,11 +343,11 @@ def test_verify_chain_clean_chain_passes(tmp_path: Path) -> None:
     spec = _seed_spec()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    e1 = emit(session_dir, "scope.warning", slice_id="posts", detail="x")
+    e1 = emit(session_dir, "scope.warning", group_id="posts", detail="x")
 
     r1 = request_amendment(
-        spec, actor="posts", slice_id="posts",
-        changes={"deps": ["shell", "auth"]},
+        spec, actor="posts", group_id="posts",
+        changes={"dependencies": ["shell", "auth"]},
         reason="add dep", trigger_event_id=e1.event_id, session_dir=session_dir,
     )
     assert r1.accepted
@@ -361,20 +364,20 @@ def test_verify_chain_consecutive_break_blocks(tmp_path: Path) -> None:
     spec = _seed_spec()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    e1 = emit(session_dir, "scope.warning", slice_id="posts", detail="r1")
-    e2 = emit(session_dir, "scope.warning", slice_id="posts", detail="r2")
+    e1 = emit(session_dir, "scope.warning", group_id="posts", detail="r1")
+    e2 = emit(session_dir, "scope.warning", group_id="posts", detail="r2")
 
     r1 = request_amendment(
-        spec, actor="posts", slice_id="posts",
-        changes={"deps": ["shell", "auth"]},
+        spec, actor="posts", group_id="posts",
+        changes={"dependencies": ["shell", "auth"]},
         reason="r1", trigger_event_id=e1.event_id, session_dir=session_dir,
     )
     assert r1.accepted
     assert r1.spec is not None
 
     r2 = request_amendment(
-        r1.spec, actor="posts", slice_id="posts",
-        changes={"tasks": ["t", "t-extra"]},
+        r1.spec, actor="posts", group_id="posts",
+        changes={"feature_ids": ["t", "t-extra"]},
         reason="r2", trigger_event_id=e2.event_id, session_dir=session_dir,
     )
     assert r2.accepted
@@ -403,11 +406,11 @@ def test_verify_chain_spec_mutated_outside_chain_blocks(tmp_path: Path) -> None:
     spec = _seed_spec()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    e1 = emit(session_dir, "scope.warning", slice_id="posts", detail="r1")
+    e1 = emit(session_dir, "scope.warning", group_id="posts", detail="r1")
 
     r1 = request_amendment(
-        spec, actor="posts", slice_id="posts",
-        changes={"deps": ["shell", "auth"]},
+        spec, actor="posts", group_id="posts",
+        changes={"dependencies": ["shell", "auth"]},
         reason="r1", trigger_event_id=e1.event_id, session_dir=session_dir,
     )
     assert r1.accepted
@@ -417,10 +420,10 @@ def test_verify_chain_spec_mutated_outside_chain_blocks(tmp_path: Path) -> None:
     # bypassing request_amendment) — final-hash check catches it.
     import dataclasses
 
-    tampered_slice = dataclasses.replace(r1.spec.slices[2], deps=["shell", "auth", "extra"])
+    tampered_slice = dataclasses.replace(r1.spec.groups[2], dependencies=["shell", "auth", "extra"])
     tampered = dataclasses.replace(
         r1.spec,
-        slices=[r1.spec.slices[0], r1.spec.slices[1], tampered_slice],
+        groups=[r1.spec.groups[0], r1.spec.groups[1], tampered_slice],
     )
 
     review = verify_amendment_chain(tampered, session_dir=session_dir)
@@ -440,9 +443,9 @@ def test_verify_chain_missing_trigger_caps_partial(tmp_path: Path) -> None:
     h0 = spec_content_sha256(spec)
     spec_after = dataclasses.replace(
         spec,
-        slices=[
-            dataclasses.replace(spec.slices[2], deps=["shell", "auth"]),
-            *[s for s in spec.slices if s.id != "posts"],
+        groups=[
+            dataclasses.replace(spec.groups[2], dependencies=["shell", "auth"]),
+            *[s for s in spec.groups if s.id != "posts"],
         ],
     )
     h1 = spec_content_sha256(spec_after)
@@ -466,11 +469,11 @@ def test_verify_chain_concentrated_amendments_caps_partial(tmp_path: Path) -> No
 
     current = spec
     for i in range(5):
-        ev = emit(session_dir, "scope.warning", slice_id="posts", detail=f"r{i}")
+        ev = emit(session_dir, "scope.warning", group_id="posts", detail=f"r{i}")
         result = request_amendment(
             current,
-            actor="posts", slice_id="posts",
-            changes={"tasks": [f"task-{i}"]},
+            actor="posts", group_id="posts",
+            changes={"feature_ids": [f"task-{i}"]},
             reason=f"round {i}", trigger_event_id=ev.event_id, session_dir=session_dir,
         )
         assert result.accepted
@@ -493,27 +496,27 @@ def test_request_amendment_rejects_unknown_slice() -> None:
     result = request_amendment(
         spec,
         actor="ghost",
-        slice_id="ghost",
-        changes={"deps": []},
+        group_id="ghost",
+        changes={"dependencies": []},
         reason="r",
         trigger_event_id="ev-000001",
     )
     assert not result.accepted
     assert result.rejection is not None
-    assert result.rejection.code == "unknown_slice"
+    assert result.rejection.code == "unknown_group"
 
 
 def test_request_amendment_rejects_no_change(tmp_path: Path) -> None:
     spec = _seed_spec()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    e1 = emit(session_dir, "scope.warning", slice_id="posts", detail="x")
+    e1 = emit(session_dir, "scope.warning", group_id="posts", detail="x")
 
     # Request with the SAME deps (no actual change)
     result = request_amendment(
         spec,
-        actor="posts", slice_id="posts",
-        changes={"deps": list(spec.slices[2].deps)},
+        actor="posts", group_id="posts",
+        changes={"dependencies": list(spec.groups[2].dependencies)},
         reason="r", trigger_event_id=e1.event_id, session_dir=session_dir,
     )
     assert not result.accepted
@@ -536,11 +539,11 @@ def test_amended_spec_persists_and_reloads(tmp_path: Path) -> None:
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    event = emit(session_dir, "scope.warning", slice_id="posts", detail="x")
+    event = emit(session_dir, "scope.warning", group_id="posts", detail="x")
 
     result = request_amendment(
-        spec, actor="posts", slice_id="posts",
-        changes={"deps": ["shell", "auth"]},
+        spec, actor="posts", group_id="posts",
+        changes={"dependencies": ["shell", "auth"]},
         reason="add dep", trigger_event_id=event.event_id, session_dir=session_dir,
     )
     assert result.accepted
@@ -549,7 +552,7 @@ def test_amended_spec_persists_and_reloads(tmp_path: Path) -> None:
     persist_spec(result.spec, target)
     loaded = load_spec(target)
 
-    assert loaded.slices[2].deps == ["shell", "auth"]
+    assert loaded.groups[2].dependencies == ["shell", "auth"]
     assert len(loaded.amendments) == 1
     assert loaded.amendments[0].trigger_event_id == event.event_id
     assert loaded.amendments[0].tier == 3
@@ -597,7 +600,7 @@ def test_consume_no_request_file_is_noop(tmp_path: Path) -> None:
     session_dir.mkdir()
 
     new_spec, result = consume_amendment_request(
-        worktree, spec, slice_id="posts", session_dir=session_dir,
+        worktree, spec, group_id="posts", session_dir=session_dir,
     )
     assert new_spec is spec
     assert result is None
@@ -611,23 +614,23 @@ def test_consume_valid_request_applies_and_writes_response(tmp_path: Path) -> No
     worktree.mkdir()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    event = emit(session_dir, "scope.warning", slice_id="posts", detail="touched auth/")
+    event = emit(session_dir, "scope.warning", group_id="posts", detail="touched auth/")
 
     request_path = worktree / AMENDMENT_REQUEST_PATH
     request_path.parent.mkdir(parents=True, exist_ok=True)
     request_path.write_text(json.dumps({
-        "changes": {"deps": ["shell", "auth"]},
+        "changes": {"dependencies": ["shell", "auth"]},
         "reason": "needs auth helper for timeline",
         "trigger_event_id": event.event_id,
     }))
 
     new_spec, result = consume_amendment_request(
-        worktree, spec, slice_id="posts", session_dir=session_dir,
+        worktree, spec, group_id="posts", session_dir=session_dir,
     )
     assert result is not None
     assert result.accepted
-    posts = next(s for s in new_spec.slices if s.id == "posts")
-    assert posts.deps == ["shell", "auth"]
+    posts = next(s for s in new_spec.groups if s.id == "posts")
+    assert posts.dependencies == ["shell", "auth"]
 
     # Request file consumed; response file written.
     assert not request_path.exists()
@@ -657,7 +660,7 @@ def test_consume_rejected_request_writes_rejection_response(tmp_path: Path) -> N
     }))
 
     new_spec, result = consume_amendment_request(
-        worktree, spec, slice_id="posts", session_dir=session_dir,
+        worktree, spec, group_id="posts", session_dir=session_dir,
     )
     assert result is not None
     assert not result.accepted
@@ -686,7 +689,7 @@ def test_consume_malformed_json_is_rejected(tmp_path: Path) -> None:
     request_path.write_text("{this is not json")
 
     new_spec, result = consume_amendment_request(
-        worktree, spec, slice_id="posts", session_dir=session_dir,
+        worktree, spec, group_id="posts", session_dir=session_dir,
     )
     assert result is not None
     assert not result.accepted
@@ -713,20 +716,20 @@ def test_consume_side_channel_hardcodes_actor_to_slice(tmp_path: Path) -> None:
     worktree.mkdir()
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    event = emit(session_dir, "scope.warning", slice_id="posts", detail="x")
+    event = emit(session_dir, "scope.warning", group_id="posts", detail="x")
 
     # Even if the agent tries to put "actor" in the JSON, it's ignored.
     request_path = worktree / AMENDMENT_REQUEST_PATH
     request_path.parent.mkdir(parents=True, exist_ok=True)
     request_path.write_text(json.dumps({
         "actor": "user",  # agent attempts privilege escalation
-        "changes": {"deps": ["shell", "auth"]},
+        "changes": {"dependencies": ["shell", "auth"]},
         "reason": "legitimately needs auth",
         "trigger_event_id": event.event_id,
     }))
 
     new_spec, result = consume_amendment_request(
-        worktree, spec, slice_id="posts", session_dir=session_dir,
+        worktree, spec, group_id="posts", session_dir=session_dir,
     )
     assert result is not None
     assert result.accepted
@@ -734,3 +737,167 @@ def test_consume_side_channel_hardcodes_actor_to_slice(tmp_path: Path) -> None:
     # Actor is the slice id, not "user" — the JSON's actor field was ignored.
     assert result.amendment.actor == "posts"
     assert result.amendment.tier == 3
+
+
+# ---------------------------------------------------------------------------
+# A6 — compute_invalidation
+# ---------------------------------------------------------------------------
+
+
+def _basic_spec() -> Spec:
+    return Spec(
+        intent="x",
+        groups=[
+            Group(id="shell", name="App shell", feature_ids=["t"]),
+            Group(id="auth", name="User auth", dependencies=["shell"],
+                  feature_ids=["a"]),
+            Group(id="feed", name="Feed", dependencies=["auth"],
+                  feature_ids=["f"]),
+        ],
+    )
+
+
+def test_compute_invalidation_no_op_returns_empty() -> None:
+    """Two identical specs => empty plan, falsy."""
+    a = _basic_spec()
+    b = _basic_spec()
+    plan = compute_invalidation(a, b)
+    assert plan.entries == ()
+    assert plan.added_group_ids == ()
+    assert plan.removed_group_ids == ()
+    assert not plan
+
+
+def test_compute_invalidation_name_change_invalidates_only_that_group() -> None:
+    """A pure rename touches one Group; deps unchanged → no cascade."""
+    old = _basic_spec()
+    new = Spec(
+        intent="x",
+        groups=[
+            Group(id="shell", name="App shell v2", feature_ids=["t"]),
+            Group(id="auth", name="User auth", dependencies=["shell"],
+                  feature_ids=["a"]),
+            Group(id="feed", name="Feed", dependencies=["auth"],
+                  feature_ids=["f"]),
+        ],
+    )
+    plan = compute_invalidation(old, new)
+    # 'shell' name changed → direct. 'auth' depends on 'shell' → cascade.
+    # 'feed' depends on 'auth' (now cascaded) → cascade.
+    direct = [e for e in plan.entries if e.direct]
+    cascaded = [e for e in plan.entries if not e.direct]
+    assert {e.group_id for e in direct} == {"shell"}
+    assert {e.group_id for e in cascaded} == {"auth", "feed"}
+    assert "name" in direct[0].reason
+
+
+def test_compute_invalidation_feature_ids_change_is_direct() -> None:
+    old = _basic_spec()
+    new = Spec(
+        intent="x",
+        groups=[
+            Group(id="shell", name="App shell", feature_ids=["t", "extra"]),
+            Group(id="auth", name="User auth", dependencies=["shell"],
+                  feature_ids=["a"]),
+            Group(id="feed", name="Feed", dependencies=["auth"],
+                  feature_ids=["f"]),
+        ],
+    )
+    plan = compute_invalidation(old, new)
+    direct = [e for e in plan.entries if e.direct]
+    assert {e.group_id for e in direct} == {"shell"}
+    assert "feature_ids" in direct[0].reason
+
+
+def test_compute_invalidation_dependency_change() -> None:
+    """auth gains a new dep → auth direct; feed (depends on auth) cascades."""
+    old = _basic_spec()
+    new = Spec(
+        intent="x",
+        groups=[
+            Group(id="shell", name="App shell", feature_ids=["t"]),
+            Group(id="auth", name="User auth",
+                  dependencies=["shell"], feature_ids=["a", "extra-feature"]),
+            Group(id="feed", name="Feed",
+                  dependencies=["auth"], feature_ids=["f"]),
+        ],
+    )
+    plan = compute_invalidation(old, new)
+    by_id = {e.group_id: e for e in plan.entries}
+    assert by_id["auth"].direct is True
+    assert "feature_ids" in by_id["auth"].reason
+    assert by_id["feed"].direct is False
+    assert "auth" in by_id["feed"].reason
+
+
+def test_compute_invalidation_unrelated_group_untouched() -> None:
+    """Edits that don't touch shell shouldn't invalidate shell."""
+    old = _basic_spec()
+    new = Spec(
+        intent="x",
+        groups=[
+            Group(id="shell", name="App shell", feature_ids=["t"]),
+            Group(id="auth", name="Auth REVAMPED",
+                  dependencies=["shell"], feature_ids=["a"]),
+            # feed unchanged
+            Group(id="feed", name="Feed", dependencies=["auth"],
+                  feature_ids=["f"]),
+        ],
+    )
+    plan = compute_invalidation(old, new)
+    invalidated = {e.group_id for e in plan.entries}
+    assert "shell" not in invalidated
+    assert "auth" in invalidated
+    assert "feed" in invalidated  # cascade through auth
+
+
+def test_compute_invalidation_removed_group_reported() -> None:
+    old = _basic_spec()
+    new = Spec(
+        intent="x",
+        groups=[
+            Group(id="shell", name="App shell", feature_ids=["t"]),
+            Group(id="auth", name="User auth", dependencies=["shell"],
+                  feature_ids=["a"]),
+            # feed removed
+        ],
+    )
+    plan = compute_invalidation(old, new)
+    assert plan.removed_group_ids == ("feed",)
+    by_id = {e.group_id: e for e in plan.entries}
+    assert "feed" in by_id
+    assert by_id["feed"].direct is True
+    assert "removed" in by_id["feed"].reason
+
+
+def test_compute_invalidation_added_group_does_not_invalidate_others() -> None:
+    old = _basic_spec()
+    new = Spec(
+        intent="x",
+        groups=[
+            Group(id="shell", name="App shell", feature_ids=["t"]),
+            Group(id="auth", name="User auth", dependencies=["shell"],
+                  feature_ids=["a"]),
+            Group(id="feed", name="Feed", dependencies=["auth"],
+                  feature_ids=["f"]),
+            Group(id="profile", name="Profile",
+                  dependencies=["auth"], feature_ids=["p"]),
+        ],
+    )
+    plan = compute_invalidation(old, new)
+    assert plan.added_group_ids == ("profile",)
+    # No existing groups changed signature → entries empty.
+    assert plan.entries == ()
+
+
+def test_compute_invalidation_owned_paths_change_is_direct() -> None:
+    old = Spec(intent="x", groups=[
+        Group(id="g", name="G", owned_paths=["a/**"], feature_ids=["t"]),
+    ])
+    new = Spec(intent="x", groups=[
+        Group(id="g", name="G", owned_paths=["a/**", "b/**"], feature_ids=["t"]),
+    ])
+    plan = compute_invalidation(old, new)
+    assert {e.group_id for e in plan.entries} == {"g"}
+    assert plan.entries[0].direct is True
+    assert "owned_paths" in plan.entries[0].reason

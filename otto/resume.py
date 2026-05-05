@@ -184,7 +184,7 @@ def plan_resume(
     else:
         ids = frozenset(str(c) for c in component_ids)
 
-    state = replay(session_dir, slice_ids=ids, project_dir=project_dir)
+    state = replay(session_dir, group_ids=ids, project_dir=project_dir)
     landed, pending = _classify_components(state, ids)
 
     prior_cost, prior_wall, halted_reason = _read_prior_accounting(session_dir)
@@ -280,7 +280,7 @@ def _all_unit_ids(spec: Spec) -> frozenset[str]:
     Resume needs both: a Group is a Feature-bearing dispatch unit, a
     Component is a Feature-less infra unit, and the journal namespaces
     them in the same id space. ``replay()`` accepts the union and seeds
-    a SliceState entry per id so PENDING ids surface in ``state.slices``
+    a GroupState entry per id so PENDING ids surface in ``state.groups``
     even when no events have fired.
     """
     ids: set[str] = set()
@@ -313,8 +313,8 @@ def _classify_components(
     landed: set[str] = set()
     pending: set[str] = set()
     for cid in all_ids:
-        slice_state = state.slices.get(cid)
-        phase = slice_state.phase if slice_state is not None else ""
+        group_state = state.groups.get(cid)
+        phase = group_state.phase if group_state is not None else ""
         if cid in unreconciled:
             pending.add(cid)
         elif phase == LANDED or phase == REDUNDANT:

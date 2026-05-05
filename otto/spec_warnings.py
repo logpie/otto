@@ -19,16 +19,19 @@ from typing import Literal
 
 WarningCode = Literal[
     "spec.coerce.amendment",       # non-dict amendment entry → wrapped
-    "spec.coerce.slice",           # non-dict slice entry → skipped or wrapped
+    "spec.coerce.group",           # non-dict group entry → skipped or wrapped
     "spec.coerce.check",           # malformed check payload → coerced/dropped
     "spec.coerce.unknown_kind",    # unknown check.kind → dropped with warning
-    "spec.coerce.slice_id",        # slice id slugified
+    "spec.coerce.group_id",        # group id slugified
     "spec.coerce.duplicate_id",    # duplicate id auto-suffixed
     "spec.coerce.project_kind",    # unrecognized kind → defaulted
-    "spec.coerce.dep_unknown",     # dep refers to non-existent slice → dropped
+    "spec.coerce.dep_unknown",     # dep refers to non-existent group → dropped
     "spec.coerce.field",           # generic field-shape coercion
     "spec.shape.missing",          # advisory: recommended field missing
     "check.runtime.malformed",     # check ran but payload was malformed
+    "spec.deprecated.slices_key",  # legacy "slices" JSON key in input
+    "spec.deprecated.cross_slice_checks_key",  # legacy "cross_slice_checks"
+    "spec.deprecated.group_field",  # legacy group inner-field name (title/tasks/deps)
 ]
 
 

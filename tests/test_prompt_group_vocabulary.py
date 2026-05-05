@@ -8,7 +8,7 @@ wire-format cutovers:
   the legacy ``slices`` key under dual-write back-compat).
 * The ``<spec_json>...</spec_json>`` envelope marker mentioned by name.
 
-Any other appearance of "slice" / "Slice" / "slices" / "Slices" is a
+Any other appearance of "slice" / "Slice" / "groups" / "Slices" is a
 regression of the prompt-prose rename and fails this test.
 """
 
@@ -21,7 +21,7 @@ import pytest
 
 PROMPTS_DIR = Path(__file__).parent.parent / "otto" / "prompts"
 
-# Match the literal word "slice" (or "slices"/"slice's"/"sliced" etc.) on a
+# Match the literal word "slice" (or "groups"/"slice's"/"sliced" etc.) on a
 # whole-word boundary, case-insensitive.
 SLICE_WORD = re.compile(r"\bslice", re.IGNORECASE)
 
@@ -80,22 +80,15 @@ def test_prose_uses_group_not_slice(prompt_path: Path) -> None:
     )
 
 
-def test_compile_spec_json_example_still_uses_slices_key() -> None:
-    """Wire-format JSON example MUST keep emitting ``slices`` under dual-write.
+def test_compile_spec_json_example_uses_groups_key() -> None:
+    """Wire-format JSON example uses canonical ``groups`` key (post-A1 cutover).
 
-    The Spec dataclass dual-writes both ``groups`` and ``slices`` for one
-    cycle (see ``otto/spec_compile.py``); the prompt example mirrors the
-    canonical wire payload, so the legacy key must still appear inside the
-    fenced JSON block. If/when the dual-write cycle ends, this test will
-    flip alongside the wire cutover.
+    Dual-emit of legacy ``slices`` was dropped in A1; the prompt
+    example mirrors the canonical wire payload.
     """
     text = (PROMPTS_DIR / "compile-spec.md").read_text()
-    # The legacy key shows up as `"slices":` inside the example JSON block.
-    assert '"slices":' in text, (
-        "compile-spec.md no longer emits the legacy `slices` JSON key in its "
-        "spec example — that's the separate wire-format cutover, not part "
-        "of the prompt-prose rename."
-    )
+    assert '"groups":' in text
+    assert '"slices":' not in text
 
 
 def test_prompt_files_referenced_by_module_render_clean() -> None:

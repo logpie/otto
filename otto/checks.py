@@ -1,7 +1,8 @@
 """Check executors — runtime for the typed Check kinds in spec_compile.py.
 
-Step 2 of the unified intent-to-product pipeline. Ports
-codex-i2p/otto/oracles.py runtime patterns and rewires them against the
+Step 2 of the unified intent-to-product pipeline. Owns the runtime
+patterns for evidence collection (formerly the prototype's
+`oracles.py`, since absorbed and deleted) and wires them against the
 typed Check dataclasses defined in `otto.spec_compile`.
 
 A check executor takes one Check, runs it, and returns Evidence:
@@ -38,9 +39,12 @@ from otto.spec_compile import (
     ApiProbe,
     BrowserJourney,
     CheckKind,
+    CLIProbe,
+    ImportCheck,
     PytestCheck,
     RepoTestCheck,
     StateInvariant,
+    TypeCheck,
 )
 
 
@@ -104,6 +108,12 @@ def run_check(
             return _run_api_probe(check, base_url, started, t0)
         if isinstance(check, StateInvariant):
             return _run_state_invariant(check, project_dir, work_dir, base_url, started, t0)
+        if isinstance(check, CLIProbe):
+            return _run_cli_probe(check, work_dir, project_dir, started, t0, raw_log_path)
+        if isinstance(check, ImportCheck):
+            return _run_import_check(check, work_dir, project_dir, started, t0, raw_log_path)
+        if isinstance(check, TypeCheck):
+            return _run_type_check(check, work_dir, project_dir, started, t0, raw_log_path)
     except subprocess.TimeoutExpired as exc:
         return Evidence(
             passed=False,
@@ -490,6 +500,212 @@ def _safe_http_get(base_url: str, path: str, *, timeout: int) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# A1b kinds — CLIProbe, ImportCheck, TypeCheck
+# ---------------------------------------------------------------------------
+
+
+def _run_cli_probe(
+    check: CLIProbe,
+    cwd: Path,
+    project_dir: Path,
+    started: str,
+    t0: float,
+    raw_log_path: Path | None,
+) -> Evidence:
+    """Run a CLI subprocess; assert exit code and optional output substrings.
+
+    Used primarily by `project_kind=cli`. Failures fold the exit-code
+    mismatch and substring misses into a single `passed=False` verdict
+    with a detail listing each failed expectation.
+    """
+    if not check.command:
+        return _malformed_check_evidence(
+            started, t0, "CLIProbe.command is empty (informational; nothing to run)"
+        )
+    completed = _run_command(
+        list(check.command), cwd=cwd, timeout_s=check.timeout_s,
+        extra_pythonpath=[project_dir, cwd],
+    )
+    output = _format_subprocess_output(check.command, completed)
+    if raw_log_path is not None:
+        _write_raw(raw_log_path, output)
+
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    exit_ok = completed.returncode == check.expect_exit_code
+    stdout_ok = (not check.expect_stdout_substring) or (check.expect_stdout_substring in stdout)
+    stderr_ok = (not check.expect_stderr_substring) or (check.expect_stderr_substring in stderr)
+    passed = exit_ok and stdout_ok and stderr_ok
+
+    detail_parts = [f"exit={completed.returncode}"]
+    if not exit_ok:
+        detail_parts.append(f"expected={check.expect_exit_code}")
+    if check.expect_stdout_substring:
+        detail_parts.append(
+            f"stdout_contains={check.expect_stdout_substring!r}={'✓' if stdout_ok else '✗'}"
+        )
+    if check.expect_stderr_substring:
+        detail_parts.append(
+            f"stderr_contains={check.expect_stderr_substring!r}={'✓' if stderr_ok else '✗'}"
+        )
+
+    return Evidence(
+        passed=passed,
+        started_at=started,
+        duration_s=time.monotonic() - t0,
+        detail=" ".join(detail_parts),
+        raw={
+            "command": list(check.command),
+            "exit_code": completed.returncode,
+            "expect_exit_code": check.expect_exit_code,
+            "expect_stdout_substring": check.expect_stdout_substring,
+            "expect_stderr_substring": check.expect_stderr_substring,
+            "stdout_match": stdout_ok,
+            "stderr_match": stderr_ok,
+            "stdout": stdout,
+            "stderr": stderr,
+        },
+    )
+
+
+def _run_import_check(
+    check: ImportCheck,
+    cwd: Path,
+    project_dir: Path,
+    started: str,
+    t0: float,
+    raw_log_path: Path | None,
+) -> Evidence:
+    """Verify `python -c "import <package_name>"` succeeds.
+
+    Used by `project_kind=library`. Optional `expect_version` checks
+    `<pkg>.__version__` matches. Captures the full traceback in `raw`
+    when import fails.
+    """
+    if not check.package_name:
+        return _malformed_check_evidence(
+            started, t0, "ImportCheck.package_name is empty (informational; nothing to import)"
+        )
+
+    package = check.package_name
+    if check.expect_version:
+        # Compare strings — agents emit the version verbatim. Build the
+        # snippet without nested f-strings so the inner repr/format is
+        # evaluated in the spawned Python at runtime.
+        snippet = (
+            f"import {package}; "
+            f"v = getattr({package}, '__version__', None); "
+            f"expected = {check.expect_version!r}; "
+            "assert v == expected, "
+            "'version mismatch: got %r, expected %r' % (v, expected)"
+        )
+    else:
+        snippet = f"import {package}"
+    cmd = [sys.executable, "-c", snippet]
+
+    completed = _run_command(
+        cmd, cwd=cwd, timeout_s=check.timeout_s,
+        extra_pythonpath=[project_dir, cwd],
+    )
+    output = _format_subprocess_output(cmd, completed)
+    if raw_log_path is not None:
+        _write_raw(raw_log_path, output)
+
+    passed = completed.returncode == 0
+    detail_parts = [f"package={package!r}", f"exit={completed.returncode}"]
+    if check.expect_version:
+        detail_parts.append(f"expect_version={check.expect_version!r}")
+    return Evidence(
+        passed=passed,
+        started_at=started,
+        duration_s=time.monotonic() - t0,
+        detail=" ".join(detail_parts),
+        raw={
+            "command": cmd,
+            "package_name": package,
+            "expect_version": check.expect_version,
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout or "",
+            "stderr": completed.stderr or "",
+        },
+    )
+
+
+def _run_type_check(
+    check: TypeCheck,
+    cwd: Path,
+    project_dir: Path,
+    started: str,
+    t0: float,
+    raw_log_path: Path | None,
+) -> Evidence:
+    """Invoke a type checker (mypy / pyright / basedpyright) on `paths`.
+
+    Tools are invoked via subprocess; if the tool isn't on PATH we
+    return `passed=False` with a clean "tool not available" detail
+    (no fabricated success). Type-checker exit 0 → pass.
+    """
+    if not check.paths:
+        return _malformed_check_evidence(
+            started, t0, "TypeCheck.paths is empty (informational; nothing to check)"
+        )
+
+    tool = (check.tool or "mypy").strip().lower()
+    if tool not in {"mypy", "pyright", "basedpyright"}:
+        return Evidence(
+            passed=False,
+            started_at=started,
+            duration_s=time.monotonic() - t0,
+            detail=f"unsupported type-checker tool: {tool!r}",
+            raw={"tool": tool, "supported": ["mypy", "pyright", "basedpyright"]},
+        )
+
+    binary = _which(tool)
+    if binary is None:
+        # Honest reporting: the tool wasn't found, so we can't make a
+        # type-safety claim. passed=False keeps the check truthful;
+        # detail explains why so callers can install or skip.
+        return Evidence(
+            passed=False,
+            started_at=started,
+            duration_s=time.monotonic() - t0,
+            detail=f"type-checker {tool!r} not available on PATH",
+            raw={"tool": tool, "tool_available": False, "paths": list(check.paths)},
+        )
+
+    if tool == "mypy":
+        cmd = [binary, *check.paths]
+    else:
+        # pyright / basedpyright share the same CLI surface.
+        cmd = [binary, *check.paths]
+
+    completed = _run_command(
+        cmd, cwd=cwd, timeout_s=check.timeout_s,
+        extra_pythonpath=[project_dir, cwd],
+    )
+    output = _format_subprocess_output(cmd, completed)
+    if raw_log_path is not None:
+        _write_raw(raw_log_path, output)
+
+    passed = completed.returncode == 0
+    return Evidence(
+        passed=passed,
+        started_at=started,
+        duration_s=time.monotonic() - t0,
+        detail=f"tool={tool} paths={list(check.paths)} exit={completed.returncode}",
+        raw={
+            "command": cmd,
+            "tool": tool,
+            "tool_available": True,
+            "paths": list(check.paths),
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout or "",
+            "stderr": completed.stderr or "",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Subprocess + evidence helpers
 # ---------------------------------------------------------------------------
 
@@ -663,7 +879,10 @@ def run_checks(
     results: list[tuple[CheckKind, Evidence]] = []
     for index, check in enumerate(checks):
         raw_log_path: Path | None = None
-        if raw_log_dir is not None and isinstance(check, (RepoTestCheck, PytestCheck, BrowserJourney)):
+        if raw_log_dir is not None and isinstance(
+            check,
+            (RepoTestCheck, PytestCheck, BrowserJourney, CLIProbe, ImportCheck, TypeCheck),
+        ):
             raw_log_path = raw_log_dir / f"{index:03d}-{type(check).__name__}.log"
         evidence = run_check(
             check,
@@ -687,4 +906,7 @@ __all__ = [
 # Suppress unused-import warning — these names are part of the typed
 # CheckKind union we dispatch on; importing them pins the module-level
 # dependency.
-_ = (PytestCheck, RepoTestCheck, ApiProbe, BrowserJourney, StateInvariant, json)
+_ = (
+    PytestCheck, RepoTestCheck, ApiProbe, BrowserJourney, StateInvariant,
+    CLIProbe, ImportCheck, TypeCheck, json,
+)

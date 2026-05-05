@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 
 from otto.audit import AuditResult, AuditVerdict, FeatureAudit
-from otto.build import BuildResult, SliceResult, SliceStatus
+from otto.build import BuildResult, GroupResult, GroupStatus
 from otto.checks import Evidence
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.render import (
@@ -68,10 +68,10 @@ def _two_feature_spec() -> Spec:
         groups=[
             Group(
                 id="core",
-                title="Core",
-                deps=[],
+                name="Core",
+                dependencies=[],
                 owned_paths=["src/**"],
-                tasks=["build"],
+                feature_ids=["build"],
                 checks=[RepoTestCheck(command=("true",), timeout_s=30)],
             ),
         ],
@@ -97,10 +97,10 @@ def _two_feature_spec() -> Spec:
 def _passing_build(tmp_path: Path) -> BuildResult:
     return BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(
-                slice_id="core",
-                status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(
+                group_id="core",
+                status=GroupStatus.PASSING,
                 attempts=1,
                 branch="i2p/x/core",
                 worktree=tmp_path,
@@ -115,10 +115,10 @@ def _landed_merge() -> MergeQueueResult:
         landed_ids=["core"],
         results=[
             MergeResult(
-                slice_id="core",
+                group_id="core",
                 status=MergeStatus.LANDED,
                 landed_commit="abc1234",
-                slice_recheck_evidence=[_evidence(True)],
+                group_recheck_evidence=[_evidence(True)],
             ),
         ],
     )
@@ -192,16 +192,16 @@ def test_render_html_no_features_section_for_legacy_packet(tmp_path: Path) -> No
         intent="legacy run",
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=[
-            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
+        groups=[
+            Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
         ],
     )
     build = BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(
-                slice_id="s1",
-                status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(
+                group_id="s1",
+                status=GroupStatus.PASSING,
                 attempts=1,
                 branch="b",
                 worktree=tmp_path,
@@ -211,7 +211,7 @@ def test_render_html_no_features_section_for_legacy_packet(tmp_path: Path) -> No
     merge = MergeQueueResult(
         landed_ids=["s1"],
         results=[
-            MergeResult(slice_id="s1", status=MergeStatus.LANDED, landed_commit="aaa"),
+            MergeResult(group_id="s1", status=MergeStatus.LANDED, landed_commit="aaa"),
         ],
     )
     audit = AuditResult(verdict=AuditVerdict.PASSED, narrative="ok")
@@ -248,8 +248,8 @@ def test_render_json_includes_features_array(tmp_path: Path) -> None:
     assert by_id["signup"]["verdict"] == "passed"
     assert by_id["login"]["verdict"] == "partial"
     # Back-compat: legacy slices array still present
-    assert "slices" in data
-    assert len(data["slices"]) == 1
+    assert "groups" in data
+    assert len(data["groups"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -302,8 +302,8 @@ def test_multi_feature_walkthrough_entry_appears_in_each_feature(
         groups=[],
         audit_narrative="",
         walkthrough_artifacts=[],
-        blocked_slice_ids=[],
-        landed_slice_ids=[],
+        blocked_group_ids=[],
+        landed_group_ids=[],
         features=feature_dicts,
     )
     html = render_html(packet, session_dir=tmp_path)
@@ -358,8 +358,8 @@ def test_per_feature_findings_filtered_by_feature_id(tmp_path: Path) -> None:
         groups=[],
         audit_narrative="",
         walkthrough_artifacts=[],
-        blocked_slice_ids=[],
-        landed_slice_ids=[],
+        blocked_group_ids=[],
+        landed_group_ids=[],
         features=feature_dicts,
     )
     html = render_html(packet, session_dir=tmp_path)
@@ -381,7 +381,7 @@ def test_render_html_escapes_feature_name_and_description(tmp_path: Path) -> Non
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
         groups=[
-            Group(id="g", title="g", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="g", name="g", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
         ],
         features=[
             Feature(
@@ -394,10 +394,10 @@ def test_render_html_escapes_feature_name_and_description(tmp_path: Path) -> Non
     )
     build = BuildResult(
         spec_session_dir=tmp_path,
-        slice_results=[
-            SliceResult(
-                slice_id="g",
-                status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(
+                group_id="g",
+                status=GroupStatus.PASSING,
                 attempts=1,
                 branch="b",
                 worktree=tmp_path,
@@ -406,7 +406,7 @@ def test_render_html_escapes_feature_name_and_description(tmp_path: Path) -> Non
     )
     merge = MergeQueueResult(
         landed_ids=["g"],
-        results=[MergeResult(slice_id="g", status=MergeStatus.LANDED, landed_commit="aaa")],
+        results=[MergeResult(group_id="g", status=MergeStatus.LANDED, landed_commit="aaa")],
     )
     audit = AuditResult(
         verdict=AuditVerdict.PASSED,

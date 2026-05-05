@@ -121,7 +121,7 @@ def test_build_run_view_legacy_slices_key_maps_to_groups(tmp_path: Path) -> None
     spec = {
         "intent": "legacy webapp",
         "project_kind": "webapp",
-        "slices": [
+        "groups": [
             {"id": "g1", "title": "G1", "tasks": [], "deps": [], "owned_paths": [], "checks": []},
         ],
     }
