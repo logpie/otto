@@ -10,8 +10,13 @@
 //
 // Per the user directive (priority on Feature, not Group), FeatureList
 // is the primary surface; GroupList is one click below.
+//
+// Destructive actions (Pause and per-Group Abort) are gated behind a
+// ConfirmDialog so a single mis-click cannot pause a run or throw away
+// a Group's worktree work. Resume is non-destructive and fires inline.
 
 import { useCallback, useState } from "react";
+import { ConfirmDialog, type ConfirmState } from "../ConfirmDialog";
 import type { RunView } from "../../types/run";
 import { FeatureList } from "./FeatureList";
 import { GroupList } from "./GroupList";
@@ -52,15 +57,50 @@ async function postSessionAction(
 export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
   const [pending, setPending] = useState<string | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [confirmPending, setConfirmPending] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
   const inFlight = view.verdict === null || !TERMINAL_VERDICTS.has(view.verdict);
   const sessionId = view.meta.session_id;
 
-  const onPause = useCallback(async () => {
-    setPending("pause");
-    const { ok, message } = await postSessionAction(sessionId, "/actions/pause");
-    setBanner(message ?? (ok ? "Run paused" : "Pause failed"));
-    setPending(null);
-    onAfterAction?.();
+  const closeConfirm = useCallback(() => {
+    if (confirmPending) return;
+    setConfirm(null);
+    setConfirmError(null);
+  }, [confirmPending]);
+
+  const runConfirm = useCallback(async () => {
+    if (!confirm) return;
+    setConfirmPending(true);
+    setConfirmError(null);
+    try {
+      await confirm.onConfirm();
+      setConfirm(null);
+    } catch (err) {
+      setConfirmError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setConfirmPending(false);
+    }
+  }, [confirm]);
+
+  const requestPause = useCallback(() => {
+    setConfirm({
+      title: "Pause this run?",
+      body: "Use Resume to continue.",
+      confirmLabel: "Pause",
+      tone: "primary",
+      onConfirm: async () => {
+        setPending("pause");
+        try {
+          const { ok, message } = await postSessionAction(sessionId, "/actions/pause");
+          setBanner(message ?? (ok ? "Run paused" : "Pause failed"));
+          if (!ok) throw new Error(message ?? "Pause failed");
+        } finally {
+          setPending(null);
+          onAfterAction?.();
+        }
+      },
+    });
   }, [sessionId, onAfterAction]);
 
   const onResume = useCallback(async () => {
@@ -71,17 +111,29 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
     onAfterAction?.();
   }, [sessionId, onAfterAction]);
 
-  const onAbortGroup = useCallback(
-    async (groupId: string) => {
-      setPending(`abort:${groupId}`);
-      const { ok, message } = await postSessionAction(
-        sessionId,
-        `/groups/${encodeURIComponent(groupId)}/abort`,
-        { reason: "operator abort" },
-      );
-      setBanner(message ?? (ok ? `Group ${groupId} aborted` : "Abort failed"));
-      setPending(null);
-      onAfterAction?.();
+  const requestAbortGroup = useCallback(
+    (groupId: string) => {
+      setConfirm({
+        title: `Abort Group ${groupId}?`,
+        body: "Its worktree work will be lost.",
+        confirmLabel: "Abort Group",
+        tone: "danger",
+        onConfirm: async () => {
+          setPending(`abort:${groupId}`);
+          try {
+            const { ok, message } = await postSessionAction(
+              sessionId,
+              `/groups/${encodeURIComponent(groupId)}/abort`,
+              { reason: "operator abort" },
+            );
+            setBanner(message ?? (ok ? `Group ${groupId} aborted` : "Abort failed"));
+            if (!ok) throw new Error(message ?? "Abort failed");
+          } finally {
+            setPending(null);
+            onAfterAction?.();
+          }
+        },
+      });
     },
     [sessionId, onAfterAction],
   );
@@ -95,7 +147,7 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
             type="button"
             className="run-action-pause"
             data-testid="run-action-pause"
-            onClick={onPause}
+            onClick={requestPause}
             disabled={pending === "pause"}
           >
             Pause
@@ -132,7 +184,7 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
           groups={view.groups}
           {...(inFlight
             ? {
-                onAbort: onAbortGroup,
+                onAbort: requestAbortGroup,
                 pendingAbortId: pending?.startsWith("abort:")
                   ? pending.slice("abort:".length)
                   : null,
@@ -144,6 +196,17 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
         <h3>Stages</h3>
         <StageTimeline stages={view.stages} />
       </section>
+      {confirm && (
+        <ConfirmDialog
+          confirm={confirm}
+          pending={confirmPending}
+          error={confirmError}
+          checkboxAck={false}
+          onChangeCheckboxAck={() => {}}
+          onCancel={closeConfirm}
+          onConfirm={runConfirm}
+        />
+      )}
     </article>
   );
 }
