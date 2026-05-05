@@ -91,26 +91,81 @@ in order:
 ## Honest gap list — read this!
 
 After the redesign was claimed "100% delivered", 5 parallel cross-check
-audits ran against actual code with file:line citations. Findings:
-**~15 material gaps + ~13 cosmetic gaps**. See **`docs/codex-followups.md`**
-for the full punch list with severity ranking and recommended ordering.
+audits surfaced **~15 material + ~13 cosmetic gaps**.
+**A round-2 fix wave then closed most of them.** Current state:
 
-Highlights you should NOT miss:
-- Slice→Group rename is half-done — runtime types (`SliceState`,
-  `slice_id`, `slice.*` events, dual JSON keys) still live everywhere
-- 3 CheckKinds (CLIProbe / ImportCheck / TypeCheck) declared but
-  silently unimplemented — they hit "unsupported check kind"
-- The promised real-Sonnet E2E test
-  (`tests/integration/test_intent_to_proof.py`) was never written
-- Mid-build edit-and-recompile invalidation, pause action, and
-  abort-a-slice are all missing despite plan/design promising them
-- Audit is multi-pass (~4 retry layers), not "one LLM pass at end"
-- Otto's default walkthrough produces NO video/screenshots — capture
-  is BYO (project must ship Playwright/Cypress runner)
-- Build agent is NOT long-lived per slice — fresh subprocess per retry
-- Bench wall_s parity criterion fails (2123s vs 1500s ceiling) but
-  verdict still emits `i2p_passed`
-- CLAUDE.md is stale — doesn't list the new `otto run` subcommand
+- ✅ **12 gaps fixed in code**: A1, A2, A3, A4, A5, A6, A7, A13, A14,
+  A15, B1, B6
+- ✅ **14 gaps documented honestly with rationale**: A8, A9, A10, A11,
+  A12, B2, B4, B7, B8, B9, B10, B11, B12, B13
+- ⏳ **2 cosmetic gaps deferred** (low value, do as you touch the
+  files): B3 (.thumbs CSS → real CSS grid), B5 (combine the two
+  passed-only / blocked-only render lifecycle tests into one fixture)
+
+See **`docs/codex-followups.md`** for the full punch list with
+file:line evidence + status notes.
+
+Round-2 highlights (what changed since the first hand-off):
+
+- **Slice→Group rename completed** in spec_compile, spec_state, build,
+  audit, render, merge_queue, runner, resume, cli_run, spec_amend,
+  spec_warnings, web/i2p_routes, frontend types, plus all tests. Parser
+  keeps a one-cycle deprecation read fallback for legacy `"slices"` /
+  `"cross_slice_checks"` JSON keys. Branch prefix `i2p/<id>` left
+  opaque per A1 §6.
+- **Group field renames**: `tasks → feature_ids`, `title → name`,
+  `deps → dependencies`. Added optional `dispatch_plan` field with
+  honest deferral docstring.
+- **CheckKind executors**: `_run_cli_probe`, `_run_import_check`,
+  `_run_type_check` wired into `run_check`. mypy/pyright/basedpyright
+  via PATH; honest `tool_available=False` when absent.
+- **Real-Sonnet E2E test** at `tests/integration/test_intent_to_proof.py`,
+  gated by `OTTO_ALLOW_REAL_COST=1`, exposed as the `i2p-e2e` tier.
+- **A6 mid-build edit invalidation**: new `compute_invalidation` diff,
+  `editing_in_flight` lifecycle, `group.invalidated_by_spec_edit`
+  events, runner re-dispatches invalidated Groups. Design at
+  `docs/i2p-spec-edit-design.md`.
+- **A7 pause + abort-a-Group verbs**: poll-flag-based pause/resume,
+  per-Group abort handler + journal events + REST routes + frontend
+  buttons.
+- **A13 review gate**: opt-in `--review-gate` between compile and build
+  with `--gate-timeout` (default 24h); `spec.review_pending` /
+  `spec.review_approved` events.
+- **A14 bench parity ladder**: emits `i2p_partial_wall_exceeded`
+  instead of silently passing; per-criterion decomposition in
+  `result.json`.
+- **A15 CLAUDE.md** lists `otto run` and the proof-packet/spec-state
+  artifacts.
+
+**Test sweep: 1640/1640 passed.** Web typecheck + build clean.
+
+Honest deferrals you SHOULD know about:
+
+- A8: Otto's default walkthrough produces no video/screenshots in v1
+  (BYO Playwright/Cypress contract documented in
+  `docs/intent-to-product-design.md`). Render layer supports embedded
+  video + screenshot links once produced.
+- A9: "Long-lived per-slice agent" really means persistent
+  worktree+branch + fresh SDK subprocess per attempt. SDK
+  session-pinning is a v2 candidate.
+- A10: Audit has up to ~4 LLM judge calls per run (run_audit self-loop
+  + audit_loop Layer 2 + run_audit's internal fix-agent loop). v2
+  candidate to collapse to 2 layers.
+- A11/A12: Multi-worktree merge eligibility ("base not stale", "not
+  superseded") and post-repair `detect_scope_violations` are
+  unimplemented because Phase A ships single-worktree mode (default
+  `lambda _s: project_dir`).
+- B11: `scripts/bench_microfeed_real_webapp.py` (the bench's mono
+  baseline source) lives only on the never-merged codex-i2p branch.
+  Current bench uses a hard-coded 1500s ceiling rather than a re-run
+  comparison.
+
+Test-order flake to watch for: `test_autopilot.py::test_autopilot_full_executes_safe_recovery_once`
+intermittently fails in the full sweep but passes in isolation —
+pre-existing pattern (also affects test_cli_smoke / test_merge_orchestrator).
+Re-run usually clears it.
+
+## Files that need attention
 
 ## Files that need attention
 
