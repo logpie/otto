@@ -50,27 +50,29 @@ hardening + bug hunt.
 Every detail you might want is captured in repository docs. Read these
 in order:
 
-1. **`progress.md`** — checkbox list of every step in every phase, with
+1. **`docs/intent-to-product-design.md`** — the architectural design
+   doc that drove the redesign (4 stages × 1 artifact × 3 roles model).
+2. **`progress.md`** — checkbox list of every step in every phase, with
    verification timestamps. Single source of truth for "what was done".
-2. **`research.md`** — pre-redesign analysis of the two prior branches
+3. **`research.md`** — pre-redesign analysis of the two prior branches
    (codex-feats, codex-i2p) and how they collapse into one model.
-3. **`plan.md`** — the 12-step implementation plan that drove the work.
-4. **`docs/i2p-resume-design.md`** — `--resume` design rationale (438
+4. **`plan.md`** — the 12-step implementation plan that drove the work.
+5. **`docs/i2p-resume-design.md`** — `--resume` design rationale (438
    LOC). Includes the 3 user-decided open questions and the v1 answers:
    (a) cost-carry with `--reset-budget` escape, (b) `otto certify
    --resume` supported, (c) refuse-on-spec-hash-mismatch with `--force`.
-5. **`docs/phase-b-summary.md`** + **`docs/phase-c-deletion-audit.md`**
+6. **`docs/phase-b-summary.md`** + **`docs/phase-c-deletion-audit.md`**
    — Phase B/C cutover and deletion order rationale.
-6. **`docs/i2p-smoke-2-20260504-202757.md`** — most recent end-to-end
+7. **`docs/i2p-smoke-2-20260504-202757.md`** — most recent end-to-end
    smoke run report; 3 honest anomalies surfaced and fixed.
-7. **`docs/otto-wireframes.md`** — Mission Control redesign UI/UX
+8. **`docs/otto-wireframes.md`** — Mission Control redesign UI/UX
    intent, including the wireframes 4a–4d that the frontend
    implements.
-8. **`docs/anti-drift-loops.md`**, **`docs/autonomous-loop.md`** —
+9. **`docs/anti-drift-loops.md`**, **`docs/autonomous-loop.md`** —
    harness doctrine that drove the autonomous /loop-based delivery.
-9. **`docs/rua/2026-05-04-172101/`** — Real-User-Audit pass evidence
-   (16 chrome-devtools screenshots through every screen).
-10. **`drift-log.md`**, **`review.md`**, **`loop-report.md`** — the
+10. **`docs/rua/2026-05-04-172101/`** — Real-User-Audit pass evidence
+    (16 chrome-devtools screenshots through every screen).
+11. **`drift-log.md`**, **`review.md`**, **`loop-report.md`** — the
     drift sentinel + checkpoint review trail.
 
 ## Ground truth — repo state
