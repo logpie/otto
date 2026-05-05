@@ -88,6 +88,30 @@ in order:
   and `capability_verdicts` removal are now baked in — they were the
   only architectural gates open at hand-off.
 
+## Honest gap list — read this!
+
+After the redesign was claimed "100% delivered", 5 parallel cross-check
+audits ran against actual code with file:line citations. Findings:
+**~15 material gaps + ~13 cosmetic gaps**. See **`docs/codex-followups.md`**
+for the full punch list with severity ranking and recommended ordering.
+
+Highlights you should NOT miss:
+- Slice→Group rename is half-done — runtime types (`SliceState`,
+  `slice_id`, `slice.*` events, dual JSON keys) still live everywhere
+- 3 CheckKinds (CLIProbe / ImportCheck / TypeCheck) declared but
+  silently unimplemented — they hit "unsupported check kind"
+- The promised real-Sonnet E2E test
+  (`tests/integration/test_intent_to_proof.py`) was never written
+- Mid-build edit-and-recompile invalidation, pause action, and
+  abort-a-slice are all missing despite plan/design promising them
+- Audit is multi-pass (~4 retry layers), not "one LLM pass at end"
+- Otto's default walkthrough produces NO video/screenshots — capture
+  is BYO (project must ship Playwright/Cypress runner)
+- Build agent is NOT long-lived per slice — fresh subprocess per retry
+- Bench wall_s parity criterion fails (2123s vs 1500s ceiling) but
+  verdict still emits `i2p_passed`
+- CLAUDE.md is stale — doesn't list the new `otto run` subcommand
+
 ## Files that need attention
 
 These are the "honest gaps" Claude knows about but didn't close. None
