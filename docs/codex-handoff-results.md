@@ -337,7 +337,7 @@ Verification:
   -> 1391 passed, 531 deselected.
 - `git diff --check` -> passed.
 
-Pending:
+Superseded pending notes:
 - Full fast gate after documentation updates.
 - Real-cost Codex-provider E2E on tiny webapp, small CLI, and brownfield
   projects after this implementation pass is committed/validated.

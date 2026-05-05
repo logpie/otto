@@ -201,8 +201,6 @@ Re-run usually clears it.
 
 ## Files that need attention
 
-## Files that need attention
-
 These are the "honest gaps" Claude knows about but didn't close. None
 block delivery. All are explicitly enumerated in `progress.md`.
 
@@ -216,18 +214,11 @@ block delivery. All are explicitly enumerated in `progress.md`.
   by design.
 - **A6.6** — file-level "preserve" markers for brownfield compile.
   Deferred at design time.
-- **CLAUDE.md** — `proof-packet.{html,json}` not in the layout table
-  (only in narrative). Doc nit.
-- **Slice → Group rename is partial.** The primary dataclass `Slice`
-  was renamed to `Group` and the `Slice = Group` alias removed. BUT
-  related runtime types still use "slice" vocabulary: `SliceState` +
-  `state.slices` dict in `otto/spec_state.py`, `slice_id` / `slice_state`
-  in `otto/resume.py`+`audit.py`+`render.py`, `slice_verdicts` field
-  on AuditAgentOutput, `total_passing_slices=` kwarg, and the JSON
-  wire key `"slices":` still emitted by `render.py` and read by
-  `spec_compile.py` for back-compat. Full vocabulary unification is
-  mechanical but real (~½ day): rename SliceState/slice_id/slice_verdicts,
-  drop the "slices" JSON key after one more bench cycle.
+- **Slice → Group rename cleanup** — canonical runtime/data fields use
+  Group vocabulary. Remaining `slice` hits are mostly historical comments,
+  test names, compatibility warnings, and read fallbacks for legacy
+  `"slices"` proof/spec files. Dropping the fallback is intentionally held
+  until after another bench cycle.
 - **Type hygiene** — basedpyright surfaces a fair number of
   `reportUnknownVariableType` / `reportExplicitAny` warnings across
   `otto/cli.py`, `otto/cli_run.py`, `mission_control/service.py`. The
