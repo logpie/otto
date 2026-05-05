@@ -259,7 +259,7 @@ Merge queue (per target branch):
   post-land: verify resolved target state
 ```
 
-### Phase A simplification (gaps A11, A12, B9, B10)
+### Phase A implementation notes (A11, A12, B9, B10)
 
 The shipping merge queue is single-worktree mode (default per-slice
 worktree = `lambda _s: project_dir`). The full design above applies
@@ -268,13 +268,20 @@ to the eventual multi-worktree extension; what shipped:
 - **No `git rebase`, no remote refresh.** Replaced with merge-first-then-
   verify-with-rollback against current HEAD. See `merge_queue.py:8-22`
   docstring.
-- **Eligibility checks "base not stale" + "not superseded" are
-  unimplemented.** Single-worktree mode makes them trivially satisfied;
-  multi-worktree mode needs them and is deferred.
-- **"Edit scope = owned_paths + conflict regions" during repair is
-  enforced by prompt instruction only**, not by `detect_scope_violations`
-  on the post-repair diff. Prompt-only enforcement is honest leakage —
-  a strict scope check on repair output is a real follow-up.
+- **Superseded eligibility is implemented.** Merge queue uses the
+  latest `BuildResult`/`ComponentResult` per id; an older PASSING result
+  cannot leak through after a later attempt for the same Group/Component.
+- **Base freshness is implemented as merge-into-current-HEAD plus
+  verification/rollback**, not as a separate pre-rebase gate. This
+  matches the current merge-first executor: land the candidate into the
+  current target, rerun Group + cross-Group checks, then rollback on
+  failure. A future true multi-worktree/rebase executor can add an
+  explicit stale-base predicate without changing the proof contract.
+- **Repair scope is enforced after the repair agent returns.**
+  `run_merge_queue` computes unstaged/staged/untracked paths, runs
+  `detect_scope_violations`, emits `scope.warning`, discards the
+  uncommitted repair, and blocks the Group when repair edits cross into
+  peer-owned paths.
 - **Repair-time counter is split**: cost is shared across build/audit/
   merge_queue; repair wall-time is build-only (audit/merge don't call
   `charge_repair`). The design implied a single shared time counter;
@@ -349,53 +356,32 @@ Certifier runs **once** at end. Distinct from per-slice checks because:
 
 Three honest deviations from the doc-as-written:
 
-**1. "Walkthrough video, screenshot set" is BYO** (gap A8).
-Otto's default walkthrough lives at `otto/audit.py` in
-`_synthesized_webapp_walkthrough`: it constructs a Flask `test_client`
-and issues GETs against routes named in the spec, saving the rendered
-HTML body as the walkthrough artifact. **No video. No screenshots.**
+**1. Walkthrough video and screenshots are bundled for default webapps.**
+When a project declares a `BrowserJourney`, Otto still runs the
+project's own Playwright/Cypress command and collects its configured
+`evidence_globs`. When a webapp has no `BrowserJourney`,
+`_synthesized_webapp_walkthrough` now captures the home page itself:
+Flask/static HTML discovery first, then Playwright against `base_url`
+or the generated body artifact. The audit dir records
+`screenshot-home.png`, `dom-home.html`, `walkthrough.webm` when the
+browser writes video, `browser-capture.log`, and a conservative
+`walkthrough.jsonl`. If Playwright or the browser binary is missing,
+the log says so and the HTML artifact remains as fallback evidence.
 
-To get video and screenshots into the audit packet, the project's spec
-must declare a `BrowserJourney` check (with `evidence_globs` pointing
-at recording outputs) AND ship a Playwright/Cypress runner that
-captures them. The audit infrastructure SUPPORTS embedding
-`<video controls>` and screenshot links via the proof-packet renderer
-(`otto/render.py:684-686`), but the capture itself is the project's
-responsibility.
+**2. The live runner has two retry layers.**
+`run_audit` still has a compatibility Group-level fix loop for direct
+callers that pass `fix_agent`. The orchestrated i2p runner does not
+use that loop: it calls `run_audit(..., fix_agent=None)` for the judge
+pass, then uses `audit_loop.repair_failing_features` as the sole repair
+layer. Layer 2 re-audits narrowed Feature ids via `feature_scope_ids`.
 
-This is intentional in v1: bundling Playwright + a headed browser into
-Otto would balloon dependencies and runtime cost. v2 may re-evaluate;
-until then, the doc-as-written promise is BYO. The integration test
-`tests/integration/test_intent_to_proof.py` reflects this with a
-lenient `>=0` screenshot assertion.
-
-**2. "One LLM pass at end" is actually multi-pass** (gap A10).
-Three retry layers stack:
-
-- `run_audit` itself loops up to `audit_retries+1` times
-  (`audit.py:585,677`).
-- `audit_loop.repair_failing_features` (Layer 2) wraps `run_audit`
-  with a separate retry budget for failure-driven re-audits
-  (`audit_loop.py:211`).
-- `run_audit` also has its own internal fix-agent slice-repair loop
-  (`audit.py:805,870`) — undocumented in the original design.
-
-Total ceiling per run: ~4 LLM judge calls. Defensible (bounded
-overall), but the design wording is stricter than what shipped. Worth
-collapsing to two layers (audit + repair) in v2; documented here so
-future work doesn't re-litigate.
-
-**3. "Long-lived agent process per slice" is actually
-"persistent worktree+branch, fresh subprocess per attempt"** (gap A9).
-Each retry constructs a new `BuildAgentInput` and invokes
-`run_agent_with_timeout`, spawning a fresh SDK subprocess. The
-worktree path and branch persist across retries; the LLM conversation
-context does not. The "fresh prompt on retry = clear conversation"
-property is satisfied incidentally by this fresh-subprocess model.
-
-True process continuity (PID reuse, conversation attach) would
-require SDK session pinning that the current `claude_agent_sdk`
-doesn't expose. Listed as a v2 candidate.
+**3. Build/fix retries keep provider session continuity.**
+`BuildAgentOutput.session_id` is threaded back into the next
+`BuildAgentInput.agent_session_id`, and `default_build_agent` maps it
+to `AgentOptions.resume`. This gives Codex/SDK session-pinned
+conversation continuity across build retries, merge repair, audit
+compatibility repair, and Layer 2 repair when the provider supports
+resume. PID reuse is not required for the product contract.
 
 ### Cross-slice fix loop
 

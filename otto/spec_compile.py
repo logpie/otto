@@ -1272,6 +1272,16 @@ def parse_spec_md(
     return Spec(**spec_kwargs), warnings
 
 
+_FEATURE_PROOF_TEMPLATE = Path(__file__).parent / "web" / "templates" / "feature-proof.html.j2"
+
+
+def _render_feature_template(context: dict[str, str]) -> str:
+    template = _FEATURE_PROOF_TEMPLATE.read_text(encoding="utf-8")
+    for key, value in context.items():
+        template = template.replace("{{ " + key + " }}", value)
+    return template
+
+
 def feature_proof_block_to_html(
     block: FeatureProofBlock,
     *,
@@ -1294,84 +1304,103 @@ def feature_proof_block_to_html(
     )
     walkthrough_html = walkthrough_renderer(block.walkthrough_entries)
 
-    parts: list[str] = []
-    parts.append(
-        f'<section class="feature-proof" id="feature-{_html_escape(block.feature_id)}">'
-    )
-    parts.append(
-        f'<h2>{_html_escape(block.name)} {_verdict_badge_html(block.verdict)}</h2>'
-    )
+    description_html = ""
     if block.description:
-        parts.append(f'<p class="description">{_html_escape(block.description)}</p>')
+        description_html = f'<p class="description">{_html_escape(block.description)}</p>'
+    detail_html = ""
     if block.detail:
-        parts.append(f'<p class="detail">{_html_escape(block.detail)}</p>')
+        detail_html = f'<p class="detail">{_html_escape(block.detail)}</p>'
 
     # Audit honesty fields (research §4)
-    parts.append(
+    honesty_html = (
         '<div class="honesty">'
         f'<span class="completeness">completeness: {_html_escape(block.evidence_completeness)}</span> '
         f'<span class="confidence">confidence: {_html_escape(block.coverage_confidence)}</span>'
         "</div>"
     )
 
+    audit_narrative_html = ""
     if block.audit_narrative_excerpt:
-        parts.append(
+        audit_narrative_html = (
             f'<blockquote class="narrative">{_html_escape(block.audit_narrative_excerpt)}</blockquote>'
         )
 
-    parts.append("<h3>Walkthrough</h3>")
-    parts.append(walkthrough_html)
-
+    check_refs_html = ""
     if block.check_evidence_refs:
-        parts.append("<h3>Deterministic checks</h3><ul>")
-        for ref in block.check_evidence_refs:
-            parts.append(f"<li><code>{_html_escape(ref)}</code></li>")
-        parts.append("</ul>")
+        check_parts = ["<h3>Deterministic checks</h3><ul>"]
+        check_parts.extend(
+            f"<li><code>{_html_escape(ref)}</code></li>"
+            for ref in block.check_evidence_refs
+        )
+        check_parts.append("</ul>")
+        check_refs_html = "".join(check_parts)
 
+    built_in_html = ""
     if block.group_id or block.files_changed:
-        parts.append("<h3>Built in</h3>")
+        built_parts = ["<h3>Built in</h3>"]
         if block.group_id:
-            parts.append(f"<p>Group: <code>{_html_escape(block.group_id)}</code></p>")
+            built_parts.append(f"<p>Group: <code>{_html_escape(block.group_id)}</code></p>")
         if block.files_changed:
-            parts.append("<ul class='files'>")
+            built_parts.append("<ul class='files'>")
             for f in block.files_changed:
-                parts.append(f"<li><code>{_html_escape(f)}</code></li>")
-            parts.append("</ul>")
+                built_parts.append(f"<li><code>{_html_escape(f)}</code></li>")
+            built_parts.append("</ul>")
+        built_in_html = "".join(built_parts)
 
+    shared_with_html = ""
     if block.shared_with:
-        parts.append("<h3>Cross-linked features</h3>")
-        parts.append("<p>This walkthrough also evidences: ")
-        parts.append(
-            ", ".join(
+        shared_with_html = (
+            "<h3>Cross-linked features</h3>"
+            "<p>This walkthrough also evidences: "
+            + ", ".join(
                 f'<a href="#feature-{_html_escape(fid)}">{_html_escape(fid)}</a>'
                 for fid in block.shared_with
             )
+            + "</p>"
         )
-        parts.append("</p>")
 
+    repair_history_html = ""
     if block.repair_history:
-        parts.append("<h3>Repair history</h3><ol>")
+        repair_parts = ["<h3>Repair history</h3><ol>"]
         for entry in block.repair_history:
             attempt_n = entry.get("attempt") or "?"
             succeeded = entry.get("succeeded")
             label = "succeeded" if succeeded else "failed"
-            parts.append(
+            repair_parts.append(
                 f"<li>Attempt {_html_escape(str(attempt_n))}: {_html_escape(label)}</li>"
             )
-        parts.append("</ol>")
+        repair_parts.append("</ol>")
+        repair_history_html = "".join(repair_parts)
 
+    findings_html = ""
     if block.findings:
-        parts.append("<h3>Quality findings</h3><ul>")
+        finding_parts = ["<h3>Quality findings</h3><ul>"]
         for finding in block.findings:
-            parts.append(
+            finding_parts.append(
                 f'<li class="finding {_html_escape(finding.severity)}">'
                 f"[{_html_escape(finding.severity)}] {_html_escape(finding.text)}"
                 "</li>"
             )
-        parts.append("</ul>")
+        finding_parts.append("</ul>")
+        findings_html = "".join(finding_parts)
 
-    parts.append("</section>")
-    return "".join(parts)
+    return _render_feature_template(
+        {
+            "feature_id": _html_escape(block.feature_id),
+            "name": _html_escape(block.name),
+            "verdict_badge": _verdict_badge_html(block.verdict),
+            "description_html": description_html,
+            "detail_html": detail_html,
+            "honesty_html": honesty_html,
+            "audit_narrative_html": audit_narrative_html,
+            "walkthrough_html": walkthrough_html,
+            "check_refs_html": check_refs_html,
+            "built_in_html": built_in_html,
+            "shared_with_html": shared_with_html,
+            "repair_history_html": repair_history_html,
+            "findings_html": findings_html,
+        }
+    )
 
 
 def validate_walkthrough_coverage(
@@ -3006,7 +3035,6 @@ def _reconcile_brownfield(new_spec: Spec, base_spec: Spec) -> Spec:
             merged_features.append(base_feat)
 
     # ---- Components ----
-    base_components_by_id = {c.id: c for c in base_spec.components}
     seen_component_ids: set[str] = set()
     merged_components: list[Component] = []
     for new_comp in new_spec.components:

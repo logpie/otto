@@ -537,6 +537,16 @@ video { max-width: 100%; border: 1px solid #d0d7de; border-radius: 6px; }
 .failure { color: #cf222e; font-style: italic; }
 """
 
+_TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
+
+
+def _render_template(name: str, context: dict[str, str]) -> str:
+    """Render a tiny repo-owned template without adding a Jinja dependency."""
+    template = (_TEMPLATES_DIR / name).read_text(encoding="utf-8")
+    for key, value in context.items():
+        template = template.replace("{{ " + key + " }}", value)
+    return template
+
 
 def render_html(packet: ProofPacket, *, session_dir: Path | None = None) -> str:
     """Render the proof packet as a self-contained HTML document.
@@ -546,14 +556,6 @@ def render_html(packet: ProofPacket, *, session_dir: Path | None = None) -> str:
     rendered as absolute paths.
     """
     parts: list[str] = []
-    parts.append(f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Proof packet — {escape(packet.intent[:80])}</title>
-<style>{_HTML_CSS}</style>
-</head>
-<body>""")
 
     # Header
     parts.append(_render_header(packet))
@@ -581,8 +583,14 @@ def render_html(packet: ProofPacket, *, session_dir: Path | None = None) -> str:
     # Merge state
     parts.append(_render_merge_state(packet))
 
-    parts.append("</body></html>")
-    return "\n".join(parts)
+    return _render_template(
+        "proof-packet.html.j2",
+        {
+            "title": f"Proof packet - {escape(packet.intent[:80])}",
+            "css": _HTML_CSS,
+            "body": "\n".join(parts),
+        },
+    )
 
 
 def _render_header(packet: ProofPacket) -> str:

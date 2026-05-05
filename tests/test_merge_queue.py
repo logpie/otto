@@ -158,6 +158,17 @@ def test_passing_slice_ids_extracts_passing_only(tmp_path: Path) -> None:
     assert passing_group_ids(build_result) == ["a", "c"]
 
 
+def test_passing_group_ids_latest_result_supersedes_older_pass(tmp_path: Path) -> None:
+    build_result = BuildResult(
+        spec_session_dir=tmp_path,
+        group_results=[
+            GroupResult(group_id="a", status=GroupStatus.PASSING, attempts=1, branch="old", worktree=tmp_path),
+            GroupResult(group_id="a", status=GroupStatus.BLOCKED, attempts=2, branch="new", worktree=tmp_path),
+        ],
+    )
+    assert passing_group_ids(build_result) == []
+
+
 # ---------------------------------------------------------------------------
 # run_merge_queue — happy path
 # ---------------------------------------------------------------------------
@@ -191,6 +202,49 @@ def test_run_merge_queue_lands_single_slice_when_checks_pass(tmp_path: Path) -> 
     assert result.blocked_ids == []
     assert result.results[0].status == MergeStatus.LANDED
     assert result.results[0].landed_commit  # short hash present
+
+
+def test_run_merge_queue_uses_latest_passing_branch_for_superseded_group(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    subprocess.run(["git", "checkout", "-b", "old"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "chosen.txt").write_text("old", encoding="utf-8")
+    subprocess.run(["git", "add", "chosen.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "old", "--no-verify"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "new"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "chosen.txt").write_text("new", encoding="utf-8")
+    subprocess.run(["git", "add", "chosen.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "new", "--no-verify"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="hello",
+                dependencies=[],
+                owned_paths=[],
+                feature_ids=[],
+                checks=[_passing_check()],
+            ),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="old", worktree=tmp_path),
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=2, branch="new", worktree=tmp_path),
+        ],
+    )
+
+    result = asyncio.run(
+        run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
+    )
+
+    assert result.landed_ids == ["s1"]
+    assert (tmp_path / "chosen.txt").read_text(encoding="utf-8") == "new"
 
 
 def test_run_merge_queue_lands_in_dep_order(tmp_path: Path) -> None:

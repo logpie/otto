@@ -19,11 +19,10 @@ delegates the chain to ``run_pipeline``.
 
 Design notes (honest gaps):
 
-* ``run_audit`` already runs an internal slice-level repair loop when
-  ``fix_agent`` is provided. ``repair_failing_features`` is the
-  research §4 Layer 2 retry — Feature-level, distinct from run_audit's
-  inner loop. The runner invokes Layer 2 only when ``run_audit``
-  returns a non-PASS verdict and a ``fix_agent`` is wired. Without
+* ``run_audit`` retains an internal Group-level repair loop for
+  direct/legacy callers when ``fix_agent`` is provided. This runner
+  deliberately calls it with ``fix_agent=None`` and reserves repair for
+  ``repair_failing_features`` — the Feature-level Layer 2 loop. Without
   ``fix_agent`` (e.g. certify mode), repair is skipped.
 * Brownfield mode skips ``run_build`` / ``run_merge_queue`` entirely:
   the existing project IS the integrated worktree, so there are no
@@ -432,7 +431,7 @@ async def run_pipeline(
 
     # ---- 5. Audit ----
     _phase("audit")
-    walk = walkthrough or default_walkthrough_from_spec(spec)
+    walk = walkthrough or default_walkthrough_from_spec(spec, base_url=base_url)
     # Resume short-circuit: when the prior run already ran the audit
     # to completion (audit.finished + non-empty verdict), skip the
     # whole phase. We synthesise an AuditResult from the journal so
@@ -450,7 +449,10 @@ async def run_pipeline(
             audit_agent=audit_agent,
             base_url=base_url,
             walkthrough=walk,
-            fix_agent=fix_agent,
+            # The live i2p runner uses only the Feature-scoped Layer 2
+            # repair loop below. Passing fix_agent into run_audit would
+            # stack the old Group-level compatibility loop on top of it.
+            fix_agent=None,
             budget=audit_budget or AuditBudget(),
             shared_budget=shared_budget,
             base_branch=base_branch,
@@ -912,6 +914,7 @@ def _make_layer2_fix_agent(
     name is left empty — Layer 2 does not own a dedicated branch yet.
     """
     _ = (session_dir, base_url)  # reserved for future per-feature log routing
+    session_by_feature: dict[str, str] = {}
 
     async def bridge(failing: FailingFeature, group: Group) -> RepairAttempt:
         if shared_budget is not None and shared_budget.remaining_total_cost_usd() <= 0:
@@ -935,6 +938,7 @@ def _make_layer2_fix_agent(
             last_failure_narrative=failing.detail,
             log_dir=None,
             feature_id=failing.feature_id,
+            agent_session_id=session_by_feature.get(failing.feature_id, ""),
         )
         t0 = time.monotonic()
         try:
@@ -955,6 +959,8 @@ def _make_layer2_fix_agent(
             )
         if shared_budget is not None:
             shared_budget.charge_cost(float(output.cost_usd or 0.0))
+        if output.session_id:
+            session_by_feature[failing.feature_id] = output.session_id
         succeeded = bool(output.succeeded)
         detail = output.detail
         if succeeded:

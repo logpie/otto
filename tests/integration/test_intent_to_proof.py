@@ -1,11 +1,11 @@
-"""A4 — real-Sonnet end-to-end intent-to-proof integration test.
+"""A4 — real-Codex end-to-end intent-to-proof integration test.
 
 Drives `otto build` against a tmp project with a tiny but non-trivial
 intent ("hello world plus a counter button") and asserts the canonical
 i2p artifacts land on disk.
 
-This is a real-cost test: it spawns a real Claude Sonnet session via
-`uv run otto build --provider claude ...`. It is gated behind
+This is a real-cost test: it spawns real Codex provider sessions via
+`uv run otto build --provider codex ...`. It is gated behind
 `OTTO_ALLOW_REAL_COST=1` so CI/local default runs never burn money.
 Run it via the `i2p-e2e` tier:
 
@@ -19,10 +19,7 @@ Asserts (happy path):
     - `<session_dir>/proof-packet.json` exists with audit verdict
       in {"passed", "partial"}
     - audit verdict == "passed" (strict — happy path should pass)
-    - at least one screenshot artifact under `audit/` (lenient: zero
-      is accepted with a comment, since gap A8 documents that Otto's
-      default walkthrough is BYO-Playwright and produces no
-      screenshots/video out of the box)
+    - at least one screenshot artifact under `audit/`
 """
 
 from __future__ import annotations
@@ -132,8 +129,8 @@ def _resolve_session_dir(project_dir: Path) -> Path:
     return target_path
 
 
-def test_intent_to_proof_real_sonnet(tmp_path: Path) -> None:
-    """Drive a real `otto build --provider claude` and assert artifacts."""
+def test_intent_to_proof_real_codex(tmp_path: Path) -> None:
+    """Drive a real `otto build --provider codex` and assert artifacts."""
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
     _init_tmp_project(project_dir)
@@ -145,12 +142,12 @@ def test_intent_to_proof_real_sonnet(tmp_path: Path) -> None:
         "build",
         _FIXTURE_INTENT,
         "--provider",
-        "claude",
+        "codex",
         "--budget",
         str(_BUDGET_SECONDS),
     ]
 
-    # Inherit env so OTTO_ALLOW_REAL_COST + Anthropic creds flow through.
+    # Inherit env so OTTO_ALLOW_REAL_COST + provider credentials flow through.
     env = os.environ.copy()
 
     completed = subprocess.run(
@@ -209,17 +206,11 @@ def test_intent_to_proof_real_sonnet(tmp_path: Path) -> None:
         f"see {proof_json}"
     )
 
-    # ---- screenshot evidence (lenient — see gap A8) ----
-    # gap A8 (docs/codex-followups.md): Otto's default walkthrough hits
-    # the rendered HTML body via Flask test_client and does NOT produce
-    # screenshots or a recording on its own. Real video/screenshots
-    # require the project to ship a Playwright/Cypress BrowserJourney
-    # check (BYO). We accept zero screenshots here and document the
-    # caveat. Tighten to >=1 once A8 ships otto-bundled capture.
+    # ---- screenshot evidence (A8) ----
+    # Otto now ships a synthesized Playwright webapp walkthrough. Real
+    # E2E should prove at least one screenshot landed in the audit dir.
     audit_dir = session_dir / "audit"
     screenshot_count = 0
     if audit_dir.exists():
         screenshot_count = sum(1 for _ in audit_dir.rglob("*.png"))
-    assert screenshot_count >= 0, "sentinel"  # always true; intentional
-    # If A8 is fixed (otto ships default capture), flip this assertion to:
-    #     assert screenshot_count >= 1, "expected ≥1 screenshot under audit/"
+    assert screenshot_count >= 1, "expected >=1 screenshot under audit/"

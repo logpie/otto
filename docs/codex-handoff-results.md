@@ -275,3 +275,69 @@ Verification:
 - `uv run ruff check otto/audit.py otto/render.py otto/runner.py otto/merge_queue.py otto/cli.py otto/runs/history.py otto/mission_control/serializers.py tests/test_audit.py tests/test_audit_walkthrough_coverage.py tests/test_audit_coverage_cap.py tests/test_audit_walkthrough_entries.py tests/test_audit_prompt_feature_tagging.py tests/test_a0_4_propagation.py tests/test_render.py tests/test_render_per_feature.py tests/test_cli_render.py tests/test_runner.py tests/test_merge_queue.py tests/test_run_history.py` -> passed.
 - `uv run python scripts/test_tiers.py fast` -> 1385 passed, 531 deselected.
 - `git diff --check` -> passed.
+
+## 2026-05-05 Codex Remaining-Gap Fix Pass
+
+Scope: user requested committing the existing worktree state first, then
+finishing the remaining gaps, specifically calling out that video/screenshot
+capture can use agent browser or Playwright. Existing worktree changes were
+committed as `6021640a3 Harden i2p design completion gaps` before this pass.
+
+Findings fixed:
+- A8 was still real: the synthesized webapp walkthrough only wrote a log and
+  HTML body. It now attempts Playwright capture against `base_url` or the
+  generated body artifact and records screenshot, DOM, video when available,
+  browser log, and `walkthrough.jsonl`. Missing browser support is logged as
+  fallback evidence, not hidden.
+- A9 was still real: provider session ids were returned by
+  `run_agent_with_timeout` but discarded. Build/fix paths now preserve
+  `session_id`, pass it back as `agent_session_id`, and set
+  `AgentOptions.resume` in `default_build_agent`.
+- A10 was still real in the live runner: `run_pipeline` passed the same
+  fix-agent into `run_audit` and Layer 2. The runner now calls
+  `run_audit(..., fix_agent=None)` and reserves repair for
+  `repair_failing_features`; direct `run_audit` callers keep the compatibility
+  loop.
+- A11 was partially real: merge eligibility did not account for superseded
+  BuildResult entries and did not use the branch/worktree from the actual
+  latest passing result. Merge queue now keys eligibility off the latest
+  Group/Component result per id and uses that result's branch/worktree.
+- A3.2 was still open in `progress.md`: added the proof-packet and
+  feature-proof template files and wired the renderers to load them without
+  adding a Jinja dependency.
+- B5 was cosmetic but easy to close: added a combined render-run lifecycle
+  fixture with one landed Group and one blocked Group.
+- While testing, an indentation error in the new session-reuse audit patch
+  caused no-scope audits to loop forever. Reproduced with a direct
+  `run_audit` smoke, fixed, and re-ran the affected suite.
+
+Verification:
+- `uv run python -m py_compile otto/audit.py otto/build.py otto/merge_queue.py otto/runner.py` passed.
+- Direct `run_audit` smoke returned `AuditVerdict.PASSED 0.1`.
+- Focused regressions:
+  `uv run pytest -q tests/test_audit.py::test_synthesized_walkthrough_static_site_branch tests/test_audit.py::test_default_walkthrough_no_browser_journey_webapp_synthesizes tests/test_build.py::test_run_build_reuses_agent_session_between_retries tests/test_build.py::test_default_build_agent_passes_resume_session_to_provider tests/test_runner.py::test_repair_called_on_non_pass_with_fix_agent tests/test_merge_queue.py::test_passing_group_ids_latest_result_supersedes_older_pass tests/test_merge_queue.py::test_run_merge_queue_uses_latest_passing_branch_for_superseded_group`
+  -> 7 passed.
+- Expanded affected suite:
+  `uv run pytest -q tests/test_audit.py tests/test_build.py tests/test_merge_queue.py tests/test_runner.py tests/test_runner_layer2_fix.py tests/test_audit_loop_repair.py tests/test_render.py`
+  -> 160 passed.
+- Template/render expansion:
+  `uv run pytest -q tests/test_render.py tests/test_render_per_feature.py tests/test_a1a_dataclasses.py -k 'feature_proof_block_to_html'`
+  -> 10 passed, 137 deselected.
+- Expanded affected suite after templates/B5:
+  `uv run pytest -q tests/test_audit.py tests/test_build.py tests/test_merge_queue.py tests/test_runner.py tests/test_runner_layer2_fix.py tests/test_audit_loop_repair.py tests/test_render.py tests/test_render_per_feature.py tests/test_a1a_dataclasses.py -k 'not test_autopilot_full_executes_safe_recovery_once'`
+  -> 294 passed.
+- Integration E2E collection:
+  `uv run python -m py_compile tests/integration/test_intent_to_proof.py && uv run pytest -q tests/integration/test_intent_to_proof.py --collect-only`
+  -> collected `test_intent_to_proof_real_codex`.
+- Lint:
+  `uv run ruff check otto/audit.py otto/build.py otto/cli_run.py otto/merge_queue.py otto/runner.py otto/render.py otto/spec_compile.py tests/test_audit.py tests/test_build.py tests/test_merge_queue.py tests/test_runner.py tests/test_render.py tests/integration/test_intent_to_proof.py`
+  -> passed.
+- Fast gate:
+  `uv run python scripts/test_tiers.py fast`
+  -> 1391 passed, 531 deselected.
+- `git diff --check` -> passed.
+
+Pending:
+- Full fast gate after documentation updates.
+- Real-cost Codex-provider E2E on tiny webapp, small CLI, and brownfield
+  projects after this implementation pass is committed/validated.

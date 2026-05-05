@@ -19,35 +19,30 @@ mode: the thorough end-of-run audit. The legacy package stays put for
 the old `otto build` / `otto certify` paths during Phase A coexistence.
 
 If the audit's verdict is `partial` or `blocked` and `audit_agent` is
-provided, the audit can route findings to the fix loop: the relevant
-slice's build agent re-engages, and the audit re-runs (bounded by
-`AuditBudget.audit_retries`).
+provided, standalone callers may route findings to the compatibility
+fix loop: the relevant Group's build agent re-engages, and the audit
+re-runs (bounded by `AuditBudget.audit_retries`). The orchestrated
+intent-to-product runner leaves `fix_agent=None` here and uses the
+Feature-level Layer 2 repair loop instead.
 
 For testability, the LLM judge is abstracted via `AuditAgentCallable`.
 A trivial `default_audit_agent` implementation is provided that
 delegates to `otto.agent.run_agent_with_timeout`.
 
-**Retry-layer landscape (gap A10 in `docs/codex-followups.md`).** The
-end-to-end run can issue up to ~4 LLM judge calls per session through
-three composed layers — be aware when reading this module in isolation:
-
-1. ``run_audit`` self-loop bounded by ``AuditBudget.audit_retries``
-   (default 2; see ``audit.py:585``).
-2. Internal fix-agent slice-repair loop inside ``run_audit`` itself
-   (``audit.py:805,870``).
-3. Layer-2 ``audit_loop.repair_failing_features`` (``audit_loop.py:211``)
-   wraps ``run_audit`` for failure-driven re-audits with a separate
-   budget (``defaults.py``: ``max_repair_attempts_per_run``,
-   ``max_audit_passes_per_run``).
-
-v2 candidate: collapse to two layers. Documented in
-``docs/intent-to-product-design.md`` "Audit, in detail".
+**Retry-layer landscape (gap A10 in `docs/codex-followups.md`).**
+Production `run_pipeline` now composes two layers: one judge pass via
+``run_audit`` and Feature-scoped Layer 2 repairs via
+``audit_loop.repair_failing_features``. This module still keeps the old
+fix-agent loop for direct/legacy callers, but the live i2p path does not
+stack both repair systems.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
+import shutil
 import time
 from collections.abc import Iterable
 import dataclasses
@@ -340,7 +335,11 @@ def _validate_walkthrough_jsonl(
     return entries, coverage
 
 
-def default_walkthrough_from_spec(spec: Spec) -> WalkthroughCallable:
+def default_walkthrough_from_spec(
+    spec: Spec,
+    *,
+    base_url: str | None = None,
+) -> WalkthroughCallable:
     """Build a production walkthrough callable from the spec.
 
     Strategy: find a `BrowserJourney` check anywhere in the spec
@@ -384,7 +383,7 @@ def default_walkthrough_from_spec(spec: Spec) -> WalkthroughCallable:
         # library), legitimately no-op.
         project_kind = (spec.project_kind or "").lower()
         if project_kind == "webapp":
-            return _synthesized_webapp_walkthrough()
+            return _synthesized_webapp_walkthrough(spec, base_url=base_url)
 
         def _no_journey(_pd: Path, _ld: Path, _ts: int) -> WalkthroughResult:
             return WalkthroughResult(
@@ -416,15 +415,19 @@ def default_walkthrough_from_spec(spec: Spec) -> WalkthroughCallable:
     return _run_journey
 
 
-def _synthesized_webapp_walkthrough() -> WalkthroughCallable:
+def _synthesized_webapp_walkthrough(
+    spec: Spec,
+    *,
+    base_url: str | None = None,
+) -> WalkthroughCallable:
     """Default walkthrough for webapp project_kind when none was declared.
 
     Boots the app via `create_app`, walks the home page using Flask's
-    test_client (no Playwright dependency, no real server), captures
-    response status/length, and saves the rendered HTML body as an
-    audit artifact. This is a best-effort default — projects that
-    don't expose `create_app()` (or aren't Flask-shaped) get a clear
-    diagnostic instead of silent no-op.
+    test_client or reads a produced static index, then uses Playwright
+    to capture browser-grade screenshot/DOM/video evidence from either
+    `base_url` or the rendered HTML artifact. This is a best-effort
+    default — projects that don't expose `create_app()` (or aren't
+    static-site-shaped) get a clear diagnostic instead of silent no-op.
 
     For richer interactive verification, projects should declare a
     BrowserJourney check in cross_slice_checks (Playwright runner,
@@ -526,11 +529,40 @@ def _synthesized_webapp_walkthrough() -> WalkthroughCallable:
         body_path = project_dir / "__audit_home_body__.html"
         if body_path.exists():
             artifacts.append(body_path)
+        browser_detail = ""
+        if completed.returncode == 0 and (base_url or body_path.exists()):
+            target_url = (base_url or "").rstrip("/") or body_path.resolve().as_uri()
+            browser_artifacts, browser_detail = _capture_playwright_page(
+                target_url,
+                log_dir,
+                timeout_s=_timeout_s,
+            )
+            artifacts.extend(browser_artifacts)
+            html_text = ""
+            for candidate in (log_dir / "dom-home.html", body_path):
+                if candidate.exists():
+                    html_text = candidate.read_text(encoding="utf-8", errors="replace")
+                    break
+            _write_synthesized_walkthrough_jsonl(
+                spec=spec,
+                log_dir=log_dir,
+                target_url=target_url,
+                html_text=html_text,
+                artifacts=browser_artifacts,
+            )
+            if browser_detail:
+                with log_path.open("a", encoding="utf-8") as fh:
+                    fh.write("\n\nBROWSER CAPTURE:\n")
+                    fh.write(browser_detail)
+                    fh.write("\n")
 
         if completed.returncode == 0:
             return WalkthroughResult(
                 succeeded=True,
-                detail=f"synthesized GET / succeeded ({completed.stdout.strip()[:200]})",
+                detail=(
+                    f"synthesized GET / succeeded ({completed.stdout.strip()[:160]})"
+                    + (f"; {browser_detail[:120]}" if browser_detail else "")
+                ),
                 artifacts=artifacts,
             )
         return WalkthroughResult(
@@ -543,6 +575,185 @@ def _synthesized_webapp_walkthrough() -> WalkthroughCallable:
         )
 
     return _walk
+
+
+def _capture_playwright_page(
+    target_url: str,
+    log_dir: Path,
+    *,
+    timeout_s: int,
+) -> tuple[list[Path], str]:
+    """Capture a synthesized browser walkthrough using Playwright.
+
+    Returns artifacts plus a one-line detail. Import/browser install
+    failures are non-fatal because the synthesized HTML artifact is
+    still useful audit input; the log records the reason instead of
+    silently pretending a browser ran.
+    """
+    capture_log = log_dir / "browser-capture.log"
+    artifacts: list[Path] = [capture_log]
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:  # noqa: BLE001
+        detail = f"playwright unavailable: {type(exc).__name__}: {exc}"
+        capture_log.write_text(detail + "\n", encoding="utf-8")
+        return artifacts, detail
+
+    screenshot_path = log_dir / "screenshot-home.png"
+    dom_path = log_dir / "dom-home.html"
+    video_dir = log_dir / "video"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    console_messages: list[str] = []
+    status_code: int | None = None
+    browser = None
+    context = None
+    page = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                record_video_dir=str(video_dir),
+                viewport={"width": 1280, "height": 720},
+            )
+            page = context.new_page()
+
+            def _on_console(message: Any) -> None:
+                msg_type = str(getattr(message, "type", "") or "")
+                if msg_type in {"error", "warning"}:
+                    text = str(getattr(message, "text", "") or "")
+                    console_messages.append(f"{msg_type}: {text}"[:500])
+
+            page.on("console", _on_console)
+            response = page.goto(
+                target_url,
+                wait_until="networkidle",
+                timeout=max(1, min(timeout_s, 60)) * 1000,
+            )
+            status_code = int(getattr(response, "status", 0) or 0) if response else None
+            page.screenshot(path=str(screenshot_path), full_page=True)
+            dom_path.write_text(page.content(), encoding="utf-8")
+            artifacts.extend([screenshot_path, dom_path])
+            page.close()
+            context.close()
+            browser.close()
+            page = None
+            context = None
+            browser = None
+    except Exception as exc:  # noqa: BLE001
+        detail = f"playwright capture failed: {type(exc).__name__}: {exc}"
+        capture_log.write_text(
+            f"url={target_url}\n{detail}\n",
+            encoding="utf-8",
+        )
+        return artifacts, detail
+    finally:
+        for closer in (page, context, browser):
+            if closer is not None:
+                try:
+                    closer.close()
+                except Exception:
+                    pass
+
+    video_candidates = sorted(video_dir.rglob("*.webm"))
+    if video_candidates:
+        video_path = log_dir / "walkthrough.webm"
+        try:
+            shutil.move(str(video_candidates[0]), str(video_path))
+            artifacts.append(video_path)
+        except OSError:
+            artifacts.append(video_candidates[0])
+    detail_parts = [
+        f"playwright opened {target_url}",
+        f"status={status_code}" if status_code is not None else "status=unknown",
+        f"artifacts={len(artifacts)}",
+    ]
+    if console_messages:
+        detail_parts.append(f"console_warnings={len(console_messages)}")
+    capture_log.write_text(
+        "\n".join([
+            f"url={target_url}",
+            f"status={status_code if status_code is not None else 'unknown'}",
+            f"artifacts={[str(p) for p in artifacts]}",
+            "console:",
+            *console_messages,
+        ])
+        + "\n",
+        encoding="utf-8",
+    )
+    return artifacts, "; ".join(detail_parts)
+
+
+def _write_synthesized_walkthrough_jsonl(
+    *,
+    spec: Spec,
+    log_dir: Path,
+    target_url: str,
+    html_text: str,
+    artifacts: list[Path],
+) -> None:
+    """Emit a conservative walkthrough.jsonl entry for synthesized browser evidence."""
+    feature_ids = _feature_ids_observed_in_html(spec, html_text)
+    screenshot = log_dir / "screenshot-home.png"
+    dom_snapshot = log_dir / "dom-home.html"
+    payload: dict[str, Any] = {
+        "t": "00:00",
+        "action_kind": "browser_navigation" if feature_ids else "exploration",
+        "feature_ids": feature_ids,
+        "narrative": (
+            "Synthesized Playwright home-page capture"
+            if feature_ids else
+            "Synthesized Playwright home-page survey; no specific feature text matched"
+        ),
+        "url": target_url,
+        "artifacts": [str(path) for path in artifacts],
+    }
+    if screenshot.exists():
+        payload["screenshot"] = str(screenshot)
+    if dom_snapshot.exists():
+        payload["dom_snapshot"] = str(dom_snapshot)
+    (log_dir / "walkthrough.jsonl").write_text(
+        json.dumps(payload, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _feature_ids_observed_in_html(spec: Spec, html_text: str) -> list[str]:
+    """Best-effort Feature tagging for synthesized home-page evidence.
+
+    We only tag a Feature when its id/name/acceptance words appear in
+    the rendered HTML. Otherwise the entry remains `exploration`, which
+    prevents default capture from falsely certifying untouched Features.
+    """
+    if not html_text or not spec.features:
+        return []
+    haystack = re.sub(r"\s+", " ", html_text).lower()
+    observed: list[str] = []
+    for feature in spec.features:
+        candidates = [
+            feature.id,
+            feature.name,
+            feature.description,
+            feature.acceptance_detail,
+        ]
+        matched = False
+        for candidate in candidates:
+            text = str(candidate or "").strip().lower()
+            if not text:
+                continue
+            if text in haystack:
+                matched = True
+                break
+            words = [
+                w
+                for w in re.findall(r"[a-z0-9]{4,}", text)
+                if w not in {"feature", "users", "user", "page", "shows", "should"}
+            ]
+            if words and sum(1 for w in words if w in haystack) >= min(2, len(words)):
+                matched = True
+                break
+        if matched:
+            observed.append(feature.id)
+    return observed
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +821,7 @@ async def run_audit(
     # otherwise the audit could re-judge the integrated state as
     # PASSED on a later attempt while real repair work never landed.
     fix_loop_failed_attempts: list[int] = []
+    fix_session_by_group: dict[str, str] = {}
 
     emit(session_dir, "audit.started")
 
@@ -935,6 +1147,7 @@ async def run_audit(
                     f"{group_id}: {next((v.detail for v in agent_output.group_verdicts if v.group_id == group_id), '')}"
                 ),
                 log_dir=session_dir / "audit" / f"attempt-{retries:02d}" / "fix" / group_id,
+                agent_session_id=fix_session_by_group.get(group_id, ""),
             )
             # V3 fix: for greenfield runs with a real build-phase Group
             # branch, checkout that branch before invoking the fix-agent
@@ -969,6 +1182,8 @@ async def run_audit(
             try:
                 fix_output = await fix_agent(agent_input_fix)
                 cost_total += fix_output.cost_usd
+                if fix_output.session_id:
+                    fix_session_by_group[group_id] = fix_output.session_id
                 if shared_budget is not None:
                     shared_budget.charge_cost(fix_output.cost_usd)
                 if not fix_output.succeeded:

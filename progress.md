@@ -16,6 +16,15 @@ Last E2E sweep: i2p-smoke-2 webapp counter (2026-05-04 20:27) — verdict=blocke
 Prior E2E sweep: tick 10/11 cli — verdict=blocked (honest), $1.52, 586s. Smoke contract PASS.
 Prior E2E sweep: tick 5/6 webapp — verdict=blocked (honest), $0.55, 212s. Smoke contract PASS.
 
+### Codex remaining-gap pass (2026-05-05, branch codex-i2p-v2)
+- [✓] **A8 — bundled screenshot/video capture** — `_synthesized_webapp_walkthrough` now runs Playwright for default webapp walkthroughs after Flask/static discovery. Artifacts: `screenshot-home.png`, `dom-home.html`, `walkthrough.webm` when video is produced, `browser-capture.log`, and conservative `walkthrough.jsonl`. Missing Playwright/browser binary is logged honestly and falls back to HTML evidence. · verified 2026-05-05
+- [✓] **A9 — provider session continuity** — `BuildAgentOutput.session_id` and `BuildAgentInput.agent_session_id` now thread through build retries, merge repair, audit compatibility repair, and Layer 2 repair; `default_build_agent` maps it to `AgentOptions.resume`. · verified 2026-05-05
+- [✓] **A10 — live retry-layer collapse** — `run_pipeline` calls `run_audit(..., fix_agent=None)` and reserves the supplied fix agent for `repair_failing_features`; direct `run_audit` callers retain the old compatibility loop. · verified 2026-05-05
+- [✓] **A11 — superseded merge eligibility** — merge queue now computes latest Group/Component result per id, ignores older PASSING entries superseded by later results, and uses the latest result's branch/worktree for the candidate. Base freshness remains the merge-into-current-HEAD + verification/rollback strategy. · verified 2026-05-05
+- [✓] **A3.2 — proof templates** — added `otto/web/templates/proof-packet.html.j2` and `feature-proof.html.j2`; the proof packet and per-Feature proof renderers now load those templates through dependency-free placeholder substitution. · verified 2026-05-05
+- [✓] **B5 — combined lifecycle render fixture** — `tests/test_render.py` now has one render-run fixture with a landed Group and blocked Group, asserting HTML + JSON lifecycle state together. · verified 2026-05-05
+- [✓] **Regression sweep for this pass** — `uv run pytest -q tests/test_audit.py tests/test_build.py tests/test_merge_queue.py tests/test_runner.py tests/test_runner_layer2_fix.py tests/test_audit_loop_repair.py tests/test_render.py tests/test_render_per_feature.py tests/test_a1a_dataclasses.py -k 'not test_autopilot_full_executes_safe_recovery_once'` -> 294 passed. `uv run python scripts/test_tiers.py fast` -> 1391 passed, 531 deselected.
+
 ### i2p-smoke-2 anomaly fixes (2026-05-04)
 - [✓] **Issue 1 — `--yes` rejected with stale `otto run` hint** — `otto/cli.py` build-path: `--yes` removed from i2p ignored-flag list (silently accepted; the i2p path has no interactive spec-approval step, so it's a definitional no-op). Stale "pass them to `otto run`" hint reworded to drop the bogus subcommand reference (build + certify paths). No tests assert on the message text. · verified 2026-05-04
 - [✓] **Issue 2 — `--budget` semantics** — no code change. `otto/cli.py:1006,1173` already declare `--budget` help as "Total wall-clock budget in seconds, must be > 0"; CLAUDE.md doesn't claim USD. Confirmed via `otto build --help` output. · verified 2026-05-04
@@ -502,11 +511,11 @@ versions. Do not work from it; use the split sub-phases above.
 
 - [ ] All A1.* unit tests green
 - [✓] Integration: `tests/integration/test_intent_to_proof.py` written
-      (gap A4) — drives real `otto build --provider claude` against a
+      (gap A4) — drives real `otto build --provider codex` against a
       tmp project; asserts spec.json shape (groups/project_kind/intent),
       no blocked groups, proof-packet.{html,json} on disk, audit verdict
-      ∈ {passed, partial} (strict==passed for the happy path), and a
-      lenient screenshot check pending gap A8 (BYO walkthrough capture).
+      ∈ {passed, partial} (strict==passed for the happy path), and at
+      least one screenshot artifact under `audit/` now that A8 is closed.
       Gated behind `OTTO_ALLOW_REAL_COST=1`, 15min wall budget. New
       `i2p-e2e` tier in `scripts/test_tiers.py` (gap A5) runs only this
       file. Collection verified: `uv run pytest
@@ -626,9 +635,13 @@ session dir; deterministic; re-runnable.
         `build_feature_proof_blocks`, so per-Feature blocks now carry
         verdicts + findings + walkthrough trace.
 
-- [ ] A3.2 — Templates
-  - [ ] `otto/web/templates/proof-packet.html.j2`
-  - [ ] `otto/web/templates/feature-proof.html.j2`
+- [✓] A3.2 — Templates · verified 2026-05-05
+  - [✓] `otto/web/templates/proof-packet.html.j2`
+  - [✓] `otto/web/templates/feature-proof.html.j2`
+  - [✓] `render_html` and `feature_proof_block_to_html` load these
+        repo-owned templates via dependency-free placeholder substitution;
+        `tests/test_render.py::test_proof_templates_exist_and_are_used`
+        verifies both files are used.
 
 - [✓] A3.3 — `otto render <session-id>` CLI
   - [✓] Re-renders without LLM cost by loading `proof-packet.json` and

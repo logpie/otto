@@ -23,6 +23,7 @@ from otto.build import (
     BuildBudget,
     GroupStatus,
     _build_agent_prompt,
+    default_build_agent,
     detect_dependency_scope_extensions,
     detect_scope_violations,
     ready_groups,
@@ -455,6 +456,84 @@ def test_run_build_retries_on_failing_check_then_passes(tmp_path: Path) -> None:
     )
     assert result.all_passing
     assert result.group_results[0].attempts == 3
+
+
+def test_run_build_reuses_agent_session_between_retries(tmp_path: Path) -> None:
+    """A9: retry attempts should resume the provider session returned by attempt 1."""
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    seen_sessions: list[str] = []
+
+    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        seen_sessions.append(input_.agent_session_id)
+        if input_.attempt == 1:
+            return BuildAgentOutput(
+                succeeded=False,
+                detail="try again",
+                session_id="provider-session-1",
+            )
+        assert input_.agent_session_id == "provider-session-1"
+        return BuildAgentOutput(succeeded=True, session_id="provider-session-2")
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="x",
+                dependencies=[],
+                owned_paths=[],
+                feature_ids=[],
+                checks=[],
+            ),
+        ]
+    )
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+        )
+    )
+    assert result.all_passing
+    assert seen_sessions == ["", "provider-session-1"]
+
+
+def test_default_build_agent_passes_resume_session_to_provider(tmp_path: Path, monkeypatch) -> None:
+    """A9: default_build_agent must set AgentOptions.resume from BuildAgentInput."""
+    from otto.agent import AgentOptions
+
+    group = Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[])
+    spec = _spec([group])
+    seen: dict[str, str] = {}
+
+    def fake_make_options(*_args, **_kwargs) -> AgentOptions:
+        return AgentOptions()
+
+    async def fake_run_agent(_prompt, options, **_kwargs):
+        seen["resume"] = options.resume or ""
+        return "done", 0.03, "provider-session-2", {}
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent)
+
+    output = asyncio.run(
+        default_build_agent(
+            BuildAgentInput(
+                spec=spec,
+                group=group,
+                project_dir=tmp_path,
+                worktree=tmp_path,
+                branch="i2p/test/s1",
+                attempt=2,
+                agent_session_id="provider-session-1",
+            )
+        )
+    )
+    assert output.succeeded is True
+    assert output.session_id == "provider-session-2"
+    assert seen["resume"] == "provider-session-1"
 
 
 def test_run_build_blocks_after_retry_exhaustion(tmp_path: Path) -> None:

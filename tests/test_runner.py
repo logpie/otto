@@ -197,6 +197,7 @@ def _wire_stubs(
     async def _repair(*, spec, feature_verdicts, fix_agent, **kwargs):
         captured["repair_calls"] += 1
         captured["repair_feature_verdicts"] = feature_verdicts
+        captured["repair_fix_agent"] = fix_agent
         order.add("repair")
         return RepairResult(
             attempts=[
@@ -437,6 +438,8 @@ def test_repair_called_on_non_pass_with_fix_agent(
     )
 
     assert "repair" in order.events
+    assert captured["audit_kwargs"]["fix_agent"] is None
+    assert captured["repair_fix_agent"] is not None
     assert captured["repair_calls"] == 1
     # Layer 2 received the failing feature verdict from feature_audits.
     fvs = captured["repair_feature_verdicts"]

@@ -23,6 +23,7 @@ from otto.render import (
     PROOF_PACKET_HTML,
     PROOF_PACKET_JSON,
     PROOF_PACKET_SCHEMA_VERSION,
+    _TEMPLATES_DIR,
     compose_proof_packet,
     proof_packet_from_dict,
     rerender_proof_packet,
@@ -33,11 +34,13 @@ from otto.render import (
 )
 from otto.spec_compile import (
     BrowserJourney,
+    FeatureProofBlock,
     RepoTestCheck,
     Group,
     Spec,
     StateInvariant,
     StructureDecisions,
+    feature_proof_block_to_html,
 )
 
 
@@ -362,6 +365,45 @@ def test_render_html_video_walkthrough_artifact(tmp_path: Path) -> None:
     assert 'src="audit/walk.webm"' in html
 
 
+def test_proof_templates_exist_and_are_used(tmp_path: Path, monkeypatch) -> None:
+    """A3.2: proof-packet and feature proof render through template files."""
+    assert (_TEMPLATES_DIR / "proof-packet.html.j2").is_file()
+    assert (_TEMPLATES_DIR / "feature-proof.html.j2").is_file()
+
+    import otto.render as render_mod
+    import otto.spec_compile as spec_compile_mod
+
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "proof-packet.html.j2").write_text(
+        "<html><body><main data-template='proof'>{{ body }}</main></body></html>",
+        encoding="utf-8",
+    )
+    feature_template = tmp_path / "feature-proof.html.j2"
+    feature_template.write_text(
+        "<section data-template='feature'>{{ name }} {{ walkthrough_html }}</section>",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(render_mod, "_TEMPLATES_DIR", template_dir)
+    monkeypatch.setattr(spec_compile_mod, "_FEATURE_PROOF_TEMPLATE", feature_template)
+
+    packet = compose_proof_packet(
+        _two_slice_spec(tmp_path),
+        _build_result_passing(tmp_path),
+        _merge_result_landed(tmp_path),
+        _audit_passed(),
+        wall_s=1.0,
+        cost_usd=0.0,
+    )
+    html = render_mod.render_html(packet, session_dir=tmp_path)
+    feature_html = feature_proof_block_to_html(
+        FeatureProofBlock(feature_id="f", name="Feature", verdict="passed")
+    )
+
+    assert "data-template='proof'" in html
+    assert "data-template='feature'" in feature_html
+
+
 def test_render_html_blocked_slice_renders_narrative(tmp_path: Path) -> None:
     spec = _two_slice_spec(tmp_path)
     build_result = BuildResult(
@@ -434,6 +476,64 @@ def test_render_run_end_to_end(tmp_path: Path) -> None:
     assert parsed["wall_s"] == 180.0
     assert parsed["cost_usd"] == 0.72
     assert len(parsed["groups"]) == 2
+
+
+def test_render_run_end_to_end_combines_landed_and_blocked_groups(tmp_path: Path) -> None:
+    """Lifecycle fixture covers passed/landed and blocked groups together."""
+    spec = _two_slice_spec(tmp_path)
+    build_result = BuildResult(
+        spec_session_dir=tmp_path,
+        group_results=[
+            GroupResult(
+                group_id="shell",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch="i2p/x/shell",
+                worktree=tmp_path,
+            ),
+            GroupResult(
+                group_id="counter",
+                status=GroupStatus.BLOCKED,
+                attempts=3,
+                branch="i2p/x/counter",
+                worktree=tmp_path,
+                failure_narrative="checks failed on attempt 3: NameError",
+            ),
+        ],
+    )
+    merge_result = MergeQueueResult(
+        landed_ids=["shell"],
+        results=[MergeResult(group_id="shell", status=MergeStatus.LANDED, landed_commit="abc1234")],
+    )
+    audit_result = AuditResult(
+        verdict=AuditVerdict.PARTIAL,
+        narrative="counter blocked",
+        group_verdicts=[
+            GroupVerdict(group_id="shell", passed=True, detail="ok"),
+            GroupVerdict(group_id="counter", passed=False, detail="missing route"),
+        ],
+    )
+
+    html_path, json_path = render_run(
+        spec,
+        session_dir=tmp_path,
+        build_result=build_result,
+        merge_result=merge_result,
+        audit_result=audit_result,
+        wall_s=180.0,
+        cost_usd=0.72,
+    )
+    html = html_path.read_text(encoding="utf-8")
+    parsed = json.loads(json_path.read_text(encoding="utf-8"))
+
+    assert parsed["verdict"] == "partial"
+    assert parsed["landed_group_ids"] == ["shell"]
+    assert parsed["blocked_group_ids"] == ["counter"]
+    statuses = {group["group_id"]: group["status"] for group in parsed["groups"]}
+    assert statuses == {"shell": "landed", "counter": "blocked"}
+    assert "Known limitations" in html
+    assert "NameError" in html
+    assert "App shell" in html and "Counter widget" in html
 
 
 def test_proof_packet_from_dict_accepts_legacy_slice_keys() -> None:

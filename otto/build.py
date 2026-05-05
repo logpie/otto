@@ -356,6 +356,7 @@ class BuildAgentInput:
     last_failure_narrative: str = ""  # empty on first attempt
     log_dir: Path | None = None  # if set, agent writes narrative there
     feature_id: str = ""  # Layer 2 narrowing: fix only this feature in the slice
+    agent_session_id: str = ""  # resume same provider conversation across attempts
 
 
 @dataclass
@@ -366,6 +367,7 @@ class BuildAgentOutput:
     cost_usd: float = 0.0
     wall_s: float = 0.0
     detail: str = ""  # short narrative of what happened
+    session_id: str = ""  # provider session id for attempt continuity
 
 
 class BuildAgentCallable(Protocol):
@@ -1545,6 +1547,7 @@ async def _run_slice(
     # while the agent makes incremental progress).
     prior_diff_hash: str = ""
     current_diff_hash: str = ""
+    agent_session_id = ""
 
     while attempt < budget.per_group_retries_hard_cap:
         attempt += 1
@@ -1697,6 +1700,7 @@ async def _run_slice(
             attempt=attempt,
             last_failure_narrative=last_failure,
             log_dir=raw_log_dir,
+            agent_session_id=agent_session_id,
         )
 
         # v2 phase 4 (observability): archive the rendered prompt
@@ -1729,6 +1733,8 @@ async def _run_slice(
             continue
 
         cost_total += agent_output.cost_usd
+        if agent_output.session_id:
+            agent_session_id = agent_output.session_id
         budget.charge_cost(agent_output.cost_usd)
         attempt_wall = time.monotonic() - attempt_t0
         if attempt > 1:
@@ -2388,10 +2394,12 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
     # a mutable dataclass; mutate in place rather than reconstruct.
     options.cwd = str(agent_input.worktree)
     options.permission_mode = "acceptEdits"  # build agents may edit owned files
+    if agent_input.agent_session_id:
+        options.resume = agent_input.agent_session_id
 
     t0 = time.monotonic()
     try:
-        text, cost, _session_id, _breakdown = await run_agent_with_timeout(
+        text, cost, session_id, _breakdown = await run_agent_with_timeout(
             prompt,
             options,
             log_dir=log_subdir,
@@ -2405,6 +2413,7 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
             cost_usd=cost or 0.0,
             wall_s=time.monotonic() - t0,
             detail=text[:500],
+            session_id=session_id or agent_input.agent_session_id,
         )
     except AgentCallError as exc:
         return BuildAgentOutput(

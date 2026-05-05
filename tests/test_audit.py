@@ -1031,7 +1031,20 @@ def test_default_walkthrough_no_browser_journey_non_webapp_returns_no_op(tmp_pat
     assert "no synthesized fallback" in result.detail
 
 
-def test_synthesized_walkthrough_static_site_branch(tmp_path: Path) -> None:
+def _fake_playwright_capture(_url: str, log_dir: Path, *, timeout_s: int):
+    _ = timeout_s
+    screenshot = log_dir / "screenshot-home.png"
+    dom = log_dir / "dom-home.html"
+    video = log_dir / "walkthrough.webm"
+    capture_log = log_dir / "browser-capture.log"
+    screenshot.write_bytes(b"fake-png")
+    dom.write_text("<html><body>Hello synthesized walkthrough Static site index</body></html>")
+    video.write_bytes(b"fake-webm")
+    capture_log.write_text("fake browser capture\n")
+    return [capture_log, screenshot, dom, video], "fake playwright capture"
+
+
+def test_synthesized_walkthrough_static_site_branch(tmp_path: Path, monkeypatch) -> None:
     """Project has output/index.html (static site) but no create_app
     → synthesized walkthrough detects and reads the static index.
     Generalization: webapp shape isn't only Flask."""
@@ -1044,6 +1057,7 @@ def test_synthesized_walkthrough_static_site_branch(tmp_path: Path) -> None:
     (tmp_path / "output" / "index.html").write_text(
         "<html><body><h1>Static site index</h1></body></html>"
     )
+    monkeypatch.setattr("otto.audit._capture_playwright_page", _fake_playwright_capture)
 
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
@@ -1068,7 +1082,7 @@ def test_synthesized_walkthrough_not_applicable_returns_succeeded(tmp_path: Path
     assert "not-applicable" in log_text
 
 
-def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Path) -> None:
+def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Path, monkeypatch) -> None:
     """Webapp spec without a BrowserJourney → synthesized walkthrough
     boots the app via create_app and hits /. v2 phase 3: audit verdict
     must NEVER come from 'LLM read code' alone for webapps.
@@ -1078,6 +1092,7 @@ def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Pat
     spec = Spec(
         intent="x",
         project_kind="webapp",
+        features=[Feature(id="hello", name="Hello synthesized walkthrough")],
         groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])],
     )
     # Seed a minimal Flask app at the project root.
@@ -1105,15 +1120,21 @@ def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Pat
         "from flask import Flask\n"
         "def create_app(config=None):\n"
         "    app = Flask(__name__)\n"
-        "    @app.get('/')\n"
-        "    def home(): return '<h1>Hello synthesized walkthrough</h1>'\n"
-        "    return app\n"
+            "    @app.get('/')\n"
+            "    def home(): return '<h1>Hello synthesized walkthrough</h1>'\n"
+            "    return app\n"
     )
+    monkeypatch.setattr("otto.audit._capture_playwright_page", _fake_playwright_capture)
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
     assert result.succeeded is True
-    # log + body artifacts present
-    assert len(result.artifacts) >= 1
+    artifact_names = {path.name for path in result.artifacts}
+    assert "screenshot-home.png" in artifact_names
+    assert "walkthrough.webm" in artifact_names
+    assert "dom-home.html" in artifact_names
+    jsonl = (tmp_path / "log" / "walkthrough.jsonl").read_text(encoding="utf-8")
+    assert '"action_kind": "browser_navigation"' in jsonl
+    assert '"feature_ids": ["hello"]' in jsonl
     # The synthesized log captures the home-page response.
     log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
     assert "Hello synthesized walkthrough" in log_text or '"status": 200' in log_text

@@ -43,6 +43,9 @@ from otto.build import (
     BuildAgentInput,
     BuildBudget,
     BuildResult,
+    ComponentResult,
+    ComponentStatus,
+    GroupResult,
     GroupStatus,
     detect_scope_violations,
 )
@@ -244,6 +247,56 @@ def shared_paths_set(spec: Spec) -> set[str]:
     return set(spec.shared_paths or [])
 
 
+def _latest_group_results(build_result: BuildResult) -> dict[str, GroupResult]:
+    """Latest result per Group id; later entries supersede earlier ones."""
+    latest: dict[str, GroupResult] = {}
+    for result in build_result.group_results:
+        latest[result.group_id] = result
+    return latest
+
+
+def _latest_component_results(build_result: BuildResult) -> dict[str, ComponentResult]:
+    """Latest result per Component id; later entries supersede earlier ones."""
+    latest: dict[str, ComponentResult] = {}
+    for result in getattr(build_result, "component_results", []) or []:
+        latest[result.component_id] = result
+    return latest
+
+
+def _candidate_branch(
+    group_obj: Group,
+    *,
+    unit_kind: str,
+    branch_for_group: Callable[[Group], str],
+    latest_group_results: dict[str, GroupResult],
+    latest_component_results: dict[str, ComponentResult],
+) -> str:
+    """Use the actual passing attempt's branch, falling back to naming policy."""
+    if unit_kind == "component":
+        result = latest_component_results.get(group_obj.id)
+    else:
+        result = latest_group_results.get(group_obj.id)
+    branch = str(getattr(result, "branch", "") or "")
+    return branch or branch_for_group(group_obj)
+
+
+def _candidate_worktree(
+    group_obj: Group,
+    *,
+    unit_kind: str,
+    project_dir: Path,
+    latest_group_results: dict[str, GroupResult],
+    latest_component_results: dict[str, ComponentResult],
+) -> Path:
+    """Use the actual passing attempt's worktree, falling back to project root."""
+    if unit_kind == "component":
+        result = latest_component_results.get(group_obj.id)
+    else:
+        result = latest_group_results.get(group_obj.id)
+    worktree = getattr(result, "worktree", None)
+    return Path(worktree) if worktree else project_dir
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
@@ -288,14 +341,22 @@ async def run_merge_queue(
     branch_for_group = branch_for_group or (lambda s: f"i2p/{session_dir.name}/{s.id}")
     git = git_runner or _git
 
-    passing_ids = list(build_result.passing_ids)
+    latest_group_results = _latest_group_results(build_result)
+    passing_ids = [
+        group_id
+        for group_id, result in latest_group_results.items()
+        if result.status == GroupStatus.PASSING
+    ]
     # A1c.3: Components participate in the same FIFO queue as Groups so
     # their branches go through the same conflict-repair flow. We pull
     # Component-passing ids from the BuildResult (older builds without
     # `passing_component_ids` produce an empty list — back-compat).
-    passing_component_ids: list[str] = list(
-        getattr(build_result, "passing_component_ids", []) or []
-    )
+    latest_component_results = _latest_component_results(build_result)
+    passing_component_ids: list[str] = [
+        component_id
+        for component_id, result in latest_component_results.items()
+        if result.status == ComponentStatus.PASSING
+    ]
     skip_set = {str(s) for s in (skip_components or ())}
     ordered_unit_ids = [g.id for g in spec.groups] + [
         c.id for c in (getattr(spec, "components", None) or [])
@@ -352,9 +413,21 @@ async def run_merge_queue(
             unit_kind = "component"
         candidate = MergeCandidate(
             group_id=group_obj.id,
-            branch=branch_for_group(group_obj),
+            branch=_candidate_branch(
+                group_obj,
+                unit_kind=unit_kind,
+                branch_for_group=branch_for_group,
+                latest_group_results=latest_group_results,
+                latest_component_results=latest_component_results,
+            ),
             base_branch=base_branch,
-            worktree=project_dir,
+            worktree=_candidate_worktree(
+                group_obj,
+                unit_kind=unit_kind,
+                project_dir=project_dir,
+                latest_group_results=latest_group_results,
+                latest_component_results=latest_component_results,
+            ),
         )
         emit(
             session_dir,
@@ -445,6 +518,7 @@ async def _process_candidate(
     cost_total = 0.0
     repair_attempts = 0
     last_failure = ""
+    repair_session_id = ""
     raw_log_dir = session_dir / "merge" / group_obj.id
 
     while True:
@@ -608,6 +682,7 @@ async def _process_candidate(
             attempt=repair_attempts,
             last_failure_narrative=last_failure,
             log_dir=raw_log_dir / f"repair-attempt-{repair_attempts:02d}",
+            agent_session_id=repair_session_id,
         )
         # C1 fix: bail out if the shared cost pool is exhausted.
         # Without this, repair retries can drain past the global cap.
@@ -627,6 +702,8 @@ async def _process_candidate(
         try:
             agent_output = await build_agent(agent_input)
             cost_total += agent_output.cost_usd
+            if agent_output.session_id:
+                repair_session_id = agent_output.session_id
             if shared_budget is not None:
                 shared_budget.charge_cost(agent_output.cost_usd)
             if not agent_output.succeeded:
@@ -1000,8 +1077,18 @@ def _commit_integration(
 
 
 def passing_group_ids(build_result: BuildResult) -> list[str]:
-    """Return the slice ids the build loop marked PASSING (merge candidates)."""
-    return [r.group_id for r in build_result.group_results if r.status == GroupStatus.PASSING]
+    """Return latest Group ids the build loop marked PASSING.
+
+    If the same Group appears multiple times, later results supersede
+    earlier ones. This mirrors merge-queue eligibility and prevents an
+    older PASSING result from leaking through after a later BLOCKED or
+    repaired attempt for the same id.
+    """
+    return [
+        group_id
+        for group_id, result in _latest_group_results(build_result).items()
+        if result.status == GroupStatus.PASSING
+    ]
 
 
 __all__ = [

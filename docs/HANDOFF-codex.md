@@ -94,13 +94,12 @@ After the redesign was claimed "100% delivered", 5 parallel cross-check
 audits surfaced **~15 material + ~13 cosmetic gaps**.
 **A round-2 fix wave then closed most of them.** Current state:
 
-- ✅ **12 gaps fixed in code**: A1, A2, A3, A4, A5, A6, A7, A13, A14,
-  A15, B1, B6
-- ✅ **14 gaps documented honestly with rationale**: A8, A9, A10, A11,
-  A12, B2, B4, B7, B8, B9, B10, B11, B12, B13
-- ⏳ **2 cosmetic gaps deferred** (low value, do as you touch the
-  files): B3 (.thumbs CSS → real CSS grid), B5 (combine the two
-  passed-only / blocked-only render lifecycle tests into one fixture)
+- ✅ **Gaps fixed in code**: A1, A2, A3, A4, A5, A6, A7, A8, A9, A10,
+  A11, A12, A13, A14, A15, B1, B3, B5, B6, B9, B12
+- ✅ **Remaining items documented honestly with rationale**: B2, B4, B7,
+  B8, B10, B11, B13
+- ✅ **Former cosmetic deferrals closed**: B3 (.thumbs CSS grid) and
+  B5 (combined landed+blocked render lifecycle fixture).
 
 See **`docs/codex-followups.md`** for the full punch list with
 file:line evidence + status notes.
@@ -119,7 +118,7 @@ Round-2 highlights (what changed since the first hand-off):
 - **CheckKind executors**: `_run_cli_probe`, `_run_import_check`,
   `_run_type_check` wired into `run_check`. mypy/pyright/basedpyright
   via PATH; honest `tool_available=False` when absent.
-- **Real-Sonnet E2E test** at `tests/integration/test_intent_to_proof.py`,
+- **Real-Codex E2E test** at `tests/integration/test_intent_to_proof.py`,
   gated by `OTTO_ALLOW_REAL_COST=1`, exposed as the `i2p-e2e` tier.
 - **A6 mid-build edit invalidation**: new `compute_invalidation` diff,
   `editing_in_flight` lifecycle, `group.invalidated_by_spec_edit`
@@ -169,24 +168,25 @@ A-list. All closed in this wave (full table in `docs/codex-followups.md`):
   `Evidence.feature_id`. Per-call-site wiring deferred — data-layer
   plumbing is in place.
 
-**Test sweep: 1656/1656 passed** (16 new tests; 0 regressions).
+**Prior Claude sweep: 1656/1656 passed** (16 new tests; 0 regressions).
+
+Codex post-merge hardening on 2026-05-05 closed the former A8/A9/A10/A11
+deferrals: synthesized webapp walkthroughs now attempt bundled Playwright
+screenshot/DOM/video capture, build/fix retries reuse provider session ids,
+the live runner no longer stacks the old run_audit fix loop on top of Layer 2,
+and merge eligibility ignores superseded older BuildResult entries.
 
 Honest deferrals you SHOULD know about:
 
-- A8: Otto's default walkthrough produces no video/screenshots in v1
-  (BYO Playwright/Cypress contract documented in
-  `docs/intent-to-product-design.md`). Render layer supports embedded
-  video + screenshot links once produced.
-- A9: "Long-lived per-slice agent" really means persistent
-  worktree+branch + fresh SDK subprocess per attempt. SDK
-  session-pinning is a v2 candidate.
-- A10: Audit has up to ~4 LLM judge calls per run (run_audit self-loop
-  + audit_loop Layer 2 + run_audit's internal fix-agent loop). v2
-  candidate to collapse to 2 layers.
-- A11/A12: Multi-worktree merge eligibility ("base not stale", "not
-  superseded") and post-repair `detect_scope_violations` are
-  unimplemented because Phase A ships single-worktree mode (default
-  `lambda _s: project_dir`).
+- A8: screenshot/video capture now exists, but real E2E still needs to
+  confirm the execution environment has Playwright browser binaries.
+- A9: session-pinned continuity is wired through `AgentOptions.resume`;
+  this is not PID reuse, and providers that ignore resume will still
+  behave as fresh subprocess calls.
+- A11: "base not stale" is satisfied by merge-into-current-HEAD plus
+  post-merge verification/rollback, not by a separate pre-rebase
+  predicate. A future true rebase/multi-worktree executor can make that
+  predicate explicit.
 - B11: `scripts/bench_microfeed_real_webapp.py` (the bench's mono
   baseline source) lives only on the never-merged codex-i2p branch.
   Current bench uses a hard-coded 1500s ceiling rather than a re-run
