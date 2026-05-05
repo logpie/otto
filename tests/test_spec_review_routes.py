@@ -34,7 +34,7 @@ def _make_spec() -> Spec:
     raw = Spec(
         intent="A doc editor for engineering teams",
         project_kind="webapp",
-        groups=[Group(id="editor", title="Editor")],
+        groups=[Group(id="editor", name="Editor")],
         features=[
             Feature(
                 id="md-render",
@@ -246,6 +246,26 @@ def test_post_approve_emits_spec_approved_once(
     assert kinds.count("spec.approved") == 1
 
 
+def test_post_approve_emits_review_approved_for_gate(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    """A13: POST /approve always emits spec.review_approved so a runner
+    blocked at the review gate wakes up. Distinct from spec.approved
+    which is lifecycle-transition-only.
+    """
+    project, sid, _ = project_with_spec
+    client = _client(project)
+    r1 = client.post(f"/api/specs/{sid}/approve")
+    assert r1.status_code == 200
+    kinds = _read_journal_kinds(project, sid)
+    assert "spec.review_approved" in kinds
+    # Repeat approve still emits review_approved so a transient runner
+    # restart can re-read the signal — bounded by user clicks.
+    client.post(f"/api/specs/{sid}/approve")
+    kinds = _read_journal_kinds(project, sid)
+    assert kinds.count("spec.review_approved") >= 1
+
+
 def test_failed_edit_does_not_emit_spec_edited(
     project_with_spec: tuple[Path, str, Spec],
 ) -> None:
@@ -374,3 +394,61 @@ def test_edit_warnings_surface_in_response(
     body = resp.json()
     assert "warnings" in body
     assert isinstance(body["warnings"], list)
+
+
+# ---------------------------------------------------------------------------
+# A6 — mid-build edit window via lifecycle=editing_in_flight
+# ---------------------------------------------------------------------------
+
+
+def test_post_edit_allowed_during_editing_in_flight_emits_invalidation(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    """Runner sets lifecycle=editing_in_flight while build is running.
+    A POST /edit during that window MUST be accepted AND must emit
+    `group.invalidated_by_spec_edit` events for any Group whose Spec
+    contributions changed.
+    """
+    project, sid, spec = project_with_spec
+    # Simulate the runner having entered the build phase.
+    sd = project / "otto_logs" / "sessions" / sid / "spec"
+    (sd / "lifecycle.json").write_text(
+        json.dumps({"lifecycle": "editing_in_flight"}, indent=2) + "\n"
+    )
+
+    client = _client(project)
+    # Edit the spec — change the editor Group's name to trigger invalidation.
+    resp = client.get(f"/api/specs/{sid}/markdown")
+    assert resp.status_code == 200
+    edited_md = resp.json()["markdown"].replace("Editor", "Editor v2")
+
+    edit_resp = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": edited_md},
+    )
+    assert edit_resp.status_code == 200, edit_resp.json()
+
+    # Journal contains a group.invalidated_by_spec_edit event for "editor".
+    journal = project / "otto_logs" / "sessions" / sid / "spec-state.jsonl"
+    assert journal.exists()
+    events = [json.loads(line) for line in journal.read_text().splitlines()
+              if line.strip()]
+    invalidations = [
+        e for e in events if e["kind"] == "group.invalidated_by_spec_edit"
+    ]
+    assert len(invalidations) >= 1
+    assert any(e["group_id"] == "editor" for e in invalidations)
+
+
+def test_post_edit_during_approved_still_blocks(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    """Plain `approved` lifecycle (no in-flight build) still 409s."""
+    project, sid, spec = project_with_spec
+    client = _client(project)
+    client.post(f"/api/specs/{sid}/approve")  # → lifecycle=approved
+    edit_resp = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": "# nope\n"},
+    )
+    assert edit_resp.status_code == 409

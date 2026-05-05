@@ -49,7 +49,13 @@ export function RunViewPage({ sessionId, onSelectFeature }: Props) {
   // If the parent supplied onSelectFeature, defer to it (host-frame
   // navigation). Otherwise, render the drilldown inline.
   if (onSelectFeature) {
-    return <RunDrawer view={data} onSelectFeature={onSelectFeature} />;
+    return (
+      <RunDrawer
+        view={data}
+        onSelectFeature={onSelectFeature}
+        onAfterAction={reload}
+      />
+    );
   }
 
   if (selectedFeatureId !== null) {
@@ -71,6 +77,7 @@ export function RunViewPage({ sessionId, onSelectFeature }: Props) {
     <RunDrawer
       view={data}
       onSelectFeature={(id) => setSelectedFeatureId(id)}
+      onAfterAction={reload}
     />
   );
 }

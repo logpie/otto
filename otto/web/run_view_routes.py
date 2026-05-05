@@ -13,9 +13,14 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, Body, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
+from otto.mission_control.actions import (
+    execute_abort_group,
+    execute_pause_run,
+    execute_resume_run,
+)
 from otto.mission_control.run_view import build_run_view
 
 logger = logging.getLogger("otto.web.run_view")
@@ -83,7 +88,52 @@ def install_run_view_routes(
         view = build_run_view(session_dir)
         return JSONResponse(view)
 
+    # ---- A7: pause / resume / abort verbs --------------------------------
+    # The run-view API reads from the spec-state.jsonl journal; these
+    # endpoints append to the same journal so the read paths reflect the
+    # operator action on the next poll. There's no separate command queue
+    # (unlike the legacy queue/atomic cancel surfaces) because the runner
+    # already polls the journal between phases for spec.review_approved /
+    # group.invalidated_by_spec_edit; we ride the same poll for pause and
+    # abort.
+
+    @router.post("/{session_id}/actions/pause")
+    def pause_run(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        project = _resolve_project_dir()
+        session_dir = _resolve_session_dir(project, session_id)
+        note = str((payload or {}).get("note") or "").strip()
+        result = execute_pause_run(session_dir, note=note)
+        return JSONResponse(_action_to_json(result), status_code=200 if result.ok else 409)
+
+    @router.post("/{session_id}/actions/resume")
+    def resume_run(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        project = _resolve_project_dir()
+        session_dir = _resolve_session_dir(project, session_id)
+        note = str((payload or {}).get("note") or "").strip()
+        result = execute_resume_run(session_dir, note=note)
+        return JSONResponse(_action_to_json(result), status_code=200 if result.ok else 409)
+
+    @router.post("/{session_id}/groups/{group_id}/abort")
+    def abort_group(
+        session_id: str,
+        group_id: str,
+        payload: dict = Body(default_factory=dict),
+    ) -> JSONResponse:
+        project = _resolve_project_dir()
+        session_dir = _resolve_session_dir(project, session_id)
+        reason = str((payload or {}).get("reason") or "").strip()
+        result = execute_abort_group(session_dir, group_id, reason=reason)
+        return JSONResponse(_action_to_json(result), status_code=200 if result.ok else 409)
+
     app.include_router(router)
+
+
+def _action_to_json(result) -> dict:
+    return {
+        "ok": result.ok,
+        "message": result.message,
+        "severity": result.severity,
+    }
 
 
 def _resolve_session_dir(project_dir: Path, session_id: str) -> Path:

@@ -44,12 +44,12 @@ def _fixture_spec(intent: str = "a tiny webapp") -> Spec:
             "routes": [{"path": "/", "component": "Home", "key_text": "Hello"}],
             "components": [{"name": "Home", "key_text": "Hello"}],
         }),
-        slices=[
+        groups=[
             Group(
                 id="shell",
-                title="App shell",
-                tasks=["scaffold the SPA"],
-                deps=[],
+                name="App shell",
+                feature_ids=["scaffold the SPA"],
+                dependencies=[],
                 owned_paths=["src/**"],
                 checks=[
                     BrowserJourney(
@@ -581,7 +581,7 @@ def test_run_falls_back_to_intent_md(tmp_path: Path, monkeypatch) -> None:
 def test_run_full_pipeline_drives_build_audit_render(tmp_path: Path, monkeypatch) -> None:
     """End-to-end mock: stub compile + build/merge/audit so the pipeline runs."""
     from otto.audit import AuditResult, AuditVerdict
-    from otto.build import BuildResult, SliceResult, SliceStatus
+    from otto.build import BuildResult, GroupResult, GroupStatus
     from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 
     _init_project(tmp_path)
@@ -596,8 +596,8 @@ def test_run_full_pipeline_drives_build_audit_render(tmp_path: Path, monkeypatch
     async def fake_build(spec, *, project_dir, session_dir, build_agent, **kwargs):
         return BuildResult(
             spec_session_dir=session_dir,
-            slice_results=[
-                SliceResult(slice_id="shell", status=SliceStatus.PASSING, attempts=1,
+            group_results=[
+                GroupResult(group_id="shell", status=GroupStatus.PASSING, attempts=1,
                             branch="b", worktree=project_dir),
             ],
             total_cost_usd=0.05,
@@ -607,7 +607,7 @@ def test_run_full_pipeline_drives_build_audit_render(tmp_path: Path, monkeypatch
     async def fake_merge(spec, build_result, *, project_dir, session_dir, **kwargs):
         return MergeQueueResult(
             landed_ids=["shell"],
-            results=[MergeResult(slice_id="shell", status=MergeStatus.LANDED,
+            results=[MergeResult(group_id="shell", status=MergeStatus.LANDED,
                                  landed_commit="abc")],
             total_cost_usd=0.02,
             total_wall_s=2.0,
@@ -645,7 +645,7 @@ def test_run_full_pipeline_drives_build_audit_render(tmp_path: Path, monkeypatch
 
 def test_run_full_pipeline_returns_nonzero_on_partial_audit(tmp_path: Path, monkeypatch) -> None:
     from otto.audit import AuditResult, AuditVerdict
-    from otto.build import BuildResult, SliceResult, SliceStatus
+    from otto.build import BuildResult, GroupResult, GroupStatus
     from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 
     _init_project(tmp_path)
@@ -660,15 +660,15 @@ def test_run_full_pipeline_returns_nonzero_on_partial_audit(tmp_path: Path, monk
     async def fake_build(spec, *, project_dir, session_dir, **kwargs):
         return BuildResult(
             spec_session_dir=session_dir,
-            slice_results=[
-                SliceResult(slice_id="shell", status=SliceStatus.PASSING, attempts=1,
+            group_results=[
+                GroupResult(group_id="shell", status=GroupStatus.PASSING, attempts=1,
                             branch="b", worktree=project_dir),
             ],
         )
 
     async def fake_merge(spec, build_result, *, project_dir, session_dir, **kwargs):
         return MergeQueueResult(landed_ids=["shell"],
-                                results=[MergeResult(slice_id="shell",
+                                results=[MergeResult(group_id="shell",
                                                      status=MergeStatus.LANDED,
                                                      landed_commit="abc")])
 
@@ -703,7 +703,7 @@ def test_run_from_spec_loads_existing_spec(tmp_path: Path, monkeypatch) -> None:
     async def fake_build(spec, *, project_dir, session_dir, **kwargs):
         captured["build_spec_intent"] = spec.intent
         captured["session_dir"] = session_dir
-        return BuildResult(spec_session_dir=session_dir, slice_results=[])
+        return BuildResult(spec_session_dir=session_dir, group_results=[])
 
     async def fake_merge(spec, build_result, **kwargs):
         return MergeQueueResult()
@@ -800,3 +800,98 @@ def test_run_resume_rejects_positional_intent(tmp_path: Path, monkeypatch) -> No
     code, out = _run(["run", "--resume", "intent text"], cwd=tmp_path)
     assert code == 2, out
     assert "--resume cannot be combined" in out
+
+
+# ---------------------------------------------------------------------------
+# A13 — review-gate flag wiring (compile → review-gate → build)
+# ---------------------------------------------------------------------------
+
+
+def test_run_review_gate_flag_threads_into_orchestrate_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`otto run --review-gate` propagates review_gate=True + the timeout
+    into orchestrate_run kwargs."""
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_run(**kwargs):
+        captured.update(kwargs)
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+    code, out = _run(
+        ["run", "--review-gate", "--gate-timeout", "60", "intent text"],
+        cwd=tmp_path,
+    )
+    assert code == 0, out
+    assert captured.get("review_gate") is True
+    assert captured.get("gate_timeout_s") == 60.0
+
+
+def test_run_default_omits_review_gate(tmp_path: Path, monkeypatch) -> None:
+    """Without the flag, review_gate=False is forwarded (preserves the
+    existing CI/script default)."""
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_run(**kwargs):
+        captured.update(kwargs)
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+    code, out = _run(["run", "anything"], cwd=tmp_path)
+    assert code == 0, out
+    assert captured.get("review_gate") is False
+
+
+def test_run_review_gate_conflicts_with_auto_approve(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """--review-gate + --auto-approve must hard-error (mutually exclusive)."""
+    _init_project(tmp_path)
+
+    def fake_orchestrate_run(**kwargs):
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+    code, out = _run(
+        ["run", "--review-gate", "--auto-approve", "anything"],
+        cwd=tmp_path,
+    )
+    assert code != 0
+    assert "mutually exclusive" in out.lower()
+
+
+def test_build_review_gate_flag_threads_into_orchestrate_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`otto build --i2p --review-gate` also wires through to
+    orchestrate_run."""
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_run(**kwargs):
+        captured.update(kwargs)
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+    code, out = _run(
+        ["build", "--i2p", "--review-gate", "intent"],
+        cwd=tmp_path,
+    )
+    assert code == 0, out
+    assert captured.get("review_gate") is True
+
+
+def test_run_help_lists_review_gate_options() -> None:
+    """`otto run --help` exposes both --review-gate and --auto-approve."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "--help"], catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "--review-gate" in result.output
+    assert "--auto-approve" in result.output

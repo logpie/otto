@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from otto.paths import session_dir, spec_dir
+from otto.spec_amend import compute_invalidation
 from otto.spec_compile import (
     Spec,
     load_spec,
@@ -48,7 +49,7 @@ LIFECYCLE_FILENAME = "lifecycle.json"
 SPEC_JSON_FILENAME = "spec.json"
 SPEC_MD_FILENAME = "spec.md"
 
-VALID_LIFECYCLES = ("draft", "approved", "amended")
+VALID_LIFECYCLES = ("draft", "approved", "amended", "editing_in_flight")
 
 
 class SpecEditPayload(BaseModel):
@@ -116,6 +117,11 @@ def install_spec_review_routes(
             )
 
         lifecycle = _read_lifecycle(sd)
+        # A6: post-approval edits are normally rejected (the user is
+        # supposed to use the amendment flow). The exception is
+        # `editing_in_flight` — the runner sets this lifecycle while
+        # a build is actively running, opening a single-window edit
+        # path that can invalidate in-flight Groups via journal events.
         if lifecycle == "approved":
             raise HTTPException(
                 status_code=409,
@@ -133,15 +139,31 @@ def install_spec_review_routes(
                 detail=f"failed to parse spec markdown: {exc}",
             ) from exc
 
+        invalidation = (
+            compute_invalidation(spec, edited)
+            if lifecycle == "editing_in_flight"
+            else None
+        )
+
         _archive_current_version(sd)
         _write_spec(sd, edited, payload.markdown)
 
+        sess_dir = session_dir(project, session_id)
         emit_state_event(
-            session_dir(project, session_id),
+            sess_dir,
             "spec.edited",
             detail=f"warnings={len(warnings)}",
             warnings=list(warnings),
         )
+        if invalidation is not None:
+            for entry in invalidation.entries:
+                emit_state_event(
+                    sess_dir,
+                    "group.invalidated_by_spec_edit",
+                    group_id=entry.group_id,
+                    detail=entry.reason,
+                    direct=entry.direct,
+                )
 
         view = _build_view(
             session_id=session_id,
@@ -168,6 +190,17 @@ def install_spec_review_routes(
                 "spec.approved",
                 detail=f"intent_hash={spec.intent_hash[:16]}",
             )
+        # A13 — review-gate signal. Always emit on POST /approve so a
+        # runner blocked at the gate wakes up even if the spec was
+        # already lifecycle-approved (e.g. user clicks Approve again
+        # after a transient runner restart). The runner reads "any
+        # spec.review_approved exists" as the resume signal; repeats
+        # are bounded by user clicks and harmless at the journal layer.
+        emit_state_event(
+            session_dir(project, session_id),
+            "spec.review_approved",
+            detail=f"intent_hash={spec.intent_hash[:16]}",
+        )
         markdown = _read_or_render_md(sd, spec)
         view = _build_view(
             session_id=session_id,

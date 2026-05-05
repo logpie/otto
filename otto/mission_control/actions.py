@@ -224,6 +224,128 @@ def execute_merge_verify(
     )
 
 
+def execute_pause_run(
+    session_dir: Path,
+    *,
+    note: str = "",
+) -> ActionResult:
+    """Append a `run.paused_by_user` event to the session's spec-state.jsonl.
+
+    Idempotent: if the most recent pause/resume event is already
+    `run.paused_by_user`, returns a warning instead of stacking another
+    pause event. The runner polls `is_run_paused_by_user(session_dir)`
+    between phases (see `otto.runner.run_pipeline`) and sleeps until a
+    `run.resumed_by_user` event arrives or it observes a cancel command.
+
+    Implementation note: we append to the journal rather than sending
+    SIGSTOP — SIGSTOP works on POSIX but freezes child processes mid-IO
+    (corrupting tempfiles, holding fd locks) and is not portable. The
+    poll-flag approach gives clean phase boundaries.
+    """
+    from otto import spec_state
+
+    session_dir = Path(session_dir)
+    if not session_dir.exists():
+        return _error_result("Pause failed", f"session dir missing: {session_dir}")
+    if spec_state.is_run_paused_by_user(session_dir):
+        return _warning_result("Pause unavailable", "Run is already paused.")
+    try:
+        spec_state.emit(
+            session_dir,
+            "run.paused_by_user",
+            detail=str(note or "")[:200],
+            requested_by="mission_control",
+        )
+    except (OSError, ValueError) as exc:
+        return _error_result("Pause failed", str(exc))
+    return ActionResult(
+        ok=True,
+        message="run paused",
+        severity="information",
+        refresh=True,
+    )
+
+
+def execute_resume_run(
+    session_dir: Path,
+    *,
+    note: str = "",
+) -> ActionResult:
+    """Append a `run.resumed_by_user` event so a paused runner picks back up.
+
+    Idempotent: if the run is not currently paused, returns a warning
+    rather than emitting a no-op resume event.
+    """
+    from otto import spec_state
+
+    session_dir = Path(session_dir)
+    if not session_dir.exists():
+        return _error_result("Resume failed", f"session dir missing: {session_dir}")
+    if not spec_state.is_run_paused_by_user(session_dir):
+        return _warning_result("Resume unavailable", "Run is not paused.")
+    try:
+        spec_state.emit(
+            session_dir,
+            "run.resumed_by_user",
+            detail=str(note or "")[:200],
+            requested_by="mission_control",
+        )
+    except (OSError, ValueError) as exc:
+        return _error_result("Resume failed", str(exc))
+    return ActionResult(
+        ok=True,
+        message="run resumed",
+        severity="information",
+        refresh=True,
+    )
+
+
+def execute_abort_group(
+    session_dir: Path,
+    group_id: str,
+    *,
+    reason: str = "",
+) -> ActionResult:
+    """Append a `group.aborted_by_user` event for `group_id`.
+
+    The build loop checks `is_group_aborted_by_user` between retry
+    attempts and exits with status=BLOCKED, narrative=reason. The merge
+    queue treats aborted groups as BLOCKED so they never land. Component
+    abort is intentionally NOT supported in this surface — Components
+    are infrastructure dispatch units and the user-facing primary cancel
+    target is a Group (research §3).
+    """
+    from otto import spec_state
+
+    session_dir = Path(session_dir)
+    group_id = str(group_id or "").strip()
+    if not group_id:
+        return _error_result("Abort failed", "group id is required")
+    if not session_dir.exists():
+        return _error_result("Abort failed", f"session dir missing: {session_dir}")
+    if spec_state.is_group_aborted_by_user(session_dir, group_id):
+        return _warning_result(
+            "Abort unavailable",
+            f"Group {group_id!r} is already aborted.",
+        )
+    try:
+        spec_state.emit(
+            session_dir,
+            "group.aborted_by_user",
+            group_id=group_id,
+            detail=str(reason or "aborted_by_user")[:200],
+            requested_by="mission_control",
+        )
+    except (OSError, ValueError) as exc:
+        return _error_result("Abort failed", str(exc))
+    return ActionResult(
+        ok=True,
+        message=f"group {group_id} aborted",
+        severity="information",
+        refresh=True,
+    )
+
+
 def execute_queue_cleanup(
     project_dir: Path,
     task_ids: list[str],

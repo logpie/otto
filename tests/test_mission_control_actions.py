@@ -826,3 +826,114 @@ def test_disabled_action_reason_surfaces_without_execution(tmp_path: Path, monke
     assert actions["r"].enabled is False
     assert actions["r"].reason == "standalone certify has no resume path"
     assert called is False
+
+
+# ---------------------------------------------------------------------------
+# A7 — pause / resume / abort_group action handlers
+# ---------------------------------------------------------------------------
+
+
+def _make_session_dir(tmp_path: Path) -> Path:
+    sd = tmp_path / "session"
+    sd.mkdir()
+    return sd
+
+
+def _journal_kinds(session_dir: Path) -> list[str]:
+    from otto.spec_state import iter_events
+
+    return [event.kind for event in iter_events(session_dir)]
+
+
+def test_execute_pause_run_emits_event_when_session_active(tmp_path: Path) -> None:
+    from otto.mission_control.actions import execute_pause_run
+    from otto import spec_state
+
+    session_dir = _make_session_dir(tmp_path)
+
+    result = execute_pause_run(session_dir, note="operator hit pause")
+
+    assert result.ok is True
+    assert result.severity == "information"
+    assert spec_state.is_run_paused_by_user(session_dir) is True
+    assert _journal_kinds(session_dir) == ["run.paused_by_user"]
+
+
+def test_execute_pause_run_idempotent_when_already_paused(tmp_path: Path) -> None:
+    from otto.mission_control.actions import execute_pause_run
+
+    session_dir = _make_session_dir(tmp_path)
+    execute_pause_run(session_dir)
+
+    second = execute_pause_run(session_dir)
+
+    assert second.ok is False
+    assert second.severity == "warning"
+    # Only one paused event in the journal — no duplicate.
+    assert _journal_kinds(session_dir) == ["run.paused_by_user"]
+
+
+def test_execute_pause_run_rejects_missing_session_dir(tmp_path: Path) -> None:
+    from otto.mission_control.actions import execute_pause_run
+
+    missing = tmp_path / "does-not-exist"
+    result = execute_pause_run(missing)
+
+    assert result.ok is False
+    assert "session dir missing" in str(result.modal_message or "")
+
+
+def test_execute_resume_run_emits_event_only_when_paused(tmp_path: Path) -> None:
+    from otto.mission_control.actions import execute_pause_run, execute_resume_run
+    from otto import spec_state
+
+    session_dir = _make_session_dir(tmp_path)
+
+    cold_resume = execute_resume_run(session_dir)
+    assert cold_resume.ok is False  # not currently paused
+    assert _journal_kinds(session_dir) == []
+
+    execute_pause_run(session_dir)
+    warm_resume = execute_resume_run(session_dir)
+    assert warm_resume.ok is True
+    assert spec_state.is_run_paused_by_user(session_dir) is False
+    assert _journal_kinds(session_dir) == [
+        "run.paused_by_user",
+        "run.resumed_by_user",
+    ]
+
+
+def test_execute_abort_group_emits_event_for_target_group(tmp_path: Path) -> None:
+    from otto.mission_control.actions import execute_abort_group
+    from otto import spec_state
+
+    session_dir = _make_session_dir(tmp_path)
+
+    result = execute_abort_group(session_dir, "g1", reason="rare bug")
+
+    assert result.ok is True
+    assert spec_state.is_group_aborted_by_user(session_dir, "g1") is True
+    assert spec_state.is_group_aborted_by_user(session_dir, "g2") is False
+    assert spec_state.aborted_group_ids(session_dir) == {"g1"}
+
+
+def test_execute_abort_group_idempotent_for_same_group(tmp_path: Path) -> None:
+    from otto.mission_control.actions import execute_abort_group
+
+    session_dir = _make_session_dir(tmp_path)
+    execute_abort_group(session_dir, "g1")
+    second = execute_abort_group(session_dir, "g1")
+
+    assert second.ok is False
+    assert second.severity == "warning"
+    # Only one aborted event recorded.
+    assert _journal_kinds(session_dir).count("group.aborted_by_user") == 1
+
+
+def test_execute_abort_group_requires_group_id(tmp_path: Path) -> None:
+    from otto.mission_control.actions import execute_abort_group
+
+    session_dir = _make_session_dir(tmp_path)
+    result = execute_abort_group(session_dir, "")
+    assert result.ok is False
+    assert "group id is required" in str(result.modal_message or "")

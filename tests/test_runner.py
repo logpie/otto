@@ -25,7 +25,7 @@ import pytest
 
 from otto.audit import AuditResult, AuditVerdict
 from otto.audit_loop import RepairAttempt, RepairResult
-from otto.build import BuildResult, SliceResult, SliceStatus
+from otto.build import BuildResult, GroupResult, GroupStatus
 from otto.merge_queue import MergeQueueResult
 from otto.runner import RunResult, run_pipeline
 from otto.seed import SeedResult
@@ -43,7 +43,7 @@ from otto.spec_compile import (
 
 
 def _spec(*, with_features: bool = False, with_audit_fixtures: bool = False) -> Spec:
-    groups = [Group(id="g", title="G")]
+    groups = [Group(id="g", name="G")]
     features = (
         [Feature(id="f1", name="f1", group_id="g")] if with_features else []
     )
@@ -86,10 +86,10 @@ def _partial_audit_with_failing_feature(spec: Spec) -> AuditResult:
 def _ok_build(spec: Spec, session_dir: Path) -> BuildResult:
     return BuildResult(
         spec_session_dir=session_dir,
-        slice_results=[
-            SliceResult(
-                slice_id="g",
-                status=SliceStatus.PASSING,
+        group_results=[
+            GroupResult(
+                group_id="g",
+                status=GroupStatus.PASSING,
                 attempts=1,
                 branch="b",
                 worktree=session_dir,
@@ -447,7 +447,7 @@ def test_brownfield_skips_build_and_merge(
     assert captured["merge_calls"] == 0
     # BuildResult / MergeQueueResult are populated as honest empties.
     assert result.build_result is not None
-    assert result.build_result.slice_results == []
+    assert result.build_result.group_results == []
     assert result.merge_result is not None
     assert result.merge_result.landed_ids == []
 
@@ -599,3 +599,509 @@ def test_resume_plan_runs_audit_when_not_finished(
     )
     assert "audit" in order.events
     assert captured["audit_calls"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A6 — mid-build spec edit invalidation re-dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_spec_edit_invalidation_redispatches_affected_groups(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Mid-build spec edit fires a journal event; runner re-dispatches the
+    affected Group with a fresh `run_build` pass.
+
+    Wiring: stub `run_build` to (1) emit a `group.invalidated_by_spec_edit`
+    event on its first call, (2) write a post-edit Spec to disk so
+    re-load picks it up, (3) return distinct results across the two
+    calls so the merge is observable.
+    """
+    from otto.spec_compile import Group as G, Spec as S, persist_spec
+
+    spec = S(intent="x", groups=[G(id="g", name="G")])
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    (session_dir / "spec").mkdir()
+    persist_spec(spec, session_dir / "spec" / "spec.json", allow_initial=True)
+
+    order = _Order()
+
+    call_count = {"n": 0}
+
+    async def _build(spec_arg, *, project_dir, session_dir, **kwargs):
+        call_count["n"] += 1
+        order.add(f"build-{call_count['n']}")
+        if call_count["n"] == 1:
+            # First pass: simulate a mid-build edit. Persist the
+            # post-edit spec to disk so re-dispatch can re-load it,
+            # and emit the invalidation event.
+            new_spec = S(intent="x",
+                         groups=[G(id="g", name="G renamed")])
+            persist_spec(
+                new_spec, session_dir / "spec" / "spec.json",
+                allow_initial=True,
+            )
+            from otto.spec_state import emit as _emit
+            _emit(
+                session_dir,
+                "group.invalidated_by_spec_edit",
+                group_id="g",
+                detail="spec edit changed name",
+                direct=True,
+            )
+            # Return BLOCKED for "g" — the build saw the invalidation
+            # mid-flight and aborted.
+            return BuildResult(
+                spec_session_dir=session_dir,
+                group_results=[
+                    GroupResult(
+                        group_id="g",
+                        status=GroupStatus.BLOCKED,
+                        attempts=1,
+                        branch="b",
+                        worktree=session_dir,
+                        failure_narrative=(
+                            "invalidated by spec edit: spec edit changed name"
+                        ),
+                        cost_usd=0.05,
+                    ),
+                ],
+                total_cost_usd=0.05,
+                total_wall_s=1.0,
+            )
+        else:
+            # Second pass: re-dispatch with fresh spec — succeeds.
+            return BuildResult(
+                spec_session_dir=session_dir,
+                group_results=[
+                    GroupResult(
+                        group_id="g",
+                        status=GroupStatus.PASSING,
+                        attempts=1,
+                        branch="b2",
+                        worktree=session_dir,
+                        cost_usd=0.07,
+                    ),
+                ],
+                total_cost_usd=0.07,
+                total_wall_s=1.0,
+            )
+
+    async def _merge(*args, **kwargs):
+        order.add("merge")
+        return MergeQueueResult(landed_ids=["g"])
+
+    async def _audit(spec_arg, **kwargs):
+        order.add("audit")
+        return _passing_audit(spec_arg)
+
+    def _render(spec_arg, *, session_dir, **kwargs):
+        order.add("render")
+        return session_dir / "h.html", session_dir / "j.json"
+
+    def _seed(spec_arg, project_dir, session_dir=None):
+        order.add("seed")
+        return SeedResult(succeeded=True, detail="no fixtures")
+
+    monkeypatch.setattr("otto.runner.seed_fixtures", _seed)
+    monkeypatch.setattr("otto.runner.run_build", _build)
+    monkeypatch.setattr("otto.runner.run_merge_queue", _merge)
+    monkeypatch.setattr("otto.runner.run_audit", _audit)
+    monkeypatch.setattr("otto.runner.render_run", _render)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None, config={},
+            build_agent=_stub_agent, audit_agent=_stub_agent, fix_agent=None,
+            spec=spec,
+        )
+    )
+
+    # run_build was called twice (initial + re-dispatch) and the order
+    # is preserved.
+    assert call_count["n"] == 2
+    assert "build-1" in order.events and "build-2" in order.events
+    # Lifecycle was set + cleared.
+    lifecycle_path = session_dir / "spec" / "lifecycle.json"
+    assert lifecycle_path.exists()
+    import json as _json
+    data = _json.loads(lifecycle_path.read_text())
+    # Final state is "approved" (the editing window closed).
+    assert data["lifecycle"] == "approved"
+    # Final BuildResult reflects the SECOND pass for "g" (PASSING),
+    # not the first pass's BLOCKED.
+    assert result.build_result is not None
+    g_result = next(
+        r for r in result.build_result.group_results if r.group_id == "g"
+    )
+    assert g_result.status == GroupStatus.PASSING
+    # Costs accumulate across both passes.
+    assert result.build_result.total_cost_usd == pytest.approx(0.05 + 0.07)
+
+
+def test_spec_edit_invalidation_no_op_when_no_event(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Without any invalidation event, run_build is called exactly once."""
+    spec = _spec()
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    (session_dir / "spec").mkdir()  # for lifecycle write target
+
+    order = _Order()
+    captured = _wire_stubs(
+        monkeypatch,
+        audit=_passing_audit(spec),
+        order=order,
+    )
+
+    asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None, config={},
+            build_agent=_stub_agent, audit_agent=_stub_agent, fix_agent=None,
+            spec=spec,
+        )
+    )
+
+    assert captured["build_calls"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A13 — review-gate (compile → review-gate → build)
+# ---------------------------------------------------------------------------
+
+
+def test_review_gate_pauses_until_approved(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When review_gate=True, the pipeline pauses after compile, emits
+    spec.review_pending, and resumes once spec.review_approved appears
+    in the journal."""
+    from otto.spec_state import emit, iter_events
+
+    spec = _spec()
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured = _wire_stubs(
+        monkeypatch, audit=_passing_audit(spec), order=order,
+    )
+
+    # The gate's poll loop is async-friendly. We approve via a separate
+    # coroutine that fires after a short delay so the gate has to wait
+    # at least one poll iteration. This proves the runner observes the
+    # journal mid-flight, not just the eventual final state.
+    async def driver():
+        # Schedule the approval before kicking off the pipeline so it
+        # races the gate's first poll.
+        async def approve_after_delay():
+            await asyncio.sleep(0.05)
+            emit(session_dir, "spec.review_approved", detail="user approved")
+
+        approval_task = asyncio.create_task(approve_after_delay())
+        try:
+            return await run_pipeline(
+                "x", tmp_path, session_dir,
+                project_kind="webapp", brownfield=False, base_url=None,
+                config={},
+                build_agent=_stub_agent, audit_agent=_stub_agent,
+                fix_agent=None,
+                spec=spec,
+                review_gate=True,
+                gate_timeout_s=10.0,
+                gate_poll_s=0.01,
+            )
+        finally:
+            await approval_task
+
+    result = asyncio.run(driver())
+
+    # Gate did NOT halt the run.
+    assert result.verdict == AuditVerdict.PASSED
+    assert "build" in order.events
+    assert captured["build_calls"] == 1
+
+    # spec.review_pending was emitted exactly once before build ran.
+    kinds = [ev.kind for ev in iter_events(session_dir)]
+    assert "spec.review_pending" in kinds
+    assert "spec.review_approved" in kinds
+    # Gate emits review_pending BEFORE the user's approval lands.
+    pending_idx = kinds.index("spec.review_pending")
+    approved_idx = kinds.index("spec.review_approved")
+    assert pending_idx < approved_idx
+
+
+def test_review_gate_times_out_blocks_build(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When the gate timeout expires with no approval, the run halts
+    with verdict=BLOCKED and build never runs."""
+    spec = _spec()
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured = _wire_stubs(
+        monkeypatch, audit=_passing_audit(spec), order=order,
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None, config={},
+            build_agent=_stub_agent, audit_agent=_stub_agent, fix_agent=None,
+            spec=spec,
+            review_gate=True,
+            gate_timeout_s=0.1,
+            gate_poll_s=0.02,
+        )
+    )
+
+    assert result.verdict == AuditVerdict.BLOCKED
+    assert "review_gate_timeout" in result.halted_reason
+    # No phase past the gate ran.
+    assert captured["build_calls"] == 0
+    assert captured["merge_calls"] == 0
+    assert captured["audit_calls"] == 0
+
+
+def test_review_gate_off_by_default(tmp_path: Path, monkeypatch) -> None:
+    """Default invocation (review_gate omitted) does NOT pause."""
+    from otto.spec_state import iter_events
+
+    spec = _spec()
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    _wire_stubs(monkeypatch, audit=_passing_audit(spec), order=order)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None, config={},
+            build_agent=_stub_agent, audit_agent=_stub_agent, fix_agent=None,
+            spec=spec,
+        )
+    )
+    assert result.verdict == AuditVerdict.PASSED
+    kinds = [ev.kind for ev in iter_events(session_dir)]
+    # Crucially: no review_pending event when the gate is off.
+    assert "spec.review_pending" not in kinds
+
+
+def test_review_gate_announce_called_with_session_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The gate_announce callback fires once with the session id so the
+    CLI can print the operator-facing URL."""
+    from otto.spec_state import emit
+
+    spec = _spec()
+    session_dir = tmp_path / "sess-id-xyz"
+    session_dir.mkdir()
+    _wire_stubs(monkeypatch, audit=_passing_audit(spec), order=_Order())
+
+    seen: list[str] = []
+
+    async def driver():
+        async def approve_after_delay():
+            await asyncio.sleep(0.02)
+            emit(session_dir, "spec.review_approved", detail="ok")
+
+        task = asyncio.create_task(approve_after_delay())
+        try:
+            return await run_pipeline(
+                "x", tmp_path, session_dir,
+                project_kind="webapp", brownfield=False, base_url=None,
+                config={},
+                build_agent=_stub_agent, audit_agent=_stub_agent,
+                fix_agent=None,
+                spec=spec,
+                review_gate=True,
+                gate_timeout_s=5.0,
+                gate_poll_s=0.01,
+                gate_announce=seen.append,
+            )
+        finally:
+            await task
+
+    asyncio.run(driver())
+    assert seen == ["sess-id-xyz"]
+
+
+def test_review_gate_skipped_on_resume(tmp_path: Path, monkeypatch) -> None:
+    """Resume path bypasses the gate even when --review-gate is set —
+    the operator already approved on the prior session."""
+    from otto.resume import ResumePlan
+    from otto.spec_state import iter_events
+
+    spec = _spec()
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    _wire_stubs(monkeypatch, audit=_passing_audit(spec), order=order)
+
+    plan = ResumePlan(
+        session_id="sess",
+        paused_session_dir=session_dir,
+        spec_hash="deadbeef",
+        landed_components=frozenset(),
+        pending_components=frozenset({"g"}),
+        audit_finished=False,
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None, config={},
+            build_agent=_stub_agent, audit_agent=_stub_agent, fix_agent=None,
+            spec=spec,
+            resume_plan=plan,
+            review_gate=True,
+            gate_timeout_s=0.1,  # would time out fast if the gate ran
+            gate_poll_s=0.02,
+        )
+    )
+    assert result.verdict == AuditVerdict.PASSED
+    kinds = [ev.kind for ev in iter_events(session_dir)]
+    assert "spec.review_pending" not in kinds
+
+
+# ---------------------------------------------------------------------------
+# A7 — abort-a-group lands honestly through the build phase
+# ---------------------------------------------------------------------------
+
+
+def test_abort_group_marks_target_blocked_and_continues_other_groups(
+    tmp_path: Path,
+) -> None:
+    """End-to-end-ish: with a Spec of two groups, aborting one mid-build
+    causes the build phase to mark it BLOCKED while the other group runs
+    to completion. Uses the real `run_build` (so the abort poll path is
+    exercised), with a fake build agent and no LLM cost.
+    """
+    import subprocess
+
+    from otto.build import (
+        BuildAgentInput,
+        BuildAgentOutput,
+        run_build,
+    )
+    from otto.mission_control.actions import execute_abort_group
+    from otto.spec_compile import (
+        RepoTestCheck,
+        StructureDecisions,
+    )
+
+    # Initialize an empty git repo so build's git-diff scope check works.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True
+    )
+    (tmp_path / ".gitkeep").write_text("", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitkeep"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "init", "--no-verify"], cwd=tmp_path, check=True
+    )
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    passing = RepoTestCheck(command=("python", "-c", "print('ok')"), timeout_s=10)
+    spec = Spec(
+        intent="abort test",
+        project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        groups=[
+            Group(
+                id="g_kill",
+                name="will-be-aborted",
+                dependencies=[],
+                owned_paths=[],
+                feature_ids=[],
+                checks=[passing],
+            ),
+            Group(
+                id="g_live",
+                name="should-still-run",
+                dependencies=[],
+                owned_paths=[],
+                feature_ids=[],
+                checks=[passing],
+            ),
+        ],
+    )
+
+    # Pre-emit the abort event BEFORE build starts. This exercises the
+    # abort-poll branch without the timing fragility of mid-flight aborts.
+    abort_result = execute_abort_group(
+        session_dir, "g_kill", reason="operator pulled it"
+    )
+    assert abort_result.ok is True
+
+    async def fake_agent(_input: BuildAgentInput) -> BuildAgentOutput:
+        return BuildAgentOutput(succeeded=True, cost_usd=0.0, wall_s=0.1, detail="ok")
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+        )
+    )
+
+    by_id = {r.group_id: r for r in result.group_results}
+    assert by_id["g_kill"].status == GroupStatus.BLOCKED
+    assert "aborted_by_user" in by_id["g_kill"].failure_narrative
+    assert by_id["g_live"].status == GroupStatus.PASSING
+    assert "g_kill" not in result.passing_ids
+    assert "g_live" in result.passing_ids
+
+
+def test_pause_flag_blocks_phase_callback_until_resume(tmp_path: Path) -> None:
+    """`_wait_while_paused` blocks while the journal is paused and
+    returns immediately once a resume event is appended. We verify the
+    behavior directly to avoid wiring a long-lived async pipeline.
+    """
+    import threading
+
+    from otto import runner as runner_mod
+    from otto.mission_control.actions import (
+        execute_pause_run,
+        execute_resume_run,
+    )
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    # Tighter poll interval keeps the test deterministic and fast.
+    runner_mod.PAUSE_POLL_INTERVAL_S = 0.01
+
+    # Not paused → returns immediately.
+    runner_mod._wait_while_paused(session_dir)
+
+    # Now pause; spawn a thread that resumes after a brief delay; verify
+    # the wait-loop returns once it observes the resume event.
+    execute_pause_run(session_dir)
+
+    def _resume_after_delay() -> None:
+        import time as _t
+
+        _t.sleep(0.05)
+        execute_resume_run(session_dir)
+
+    waiter = threading.Thread(target=_resume_after_delay, daemon=True)
+    waiter.start()
+
+    runner_mod._wait_while_paused(session_dir)  # should return after the resume event
+    waiter.join(timeout=2.0)
+    from otto import spec_state
+
+    assert spec_state.is_run_paused_by_user(session_dir) is False
