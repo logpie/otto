@@ -480,6 +480,19 @@ class TestDetectProjectKind:
 
         assert detect_project_kind(tmp_bare_git_repo) == "cli"
 
+    def test_python_manifest_beats_auxiliary_package_json(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "pyproject.toml").write_text(
+            "[project]\nname = 'mixed-python-app'\n"
+            "[project.scripts]\napp = 'app.cli:main'\n",
+            encoding="utf-8",
+        )
+        (tmp_bare_git_repo / "package.json").write_text(
+            json.dumps({"scripts": {"build": "esbuild app.js"}}),
+            encoding="utf-8",
+        )
+
+        assert detect_project_kind(tmp_bare_git_repo) == "cli"
+
     def test_detects_python_api(self, tmp_bare_git_repo):
         (tmp_bare_git_repo / "pyproject.toml").write_text(
             "[project]\nname = 'api'\ndependencies = ['fastapi']\n",

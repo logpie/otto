@@ -1260,31 +1260,6 @@ def detect_project_kind(project_dir: Path) -> str:
     empty/new projects, while existing Python/Node/Rust projects with clear
     library or CLI markers avoid being compiled against the webapp schema.
     """
-    pkg_json = project_dir / "package.json"
-    if pkg_json.exists():
-        try:
-            pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pkg = {}
-        if isinstance(pkg, dict):
-            if pkg.get("bin"):
-                return "cli"
-            deps: dict[str, Any] = {}
-            for key in ("dependencies", "devDependencies", "peerDependencies"):
-                raw = pkg.get(key)
-                if isinstance(raw, dict):
-                    deps.update(raw)
-            scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
-            web_markers = {
-                "react", "vue", "svelte", "next", "nuxt", "vite",
-                "@angular/core", "astro", "webpack",
-            }
-            if web_markers.intersection(deps) or any(
-                name in scripts for name in ("dev", "start", "preview")
-            ):
-                return "webapp"
-            return "library"
-
     pyproject = project_dir / "pyproject.toml"
     setup_py = project_dir / "setup.py"
     setup_cfg = project_dir / "setup.cfg"
@@ -1333,6 +1308,31 @@ def detect_project_kind(project_dir: Path) -> str:
         if "fastapi" in combined:
             return "api"
         return "library"
+
+    pkg_json = project_dir / "package.json"
+    if pkg_json.exists():
+        try:
+            pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pkg = {}
+        if isinstance(pkg, dict):
+            if pkg.get("bin"):
+                return "cli"
+            deps: dict[str, Any] = {}
+            for key in ("dependencies", "devDependencies", "peerDependencies"):
+                raw = pkg.get(key)
+                if isinstance(raw, dict):
+                    deps.update(raw)
+            scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+            web_markers = {
+                "react", "vue", "svelte", "next", "nuxt", "vite",
+                "@angular/core", "astro", "webpack",
+            }
+            if web_markers.intersection(deps) or any(
+                name in scripts for name in ("dev", "start", "preview")
+            ):
+                return "webapp"
+            return "library"
 
     if (project_dir / "go.mod").exists() or (project_dir / "Cargo.toml").exists():
         return "cli"
