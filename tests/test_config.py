@@ -446,6 +446,18 @@ class TestDetectTestCommand:
         assert result == str(venv_pytest)
         assert "tox" not in result
 
+    def test_detects_django_manage_py_test_with_project_venv(
+        self, tmp_bare_git_repo
+    ):
+        (tmp_bare_git_repo / "manage.py").write_text("#!/usr/bin/env python\n")
+        venv_python = tmp_bare_git_repo / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("#!/bin/sh\n")
+
+        result = detect_test_command(tmp_bare_git_repo)
+
+        assert result == f"{venv_python} manage.py test"
+
     def test_detects_nox(self, tmp_bare_git_repo):
         (tmp_bare_git_repo / "tests").mkdir()
         (tmp_bare_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")

@@ -1199,6 +1199,12 @@ def detect_test_command(project_dir: Path) -> str | None:
         else:
             candidates.append("pytest")
 
+    manage_py = project_dir / "manage.py"
+    if manage_py.exists() and not has_py_tests:
+        venv_python = project_dir / ".venv" / "bin" / "python"
+        python_cmd = f"{venv_python}" if venv_python.exists() else "python"
+        candidates.append(f"{python_cmd} manage.py test")
+
     has_project_pytest = any(
         c.endswith("/.venv/bin/pytest") or c.endswith("\\.venv\\Scripts\\pytest.exe")
         for c in candidates
