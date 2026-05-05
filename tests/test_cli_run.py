@@ -509,6 +509,8 @@ def test_orchestrate_improve_uses_target_brownfield_compile(
     assert captured["brownfield"] is True
     assert captured["brownfield_mode"] == "target"
     assert captured["pipeline_command"] == "improve"
+    assert "brownfield target spec" in out
+    assert "brownfield baseline spec" not in out
 
 
 def test_improve_feature_i2p_threads_runtime_overrides(

@@ -667,3 +667,120 @@ Gates run for this entry:
 Decision:
 - Escalate to Tier 3. Tier 2 passed after one real repair cycle and two
   generic Otto fixes; no Tier 2 beyond-current-capability finding.
+
+## 2026-05-05 Pressure Test Tier 3 - Full-Stack/Persistence OSS App
+
+Project:
+- Tier: 3, full-stack/persistence-backed real OSS app.
+- Source/path: fresh Datasette clone at
+  `/tmp/otto-i2p-pressure-20260505/tier3/datasette`, starting from
+  `0dc7bb1 Table headers and column options visible for 0 rows`.
+- Why this is harder than Tier 2: the task touched a larger mature codebase
+  with CLI output, SQLite persistence, immutable inspect-file cache semantics,
+  JSON APIs, native tests, and durable state verification rather than a single
+  rendered page workflow.
+
+Otto run:
+- Exact command:
+  `/usr/bin/time -p uv --project /Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2 run --extra dev python -m otto.cli improve feature "Enhance Datasette's inspect-file workflow so datasette inspect includes a columns list for each table in database order, and when Datasette is served with --inspect-file the database JSON for immutable databases exposes those column lists without losing existing cached counts, hash, size, table rows, or table API behavior. Preserve existing inspect output fields, add focused tests, and keep the native targeted tests passing." --i2p --provider codex --budget 2600 --max-turns 160 --break-lock --verbose`
+- Provider/model: Codex provider requested and verified by child process tree;
+  concrete model name was not surfaced in Otto artifacts.
+- Session id: `2026-05-05-193804-887f13`.
+- Wall time: `/usr/bin/time` `real 1309.65s`; `summary.json`
+  `duration_s=1029.324188041035`.
+- Cost: `summary.json cost_usd=0.0`; Codex token usage was recorded in logs
+  but no USD cost was surfaced by the provider adapter.
+- Final Otto verdict: `passed`; `summary.json` reports `stories_passed=6`,
+  `stories_tested=6`, `rounds=1`.
+- Proof packet:
+  `/tmp/otto-i2p-pressure-20260505/tier3/datasette/otto_logs/sessions/2026-05-05-193804-887f13/proof-packet.html`
+  and
+  `/tmp/otto-i2p-pressure-20260505/tier3/datasette/otto_logs/sessions/2026-05-05-193804-887f13/proof-packet.json`.
+- Browser/video/screenshot artifacts: not applicable for this CLI/API tier.
+
+Run behavior and evidence:
+- Baseline targeted native tests before Otto:
+  `uv run --group dev pytest -q tests/test_cli.py::test_inspect_cli tests/test_cli.py::test_serve_with_inspect_file_prepopulates_table_counts_cache tests/test_api.py::test_inspect_file_used_for_count`
+  -> `3 passed`.
+- Compile produced a 4-group target contract for database introspection,
+  CLI inspect workflow, database JSON API, and table JSON API. The rendered
+  compile prompt correctly used target repair guidance, not baseline guidance.
+- Initial audit correctly blocked `datasette inspect`: output had counts only,
+  omitted `columns`, and returned tables alphabetically instead of SQLite
+  creation order for an audit DB created as `z_first`, then `a_second`.
+- Repair focused on `datasette/cli.py` and `tests/test_cli.py`, then committed
+  `e530a85 i2p(cli-inspect-workflow): build slice on layer2/inspect-json-summary-with-columns`.
+- Second audit ran focused CLI/API checks, created an independent SQLite DB,
+  mutated generated inspect-file count/hash/size to sentinel values, served it
+  immutable, and verified CLI output, `/audit-columns.json`,
+  `/-/databases.json`, and table JSON behavior. Audit verdict passed.
+
+External verifier:
+- Targeted native suite after Otto:
+  `uv run --group dev pytest -q tests/test_cli.py::test_inspect_cli tests/test_cli.py::test_inspect_cli_writes_to_file tests/test_cli.py::test_serve_with_inspect_file_prepopulates_table_counts_cache tests/test_api.py::test_inspect_file_used_for_count tests/test_api.py::test_database_page tests/test_table_api.py::test_table_json`
+  -> `6 passed in 1.16s`.
+- Independent durable-state verifier outside Otto:
+  created a SQLite DB with `z_first` then `a_second`, asserted
+  `datasette inspect` stdout and `--inspect-file` output preserve creation
+  order and per-table column lists, mutated inspect-file count/hash/size to
+  sentinel values, and verified `serve -i --inspect-file --get` responses for
+  `/audit-columns.json`, `/-/databases.json`, and
+  `/audit-columns/z_first.json?_size=1&_extra=count`.
+  Result: passed; verifier temp dir
+  `/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/otto-datasette-tier3-verify-v6jzufr7`.
+- Verifier correction: the first outside script expected the wrong table JSON
+  field (`filtered_table_rows_count`); live Datasette returns `count` for this
+  endpoint. Classified as brittle oracle fixed generically, not an Otto or
+  product bug.
+
+Bugs found and classification:
+- Otto bug fixed before the run: mixed Python/Node manifests were classified as
+  `library` because `package.json` could override `pyproject.toml`; Datasette
+  has both. Generic fix committed in `03abc4370` so Python manifests win over
+  auxiliary package manifests.
+- Otto bug fixed after the run: target-mode brownfield improve printed
+  `brownfield baseline spec` even though it sent the correct target prompt.
+  This was a misleading log/triage bug, not a behavior blocker.
+- Skill/doc bug fixed: `otto-as-user` still described `--resume` as a generic
+  i2p flag. Current CLI supports i2p resume for `build` and `certify`; `improve
+  --resume` is legacy-only/ignored. The skill now says that explicitly.
+- Project bug fixed by Otto in target repo: Datasette inspect JSON did not
+  include table `columns` and did not preserve SQLite creation order for the
+  new desired contract.
+
+Root cause:
+- Otto project-kind inference needed to respect primary language manifests
+  before auxiliary frontend/tooling manifests in mixed repositories.
+- Brownfield target/baseline mode existed in prompt plumbing but the CLI
+  progress label was hard-coded, which undercut logs-first debugging.
+- The user-level dogfood skill needed to track current CLI semantics after the
+  redesign cutover.
+
+Generic fixes made in this worktree:
+- `otto/config.py` project-kind detection now checks Python manifests before
+  JavaScript manifests.
+- `otto/cli_run.py` now prints `brownfield target spec` for improve-mode target
+  compile and `brownfield baseline spec` for baseline compile.
+- `.codex/skills/otto-as-user/SKILL.md` now documents build/certify resume
+  support and warns that improve resume is currently legacy-only/ignored.
+
+Regression tests added:
+- `tests/test_config.py::TestDetectProjectKind::test_python_manifest_beats_auxiliary_package_json`
+- `tests/test_cli_run.py::test_orchestrate_improve_uses_target_brownfield_compile`
+  now also asserts the target-mode compile heading.
+
+Gates run for this entry:
+- Worktree mixed-manifest regression:
+  `uv run pytest -q tests/test_config.py::TestDetectProjectKind` -> `7 passed`.
+- Worktree compile-heading regression:
+  `uv run pytest -q tests/test_cli_run.py::test_orchestrate_improve_uses_target_brownfield_compile`
+  -> `1 passed`.
+- Touched-file lint:
+  `uv run ruff check otto/config.py otto/cli_run.py tests/test_config.py tests/test_cli_run.py`
+  -> passed.
+- `git diff --check` -> passed.
+- Target repo external native and durable-state verifiers -> passed as above.
+
+Decision:
+- Escalate to Tier 4. Tier 3 passed after one real repair cycle; no Tier 3
+  beyond-current-capability finding.

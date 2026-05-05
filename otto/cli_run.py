@@ -1004,8 +1004,9 @@ def _brownfield_compile_locked(
             session_id = _new_session_id(project_dir)
             session_dir = _paths.session_dir(project_dir, session_id)
             console.print(f"  [bold]{cli_heading}[/bold] — session {session_id}\n")
+            mode_label = "target" if brownfield_mode == "target" else "baseline"
             console.print(
-                "  [bold]Compile phase[/bold] — brownfield baseline spec"
+                f"  [bold]Compile phase[/bold] — brownfield {mode_label} spec"
             )
             run_dir = session_dir / "spec"
             run_dir.mkdir(parents=True, exist_ok=True)

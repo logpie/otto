@@ -58,7 +58,10 @@ uv run --extra dev python -m otto.cli certify --i2p --provider codex --budget 12
 
 Useful i2p flags:
 
-- `--resume`: continue an interrupted i2p checkpoint.
+- `otto build --resume`: continue an interrupted i2p build checkpoint.
+- `otto certify --resume`: resume a paused i2p audit checkpoint.
+- `otto improve ... --resume` is currently legacy-only/ignored; do not use it
+  as evidence that brownfield improve resume works unless the CLI changes.
 - `--reset-budget`: do not count prior attempt spend on resume.
 - `--review-gate`: pause after compile until spec review approves.
 - `--auto-approve`: make scripted runs explicit about skipping review gate.
