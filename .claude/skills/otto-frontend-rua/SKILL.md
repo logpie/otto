@@ -105,6 +105,41 @@ it correctly?" Everything below is in service of that.
 - **Console + network sanity** — no React hydration warnings, no
   unmounted-setState, no duplicate API calls per drawer open. These
   destroy debugging when they pile up.
+- **Keyboard navigation basics** — Otto's user is a developer who
+  lives in keyboards. Tab order through form fields makes sense
+  (visual order matches DOM order). `Enter` submits the focused
+  form. `Escape` closes a modal. Focus returns to the trigger
+  button when the modal closes. (NOT a full WCAG audit; just the
+  power-user shortcuts.)
+- **Focus indicators visible** — when Tab moves focus, you can SEE
+  where it is. Use `:focus-visible` (don't strip with `outline:
+  none`). Mouse users won't see focus rings; keyboard users will.
+- **No-blank loading state** — never show a blank screen during
+  fetch. Minimum: a spinner, "Loading…" text, or a single-line
+  skeleton. (Full skeleton matching final layout = polish; defer.)
+- **No content shift (CLS) after initial fetch** — when data loads,
+  content shouldn't jump. Reserve container heights with
+  `min-height` or skeletons. (LCP/INP perf metrics = defer; CLS
+  affects daily usability — keep.)
+- **Microinteraction minimum** — hover/focus state transitions
+  exist (100-250ms ease — not 0ms instant snaps; that feels
+  broken). Modal open/close has SOME animation (even just a 150ms
+  fade). Disabled→enabled doesn't pop. (Full motion design system =
+  polish; defer. The minimum = "doesn't feel like a 1995 webpage".)
+- **Browser zoom 125% / 150% works** — devs often work zoomed in.
+  Use `rem` for typography and spacing where possible; don't trap
+  content in fixed-px containers that cut off when scaled. Test by
+  Cmd+Plus a few times.
+- **Initial-load smell test** — does the page feel snappy on
+  localhost? If the bundle is so large it takes >2s to render on
+  localhost, something is wrong (memory leak, infinite re-render,
+  bundle bloat). NOT a Lighthouse Performance score target — just
+  "doesn't feel sluggish".
+- **Basic design-token consistency** — type sizes from a small set
+  (not "every heading a random px"). Border radii from a small set
+  (not "buttons 4, cards 6, modals 7"). Shadows used sparingly +
+  consistently. The exact ratio (1.25 vs 1.333) is polish; the
+  EXISTENCE of any rhythm is pre-release.
 
 **Skip (defer until public release):**
 
@@ -125,18 +160,24 @@ Performance budget:
 
 Aesthetic micro-tuning:
 - Brand voice through typography (functional > aspirational).
-- Iconography family consistency (✓/✗/⊘ emoji is fine for now —
-  but DO ensure they render at consistent size, see "button/text
-  style discipline" above).
-- Type scale ratio (1.25 vs 1.333) micro-tuning.
-- Radius/shadow scale token rigor (the values can be ad-hoc as long
-  as they're consistent across screens — see "cross-screen
-  consistency" above).
-- Microinteraction polish (200ms transitions, ease curves).
-- Empty-state illustrations (text empty states are fine; but copy
-  must be clear — see "UI / text clarity" above).
-- Skeleton loaders (spinner or "Loading…" is fine; just don't show
-  blank).
+- Iconography family unification (✓/✗/⊘ emoji is fine for now —
+  but DO ensure they render at consistent size). Note: emoji
+  render differently across OSes; if your dev fleet mixes
+  macOS/Linux/Windows, normalize to SVG. Otherwise defer.
+- Type scale ratio precision (1.25 vs 1.333 vs 1.5 — the EXACT
+  ratio is polish; "any consistent rhythm exists" is pre-release).
+- Radius/shadow token PRECISION (the EXACT values are polish;
+  basic consistency is pre-release).
+- Full motion design system (ease curves, spring physics, staggered
+  reveals) — the MINIMUM (transitions exist, modals fade) is
+  pre-release; the system is polish.
+- Empty-state illustrations + onboarding CTAs (clear copy is
+  pre-release; pretty illustrations are polish).
+- Skeleton loaders matching final layout (any non-blank loading
+  state is pre-release; the matching-shape skeleton is polish).
+- `prefers-reduced-motion` respect (most users default to motion
+  on; polish for the minority. But: if you're shipping ANY
+  animation > 300ms, gate it behind reduced-motion).
 
 **Important — what stays IN the pre-release tier**: layout coherence,
 UI/text clarity, dedup, cross-screen consistency, button/text style
