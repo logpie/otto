@@ -139,6 +139,38 @@ Round-2 highlights (what changed since the first hand-off):
 
 **Test sweep: 1640/1640 passed.** Web typecheck + build clean.
 
+### Round-3 fix wave (5 backend gaps, 2026-05-05)
+
+Round-3 cross-check audits surfaced 5 narrow backend gaps below the
+A-list. All closed in this wave (full table in `docs/codex-followups.md`):
+
+- **R3-1 phase-map completeness**: `group.aborted_by_user → BLOCKED`
+  added to `_PHASE_FOR_KIND` so aborted Groups round-trip honestly
+  through `replay()`-derived RunState instead of stranding at BUILDING.
+  Run-scoped events (`run.paused_by_user`, `spec.review_pending`, etc.)
+  documented as intentionally not phase-affecting.
+- **R3-2 spec-review preconditions**: `/edit` and `/approve` now both
+  refuse with 409 when the underlying run is paused. `/approve` gained
+  a lifecycle precondition (allowed only from `draft` or `approved`).
+  Concurrent surgery via `editing_in_flight` / `amended` no longer
+  rubber-stampable through `/approve`.
+- **R3-3 resume composes with A6/A7**: `ResumePlan` gained
+  `paused_by_user: bool` and `prior_invalidated_group_ids: frozenset[str]`
+  populated by `plan_resume` from journal scans. Runner logs a warn-level
+  line on resume when either is non-empty. Documented in
+  `docs/i2p-resume-design.md` §7.7 / §7.8.
+- **R3-4 schema bump v1 → v2**: `SCHEMA_VERSION = 2`. Legacy v1 keys
+  still read with one advisory warning; v2 specs carrying leftover
+  legacy keys emit louder warnings to time-bound the deprecation
+  window. Auto-detect v1 when `schema_version` is absent and legacy
+  keys are present.
+- **R3-5 Event.feature_id**: optional `feature_id: str = ""` added to
+  `Event`. Threaded through `emit()` + `iter_events()`. Mirrors
+  `Evidence.feature_id`. Per-call-site wiring deferred — data-layer
+  plumbing is in place.
+
+**Test sweep: 1656/1656 passed** (16 new tests; 0 regressions).
+
 Honest deferrals you SHOULD know about:
 
 - A8: Otto's default walkthrough produces no video/screenshots in v1

@@ -5,6 +5,23 @@ after the redesign was claimed "100% delivered". Each gap below was
 verified against actual code with file:line citations. Codex should
 treat this as the authoritative todo list for hardening.
 
+## Round-3 fix wave (5 gaps closed)
+
+Five backend gaps surfaced by the round-3 cross-check audits closed in
+this wave. All five tracked in `docs/HANDOFF-codex.md`. Status: DONE.
+
+| Gap | Area | Resolution |
+|-----|------|------------|
+| R3-1 | ✅ **DONE 2026-05-05** — `replay()` phase mapping completeness. Added `group.aborted_by_user → BLOCKED` to `_PHASE_FOR_KIND` so an aborted Group's phase reflects the operator-terminal state instead of staying at BUILDING. Added explanatory `_RUN_SCOPED_NO_PHASE_KINDS` frozenset documenting which run-scoped events (`run.paused_by_user`, `run.resumed_by_user`, `spec.review_pending`, `spec.review_approved`, `spec.review.opened`, `spec.edited`, `spec.approved`, `spec.regenerated`) are intentionally NOT phase-affecting. New unit test `test_replay_marks_aborted_group_as_blocked` + `test_replay_ignores_run_scoped_events_without_changing_phase`. | `otto/spec_state.py:195-228`; `tests/test_spec_state.py` |
+| R3-2 | ✅ **DONE 2026-05-05** — Spec-review route preconditions. `/edit` now also refuses with 409 when the run is paused (`is_run_paused_by_user(session_dir)`). `/approve` gained a lifecycle precondition (allowed only from `draft` or `approved` — refuses on `editing_in_flight` / `amended` / unknown) and a paused-session refusal. 4 new tests in `tests/test_spec_review_routes.py`: edit while paused, approve while paused, approve from `editing_in_flight`, normal-flow approve still works. | `otto/web/spec_review_routes.py`; `tests/test_spec_review_routes.py` |
+| R3-3 | ✅ **DONE 2026-05-05** — Resume composes with A6/A7. `ResumePlan` gained `paused_by_user: bool` and `prior_invalidated_group_ids: frozenset[str]` populated by `plan_resume` from journal scans. The runner logs a warn-level line on resume start when either is non-empty (no refusal — operator may have invoked `--resume` deliberately). The runner's existing `_invalidated_group_ids` predicate already picks up the trailing invalidations on the post-build re-dispatch path, so prior invalidations compose automatically. New `_scan_prior_invalidations` helper in `otto/resume.py`. Documented composition with A6 (`--force` semantics now log prior invalidations) and A7 (paused state surfaces a warning, not a refusal) in `docs/i2p-resume-design.md` §7.7 / §7.8. 3 new tests in `tests/test_resume.py`: paused_by_user pickup + clear, invalidations pickup + clear, default empty. | `otto/resume.py`; `otto/runner.py`; `docs/i2p-resume-design.md`; `tests/test_resume.py` |
+| R3-4 | ✅ **DONE 2026-05-05** — Schema bump v1 → v2. `SCHEMA_VERSION = 2` in `otto/spec_compile.py`. Read-fallback for legacy v1 keys preserved with one extra warning code (`spec.deprecated.schema_v1_read`); v2 specs that carry leftover legacy keys (`slices`/`cross_slice_checks` at top level, `title`/`tasks`/`deps` per-group) emit louder `spec.deprecated.schema_v2_legacy_top_keys` / `_legacy_group_fields` warnings to time-bound the deprecation window. Auto-detected v1 when `schema_version` is absent and legacy keys are present. 4 new tests in `tests/test_spec_compile.py`. | `otto/spec_compile.py:56-72,2174-2227`; `tests/test_spec_compile.py` |
+| R3-5 | ✅ **DONE 2026-05-05** — `Event.feature_id` field. Added optional `feature_id: str = ""` to the `Event` dataclass. Threaded through `emit()` kwarg and `iter_events()` JSON parse. Mirrors `Evidence.feature_id` so per-Feature attribution joins cleanly. The field is optional and defaults empty, so existing replay() consumers ignore it — no breakage. New round-trip test `test_event_feature_id_round_trips_through_emit_and_replay`. Per-call-site wiring in `otto/build.py` / `otto/audit.py` / `otto/merge_queue.py` left for future feature-scoped events; the data-layer plumbing is in place. | `otto/spec_state.py:160-176,304-336,431-441`; `tests/test_spec_state.py` |
+
+Test sweep: **1656 passed** (1640 → 1656; 16 new tests). No regressions.
+
+
+
 ## Gaps by severity
 
 ### A. Material — real work, not just naming
