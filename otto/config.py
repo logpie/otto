@@ -61,6 +61,13 @@ DEFAULTS: dict[str, Any] = {
     # Features (opt-in)
     "memory":                 False,
 
+    # Phase B.3 cutover (tick 62): default flipped from "legacy" to "i2p".
+    # `otto build` / `otto certify` / `otto improve` now route through the
+    # new intent-to-product stack (compile → seed → build → merge → audit
+    # → repair → render). Users hitting regressions fall back via
+    # `--legacy` for one cycle before Phase C deletes the legacy paths.
+    "default_pipeline":       "i2p",      # "legacy" | "i2p"
+
     # Queue settings — used by `otto queue` runner and `otto merge`.
     # See plan-parallel.md §3.3.
     "queue": {

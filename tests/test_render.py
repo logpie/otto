@@ -32,7 +32,7 @@ from otto.render import (
 from otto.spec_compile import (
     BrowserJourney,
     RepoTestCheck,
-    Slice,
+    Group,
     Spec,
     StateInvariant,
     StructureDecisions,
@@ -66,7 +66,7 @@ def _two_slice_spec(tmp_path: Path) -> Spec:
             }
         ),
         slices=[
-            Slice(
+            Group(
                 id="shell",
                 title="App shell",
                 deps=[],
@@ -74,7 +74,7 @@ def _two_slice_spec(tmp_path: Path) -> Spec:
                 tasks=["scaffold"],
                 checks=[RepoTestCheck(command=("npm", "run", "build"), timeout_s=60)],
             ),
-            Slice(
+            Group(
                 id="counter",
                 title="Counter widget",
                 deps=["shell"],
@@ -271,7 +271,7 @@ def test_render_html_contains_required_sections(tmp_path: Path) -> None:
     assert "<h2>Spec</h2>" in html
     assert "Non-goals" in html
     assert "Done means" in html
-    # Slice sections
+    # Group sections
     assert "<h2>Slices</h2>" in html
     assert "shell" in html
     assert "counter" in html
@@ -289,7 +289,7 @@ def test_render_html_escapes_user_input(tmp_path: Path) -> None:
         intent="<script>alert('xss')</script>",
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
-        slices=[Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[])],
+        slices=[Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[])],
     )
     build_result = BuildResult(
         spec_session_dir=tmp_path,

@@ -476,14 +476,15 @@ def _summarize(
 
     quality_score = 0
     quality_findings: list[str] = []
-    capability_verdicts: list[dict[str, Any]] = []
+    # A0.4: read the canonical `feature_audits` key.
+    feature_audits: list[dict[str, Any]] = []
     packet_path = session_dir / "proof-packet.json" if session_dir else None
     if packet_path and packet_path.exists():
         try:
             packet = json.loads(packet_path.read_text(encoding="utf-8"))
             quality_score = int(packet.get("quality_score") or 0)
             quality_findings = [str(f) for f in (packet.get("quality_findings") or [])[:20]]
-            capability_verdicts = list(packet.get("capability_verdicts") or [])
+            feature_audits = list(packet.get("feature_audits") or [])
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -499,7 +500,7 @@ def _summarize(
         "audit_verdict": audit_verdict,
         "quality_score": quality_score,
         "quality_findings": quality_findings,
-        "capability_verdicts": capability_verdicts,
+        "feature_audits": feature_audits,
         "evaluator_aggregate": be.aggregate_status(eval_results),
         "evaluator_summary": {r.name: r.status for r in eval_results},
     }, eval_results
@@ -598,11 +599,12 @@ def main() -> int:
         lines.append("## Quality findings")
         for f in summary["quality_findings"]:
             lines.append(f"- {f}")
-    if summary.get("capability_verdicts"):
+    feature_audit_list = summary.get("feature_audits")
+    if feature_audit_list:
         lines.append("")
-        lines.append("## Capability verdicts")
-        for cv in summary["capability_verdicts"]:
-            lines.append(f"- **{cv.get('name')}** [{cv.get('status')}]: {cv.get('detail','')[:200]}")
+        lines.append("## Feature audits")
+        for fa in feature_audit_list:
+            lines.append(f"- **{fa.get('name')}** [{fa.get('status')}]: {fa.get('detail','')[:200]}")
     (artifacts_dir / "REPORT.md").write_text("\n".join(lines) + "\n")
     print(f"\nwrote {artifacts_dir}/REPORT.md")
     print(f"verdict: {verdict}")

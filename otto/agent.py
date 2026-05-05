@@ -1169,7 +1169,7 @@ def _remember_agent_process(state: dict[str, Any], pid: int) -> None:
 
 
 def _cleanup_agent_processes(project_dir: Path, agent_state: dict[str, Any]) -> None:
-    from otto.pipeline import _cleanup_orphan_processes
+    from otto.runs.lifecycle import _cleanup_orphan_processes
 
     _cleanup_orphan_processes(
         project_dir,

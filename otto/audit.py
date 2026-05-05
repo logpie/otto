@@ -30,6 +30,7 @@ delegates to `otto.agent.run_agent_with_timeout`.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Iterable
@@ -37,7 +38,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from otto.build import (
     BuildAgentCallable,
@@ -76,17 +77,23 @@ class SliceVerdict:
 
 
 @dataclass
-class CapabilityVerdict:
-    """Per-capability judgment from the audit (v2.6).
+class FeatureAudit:
+    """Per-feature judgment from the audit (research §2 vocabulary).
 
-    A capability is one user-observable feature, typically derived
-    from a `done_means` item. Replaces the single-verdict-for-everything
-    model with structured per-feature judgments — lets the proof
-    packet show a "feature checklist" and lets downstream tooling
-    target specific gaps.
+    A feature is one atomic user-observable unit of value, typically
+    derived from a `done_means` item. Replaces the single-verdict-
+    for-everything model with structured per-feature judgments — lets
+    the proof packet show a "feature checklist" and lets downstream
+    tooling target specific gaps.
+
+    Naming note: A0.4 renamed `CapabilityVerdict` → `FeatureAudit`. The
+    new name disambiguates from the TS-layer `FeatureVerdict` Literal
+    (in otto/web/client/src/types/run.ts) which means just the verdict
+    outcome string. This dataclass carries name + status + detail +
+    evidence_refs.
 
     Status:
-      - "passed": capability fully works.
+      - "passed": feature fully works.
       - "partial": works but with caveats (specific in `narrative`).
       - "blocked": doesn't work or unverified.
 
@@ -104,21 +111,48 @@ class CapabilityVerdict:
 
 @dataclass
 class AuditResult:
-    """Aggregate audit outcome."""
+    """Aggregate audit outcome.
+
+    A0.4: `feature_audits` is the canonical name for the per-feature
+    verdict list (formerly `capability_verdicts`).
+    """
 
     verdict: AuditVerdict
     narrative: str
     slice_verdicts: list[SliceVerdict] = field(default_factory=list)
-    capability_verdicts: list[CapabilityVerdict] = field(default_factory=list)
+    feature_audits: list[FeatureAudit] = field(default_factory=list)
     cross_slice_evidence: list[Evidence] = field(default_factory=list)
     walkthrough_artifacts: list[Path] = field(default_factory=list)
     contract_test_passed: bool | None = None  # None if no test_command configured
     contract_test_detail: str = ""
     quality_score: int = 0  # 1-5; 0 = not assessed
+    # quality_findings: bare strings here (no severity). Per-Feature
+    # severity-tagged findings live on FeatureProofBlock and use the
+    # canonical `critical`/`important`/`polish` vocabulary from
+    # `otto/spec_compile.py:FINDING_SEVERITIES` (research §4 ladder).
+    # Legacy synonyms (`blocking`/`high`/`low`) are translated to canonical
+    # at the run-view parse boundary — see
+    # `otto/mission_control/run_view.py:_normalize_severity`.
     quality_findings: list[str] = field(default_factory=list)
     retries: int = 0
     cost_usd: float = 0.0
     wall_s: float = 0.0
+    # A2.1: walkthrough Feature-tagging coverage (research §A2 honesty contract).
+    # `coverage_ratio < 0.90` is surfaced AND caps the audit verdict at
+    # PARTIAL — see `verdict_cap_reasons` for the audit-trail of every
+    # cap that fired.
+    walkthrough_coverage: dict[str, Any] | None = None
+    # A3.1 plumbing: parsed WalkthroughEntry objects from walkthrough.jsonl,
+    # threaded into `compose_proof_packet` → `build_feature_proof_blocks` so
+    # per-Feature proof blocks render their walkthrough trace. Empty list
+    # when no walkthrough.jsonl exists (e.g. no-op walkthrough).
+    walkthrough_entries: list[Any] = field(default_factory=list)
+    # A2.1 follow-up (tick 58 deferral): human-readable record of every
+    # post-judge verdict cap that fired (e.g. low walkthrough Feature-tag
+    # coverage). Empty when the LLM verdict was honored as-is. Render
+    # surfaces these so an operator can see WHY the final verdict differs
+    # from the LLM judge's output.
+    verdict_cap_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -151,15 +185,19 @@ class AuditAgentInput:
 
 @dataclass
 class AuditAgentOutput:
-    """What an audit-agent callable returns."""
+    """What an audit-agent callable returns.
+
+    A0.4: `feature_audits` is the canonical per-Feature verdict list
+    (formerly `capability_verdicts`).
+    """
 
     verdict: AuditVerdict
     narrative: str
     slice_verdicts: list[SliceVerdict] = field(default_factory=list)
-    # v2.6 per-capability verdicts: one entry per done_means item
+    # v2.6 per-feature verdicts: one entry per done_means item
     # (or per derived feature). Lets the proof packet show a feature
     # checklist instead of one global verdict.
-    capability_verdicts: list[CapabilityVerdict] = field(default_factory=list)
+    feature_audits: list[FeatureAudit] = field(default_factory=list)
     # Quality dimension (added when "audit final app quality" check
     # surfaced that bare-bones-but-functional products were passing).
     # Score 1-5 where 1 = unusable, 3 = MVP, 5 = polished. Findings
@@ -207,6 +245,72 @@ def no_op_walkthrough(_project_dir: Path, _log_dir: Path, _timeout_s: int) -> Wa
     return WalkthroughResult(succeeded=True, detail="no walkthrough configured", artifacts=[])
 
 
+def _validate_walkthrough_jsonl(
+    walk_log_dir: Path,
+    spec: Spec,
+) -> tuple[list[Any], dict[str, Any] | None]:
+    """A2.1 — load walkthrough.jsonl + Feature-tag coverage report.
+
+    Looks for `walkthrough.jsonl` under `walk_log_dir`. Parses each line
+    into a `WalkthroughEntry` via `parse_walkthrough_entry`, then runs
+    `validate_walkthrough_coverage` against the spec.
+
+    Returns `(entries, coverage)` where:
+      - `entries` is the list of parsed `WalkthroughEntry` objects (empty
+        when no walkthrough.jsonl exists, so callers can splat directly
+        into `AuditResult.walkthrough_entries`).
+      - `coverage` is a JSON-friendly dict suitable for
+        `AuditResult.walkthrough_coverage`, or `None` if no
+        walkthrough.jsonl was emitted (e.g. no-op walkthrough).
+
+    A3.1 plumbing: `entries` is what `compose_proof_packet` feeds into
+    `build_feature_proof_blocks` so per-Feature proof blocks carry their
+    walkthrough trace. Single read pass — no second parser.
+    """
+    from otto.spec_compile import (
+        parse_walkthrough_entry,
+        validate_walkthrough_coverage,
+    )
+
+    jsonl_path = walk_log_dir / "walkthrough.jsonl"
+    if not jsonl_path.exists():
+        return [], None
+
+    entries: list[Any] = []  # list[WalkthroughEntry]
+    parse_errors: list[str] = []
+    parse_warnings: list[str] = []
+    for i, line in enumerate(jsonl_path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            parse_errors.append(f"line {i}: {exc}")
+            continue
+        entry, line_warnings = parse_walkthrough_entry(payload, spec)
+        if entry is None:
+            parse_errors.append(f"line {i}: " + "; ".join(line_warnings))
+            continue
+        entries.append(entry)
+        parse_warnings.extend(f"line {i}: {w}" for w in line_warnings)
+
+    report = validate_walkthrough_coverage(entries, spec)
+    coverage = {
+        "total_entries": report.total_entries,
+        "exploration_entries": report.exploration_entries,
+        "tagged_entries": report.tagged_entries,
+        "untagged_entries": report.untagged_entries,
+        "non_exploration_total": report.non_exploration_total,
+        "coverage_ratio": report.coverage_ratio,
+        "meets_threshold": report.meets_threshold(),
+        "unknown_feature_id_refs": list(report.unknown_feature_id_refs),
+        "per_feature_evidence_count": dict(report.per_feature_evidence_count),
+        "parse_errors": parse_errors,
+        "parse_warnings": parse_warnings,
+    }
+    return entries, coverage
+
+
 def default_walkthrough_from_spec(spec: Spec) -> WalkthroughCallable:
     """Build a production walkthrough callable from the spec.
 
@@ -230,12 +334,12 @@ def default_walkthrough_from_spec(spec: Spec) -> WalkthroughCallable:
     from otto.spec_compile import BrowserJourney
 
     journey: BrowserJourney | None = None
-    for check in spec.cross_slice_checks:
+    for check in spec.cross_group_checks:
         if isinstance(check, BrowserJourney):
             journey = check
             break
     if journey is None:
-        for slice_ in spec.slices:
+        for slice_ in spec.groups:
             for check in slice_.checks:
                 if isinstance(check, BrowserJourney):
                     journey = check
@@ -482,7 +586,7 @@ async def run_audit(
         retries_this_pass = retries
         # 1: cross-slice checks against integrated worktree
         cross_pairs = run_checks(
-            list(spec.cross_slice_checks),
+            list(spec.cross_group_checks),
             project_dir=project_dir,
             cwd=project_dir,
             base_url=base_url,
@@ -503,6 +607,21 @@ async def run_audit(
         walk_log_dir = session_dir / "audit" / f"attempt-{retries:02d}" / "walkthrough"
         walk_log_dir.mkdir(parents=True, exist_ok=True)
         walk_result = walk(project_dir, walk_log_dir, budget.walk_timeout_s)
+
+        # 2b (A2.1): Feature-tag coverage validation. The audit walkthrough
+        # is contracted to emit `walkthrough.jsonl` with `feature_ids[]` per
+        # action (research §A2 honesty). We compute coverage now so the
+        # AuditResult surfaces tagging health — verdict cap on threshold
+        # failure is a follow-up tick.
+        walk_entries, walk_coverage = _validate_walkthrough_jsonl(walk_log_dir, spec)
+        if walk_coverage is not None and not walk_coverage["meets_threshold"]:
+            logger.warning(
+                "audit walkthrough Feature-tagging coverage %.1f%% below "
+                "90%% threshold (%d/%d non-exploration entries tagged)",
+                walk_coverage["coverage_ratio"] * 100.0,
+                walk_coverage["tagged_entries"],
+                walk_coverage["non_exploration_total"],
+            )
 
         # 3: LLM judge
         agent_input = AuditAgentInput(
@@ -542,7 +661,7 @@ async def run_audit(
                 verdict=AuditVerdict.PARTIAL,
                 narrative=halt_msg,
                 slice_verdicts=[],
-                capability_verdicts=[],
+                feature_audits=[],
                 cross_slice_evidence=cross_evidence,
                 walkthrough_artifacts=list(walk_result.artifacts),
                 contract_test_passed=contract_passed,
@@ -552,6 +671,8 @@ async def run_audit(
                 retries=retries,
                 cost_usd=cost_total,
                 wall_s=time.monotonic() - t0,
+                walkthrough_coverage=walk_coverage,
+                walkthrough_entries=list(walk_entries),
             )
         agent_output = await audit_agent(agent_input)
         cost_total += agent_output.cost_usd
@@ -595,11 +716,36 @@ async def run_audit(
                 + "floored at PARTIAL until repair lands cleanly."
             )
 
+        # A2.1 follow-up (tick 58 deferral): walkthrough Feature-tag
+        # coverage cap. Research §A2 honesty contract — if the walkthrough
+        # didn't tag enough actions to their Features, the audit cannot
+        # legitimately certify the product. Force at least PARTIAL via
+        # `_strictest` (so an already-BLOCKED verdict is not downgraded).
+        # Audit trail: narrate the reason AND record it in
+        # `verdict_cap_reasons` so render can surface WHY the final
+        # verdict differs from the LLM judge's output. The threshold
+        # itself lives in `CoverageReport.meets_threshold()` —
+        # `walk_coverage["meets_threshold"]` is the precomputed bool.
+        verdict_cap_reasons: list[str] = []
+        if walk_coverage is not None and not walk_coverage["meets_threshold"]:
+            cap_reason = (
+                f"walkthrough Feature-tag coverage "
+                f"{walk_coverage['coverage_ratio'] * 100.0:.1f}% below "
+                f"threshold "
+                f"({walk_coverage['tagged_entries']}/"
+                f"{walk_coverage['non_exploration_total']} non-exploration "
+                f"entries tagged); verdict capped at partial — audit cannot "
+                f"certify Features it did not observe"
+            )
+            verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+            narrative = narrative + "\n\n[walkthrough coverage cap]\n" + cap_reason
+            verdict_cap_reasons.append(cap_reason)
+
         last_result = AuditResult(
             verdict=verdict,
             narrative=narrative,
             slice_verdicts=list(agent_output.slice_verdicts),
-            capability_verdicts=list(agent_output.capability_verdicts),
+            feature_audits=list(agent_output.feature_audits),
             cross_slice_evidence=cross_evidence,
             walkthrough_artifacts=list(walk_result.artifacts),
             contract_test_passed=contract_passed,
@@ -609,13 +755,16 @@ async def run_audit(
             retries=retries_this_pass,
             cost_usd=cost_total,
             wall_s=time.monotonic() - t0,
+            walkthrough_coverage=walk_coverage,
+            walkthrough_entries=list(walk_entries),
+            verdict_cap_reasons=verdict_cap_reasons,
         )
 
         # Pattern A: emit a per-attempt verdict event so the journal
         # records each retry's outcome. Previously only the FINAL
         # audit.finished was emitted — debugging a fix loop required
         # reading per-attempt log dirs by hand.
-        # C2 fix: include the FULL capability_verdicts payload (not
+        # C2 fix: include the FULL feature_audits payload (not
         # just the names of blocked ones) so the journal is a complete
         # audit trail. C5 fix: also include contract_test_passed and
         # contract_test_detail so an operator can reconstruct WHY the
@@ -627,18 +776,18 @@ async def run_audit(
             detail=narrative[:200],
             verdict=verdict.value,
             quality_score=agent_output.quality_score,
-            blocked_capabilities=[
-                c.name for c in agent_output.capability_verdicts
+            blocked_features=[
+                c.name for c in agent_output.feature_audits
                 if c.status == "blocked"
             ],
-            capability_verdicts=[
+            feature_audits=[
                 {
                     "name": c.name,
                     "status": c.status,
                     "detail": (c.detail or "")[:500],
                     "evidence_refs": list(c.evidence_refs or []),
                 }
-                for c in agent_output.capability_verdicts
+                for c in agent_output.feature_audits
             ],
             contract_test_passed=contract_passed,
             contract_test_detail=(contract_detail or "")[:500],
@@ -697,7 +846,7 @@ async def run_audit(
                     detail="shared cost budget exhausted; fix skipped",
                 )
                 break
-            slice_obj = next((s for s in spec.slices if s.id == slice_id), None)
+            slice_obj = next((s for s in spec.groups if s.id == slice_id), None)
             if slice_obj is None:
                 continue
             # Find the slice's build branch from build_result.
@@ -954,11 +1103,41 @@ def _merge_summary(merge_result: MergeQueueResult) -> dict:
 # ---------------------------------------------------------------------------
 
 
+_AUDIT_FEATURE_TAGGING_PROMPT_PATH = (
+    Path(__file__).resolve().parent / "prompts" / "audit-feature-tagging.md"
+)
+
+
+def _load_feature_tagging_contract() -> str:
+    """Load the audit walkthrough Feature-tagging contract markdown.
+
+    The contract (research §A2 + §4) is the single source of truth for
+    what every audit agent must emit in `walkthrough.jsonl`:
+    `feature_ids[]`, `action_kind`, ≥90% non-exploration coverage,
+    per-project-kind examples. It lives as a sibling prompt so reviewers
+    can edit one file instead of hunting for inline strings.
+
+    Falling back to a minimal stub keeps unit-test environments that
+    strip the prompts dir from breaking — the real prompt is the
+    file-on-disk one in production.
+    """
+    try:
+        return _AUDIT_FEATURE_TAGGING_PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return (
+            "# Audit Feature-tagging contract\n\n"
+            "Every walkthrough action carries `feature_ids[]`. Untagged\n"
+            "actions outside `action_kind: \"exploration\"` are rejected.\n"
+            "≥90% non-exploration coverage required.\n"
+        )
+
+
 def _audit_prompt(agent_input: AuditAgentInput) -> str:
     """Compose the audit-agent prompt.
 
     Walks: spec → integrated worktree state → build summary → merge
-    summary → cross-slice check verdicts → walkthrough artifacts → ask
+    summary → cross-slice check verdicts → walkthrough artifacts →
+    Feature-tagging contract (audit-feature-tagging.md) → ask
     for a per-slice verdict + a narrative.
     """
     import json as _json
@@ -975,7 +1154,7 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     lines.append(f"Integrated worktree: {agent_input.integrated_worktree}")
     lines.append("")
     lines.append("## Spec slices")
-    for s in spec.slices:
+    for s in spec.groups:
         lines.append(f"- {s.id}: {s.title}")
     lines.append("")
     lines.append("## Build summary")
@@ -1000,6 +1179,23 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
             "to assess what a user actually sees."
         )
         lines.append("")
+    # ── Feature-tagging contract (research §A2 + §4) ─────────────────
+    # The audit agent MUST emit walkthrough.jsonl with `feature_ids[]`
+    # per action and ≥90% non-exploration coverage. Inline the contract
+    # so prompt edits land in one place (otto/prompts/audit-feature-
+    # tagging.md) rather than scattered string literals.
+    lines.append("## Walkthrough Feature-tagging contract (REQUIRED)")
+    lines.append("")
+    lines.append(
+        "Before recording your verdicts, you must walk the integrated "
+        "product and emit `audit/attempt-NN/walkthrough.jsonl` per the "
+        "contract below. Per-Feature evidence is derived from these "
+        "tagged actions; untagged or weakly-tagged walkthroughs cause "
+        "the audit pass to be rejected."
+    )
+    lines.append("")
+    lines.append(_load_feature_tagging_contract().rstrip())
+    lines.append("")
     lines.append("## Your task")
     lines.append("")
     lines.append(
@@ -1119,8 +1315,8 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "  verdict: passed|partial|blocked,\n"
         "  narrative: str,\n"
         "  slice_verdicts: [{slice_id, passed: bool, detail: str}, ...],\n"
-        "  capability_verdicts: [{name: str, status: passed|partial|blocked,\n"
-        "                         detail: str, evidence_refs: [str, ...]}, ...],\n"
+        "  feature_audits: [{name: str, status: passed|partial|blocked,\n"
+        "                    detail: str, evidence_refs: [str, ...]}, ...],\n"
         "  quality_score: int (1-5),\n"
         "  quality_findings: [str, ...]\n"
         "}"
@@ -1217,7 +1413,7 @@ def _compose_verdict(
         )
 
     # Capability cap.
-    caps = agent_output.capability_verdicts
+    caps = agent_output.feature_audits
     if caps:
         blocked = [c for c in caps if c.status == "blocked"]
         partial = [c for c in caps if c.status == "partial"]
@@ -1291,12 +1487,13 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
     if isinstance(raw_findings, list):
         quality_findings = [str(f) for f in raw_findings if f]
 
-    # v2.6: per-capability verdicts. Permissive — invalid status →
-    # "blocked" (defensive default), missing fields → empty.
-    capability_verdicts: list[CapabilityVerdict] = []
-    raw_caps = data.get("capability_verdicts") or []
-    if isinstance(raw_caps, list):
-        for entry in raw_caps:
+    # A0.4: per-Feature audits. Canonical wire key is `feature_audits`.
+    # Permissive — invalid status → "blocked" (defensive default),
+    # missing fields → empty.
+    feature_audits: list[FeatureAudit] = []
+    raw_feats = data.get("feature_audits") or []
+    if isinstance(raw_feats, list):
+        for entry in raw_feats:
             if not isinstance(entry, dict):
                 continue
             name = str(entry.get("name") or "").strip()
@@ -1315,7 +1512,7 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
                 [str(e) for e in evidence_raw if e]
                 if isinstance(evidence_raw, list) else []
             )
-            capability_verdicts.append(CapabilityVerdict(
+            feature_audits.append(FeatureAudit(
                 name=name,
                 status=status,
                 detail=str(entry.get("detail") or ""),
@@ -1326,7 +1523,7 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
         verdict=verdict,
         narrative=str(data.get("narrative") or ""),
         slice_verdicts=slice_verdicts,
-        capability_verdicts=capability_verdicts,
+        feature_audits=feature_audits,
         quality_score=quality_score,
         quality_findings=quality_findings,
     )
@@ -1405,7 +1602,7 @@ __all__ = [
     "AuditBudget",
     "AuditResult",
     "AuditVerdict",
-    "CapabilityVerdict",
+    "FeatureAudit",
     "SliceVerdict",
     "WalkthroughCallable",
     "WalkthroughResult",

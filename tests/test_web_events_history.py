@@ -67,37 +67,10 @@ def test_web_events_tail_preserves_boundary_aligned_rows(tmp_path: Path, monkeyp
     assert events["items"][0]["message"] == "second"
     assert events["total_count"] == 1
 
-def test_web_history_detail_recovers_provider_from_manifest_argv(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    manifest_path = repo / "otto_logs" / "queue" / "hello-web" / "manifest.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
-        json.dumps({"argv": ["build", "hello", "--provider", "codex", "--effort", "high"]}),
-        encoding="utf-8",
-    )
-    append_history_snapshot(
-        repo,
-        build_terminal_snapshot(
-            run_id="run-history",
-            domain="queue",
-            run_type="queue",
-            command="build hello",
-            intent_meta={"summary": "hello"},
-            status="done",
-            terminal_outcome="success",
-            timing={"finished_at": "2026-04-24T00:00:00Z"},
-            metrics={"cost_usd": 0.0},
-            artifacts={"manifest_path": str(manifest_path)},
-            source={"resumable": True},
-            identity={"queue_task_id": "hello-web"},
-        ),
-    )
-
-    detail = _client(repo).get("/api/runs/run-history").json()
-
-    assert detail["provider"] == "codex"
-    assert detail["reasoning_effort"] == "high"
+# test_web_history_detail_recovers_provider_from_manifest_argv removed in
+# Phase C.4 (tick 65): exercised legacy `/api/runs/<run_id>` detail route
+# which has been deleted alongside the legacy MC inspector. Provider
+# recovery from manifest argv is now covered by run-view tests.
 
 def test_web_history_usage_reads_merge_summary_extra_artifact(tmp_path: Path) -> None:
     repo = tmp_path / "repo"

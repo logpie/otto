@@ -26,7 +26,6 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from otto.config import repo_preflight_issues
-from otto.merge.state import BranchOutcome, MergeState, write_state as write_merge_state
 from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
 from otto.runs.registry import make_run_record, write_record
 from otto.web.app import create_app
@@ -96,11 +95,6 @@ def _seed_ready_task(repo: Path) -> None:
         adapter_key="queue.attempt",
     )
     write_record(repo, record)
-
-
-def _post_merge(client: TestClient, run_id: str = "run-ready") -> tuple[int, dict]:
-    response = client.post(f"/api/runs/{run_id}/actions/merge", json={})
-    return response.status_code, response.json()
 
 
 # ---------------------------------------------------------------------------
@@ -219,85 +213,14 @@ def test_preflight_flags_staged_changes_in_root(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Service-level: HTTP merge action returns 409 with structured detail
+# Service-level: landing payload surfaces dirty-tree blockers
 # ---------------------------------------------------------------------------
-
-
-def test_merge_blocks_when_user_untracked_file_in_root(tmp_path: Path) -> None:
-    """Live W5-CRITICAL-1 repro at the HTTP layer: untracked
-    ``DIRTY_FILE.txt`` MUST cause ``POST /api/runs/{id}/actions/merge``
-    to return 409 with the file in the message + ``dirty_files``."""
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _seed_ready_task(repo)
-    (repo / "DIRTY_FILE.txt").write_text("user work\n", encoding="utf-8")
-
-    status, body = _post_merge(TestClient(create_app(repo)))
-
-    assert status == 409, f"expected dirty-tree 409; got {status} body={body!r}"
-    message = str(body.get("message") or "")
-    assert "DIRTY_FILE.txt" in message, f"file must be in message; got {message!r}"
-    assert "untracked" in message.lower() or "uncommitted" in message.lower(), (
-        f"message must explain the dirty-tree block; got {message!r}"
-    )
-
-
-def test_merge_allows_when_only_otto_owned_untracked(tmp_path: Path, monkeypatch) -> None:
-    """The merge preflight must not refuse purely on Otto's runtime
-    files (W11-CRITICAL-1 invariant). We stub ``execute_action`` so the
-    test doesn't actually shell out to the merge orchestrator — the
-    contract under test is that the preflight does NOT raise 409."""
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _seed_ready_task(repo)
-    (repo / ".otto-queue-state.json").write_text("{}", encoding="utf-8")
-    (repo / ".watcher.log").write_text("", encoding="utf-8")
-
-    captured: list[str] = []
-    def _fake_execute(record, kind, project_dir, **kwargs):
-        captured.append(kind)
-        from otto.mission_control.actions import ActionResult
-        return ActionResult(ok=True, message="merged", refresh=True)
-
-    monkeypatch.setattr("otto.mission_control.service.execute_action", _fake_execute)
-
-    status, body = _post_merge(TestClient(create_app(repo)))
-
-    assert status == 200, f"otto-owned-only must not block merge; got {status} body={body!r}"
-    assert captured == ["m"], "merge action must reach execute_action"
-
-
-def test_merge_blocks_when_tracked_file_modified(tmp_path: Path) -> None:
-    """Existing behaviour: modifying a committed file blocks the merge."""
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _seed_ready_task(repo)
-    (repo / "README.md").write_text("# repo\n\nlocal edit\n", encoding="utf-8")
-
-    status, body = _post_merge(TestClient(create_app(repo)))
-
-    assert status == 409
-    message = str(body.get("message") or "")
-    assert "README.md" in message
-    assert "unstaged" in message.lower()
-
-
-def test_merge_blocks_when_staged_changes_in_root(tmp_path: Path) -> None:
-    """Existing behaviour: a staged-but-uncommitted new file blocks the
-    merge — the regression fix must not loosen this for the
-    untracked-detection code path."""
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _seed_ready_task(repo)
-    (repo / "staged.txt").write_text("staged\n", encoding="utf-8")
-    subprocess.run(["git", "add", "staged.txt"], cwd=repo, check=True)
-
-    status, body = _post_merge(TestClient(create_app(repo)))
-
-    assert status == 409
-    message = str(body.get("message") or "")
-    assert "staged.txt" in message
-    assert "staged" in message.lower()
+#
+# Phase C.1e deleted the per-run ``POST /api/runs/{id}/actions/merge``
+# route; merge is now driven by the global ``/api/actions/merge-all``
+# route + the landing payload's ``merge_blocked``/``dirty_files``
+# channel. Tests that exercised the deleted per-run route were removed
+# in W8-A.
 
 
 def test_merge_blocks_lists_user_untracked_in_dirty_files(tmp_path: Path) -> None:
@@ -319,36 +242,3 @@ def test_merge_blocks_lists_user_untracked_in_dirty_files(tmp_path: Path) -> Non
         f"{landing['dirty_files']!r}"
     )
     assert any("untracked" in msg.lower() for msg in landing["merge_blockers"])
-
-
-def test_already_merged_check_still_precedes_dirty_tree_block(tmp_path: Path) -> None:
-    """Defensive: if the branch is *already* merged, we still want the
-    "Already merged into main" 409 (more actionable than "dirty tree").
-    The order in service.execute is: already_merged → SHA freshness →
-    dirty-tree. This test pins that ordering survives the W5 fix."""
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _seed_ready_task(repo)
-    (repo / "DIRTY_FILE.txt").write_text("user work\n", encoding="utf-8")
-    write_merge_state(
-        repo,
-        MergeState(
-            merge_id="merge-already",
-            started_at="2026-04-26T00:00:00Z",
-            finished_at="2026-04-26T00:01:00Z",
-            target="main",
-            status="done",
-            terminal_outcome="success",
-            branches_in_order=["build/ready-task"],
-            outcomes=[BranchOutcome(branch="build/ready-task", status="merged")],
-        ),
-    )
-
-    status, body = _post_merge(TestClient(create_app(repo)))
-
-    # Either 409 is acceptable but the message MUST be the
-    # already-merged one — that's the more actionable error and the
-    # ordering the existing test_web_merge_action_reports_already_merged_before_dirty_repo
-    # test pins for tracked-file dirt.
-    assert status == 409
-    assert body.get("message") == "Already merged into main."

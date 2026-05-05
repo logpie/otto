@@ -5,7 +5,7 @@ from pathlib import Path
 
 from otto import paths
 from otto.mission_control.model import _token_usage_from_summary_paths
-from otto.pipeline import _write_session_summary
+from otto.runs.lifecycle import _write_session_summary
 from otto.queue.runner import _token_usage_from_summary
 from otto.token_usage import format_token_spend, token_spend_summary
 from tests._helpers import init_repo

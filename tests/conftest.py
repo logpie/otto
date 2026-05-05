@@ -46,7 +46,6 @@ SLOW_TEST_NODEIDS = {
 HEAVY_TEST_FILES = {
     "tests/test_hardening.py",
     "tests/test_logstream.py",
-    "tests/test_merge_orchestrator.py",
     "tests/test_queue_runner.py",
     "tests/test_v3_pipeline.py",
     "tests/test_web_events_history.py",

@@ -9,9 +9,7 @@ import pytest
 
 from otto import paths
 from otto.history import append_history_entry
-from otto.merge.orchestrator import _append_merge_history
-from otto.merge.state import MergeState
-from otto.pipeline import _append_session_history
+from otto.runs.lifecycle import _append_session_history
 from otto.queue.runner import Runner, RunnerConfig
 from otto.queue.schema import QueueTask
 from otto.runs.history import append_history_snapshot, load_project_history_rows, read_history_rows
@@ -234,27 +232,14 @@ def test_terminal_history_writers_emit_v2_snapshots_for_all_domains(tmp_path: Pa
         terminal_outcome="success",
     )
 
-    merge_run_dir = paths.merge_dir(tmp_path) / "merge-run"
-    merge_run_dir.mkdir(parents=True, exist_ok=True)
-    (merge_run_dir / "state.json").write_text("{}", encoding="utf-8")
-
-    _append_merge_history(
-        tmp_path,
-        MergeState(
-            merge_id="merge-run",
-            started_at="2026-04-23T12:40:00Z",
-            finished_at="2026-04-23T12:40:15Z",
-            status="failed",
-            terminal_outcome="failure",
-            target="main",
-            branches_in_order=["feature/a", "feature/b"],
-        ),
-    )
-
+    # Merge-domain history was produced by ``_append_merge_history`` in
+    # ``otto/merge/orchestrator.py``; both were deleted in Phase C.4.
+    # Remaining domains (build / improve / certify / queue) still exercise
+    # the terminal-snapshot writers.
     rows = read_history_rows(paths.history_jsonl(tmp_path))
     by_run_id = {row["run_id"]: row for row in rows}
 
-    assert set(by_run_id) == {"build-run", "improve-run", "certify-run", "queue-run", "merge-run"}
+    assert set(by_run_id) == {"build-run", "improve-run", "certify-run", "queue-run"}
     assert all(row["schema_version"] == 2 for row in rows)
     assert all(row["history_kind"] == "terminal_snapshot" for row in rows)
     assert all(row["dedupe_key"] == f"terminal_snapshot:{row['run_id']}" for row in rows)
@@ -272,8 +257,6 @@ def test_terminal_history_writers_emit_v2_snapshots_for_all_domains(tmp_path: Pa
     assert by_run_id["queue-run"]["child_run_id"] == "queue-run"
     assert by_run_id["queue-run"]["expected_child_run_id"] == "queue-run"
     assert by_run_id["queue-run"]["artifacts"]["primary_log_path"].endswith("/queue-run/build/narrative.log")
-    assert by_run_id["merge-run"]["domain"] == "merge"
-    assert by_run_id["merge-run"]["artifacts"]["extra_log_paths"][0].endswith("/merge-run/state.json")
 
 
 def test_queue_history_snapshot_preserves_timeout_context(tmp_path: Path) -> None:

@@ -342,6 +342,32 @@ def _execute_resume(
     )
 
 
+_SPEC_REVIEW_DECISION_FILE = "review-decision.json"
+
+
+def _write_spec_review_decision(spec_path: Path, *, action: str, note: str = "") -> Path:
+    """Persist a web spec-review decision sidecar next to the spec file.
+
+    Inlined from the legacy otto.spec module. Writes
+    `review-decision.json` next to the spec — Mission Control queues
+    `otto queue resume <task_id>` after this returns; the resume reads the
+    checkpoint, not this file (the sidecar is currently informational only,
+    preserved for parity with the legacy gate).
+    """
+    normalized = str(action or "").strip().lower()
+    if normalized not in {"approve", "regenerate"}:
+        raise ValueError("spec review action must be approve or regenerate")
+    payload = {
+        "schema_version": 1,
+        "action": normalized,
+        "note": str(note or "").strip(),
+        "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    sidecar = Path(spec_path).with_name(_SPEC_REVIEW_DECISION_FILE)
+    sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return sidecar
+
+
 def _execute_spec_review_decision(
     record: RunRecord,
     project_dir: Path,
@@ -372,9 +398,7 @@ def _execute_spec_review_decision(
     if action == "regenerate" and not note:
         return _warning_result("Spec review needs a note", "Add a short note describing what should change.")
     try:
-        from otto.spec import write_spec_review_decision
-
-        write_spec_review_decision(Path(spec_path), action=action, note=note)
+        _write_spec_review_decision(Path(spec_path), action=action, note=note)
     except Exception as exc:
         return _error_result("Spec review failed", str(exc))
     return _launch_process(

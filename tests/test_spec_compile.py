@@ -12,7 +12,7 @@ from otto.spec_compile import (
     BrowserJourney,
     PROJECT_KINDS,
     PytestCheck,
-    Slice,
+    Group,
     Spec,
     SpecValidationError,
     StructureDecisions,
@@ -44,7 +44,7 @@ def _valid_webapp_spec() -> Spec:
         project_kind="webapp",
         structure=StructureDecisions(payload=_valid_webapp_payload()),
         slices=[
-            Slice(
+            Group(
                 id="shell",
                 title="App shell",
                 tasks=["scaffold the SPA", "add Home route"],
@@ -94,7 +94,7 @@ def test_spec_roundtrip_supports_all_check_kinds() -> None:
         project_kind="webapp",
         structure=StructureDecisions(payload=_valid_webapp_payload()),
         slices=[
-            Slice(
+            Group(
                 id="kitchen-sink",
                 title="every check kind",
                 tasks=["t"],
@@ -189,7 +189,7 @@ def test_validator_warns_cli_missing_entrypoint() -> None:
             "commands": [{"name": "build", "summary": "build the thing"}],
         }),
         slices=[
-            Slice(
+            Group(
                 id="root",
                 title="bootstrap",
                 tasks=["t"],
@@ -209,7 +209,7 @@ def test_validator_warns_duplicate_slice_ids() -> None:
     when callers construct a Spec by hand bypassing the parser.
     """
     spec = _valid_webapp_spec()
-    spec.slices.append(Slice(
+    spec.slices.append(Group(
         id="shell",
         title="dup",
         tasks=["t"],
@@ -223,7 +223,7 @@ def test_validator_warns_duplicate_slice_ids() -> None:
 
 def test_validator_warns_unknown_dep() -> None:
     spec = _valid_webapp_spec()
-    spec.slices.append(Slice(
+    spec.slices.append(Group(
         id="shell-extra",
         title="bad dep",
         tasks=["t"],
@@ -240,9 +240,9 @@ def test_validator_flags_dep_cycle() -> None:
     """Dep cycles remain hard errors — they would loop the build forever."""
     spec = _valid_webapp_spec()
     spec.slices = [
-        Slice(id="a", title="a", tasks=["t"], deps=["b"], owned_paths=["a/**"],
+        Group(id="a", title="a", tasks=["t"], deps=["b"], owned_paths=["a/**"],
               checks=[PytestCheck(selector="x")]),
-        Slice(id="b", title="b", tasks=["t"], deps=["a"], owned_paths=["b/**"],
+        Group(id="b", title="b", tasks=["t"], deps=["a"], owned_paths=["b/**"],
               checks=[PytestCheck(selector="x")]),
     ]
     result = validate_spec(spec)
@@ -425,15 +425,15 @@ def test_persist_spec_rejects_amendment_with_wrong_prior_hash(tmp_path: Path) ->
 # ---------------------------------------------------------------------------
 
 
-def _slice_with_tasks(tasks: list[str], slice_id: str = "s1") -> Slice:
-    return Slice(
+def _slice_with_tasks(tasks: list[str], slice_id: str = "s1") -> Group:
+    return Group(
         id=slice_id, title="x", deps=[],
         owned_paths=["x.txt"], tasks=tasks,
         checks=[PytestCheck(selector="tests/")],
     )
 
 
-def _spec_with_slice(slice_: Slice) -> Spec:
+def _spec_with_slice(slice_: Group) -> Spec:
     return Spec(
         intent="test", project_kind="webapp",
         structure=StructureDecisions(payload={}),

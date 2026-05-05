@@ -44,7 +44,18 @@ from otto.audit import AuditResult, AuditVerdict, SliceVerdict
 from otto.build import BuildResult, SliceResult, SliceStatus
 from otto.checks import Evidence
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
-from otto.spec_compile import Slice, Spec, spec_to_dict
+from otto.spec_compile import (
+    Feature,
+    FeatureProofBlock,
+    Finding,
+    Group,
+    Spec,
+    WalkthroughEntry,
+    build_feature_proof_blocks,
+    feature_proof_block_to_html,
+    feature_proof_blocks_to_dicts,
+    spec_to_dict,
+)
 
 logger = logging.getLogger("otto.render")
 
@@ -89,7 +100,7 @@ class ProofPacket:
     structure: dict[str, Any]
     non_goals: list[str]
     done_means: list[str]
-    slices: list[SlicePacket]
+    groups: list[SlicePacket]
     audit_narrative: str
     walkthrough_artifacts: list[str]  # absolute paths
     blocked_slice_ids: list[str]
@@ -100,8 +111,29 @@ class ProofPacket:
     # plus concrete UX/visual findings.
     quality_score: int = 0
     quality_findings: list[str] = field(default_factory=list)
-    # v2.6 per-capability verdicts — feature checklist for the proof packet.
-    capability_verdicts: list[dict[str, Any]] = field(default_factory=list)
+    # A0.4: per-Feature audits — feature checklist for the proof packet.
+    # `feature_audits` is the canonical key (formerly `capability_verdicts`,
+    # dropped post-cutover).
+    feature_audits: list[dict[str, Any]] = field(default_factory=list)
+
+    # A3: per-Feature proof blocks (research §7). Each block is the dict
+    # shape from `feature_proof_block_to_dict` — research-§7 layout
+    # mirrors what `proof/features/<feature-id>/proof.json` holds.
+    # Empty for legacy packets and for runs that haven't been audited
+    # under the new design yet. The whole-product proof-packet.json
+    # carries this list; render layer emits per-Feature mini-pages
+    # from it.
+    features: list[dict[str, Any]] = field(default_factory=list)
+
+    # Backward-compat: every existing `.slices` reference works during
+    # incremental A0.3 migration. Removed at A0.3.4 final cleanup.
+    @property
+    def slices(self) -> list[SlicePacket]:
+        return self.groups
+
+    @slices.setter
+    def slices(self, value: list[SlicePacket]) -> None:
+        self.groups = value
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +189,7 @@ def compose_proof_packet(
     }
 
     slice_packets: list[SlicePacket] = []
-    for s in spec.slices:
+    for s in spec.groups:
         bres = build_by_slice.get(s.id)
         mres = merge_by_slice.get(s.id)
         averdict = audit_by_slice.get(s.id)
@@ -219,16 +251,50 @@ def compose_proof_packet(
         for a in spec.amendments
     ]
 
-    # v2.6: render per-capability verdicts as a feature checklist.
-    capability_render = [
+    # A0.4: render per-Feature audits as a feature checklist.
+    feature_audit_render = [
         {
-            "name": c.name,
-            "status": c.status,
-            "detail": c.detail,
-            "evidence_refs": list(c.evidence_refs),
+            "name": fa.name,
+            "status": fa.status,
+            "detail": fa.detail,
+            "evidence_refs": list(fa.evidence_refs),
         }
-        for c in audit_result.capability_verdicts
+        for fa in audit_result.feature_audits
     ]
+
+    # A3: per-Feature proof blocks (research §7). Best-effort population:
+    # we map FeatureAudit entries (by name → Feature.id, falling back to
+    # name → name) into the verdict-dict shape `build_feature_proof_blocks`
+    # expects. Walkthrough entries flow in from
+    # `audit_result.walkthrough_entries` (parsed during run_audit by
+    # `_validate_walkthrough_jsonl`) so per-Feature blocks carry their
+    # walkthrough trace. Empty list → helper's "no entries tagged"
+    # empty-state per research §4 honesty rule.
+    feature_verdict_dicts: list[dict[str, Any]] = []
+    if spec.features:
+        # Map FeatureAudit by name (and fallback id) so we can attach
+        # status/detail/evidence_refs to the matching Feature.id.
+        audits_by_key: dict[str, Any] = {}
+        for fa in audit_result.feature_audits:
+            audits_by_key[fa.name] = fa
+        for feature in spec.features:
+            fa = audits_by_key.get(feature.name) or audits_by_key.get(feature.id)
+            if fa is None:
+                continue
+            feature_verdict_dicts.append({
+                "feature_id": feature.id,
+                "verdict": fa.status,
+                "detail": fa.detail,
+                "evidence_refs": list(fa.evidence_refs),
+            })
+        feature_blocks = build_feature_proof_blocks(
+            spec,
+            walkthrough_entries=list(audit_result.walkthrough_entries),
+            feature_verdicts=feature_verdict_dicts,
+        )
+        feature_dicts = feature_proof_blocks_to_dicts(feature_blocks)
+    else:
+        feature_dicts = []
 
     return ProofPacket(
         schema_version=PROOF_PACKET_SCHEMA_VERSION,
@@ -240,7 +306,7 @@ def compose_proof_packet(
         structure=dict(spec.structure.payload or {}),
         non_goals=list(spec.non_goals),
         done_means=list(spec.done_means),
-        slices=slice_packets,
+        groups=slice_packets,
         audit_narrative=audit_result.narrative,
         walkthrough_artifacts=[_path_to_str(p) for p in audit_result.walkthrough_artifacts],
         blocked_slice_ids=list(merge_result.blocked_ids) + list(build_result.blocked_ids),
@@ -248,7 +314,8 @@ def compose_proof_packet(
         amendments=amendments_render,
         quality_score=audit_result.quality_score,
         quality_findings=list(audit_result.quality_findings),
-        capability_verdicts=capability_render,
+        feature_audits=feature_audit_render,
+        features=feature_dicts,
     )
 
 
@@ -279,7 +346,10 @@ def _packet_to_dict(packet: ProofPacket) -> dict[str, Any]:
         "amendments": packet.amendments,
         "quality_score": packet.quality_score,
         "quality_findings": packet.quality_findings,
-        "capability_verdicts": packet.capability_verdicts,
+        # A0.4: canonical per-Feature audit checklist
+        # (formerly `capability_verdicts`, dropped post-cutover).
+        "feature_audits": packet.feature_audits,
+        "features": list(packet.features),  # A3: per-Feature proof blocks
         "slices": [
             {
                 "slice_id": s.slice_id,
@@ -294,7 +364,7 @@ def _packet_to_dict(packet: ProofPacket) -> dict[str, Any]:
                 "failure_narrative": s.failure_narrative,
                 "repair_attempts": s.repair_attempts,
             }
-            for s in packet.slices
+            for s in packet.groups
         ],
     }
 
@@ -385,9 +455,15 @@ def render_html(packet: ProofPacket, *, session_dir: Path | None = None) -> str:
     # Spec summary
     parts.append(_render_spec_summary(packet))
 
-    # Per-slice sections
+    # Per-Feature sections (A3 — research §3 atomic units, primary surface).
+    # Emitted before per-Slice (legacy back-compat) so Features lead the
+    # human review path. Empty `features` is a no-op section; legacy
+    # packets without per-Feature blocks render unchanged below.
+    parts.append(_render_feature_section(packet, session_dir=session_dir))
+
+    # Per-slice sections (back-compat for legacy proof-of-work readers)
     parts.append("<h2>Slices</h2>")
-    for s in packet.slices:
+    for s in packet.groups:
         parts.append(_render_slice(s, session_dir=session_dir))
 
     # Audit section
@@ -411,7 +487,7 @@ def _render_header(packet: ProofPacket) -> str:
   <span class="kpi"><span class="label">wall</span> <span class="value">{packet.wall_s:.0f} s</span></span>
   <span class="kpi"><span class="label">cost</span> <span class="value">${packet.cost_usd:.2f}</span></span>
   <span class="kpi"><span class="label">slices</span>
-    <span class="value">{len(packet.landed_slice_ids)} landed / {len(packet.slices)} total</span>
+    <span class="value">{len(packet.landed_slice_ids)} landed / {len(packet.groups)} total</span>
   </span>
 </p>"""
 
@@ -431,6 +507,86 @@ def _render_spec_summary(packet: ProofPacket) -> str:
         parts.append("<h3>Done means</h3><ul>")
         parts.extend(f"<li>{escape(g)}</li>" for g in packet.done_means)
         parts.append("</ul>")
+    return "\n".join(parts)
+
+
+def _feature_block_from_dict(payload: dict[str, Any]) -> FeatureProofBlock:
+    """Reconstruct a FeatureProofBlock from its serialised dict shape.
+
+    Inverse of `feature_proof_block_to_dict`. Lets render layer hand
+    `packet.features[]` dicts back to the canonical HTML helper without
+    duplicating template logic.
+    """
+    raw_entries = payload.get("walkthrough_entries") or []
+    entries: list[WalkthroughEntry] = []
+    core_keys = {"t", "feature_ids", "action_kind", "narrative"}
+    for raw in raw_entries:
+        if not isinstance(raw, dict):
+            continue
+        extras = {k: v for k, v in raw.items() if k not in core_keys}
+        entries.append(
+            WalkthroughEntry(
+                t=str(raw.get("t") or ""),
+                feature_ids=[str(fid) for fid in (raw.get("feature_ids") or [])],
+                action_kind=str(raw.get("action_kind") or "exploration"),
+                narrative=str(raw.get("narrative") or ""),
+                extras=extras,
+            )
+        )
+    findings_raw = payload.get("findings") or []
+    findings: list[Finding] = []
+    for raw in findings_raw:
+        if not isinstance(raw, dict):
+            continue
+        findings.append(
+            Finding(
+                severity=str(raw.get("severity") or "important"),
+                text=str(raw.get("text") or ""),
+                feature_id=str(raw.get("feature_id") or ""),
+            )
+        )
+    return FeatureProofBlock(
+        feature_id=str(payload.get("feature_id") or ""),
+        name=str(payload.get("name") or ""),
+        description=str(payload.get("description") or ""),
+        group_id=str(payload.get("group_id") or ""),
+        verdict=payload.get("verdict"),
+        detail=str(payload.get("detail") or ""),
+        walkthrough_entries=entries,
+        shared_with=[str(s) for s in (payload.get("shared_with") or [])],
+        evidence_completeness=str(payload.get("evidence_completeness") or "full"),
+        coverage_confidence=str(payload.get("coverage_confidence") or "high"),
+        check_evidence_refs=[str(r) for r in (payload.get("check_evidence_refs") or [])],
+        files_changed=[str(f) for f in (payload.get("files_changed") or [])],
+        repair_history=list(payload.get("repair_history") or []),
+        audit_narrative_excerpt=str(payload.get("audit_narrative_excerpt") or ""),
+        findings=findings,
+    )
+
+
+def _render_feature_section(packet: ProofPacket, *, session_dir: Path | None) -> str:
+    """Render the per-Feature proof section (A3 — research §7).
+
+    Emits one `<section>` per Feature (in spec order) by handing each
+    serialised feature-dict to `feature_proof_block_to_html`. Cross-link
+    correctness (multi-Feature entries appearing in each Feature's
+    section) is preserved by `build_feature_proof_blocks` upstream.
+
+    Empty `packet.features` produces an empty section (no header, no
+    content) so legacy packets render unchanged.
+    """
+    if not packet.features:
+        return ""
+    parts: list[str] = ["<h2>Features</h2>"]
+    for payload in packet.features:
+        if not isinstance(payload, dict):
+            continue
+        block = _feature_block_from_dict(payload)
+        parts.append(
+            feature_proof_block_to_html(
+                block, project_kind=packet.project_kind,
+            )
+        )
     return "\n".join(parts)
 
 
@@ -549,7 +705,7 @@ def _render_limitations(packet: ProofPacket) -> str:
     if not packet.blocked_slice_ids:
         return ""
     parts = ["<h2>Known limitations</h2>", "<p>The following slices did not land:</p><ul>"]
-    blocked = [s for s in packet.slices if s.slice_id in set(packet.blocked_slice_ids)]
+    blocked = [s for s in packet.groups if s.slice_id in set(packet.blocked_slice_ids)]
     for s in blocked:
         narrative = s.failure_narrative or "blocked"
         parts.append(f"<li><code>{escape(s.slice_id)}</code> — {escape(narrative)}</li>")
@@ -559,7 +715,7 @@ def _render_limitations(packet: ProofPacket) -> str:
 
 def _render_merge_state(packet: ProofPacket) -> str:
     parts = ["<h2>Merge state</h2><ul>"]
-    for s in packet.slices:
+    for s in packet.groups:
         if s.landed:
             parts.append(
                 f"<li>✅ <code>{escape(s.slice_id)}</code> landed @ "
@@ -635,4 +791,4 @@ __all__ = [
 
 
 # Pin imports the dispatch flow needs but doesn't reference at module top level.
-_ = (Iterable, AuditVerdict, time, Slice, spec_to_dict)
+_ = (Iterable, AuditVerdict, time, Group, spec_to_dict, Feature)

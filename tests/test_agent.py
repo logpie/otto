@@ -573,7 +573,7 @@ async def test_run_agent_with_timeout_cleans_up_on_cancelled_error(tmp_path, mon
         captured["process_start_time_ns"] = process_start_time_ns
 
     monkeypatch.setattr("otto.agent.run_agent_query", fake_run_agent_query)
-    monkeypatch.setattr("otto.pipeline._cleanup_orphan_processes", fake_cleanup)
+    monkeypatch.setattr("otto.runs.lifecycle._cleanup_orphan_processes", fake_cleanup)
 
     with pytest.raises(asyncio.CancelledError):
         await run_agent_with_timeout(
@@ -592,12 +592,12 @@ async def test_run_agent_with_timeout_cleans_up_on_cancelled_error(tmp_path, mon
 
 
 def test_cleanup_orphan_processes_skips_reused_process_group(tmp_path, monkeypatch):
-    from otto.pipeline import _cleanup_orphan_processes
+    from otto.runs.lifecycle import _cleanup_orphan_processes
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("stale process identity must not be signaled")
 
-    monkeypatch.setattr("otto.pipeline.os.killpg", fail_if_called)
+    monkeypatch.setattr("otto.runs.lifecycle.os.killpg", fail_if_called)
 
     _cleanup_orphan_processes(
         tmp_path,

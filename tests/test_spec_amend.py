@@ -23,7 +23,7 @@ from otto.spec_amend import (
 )
 from otto.spec_compile import (
     PytestCheck,
-    Slice,
+    Group,
     Spec,
     SpecValidationError,
     compute_intent_hash,
@@ -37,9 +37,9 @@ def _seed_spec() -> Spec:
     spec = Spec(
         intent="build a microfeed-style social app",
         slices=[
-            Slice(id="shell", title="App shell", tasks=["t"]),
-            Slice(id="auth", title="User auth", deps=["shell"], tasks=["t"]),
-            Slice(id="posts", title="Posts feed", deps=["shell"], tasks=["t"]),
+            Group(id="shell", title="App shell", tasks=["t"]),
+            Group(id="auth", title="User auth", deps=["shell"], tasks=["t"]),
+            Group(id="posts", title="Posts feed", deps=["shell"], tasks=["t"]),
         ],
     )
     return lock_intent(spec)

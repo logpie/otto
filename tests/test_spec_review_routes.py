@@ -1,0 +1,376 @@
+"""Tests for otto/web/spec_review_routes.py — A5 FastAPI spec-review surface.
+
+Covers:
+* `GET /api/specs/<id>/markdown` happy-path returns SpecMdView JSON.
+* `POST /api/specs/<id>/edit` round-trips through parse_spec_md;
+  archives prior version to spec-v<N>.json/.md.
+* `POST /api/specs/<id>/edit` with stale intent_hash → 409.
+* `POST /api/specs/<id>/approve` flips lifecycle, idempotent.
+* Path-traversal blocked.
+* 404 when spec dir missing.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from otto.spec_compile import (
+    Feature,
+    Group,
+    Spec,
+    lock_intent,
+    render_spec_md,
+    spec_to_dict,
+)
+from otto.web.spec_review_routes import install_spec_review_routes
+
+
+def _make_spec() -> Spec:
+    raw = Spec(
+        intent="A doc editor for engineering teams",
+        project_kind="webapp",
+        groups=[Group(id="editor", title="Editor")],
+        features=[
+            Feature(
+                id="md-render",
+                name="Markdown rendering",
+                description="Pages render .md as HTML.",
+                evidence_kinds=["BrowserJourney"],
+                group_id="editor",
+            ),
+        ],
+    )
+    return lock_intent(raw)
+
+
+@pytest.fixture
+def project_with_spec(tmp_path: Path) -> tuple[Path, str, Spec]:
+    """Create a project + session with a populated spec/spec.json."""
+    project = tmp_path / "proj"
+    session_id = "2026-05-04-203000-abc123"
+    sd = project / "otto_logs" / "sessions" / session_id / "spec"
+    sd.mkdir(parents=True)
+    spec = _make_spec()
+    (sd / "spec.json").write_text(
+        json.dumps(spec_to_dict(spec), indent=2, sort_keys=True) + "\n"
+    )
+    (sd / "spec.md").write_text(render_spec_md(spec))
+    return project, session_id, spec
+
+
+def _client(project: Path) -> TestClient:
+    app = FastAPI()
+    install_spec_review_routes(app, project_dir=project)
+    return TestClient(app)
+
+
+def test_get_markdown_returns_view(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, spec = project_with_spec
+    client = _client(project)
+    resp = client.get(f"/api/specs/{sid}/markdown")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["session_id"] == sid
+    assert body["spec_id"] == sid
+    assert body["intent_hash"] == spec.intent_hash
+    assert body["lifecycle"] == "draft"
+    assert "Markdown rendering" in body["markdown"]
+    assert "<!-- feature: md-render" in body["markdown"]
+
+
+def test_get_markdown_404_for_missing_session(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    client = _client(project)
+    resp = client.get("/api/specs/no-such-session/markdown")
+    assert resp.status_code == 404
+
+
+def test_post_edit_round_trip_archives_prior_version(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, spec = project_with_spec
+    client = _client(project)
+    # Edit: rename the feature (id stays via metadata comment)
+    md = render_spec_md(spec).replace(
+        "Markdown rendering", "MD rendering (renamed)"
+    )
+    resp = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": md},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["view"]["lifecycle"] == "draft"
+    assert "MD rendering (renamed)" in body["view"]["markdown"]
+    assert isinstance(body["warnings"], list)
+
+    # Archive present
+    sd = project / "otto_logs" / "sessions" / sid / "spec"
+    assert (sd / "spec-v1.json").exists()
+    assert (sd / "spec-v1.md").exists()
+    # Live spec.json updated
+    new_spec = json.loads((sd / "spec.json").read_text())
+    md_render = next(f for f in new_spec["features"] if f["id"] == "md-render")
+    assert md_render["name"] == "MD rendering (renamed)"
+
+
+def test_post_edit_stale_intent_hash_returns_409(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, _spec = project_with_spec
+    client = _client(project)
+    resp = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": "deadbeef" * 8, "markdown": "# stale\n"},
+    )
+    assert resp.status_code == 409
+    assert "stale" in resp.json()["detail"]
+
+
+def test_post_edit_blocked_after_approval(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, spec = project_with_spec
+    client = _client(project)
+    # Approve first
+    approve_resp = client.post(f"/api/specs/{sid}/approve")
+    assert approve_resp.status_code == 200
+    # Now edits should fail
+    edit_resp = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": "# x\n"},
+    )
+    assert edit_resp.status_code == 409
+    assert "approved" in edit_resp.json()["detail"]
+
+
+def test_post_approve_idempotent(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, _spec = project_with_spec
+    client = _client(project)
+    r1 = client.post(f"/api/specs/{sid}/approve")
+    assert r1.status_code == 200
+    assert r1.json()["view"]["lifecycle"] == "approved"
+    r2 = client.post(f"/api/specs/{sid}/approve")
+    assert r2.status_code == 200
+    assert r2.json()["view"]["lifecycle"] == "approved"
+
+
+def test_get_markdown_after_approve_shows_approved_lifecycle(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, _spec = project_with_spec
+    client = _client(project)
+    client.post(f"/api/specs/{sid}/approve")
+    resp = client.get(f"/api/specs/{sid}/markdown")
+    assert resp.status_code == 200
+    assert resp.json()["lifecycle"] == "approved"
+
+
+def test_path_traversal_rejected(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    (project / "otto_logs" / "sessions").mkdir(parents=True)
+    client = _client(project)
+    resp = client.get("/api/specs/..%2F..%2Fetc/markdown")
+    # FastAPI/Starlette routes don't normalize ".." but we still reject
+    # via _resolve_spec_dir's relative_to guard.
+    assert resp.status_code in (404, 400)
+
+
+# ---------------------------------------------------------------------------
+# spec.* state events (tick 36)
+# ---------------------------------------------------------------------------
+
+
+def _read_journal_kinds(project: Path, session_id: str) -> list[str]:
+    journal = (
+        project / "otto_logs" / "sessions" / session_id / "spec-state.jsonl"
+    )
+    if not journal.exists():
+        return []
+    return [json.loads(line)["kind"] for line in journal.read_text().splitlines() if line.strip()]
+
+
+def test_get_markdown_emits_spec_review_opened(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, _ = project_with_spec
+    client = _client(project)
+    assert _read_journal_kinds(project, sid) == []
+    client.get(f"/api/specs/{sid}/markdown")
+    assert "spec.review.opened" in _read_journal_kinds(project, sid)
+
+
+def test_repeat_get_does_not_duplicate_review_opened(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, _ = project_with_spec
+    client = _client(project)
+    for _ in range(3):
+        client.get(f"/api/specs/{sid}/markdown")
+    kinds = _read_journal_kinds(project, sid)
+    assert kinds.count("spec.review.opened") == 1
+
+
+def test_post_edit_emits_spec_edited(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, spec = project_with_spec
+    client = _client(project)
+    md = render_spec_md(spec)
+    resp = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": md},
+    )
+    assert resp.status_code == 200
+    assert "spec.edited" in _read_journal_kinds(project, sid)
+
+
+def test_post_approve_emits_spec_approved_once(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, _ = project_with_spec
+    client = _client(project)
+    client.post(f"/api/specs/{sid}/approve")
+    client.post(f"/api/specs/{sid}/approve")  # idempotent — no second event
+    kinds = _read_journal_kinds(project, sid)
+    assert kinds.count("spec.approved") == 1
+
+
+def test_failed_edit_does_not_emit_spec_edited(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, _ = project_with_spec
+    client = _client(project)
+    # Stale intent_hash → 409, no event
+    client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": "stale" * 13, "markdown": "# x\n"},
+    )
+    assert "spec.edited" not in _read_journal_kinds(project, sid)
+
+
+def test_versions_empty_when_no_edits(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, _ = project_with_spec
+    client = _client(project)
+    resp = client.get(f"/api/specs/{sid}/versions")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["session_id"] == sid
+    assert body["versions"] == []
+
+
+def test_versions_lists_archived_after_edits(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, spec = project_with_spec
+    client = _client(project)
+    md1 = render_spec_md(spec).replace(
+        "Markdown rendering", "Markdown rendering v2"
+    )
+    r1 = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": md1},
+    )
+    assert r1.status_code == 200, r1.text
+    md2 = md1.replace("Markdown rendering v2", "Markdown rendering v3")
+    r2 = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": md2},
+    )
+    assert r2.status_code == 200, r2.text
+    resp = client.get(f"/api/specs/{sid}/versions")
+    assert resp.status_code == 200
+    assert resp.json()["versions"] == [1, 2]
+
+
+def test_diff_returns_paired_payload(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, spec = project_with_spec
+    client = _client(project)
+    md1 = render_spec_md(spec).replace(
+        "Markdown rendering", "Markdown rendering v2"
+    )
+    client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": md1},
+    )
+    md2 = md1.replace("Markdown rendering v2", "Markdown rendering v3")
+    client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": md2},
+    )
+    resp = client.get(f"/api/specs/{sid}/diff?from=1&to=2")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["from_version"] == 1
+    assert body["to_version"] == 2
+    assert "Markdown rendering" in body["from_md"]
+    assert "Markdown rendering v2" in body["to_md"]
+    assert isinstance(body["from_json"], dict)
+    assert isinstance(body["to_json"], dict)
+    # JSON structure should round-trip the spec.
+    assert "features" in body["from_json"]
+    assert "features" in body["to_json"]
+
+
+def test_diff_404_for_missing_version(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, spec = project_with_spec
+    client = _client(project)
+    md1 = render_spec_md(spec).replace(
+        "Markdown rendering", "Markdown rendering v2"
+    )
+    r1 = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": md1},
+    )
+    assert r1.status_code == 200
+    # Only v1 exists; v9 should 404.
+    resp = client.get(f"/api/specs/{sid}/diff?from=1&to=9")
+    assert resp.status_code == 404
+    assert "v9" in resp.json()["detail"]
+
+
+def test_diff_rejects_zero_or_negative_versions(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    project, sid, _ = project_with_spec
+    client = _client(project)
+    resp = client.get(f"/api/specs/{sid}/diff?from=0&to=1")
+    # FastAPI Query(ge=1) → 422 validation error
+    assert resp.status_code == 422
+
+
+def test_edit_warnings_surface_in_response(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    """parse_spec_md returns warnings; the route surfaces them."""
+    project, sid, spec = project_with_spec
+    client = _client(project)
+    # Markdown with no Features section at all — parser should still
+    # accept it (warnings will surface from parse_spec_md if any).
+    resp = client.post(
+        f"/api/specs/{sid}/edit",
+        json={
+            "intent_hash": spec.intent_hash,
+            "markdown": "# Doc editor\n\n## Project kind\n\nwebapp\n",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "warnings" in body
+    assert isinstance(body["warnings"], list)

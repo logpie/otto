@@ -831,458 +831,6 @@ def _new_run_id(project_dir: "Path | None" = None) -> str:
     return allocate_run_id(project_dir)
 
 
-async def _run_spec_phase(
-    *,
-    project_dir: Path,
-    intent: str,
-    spec: bool,
-    spec_file: Path | None,
-    auto_approve: bool,
-    spec_review_mode: str = "interactive",
-    resume_state,
-    config: dict,
-    split_mode: bool,
-    run_id: str | None = None,
-    budget=None,
-) -> tuple[str, str, float, float]:
-    """Drive the spec phase before the main build.
-
-    Returns (run_id, spec_content, total_spec_cost, total_spec_duration). Writes checkpoint at
-    each phase boundary (`spec` → `spec_review` → `spec_approved`).
-
-    Raises SystemExit(2) with a user message on failure.
-    """
-    from otto.checkpoint import (
-        load_checkpoint,
-        spec_phase_completed,
-        write_checkpoint,
-    )
-    from otto.spec import (
-        MAX_SPEC_REGENERATIONS,
-        SpecResult,
-        count_open_questions,
-        read_spec_file,
-        read_spec_review_decision,
-        review_spec,
-        run_spec_agent,
-        spec_review_decision_path,
-        spec_hash,
-        validate_spec,
-    )
-    from otto.observability import sha256_text, update_input_provenance
-    from otto.pipeline import _runtime_metadata
-    from otto.observability import write_runtime_metadata
-
-    from otto import paths as _paths
-    # Determine run_id (unified session_id): resume preserves, otherwise fresh.
-    spec_started_at = time.time()
-    run_id = run_id or resume_state.run_id or _new_run_id(project_dir)
-    _paths.ensure_session_scaffold(project_dir, run_id, phase="spec")
-    run_dir = _paths.spec_dir(project_dir, run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    _paths.set_pointer(project_dir, _paths.LATEST_POINTER, run_id)
-    write_runtime_metadata(_paths.session_dir(project_dir, run_id), _runtime_metadata(project_dir))
-    update_input_provenance(
-        _paths.session_dir(project_dir, run_id),
-        intent={
-            "source": str(config.get("_intent_source") or "cli-argument"),
-            "fallback_reason": str(config.get("_intent_fallback_reason") or ""),
-            "resolved_text": intent,
-            "sha256": sha256_text(intent),
-        },
-        spec={"source": "none", "path": "", "sha256": ""},
-    )
-
-    def _mark_queue_ready(phase: str) -> None:
-        from otto.queue.runtime import mark_queue_child_ready
-
-        mark_queue_child_ready(
-            project_dir,
-            run_id=run_id,
-            session_dir=_paths.session_dir(project_dir, run_id),
-            phase=phase,
-            checkpoint_path=_paths.session_checkpoint(project_dir, run_id),
-        )
-
-    def _write_web_spec_pause_manifest(spec_path: Path, spec_cost_value: float, spec_duration_value: float) -> None:
-        from otto.branching import current_branch
-        from otto.manifest import (
-            QUEUE_TASK_ENV,
-            current_head_sha,
-            make_manifest,
-            write_manifest,
-        )
-
-        session_dir = _paths.session_dir(project_dir, run_id)
-        manifest = make_manifest(
-            command="build",
-            argv=list(sys.argv[1:]),
-            queue_task_id=os.environ.get(QUEUE_TASK_ENV),
-            run_id=run_id,
-            branch=(current_branch(project_dir) or None),
-            checkpoint_path=_paths.session_checkpoint(project_dir, run_id),
-            proof_of_work_path=None,
-            cost_usd=spec_cost_value,
-            duration_s=max(spec_duration_value, time.time() - spec_started_at),
-            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(spec_started_at)),
-            head_sha=current_head_sha(project_dir),
-            resolved_intent=intent,
-            exit_status="paused",
-        )
-        manifest.extra.update({
-            "phase": "spec_review",
-            "spec_path": str(spec_path),
-            "next_action": "approve or request changes in Mission Control",
-        })
-        write_manifest(manifest, project_dir=project_dir, fallback_dir=session_dir)
-
-    async def _review_spec_for_web(spec_result: SpecResult, regen_count: int) -> SpecResult:
-        decision = read_spec_review_decision(spec_result.path)
-        if decision is None:
-            write_checkpoint(
-                project_dir,
-                run_id=run_id,
-                command="build",
-                phase="spec_review",
-                status="paused",
-                split_mode=split_mode,
-                intent=intent,
-                spec_path=str(spec_result.path),
-                spec_hash=spec_hash(spec_result.content),
-                spec_version=spec_result.version,
-                spec_cost=spec_result.cost,
-            )
-            _mark_queue_ready("spec_review")
-            _write_web_spec_pause_manifest(spec_result.path, spec_result.cost, spec_result.duration_s)
-            console.print(
-                f"  [yellow]Spec is waiting for web review: {spec_result.path}[/yellow]\n"
-                "  Approve or request changes from Mission Control."
-            )
-            sys.exit(0)
-
-        decision_path = spec_review_decision_path(spec_result.path)
-        try:
-            decision_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-        if decision["action"] == "approve":
-            return spec_result
-
-        if regen_count >= MAX_SPEC_REGENERATIONS:
-            raise ValueError(
-                f"spec regeneration limit reached ({MAX_SPEC_REGENERATIONS}); approve the current spec or start a new run"
-            )
-        note = decision.get("note") or "Revise the spec based on the web review request."
-        next_version = regen_count + 1
-        archive_path = run_dir / f"spec-v{next_version}.md"
-        try:
-            archive_path.write_text(spec_result.content)
-        except OSError as exc:
-            console.print(f"  [yellow]Could not archive prior spec: {exc}[/yellow]")
-        console.print("  [bold]Spec phase[/bold] — regenerating from web review note...\n")
-        new = await run_spec_agent(
-            intent,
-            project_dir,
-            run_dir,
-            config,
-            prior_spec=spec_result.content,
-            user_notes=note,
-            version=next_version,
-            budget=budget,
-        )
-        current = SpecResult(
-            path=new.path,
-            content=new.content,
-            open_questions=new.open_questions,
-            cost=spec_result.cost + new.cost,
-            duration_s=spec_result.duration_s + new.duration_s,
-            version=next_version,
-        )
-        write_checkpoint(
-            project_dir,
-            run_id=run_id,
-            command="build",
-            phase="spec_review",
-            status="paused",
-            split_mode=split_mode,
-            intent=intent,
-            spec_path=str(current.path),
-            spec_hash=spec_hash(current.content),
-            spec_version=current.version,
-            spec_cost=current.cost,
-        )
-        update_input_provenance(
-            _paths.session_dir(project_dir, run_id),
-            spec={"source": "spec-agent", "path": str(current.path), "sha256": spec_hash(current.content)},
-        )
-        _mark_queue_ready("spec_review")
-        _write_web_spec_pause_manifest(current.path, current.cost, current.duration_s)
-        console.print(
-            f"  [yellow]Regenerated spec is waiting for web review: {current.path}[/yellow]"
-        )
-        sys.exit(0)
-
-    # Resume fast-path: already approved.
-    if resume_state.resumed and spec_phase_completed(resume_state.phase):
-        # Load the approved spec from disk, verify hash, skip spec phase.
-        if not resume_state.spec_path:
-            error_console.print("[error]Resume from spec_approved but no spec_path in checkpoint.[/error]")
-            sys.exit(2)
-        spec_md = Path(resume_state.spec_path)
-        if not spec_md.exists():
-            error_console.print(f"[error]Approved spec file missing: {spec_md}[/error]")
-            sys.exit(2)
-        content = spec_md.read_text()
-        if resume_state.spec_hash and spec_hash(content) != resume_state.spec_hash:
-            error_console.print(
-                f"[error]Spec hash mismatch at {spec_md}. The file was modified after approval.\n"
-                "  Run without --resume to start a fresh spec, or restore the original file.[/error]"
-            )
-            sys.exit(2)
-        return run_id, content, resume_state.spec_cost, 0.0
-
-    spec_cost = resume_state.spec_cost or 0.0
-    spec_duration = 0.0
-    current_phase = "spec"
-    current_spec_path = resume_state.spec_path or ""
-    current_spec_hash = resume_state.spec_hash or ""
-    current_spec_version = resume_state.spec_version or 0
-
-    # Resume mid-review: spec.md exists, re-open the gate.
-    resume_mid_review = (
-        resume_state.resumed
-        and resume_state.phase == "spec_review"
-        and resume_state.spec_path
-        and Path(resume_state.spec_path).exists()
-    )
-
-    # Resume mid-spec-agent: if spec.md exists and validates, promote to review.
-    resume_mid_spec_with_file = (
-        resume_state.resumed
-        and resume_state.phase == "spec"
-        and resume_state.spec_path
-        and Path(resume_state.spec_path).exists()
-    )
-
-    try:
-        if spec_file:
-            config["_spec_source"] = "--spec-file"
-            config["_spec_path"] = str(spec_file)
-            # External spec: load, validate, skip agent.
-            spec_path_out = run_dir / "spec.md"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            intent_from_file, content = read_spec_file(spec_file)
-            # Only overwrite the run-dir copy on fresh runs; on resume keep existing.
-            if not spec_path_out.exists():
-                spec_path_out.write_text(content)
-            spec_result = SpecResult(
-                path=spec_path_out,
-                content=content,
-                open_questions=count_open_questions(content),
-                cost=spec_cost,
-                duration_s=0.0,
-                version=resume_state.spec_version,
-            )
-            # --spec-file implies auto-approve
-            auto_approve = True
-            # Write spec_review checkpoint before approval (so crash = resumable)
-            current_phase = "spec_review"
-            current_spec_path = str(spec_path_out)
-            current_spec_hash = spec_hash(content)
-            current_spec_version = resume_state.spec_version
-            write_checkpoint(
-                project_dir,
-                run_id=run_id,
-                command="build",
-                phase="spec_review",
-                split_mode=split_mode,
-                intent=intent,
-                spec_path=str(spec_path_out),
-                spec_hash=current_spec_hash,
-                spec_version=current_spec_version,
-                spec_cost=spec_cost,
-            )
-            _mark_queue_ready("spec_review")
-            update_input_provenance(
-                _paths.session_dir(project_dir, run_id),
-                spec={"source": "--spec-file", "path": str(spec_path_out), "sha256": current_spec_hash},
-            )
-        elif resume_mid_review or resume_mid_spec_with_file:
-            # Re-open the review gate using existing on-disk spec.
-            existing_path = Path(resume_state.spec_path)
-            content = existing_path.read_text()
-            errors = validate_spec(content)
-            if errors:
-                console.print(f"  [yellow]Existing spec has issues: {'; '.join(errors)}[/yellow]")
-                console.print("  [yellow]Re-running spec agent.[/yellow]\n")
-                # Fall through to agent path
-                current_phase = "spec"
-                write_checkpoint(
-                    project_dir, run_id=run_id, command="build", phase="spec",
-                    split_mode=split_mode,
-                    intent=intent, spec_cost=spec_cost, spec_version=resume_state.spec_version,
-                )
-                _mark_queue_ready("spec")
-                spec_result = await run_spec_agent(
-                    intent, project_dir, run_dir, config,
-                    version=resume_state.spec_version, budget=budget,
-                )
-                config["_spec_source"] = "spec-agent"
-                config["_spec_path"] = str(spec_result.path)
-                spec_cost += spec_result.cost
-                spec_duration += spec_result.duration_s
-                current_phase = "spec_review"
-                current_spec_path = str(spec_result.path)
-                current_spec_hash = spec_hash(spec_result.content)
-                current_spec_version = spec_result.version
-                write_checkpoint(
-                    project_dir, run_id=run_id, command="build", phase="spec_review",
-                    split_mode=split_mode,
-                    intent=intent, spec_path=str(spec_result.path),
-                    spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
-                )
-                _mark_queue_ready("spec_review")
-                update_input_provenance(
-                    _paths.session_dir(project_dir, run_id),
-                    spec={"source": "spec-agent", "path": str(spec_result.path), "sha256": current_spec_hash},
-                )
-            else:
-                spec_result = SpecResult(
-                    path=existing_path,
-                    content=content,
-                    open_questions=count_open_questions(content),
-                    cost=spec_cost,
-                    duration_s=0.0,
-                    version=resume_state.spec_version,
-                )
-                current_phase = "spec_review"
-                current_spec_path = str(existing_path)
-                current_spec_hash = spec_hash(content)
-                current_spec_version = resume_state.spec_version
-                console.print(f"  [info]Resuming at review gate (existing spec at {existing_path})[/info]\n")
-        else:
-            # Fresh spec generation.
-            current_phase = "spec"
-            write_checkpoint(
-                project_dir, run_id=run_id, command="build", phase="spec",
-                split_mode=split_mode,
-                intent=intent, spec_cost=spec_cost, spec_version=resume_state.spec_version,
-            )
-            _mark_queue_ready("spec")
-            console.print("  [bold]Spec phase[/bold] — generating product spec...\n")
-            spec_result = await run_spec_agent(
-                intent, project_dir, run_dir, config, budget=budget,
-            )
-            config["_spec_source"] = "spec-agent"
-            config["_spec_path"] = str(spec_result.path)
-            spec_cost += spec_result.cost
-            spec_duration += spec_result.duration_s
-            current_phase = "spec_review"
-            current_spec_path = str(spec_result.path)
-            current_spec_hash = spec_hash(spec_result.content)
-            current_spec_version = spec_result.version
-            write_checkpoint(
-                project_dir, run_id=run_id, command="build", phase="spec_review",
-                split_mode=split_mode,
-                intent=intent, spec_path=str(spec_result.path),
-                spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
-            )
-            _mark_queue_ready("spec_review")
-            update_input_provenance(
-                _paths.session_dir(project_dir, run_id),
-                spec={"source": "spec-agent", "path": str(spec_result.path), "sha256": current_spec_hash},
-            )
-
-        # Review gate
-        if spec_review_mode == "web" and not auto_approve:
-            approved = await _review_spec_for_web(spec_result, resume_state.spec_version)
-        else:
-            approved = await review_spec(
-                spec_result, project_dir, run_dir, run_id, intent, config,
-                auto_approve=auto_approve,
-                initial_regen_count=resume_state.spec_version,
-                budget=budget,
-            )
-        spec_cost = approved.cost
-        spec_duration = approved.duration_s
-        current_phase = "spec_approved"
-        current_spec_path = str(approved.path)
-        current_spec_hash = spec_hash(approved.content)
-        current_spec_version = approved.version
-
-        # Record approved state
-        write_checkpoint(
-            project_dir, run_id=run_id, command="build", phase="spec_approved",
-            split_mode=split_mode,
-            intent=intent, spec_path=str(approved.path),
-            spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
-        )
-        update_input_provenance(
-            _paths.session_dir(project_dir, run_id),
-            spec={"source": str(config.get("_spec_source") or "spec-agent"), "path": str(approved.path), "sha256": current_spec_hash},
-        )
-        return run_id, approved.content, spec_cost, spec_duration
-
-    except ValueError as exc:
-        error_console.print(f"[error]{exc}[/error]")
-        sys.exit(2)
-    except KeyboardInterrupt:
-        prior_cp = load_checkpoint(project_dir, run_id=run_id) or {}
-        write_checkpoint(
-            project_dir,
-            run_id=run_id,
-            command="build",
-            phase=(prior_cp.get("phase", "") or current_phase),
-            split_mode=bool(prior_cp.get("split_mode", split_mode)),
-            intent=intent,
-            status="paused",
-            spec_path=(prior_cp.get("spec_path", "") or current_spec_path),
-            spec_hash=(prior_cp.get("spec_hash", "") or current_spec_hash),
-            spec_version=int(prior_cp.get("spec_version", current_spec_version) or 0),
-            spec_cost=float(prior_cp.get("spec_cost", spec_cost) or 0.0),
-        )
-        raise
-    except Exception as exc:
-        if isinstance(exc, AgentCallError):
-            prior_cp = load_checkpoint(project_dir, run_id=run_id) or {}
-            session_id = (
-                exc.session_id
-                or prior_cp.get("agent_session_id")
-                or prior_cp.get("session_id", "")
-            )
-            write_checkpoint(
-                project_dir, run_id=run_id, command="build",
-                status="paused", phase=current_phase,
-                split_mode=bool(prior_cp.get("split_mode", split_mode)),
-                intent=intent,
-                spec_path=current_spec_path or None,
-                spec_hash=current_spec_hash or None,
-                spec_version=current_spec_version,
-                spec_cost=spec_cost,
-                session_id=session_id,
-            )
-            error_console.print(
-                f"[error]Run budget exhausted during spec ({exc.reason}).[/error]\n"
-                "  Use `otto build --resume` to continue, or raise "
-                "`run_budget_seconds` in otto.yaml."
-            )
-            sys.exit(1)
-        # Validation failures / missing-spec-file errors leave no resumable
-        # state — clear the in_progress checkpoint so retry doesn't demand
-        # --force for a checkpoint that couldn't be resumed anyway.
-        from otto.checkpoint import clear_checkpoint
-        try:
-            clear_checkpoint(project_dir, run_id=run_id)
-        except Exception:
-            pass
-        error_console.print(
-            f"[error]Spec phase failed: {exc}[/error]\n"
-            "  The invalid spec has been discarded — re-run `otto build --spec` to retry."
-        )
-        sys.exit(1)
-
-
 def _open_command_hint(project_dir: Path) -> str:
     index_html = project_dir / "index.html"
     if index_html.exists():
@@ -1418,6 +966,34 @@ def _exit_for_lock_busy(exc) -> None:
     sys.exit(1)
 
 
+def _exit_legacy_build_removed() -> None:
+    """Phase C.3: legacy v3 build pipeline (build_agentic_v3 + run_certify_fix_loop)
+    is gone. Point users at the new --i2p path (now the default in
+    ``otto/config.py::default_pipeline``).
+    """
+    error_console.print(
+        "[error]Legacy v3 build pipeline has been removed in Phase C. "
+        "Use --i2p (default) or pin --legacy in older otto versions.[/error]"
+    )
+    sys.exit(1)
+
+
+def _exit_legacy_certify_removed() -> None:
+    """Phase C.2: legacy ``run_agentic_certifier`` dispatch is gone. Point
+    users at the new ``--i2p`` path (default in
+    ``otto/config.py::default_pipeline``).
+
+    Mirrors ``_exit_legacy_build_removed`` for the certify subcommand —
+    one helper per subcommand keeps each migration message close to
+    its trigger so log readers don't have to hunt across modules.
+    """
+    error_console.print(
+        "[error]Legacy certify pipeline has been removed in Phase C. "
+        "Use --i2p (default) or pin --legacy in older otto versions.[/error]"
+    )
+    sys.exit(1)
+
+
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent", required=False)
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
@@ -1446,6 +1022,12 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
 @click.option("--resume", is_flag=True, help="Resume from last checkpoint (requires an in-progress run)")
 @click.option(
+    "--reset-budget",
+    "reset_budget",
+    is_flag=True,
+    help="On --resume, do NOT count the prior attempt's spend against the budget cap (i2p only).",
+)
+@click.option(
     "--force-cross-command-resume",
     is_flag=True,
     help="Allow --resume to reuse a checkpoint written by a different otto command",
@@ -1466,7 +1048,25 @@ def _exit_for_lock_busy(exc) -> None:
                    "instead of modifying the current working tree")
 @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has local modifications or untracked files")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budget, max_turns, model, provider, effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, resume, force_cross_command_resume, spec, spec_file, yes, spec_review_mode, force, in_worktree, allow_dirty, break_lock):
+@click.option(
+    "--i2p",
+    is_flag=True,
+    help=(
+        "Force-route through the new intent-to-product stack (compile_spec → "
+        "build → merge → audit → render). Overrides otto.yaml default_pipeline. "
+        "Phase B.0 opt-in."
+    ),
+)
+@click.option(
+    "--legacy",
+    is_flag=True,
+    help=(
+        "Force-route through the legacy v3 pipeline (build_agentic_v3). "
+        "Overrides otto.yaml default_pipeline. Use this if you've migrated "
+        "to the i2p default but hit a regression."
+    ),
+)
+def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budget, max_turns, model, provider, effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, resume, reset_budget, force_cross_command_resume, spec, spec_file, yes, spec_review_mode, force, in_worktree, allow_dirty, break_lock, i2p, legacy):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -1492,678 +1092,79 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
     project_dir = resolve_project_dir(Path.cwd())
     from otto import paths as _paths
 
-    try:
-        with _signal_interrupt_guard():
-            with _paths.project_lock(project_dir, "build", break_lock=break_lock):
-                _build_locked(
-                    intent, no_qa, fast, standard_, thorough, split, agentic, rounds,
-                    budget, max_turns, model, provider, effort,
-                    build_provider, build_model, build_effort,
-                    certifier_provider, certifier_model, certifier_effort,
-                    fix_provider, fix_model, fix_effort,
-                    strict, verbose, debug_unredacted,
-                    resume, force_cross_command_resume, spec, spec_file, yes, spec_review_mode, force, in_worktree, allow_dirty, project_dir,
-                )
-    except _paths.LockBreakError as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(1)
-    except _paths.LockBusy as exc:
-        _exit_for_lock_busy(exc)
-
-
-def _build_locked(
-    intent,
-    no_qa,
-    fast,
-    standard_,
-    thorough,
-    split,
-    agentic,
-    rounds,
-    budget,
-    max_turns,
-    model,
-    provider,
-    effort,
-    build_provider,
-    build_model,
-    build_effort,
-    certifier_provider,
-    certifier_model,
-    certifier_effort,
-    fix_provider,
-    fix_model,
-    fix_effort,
-    strict,
-    verbose,
-    debug_unredacted,
-    resume,
-    force_cross_command_resume,
-    spec,
-    spec_file,
-    yes,
-    spec_review_mode,
-    force,
-    in_worktree,
-    allow_dirty,
-    project_dir: Path,
-):
-    from otto import paths as _paths
-
-    from otto.checkpoint import (
-        enforce_resume_available,
-        enforce_resume_command_match,
-        initial_build_completed,
-        load_checkpoint,
-        is_spec_phase,
-        print_resume_status,
-        resolve_resume,
+    from otto.cli_run import resolve_pipeline_choice
+    pipeline_choice = resolve_pipeline_choice(
+        i2p_flag=i2p,
+        legacy_flag=legacy,
+        project_dir=project_dir,
     )
-    from otto.config import PROJECT_INTENT_MIN_CHARS, read_project_intent_md
-    from otto.spec import read_spec_file
-    from otto.config import ensure_safe_repo_state
-
-    bootstrap_intent = "Bootstrap and maintain the product described in intent.md"
-    split_cli = bool(split)
-    agentic_cli = bool(agentic)
-
-    if spec and spec_file:
-        error_console.print("[error]--spec and --spec-file are mutually exclusive.[/error]")
-        sys.exit(2)
-
-    cp = load_checkpoint(project_dir)
-
-    # Protect paused spec checkpoints before resolve_resume() can clear them.
-    if cp and is_spec_phase(cp.get("phase", "") or "") and not resume:
-        if not force:
-            error_console.print(
-                "[error]Paused spec run detected at "
-                f"phase={cp.get('phase')!r}, run_id={cp.get('run_id', '')!r}.[/error]\n"
-                "  Use --resume to continue, or --force to discard."
+    if pipeline_choice == "i2p":
+        # Phase B.0/B.3: route through the new intent-to-product stack.
+        # Most legacy --build flags don't map cleanly; surface which
+        # knobs the new stack consumes vs ignores so the user isn't
+        # surprised. orchestrate_run holds its own lock and exits on
+        # completion.
+        # In i2p mode, ``--resume`` and ``--force`` map to the new
+        # resume planner (see otto/resume.py); the rest remain
+        # legacy-only knobs.
+        # ``--yes`` is silently accepted: the i2p path has no interactive
+        # spec-approval step, so the flag is a definitional no-op (kept
+        # for CI/script compatibility with the legacy CLI).
+        _ignored = [
+            name
+            for name, val in (
+                ("--no-qa", no_qa),
+                ("--fast", fast),
+                ("--standard", standard_),
+                ("--thorough", thorough),
+                ("--split", split),
+                ("--agentic", agentic),
+                ("--rounds", rounds is not None),
+                ("--strict", strict),
+                ("--force-cross-command-resume", force_cross_command_resume),
+                ("--spec", spec),
+                ("--spec-file", spec_file),
+                ("--in-worktree", in_worktree),
+                ("--allow-dirty", allow_dirty),
             )
-            sys.exit(2)
-        from otto.checkpoint import clear_checkpoint
-        run_id_to_archive = cp.get("run_id", "") or ""
-        if run_id_to_archive:
-            # New layout: mark the session as abandoned via summary.json
-            # (preserves dir for forensics, no rename). Legacy fallback does
-            # the old rename for pre-restructure layouts.
-            session_dir = _paths.session_dir(project_dir, run_id_to_archive)
-            if session_dir.exists():
-                try:
-                    from otto.observability import write_json_atomic
-
-                    summary_path = session_dir / "summary.json"
-                    write_json_atomic(summary_path, {
-                        "status": "abandoned",
-                        "abandoned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        "run_id": run_id_to_archive,
-                    })
-                    console.print(f"  [yellow]Marked prior session as abandoned: {session_dir}[/yellow]")
-                except OSError as exc:
-                    console.print(f"  [yellow]Could not mark prior session abandoned: {exc}[/yellow]")
-            # Legacy path (pre-restructure) archive-by-rename.
-            legacy_runs_dir = _paths.legacy_runs_dir(project_dir)
-            legacy_run_dir = legacy_runs_dir / run_id_to_archive
-            legacy_abandoned = legacy_runs_dir / f"{run_id_to_archive}.abandoned"
-            if legacy_run_dir.exists():
-                try:
-                    legacy_run_dir.rename(legacy_abandoned)
-                    console.print(f"  [yellow]Archived legacy spec run to {legacy_abandoned}[/yellow]")
-                except OSError as exc:
-                    console.print(f"  [yellow]Could not archive legacy spec run: {exc}[/yellow]")
-        clear_checkpoint(project_dir, run_id=run_id_to_archive or None)
-        cp = None
-
-    resume_state = resolve_resume(
-        project_dir,
-        resume,
-        expected_command="build",
-        force=force,
-        reject_incompatible=False,
-    )
-    if resume_state.fingerprint_mismatch and not force:
-        error_console.print(
-            "[error]Checkpoint fingerprint does not match the current code/prompt state.[/error]\n"
-            "  Pass `--force --resume` to override."
+            if val
+        ]
+        if _ignored:
+            console.print(
+                "  [yellow]i2p mode: these flags are ignored: "
+                f"{', '.join(_ignored)}[/yellow]"
+            )
+        from otto.cli_run import orchestrate_run
+        orchestrate_run(
+            intent=intent,
+            project_kind="webapp",
+            break_lock=break_lock,
+            no_build=False,
+            base_url=None,
+            from_spec=None,
+            project_dir=project_dir,
+            resume=resume,
+            reset_budget=reset_budget,
+            force=force,
         )
-        sys.exit(2)
-    enforce_resume_available(
-        resume_state,
-        resume_flag=resume,
-        expected_command="build",
-    )
-    enforce_resume_command_match(
-        resume_state,
-        "build",
-        force_cross_command_resume=force_cross_command_resume,
-    )
-    if resume_state.resumed and resume_state.split_mode is not None:
-        split = resume_state.split_mode
-    if resume and not resume_state.resumed and resume_state.missing_paused_session_path and not intent:
-        error_console.print(
-            "[error]Your paused session at "
-            f"{resume_state.missing_paused_session_path} was deleted; nothing to resume.[/error]"
-        )
-        sys.exit(2)
-    use_spec = (
-        bool(spec or spec_file)
-        or is_spec_phase(resume_state.phase)
-        or bool(resume_state.spec_path)
-    )
+        return  # orchestrate_run sys.exit's on its own; defensive return
 
-    intent = _normalize_intent(intent or "")
+    # Phase C.3: only the i2p path remains. Anything else (legacy flag,
+    # or default_pipeline=legacy in otto.yaml) hard-errors with a
+    # migration hint — the v3 pipeline (build_agentic_v3 +
+    # run_certify_fix_loop) was deleted with this commit.
+    _exit_legacy_build_removed()
 
-    if spec_file:
-        try:
-            file_intent, _ = read_spec_file(Path(spec_file))
-            file_intent = _normalize_intent(file_intent)
-        except ValueError as exc:
-            error_console.print(f"[error]{exc}[/error]")
-            sys.exit(2)
-        if intent and intent != file_intent:
-            error_console.print(
-                f"[error]Intent mismatch: CLI intent does not match {spec_file}.[/error]"
-            )
-            sys.exit(2)
-        if resume and resume_state.resumed and resume_state.spec_path:
-            expected_spec_path = Path(resume_state.spec_path).resolve(strict=False)
-            given_spec_path = Path(spec_file).resolve(strict=False)
-            if given_spec_path != expected_spec_path:
-                error_console.print(
-                    "[error]Cannot change --spec-file on resume. "
-                    f"Checkpoint spec is {expected_spec_path}, got {given_spec_path}.[/error]"
-                )
-                sys.exit(2)
-        intent = file_intent
 
-    config_path = project_dir / "otto.yaml"
-    config = _load_config_or_exit(config_path)
+def _build_locked(*_args, **_kwargs) -> None:
+    """Phase C.3 stub — the legacy v3 build pipeline is gone.
 
-    checkpoint_intent = _normalize_intent(resume_state.intent or "")
-    if resume and resume_state.resumed and intent and checkpoint_intent and intent != checkpoint_intent:
-        error_console.print(
-            "[error]Intent mismatch on resume.[/error]\n"
-            f"  checkpoint intent: '{rich_escape(checkpoint_intent)}'\n"
-            f"  CLI intent:        '{rich_escape(intent)}'\n"
-            "  Resume preserves the checkpoint intent. Omit INTENT on resume, or run "
-            "`otto build <new intent>` to start a fresh run."
-        )
-        sys.exit(2)
-
-    resume_without_intent = bool(resume and resume_state.resumed and not intent)
-    display_intent = intent or "(resumed run)"
-    intent_source = "cli-argument"
-    intent_fallback_reason = ""
-
-    try:
-        ensure_safe_repo_state(
-            project_dir,
-            allow_dirty=bool(resume_state.resumed or allow_dirty or config.get("allow_dirty_repo")),
-        )
-    except ConfigError as exc:
-        if resume_state.run_id:
-            try:
-                from otto.checkpoint import load_checkpoint, write_checkpoint
-                from otto.observability import dirty_worktree_files
-
-                prior_cp = load_checkpoint(project_dir, run_id=resume_state.run_id) or {}
-                write_checkpoint(
-                    project_dir,
-                    run_id=resume_state.run_id,
-                    command=prior_cp.get("command", "build") or "build",
-                    certifier_mode=prior_cp.get("certifier_mode", "thorough") or "thorough",
-                    prompt_mode=prior_cp.get("prompt_mode", "build") or "build",
-                    focus=prior_cp.get("focus"),
-                    target=prior_cp.get("target"),
-                    max_rounds=int(prior_cp.get("max_rounds", 8) or 8),
-                    status=prior_cp.get("status", "paused") or "paused",
-                    phase=prior_cp.get("phase", "") or "",
-                    split_mode=prior_cp.get("split_mode"),
-                    session_id=prior_cp.get("agent_session_id", "") or "",
-                    current_round=int(prior_cp.get("current_round", 0) or 0),
-                    total_cost=float(prior_cp.get("total_cost", 0.0) or 0.0),
-                    total_duration=float(prior_cp.get("total_duration", 0.0) or 0.0),
-                    rounds=list(prior_cp.get("rounds", []) or []),
-                    child_session_ids=list(prior_cp.get("child_session_ids", []) or []),
-                    intent=prior_cp.get("intent"),
-                    spec_path=prior_cp.get("spec_path"),
-                    spec_hash=prior_cp.get("spec_hash"),
-                    spec_version=int(prior_cp.get("spec_version", 0) or 0),
-                    spec_cost=float(prior_cp.get("spec_cost", 0.0) or 0.0),
-                    dirty_files=dirty_worktree_files(project_dir),
-                )
-            except Exception:
-                pass
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-
-    # Inherit intent from checkpoint for spec-phase resume, or fall back to
-    # split-mode intent.md resolution for backwards compat.
-    if not intent:
-        if resume_without_intent:
-            if resume_state.intent:
-                intent = _normalize_intent(resume_state.intent)
-                display_intent = intent
-                intent_source = "checkpoint"
-            elif split and not no_qa:
-                from otto.config import resolve_intent_provenance
-                try:
-                    intent_meta = resolve_intent_provenance(project_dir)
-                    intent = _normalize_intent(intent_meta.get("resolved_text", "") or "")
-                except (ConfigError, ValueError) as exc:
-                    error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-                    sys.exit(2)
-                if not intent:
-                    error_console.print(
-                        "[error]Resume needs a product description for split mode. "
-                        "Provide INTENT or create intent.md/README.md.[/error]"
-                    )
-                    sys.exit(2)
-                if intent:
-                    intent_source = intent_meta.get("source") or "intent.md"
-                    intent_fallback_reason = intent_meta.get("fallback_reason") or ""
-        else:
-            try:
-                project_intent = read_project_intent_md(
-                    project_dir,
-                    min_chars=PROJECT_INTENT_MIN_CHARS,
-                )
-            except (ConfigError, ValueError) as exc:
-                error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-                sys.exit(2)
-            if project_intent:
-                intent = bootstrap_intent
-                display_intent = intent
-                intent_source = "intent.md"
-                console.print(
-                    f"  [dim]Using project intent from intent.md ({len(project_intent)} chars)[/dim]"
-                )
-            else:
-                error_console.print(
-                    "[error]Intent cannot be empty. Either pass a description as the first "
-                    "argument, or write a description of the product to ./intent.md[/error]"
-                )
-                sys.exit(2)
-
-    display_intent = intent or display_intent
-    from otto.config import MAX_INTENT_CHARS, validate_text_limit
-    try:
-        intent = validate_text_limit(
-            intent,
-            kind="intent",
-            source="CLI argument" if not resume_without_intent else "resolved intent",
-            max_chars=MAX_INTENT_CHARS,
-        )
-    except ConfigError as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-    print_resume_status(console, resume_state, resume, expected_command="build")
-
-    # No auto-create: `otto.yaml` only exists if the user ran `otto setup`.
-    # `load_config` returns built-in defaults + auto-detected project values
-    # when the yaml is absent.
-    try:
-        resolved_skip_qa, split, skip_qa_source, sources = _apply_build_cli_overrides(
-            config=config,
-            config_path=config_path,
-            no_qa=no_qa,
-            fast=fast,
-            standard_=standard_,
-            thorough=thorough,
-            split=split_cli,
-            agentic=agentic_cli,
-            rounds=rounds,
-            budget=budget,
-            max_turns=max_turns,
-            model=model,
-            provider=provider,
-            effort=effort,
-            build_provider=build_provider,
-            build_model=build_model,
-            build_effort=build_effort,
-            certifier_provider=certifier_provider,
-            certifier_model=certifier_model,
-            certifier_effort=certifier_effort,
-            fix_provider=fix_provider,
-            fix_model=fix_model,
-            fix_effort=fix_effort,
-            strict=strict,
-            verbose=verbose,
-            debug_unredacted=debug_unredacted,
-            allow_dirty=allow_dirty,
-            resume_state=resume_state,
-            spec_file=spec_file,
-            intent_source=intent_source,
-            intent_fallback_reason=intent_fallback_reason,
-        )
-    except ConfigError as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-
-    if use_spec and resolved_skip_qa:
-        source_text = "--no-qa" if skip_qa_source == "--no-qa" else "otto.yaml: skip_product_qa: true"
-        error_console.print(
-            "[error]--spec requires the certifier (Must-NOT-Have scope check); "
-            f"skip_product_qa is enabled via {rich_escape(source_text)}.[/error]"
-        )
-        sys.exit(2)
-    if sum(bool(x) for x in (fast, standard_, thorough)) > 1:
-        error_console.print(
-            "[error]--fast, --standard, and --thorough are mutually exclusive.[/error]"
-        )
-        sys.exit(2)
-
-    # Phase 1.2: --in-worktree creates an isolated worktree (in-process chdir,
-    # no subprocess re-entry) and runs the rest of the pipeline from there.
-    # The branch policy below then runs from the new cwd.
-    if in_worktree:
-        if resume and resume_state.resumed:
-            error_console.print(
-                "[error]--in-worktree is not compatible with --resume.[/error]\n"
-                "  Resume continues an existing run in its original cwd. To resume "
-                "a worktree run, cd into the worktree directly and run `otto build --resume`."
-            )
-            sys.exit(2)
-        from otto.worktree import (
-            WorktreeAlreadyCheckedOut,
-            setup_worktree_for_atomic_cli,
-        )
-        try:
-            wt_path, config = setup_worktree_for_atomic_cli(
-                project_dir=project_dir,
-                mode="build",
-                intent=intent,
-                config=config,
-            )
-        except WorktreeAlreadyCheckedOut as exc:
-            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-            sys.exit(1)
-        except (RuntimeError, ValueError) as exc:
-            error_console.print(f"[error]Worktree setup failed: {rich_escape(str(exc))}[/error]")
-            sys.exit(1)
-        console.print(f"  [dim]Worktree:[/dim] [info]{wt_path}[/info]")
-        # Re-anchor project_dir to the worktree — the rest of the pipeline
-        # operates on this isolated checkout.
-        project_dir = wt_path
-        config_path = project_dir / "otto.yaml"
-        try:
-            resolved_skip_qa, split, skip_qa_source, sources = _apply_build_cli_overrides(
-                config=config,
-                config_path=config_path,
-                no_qa=no_qa,
-                fast=fast,
-                standard_=standard_,
-                thorough=thorough,
-                split=split_cli,
-                agentic=agentic_cli,
-                rounds=rounds,
-                budget=budget,
-                max_turns=max_turns,
-                model=model,
-                provider=provider,
-                effort=effort,
-                build_provider=build_provider,
-                build_model=build_model,
-                build_effort=build_effort,
-                certifier_provider=certifier_provider,
-                certifier_model=certifier_model,
-                certifier_effort=certifier_effort,
-                fix_provider=fix_provider,
-                fix_model=fix_model,
-                fix_effort=fix_effort,
-                strict=strict,
-                verbose=verbose,
-                debug_unredacted=debug_unredacted,
-                allow_dirty=allow_dirty,
-                resume_state=resume_state,
-                spec_file=spec_file,
-                intent_source=intent_source,
-                intent_fallback_reason=intent_fallback_reason,
-            )
-        except ConfigError as exc:
-            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-            sys.exit(2)
-
-    # Branch policy (Phase 1.1): if user is on the default branch, create a
-    # build/<slug>-<date> branch and switch. If on any other branch, stay put
-    # (mirrors `otto improve`'s long-standing pattern). Resume reuses the
-    # current branch — never re-branches mid-flight. With --in-worktree, the
-    # branch was already created by enter_worktree_for_atomic_command.
-    if not (resume and resume_state.resumed) and not in_worktree:
-        from otto.branching import ensure_branch_for_atomic_command
-        try:
-            branch_name, created_new = ensure_branch_for_atomic_command(
-                mode="build",
-                intent=intent,
-                project_dir=project_dir,
-                default_branch=config.get("default_branch", "main"),
-            )
-            if created_new:
-                console.print(f"  [dim]Branch:[/dim] [info]{branch_name}[/info] (created)")
-            elif branch_name:
-                console.print(f"  [dim]Branch:[/dim] [info]{branch_name}[/info] (current)")
-            else:
-                console.print("  [dim]Branch:[/dim] (greenfield — no commits yet)")
-        except RuntimeError as exc:
-            error_console.print(f"[error]Branch setup failed: {rich_escape(str(exc))}[/error]")
-            sys.exit(1)
-
-    run_id: str = resume_state.run_id or ""
-    if not run_id:
-        run_id = _new_run_id(project_dir)
-
-    _print_config_banner(console, config, sources, config_path, primary_agent_type="build")
-    _print_startup_context(console, project_dir, run_id)
-    if debug_unredacted:
-        console.print("  [bold red]UNREDACTED LOGS — do not share[/bold red]")
-
-    from otto.pipeline import build_agentic_v3, run_certify_fix_loop, BuildResult
-    from otto.budget import RunBudget
-    run_budget = RunBudget.start_from(
-        config,
-        session_started_at=resume_state.session_started_at or None,
-    )
-
-    # --- Spec phase (if --spec or --spec-file) ---
-    # Start timer BEFORE spec so reported duration matches budget accounting.
-    build_start = time.time()
-    spec_content: str | None = None
-    spec_cost_total: float = resume_state.spec_cost or 0.0
-    spec_duration_total: float = 0.0
-    if use_spec:
-        try:
-            run_id, spec_content, spec_cost_total, spec_duration_total = asyncio.run(_run_spec_phase(
-                project_dir=project_dir,
-                intent=intent,
-                spec=spec,
-                spec_file=spec_file,
-                auto_approve=yes,
-                spec_review_mode=spec_review_mode,
-                resume_state=resume_state,
-                config=config,
-                split_mode=split,
-                run_id=run_id or None,
-                budget=run_budget,
-            ))
-        except KeyboardInterrupt:
-            console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")
-            sys.exit(0)
-
-    console.print()
-    build_dir = _paths.build_dir(project_dir, run_id)
-    certify_dir = _paths.certify_dir(project_dir, run_id)
-    narrative_log = build_dir / "narrative.log"
-
-    # Priority: CLI flag (stored in _certifier_mode) > otto.yaml (certifier_mode)
-    # > "fast" fallback (cheap default for quick iteration; users who want real
-    # QA set `certifier_mode: standard` or `thorough` in otto.yaml).
-    certifier_mode = resolve_certifier_mode(
-        config,
-        cli_mode=config.pop("_certifier_mode", None),
-    )
-
-    try:
-        if split and not resolved_skip_qa:
-            console.print("  [bold]Split mode[/bold] \u2014 system-controlled certify loop\n")
-            # Resume skips the initial build only after it has completed.
-            skip_initial_build = resume_state.resumed and initial_build_completed(
-                resume_state.phase
-            )
-            result: BuildResult = asyncio.run(
-                run_certify_fix_loop(intent, project_dir, config,
-                                     certifier_mode=certifier_mode,
-                                     skip_initial_build=skip_initial_build,
-                                     start_round=resume_state.start_round,
-                                     resume_cost=resume_state.total_cost,
-                                     resume_duration=resume_state.total_duration,
-                                     resume_rounds=resume_state.rounds,
-                                     resume_session_id=resume_state.agent_session_id or None,
-                                     session_id=run_id or None,
-                                     command="build",
-                                     record_intent=not resume_without_intent,
-                                     spec=spec_content,
-                                     spec_cost=spec_cost_total,
-                                     spec_duration=spec_duration_total,
-                                     budget=run_budget,
-                                     strict_mode=bool(config.get("strict_mode")),
-                                     verbose=bool(verbose))
-            )
-        else:
-            console.print("  Verifying core requirements after each build.\n")
-            result: BuildResult = asyncio.run(
-                build_agentic_v3(intent, project_dir, config,
-                                 certifier_mode=certifier_mode,
-                                 resume_session_id=resume_state.agent_session_id or None,
-                                 record_intent=not resume_without_intent,
-                                 resume_existing_session=resume_without_intent,
-                                 spec=spec_content,
-                                 run_id=run_id or None,
-                                 prior_total_cost=resume_state.total_cost,
-                                 prior_total_duration=resume_state.total_duration,
-                                 budget=run_budget,
-                                 spec_cost=spec_cost_total,
-                                 spec_duration=spec_duration_total,
-                                 strict_mode=bool(config.get("strict_mode")),
-                                 verbose=bool(verbose))
-            )
-    except KeyboardInterrupt:
-        console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")
-        sys.exit(0)
-    except Exception as e:
-        crash_details_line = f"  crash details: {e.crash_path}\n" if isinstance(e, AgentCallError) and getattr(e, "crash_path", "") else ""
-        if isinstance(e, AgentCallError) and e.reason.startswith("Timed out after"):
-            error_console.print(
-                (
-                    f"[error]Run timed out after {rich_escape(e.reason.removeprefix('Timed out after ').strip())} "
-                    "(run_budget_seconds).[/error]\n"
-                    f"  Narrative log: {build_dir / 'narrative.log'}\n"
-                    f"{crash_details_line}"
-                    "  Resume:        otto build --resume"
-                )
-            )
-            sys.exit(1)
-        if isinstance(e, AgentCallError) and e.reason.startswith("Agent crashed"):
-            crash_reason = e.reason.removeprefix("Agent crashed:").strip()
-            error_console.print(
-                (
-                    f"[error]Agent crashed: {rich_escape(crash_reason)}[/error]\n"
-                    f"  Narrative log: {build_dir / 'narrative.log'}  "
-                    "(last events may be incomplete)\n"
-                    f"{crash_details_line}"
-                    "  Resume:        otto build --resume"
-                )
-            )
-            sys.exit(1)
-        error_console.print(
-            f"[error]Build failed: {rich_escape(str(e))}[/error]\n"
-            f"  Narrative log: {build_dir / 'narrative.log'}  (for full context)"
-        )
-        sys.exit(1)
-
-    build_duration = time.time() - build_start
-    _print_build_result(
-        project_dir,
-        display_intent,
-        result,
-        build_duration,
-        strict_mode=bool(config.get("strict_mode")),
-    )
-
-    # Per-run manifest for queue/merge subsystems. The canonical record lives
-    # at the session root; queue-backed runs also mirror it by task slug.
-    session_dir = _paths.session_dir(project_dir, result.build_id)
-    build_dir = _paths.build_dir(project_dir, result.build_id)
-    certify_dir = _paths.certify_dir(project_dir, result.build_id)
-    try:
-        from otto.manifest import (
-            QUEUE_TASK_ENV,
-            current_head_sha,
-            make_manifest,
-            write_manifest,
-        )
-        from otto.branching import current_branch
-        manifest = make_manifest(
-            command="build",
-            argv=list(sys.argv[1:]),
-            queue_task_id=os.environ.get(QUEUE_TASK_ENV),
-            run_id=result.build_id,
-            branch=(current_branch(project_dir) or None),
-            checkpoint_path=session_dir / "checkpoint.json",
-            proof_of_work_path=certify_dir / "proof-of-work.json",
-            cost_usd=result.total_cost,
-            duration_s=build_duration,
-            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(build_start)),
-            head_sha=current_head_sha(project_dir),
-            resolved_intent=intent,
-            exit_status="success" if result.passed else "failure",
-        )
-        write_manifest(manifest, project_dir=project_dir, fallback_dir=session_dir)
-    except Exception as exc:
-        # Manifest writing is observability — never let it crash the user
-        from otto.theme import error_console as _err
-        _err.print(f"[yellow]warning: manifest write failed: {exc}[/yellow]")
-
-    if not result.passed:
-        narrative_log = build_dir / "narrative.log"
-        total_stories = result.tasks_passed + result.tasks_failed
-        pow_html = certify_dir / "proof-of-work.html"
-        try:
-            narrative_text = narrative_log.read_text() if narrative_log.exists() else ""
-        except OSError:
-            narrative_text = ""
-        timeout_match = re.search(r"Timed out after (\d+s)", narrative_text)
-        crash_match = re.search(r"Agent crashed: (.+)", narrative_text)
-        if timeout_match:
-            error_console.print(
-                f"[error]Run timed out after {timeout_match.group(1)} "
-                "(run_budget_seconds).[/error]\n"
-                f"  Narrative log: {narrative_log}\n"
-                "  Resume:        otto build --resume"
-            )
-            sys.exit(1)
-        if crash_match:
-            error_console.print(
-                f"[error]Agent crashed: {rich_escape(crash_match.group(1).strip())}[/error]\n"
-                f"  Narrative log: {narrative_log}  (last events may be incomplete)\n"
-                "  Resume:        otto build --resume"
-            )
-            sys.exit(1)
-        if pow_html.exists():
-            error_console.print(
-                f"[error]Build did not pass certification ({result.tasks_passed}/{total_stories} "
-                "stories passed).[/error]\n"
-                f"  Report: {pow_html}\n"
-                f"  Narrative: {narrative_log}"
-            )
-        else:
-            error_console.print(
-                "[error]Build failed.[/error]\n"
-                f"  Narrative log: {narrative_log}  (for full context)"
-            )
-        sys.exit(1)
-
-    sys.exit(0)
+    The build CLI now routes everything through `_exit_legacy_build_removed()`
+    before this function is reached. We keep the symbol so test patches
+    (`tests/test_cli_run.py`, `tests/test_hardening.py`) keep importing
+    cleanly; calling it directly hard-errors the same way the CLI does.
+    """
+    _exit_legacy_build_removed()
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -2181,7 +1182,27 @@ def _build_locked(
 @click.option("--certifier-model", default=None, help="Override model for this certification run")
 @click.option("--certifier-effort", default=None, help="Override effort for this certification run")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model, provider, effort, certifier_provider, certifier_model, certifier_effort, break_lock):
+@click.option("--resume", is_flag=True, help="Resume the paused i2p audit instead of re-compiling fresh.")
+@click.option("--reset-budget", "reset_budget", is_flag=True, help="On --resume, do NOT count the prior attempt's spend against the budget cap.")
+@click.option("--force", is_flag=True, help="On --resume, bypass the spec-hash check.")
+@click.option(
+    "--i2p",
+    is_flag=True,
+    help=(
+        "Force-route through the new intent-to-product stack "
+        "(brownfield-compile → audit → render). Overrides otto.yaml "
+        "default_pipeline. Phase B.1 opt-in."
+    ),
+)
+@click.option(
+    "--legacy",
+    is_flag=True,
+    help=(
+        "Force-route through the legacy certifier (run_agentic_certifier). "
+        "Overrides otto.yaml default_pipeline."
+    ),
+)
+def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model, provider, effort, certifier_provider, certifier_model, certifier_effort, break_lock, resume, reset_budget, force, i2p, legacy):
     """Certify a product — independent, builder-blind verification.
 
     Tests the product in the current directory as a real user. Works on
@@ -2207,251 +1228,53 @@ def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model,
         sys.exit(2)
     intent = _normalize_intent(intent or "")
 
-    try:
-        with _signal_interrupt_guard():
-            with _paths.project_lock(project_dir, "certify", break_lock=break_lock):
-                session_id = _new_run_id(project_dir)
-                _certify_locked(
-                    intent, thorough, fast, standard_,
-                    budget, max_turns, strict, model, provider, effort,
-                    certifier_provider, certifier_model, certifier_effort,
-                    project_dir, session_id,
-                )
-    except _paths.LockBreakError as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(1)
-    except _paths.LockBusy as exc:
-        _exit_for_lock_busy(exc)
-
-
-def _certify_locked(
-    intent, thorough, fast, standard_,
-    budget, max_turns, strict, model, provider, effort,
-    certifier_provider, certifier_model, certifier_effort,
-    project_dir: Path, session_id: str,
-):
-
-    # Load config so run_budget_seconds and other settings are respected
-    config_path = project_dir / "otto.yaml"
-    config = _load_config_or_exit(config_path)
-
-    sources: dict[str, str] = {}
-    if budget is not None:
-        config["run_budget_seconds"] = budget
-        sources["run_budget_seconds"] = "cli"
-    if max_turns is not None:
-        config["max_turns_per_call"] = max_turns
-        sources["max_turns_per_call"] = "cli"
-    if strict:
-        config["strict_mode"] = True
-        sources["strict_mode"] = "cli"
-    if model:
-        config["model"] = model
-        sources["model"] = "cli"
-        _record_cli_override(config, "model", model)
-    if provider:
-        config["provider"] = provider
-        sources["provider"] = "cli"
-        _record_cli_override(config, "provider", provider)
-    if effort:
-        config["effort"] = effort
-        sources["effort"] = "cli"
-        _record_cli_override(config, "effort", effort)
-    _record_phase_agent_cli_overrides(
-        config=config,
-        sources=sources,
-        values={
-            "certifier": {
-                "provider": certifier_provider,
-                "model": certifier_model,
-                "effort": certifier_effort,
-            },
-        },
+    from otto.cli_run import resolve_pipeline_choice
+    pipeline_choice = resolve_pipeline_choice(
+        i2p_flag=i2p,
+        legacy_flag=legacy,
+        project_dir=project_dir,
     )
-    mode_flag = "fast" if fast else ("standard" if standard_ else ("thorough" if thorough else None))
-    if mode_flag:
-        config["certifier_mode"] = mode_flag
-        sources["certifier_mode"] = "cli"
-    from otto.config import get_max_turns_per_call
-    try:
-        config["max_turns_per_call"] = get_max_turns_per_call(config)
-    except ConfigError as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-    _print_config_banner(console, config, sources, config_path, primary_agent_type="certifier")
-
-    # Resolve intent: argument > intent.md > README.md
-    if not intent:
-        from otto.config import resolve_intent
-        try:
-            intent = _normalize_intent(resolve_intent(project_dir) or "")
-        except (ConfigError, ValueError) as exc:
-            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-            sys.exit(2)
-        if intent:
-            console.print("  [dim]Intent from project files[/dim]")
-        else:
-            error_console.print("[error]No intent provided. Pass as argument or create intent.md[/error]")
-            sys.exit(2)
-    else:
-        from otto.config import MAX_INTENT_CHARS, validate_text_limit
-
-        try:
-            intent = validate_text_limit(
-                intent,
-                kind="intent",
-                source="CLI argument",
-                max_chars=MAX_INTENT_CHARS,
+    if pipeline_choice == "i2p":
+        # Phase B.1/B.3: route through the new intent-to-product stack
+        # (brownfield-compile → audit → render). Most legacy certify
+        # flags don't map cleanly; surface ignored ones honestly so
+        # users aren't surprised. orchestrate_certify holds its own
+        # lock and exits on completion.
+        _ignored = [
+            name
+            for name, val in (
+                ("--fast", fast),
+                ("--standard", standard_),
+                ("--thorough", thorough),
+                ("--rounds (n/a in i2p)", False),
+                ("--strict", strict),
+                ("--max-turns", max_turns is not None),
+                ("--budget", budget is not None),
             )
-        except ConfigError as exc:
-            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-            sys.exit(2)
-
-    _mode = resolve_certifier_mode(config, cli_mode=mode_flag)
-
-    if _mode == "fast":
-        mode_label = "happy-path only (Must-Have stories, ~30s)"
-    elif _mode == "thorough":
-        mode_label = "adversarial (Must-Have + edge probes + code review)"
-    else:
-        mode_label = "standard (Must-Have + generic checklist: CRUD, edge cases, access control)"
-    console.print(f"\n  [bold]Certifying[/bold] \u2014 {mode_label}\n")
-
-    from otto.certifier import run_agentic_certifier
-    from otto.budget import RunBudget
-    budget = RunBudget.start_from(config)
-
-    start = time.time()
-    try:
-        report = None
-        total_certify_cost = 0.0
-        required_passes = 2 if strict else 1
-        completed_passes = 0
-        while completed_passes < required_passes:
-            active_session_id = session_id if completed_passes == 0 else _new_run_id(project_dir)
-            report = asyncio.run(run_agentic_certifier(
-                intent=intent,
-                project_dir=project_dir,
-                config=config,
-                mode=_mode,
-                budget=budget,
-                session_id=active_session_id,
-            ))
-            total_certify_cost += float(report.cost_usd or 0.0)
-            if report.outcome.value != "passed":
-                break
-            completed_passes += 1
-            if completed_passes < required_passes:
-                console.print(
-                    f"  [dim]\u2713 pass {completed_passes}/{required_passes} "
-                    "\u2014 re-running verification for consistency (strict mode)[/dim]"
-                )
-    except KeyboardInterrupt:
-        console.print("\n  Aborted.")
-        sys.exit(1)
-    except Exception as e:
-        from otto.markers import MalformedCertifierOutputError
-
-        if isinstance(e, AgentCallError):
-            message = str(e)
-            if message.startswith("Timed out after"):
-                error_console.print(
-                    f"[error]{rich_escape(message)}.[/error]\n"
-                    "  Raise `--budget` or `run_budget_seconds` in otto.yaml. "
-                    "Standalone certify has no resume — rerun the command."
-                )
-                sys.exit(1)
-            error_console.print(
-                f"[error]{rich_escape(message)}[/error]\n"
-                "  Standalone certify has no resume — rerun the command."
+            if val
+        ]
+        if _ignored:
+            console.print(
+                "  [yellow]i2p mode: these flags are ignored: "
+                f"{', '.join(_ignored)}[/yellow]"
             )
-            sys.exit(1)
-        if isinstance(e, MalformedCertifierOutputError):
-            error_console.print(f"[error]{rich_escape(str(e))}[/error]")
-            sys.exit(1)
-        error_console.print(f"[error]Certification failed: {rich_escape(str(e))}[/error]")
-        sys.exit(1)
-
-    duration = time.time() - start
-    assert report is not None
-    story_results = report.story_results
-    passed_count = sum(1 for s in story_results if s.get("passed"))
-
-    # Display results
-    if story_results:
-        for s in story_results:
-            icon = "[success]\u2713[/success]" if s.get("passed") else "[red]\u2717[/red]"
-            console.print(f"    {icon} {rich_escape(s.get('summary', s.get('story_id', '')))}")
-
-    console.print()
-    outcome = report.outcome.value
-    if outcome == "passed":
-        console.print(f"  [success bold]PASSED[/success bold] \u2014 {passed_count}/{len(story_results)} stories")
-    elif story_results and passed_count == len(story_results):
-        console.print(
-            f"  [red bold]FAILED[/red bold] \u2014 proof gate blocked pass "
-            f"({passed_count}/{len(story_results)} stories passed)"
+        from otto.cli_run import orchestrate_certify
+        orchestrate_certify(
+            intent=intent,
+            project_kind="webapp",
+            break_lock=break_lock,
+            project_dir=project_dir,
+            resume=resume,
+            reset_budget=reset_budget,
+            force=force,
         )
-        if report.diagnosis:
-            console.print(f"  [red]{rich_escape(str(report.diagnosis).splitlines()[-1])}[/red]")
-    else:
-        console.print(f"  [red bold]FAILED[/red bold] \u2014 {passed_count}/{len(story_results)} stories")
+        return  # orchestrate_certify sys.exit's; defensive return
 
-    token_usage = getattr(report, "token_usage", {}) or {}
-    spend_text = format_token_spend(token_usage)
-    if spend_text == "-":
-        spend_text = "tokens not recorded"
-    console.print(f"  Spend: {spend_text}  Duration: {duration:.0f}s")
-
-    # PoW report location — new layout uses session-scoped paths, pointed
-    # to by the `latest` symlink. Fall back to the legacy certifier/latest
-    # path for projects still on pre-restructure layout.
-    from otto import paths as _paths
-    latest_session = _paths.resolve_pointer(project_dir, _paths.LATEST_POINTER)
-    if latest_session is not None:
-        pow_html = latest_session / "certify" / "proof-of-work.html"
-        if pow_html.exists():
-            console.print(f"  Report: {pow_html}")
-    else:
-        legacy_pow = _paths.legacy_certifier_latest_pow_html(project_dir)
-        if legacy_pow.exists():
-            console.print(f"  Report: {legacy_pow}")
-
-    # Per-run manifest for queue/merge consumption. Canonical at session root,
-    # with a queue mirror when OTTO_QUEUE_TASK_ID is present.
-    try:
-        from otto.manifest import (
-            QUEUE_TASK_ENV,
-            current_head_sha,
-            make_manifest,
-            write_manifest,
-        )
-        from otto.branching import current_branch
-        cert_run_id = report.run_id or "unknown"
-        cert_session_dir = _paths.session_dir(project_dir, cert_run_id)
-        cert_certify_dir = _paths.certify_dir(project_dir, cert_run_id)
-        manifest = make_manifest(
-            command="certify",
-            argv=list(sys.argv[1:]),
-            queue_task_id=os.environ.get(QUEUE_TASK_ENV),
-            run_id=cert_run_id,
-            branch=(current_branch(project_dir) or None),
-            checkpoint_path=None,  # certify doesn't write a checkpoint.json
-            proof_of_work_path=cert_certify_dir / "proof-of-work.json",
-            cost_usd=float(report.cost_usd),
-            duration_s=duration,
-            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start)),
-            head_sha=current_head_sha(project_dir),
-            resolved_intent=intent,
-            exit_status="success" if outcome == "passed" else "failure",
-        )
-        write_manifest(manifest, project_dir=project_dir, fallback_dir=cert_session_dir)
-    except Exception as exc:
-        from otto.theme import error_console as _err
-        _err.print(f"[yellow]warning: manifest write failed: {exc}[/yellow]")
-
-    console.print()
-    sys.exit(0 if outcome == "passed" else 1)
+    # Phase C.2 (tick 64): the legacy ``run_agentic_certifier`` dispatch
+    # was removed. Anything that wasn't routed to ``orchestrate_certify``
+    # above is the legacy ``--legacy`` path — surface the migration
+    # message and exit. Mirrors ``--legacy`` handling in cli_improve.
+    _exit_legacy_certify_removed()
 
 
 # Setup command (registered from otto/cli_setup.py)
@@ -2478,10 +1301,6 @@ register_queue_commands(main)
 # Cleanup command (Mission Control terminal-record GC)
 from otto.cli_cleanup import register_cleanup_command  # noqa: E402
 register_cleanup_command(main)
-
-# Merge command (Phase 4 — registered from otto/cli_merge.py)
-from otto.cli_merge import register_merge_command  # noqa: E402
-register_merge_command(main)
 
 # Run command (intent-to-product pipeline, Phase A: compile-only)
 from otto.cli_run import register_run_command  # noqa: E402

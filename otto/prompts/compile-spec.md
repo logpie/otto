@@ -10,7 +10,7 @@ build agents cannot drift on structure.
 
 ## What you produce
 
-A single JSON object describing the product as a set of vertical slices,
+A single JSON object describing the product as a set of vertical groups,
 each owned end-to-end by one build agent. Wrap the JSON in
 `<spec_json>...</spec_json>` so it can be parsed deterministically.
 
@@ -93,7 +93,7 @@ Forms buried at `/feature/sub-page` that have no entry from `/` are
 effectively invisible.
 
 For each primary action, set the home component's `key_text` to enumerate
-the controls it exposes — that's what stops slices from rendering
+the controls it exposes — that's what stops groups from rendering
 competing app shells. Examples:
 
 - Social app intent ("create users, follow, post, search, export CSV")
@@ -253,9 +253,9 @@ round (same mechanism that fixed RSS discovery one round earlier).
 ## Recommended fields by `project_kind`
 
 The parser is permissive (it coerces missing fields and surfaces
-warnings rather than failing the compile). But the slices still need
+warnings rather than failing the compile). But the groups still need
 concrete structure to avoid drifting on shapes — the recommended
-fields below are what stops two slices from inventing competing
+fields below are what stops two groups from inventing competing
 schemas. For `project_kind: "webapp"`:
 
 * **`routes`** — REQUIRED, non-empty array. Each route MUST have:
@@ -268,7 +268,7 @@ schemas. For `project_kind: "webapp"`:
     * `method` — `"GET" | "POST" | "PUT" | "DELETE" | "PATCH"`
     * `request_shape` — flat object mapping request body field name to
       type (e.g. `{"follower": "string", "target": "string"}`). Field
-      names are CONTRACT — two slices reading the spec must produce the
+      names are CONTRACT — two groups reading the spec must produce the
       same wire format. Do NOT invent semantically-similar names like
       `following` when the contract uses `target`. If the project
       already has tests/run_acceptance.py or similar, READ IT and pin
@@ -288,7 +288,7 @@ schemas. For `project_kind: "webapp"`:
   (non-empty array of strings).
   → Example: `{"name": "User", "fields": ["id", "username",
     "display_name"]}`. Naming the entities and their fields is what
-    stops two slices from inventing competing schemas.
+    stops two groups from inventing competing schemas.
 
 Use the canonical key names (`routes`, `components`, `data_model`).
 Inventing custom keys (`api_endpoints`, `pages`, `models`, `schemas`)
@@ -310,7 +310,7 @@ as compile warnings):
   one-line description). Optional: `args` (array of strings naming
   positional/flag args).
   → Even single-command CLIs declare one entry (e.g. name=`run`).
-  → Listing commands here pins the CLI surface so two slices do not
+  → Listing commands here pins the CLI surface so two groups do not
     invent contradictory subcommand sets or flag spellings.
 
 Example:
@@ -339,7 +339,7 @@ EXACT field names (the per-kind json schema validates them):
   `response_shape` (string describing JSON shape, e.g.
   `'{"users": [{"id": int, "username": str}]}'`). Optional:
   `auth` (`"public"|"bearer"|"session"`), `request_shape`.
-  → Pinning endpoints here stops two slices from drifting on auth
+  → Pinning endpoints here stops two groups from drifting on auth
     scheme, status codes, or field names.
 * **`data_model`** — OPTIONAL but recommended. Each entry has
   `name` and `fields` (non-empty array of strings).
@@ -357,7 +357,7 @@ EXACT field names:
   `"function"|"class"|"constant"|"exception"`), `summary` (string,
   one-line description). Optional: `signature` (string, e.g.
   `"def parse(text: str) -> dict"`).
-  → A library's public surface IS its contract. Slices that depend
+  → A library's public surface IS its contract. Groups that depend
     on the library import only what's listed here.
 * **`examples`** — OPTIONAL. Array of `{title, code}` doctest-shaped
   usage snippets.
@@ -379,7 +379,7 @@ Example for a library:
 ## Concreteness rules (mandatory)
 
 0. **Tasks are CONCRETE actions, not vague prose.** Every entry in
-   `slice.tasks` must name a specific file path, API shape, data
+   `group.tasks` must name a specific file path, API shape, data
    structure, or visible behavior — referenced from elsewhere in the
    spec where possible. Vague prose ("implement the feature", "build
    the API", "fix the bug", "add error handling") is rejected: a
@@ -399,57 +399,57 @@ Example for a library:
 
 1. **Routes / components are NAMED** with their key visible text. "Home"
    alone is not enough — say `"key_text": "Bookmark Manager"`. This is
-   what stops two slices from rendering competing app shells.
+   what stops two groups from rendering competing app shells.
 
-2. **`owned_paths` is a write-scope** — each slice gets globs it may
-   *modify*. Slices may always *add* new files anywhere; modifying a
-   file matched by another slice's `owned_paths` requires the other
-   slice's permission (the runtime enforces this).
+2. **`owned_paths` is a write-scope** — each group gets globs it may
+   *modify*. Groups may always *add* new files anywhere; modifying a
+   file matched by another group's `owned_paths` requires the other
+   group's permission (the runtime enforces this).
 
-3. **`shared_scaffold`** lists files that no slice exclusively owns —
-   any slice may *modify* them. The **rule of thumb**: if you predict
-   that two or more slices will *modify* a file (not just create new
+3. **`shared_scaffold`** lists files that no group exclusively owns —
+   any group may *modify* them. The **rule of thumb**: if you predict
+   that two or more groups will *modify* a file (not just create new
    files alongside it), put that file in `shared_scaffold`, NOT in
-   any slice's `owned_paths`. Three categories typically belong here:
+   any group's `owned_paths`. Three categories typically belong here:
 
-   * **Build/config files** — anything every slice may add to:
+   * **Build/config files** — anything every group may add to:
      lockfiles, `package.json`, `vite.config.*`, `requirements.txt`,
      `pytest.ini`, `.gitignore`, language-specific manifests.
 
-   * **Extension-point modules** — files where MULTIPLE slices register
+   * **Extension-point modules** — files where MULTIPLE groups register
      themselves. The shape varies by stack but the pattern is:
      - **App factory / entry**: e.g. `app.py`, `app/__init__.py`,
-       `cmd/main.go`, `src/main.ts`. Every slice registers its
+       `cmd/main.go`, `src/main.ts`. Every group registers its
        blueprint / route / handler / command.
      - **Data model module**: e.g. `models.py`, `schema.sql`,
-       `db/schema.go`. Every slice that adds an entity declares it.
-     - **Config / settings**: e.g. `config.py`, `settings.toml`. Slices
+       `db/schema.go`. Every group that adds an entity declares it.
+     - **Config / settings**: e.g. `config.py`, `settings.toml`. Groups
        may need new settings.
      - **Init / DB setup**: e.g. `database.py`, `migrations/`.
 
    * **Shared rendering surfaces** — for any project that produces
      output through templates / shared layouts, the templates that
-     multiple slices contribute to belong here. Pattern-recognize by
-     asking "do two or more slices' features appear on the same page
+     multiple groups contribute to belong here. Pattern-recognize by
+     asking "do two or more groups' features appear on the same page
      / output file?". Examples across project shapes:
      - **Webapp** (multi-feature pages): `templates/base.html` (nav,
-       layout), `templates/home.html` (slices add their controls),
+       layout), `templates/home.html` (groups add their controls),
        `templates/timeline.html` or any feature page where multiple
-       slices contribute UI fragments (links, buttons, embeds).
+       groups contribute UI fragments (links, buttons, embeds).
      - **Static-site generator**: `templates/base.html`, `templates/
        index.html`, `templates/post.html`, `templates/tag.html` — if
-       multiple slices (rendering, indexing, RSS, tags) all touch
+       multiple groups (rendering, indexing, RSS, tags) all touch
        these files, they're shared.
      - **Documentation site**: `templates/_layout.html`,
        `templates/_sidebar.html` — TOC + navigation are cross-cutting.
 
-   **CRITICAL**: putting a foundational file in one slice's
-   `owned_paths` BLOCKS every other slice from touching it. The
+   **CRITICAL**: putting a foundational file in one group's
+   `owned_paths` BLOCKS every other group from touching it. The
    runtime emits scope warnings (informational, not blocking) when
    peer-owned files get modified, but the cleaner outcome is to
    declare shared-scaffold up front.
 
-   The slice that initially CREATES a shared-scaffold file is fine —
+   The group that initially CREATES a shared-scaffold file is fine —
    the rule is about exclusive ownership, not initial authorship.
 
    **V13 — Package-metadata exception (initialize-once, not append-many)**
@@ -461,24 +461,24 @@ Example for a library:
    * `Cargo.toml`, `go.mod`, `Gemfile`, `pubspec.yaml`, `build.gradle`
 
    These files declare DEPENDENCIES for the whole product. If two
-   sibling slices both modify them — each adding their own deps —
+   sibling groups both modify them — each adding their own deps —
    merge phase WILL hit a real content conflict, because the files
    have project-wide singletons (single `[project.dependencies]`
    list, single `dependencies` map, etc.) that two independent edits
    cannot coexist in.
 
    **Rule**: package-metadata files MUST be:
-     - In `shared_scaffold` (NOT in any slice's `owned_paths`).
-     - Initialized by exactly ONE slice (the foundation/scaffold
-       slice). That slice declares ALL dependencies the entire
+     - In `shared_scaffold` (NOT in any group's `owned_paths`).
+     - Initialized by exactly ONE group (the foundation/scaffold
+       group). That group declares ALL dependencies the entire
        product needs upfront, predicting from the spec.
-     - Treated as READ-ONLY by every other slice. If a slice needs
+     - Treated as READ-ONLY by every other group. If a group needs
        a new dep, it MUST request an amendment via
        `.otto/amendment_request.json` (the runtime supports this);
        it must NOT modify the metadata file directly.
 
    This is the only correct way to avoid content conflicts on these
-   files. List ALL needed deps on the foundation slice's tasks,
+   files. List ALL needed deps on the foundation group's tasks,
    even if predicting forward — better to have an unused dep than
    a content conflict at merge.
 
@@ -489,12 +489,12 @@ Example for a library:
    * `app.py`, `app/__init__.py`, `wsgi.py`, `cmd/main.go`, `src/main.ts`
    * `models.py`, `db/schema.go`, `schema.sql`
    * `routes.py`, `urls.py`, route registries
-   * `config.py`/`settings.toml` when slices add settings
+   * `config.py`/`settings.toml` when groups add settings
 
-   Sibling slices each "register their routes/blueprints/models" by
-   independently editing `app.py`. Build phase passes (each slice
+   Sibling groups each "register their routes/blueprints/models" by
+   independently editing `app.py`. Build phase passes (each group
    tests in isolation). Merge phase HITS A CONFLICT because two
-   slices added registrations to the same line range or imported the
+   groups added registrations to the same line range or imported the
    same symbol differently. The fix-loop usually can't reconcile
    because the conflict is structural, not textual. Observed in the
    P7 e2e: dashboard and public_shortening BOTH registered their
@@ -503,12 +503,12 @@ Example for a library:
 
    **Rule**: extension-point files MUST follow register-via-discovery:
 
-   1. The **foundation slice** creates the entry-point file ONCE
+   1. The **foundation group** creates the entry-point file ONCE
       with a single registration point. Two patterns work:
 
       a) **Auto-discovery** (preferred for Python/JS):
          ```python
-         # app.py — foundation slice owns this; do NOT edit elsewhere
+         # app.py — foundation group owns this; do NOT edit elsewhere
          from flask import Flask
          from importlib import import_module
          from pathlib import Path
@@ -531,53 +531,53 @@ Example for a library:
          BLUEPRINTS = ["routes.auth", "routes.public", "routes.dashboard", ...]
          ```
 
-   2. **Other slices DO NOT modify the entry-point file.** They each
-      create new files at `routes/<slice>.py` (or equivalent
-      sub-namespace). Each slice's file exports the blueprint/handler
+   2. **Other groups DO NOT modify the entry-point file.** They each
+      create new files at `routes/<group>.py` (or equivalent
+      sub-namespace). Each group's file exports the blueprint/handler
       via the convention the foundation chose (e.g. module-level `bp`).
 
-   3. For `models.py` / data layer: split per-slice models into
-      `models/<slice>.py` files; foundation provides a `models/__init__.py`
-      that re-exports or imports them. Each slice owns its own model
+   3. For `models.py` / data layer: split per-group models into
+      `models/<group>.py` files; foundation provides a `models/__init__.py`
+      that re-exports or imports them. Each group owns its own model
       file; the foundation's `__init__.py` is the only file that
       knows about all of them.
 
    4. Use `shared_scaffold` for the registration POINT itself (so the
-      foundation slice owns it but it's documented as "do not modify
-      from peer slices"); but the slices that NEED to register go in
+      foundation group owns it but it's documented as "do not modify
+      from peer groups"); but the groups that NEED to register go in
       a sub-namespace they own (`routes/auth.py` is in auth's
       `owned_paths`, not in shared_scaffold).
 
-   This pattern means **each slice writes ONLY to files it owns**.
+   This pattern means **each group writes ONLY to files it owns**.
    Merge phase has zero conflicts on shared structure. The foundation
-   slice's auto-discovery imports new files as they appear without
+   group's auto-discovery imports new files as they appear without
    needing modification.
 
-   When you compile a multi-slice spec, design the foundation's
+   When you compile a multi-group spec, design the foundation's
    registration mechanism FIRST and document it in the foundation
-   slice's tasks. Then every other slice's tasks include "create
-   `routes/<slice>.py` exporting `bp`" or similar.
+   group's tasks. Then every other group's tasks include "create
+   `routes/<group>.py` exporting `bp`" or similar.
 
-4. **Every slice has at least one check**. Browser journeys are
+4. **Every group has at least one check**. Browser journeys are
    `subprocess + glob` for v1: `command` runs (typically a Playwright
    pytest), then matching files in `evidence_globs` are collected as
    evidence. Do not invent a `steps:` array — that's a future field.
 
-5. **`deps` is a DAG**. No cycles. Slices with no deps run first.
+5. **`deps` is a DAG**. No cycles. Groups with no deps run first.
 
-   `deps` declares both DATA and UI dependencies. A slice may modify
-   a dep's owned files; modifying a peer's (a slice not in its
+   `deps` declares both DATA and UI dependencies. A group may modify
+   a dep's owned files; modifying a peer's (a group not in its
    transitive deps) emits a scope warning (informational).
 
-   When slice X needs to add code or UI to slice Y's owned area, you
+   When group X needs to add code or UI to group Y's owned area, you
    have two options:
 
    - **Either** declare Y in `X.deps` (X depends on Y, modification
      is in-scope), OR
-   - **Move Y's contested file(s) to `shared_scaffold`** (no slice
+   - **Move Y's contested file(s) to `shared_scaffold`** (no group
      owns them exclusively).
 
-   Common cross-slice-edit patterns (pattern-recognize across project
+   Common cross-group-edit patterns (pattern-recognize across project
    shapes; specific names will vary):
 
    - **Add a control to a peer's page**: e.g. an "export" feature adds
@@ -585,11 +585,11 @@ Example for a library:
      dep, or shared-scaffold the template.
    - **Display data from a peer**: e.g. one feature shows counts/info
      produced by another. Declare the data dep.
-   - **Wire a navigation entry**: every slice that adds a route should
+   - **Wire a navigation entry**: every group that adds a route should
      either own the nav source-of-truth or declare the layout template
      as shared.
 
-   Rule of thumb: **a file that 3+ feature slices contribute to is
+   Rule of thumb: **a file that 3+ feature groups contribute to is
    shared infrastructure** — put it in `shared_scaffold` rather than
    chaining many transitive deps.
 
@@ -609,7 +609,7 @@ Example for a library:
 **Critical: do NOT emit `api_probe` checks in v1.** The build runtime has
 no app-server boot — there is no `base_url` for the probe to hit. An
 `api_probe` check will fail immediately at the check stage with
-"ApiProbe needs base_url" and BLOCK the slice.
+"ApiProbe needs base_url" and BLOCK the group.
 
 **Prefer `pytest` checks against the project's existing test command**
 when validating API routes. If the project root has
@@ -643,19 +643,19 @@ real failures observed in benches:
 
 - `'def generate_index' in read_text('blog/pages.py')` — predicted
   the function would be named `generate_index`. Build agent named it
-  `build_index_page`. Predicate returns False → slice blocked even
+  `build_index_page`. Predicate returns False → group blocked even
   though the file exists with working code that satisfies the
   acceptance test.
 - `exists('src/__main__.py')` — predicted package directory `src/`.
   Build agent (correctly inferring from acceptance test) used `blog/`.
-  Slice blocked.
+  Group blocked.
 
 **Rule**: state_invariants check structural facts, NOT
 implementation details.
 
 Acceptable patterns:
 - File / directory existence: `exists('app.py')`, `is_dir('templates')`.
-- Symbol presence by *role*, not name: prefer the slice's `repo_test`
+- Symbol presence by *role*, not name: prefer the group's `repo_test`
   / `pytest` check (which exercises behavior) over a state_invariant
   that grep's for a specific function name.
 - Counts: `glob_count('migrations/*.sql') >= 1`.
@@ -694,7 +694,7 @@ Examples that WORK:
 ```
 
 Examples that FAIL (DO NOT emit these — they cause SyntaxError at
-eval-time and the slice will be BLOCKED):
+eval-time and the group will be BLOCKED):
 
 ```
 "app.py exists and models.py has User class"            ← prose
@@ -713,7 +713,7 @@ implementation; build agent's correct-but-different output trips them):
 
 **Browser UI verification**: if the project root has
 `tests/run_browser_journey.py` (the bench seeds this for webapps with
-browser UI requirements), the slice that owns the Home page MUST include
+browser UI requirements), the group that owns the Home page MUST include
 a `browser_journey` check pointing at it:
 
 ```json
@@ -727,7 +727,7 @@ a `browser_journey` check pointing at it:
 
 This script boots the app, drives Playwright through the home page,
 asserts the required forms exist, and screenshots each surface. Without
-this check, the slice will pass its other tests but the integrated app
+this check, the group will pass its other tests but the integrated app
 will fail downstream browser quality evaluators.
 
 ## Process
@@ -735,7 +735,7 @@ will fail downstream browser quality evaluators.
 1. If the project root has files (existing repo), read README / key
    files first — don't contradict what's already there.
 2. Decide `project_kind`. Default to `webapp` for product-shaped intents.
-3. Decompose into 2–6 vertical slices with explicit deps.
+3. Decompose into 2–6 vertical groups with explicit deps.
 4. Write the spec JSON to `{spec_path}` AND emit it inside
    `<spec_json>...</spec_json>` in your final message. Do NOT add
    markdown fences inside the tags.

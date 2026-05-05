@@ -305,6 +305,6 @@ def test_web_state_exposes_queue_task_build_config(tmp_path: Path) -> None:
         assert config["agents"]["build"]["provider"] == "codex"
         assert config["agents"]["certifier"]["provider"] == "codex"
 
-    detail = client.get(f"/api/runs/{state['live']['items'][0]['run_id']}").json()
-    assert detail["build_config"]["certifier_mode"] == "thorough"
-    assert detail["build_config"]["queue"]["task_timeout_s"] == 1500.0
+    # Phase C.4 (tick 65): legacy `/api/runs/<run_id>` detail call removed.
+    # `live`/`landing` build_config assertions above already cover the
+    # certifier_mode/task_timeout_s plumbing surfaced via /api/state.

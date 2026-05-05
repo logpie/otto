@@ -46,7 +46,14 @@ from otto.spec_compile import (
 
 @dataclass
 class Evidence:
-    """Result of running one Check."""
+    """Result of running one Check.
+
+    `feature_id` (A1b addition, research §4 audit honesty) attributes the
+    evidence to a specific Feature so per-Feature proof can aggregate
+    evidence from any number of Checks. Empty string means "not yet
+    attributed" (legacy code paths) or "applies to whole product"
+    (cross-Group / integration checks).
+    """
 
     passed: bool
     started_at: str  # ISO-8601 UTC
@@ -54,6 +61,7 @@ class Evidence:
     detail: str  # one-line human summary
     artifacts: list[Path] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    feature_id: str = ""  # A1b: per-Feature attribution; empty = unattributed
 
 
 def run_check(

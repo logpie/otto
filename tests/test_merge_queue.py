@@ -32,14 +32,14 @@ from otto.merge_queue import (
 )
 from otto.spec_compile import (
     RepoTestCheck,
-    Slice,
+    Group,
     Spec,
     StateInvariant,
     StructureDecisions,
 )
 
 
-def _spec(slices: list[Slice], cross_checks=None) -> Spec:
+def _spec(slices: list[Group], cross_checks=None) -> Spec:
     return Spec(
         intent="test intent",
         project_kind="webapp",
@@ -81,9 +81,9 @@ def _passing_state_invariant(predicate: str) -> StateInvariant:
 def test_eligible_candidates_returns_passing_with_satisfied_deps() -> None:
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Slice(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
-            Slice(id="s3", title="z", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s3", title="z", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
         ]
     )
     eligible = eligible_candidates(
@@ -95,7 +95,7 @@ def test_eligible_candidates_returns_passing_with_satisfied_deps() -> None:
 def test_eligible_candidates_excludes_already_landed() -> None:
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
         ]
     )
     eligible = eligible_candidates(
@@ -107,7 +107,7 @@ def test_eligible_candidates_excludes_already_landed() -> None:
 def test_eligible_candidates_excludes_blocked() -> None:
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
         ]
     )
     eligible = eligible_candidates(
@@ -119,8 +119,8 @@ def test_eligible_candidates_excludes_blocked() -> None:
 def test_eligible_candidates_holds_back_when_dep_unlanded() -> None:
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Slice(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
         ]
     )
     # s2 passing but s1 not landed → s2 not eligible
@@ -133,8 +133,8 @@ def test_eligible_candidates_holds_back_when_dep_unlanded() -> None:
 def test_eligible_candidates_fifo_within_eligible_per_spec_order() -> None:
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Slice(id="s2", title="y", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s2", title="y", deps=[], owned_paths=[], tasks=[], checks=[]),
         ]
     )
     eligible = eligible_candidates(spec, passing_ids={"s1", "s2"}, landed_ids=set())
@@ -169,7 +169,7 @@ def test_run_merge_queue_lands_single_slice_when_checks_pass(tmp_path: Path) -> 
     session_dir.mkdir()
     spec = _spec(
         [
-            Slice(
+            Group(
                 id="s1", title="hello", deps=[], owned_paths=[], tasks=[],
                 checks=[_passing_check()],
             ),
@@ -199,9 +199,9 @@ def test_run_merge_queue_lands_in_dep_order(tmp_path: Path) -> None:
     session_dir.mkdir()
     spec = _spec(
         [
-            Slice(id="s1", title="a", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
-            Slice(id="s2", title="b", deps=["s1"], owned_paths=[], tasks=[], checks=[_passing_check()]),
-            Slice(id="s3", title="c", deps=["s2"], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", title="a", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s2", title="b", deps=["s1"], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s3", title="c", deps=["s2"], owned_paths=[], tasks=[], checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
@@ -226,7 +226,7 @@ def test_run_merge_queue_runs_cross_slice_checks(tmp_path: Path) -> None:
     (tmp_path / "marker.txt").write_text("ok", encoding="utf-8")
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
         ],
         cross_checks=[_passing_state_invariant("exists('marker.txt')")],
     )
@@ -255,7 +255,7 @@ def test_run_merge_queue_blocks_on_cross_slice_failure_without_agent(tmp_path: P
     session_dir.mkdir()
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
         ],
         cross_checks=[_passing_state_invariant("exists('does-not-exist.txt')")],
     )
@@ -281,7 +281,7 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
     # Cross-slice check: needs marker.txt to exist. Initially absent.
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=["marker.txt"], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", title="x", deps=[], owned_paths=["marker.txt"], tasks=[], checks=[_passing_check()]),
         ],
         cross_checks=[_passing_state_invariant("exists('marker.txt')")],
     )
@@ -314,7 +314,7 @@ def test_run_merge_queue_blocks_when_repair_retries_exhausted(tmp_path: Path) ->
     session_dir.mkdir()
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
         ],
         cross_checks=[_passing_state_invariant("False")],  # always fails
     )
@@ -347,7 +347,7 @@ def test_run_merge_queue_handles_agent_crash_during_repair(tmp_path: Path) -> No
     session_dir.mkdir()
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
         ],
         cross_checks=[_passing_state_invariant("exists('marker.txt')")],
     )
@@ -391,7 +391,7 @@ def test_run_merge_queue_commits_pending_changes(tmp_path: Path) -> None:
     (tmp_path / "new-file.txt").write_text("from build", encoding="utf-8")
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
@@ -419,7 +419,7 @@ def test_run_merge_queue_no_op_commit_when_no_changes(tmp_path: Path) -> None:
     session_dir.mkdir()
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[_passing_check()]),
         ]
     )
     build_result = BuildResult(
@@ -439,7 +439,7 @@ def test_run_merge_queue_no_op_commit_when_no_changes(tmp_path: Path) -> None:
     ).stdout.strip()
     # No changes → no new commit.
     assert head_before == head_after
-    # Slice still LANDED (degenerate case).
+    # Group still LANDED (degenerate case).
     assert result.landed_ids == ["s1"]
 
 
@@ -470,7 +470,7 @@ def test_run_merge_queue_real_merge_when_slice_branch_exists(tmp_path: Path) -> 
 
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=["slice-work.txt"],
+            Group(id="s1", title="x", deps=[], owned_paths=["slice-work.txt"],
                   tasks=["write slice-work"], checks=[_passing_check()]),
         ]
     )
@@ -495,7 +495,7 @@ def test_run_merge_queue_real_merge_when_slice_branch_exists(tmp_path: Path) -> 
         cwd=tmp_path, capture_output=True, text=True, check=True,
     ).stdout.strip().split()
     assert len(head_parents) == 2, f"expected merge commit (2 parents), got {head_parents}"
-    # Slice's file is now on main.
+    # Group's file is now on main.
     assert (tmp_path / "slice-work.txt").exists()
 
 
@@ -513,7 +513,7 @@ def test_run_merge_queue_real_merge_redundant_when_branch_empty(tmp_path: Path) 
 
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[],
+            Group(id="s1", title="x", deps=[],
                   owned_paths=["expected.txt"],  # had declared work
                   tasks=["write expected.txt"],
                   checks=[_passing_check()]),
@@ -532,7 +532,7 @@ def test_run_merge_queue_real_merge_redundant_when_branch_empty(tmp_path: Path) 
             branch_for_slice=lambda s: branch,
         )
     )
-    # Slice declared work but produced no diff — REDUNDANT, surfaced
+    # Group declared work but produced no diff — REDUNDANT, surfaced
     # as the over-reach diagnostic. Counts as landed for dep flow.
     assert "s1" in result.landed_ids
     assert "s1" in result.redundant_ids
@@ -568,7 +568,7 @@ def test_run_merge_queue_real_merge_blocks_on_conflict(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=["shared.txt"],
+            Group(id="s1", title="x", deps=[], owned_paths=["shared.txt"],
                   tasks=["edit shared.txt"], checks=[_passing_check()]),
         ]
     )
@@ -603,8 +603,8 @@ def test_run_merge_queue_real_merge_blocks_on_conflict(tmp_path: Path) -> None:
 def test_passing_slice_ids_drives_eligible_candidates(tmp_path: Path) -> None:
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
-            Slice(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s1", title="x", deps=[], owned_paths=[], tasks=[], checks=[]),
+            Group(id="s2", title="y", deps=["s1"], owned_paths=[], tasks=[], checks=[]),
         ]
     )
     build_result = BuildResult(
@@ -642,7 +642,7 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
         ["git", "commit", "-q", "-m", "main A", "--no-verify"],
         cwd=tmp_path, check=True, capture_output=True,
     )
-    # Slice branch off main~1, modify shared.txt to B → will conflict.
+    # Group branch off main~1, modify shared.txt to B → will conflict.
     subprocess.run(["git", "checkout", "-b", "i2p/_session/s1", "main~1"],
                    cwd=tmp_path, check=True, capture_output=True)
     (tmp_path / "shared.txt").write_text("B", encoding="utf-8")
@@ -655,7 +655,7 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Slice(id="s1", title="x", deps=[], owned_paths=["shared.txt"],
+            Group(id="s1", title="x", deps=[], owned_paths=["shared.txt"],
                   tasks=["edit shared"], checks=[_passing_check()]),
         ]
     )
@@ -727,10 +727,10 @@ def test_merge_passes_check_against_post_merge_state(tmp_path: Path) -> None:
     # Templates do NOT exist on main pre-merge.
     assert not (tmp_path / "templates").exists()
 
-    # Slice's check: a state invariant requiring templates/ to exist.
+    # Group's check: a state invariant requiring templates/ to exist.
     spec = _spec(
         [
-            Slice(id="templates_slice", title="x", deps=[],
+            Group(id="templates_slice", title="x", deps=[],
                   owned_paths=["templates/*"],
                   tasks=["render index"],
                   checks=[_passing_state_invariant("exists('templates')")]),
@@ -783,7 +783,7 @@ def test_merge_rolls_back_when_post_merge_check_fails(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Slice(id="bad_slice", title="x", deps=[],
+            Group(id="bad_slice", title="x", deps=[],
                   owned_paths=["broken.txt"],
                   tasks=["create broken.txt"],
                   # Check that will FAIL post-merge.
@@ -836,7 +836,7 @@ def test_merge_handles_dirty_worktree_from_prior_check(tmp_path: Path) -> None:
     subprocess.run(["git", "add", "runtime.bin"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-q", "-m", "v1", "--no-verify"],
                    cwd=tmp_path, check=True, capture_output=True)
-    # Slice branch off main; modifies a DIFFERENT file (no merge conflict).
+    # Group branch off main; modifies a DIFFERENT file (no merge conflict).
     branch = "i2p/_session/clean_slice"
     subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
     (tmp_path / "feature.txt").write_text("feature", encoding="utf-8")
@@ -855,7 +855,7 @@ def test_merge_handles_dirty_worktree_from_prior_check(tmp_path: Path) -> None:
 
     spec = _spec(
         [
-            Slice(id="clean_slice", title="x", deps=[],
+            Group(id="clean_slice", title="x", deps=[],
                   owned_paths=["feature.txt"], tasks=["add feature"],
                   checks=[_passing_check()]),
         ]

@@ -182,7 +182,7 @@ def serialize_live_item(item: LiveRunItem) -> dict[str, Any]:
 
 def serialize_history_item(item: HistoryItem) -> dict[str, Any]:
     row = item.row
-    return {
+    payload: dict[str, Any] = {
         "run_id": row.run_id,
         "domain": row.domain,
         "run_type": row.run_type,
@@ -208,6 +208,24 @@ def serialize_history_item(item: HistoryItem) -> dict[str, Any]:
         "resumable": row.resumable,
         "adapter_key": row.adapter_key,
     }
+    # V19d: surface i2p slice counts in the existing Stories/Files
+    # columns so the dashboard row carries actionable signal instead
+    # of em-dashes. Mapping: stories_tested = total slices,
+    # stories_passed = landed slices. The frontend already renders
+    # `<passed>/<tested>` (e.g. "5/6") in the chip; for an i2p run
+    # this reads as "5 of 6 slices landed". Files column intentionally
+    # left null — there's no single per-row diff for i2p (slices land
+    # multiple branches into target).
+    if row.domain == "i2p":
+        slice_count = int(row.raw.get("i2p_slice_count") or 0)
+        landed_count = int(row.raw.get("i2p_landed_count") or 0)
+        if slice_count > 0:
+            payload["stories_tested"] = slice_count
+            payload["stories_passed"] = landed_count
+        verdict = str(row.raw.get("i2p_verdict") or "").strip().lower()
+        if verdict:
+            payload["i2p_verdict"] = verdict
+    return payload
 
 
 def serialize_project_stats(stats: ProjectStats) -> dict[str, Any]:

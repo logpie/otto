@@ -26,7 +26,10 @@ def test_python_module_cli_help_exits_zero() -> None:
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_python_module_cli_merge_help_exits_zero() -> None:
+def test_python_module_cli_merge_command_removed() -> None:
+    """Phase C.4 deleted the legacy ``otto merge`` CLI; invoking it must
+    surface Click's ``No such command`` error (exit code 2).
+    """
     result = subprocess.run(
         [sys.executable, "-m", "otto.cli", "merge", "--help"],
         cwd=REPO_ROOT,
@@ -34,7 +37,8 @@ def test_python_module_cli_merge_help_exits_zero() -> None:
         text=True,
     )
 
-    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.returncode != 0
+    assert "No such command 'merge'" in (result.stderr + result.stdout)
 
 
 def test_config_banner_uses_effective_provider_safe_default(tmp_path: Path, monkeypatch) -> None:

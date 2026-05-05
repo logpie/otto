@@ -19,7 +19,7 @@ from click.testing import CliRunner
 from otto.cli import main
 from otto.spec_compile import (
     BrowserJourney,
-    Slice,
+    Group,
     Spec,
     StructureDecisions,
 )
@@ -45,7 +45,7 @@ def _fixture_spec(intent: str = "a tiny webapp") -> Spec:
             "components": [{"name": "Home", "key_text": "Hello"}],
         }),
         slices=[
-            Slice(
+            Group(
                 id="shell",
                 title="App shell",
                 tasks=["scaffold the SPA"],
@@ -71,6 +71,398 @@ def _run(args: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> tu
     finally:
         os.chdir(saved_cwd)
     return result.exit_code, result.output
+
+
+# ---------------------------------------------------------------------------
+# Phase B.0 — `otto build --i2p` opt-in routing through the new stack
+# ---------------------------------------------------------------------------
+
+
+def test_build_i2p_flag_appears_in_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["build", "--help"], catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "--i2p" in result.output
+    # Click line-wraps long help text, so check for an unbroken token.
+    assert "intent-to-product" in result.output
+
+
+def test_build_i2p_dispatches_to_orchestrate_run(tmp_path: Path, monkeypatch) -> None:
+    """`otto build --i2p` calls cli_run.orchestrate_run with the build's
+    intent argument and project_kind=webapp default."""
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_run(*, intent, project_kind, break_lock, no_build,
+                              base_url, from_spec, project_dir, **_extra):
+        captured["intent"] = intent
+        captured["project_kind"] = project_kind
+        captured["break_lock"] = break_lock
+        captured["no_build"] = no_build
+        captured["base_url"] = base_url
+        captured["from_spec"] = from_spec
+        captured["project_dir"] = project_dir
+        captured.update(_extra)
+        # Mimic the real orchestrate_run's sys.exit(0) on success.
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+
+    code, out = _run(
+        ["build", "--i2p", "build me a tiny webapp"],
+        cwd=tmp_path,
+    )
+    assert code == 0, out
+    assert captured["intent"] == "build me a tiny webapp"
+    assert captured["project_kind"] == "webapp"
+    assert captured["no_build"] is False
+    assert captured["from_spec"] is None
+    assert Path(captured["project_dir"]).resolve() == tmp_path.resolve()
+
+
+def test_build_i2p_warns_about_ignored_legacy_flags(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When legacy build flags are passed alongside --i2p, the user gets
+    an explicit warning listing the ignored flags."""
+    _init_project(tmp_path)
+
+    def fake_orchestrate_run(**_kwargs):
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+
+    code, out = _run(
+        ["build", "--i2p", "--thorough", "--strict", "intent text"],
+        cwd=tmp_path,
+    )
+    assert code == 0
+    # Both flags surfaced as ignored
+    assert "i2p mode" in out and "ignored" in out
+    assert "--thorough" in out
+    assert "--strict" in out
+
+
+def test_build_without_i2p_hard_errors_after_phase_c3(tmp_path: Path, monkeypatch) -> None:
+    """Phase C.3: `otto build` without --i2p (or with `default_pipeline: legacy`
+    in otto.yaml) must hard-error — the v3 pipeline was deleted. Users see a
+    migration message pointing at the new --i2p default.
+    """
+    _init_project(tmp_path)
+    (tmp_path / "otto.yaml").write_text("default_pipeline: legacy\n")
+
+    sentinel: dict[str, bool] = {"new_called": False}
+
+    def fake_orchestrate_run(**_kwargs):
+        sentinel["new_called"] = True
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+
+    code, out = _run(
+        ["build", "--no-qa", "intent"],
+        cwd=tmp_path,
+    )
+    # The new path is NOT hit (legacy was selected) and the legacy
+    # path now exits with status 1 + a migration message.
+    assert sentinel["new_called"] is False
+    assert code == 1
+    assert "Phase C" in out or "removed" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase B.1 — `otto certify --i2p`
+# ---------------------------------------------------------------------------
+
+
+def test_certify_i2p_flag_appears_in_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["certify", "--help"], catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "--i2p" in result.output
+    # Click line-wraps long help text, so check for an unbroken token.
+    assert "intent-to-product" in result.output
+
+
+def test_certify_i2p_dispatches_to_orchestrate_certify(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`otto certify --i2p "intent"` calls cli_run.orchestrate_certify."""
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_certify(*, intent, project_kind, break_lock,
+                                  project_dir, **_extra):
+        captured["intent"] = intent
+        captured["project_kind"] = project_kind
+        captured["break_lock"] = break_lock
+        captured["project_dir"] = project_dir
+        captured.update(_extra)
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_certify", fake_orchestrate_certify)
+
+    code, out = _run(
+        ["certify", "--i2p", "audit this CLI"],
+        cwd=tmp_path,
+    )
+    assert code == 0, out
+    assert captured["intent"] == "audit this CLI"
+    assert captured["project_kind"] == "webapp"
+    assert Path(captured["project_dir"]).resolve() == tmp_path.resolve()
+
+
+def test_certify_i2p_warns_about_ignored_legacy_flags(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _init_project(tmp_path)
+
+    def fake_orchestrate_certify(**_kwargs):
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_certify", fake_orchestrate_certify)
+
+    code, out = _run(
+        ["certify", "--i2p", "--thorough", "--strict", "intent text"],
+        cwd=tmp_path,
+    )
+    assert code == 0
+    assert "i2p mode" in out and "ignored" in out
+    assert "--thorough" in out
+    assert "--strict" in out
+
+
+def test_certify_without_i2p_hard_errors_after_phase_c2(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Phase C.2 (tick 64): `otto certify` without --i2p (or with
+    `default_pipeline: legacy` in otto.yaml) must hard-error — the
+    legacy `run_agentic_certifier` dispatcher was deleted. Mirrors
+    `test_build_without_i2p_hard_errors_after_phase_c3` for the certify
+    subcommand.
+    """
+    _init_project(tmp_path)
+    (tmp_path / "otto.yaml").write_text("default_pipeline: legacy\n")
+    (tmp_path / "intent.md").write_text("test intent\n")
+
+    sentinel: dict[str, bool] = {"new_called": False}
+
+    def fake_orchestrate_certify(**_kwargs):
+        sentinel["new_called"] = True
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr(
+        "otto.cli_run.orchestrate_certify", fake_orchestrate_certify
+    )
+
+    code, out = _run(["certify", "explicit intent"], cwd=tmp_path)
+    # The new path is NOT hit (legacy was selected) and the legacy
+    # path now exits with status 1 + a migration message.
+    assert sentinel["new_called"] is False
+    assert code == 1
+    assert "Phase C" in out or "removed" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase B.2 — `otto improve bugs --i2p`
+# ---------------------------------------------------------------------------
+
+
+def test_improve_bugs_i2p_flag_appears_in_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["improve", "bugs", "--help"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    assert "--i2p" in result.output
+    # Click line-wraps long help text, so check for an unbroken token.
+    assert "intent-to-product" in result.output
+
+
+def test_improve_bugs_i2p_dispatches_to_orchestrate_improve(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`otto improve bugs --i2p "focus"` calls cli_run.orchestrate_improve."""
+    _init_project(tmp_path)
+    (tmp_path / "intent.md").write_text("test intent\n")
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_improve(*, intent, project_kind, break_lock,
+                                  project_dir, rounds, focus):
+        captured["intent"] = intent
+        captured["project_kind"] = project_kind
+        captured["break_lock"] = break_lock
+        captured["project_dir"] = project_dir
+        captured["rounds"] = rounds
+        captured["focus"] = focus
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_improve", fake_orchestrate_improve)
+
+    code, out = _run(
+        ["improve", "bugs", "--i2p", "--rounds", "3", "error handling"],
+        cwd=tmp_path,
+    )
+    assert code == 0, out
+    assert captured["project_kind"] == "webapp"
+    assert captured["rounds"] == 3
+    assert captured["focus"] == "error handling"
+    assert Path(captured["project_dir"]).resolve() == tmp_path.resolve()
+
+
+def test_improve_bugs_i2p_warns_about_ignored_legacy_flags(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _init_project(tmp_path)
+    (tmp_path / "intent.md").write_text("test intent\n")
+
+    def fake_orchestrate_improve(**_kwargs):
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_improve", fake_orchestrate_improve)
+
+    code, out = _run(
+        ["improve", "bugs", "--i2p", "--strict", "--thorough", "focus"],
+        cwd=tmp_path,
+    )
+    assert code == 0
+    assert "i2p mode" in out and "ignored" in out
+    assert "--strict" in out
+    assert "--thorough" in out
+
+
+def test_improve_bugs_legacy_pipeline_now_hard_errors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Phase C: pinning ``default_pipeline: legacy`` (or passing
+    ``--legacy``) routes ``otto improve bugs`` into the deletion error
+    path — no orchestrate_improve call, exit 1.
+    """
+    _init_project(tmp_path)
+    (tmp_path / "intent.md").write_text("test intent\n")
+    (tmp_path / "otto.yaml").write_text("default_pipeline: legacy\n")
+
+    sentinel: dict[str, bool] = {"orchestrated": False}
+
+    def fake_orchestrate(**_kwargs):
+        sentinel["orchestrated"] = True
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_improve", fake_orchestrate)
+
+    code, _out = _run(
+        ["improve", "bugs", "focus"],
+        cwd=tmp_path,
+    )
+    assert code == 1
+    assert sentinel["orchestrated"] is False
+
+
+# ---------------------------------------------------------------------------
+# Phase B.2 — `otto improve feature/target --i2p` (tick 51)
+# ---------------------------------------------------------------------------
+
+
+def test_improve_feature_i2p_flag_appears_in_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["improve", "feature", "--help"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    assert "--i2p" in result.output
+    assert "--legacy" in result.output
+
+
+def test_improve_target_i2p_flag_appears_in_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["improve", "target", "--help"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    assert "--i2p" in result.output
+    assert "--legacy" in result.output
+
+
+def test_improve_feature_i2p_dispatches_to_orchestrate_improve(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _init_project(tmp_path)
+    (tmp_path / "intent.md").write_text("test intent\n")
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_improve(*, intent, project_kind, break_lock,
+                                  project_dir, rounds, focus):
+        captured["focus"] = focus
+        captured["rounds"] = rounds
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_improve", fake_orchestrate_improve)
+
+    code, _out = _run(
+        ["improve", "feature", "--i2p", "search UX"],
+        cwd=tmp_path,
+    )
+    assert code == 0
+    assert captured["focus"] == "search UX"
+
+
+def test_improve_target_i2p_dispatches_to_orchestrate_improve(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _init_project(tmp_path)
+    (tmp_path / "intent.md").write_text("test intent\n")
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_improve(*, intent, project_kind, break_lock,
+                                  project_dir, rounds, focus):
+        # `target`'s goal arg is forwarded as `focus` — the legacy
+        # improve loop treated them differently, but for the i2p path
+        # they collapse to "scope hint".
+        captured["focus"] = focus
+        captured["rounds"] = rounds
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_improve", fake_orchestrate_improve)
+
+    code, _out = _run(
+        ["improve", "target", "--i2p", "latency < 100ms"],
+        cwd=tmp_path,
+    )
+    assert code == 0
+    assert captured["focus"] == "latency < 100ms"
+
+
+def test_improve_feature_legacy_pipeline_now_hard_errors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Phase C: pinning ``default_pipeline: legacy`` routes
+    ``otto improve feature`` into the deletion error path."""
+    _init_project(tmp_path)
+    (tmp_path / "intent.md").write_text("test intent\n")
+    (tmp_path / "otto.yaml").write_text("default_pipeline: legacy\n")
+    sentinel: dict[str, bool] = {"orchestrated": False}
+
+    def fake_orchestrate(**_kwargs):
+        sentinel["orchestrated"] = True
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_improve", fake_orchestrate)
+
+    code, _out = _run(["improve", "feature", "search UX"], cwd=tmp_path)
+    assert code == 1
+    assert sentinel["orchestrated"] is False
 
 
 def test_run_subcommand_appears_in_help() -> None:
@@ -231,9 +623,10 @@ def test_run_full_pipeline_drives_build_audit_render(tmp_path: Path, monkeypatch
         )
 
     monkeypatch.setattr("otto.cli_run.compile_spec", fake_compile)
-    monkeypatch.setattr("otto.cli_run.run_build", fake_build)
-    monkeypatch.setattr("otto.cli_run.run_merge_queue", fake_merge)
-    monkeypatch.setattr("otto.cli_run.run_audit", fake_audit)
+    # A1.6: pipeline phases (build/merge/audit) live in otto.runner now.
+    monkeypatch.setattr("otto.runner.run_build", fake_build)
+    monkeypatch.setattr("otto.runner.run_merge_queue", fake_merge)
+    monkeypatch.setattr("otto.runner.run_audit", fake_audit)
 
     env = {"OTTO_RUN_ID": "2026-05-03-130000-fff999"}
     code, out = _run(["run", "build it"], cwd=tmp_path, env=env)
@@ -283,9 +676,10 @@ def test_run_full_pipeline_returns_nonzero_on_partial_audit(tmp_path: Path, monk
         return AuditResult(verdict=AuditVerdict.PARTIAL, narrative="partial")
 
     monkeypatch.setattr("otto.cli_run.compile_spec", fake_compile)
-    monkeypatch.setattr("otto.cli_run.run_build", fake_build)
-    monkeypatch.setattr("otto.cli_run.run_merge_queue", fake_merge)
-    monkeypatch.setattr("otto.cli_run.run_audit", fake_audit)
+    # A1.6: pipeline phases live in otto.runner now.
+    monkeypatch.setattr("otto.runner.run_build", fake_build)
+    monkeypatch.setattr("otto.runner.run_merge_queue", fake_merge)
+    monkeypatch.setattr("otto.runner.run_audit", fake_audit)
 
     env = {"OTTO_RUN_ID": "2026-05-03-130100-aaa999"}
     code, _out = _run(["run", "x"], cwd=tmp_path, env=env)
@@ -317,9 +711,10 @@ def test_run_from_spec_loads_existing_spec(tmp_path: Path, monkeypatch) -> None:
     async def fake_audit(spec, **kwargs):
         return AuditResult(verdict=AuditVerdict.PASSED, narrative="from-spec passed")
 
-    monkeypatch.setattr("otto.cli_run.run_build", fake_build)
-    monkeypatch.setattr("otto.cli_run.run_merge_queue", fake_merge)
-    monkeypatch.setattr("otto.cli_run.run_audit", fake_audit)
+    # A1.6: pipeline phases live in otto.runner now.
+    monkeypatch.setattr("otto.runner.run_build", fake_build)
+    monkeypatch.setattr("otto.runner.run_merge_queue", fake_merge)
+    monkeypatch.setattr("otto.runner.run_audit", fake_audit)
 
     code, out = _run(
         ["run", "--from-spec", str(spec_dir / "spec.json")],
@@ -328,3 +723,80 @@ def test_run_from_spec_loads_existing_spec(tmp_path: Path, monkeypatch) -> None:
     assert code == 0, out
     assert captured["build_spec_intent"] == "from-spec"
     assert "manual-session" in str(captured["session_dir"])
+
+
+# ---------------------------------------------------------------------------
+# `otto build --resume` and `otto certify --resume` (i2p resume planner)
+# ---------------------------------------------------------------------------
+
+
+def test_build_resume_flag_propagates(tmp_path: Path, monkeypatch) -> None:
+    """`otto build --i2p --resume` calls orchestrate_run with resume=True."""
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_run(**kwargs):
+        captured.update(kwargs)
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+
+    code, out = _run(["build", "--i2p", "--resume"], cwd=tmp_path)
+    assert code == 0, out
+    assert captured.get("resume") is True
+    assert captured.get("reset_budget") is False
+    assert captured.get("force") is False
+
+
+def test_build_resume_with_reset_budget_and_force(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_run(**kwargs):
+        captured.update(kwargs)
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+
+    code, out = _run(
+        ["build", "--i2p", "--resume", "--reset-budget", "--force"],
+        cwd=tmp_path,
+    )
+    assert code == 0, out
+    assert captured.get("resume") is True
+    assert captured.get("reset_budget") is True
+    assert captured.get("force") is True
+
+
+def test_certify_resume_flag_propagates(tmp_path: Path, monkeypatch) -> None:
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_certify(**kwargs):
+        captured.update(kwargs)
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr(
+        "otto.cli_run.orchestrate_certify", fake_orchestrate_certify
+    )
+
+    code, out = _run(
+        ["certify", "--i2p", "--resume", "--force"], cwd=tmp_path
+    )
+    assert code == 0, out
+    assert captured.get("resume") is True
+    assert captured.get("force") is True
+    assert captured.get("reset_budget") is False
+
+
+def test_run_resume_rejects_positional_intent(tmp_path: Path, monkeypatch) -> None:
+    """--resume + positional intent → exit 2 ("cannot be combined")."""
+    _init_project(tmp_path)
+    code, out = _run(["run", "--resume", "intent text"], cwd=tmp_path)
+    assert code == 2, out
+    assert "--resume cannot be combined" in out

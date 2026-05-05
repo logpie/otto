@@ -1,11 +1,16 @@
-"""Otto CLI — improve command group (bugs, feature, target)."""
+"""Otto CLI — improve command group (bugs, feature, target).
 
-import asyncio
-import os
-import secrets
-import subprocess
+Phase C deletion (tick 63): the legacy `_run_improve` / `_run_improve_locked`
+outer loops + their helpers are gone. The click subcommand bodies stay so
+the surface (`otto improve bugs|feature|target`) keeps responding, but the
+``--legacy`` flag is now a hard error pointing operators at the new
+``--i2p`` (default) pipeline. Pure helpers (`_render_results_section`,
+`_VERDICT_GLYPHS`, `_journey_verdict`, intent/option callbacks) are
+preserved because external tests still cover them and they remain useful
+for future renderers.
+"""
+
 import sys
-import time
 from pathlib import Path
 
 import click
@@ -16,8 +21,9 @@ from otto.theme import error_console
 
 
 # --------------------------------------------------------------------------- #
-# Report rendering helpers (pure — pulled out so they can be unit-tested
-# without spinning up the certify→fix loop)
+# Report rendering helpers (pure — kept post-Phase-C deletion because they
+# have direct unit tests in tests/test_improvement_report_*.py and remain
+# useful for any future report renderer wired to the new audit pipeline).
 # --------------------------------------------------------------------------- #
 
 
@@ -112,703 +118,19 @@ def _max_turns_option(
     return value
 
 
-def _apply_improver_agent_aliases(overrides: dict, *, resolved_split: bool) -> None:
-    """Map improve-native agent flags onto the implementation phase.
+def _exit_legacy_removed() -> None:
+    """Phase C: legacy improve loop is gone. Point the user at the new path.
 
-    Split improve has no initial build phase, so the code-changing agent is
-    stored as ``fix``. Agentic improve is a single main session, currently
-    stored as ``build`` for provider dispatch. Keep that implementation detail
-    out of the public CLI by accepting ``--improver-*`` in both modes.
+    Kept as a single helper so the three subcommand bodies all surface the
+    exact same migration message. The CLI is the only place an operator
+    sees this — the new ``--i2p`` path (now the default in
+    ``otto/config.py::default_pipeline``) covers every prior code path.
     """
-    target_prefix = "fix" if resolved_split else "build"
-    hidden_alias = "fix" if target_prefix == "build" else "build"
-    for field in ("provider", "model", "effort"):
-        improver_key = f"improver_{field}"
-        target_key = f"{target_prefix}_{field}"
-        alias_key = f"{hidden_alias}_{field}"
-        improver_value = overrides.get(improver_key)
-        target_value = overrides.get(target_key)
-        if improver_value and target_value and improver_value != target_value:
-            error_console.print(
-                "[error]"
-                f"--improver-{field} conflicts with --{target_prefix}-{field} "
-                "for the selected improve execution mode."
-                "[/error]"
-            )
-            sys.exit(2)
-        if improver_value:
-            overrides[target_key] = improver_value
-        if overrides.get(alias_key):
-            # Improve split starts at evaluation, and agentic improve is a
-            # single main session. Preserve backward compatibility by
-            # accepting old queued args, but do not surface no-op phase
-            # overrides in config output.
-            overrides[alias_key] = None
-
-
-def _exit_for_lock_busy(exc) -> None:
-    holder = exc.holder or {}
     error_console.print(
-        "[error]Another otto command is already running in this project.[/error]\n"
-        f"  Holder: pid={holder.get('pid', '?')} command={holder.get('command', '?')} "
-        f"started_at={holder.get('started_at', '?')} "
-        f"session={holder.get('session_id', '') or 'unknown'}\n"
-        "  Re-run with `--break-lock` only if you are sure the lock is stuck."
+        "[error]Legacy improve loop has been removed in Phase C. "
+        "Use --i2p (default) or pin --legacy in older versions.[/error]"
     )
     sys.exit(1)
-
-
-def _create_improve_branch(project_dir: Path) -> str:
-    """Create an improvement branch and switch to it. Returns branch name."""
-    from otto.merge.git_ops import try_current_branch
-
-    branch = f"improve/{time.strftime('%Y-%m-%d')}-{secrets.token_hex(3)}"
-    # Check if already on an improve branch
-    current = try_current_branch(project_dir) or ""
-    if current.startswith("improve/"):
-        return current  # already on an improve branch
-
-    # Create and switch to a unique per-run branch.
-    result = subprocess.run(
-        ["git", "checkout", "-b", branch],
-        cwd=project_dir, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
-        stdout = (result.stdout or "").strip()
-        error_console.print(
-            "[error]Failed to create improvement branch "
-            f"{branch}: {stderr or stdout or 'unknown git error'}[/error]"
-        )
-        sys.exit(1)
-
-    current_branch = try_current_branch(project_dir) or ""
-    if current_branch != branch:
-        error_console.print(
-            "[error]Failed to switch to improvement branch. "
-            f"Expected {branch}, got {current_branch or '(none)'}[/error]"
-        )
-        sys.exit(1)
-
-    return branch
-
-
-def _resolve_improve_certifier_mode(
-    *,
-    default_mode: str,
-    fast: bool = False,
-    standard: bool = False,
-    thorough: bool = False,
-) -> str:
-    from otto.config import resolve_certifier_mode
-
-    if sum(bool(x) for x in (fast, standard, thorough)) > 1:
-        error_console.print(
-            "[error]--fast, --standard, and --thorough are mutually exclusive.[/error]"
-        )
-        sys.exit(2)
-    cli_mode = "fast" if fast else ("standard" if standard else ("thorough" if thorough else None))
-    return resolve_certifier_mode(
-        {"certifier_mode": default_mode},
-        cli_mode=cli_mode,
-        allow_internal=True,
-    )
-
-
-def _resolve_feature_certifier_mode(focus: str | None) -> str:
-    """Pick the evaluator mode for `otto improve feature`.
-
-    Unfocused feature improvement is product discovery, so hillclimb is the
-    right evaluator. A focused feature request is different: the user has
-    already specified the feature, so Otto should verify that request like a
-    normal product contract instead of asking a product advisor to invent or
-    re-rank improvements.
-    """
-    return "standard" if str(focus or "").strip() else "hillclimb"
-
-
-def _run_improve(
-    project_dir: Path,
-    intent: str,
-    rounds: int,
-    focus: str | None,
-    certifier_mode: str,
-    command_label: str,
-    *,
-    subcommand: str,
-    target: str | None = None,
-    split: bool = False,
-    agentic: bool = False,
-    resume: bool = False,
-    resume_state=None,
-    force_cross_command_resume: bool = False,
-    in_worktree: bool = False,
-    break_lock: bool = False,
-    force: bool = False,
-    allow_dirty: bool = False,
-    cli_overrides: dict | None = None,
-) -> None:
-    """CLI wrapper: branch creation, display, and report around the shared loop.
-
-    ``subcommand`` is "bugs" | "feature" | "target" — written into the
-    checkpoint as ``command="improve.<subcommand>"`` so resuming preserves the
-    exact intent and the mismatch warning can fire if the user switches modes.
-    """
-    from otto.checkpoint import (
-        enforce_resume_available,
-        enforce_resume_command_match,
-        print_resume_status,
-        resolve_resume,
-    )
-    from otto.config import load_config
-
-    command_id = f"improve.{subcommand}"
-    try:
-        config = load_config(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
-    except (ConfigError, ValueError) as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-    if resume_state is None:
-        resume_state = resolve_resume(
-            project_dir,
-            resume,
-            expected_command=command_id,
-            force=force,
-            reject_incompatible=False,
-        )
-    if resume_state.fingerprint_mismatch and not force:
-        error_console.print(
-            "[error]Checkpoint fingerprint does not match the current code/prompt state.[/error]\n"
-            "  Pass `--force --resume` to override."
-        )
-        sys.exit(2)
-    enforce_resume_available(
-        resume_state,
-        resume_flag=resume,
-        expected_command=command_id,
-    )
-    enforce_resume_command_match(
-        resume_state,
-        command_id,
-        force_cross_command_resume=force_cross_command_resume,
-    )
-    print_resume_status(console, resume_state, resume, expected_command=command_id)
-
-    # --in-worktree creates an isolated worktree before branching.
-    if in_worktree:
-        if resume:
-            error_console.print(
-                "[error]--in-worktree is not compatible with --resume.[/error]\n"
-                "  cd into the existing worktree directly to resume."
-            )
-            sys.exit(2)
-        from otto.worktree import (
-            WorktreeAlreadyCheckedOut,
-            setup_worktree_for_atomic_cli,
-        )
-        worktree_slug_source = focus or target or intent
-        try:
-            wt_path, config = setup_worktree_for_atomic_cli(
-                project_dir=project_dir,
-                mode=f"improve-{subcommand}",
-                intent=intent,
-                config=config,
-                slug_source=worktree_slug_source,
-            )
-        except WorktreeAlreadyCheckedOut as exc:
-            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-            sys.exit(1)
-        except (RuntimeError, ValueError) as exc:
-            error_console.print(f"[error]Worktree setup failed: {rich_escape(str(exc))}[/error]")
-            sys.exit(1)
-        console.print(f"  [dim]Worktree:[/dim] [info]{wt_path}[/info]")
-        project_dir = wt_path
-
-    from otto import paths as _paths
-    try:
-        from otto.cli import _signal_interrupt_guard
-
-        with _signal_interrupt_guard():
-            with _paths.project_lock(project_dir, command_id, break_lock=break_lock):
-                run_id = resume_state.run_id or ""
-                if not run_id:
-                    run_id = os.environ.get("OTTO_RUN_ID", "").strip()
-                if not run_id:
-                    from otto.runs.registry import allocate_run_id
-                    run_id = allocate_run_id(project_dir)
-                _run_improve_locked(
-                    project_dir=project_dir,
-                    intent=intent,
-                    rounds=rounds,
-                    focus=focus,
-                    certifier_mode=certifier_mode,
-                    command_label=command_label,
-                    command_id=command_id,
-                    subcommand=subcommand,
-                    target=target,
-                    split=split,
-                    agentic=agentic,
-                    resume=resume,
-                    resume_state=resume_state,
-                    run_id=run_id,
-                    in_worktree=in_worktree,
-                    allow_dirty=allow_dirty,
-                    cli_overrides=cli_overrides or {},
-                )
-    except _paths.LockBreakError as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(1)
-    except _paths.LockBusy as exc:
-        _exit_for_lock_busy(exc)
-
-
-def _run_improve_locked(
-    *,
-    project_dir: Path,
-    intent: str,
-    rounds: int,
-    focus: str | None,
-    certifier_mode: str,
-    command_label: str,
-    command_id: str,
-    subcommand: str,
-    target: str | None,
-    split: bool,
-    agentic: bool,
-    resume: bool,
-    resume_state,
-    run_id: str,
-    in_worktree: bool = False,
-    allow_dirty: bool = False,
-    cli_overrides: dict | None = None,
-) -> None:
-    from otto import paths as _paths
-    from otto.cli import (
-        _load_config_or_exit,
-        _print_config_banner,
-        _record_cli_override,
-        _record_phase_agent_cli_overrides,
-    )
-    from otto.config import ensure_safe_repo_state, get_max_rounds, get_max_turns_per_call
-    from otto.pipeline import build_agentic_v3, run_certify_fix_loop
-
-    config_path = project_dir / "otto.yaml"
-    config = _load_config_or_exit(config_path)
-    resume_rounds = getattr(resume_state, "max_rounds", 0) or 0
-    if rounds is not None:
-        resolved_rounds = rounds
-    elif resume_state.resumed and resume_rounds:
-        resolved_rounds = resume_rounds
-    else:
-        resolved_rounds = get_max_rounds(config)
-    if split and agentic:
-        error_console.print("[error]--split and --agentic are mutually exclusive.[/error]")
-        sys.exit(2)
-    if split:
-        resolved_split = True
-    elif agentic:
-        resolved_split = False
-    else:
-        resolved_split = bool(config.get("split_mode"))
-    if resume_state.resumed and resume_state.split_mode is not None:
-        if split and resume_state.split_mode is False:
-            error_console.print("[error]Cannot change an agentic checkpoint to split mode on resume.[/error]")
-            sys.exit(2)
-        if agentic and resume_state.split_mode is True:
-            error_console.print("[error]Cannot change a split checkpoint to agentic mode on resume.[/error]")
-            sys.exit(2)
-        resolved_split = resume_state.split_mode
-    if resume_state.resumed and not focus and getattr(resume_state, "focus", ""):
-        focus = resume_state.focus
-    if (
-        resume_state.resumed
-        and not (cli_overrides or {}).get("certifier_mode_explicit")
-        and getattr(resume_state, "certifier_mode", "")
-        and subcommand == "bugs"
-    ):
-        certifier_mode = resume_state.certifier_mode
-
-    pre_branch_allow_dirty = bool(allow_dirty or config.get("allow_dirty_repo"))
-    if not resume_state.resumed:
-        try:
-            ensure_safe_repo_state(project_dir, allow_dirty=pre_branch_allow_dirty)
-        except ConfigError as exc:
-            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-            sys.exit(2)
-
-    if in_worktree:
-        from otto.branching import current_branch as _cb
-
-        branch = _cb(project_dir)
-    else:
-        branch = _create_improve_branch(project_dir)
-    mode_label = "split" if resolved_split else "agentic"
-    console.print(f"\n  [bold]{command_label}[/bold] ({mode_label}) — branch: [info]{branch}[/info]")
-    if focus:
-        console.print(f"  Focus: {rich_escape(focus)}")
-    if target:
-        console.print(f"  Target: {rich_escape(target)}")
-    console.print(f"  Rounds: up to {resolved_rounds}")
-    console.print()
-
-    config["max_certify_rounds"] = resolved_rounds
-    config["split_mode"] = resolved_split
-    config["certifier_mode"] = certifier_mode
-
-    # Apply CLI overrides to the loaded config.
-    overrides = dict(cli_overrides or {})
-    _apply_improver_agent_aliases(overrides, resolved_split=resolved_split)
-    config["_agent_label_overrides"] = (
-        {"certifier": "evaluator", "fix": "improver"}
-        if resolved_split
-        else {"build": "improver"}
-    )
-    config["_agent_types_for_banner"] = (
-        ("certifier", "fix") if resolved_split else ("build",)
-    )
-    sources: dict[str, str] = {}
-    if rounds is not None:
-        sources["max_certify_rounds"] = "--rounds"
-    elif resume_state.resumed and resume_rounds:
-        sources["max_certify_rounds"] = "checkpoint"
-    if (
-        resume_state.resumed
-        and not overrides.get("certifier_mode_explicit")
-        and getattr(resume_state, "certifier_mode", "")
-        and subcommand == "bugs"
-    ):
-        sources["certifier_mode"] = "checkpoint"
-    if overrides.get("budget") is not None:
-        config["run_budget_seconds"] = overrides["budget"]
-        sources["run_budget_seconds"] = "--budget"
-    if overrides.get("max_turns") is not None:
-        config["max_turns_per_call"] = overrides["max_turns"]
-        sources["max_turns_per_call"] = "--max-turns"
-    if overrides.get("model"):
-        config["model"] = overrides["model"]
-        sources["model"] = "--model"
-        _record_cli_override(config, "model", overrides["model"])
-    if overrides.get("provider"):
-        config["provider"] = overrides["provider"]
-        sources["provider"] = "--provider"
-        _record_cli_override(config, "provider", overrides["provider"])
-    if overrides.get("effort"):
-        config["effort"] = overrides["effort"]
-        sources["effort"] = "--effort"
-        _record_cli_override(config, "effort", overrides["effort"])
-    if split:
-        sources["split_mode"] = "--split"
-    elif agentic:
-        sources["split_mode"] = "--agentic"
-    elif resume_state.resumed and resume_state.split_mode is not None:
-        sources["split_mode"] = "checkpoint"
-    _record_phase_agent_cli_overrides(
-        config=config,
-        sources=sources,
-        values={
-            "build": {
-                "provider": overrides.get("build_provider"),
-                "model": overrides.get("build_model"),
-                "effort": overrides.get("build_effort"),
-            },
-            "certifier": {
-                "provider": overrides.get("certifier_provider"),
-                "model": overrides.get("certifier_model"),
-                "effort": overrides.get("certifier_effort"),
-            },
-            "fix": {
-                "provider": overrides.get("fix_provider"),
-                "model": overrides.get("fix_model"),
-                "effort": overrides.get("fix_effort"),
-            },
-        },
-    )
-    if overrides.get("strict"):
-        config["strict_mode"] = True
-        sources["strict_mode"] = "--strict"
-    if allow_dirty:
-        config["allow_dirty_repo"] = True
-        sources["allow_dirty_repo"] = "--allow-dirty"
-    if overrides.get("debug_unredacted"):
-        config["debug_unredacted"] = True
-        sources["debug_unredacted"] = "--debug-unredacted"
-    config["_verbose"] = bool(overrides.get("verbose"))
-    try:
-        from otto.config import resolve_intent_provenance
-
-        intent_meta = resolve_intent_provenance(project_dir)
-    except Exception:
-        intent_meta = {}
-    config["_intent_source"] = intent_meta.get("source") or "cli-argument"
-    config["_intent_fallback_reason"] = intent_meta.get("fallback_reason") or ""
-    try:
-        config["max_certify_rounds"] = get_max_rounds(config)
-        config["max_turns_per_call"] = get_max_turns_per_call(config)
-    except Exception as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-    _print_config_banner(console, config, sources, config_path)
-    if overrides.get("debug_unredacted"):
-        console.print("  [bold red]UNREDACTED LOGS — do not share[/bold red]")
-    try:
-        ensure_safe_repo_state(
-            project_dir,
-            allow_dirty=bool(resume_state.resumed or allow_dirty or config.get("allow_dirty_repo")),
-        )
-    except ConfigError as exc:
-        if resume_state.run_id:
-            try:
-                from otto.checkpoint import load_checkpoint, write_checkpoint
-                from otto.observability import dirty_worktree_files
-
-                prior_cp = load_checkpoint(project_dir, run_id=resume_state.run_id) or {}
-                write_checkpoint(
-                    project_dir,
-                    run_id=resume_state.run_id,
-                    command=prior_cp.get("command", command_id) or command_id,
-                    certifier_mode=prior_cp.get("certifier_mode", certifier_mode) or certifier_mode,
-                    prompt_mode=prior_cp.get("prompt_mode", "improve") or "improve",
-                    focus=prior_cp.get("focus"),
-                    target=prior_cp.get("target"),
-                    max_rounds=int(prior_cp.get("max_rounds", resolved_rounds) or resolved_rounds),
-                    status=prior_cp.get("status", "paused") or "paused",
-                    phase=prior_cp.get("phase", "") or "",
-                    split_mode=prior_cp.get("split_mode"),
-                    session_id=prior_cp.get("agent_session_id", "") or "",
-                    current_round=int(prior_cp.get("current_round", 0) or 0),
-                    total_cost=float(prior_cp.get("total_cost", 0.0) or 0.0),
-                    total_duration=float(prior_cp.get("total_duration", 0.0) or 0.0),
-                    rounds=list(prior_cp.get("rounds", []) or []),
-                    child_session_ids=list(prior_cp.get("child_session_ids", []) or []),
-                    intent=prior_cp.get("intent"),
-                    spec_path=prior_cp.get("spec_path"),
-                    spec_hash=prior_cp.get("spec_hash"),
-                    spec_version=int(prior_cp.get("spec_version", 0) or 0),
-                    spec_cost=float(prior_cp.get("spec_cost", 0.0) or 0.0),
-                    dirty_files=dirty_worktree_files(project_dir),
-                )
-            except Exception:
-                pass
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-
-    from otto.budget import RunBudget
-    budget = RunBudget.start_from(
-        config,
-        session_started_at=resume_state.session_started_at or None,
-    )
-
-    # Pass target to config for prompt filling
-    if target:
-        config["_target"] = target
-
-    # Build the improve intent with focus/target context
-    improve_intent = intent
-    if focus:
-        improve_intent += f"\n\n## Improvement Focus\n{focus}"
-    if target:
-        improve_intent += f"\n\n## Target\n{target}"
-
-    start = time.time()
-    try:
-        if resolved_split:
-            # System-driven: Python controls certify→fix loop
-            result = asyncio.run(run_certify_fix_loop(
-                intent=intent,
-                project_dir=project_dir,
-                config=config,
-                certifier_mode=certifier_mode,
-                focus=focus,
-                target=target,
-                skip_initial_build=True,
-                start_round=resume_state.start_round,
-                resume_cost=resume_state.total_cost,
-                resume_duration=resume_state.total_duration,
-                resume_rounds=resume_state.rounds,
-                resume_session_id=resume_state.agent_session_id or None,
-                command=command_id,
-                session_id=resume_state.run_id or run_id,
-                budget=budget,
-                strict_mode=bool(config.get("strict_mode")),
-                verbose=bool(config.get("_verbose")),
-            ))
-        else:
-            # Agent-driven: one session, agent drives certify→fix loop
-            result = asyncio.run(build_agentic_v3(
-                improve_intent,
-                project_dir,
-                config,
-                certifier_mode=certifier_mode,
-                prompt_mode="improve",
-                resume_session_id=resume_state.agent_session_id or None,
-                command=command_id,
-                run_id=resume_state.run_id or run_id,
-                prior_total_cost=resume_state.total_cost,
-                prior_total_duration=resume_state.total_duration,
-                budget=budget,
-                strict_mode=bool(config.get("strict_mode")),
-                verbose=bool(config.get("_verbose")),
-            ))
-    except KeyboardInterrupt:
-        console.print("\n  [yellow]Paused. Run with --resume to continue.[/yellow]")
-        sys.exit(0)
-    except Exception as e:
-        error_console.print(f"[error]{command_label} failed: {rich_escape(str(e))}[/error]")
-        sys.exit(1)
-
-    duration = result.total_duration or (time.time() - start)
-    default_branch = str(config.get("default_branch") or "main")
-
-    # W3-IMPORTANT-2: build-journal.md must exist after EVERY improve so
-    # operators always have the round-by-round index documented in CLAUDE.md.
-    # The agent-driven path (build_agentic_v3 with prompt_mode="improve")
-    # never calls append_journal — only the system-driven run_certify_fix_loop
-    # does. Even the system path skips the journal when the loop bails on
-    # first-round PASS without entering the fix branch. Seed/append a final
-    # row here so single-round PASS, multi-round PASS, and FAIL all leave a
-    # journal behind.
-    try:
-        from otto.journal import append_journal
-        verdict = "PASS" if result.passed else "FAIL"
-        rounds = result.rounds or 1
-        append_journal(
-            project_dir,
-            f"round-{rounds:03d}",
-            f"{command_label.lower()} complete",
-            verdict,
-            float(result.total_cost or 0.0),
-            session_id=result.build_id,
-        )
-    except OSError:
-        # Journal is best-effort; never fail the improve over a write error.
-        pass
-
-    # --- Write report ---
-    report_lines = [
-        f"# {command_label} Report",
-        f"> {time.strftime('%Y-%m-%d %H:%M')} | "
-        f"{result.rounds} rounds | ${result.total_cost:.2f} | {duration / 60:.1f} min",
-        "",
-        f"**Branch:** {branch}",
-        f"**Intent:** {intent[:200]}",
-        "",
-    ]
-    if focus:
-        report_lines.append(f"**Focus:** {focus}")
-        report_lines.append("")
-    if target:
-        report_lines.append(f"**Target:** {target}")
-        report_lines.append("")
-
-    report_lines.extend(_render_results_section(result.journeys))
-
-    report_lines.append("## Summary")
-    report_lines.append(f"- **Result:** {'PASSED' if result.passed else 'FAILED'}")
-    # W3-IMPORTANT-4: WARN-level certifier observations are stored with
-    # `passed=True` (so they don't fail the run) but they are NOT met
-    # requirements. The prior `Stories: 5/5` line counted WARNs in the
-    # numerator, contradicting the certifier's narrative `(3/5)`. Split
-    # the count by verdict so operators see the real shape of the result.
-    pass_count = sum(1 for j in result.journeys if str(j.get("verdict") or "").upper() == "PASS")
-    warn_count = sum(1 for j in result.journeys if str(j.get("verdict") or "").upper() == "WARN")
-    fail_count = sum(1 for j in result.journeys if str(j.get("verdict") or "").upper() in {"FAIL", "FLAG_FOR_HUMAN"})
-    if warn_count or (pass_count + warn_count + fail_count > 0):
-        report_lines.append(
-            f"- **Stories:** {pass_count} PASS / {warn_count} WARN / {fail_count} FAIL"
-        )
-    else:
-        # Fallback for legacy/empty journeys: keep the old aggregate ratio.
-        report_lines.append(
-            f"- **Stories:** {result.tasks_passed}/{result.tasks_passed + result.tasks_failed}"
-        )
-    report_lines.append(f"- **Rounds:** {result.rounds}")
-    report_lines.append(f"- **Cost:** ${result.total_cost:.2f}")
-    report_lines.append(f"- **Duration:** {duration / 60:.1f} min")
-    report_lines.append("")
-    report_lines.append(f"Review: `git diff {default_branch}...{branch}`")
-    report_lines.append(f"Merge: `git merge {branch}`")
-    report_lines.append("")
-
-    # Under the new layout the report lives inside the improve session dir.
-    report_path = _paths.improve_dir(project_dir, result.build_id) / "improvement-report.md"
-    report_text = "\n".join(report_lines)
-    try:
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(report_text)
-    except OSError as exc:
-        console.print()
-        console.print(f"  [bold]{command_label} complete[/bold]")
-        console.print(f"  Rounds: {result.rounds}")
-        console.print(f"  Cost: ${result.total_cost:.2f}")
-        console.print(f"  Duration: {duration / 60:.1f} min")
-        console.print(f"  [yellow]Warning: could not write report file {report_path}: {exc}[/yellow]")
-        console.print()
-        sys.exit(0 if result.passed else 1)
-
-    # Per-run manifest. The canonical record always lives at the session root;
-    # queue-backed runs also mirror it into otto_logs/queue/<task-id>/.
-    try:
-        from otto import paths as _paths
-        from otto.manifest import (
-            QUEUE_TASK_ENV,
-            current_head_sha,
-            make_manifest,
-            write_manifest,
-        )
-        session_dir_path = _paths.session_dir(project_dir, result.build_id)
-        certify_dir_path = _paths.certify_dir(project_dir, result.build_id)
-        manifest = make_manifest(
-            command="improve",
-            argv=list(sys.argv[1:]),
-            queue_task_id=os.environ.get(QUEUE_TASK_ENV),
-            run_id=result.build_id,
-            branch=branch,
-            checkpoint_path=session_dir_path / "checkpoint.json",
-            proof_of_work_path=certify_dir_path / "proof-of-work.json",
-            cost_usd=result.total_cost,
-            duration_s=duration,
-            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start)),
-            head_sha=None,  # filled below
-            resolved_intent=intent,
-            focus=focus,
-            target=target,
-            exit_status="success" if result.passed else "failure",
-        )
-        manifest.head_sha = current_head_sha(project_dir)
-        write_manifest(manifest, project_dir=project_dir, fallback_dir=session_dir_path)
-    except Exception as exc:
-        error_console.print(f"[yellow]warning: manifest write failed: {exc}[/yellow]")
-
-    # --- Summary ---
-    console.print()
-    console.print(f"  [bold]{command_label} complete[/bold]")
-    if result.journeys:
-        # Mirror the on-disk report tier: PASS = success, WARN = warning,
-        # everything else = danger. Plain-text label included so console
-        # screenshots are unambiguous even on terminals without color.
-        _CONSOLE_GLYPHS: dict[str, tuple[str, str]] = {
-            "PASS": ("[success]\u2713[/success]", "PASS"),
-            "WARN": ("[yellow]![/yellow]", "WARN"),
-            "FAIL": ("[red]\u2717[/red]", "FAIL"),
-            "SKIPPED": ("[muted]\u2013[/muted]", "SKIP"),
-            "FLAG_FOR_HUMAN": ("[yellow]\u26a0[/yellow]", "FLAG"),
-        }
-        for j in result.journeys:
-            verdict = _journey_verdict(j)
-            icon, label = _CONSOLE_GLYPHS.get(verdict, ("?", verdict))
-            console.print(f"    {icon} [{label}] {rich_escape(j.get('name', ''))}")
-    console.print(f"  Rounds: {result.rounds}")
-    console.print(f"  Cost: ${result.total_cost:.2f}")
-    console.print(f"  Duration: {duration / 60:.1f} min")
-    console.print(f"  Report: {report_path}")
-    console.print()
-    console.print(f"  Review: [info]git diff {default_branch}...{branch}[/info]")
-    console.print(f"  Merge:  [info]git merge {branch}[/info]")
-    console.print()
-
-    # Exit code mirrors `otto build` — non-zero when the run didn't reach
-    # its goal so CI/wrappers can detect failure.
-    sys.exit(0 if result.passed else 1)
 
 
 def _require_intent(
@@ -867,145 +189,170 @@ def register_improve_commands(main: click.Group) -> None:
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
     @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
-    @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
-    @click.option("--agentic", is_flag=True, help="One provider session owns certify and fix")
-    @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    @click.option("--split", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--agentic", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--resume", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option(
         "--force-cross-command-resume",
         is_flag=True,
-        help="Allow --resume to reuse a checkpoint written by a different otto command",
+        help="(legacy-only; ignored in --i2p mode)",
     )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
-                  help="Run in an isolated git worktree (./.worktrees/improve-bugs-<slug>-<date>/)")
+                  help="(legacy-only; ignored in --i2p mode)")
     @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
     @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
-    @click.option("--improver-provider", default=None, help="Override provider for the improver/fixer agent")
-    @click.option("--improver-model", default=None, help="Override model for the improver/fixer agent")
-    @click.option("--improver-effort", default=None, help="Override effort for the improver/fixer agent")
+    @click.option("--improver-provider", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--improver-model", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--improver-effort", default=None, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--build-provider", default=None, hidden=True)
     @click.option("--build-model", default=None, hidden=True)
     @click.option("--build-effort", default=None, hidden=True)
-    @click.option("--certifier-provider", default=None, help="Override provider for the evaluator/certifier phase")
-    @click.option("--certifier-model", default=None, help="Override model for the evaluator/certifier phase")
-    @click.option("--certifier-effort", default=None, help="Override effort for the evaluator/certifier phase")
+    @click.option("--certifier-provider", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--certifier-model", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--certifier-effort", default=None, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--fix-provider", default=None, hidden=True)
     @click.option("--fix-model", default=None, hidden=True)
     @click.option("--fix-effort", default=None, hidden=True)
-    @click.option("--fast", is_flag=True, help="Downgrade bug certification to fast mode")
-    @click.option("--standard", is_flag=True, help="Downgrade bug certification to standard mode")
-    @click.option("--thorough", is_flag=True, help="Bug certification depth (default)")
-    @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
+    @click.option("--fast", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--standard", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--thorough", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--strict", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
-    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
+    @click.option("--allow-dirty", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
-    def bugs(focus, rounds, split, agentic, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, improver_provider, improver_model, improver_effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, fast, standard, thorough, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
+    @click.option("--force", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option(
+        "--i2p",
+        is_flag=True,
+        help=(
+            "Force-route through the new intent-to-product stack "
+            "(brownfield-compile + audit/repair loop). Overrides otto.yaml "
+            "default_pipeline. Phase B.3 default."
+        ),
+    )
+    @click.option(
+        "--legacy",
+        is_flag=True,
+        help=(
+            "REMOVED in Phase C — passing this flag now exits with an "
+            "error. Use --i2p (default) instead."
+        ),
+    )
+    def bugs(focus, rounds, split, agentic, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, improver_provider, improver_model, improver_effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, fast, standard, thorough, strict, verbose, debug_unredacted, allow_dirty, break_lock, force, i2p, legacy):
         """Find and fix bugs, edge cases, and error handling gaps.
 
-        One agent certifies, reads findings, fixes, and re-certifies
-        autonomously. Use --split for system-controlled loop instead.
+        Routes through the new intent-to-product stack by default. Pass
+        ``--legacy`` to surface the Phase C migration error message.
 
         \b
         Examples:
             otto improve bugs                  # find and fix all bugs
             otto improve bugs "error handling" # focus on error handling
             otto improve bugs -n 5             # 5 rounds
-            otto improve bugs --split          # system-controlled loop
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
         intent = _require_intent(project_dir, fallback=focus, fallback_label="focus")
-        _run_improve(
+
+        from otto.cli_run import resolve_pipeline_choice
+        pipeline_choice = resolve_pipeline_choice(
+            i2p_flag=i2p,
+            legacy_flag=legacy,
             project_dir=project_dir,
+        )
+        if pipeline_choice == "legacy":
+            _exit_legacy_removed()
+        # i2p path
+        _ignored = [
+            name for name, val in (
+                ("--split", split),
+                ("--agentic", agentic),
+                ("--resume", resume),
+                ("--in-worktree", in_worktree),
+                ("--fast", fast),
+                ("--standard", standard),
+                ("--thorough", thorough),
+                ("--strict", strict),
+                ("--force", force),
+            ) if val
+        ]
+        if _ignored:
+            console.print(
+                "  [yellow]i2p mode: these flags are ignored — pass them to "
+                f"`otto run` for full pipeline control: {', '.join(_ignored)}[/yellow]"
+            )
+        from otto.cli_run import orchestrate_improve
+        orchestrate_improve(
             intent=intent,
+            project_kind="webapp",
+            break_lock=break_lock,
+            project_dir=project_dir,
             rounds=rounds,
             focus=focus,
-            certifier_mode=_resolve_improve_certifier_mode(
-                default_mode="thorough",
-                fast=fast,
-                standard=standard,
-                thorough=thorough,
-            ),
-            command_label="Bug fixing",
-            subcommand="bugs",
-            split=split,
-            agentic=agentic,
-            resume=resume,
-            force_cross_command_resume=force_cross_command_resume,
-            in_worktree=in_worktree,
-            break_lock=break_lock,
-            force=force,
-            allow_dirty=allow_dirty,
-            cli_overrides={
-                "budget": budget,
-                "max_turns": max_turns,
-                "model": model,
-                "provider": provider,
-                "effort": effort,
-                "improver_provider": improver_provider,
-                "improver_model": improver_model,
-                "improver_effort": improver_effort,
-                "build_provider": build_provider,
-                "build_model": build_model,
-                "build_effort": build_effort,
-                "certifier_provider": certifier_provider,
-                "certifier_model": certifier_model,
-                "certifier_effort": certifier_effort,
-                "fix_provider": fix_provider,
-                "fix_model": fix_model,
-                "fix_effort": fix_effort,
-                "strict": strict,
-                "verbose": verbose,
-                "debug_unredacted": debug_unredacted,
-                "certifier_mode_explicit": bool(fast or standard or thorough),
-            },
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
     @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
-    @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
-    @click.option("--agentic", is_flag=True, help="One provider session owns certify and fix")
-    @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    @click.option("--split", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--agentic", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--resume", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option(
         "--force-cross-command-resume",
         is_flag=True,
-        help="Allow --resume to reuse a checkpoint written by a different otto command",
+        help="(legacy-only; ignored in --i2p mode)",
     )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
-                  help="Run in an isolated git worktree (./.worktrees/improve-feature-<slug>-<date>/)")
+                  help="(legacy-only; ignored in --i2p mode)")
     @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
     @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
-    @click.option("--improver-provider", default=None, help="Override provider for the improver/fixer agent")
-    @click.option("--improver-model", default=None, help="Override model for the improver/fixer agent")
-    @click.option("--improver-effort", default=None, help="Override effort for the improver/fixer agent")
+    @click.option("--improver-provider", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--improver-model", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--improver-effort", default=None, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--build-provider", default=None, hidden=True)
     @click.option("--build-model", default=None, hidden=True)
     @click.option("--build-effort", default=None, hidden=True)
-    @click.option("--certifier-provider", default=None, help="Override provider for the evaluator/certifier phase")
-    @click.option("--certifier-model", default=None, help="Override model for the evaluator/certifier phase")
-    @click.option("--certifier-effort", default=None, help="Override effort for the evaluator/certifier phase")
+    @click.option("--certifier-provider", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--certifier-model", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--certifier-effort", default=None, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--fix-provider", default=None, hidden=True)
     @click.option("--fix-model", default=None, hidden=True)
     @click.option("--fix-effort", default=None, hidden=True)
-    @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
+    @click.option("--strict", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
-    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
+    @click.option("--allow-dirty", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
-    def feature(focus, rounds, split, agentic, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, improver_provider, improver_model, improver_effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
+    @click.option("--force", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option(
+        "--i2p",
+        is_flag=True,
+        help=(
+            "Force-route through the new intent-to-product stack "
+            "(brownfield-compile + audit/repair loop). Overrides "
+            "otto.yaml default_pipeline. Phase B.3 default."
+        ),
+    )
+    @click.option(
+        "--legacy",
+        is_flag=True,
+        help=(
+            "REMOVED in Phase C — passing this flag now exits with an "
+            "error. Use --i2p (default) instead."
+        ),
+    )
+    def feature(focus, rounds, split, agentic, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, improver_provider, improver_model, improver_effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, allow_dirty, break_lock, force, i2p, legacy):
         """Suggest and implement product improvements.
 
-        One agent evaluates the product, identifies improvements, implements
-        them, and re-evaluates. Use --split for system-controlled loop.
+        Routes through the new intent-to-product stack by default. Pass
+        ``--legacy`` to surface the Phase C migration error message.
 
         \b
         Examples:
@@ -1016,87 +363,98 @@ def register_improve_commands(main: click.Group) -> None:
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
         intent = _require_intent(project_dir, fallback=focus, fallback_label="focus")
-        _run_improve(
+
+        from otto.cli_run import resolve_pipeline_choice
+        pipeline_choice = resolve_pipeline_choice(
+            i2p_flag=i2p,
+            legacy_flag=legacy,
             project_dir=project_dir,
+        )
+        if pipeline_choice == "legacy":
+            _exit_legacy_removed()
+        _ignored = [
+            name for name, val in (
+                ("--split", split),
+                ("--agentic", agentic),
+                ("--resume", resume),
+                ("--in-worktree", in_worktree),
+                ("--strict", strict),
+                ("--force", force),
+            ) if val
+        ]
+        if _ignored:
+            console.print(
+                "  [yellow]i2p mode: these flags are ignored — pass them to "
+                f"`otto run` for full pipeline control: {', '.join(_ignored)}[/yellow]"
+            )
+        from otto.cli_run import orchestrate_improve
+        orchestrate_improve(
             intent=intent,
+            project_kind="webapp",
+            break_lock=break_lock,
+            project_dir=project_dir,
             rounds=rounds,
             focus=focus,
-            certifier_mode=_resolve_feature_certifier_mode(focus),
-            command_label="Feature improvement",
-            subcommand="feature",
-            split=split,
-            agentic=agentic,
-            resume=resume,
-            force_cross_command_resume=force_cross_command_resume,
-            in_worktree=in_worktree,
-            break_lock=break_lock,
-            force=force,
-            allow_dirty=allow_dirty,
-            cli_overrides={
-                "budget": budget,
-                "max_turns": max_turns,
-                "model": model,
-                "provider": provider,
-                "effort": effort,
-                "improver_provider": improver_provider,
-                "improver_model": improver_model,
-                "improver_effort": improver_effort,
-                "build_provider": build_provider,
-                "build_model": build_model,
-                "build_effort": build_effort,
-                "certifier_provider": certifier_provider,
-                "certifier_model": certifier_model,
-                "certifier_effort": certifier_effort,
-                "fix_provider": fix_provider,
-                "fix_model": fix_model,
-                "fix_effort": fix_effort,
-                "strict": strict,
-                "verbose": verbose,
-                "debug_unredacted": debug_unredacted,
-            },
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("goal", required=False)
     @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
-    @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
-    @click.option("--agentic", is_flag=True, help="One provider session owns certify and fix")
-    @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    @click.option("--split", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--agentic", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--resume", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option(
         "--force-cross-command-resume",
         is_flag=True,
-        help="Allow --resume to reuse a checkpoint written by a different otto command",
+        help="(legacy-only; ignored in --i2p mode)",
     )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
-                  help="Run in an isolated git worktree (./.worktrees/improve-target-<slug>-<date>/)")
+                  help="(legacy-only; ignored in --i2p mode)")
     @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
     @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
-    @click.option("--improver-provider", default=None, help="Override provider for the improver/fixer agent")
-    @click.option("--improver-model", default=None, help="Override model for the improver/fixer agent")
-    @click.option("--improver-effort", default=None, help="Override effort for the improver/fixer agent")
+    @click.option("--improver-provider", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--improver-model", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--improver-effort", default=None, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--build-provider", default=None, hidden=True)
     @click.option("--build-model", default=None, hidden=True)
     @click.option("--build-effort", default=None, hidden=True)
-    @click.option("--certifier-provider", default=None, help="Override provider for the evaluator/certifier phase")
-    @click.option("--certifier-model", default=None, help="Override model for the evaluator/certifier phase")
-    @click.option("--certifier-effort", default=None, help="Override effort for the evaluator/certifier phase")
+    @click.option("--certifier-provider", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--certifier-model", default=None, help="(legacy-only; ignored in --i2p mode)")
+    @click.option("--certifier-effort", default=None, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--fix-provider", default=None, hidden=True)
     @click.option("--fix-model", default=None, hidden=True)
     @click.option("--fix-effort", default=None, hidden=True)
-    @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
+    @click.option("--strict", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
-    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
+    @click.option("--allow-dirty", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
-    def target(goal, rounds, split, agentic, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, improver_provider, improver_model, improver_effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
+    @click.option("--force", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
+    @click.option(
+        "--i2p",
+        is_flag=True,
+        help=(
+            "Force-route through the new intent-to-product stack "
+            "(brownfield-compile + audit/repair loop). Overrides "
+            "otto.yaml default_pipeline. Phase B.3 default."
+        ),
+    )
+    @click.option(
+        "--legacy",
+        is_flag=True,
+        help=(
+            "REMOVED in Phase C — passing this flag now exits with an "
+            "error. Use --i2p (default) instead."
+        ),
+    )
+    def target(goal, rounds, split, agentic, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, improver_provider, improver_model, improver_effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, allow_dirty, break_lock, force, i2p, legacy):
         """Optimize toward a measurable target.
 
-        Measures a metric, compares to the target, and iterates until met.
-        Use --split for system-controlled loop.
+        Routes through the new intent-to-product stack by default. Pass
+        ``--legacy`` to surface the Phase C migration error message.
 
         \b
         Examples:
@@ -1107,99 +465,39 @@ def register_improve_commands(main: click.Group) -> None:
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
-        from otto.checkpoint import (
-            enforce_resume_available,
-            enforce_resume_command_match,
-            resolve_resume,
-        )
 
-        resume_state = resolve_resume(
-            project_dir,
-            resume,
-            expected_command="improve.target",
-            force=force,
-            reject_incompatible=False,
-        )
-        if resume_state.fingerprint_mismatch and not force:
-            error_console.print(
-                "[error]Checkpoint fingerprint does not match the current code/prompt state.[/error]\n"
-                "  Pass `--force --resume` to override."
-            )
-            sys.exit(2)
-        enforce_resume_available(
-            resume_state,
-            resume_flag=resume,
-            expected_command="improve.target",
-        )
-        enforce_resume_command_match(
-            resume_state,
-            "improve.target",
-            force_cross_command_resume=force_cross_command_resume,
-        )
-        from otto.config import _normalize_intent
-
-        checkpoint_goal = _normalize_intent(resume_state.target or "")
-        requested_goal = _normalize_intent(goal or "")
-
-        if resume and resume_state.resumed:
-            if requested_goal:
-                if checkpoint_goal and requested_goal != checkpoint_goal:
-                    error_console.print(
-                        "[error]Checkpoint target does not match the requested goal. "
-                        "Resume without GOAL to inherit the checkpoint target, or run "
-                        "without --resume to start a new target-improvement run.[/error]"
-                    )
-                    sys.exit(2)
-            elif checkpoint_goal:
-                goal = checkpoint_goal
-
-        goal = _normalize_intent(goal or "")
-        if not goal:
-            error_console.print(
-                "[error]Goal cannot be empty. Provide a measurable target, or use "
-                "--resume to inherit it from an in-progress checkpoint.[/error]"
-            )
-            sys.exit(2)
-
-        intent = _require_intent(project_dir, fallback=goal, fallback_label="goal")
-        _run_improve(
+        from otto.cli_run import resolve_pipeline_choice
+        pipeline_choice = resolve_pipeline_choice(
+            i2p_flag=i2p,
+            legacy_flag=legacy,
             project_dir=project_dir,
-            intent=intent,
-            rounds=rounds,
-            focus=None,
-            certifier_mode="target",
-            command_label=f"Target: {goal}",
-            subcommand="target",
-            target=goal,
-            split=split,
-            agentic=agentic,
-            resume=resume,
-            resume_state=resume_state,
-            force_cross_command_resume=force_cross_command_resume,
-            in_worktree=in_worktree,
+        )
+        if pipeline_choice == "legacy":
+            _exit_legacy_removed()
+        _ignored = [
+            name for name, val in (
+                ("--split", split),
+                ("--agentic", agentic),
+                ("--resume", resume),
+                ("--in-worktree", in_worktree),
+                ("--strict", strict),
+                ("--force", force),
+            ) if val
+        ]
+        if _ignored:
+            console.print(
+                "  [yellow]i2p mode: these flags are ignored — pass them to "
+                f"`otto run` for full pipeline control: {', '.join(_ignored)}[/yellow]"
+            )
+        from otto.cli_run import orchestrate_improve
+        # `target` uses `goal` as the focus equivalent.
+        orchestrate_improve(
+            intent=_require_intent(
+                project_dir, fallback=goal, fallback_label="goal"
+            ),
+            project_kind="webapp",
             break_lock=break_lock,
-            force=force,
-            allow_dirty=allow_dirty,
-            cli_overrides={
-                "budget": budget,
-                "max_turns": max_turns,
-                "model": model,
-                "provider": provider,
-                "effort": effort,
-                "improver_provider": improver_provider,
-                "improver_model": improver_model,
-                "improver_effort": improver_effort,
-                "build_provider": build_provider,
-                "build_model": build_model,
-                "build_effort": build_effort,
-                "certifier_provider": certifier_provider,
-                "certifier_model": certifier_model,
-                "certifier_effort": certifier_effort,
-                "fix_provider": fix_provider,
-                "fix_model": fix_model,
-                "fix_effort": fix_effort,
-                "strict": strict,
-                "verbose": verbose,
-                "debug_unredacted": debug_unredacted,
-            },
+            project_dir=project_dir,
+            rounds=rounds,
+            focus=goal,
         )

@@ -46,7 +46,7 @@ from otto.build import (
     SliceStatus,
 )
 from otto.checks import Evidence, run_checks
-from otto.spec_compile import Slice, Spec
+from otto.spec_compile import Group, Spec
 from otto.spec_state import emit
 
 logger = logging.getLogger("otto.merge_queue")
@@ -123,31 +123,124 @@ def eligible_candidates(
     passing_ids: Iterable[str],
     landed_ids: Iterable[str],
     blocked_ids: Iterable[str] = (),
-) -> list[Slice]:
-    """Return slices that are merge candidates, in dep-topological FIFO order.
+) -> list[Group]:
+    """Return Groups that are merge candidates, in dep-topological FIFO order.
 
     Eligibility:
-        * slice.id is in `passing_ids` (build.py reported PASSING)
-        * slice.id is NOT in `landed_ids` (already landed)
-        * slice.id is NOT in `blocked_ids` (terminally failed merge)
-        * all of slice.deps are in `landed_ids`
+        * group.id is in `passing_ids` (build.py reported PASSING)
+        * group.id is NOT in `landed_ids` (already landed)
+        * group.id is NOT in `blocked_ids` (terminally failed merge)
+        * every dep in `group.dependencies` is in `landed_ids`
+          — deps may reference other Group ids OR Component ids
+            (research §2.6). The caller is responsible for passing a
+            `landed_ids` set that is the union of landed Groups +
+            landed Components, so that a Group can wait on a
+            Component to land first (and vice versa).
 
-    Ordering is the spec's slice declaration order, which is also the
-    natural FIFO order — earlier slices in the spec land first.
+    Ordering is the spec's group declaration order, which is also the
+    natural FIFO order — earlier groups in the spec land first.
+
+    Reads `group.dependencies` (canonical new-design name); the Group
+    dataclass exposes `.dependencies` as an alias for the legacy
+    `.deps` field, so callers that still set `Group(deps=[...])`
+    continue to work.
     """
     passing = set(passing_ids)
     landed = set(landed_ids)
     blocked = set(blocked_ids)
-    eligible: list[Slice] = []
-    for s in spec.slices:
+    eligible: list[Group] = []
+    for s in spec.groups:
         if s.id not in passing:
             continue
         if s.id in landed or s.id in blocked:
             continue
-        if not all(dep in landed for dep in (s.deps or [])):
+        if not all(dep in landed for dep in (s.dependencies or [])):
             continue
         eligible.append(s)
     return eligible
+
+
+# ---------------------------------------------------------------------------
+# A1c: Component eligibility (research §2.6) — Components dispatch like
+# Groups but produce no Feature verdict. Their merge-queue treatment is
+# identical to Groups: dep-topological FIFO, deps must be landed first.
+# Components and Groups can depend on each other.
+# ---------------------------------------------------------------------------
+
+
+def eligible_components(
+    spec: Spec,
+    *,
+    passing_ids: Iterable[str],
+    landed_ids: Iterable[str],
+    blocked_ids: Iterable[str] = (),
+) -> list:  # type: list[Component]; avoid forward-import circularity here
+    """Return Components that are merge candidates, in dep-topological FIFO order.
+
+    Eligibility mirrors `eligible_candidates` for Groups:
+        * component.id is in `passing_ids` (build.py reported PASSING)
+        * component.id is NOT in `landed_ids` (already landed)
+        * component.id is NOT in `blocked_ids` (terminally failed merge)
+        * all of component.dependencies are in `landed_ids`
+          (deps may include Group ids OR other Component ids;
+           landed_ids must be the union of landed Groups + Components
+           when the caller mixes both kinds)
+
+    Ordering is the spec's components declaration order. Components and
+    Groups land into the same target branch via the merge queue;
+    eligibility is computed independently but lands serialise through
+    the same git base.
+    """
+    passing = set(passing_ids)
+    landed = set(landed_ids)
+    blocked = set(blocked_ids)
+    eligible: list = []
+    for c in spec.components:
+        if c.id not in passing:
+            continue
+        if c.id in landed or c.id in blocked:
+            continue
+        if not all(dep in landed for dep in (c.dependencies or [])):
+            continue
+        eligible.append(c)
+    return eligible
+
+
+def _component_as_merge_slice(component: Any) -> Group:
+    """Adapt a Component to the Slice surface for the merge queue.
+
+    Mirrors `otto.build._component_as_slice`: owned_paths, dependencies,
+    and checks pass through verbatim so the conflict-repair flow (which
+    routes through `BuildAgentInput.slice` and `detect_scope_violations`)
+    pins repair edits to the Component's owned_paths just like a Group's.
+
+    Components have no user-facing tasks, so we synthesize a single task
+    line from the component's description / name to give the build agent
+    a concrete brief during repair.
+    """
+    description = getattr(component, "description", "") or component.name
+    return Group(
+        id=component.id,
+        title=component.name,
+        tasks=[description] if description else [],
+        deps=list(getattr(component, "dependencies", []) or []),
+        owned_paths=list(getattr(component, "owned_paths", []) or []),
+        checks=list(getattr(component, "checks", []) or []),
+    )
+
+
+def shared_paths_set(spec: Spec) -> set[str]:
+    """Return the spec's shared_paths as a set for quick membership checks
+    (research §2.6).
+
+    Files in `shared_paths` belong to no single Group/Component — every
+    dispatched agent may freely add or modify them. The merge queue
+    serialises lands across any Groups/Components that touched a
+    shared_path so that simultaneous edits don't collide; the actual
+    git serialisation happens transparently because lands are sequential
+    by design.
+    """
+    return set(spec.shared_paths or [])
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +259,7 @@ async def run_merge_queue(
     build_agent: BuildAgentCallable | None = None,
     budget: MergeBudget | None = None,
     shared_budget: BuildBudget | None = None,
-    branch_for_slice: Callable[[Slice], str] | None = None,
+    branch_for_slice: Callable[[Group], str] | None = None,
     git_runner: Callable[[list[str], Path], subprocess.CompletedProcess[str]] | None = None,
 ) -> MergeQueueResult:
     """Process all merge candidates from a BuildResult.
@@ -191,6 +284,13 @@ async def run_merge_queue(
     git = git_runner or _git
 
     passing_ids = list(build_result.passing_ids)
+    # A1c.3: Components participate in the same FIFO queue as Groups so
+    # their branches go through the same conflict-repair flow. We pull
+    # Component-passing ids from the BuildResult (older builds without
+    # `passing_component_ids` produce an empty list — back-compat).
+    passing_component_ids: list[str] = list(
+        getattr(build_result, "passing_component_ids", []) or []
+    )
     landed_ids: list[str] = []
     blocked_ids: list[str] = []
     redundant_ids: list[str] = []
@@ -205,9 +305,35 @@ async def run_merge_queue(
             landed_ids=landed_ids,
             blocked_ids=blocked_ids,
         )
-        if not eligible:
+        # A1c.3: Components are dispatched alongside Groups. Both share
+        # `landed_ids` and `blocked_ids` because Group<->Component cross
+        # deps reference the same flat id space.
+        eligible_comps = eligible_components(
+            spec,
+            passing_ids=passing_component_ids,
+            landed_ids=landed_ids,
+            blocked_ids=blocked_ids,
+        )
+        if not eligible and not eligible_comps:
             break
-        slice_obj = eligible[0]  # FIFO within eligible
+        # FIFO ordering: Groups first (preserves stable ordering for the
+        # existing slice-only tests), then Components. Cross-kind dep
+        # ordering is already enforced by eligibility — a Component that
+        # depends on a Group will simply not appear in `eligible_comps`
+        # until that Group has landed.
+        if eligible:
+            unit = eligible[0]
+            slice_obj = unit
+            unit_kind = "group"
+        else:
+            unit = eligible_comps[0]
+            # Adapt the Component to the Slice surface so the existing
+            # `_process_candidate` flow (and its conflict-repair path)
+            # works verbatim — Component.owned_paths / dependencies /
+            # checks pass through exactly like Groups (mirroring the
+            # build.py adapter `_component_as_slice`).
+            slice_obj = _component_as_merge_slice(unit)
+            unit_kind = "component"
         candidate = MergeCandidate(
             slice_id=slice_obj.id,
             branch=branch_for_slice(slice_obj),
@@ -218,7 +344,7 @@ async def run_merge_queue(
             session_dir,
             "slice.merge.started",
             slice_id=slice_obj.id,
-            detail=f"branch={candidate.branch} base={base_branch}",
+            detail=f"branch={candidate.branch} base={base_branch} kind={unit_kind}",
         )
         result = await _process_candidate(
             spec=spec,
@@ -281,7 +407,7 @@ async def run_merge_queue(
 async def _process_candidate(
     *,
     spec: Spec,
-    slice_obj: Slice,
+    slice_obj: Group,
     candidate: MergeCandidate,
     project_dir: Path,
     session_dir: Path,
@@ -773,8 +899,10 @@ __all__ = [
     "MergeResult",
     "MergeStatus",
     "eligible_candidates",
+    "eligible_components",
     "passing_slice_ids",
     "run_merge_queue",
+    "shared_paths_set",
 ]
 
 

@@ -40,7 +40,7 @@ from typing import Any, Literal
 
 from otto.spec_compile import (
     Amendment,
-    Slice,
+    Group,
     Spec,
     _iso_now,
     append_amendment,
@@ -132,7 +132,7 @@ def request_amendment(
         spec: Current Spec.
         actor: Who is making the request (e.g., build agent's slice id,
             or the literal string "user" for review-gate edits).
-        slice_id: Slice to amend. Must exist in `spec.slices`. For agent
+        slice_id: Slice to amend. Must exist in `spec.groups`. For agent
             requests, `actor` and `slice_id` should match (scope rule).
         changes: Mapping of field name → new value, restricted to
             SLICE_TIER_3_FIELDS. `checks` may only be a SUPERSET of the
@@ -150,7 +150,7 @@ def request_amendment(
         amended Spec with a new Amendment in its chain.
     """
     # ---- find the slice ----
-    target = next((s for s in spec.slices if s.id == slice_id), None)
+    target = next((s for s in spec.groups if s.id == slice_id), None)
     if target is None:
         return _reject("unknown_slice", f"slice {slice_id!r} not found in spec")
 
@@ -209,8 +209,12 @@ def request_amendment(
     if new_target == target:
         return _reject("no_change", "no field changed")
 
-    new_slices = [new_target if s.id == slice_id else s for s in spec.slices]
-    spec_after = dataclasses.replace(spec, slices=new_slices)
+    new_groups = [new_target if s.id == slice_id else s for s in spec.groups]
+    # `dataclasses.replace` uses the canonical field name (`groups`), not the
+    # `slices` back-compat property — passing `slices=` would silently no-op
+    # because `groups=` from the original spec already takes precedence in
+    # `Spec.__init__`'s alias-resolution branch.
+    spec_after = dataclasses.replace(spec, groups=new_groups)
 
     # ---- chain extension ----
     prior_hash = spec_content_sha256(spec)
@@ -377,12 +381,12 @@ def _is_check_superset(new_checks: Any, current_checks: list) -> bool:  # type: 
     return True
 
 
-def _apply_changes(slice_: Slice, changes: dict[str, Any]) -> Slice:
-    """Return a new Slice with the requested fields replaced."""
+def _apply_changes(slice_: Group, changes: dict[str, Any]) -> Group:
+    """Return a new Group with the requested fields replaced."""
     payload = {f.name: getattr(slice_, f.name) for f in dataclasses.fields(slice_)}
     for k, v in changes.items():
         payload[k] = v
-    return Slice(**payload)
+    return Group(**payload)
 
 
 # ---------------------------------------------------------------------------

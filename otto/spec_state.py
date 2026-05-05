@@ -87,6 +87,14 @@ EVENT_KINDS: tuple[str, ...] = (
     "amendment.applied",        # request passed all tier checks and persisted
     "amendment.rejected",       # request failed a tier rule
     "intent.lock.violated",     # tier-1 invariant violated (tampering signal)
+    # A5 — spec-review surface (research §2.1) -------------------------
+    "spec.review.opened",       # user opened the spec-review UI for this session
+    "spec.edited",              # user posted edited markdown via /api/specs/.../edit
+    "spec.approved",            # user approved the spec via /api/specs/.../approve
+    "spec.regenerated",         # spec re-emitted by the compile agent (post-edit recompile)
+    # Seed stage lifecycle (RunView stage timeline; RUA W6-C fix) -------
+    "seed.started",             # seed_fixtures() entered (one per Run)
+    "seed.finished",            # seed_fixtures() returning; extra.succeeded=bool
 )
 
 EventKind = Literal[
@@ -108,6 +116,12 @@ EventKind = Literal[
     "amendment.applied",
     "amendment.rejected",
     "intent.lock.violated",
+    "spec.review.opened",
+    "spec.edited",
+    "spec.approved",
+    "spec.regenerated",
+    "seed.started",
+    "seed.finished",
 ]
 
 

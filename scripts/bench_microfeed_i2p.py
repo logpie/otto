@@ -93,6 +93,11 @@ class I2pSummary:
     audit_narrative: str = ""
     cost_usd: float = 0.0
     proof_packet_path: str = ""
+    # Plan.md Step 11: did the spec validator accept the compiled spec?
+    # Populated when the bench reads the on-disk spec.json validator state.
+    compile_validator_passed: bool = False
+    # i2p path marker (always True for this bench; legacy bench omits).
+    i2p_path: bool = True
     # Audit-final-quality (audit-final-quality check). 0 = not assessed.
     quality_score: int = 0
     quality_findings: list[str] = field(default_factory=list)
@@ -195,8 +200,14 @@ def _run_i2p(
                 spec = json.loads(spec_path.read_text(encoding="utf-8"))
                 summary.spec_slices = len(spec.get("slices") or [])
                 summary.project_kind = str(spec.get("project_kind") or "webapp")
+                # Plan.md Step 11: validator-passed signal. The compile
+                # path runs validate_spec() and either persists the spec
+                # or raises SpecValidationError. The fact that spec.json
+                # exists on disk implies the validator accepted it.
+                summary.compile_validator_passed = True
             except Exception:
                 summary.notes.append("spec.json present but unreadable")
+                summary.compile_validator_passed = False
         # Read proof-packet.json
         packet_path = session_dir / "proof-packet.json"
         if packet_path.exists():

@@ -16,7 +16,7 @@ from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.render import render_run
 from otto.spec_compile import (
     RepoTestCheck,
-    Slice,
+    Group,
     Spec,
     StructureDecisions,
     persist_spec,
@@ -46,9 +46,9 @@ def _seed_session(project_dir: Path, session_id: str, *, with_proof: bool = Fals
         project_kind="webapp",
         structure=StructureDecisions(payload={"routes": [{"path": "/", "component": "Home", "key_text": "x"}], "components": [{"name": "Home", "key_text": "x"}]}),
         slices=[
-            Slice(id="shell", title="App shell", deps=[], owned_paths=["src/App.*"], tasks=["scaffold"],
+            Group(id="shell", title="App shell", deps=[], owned_paths=["src/App.*"], tasks=["scaffold"],
                   checks=[RepoTestCheck(command=("npm", "run", "build"), timeout_s=60)]),
-            Slice(id="counter", title="Counter widget", deps=["shell"], owned_paths=["src/Counter.*"], tasks=["increment"],
+            Group(id="counter", title="Counter widget", deps=["shell"], owned_paths=["src/Counter.*"], tasks=["increment"],
                   checks=[RepoTestCheck(command=("npm", "test"), timeout_s=120)]),
         ],
         non_goals=["multi-user"],

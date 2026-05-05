@@ -35,7 +35,7 @@ from otto.build import (
 )
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.spec_compile import (
-    Slice,
+    Group,
     Spec,
     StateInvariant,
     StructureDecisions,
@@ -53,7 +53,7 @@ def _spec(slice_ids: list[str], cross_checks=None) -> Spec:
         project_kind="webapp",
         structure=StructureDecisions(payload={}),
         slices=[
-            Slice(id=sid, title=sid.upper(), deps=[], owned_paths=[], tasks=[], checks=[])
+            Group(id=sid, title=sid.upper(), deps=[], owned_paths=[], tasks=[], checks=[])
             for sid in slice_ids
         ],
         cross_slice_checks=cross_checks or [],
@@ -530,7 +530,7 @@ def test_audit_prompt_requests_quality_assessment(tmp_path: Path) -> None:
     from otto.audit import _audit_prompt
 
     spec = Spec(intent="x", project_kind="webapp",
-                slices=[Slice(id="s", title="t")])
+                slices=[Group(id="s", title="t")])
     inp = AuditAgentInput(
         spec=spec, project_dir=tmp_path, integrated_worktree=tmp_path,
         build_summary={}, merge_summary={}, cross_slice_evidence=[],
@@ -589,13 +589,13 @@ def test_audit_parser_clamps_quality_score() -> None:
     assert absent.quality_findings == []
 
 
-def test_audit_prompt_requests_capability_verdicts(tmp_path: Path) -> None:
-    """v2.6: prompt asks for per-capability verdicts (one per done_means)."""
+def test_audit_prompt_requests_feature_audits(tmp_path: Path) -> None:
+    """v2.6 (A0.4): prompt asks for per-feature audits (one per done_means)."""
     from otto.audit import _audit_prompt
 
     spec = Spec(
         intent="x", project_kind="webapp",
-        slices=[Slice(id="s", title="t")],
+        slices=[Group(id="s", title="t")],
         done_means=["users can sign up", "RSS feed is reachable from /"],
     )
     inp = AuditAgentInput(
@@ -604,15 +604,17 @@ def test_audit_prompt_requests_capability_verdicts(tmp_path: Path) -> None:
         walkthrough_artifacts=[],
     )
     prompt = _audit_prompt(inp)
-    assert "capability_verdicts" in prompt
+    assert "feature_audits" in prompt
+    # Legacy key must NOT appear in the prompt — back-compat is gone.
+    assert "capability_verdicts" not in prompt
     assert "evidence_refs" in prompt
     assert "passed" in prompt and "partial" in prompt and "blocked" in prompt
     # done_means anchor reference
     assert "done_means" in prompt
 
 
-def test_audit_parser_reads_capability_verdicts() -> None:
-    """v2.6: parser reads capability_verdicts list with status, detail, evidence."""
+def test_audit_parser_reads_feature_audits() -> None:
+    """v2.6 (A0.4): parser reads feature_audits list with status, detail, evidence."""
     from otto.audit import _parse_audit_output
 
     output = """```json
@@ -620,7 +622,7 @@ def test_audit_parser_reads_capability_verdicts() -> None:
   "verdict": "partial",
   "narrative": "mostly works",
   "slice_verdicts": [],
-  "capability_verdicts": [
+  "feature_audits": [
     {"name": "user signup", "status": "passed",
      "detail": "Signup form works",
      "evidence_refs": ["templates/home.html:5"]},
@@ -631,11 +633,11 @@ def test_audit_parser_reads_capability_verdicts() -> None:
 }
 ```"""
     result = _parse_audit_output(output)
-    assert len(result.capability_verdicts) == 2
-    assert result.capability_verdicts[0].name == "user signup"
-    assert result.capability_verdicts[0].status == "passed"
-    assert result.capability_verdicts[0].evidence_refs == ["templates/home.html:5"]
-    assert result.capability_verdicts[1].status == "blocked"
+    assert len(result.feature_audits) == 2
+    assert result.feature_audits[0].name == "user signup"
+    assert result.feature_audits[0].status == "passed"
+    assert result.feature_audits[0].evidence_refs == ["templates/home.html:5"]
+    assert result.feature_audits[1].status == "blocked"
 
 
 def test_audit_parser_unknown_capability_status_defaults_blocked() -> None:
@@ -644,21 +646,21 @@ def test_audit_parser_unknown_capability_status_defaults_blocked() -> None:
 
     output = """```json
 {"verdict":"passed",
- "capability_verdicts":[{"name":"x","status":"works fine"}]}```"""
+ "feature_audits":[{"name":"x","status":"works fine"}]}```"""
     result = _parse_audit_output(output)
-    assert result.capability_verdicts[0].status == "blocked"
+    assert result.feature_audits[0].status == "blocked"
 
 
 def test_audit_blocked_capability_caps_passed_to_partial(tmp_path: Path) -> None:
     """v2.6 cap: any blocked capability prevents PASSED. Real damage
     surfaces — even if everything else is green."""
-    from otto.audit import CapabilityVerdict
+    from otto.audit import FeatureAudit
 
     session_dir = tmp_path / "_session"
     session_dir.mkdir()
     spec = Spec(
         intent="x", project_kind="webapp",
-        slices=[Slice(id="s1", title="t",
+        slices=[Group(id="s1", title="t",
                       checks=[StateInvariant(description="exists",
                                              expression="True")])],
         done_means=["users can sign up", "RSS reachable"],
@@ -669,9 +671,9 @@ def test_audit_blocked_capability_caps_passed_to_partial(tmp_path: Path) -> None
             verdict=AuditVerdict.PASSED,
             narrative="functional",
             slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
-            capability_verdicts=[
-                CapabilityVerdict(name="users can sign up", status="passed", detail="ok"),
-                CapabilityVerdict(name="RSS reachable", status="blocked",
+            feature_audits=[
+                FeatureAudit(name="users can sign up", status="passed", detail="ok"),
+                FeatureAudit(name="RSS reachable", status="blocked",
                                   detail="no link in head"),
             ],
             quality_score=4,
@@ -688,21 +690,21 @@ def test_audit_blocked_capability_caps_passed_to_partial(tmp_path: Path) -> None
     )
     # Functional says PASSED + quality 4/5 OK, BUT capability blocked → PARTIAL.
     assert result.verdict == AuditVerdict.PARTIAL
-    assert len(result.capability_verdicts) == 2
-    blocked = [c for c in result.capability_verdicts if c.status == "blocked"]
+    assert len(result.feature_audits) == 2
+    blocked = [c for c in result.feature_audits if c.status == "blocked"]
     assert len(blocked) == 1
     assert "capability cap" in result.narrative
 
 
 def test_audit_majority_partial_capabilities_caps_passed(tmp_path: Path) -> None:
     """v2.6: >50% partial caps PASSED → PARTIAL even with no blocked."""
-    from otto.audit import CapabilityVerdict
+    from otto.audit import FeatureAudit
 
     session_dir = tmp_path / "_session"
     session_dir.mkdir()
     spec = Spec(
         intent="x", project_kind="webapp",
-        slices=[Slice(id="s1", title="t",
+        slices=[Group(id="s1", title="t",
                       checks=[StateInvariant(description="x", expression="True")])],
     )
 
@@ -711,11 +713,11 @@ def test_audit_majority_partial_capabilities_caps_passed(tmp_path: Path) -> None
             verdict=AuditVerdict.PASSED,
             narrative="works",
             slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
-            capability_verdicts=[
-                CapabilityVerdict(name="a", status="passed", detail="ok"),
-                CapabilityVerdict(name="b", status="partial", detail="caveat"),
-                CapabilityVerdict(name="c", status="partial", detail="caveat"),
-                CapabilityVerdict(name="d", status="partial", detail="caveat"),
+            feature_audits=[
+                FeatureAudit(name="a", status="passed", detail="ok"),
+                FeatureAudit(name="b", status="partial", detail="caveat"),
+                FeatureAudit(name="c", status="partial", detail="caveat"),
+                FeatureAudit(name="d", status="partial", detail="caveat"),
             ],
             quality_score=4,
         )
@@ -737,7 +739,7 @@ def test_caps_compose_order_independent(tmp_path: Path) -> None:
     not just the first one to fire its cap. Previously each cap had
     its own `if verdict == PASSED` guard and silently no-op'd later
     caps' narratives."""
-    from otto.audit import CapabilityVerdict
+    from otto.audit import FeatureAudit
 
     session_dir = tmp_path / "_session"
     session_dir.mkdir()
@@ -749,7 +751,7 @@ def test_caps_compose_order_independent(tmp_path: Path) -> None:
 
     spec = Spec(
         intent="x", project_kind="webapp",
-        slices=[Slice(id="s1", title="t",
+        slices=[Group(id="s1", title="t",
                       checks=[StateInvariant(description="x", expression="True")])],
     )
 
@@ -758,9 +760,9 @@ def test_caps_compose_order_independent(tmp_path: Path) -> None:
             verdict=AuditVerdict.PASSED,
             narrative="LLM thinks it works",
             slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
-            capability_verdicts=[
-                CapabilityVerdict(name="signup", status="passed", detail="ok"),
-                CapabilityVerdict(name="search", status="blocked", detail="not implemented"),
+            feature_audits=[
+                FeatureAudit(name="signup", status="passed", detail="ok"),
+                FeatureAudit(name="search", status="blocked", detail="not implemented"),
             ],
             quality_score=2,
             quality_findings=["bare-bones UI", "no error states"],
@@ -791,13 +793,13 @@ def test_capability_cap_can_escalate_to_blocked(tmp_path: Path) -> None:
     """Pattern B fix: when more than half of capabilities are blocked,
     verdict must escalate to BLOCKED, not just PARTIAL. Previously the
     cap could only downgrade PASSED→PARTIAL."""
-    from otto.audit import CapabilityVerdict
+    from otto.audit import FeatureAudit
 
     session_dir = tmp_path / "_session"
     session_dir.mkdir()
     spec = Spec(
         intent="x", project_kind="webapp",
-        slices=[Slice(id="s1", title="t",
+        slices=[Group(id="s1", title="t",
                       checks=[StateInvariant(description="x", expression="True")])],
     )
 
@@ -806,11 +808,11 @@ def test_capability_cap_can_escalate_to_blocked(tmp_path: Path) -> None:
             verdict=AuditVerdict.PASSED,
             narrative="agent says ok",
             slice_verdicts=[SliceVerdict(slice_id="s1", passed=True, detail="ok")],
-            capability_verdicts=[
-                CapabilityVerdict(name="a", status="blocked", detail="missing"),
-                CapabilityVerdict(name="b", status="blocked", detail="missing"),
-                CapabilityVerdict(name="c", status="blocked", detail="missing"),
-                CapabilityVerdict(name="d", status="passed", detail="works"),
+            feature_audits=[
+                FeatureAudit(name="a", status="blocked", detail="missing"),
+                FeatureAudit(name="b", status="blocked", detail="missing"),
+                FeatureAudit(name="c", status="blocked", detail="missing"),
+                FeatureAudit(name="d", status="passed", detail="works"),
             ],
             quality_score=4,
         )
@@ -834,7 +836,7 @@ def test_audit_quality_low_caps_verdict_at_partial(tmp_path: Path) -> None:
     session_dir = tmp_path / "_session"
     session_dir.mkdir()
     spec = Spec(intent="x", project_kind="webapp",
-                slices=[Slice(id="s1", title="t",
+                slices=[Group(id="s1", title="t",
                               checks=[StateInvariant(description="exists",
                                                      expression="True")])])
 
@@ -872,7 +874,7 @@ def test_default_walkthrough_no_browser_journey_non_webapp_returns_no_op(tmp_pat
     spec = Spec(
         intent="x",
         project_kind="cli",
-        slices=[Slice(id="s", title="t", checks=[PytestCheck(selector="x")])],
+        slices=[Group(id="s", title="t", checks=[PytestCheck(selector="x")])],
     )
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
@@ -888,7 +890,7 @@ def test_synthesized_walkthrough_static_site_branch(tmp_path: Path) -> None:
     from otto.spec_compile import PytestCheck
 
     spec = Spec(intent="x", project_kind="webapp",
-                slices=[Slice(id="s", title="t", checks=[PytestCheck(selector="x")])])
+                slices=[Group(id="s", title="t", checks=[PytestCheck(selector="x")])])
 
     (tmp_path / "output").mkdir()
     (tmp_path / "output" / "index.html").write_text(
@@ -910,7 +912,7 @@ def test_synthesized_walkthrough_not_applicable_returns_succeeded(tmp_path: Path
     from otto.spec_compile import PytestCheck
 
     spec = Spec(intent="x", project_kind="webapp",
-                slices=[Slice(id="s", title="t", checks=[PytestCheck(selector="x")])])
+                slices=[Group(id="s", title="t", checks=[PytestCheck(selector="x")])])
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
     assert result.succeeded is True
@@ -928,7 +930,7 @@ def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Pat
     spec = Spec(
         intent="x",
         project_kind="webapp",
-        slices=[Slice(id="s", title="t", checks=[PytestCheck(selector="x")])],
+        slices=[Group(id="s", title="t", checks=[PytestCheck(selector="x")])],
     )
     # Seed a minimal Flask app at the project root.
     (tmp_path / "app.py").write_text(
@@ -959,7 +961,7 @@ def test_default_walkthrough_picks_cross_slice_journey_first(tmp_path: Path) -> 
     spec = Spec(
         intent="x",
         cross_slice_checks=[cross],
-        slices=[Slice(id="s", title="t", checks=[slice_journey])],
+        slices=[Group(id="s", title="t", checks=[slice_journey])],
     )
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
@@ -977,7 +979,7 @@ def test_default_walkthrough_falls_back_to_slice_journey(tmp_path: Path) -> None
     slice_journey = BrowserJourney(command=("echo", "slice"), evidence_globs=("*.png",))
     spec = Spec(
         intent="x",
-        slices=[Slice(id="s", title="t", checks=[slice_journey])],
+        slices=[Group(id="s", title="t", checks=[slice_journey])],
     )
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
@@ -1005,7 +1007,7 @@ def test_compose_verdict_caps_at_partial_when_merge_blocked() -> None:
         verdict=AuditVerdict.PASSED,
         narrative="all good",
         slice_verdicts=[],
-        capability_verdicts=[],
+        feature_audits=[],
         quality_score=4,
         quality_findings=[],
     )
@@ -1037,7 +1039,7 @@ def test_compose_verdict_caps_at_blocked_when_majority_blocked() -> None:
         verdict=AuditVerdict.PASSED,
         narrative="",
         slice_verdicts=[],
-        capability_verdicts=[],
+        feature_audits=[],
         quality_score=4,
         quality_findings=[],
     )
@@ -1062,7 +1064,7 @@ def test_compose_verdict_passes_when_no_merge_blocked() -> None:
         verdict=AuditVerdict.PASSED,
         narrative="ok",
         slice_verdicts=[],
-        capability_verdicts=[],
+        feature_audits=[],
         quality_score=5,
         quality_findings=[],
     )

@@ -173,33 +173,9 @@ def test_empty_journeys_renders_nothing() -> None:
     assert _render_results_section([]) == []
 
 
-# --------------------------------------------------------------------------- #
-# End-to-end: stories→journeys→render carries verdict through
-# --------------------------------------------------------------------------- #
-
-
-def test_stories_to_journeys_carries_verdict_for_warn() -> None:
-    """Verifies the pipeline helper preserves WARN so the renderer sees it."""
-    from otto.pipeline import _stories_to_journeys
-
-    stories = [
-        {"summary": "ok", "passed": True, "verdict": "PASS"},
-        # Realistic certifier shape: passed=True + warn=True + verdict=WARN.
-        {"summary": "soft", "passed": True, "warn": True, "verdict": "WARN"},
-        {"summary": "broken", "passed": False, "verdict": "FAIL"},
-    ]
-    journeys = _stories_to_journeys(stories)
-    assert [j["verdict"] for j in journeys] == ["PASS", "WARN", "FAIL"]
-
-
-def test_stories_to_journeys_infers_warn_from_warn_flag_when_verdict_missing() -> None:
-    """Defensive: pre-restructure callers may set `warn` without `verdict`."""
-    from otto.pipeline import _stories_to_journeys
-
-    journeys = _stories_to_journeys(
-        [{"summary": "soft", "passed": True, "warn": True}]
-    )
-    assert journeys[0]["verdict"] == "WARN"
+# Phase C.3: removed two tests for `_stories_to_journeys` — that helper
+# lived in the deleted v3 pipeline (`otto/pipeline.py`). The renderer's
+# WARN/PASS/FAIL handling is still covered by the rendering tests above.
 
 
 if __name__ == "__main__":
