@@ -270,16 +270,46 @@ Goal: exhaustive bug-mining per surface.
      a 1000-char intent, a feature with a 500-char acceptance.
    - **Hover** on every interactive element (links, buttons, rows) —
      screenshot the hover state.
-2. **For each screenshot, do 6 vision passes** with different focus
-   questions. **MULTI-PASS IS MANDATORY, NOT OPTIONAL.** Empirical:
-   in the 2026-05-05 round-2 audit a single-pass review of 8
-   screenshots caught 3 bugs. A re-read of the SAME 8 screenshots
-   with the 6-pass framing surfaced **30+ additional bugs** that the
-   single pass had completely missed (page heading hierarchy
-   inversion, KPI tabular-nums, audit-context pill styling, app
-   shell consistency, diff theme inconsistency, multiple h1 elements
-   on a page, etc.). Don't skip passes. Each pass is a different
-   lens; the overlap is small.
+2. **For each screenshot, run the 6-pass inner loop.** **MANDATORY,
+   NOT OPTIONAL.** Empirical: in 2026-05-05 round-2 a single-pass
+   review of 8 screenshots caught 3 bugs. A re-read of the SAME 8
+   screenshots with the 6-pass framing surfaced **30+ additional
+   bugs** the single pass had completely missed (page heading
+   hierarchy inversion, KPI tabular-nums, audit-context pill
+   styling, app shell consistency, diff theme inconsistency,
+   multiple h1 elements on a page, etc.).
+
+   **The inner loop has a strict protocol:**
+
+   ```
+   for screenshot in [each captured screenshot]:
+     findings_so_far = []
+     for pass in [1..6]:
+       state your focus question explicitly ("Pass N — typography:
+         is the heading hierarchy obvious + scaled? does the body
+         use a single sans? do KPI numbers use tabular-nums?")
+       list NEW findings produced by this pass (anything not yet
+         in findings_so_far)
+       append to findings_so_far
+     if total findings_so_far is < 3 — RE-EXAMINE. Most surfaces
+       have at least 3 things wrong with them; getting 0-2 means
+       you skimmed. Run the 6 passes again with sharper questions.
+   ```
+
+   **Rules:**
+   - Don't merge passes. Run pass 1, write findings, then pass 2,
+     etc. If you find yourself reading the screenshot once and
+     listing all problems at once, you're back to single-pass.
+   - State the focus question at the start of each pass so future
+     readers (and you re-running in a week) know which lens
+     produced which finding.
+   - If the screenshot looks "clean" on pass 1, that's the
+     strongest signal you need passes 2-6. Pass 1 is layout/
+     spacing — the most obvious dimension. Bugs in typography,
+     color tone, info-completeness, edge-cases, design-system
+     coherence are all INVISIBLE on a layout-focused first read.
+   - After the screenshot, count findings. < 3 ⇒ re-run with
+     sharper questions before moving on.
 
    | Pass | Focus | Specific things to look for |
    |------|-------|------------------------------|
