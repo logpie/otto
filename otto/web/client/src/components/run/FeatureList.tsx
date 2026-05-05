@@ -3,8 +3,12 @@
 //
 // Each row: verdict glyph + name + 1-line detail (truncated). Click expands
 // for evidence drilldown (deferred to a separate FeatureDrilldown component).
+//
+// Post-RUA round 1 (B1): rows lay out via flex/gap rather than baked-in
+// whitespace; status renders through the scoped <Pill> component (B2).
 
 import type { FeatureView, FeatureVerdict } from "../../types/run";
+import { Pill, type PillTone } from "./Pill";
 
 interface Props {
   features: FeatureView[];
@@ -27,6 +31,14 @@ function verdictTone(verdict: FeatureVerdict | null): "ok" | "warn" | "fail" | "
   return "fail";
 }
 
+function verdictPillTone(verdict: FeatureVerdict | null): PillTone {
+  if (verdict === null) return "muted";
+  if (verdict === "passed") return "ok";
+  if (verdict === "partial") return "warn";
+  if (verdict === "missing") return "info";
+  return "error";
+}
+
 export function FeatureList({ features, onSelect }: Props) {
   if (features.length === 0) {
     return <p className="empty">No features in this run.</p>;
@@ -44,15 +56,18 @@ export function FeatureList({ features, onSelect }: Props) {
             {verdictGlyph(f.verdict)}
           </span>
           <span className="feature-name">{f.name}</span>
+          <Pill tone={verdictPillTone(f.verdict)} className="feature-verdict-pill">
+            {f.verdict ?? "pending"}
+          </Pill>
           {f.evidence_completeness !== "full" && (
-            <span className="completeness-badge" title="Evidence not full">
+            <Pill tone="muted" title="Evidence not full" className="completeness-badge">
               {f.evidence_completeness}
-            </span>
+            </Pill>
           )}
           {f.multi_actor_required && (
-            <span className="multi-actor-badge" title="Requires multiple actors">
+            <Pill tone="muted" title="Requires multiple actors" className="multi-actor-badge">
               multi-actor
-            </span>
+            </Pill>
           )}
           {f.description && (
             <span className="feature-detail" title={f.description}>

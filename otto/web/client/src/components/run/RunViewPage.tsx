@@ -18,7 +18,7 @@ interface Props {
 }
 
 export function RunViewPage({ sessionId, onSelectFeature }: Props) {
-  const { data, loading, error, reload } = useRunView(sessionId);
+  const { data, loading, error, errorStatus, reload } = useRunView(sessionId);
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
 
   if (loading && !data) {
@@ -29,12 +29,49 @@ export function RunViewPage({ sessionId, onSelectFeature }: Props) {
     );
   }
   if (error) {
+    // B19 — friendly 404 page. For 404 we know the run doesn't exist
+    // (or never did); a "Retry" button just hammers the same dead URL.
+    // Surface a "Back to runs" primary action instead. For non-404
+    // errors (network / 5xx) we keep a "Try anyway" secondary that
+    // calls reload — those failures are usually transient.
+    const isNotFound = errorStatus === 404;
+    if (isNotFound) {
+      return (
+        <div
+          className="run-view-error run-view-not-found"
+          data-testid="run-view-not-found"
+          role="alert"
+        >
+          <h2>Run not found</h2>
+          <p>
+            Session ID <code>{sessionId}</code> doesn{"’"}t exist. It may
+            have been deleted, or the URL is wrong.
+          </p>
+          <div className="run-view-error-actions">
+            <a className="primary-action" href="/" data-testid="run-view-back-to-runs">
+              Back to runs
+            </a>
+          </div>
+        </div>
+      );
+    }
     return (
-      <div className="run-view-error" data-testid="run-view-error">
-        <p>Failed to load run: {error}</p>
-        <button type="button" onClick={reload}>
-          Retry
-        </button>
+      <div className="run-view-error" data-testid="run-view-error" role="alert">
+        <h2>Couldn{"’"}t load this run</h2>
+        <p className="run-view-error-detail">{error}</p>
+        <div className="run-view-error-actions">
+          <a className="primary-action" href="/" data-testid="run-view-back-to-runs">
+            Back to runs
+          </a>
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={reload}
+            data-testid="run-view-try-anyway"
+          >
+            Try anyway
+          </button>
+        </div>
       </div>
     );
   }

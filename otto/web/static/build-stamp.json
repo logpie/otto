@@ -1,7 +1,7 @@
 {
-  "built_at": "2026-05-05T07:08:52+00:00",
-  "git_commit": "0c20fcd5b9dbae4f980b03ee4f89c68caf6ba193",
+  "built_at": "2026-05-05T18:30:08+00:00",
+  "git_commit": "eff8d0a477c444766a183de20e652a81def04a7d",
   "node_version": "25.8.2",
-  "source_hash": "d2877f999de382d4e3cb82648143ef87f7cc35035d006e361f2e23a172798f57",
+  "source_hash": "cfa315a18bc37784e4124dbf1193d3433d03d9a15baa88ea878fb784bd41313a",
   "vite_version": "7.3.2"
 }

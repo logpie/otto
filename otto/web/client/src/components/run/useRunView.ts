@@ -19,6 +19,10 @@ export interface UseRunViewState {
   data: RunView | null;
   loading: boolean;
   error: string | null;
+  // Initial-fetch HTTP status (when the failure was an HTTP error, not a
+  // network error). Surfaces 404 specifically so the page can render a
+  // friendly "Run not found" instead of the raw HTTP message (B19).
+  errorStatus: number | null;
   reload: () => void;
 }
 
@@ -43,6 +47,7 @@ export function useRunView(sessionId: string | null): UseRunViewState {
   const [data, setData] = useState<RunView | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [reloadCounter, setReloadCounter] = useState<number>(0);
 
   // Mirror of latest status so the polling effect can decide whether to keep
@@ -57,6 +62,7 @@ export function useRunView(sessionId: string | null): UseRunViewState {
     if (!sessionId) {
       setData(null);
       setError(null);
+      setErrorStatus(null);
       setLoading(false);
       statusRef.current = null;
       return;
@@ -68,11 +74,16 @@ export function useRunView(sessionId: string | null): UseRunViewState {
       if (isInitial) {
         setLoading(true);
         setError(null);
+        setErrorStatus(null);
       }
       fetch(`/api/run-view/${encodeURIComponent(sessionId)}`)
         .then((resp) => {
           if (!resp.ok) {
-            throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+            const httpErr = new Error(`HTTP ${resp.status} ${resp.statusText}`);
+            // Tag the error with its HTTP status so the consumer can
+            // distinguish 404 (resource missing) from 5xx (transient).
+            (httpErr as Error & { status?: number }).status = resp.status;
+            throw httpErr;
           }
           return resp.json() as Promise<RunView>;
         })
@@ -89,10 +100,11 @@ export function useRunView(sessionId: string | null): UseRunViewState {
             intervalId = null;
           }
         })
-        .catch((err: Error) => {
+        .catch((err: Error & { status?: number }) => {
           if (cancelled) return;
           if (isInitial) {
             setError(err.message || String(err));
+            setErrorStatus(typeof err.status === "number" ? err.status : null);
             setLoading(false);
           } else {
             // Mid-poll fetch failure: keep the last successful snapshot in
@@ -136,7 +148,7 @@ export function useRunView(sessionId: string | null): UseRunViewState {
     };
   }, [sessionId, reloadCounter]);
 
-  return { data, loading, error, reload };
+  return { data, loading, error, errorStatus, reload };
 }
 
 export default useRunView;

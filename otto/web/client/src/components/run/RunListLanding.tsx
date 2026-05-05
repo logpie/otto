@@ -5,23 +5,192 @@
 // sessions from `/api/run-view` and links each to `?view=run-view&session=<id>`,
 // which mounts <RunViewPage/> via main.tsx routing.
 //
-// Empty state: "no sessions yet" — first run will populate. The new
-// design's Mission Control surface is intentionally minimal here; richer
-// per-project dashboards come in Phase D / post-deletion.
+// B4 (post-RUA round 1): replaced the bullet-list of session-IDs with
+// per-session cards per wireframe Screen 2 (intent, status pill, count
+// rollup, wall+cost, finished-relative). Backend was extended to return
+// a `sessions: [obj]` array alongside the legacy `runs: [str]` array.
+// Cards collapse gracefully when fields are absent — "—" placeholders
+// rather than failing the whole list.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 interface Props {
   // Optional override for tests. Defaults to /api/run-view.
   endpoint?: string;
 }
 
+interface SessionSummary {
+  id: string;
+  intent: string | null;
+  status: string | null;
+  verdict: string | null;
+  cost_usd: number | null;
+  wall_s: number | null;
+  feature_total: number | null;
+  feature_passed: number | null;
+  critical_findings: number | null;
+  quality_score: number | null;
+  finished_at: string | null;
+  lifecycle: string | null;
+}
+
 interface ListResponse {
-  runs: string[];
+  runs?: string[];
+  sessions?: SessionSummary[];
+}
+
+// Status pill — local copy. The parallel agent A is also building a
+// Pill component; we duplicate the pattern here intentionally to keep
+// this file independent and reconcile in a future commit.
+function StatusPill({ status }: { status: string | null }) {
+  const label = (status || "unknown").toLowerCase();
+  const tone = pillToneFor(label);
+  return (
+    <span
+      className={`landing-status-pill landing-status-pill--${tone}`}
+      data-testid="landing-status-pill"
+    >
+      {label}
+    </span>
+  );
+}
+
+function pillToneFor(status: string): string {
+  if (status === "passed" || status === "landed") return "success";
+  if (status === "partial" || status === "awaiting_spec_review") return "warning";
+  if (
+    status === "blocked" ||
+    status === "failed" ||
+    status === "aborted"
+  )
+    return "danger";
+  if (
+    status === "queued" ||
+    status === "compiling" ||
+    status === "building" ||
+    status === "auditing" ||
+    status === "rendering" ||
+    status === "landing"
+  )
+    return "info";
+  return "neutral";
+}
+
+function truncate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1).trimEnd() + "…";
+}
+
+function formatDuration(wall_s: number | null): string {
+  if (wall_s === null || wall_s === undefined) return "—";
+  if (wall_s < 60) return `${Math.round(wall_s)}s`;
+  const m = Math.floor(wall_s / 60);
+  const s = Math.round(wall_s - m * 60);
+  return `${m}m${s > 0 ? ` ${s}s` : ""}`;
+}
+
+function formatCost(cost: number | null): string {
+  if (cost === null || cost === undefined) return "—";
+  return `$${cost.toFixed(2)}`;
+}
+
+const RTF =
+  typeof Intl !== "undefined" && Intl.RelativeTimeFormat
+    ? new Intl.RelativeTimeFormat(undefined, { numeric: "auto" })
+    : null;
+
+function formatRelative(iso: string | null): string {
+  if (!iso) return "—";
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return "—";
+  const diffMs = ts - Date.now();
+  const absSec = Math.abs(diffMs) / 1000;
+  if (!RTF) {
+    if (absSec < 60) return "just now";
+    return iso;
+  }
+  if (absSec < 60) return RTF.format(Math.round(diffMs / 1000), "second");
+  if (absSec < 3600) return RTF.format(Math.round(diffMs / 60000), "minute");
+  if (absSec < 86400) return RTF.format(Math.round(diffMs / 3600000), "hour");
+  if (absSec < 86400 * 30)
+    return RTF.format(Math.round(diffMs / 86400000), "day");
+  if (absSec < 86400 * 365)
+    return RTF.format(Math.round(diffMs / (86400000 * 30)), "month");
+  return RTF.format(Math.round(diffMs / (86400000 * 365)), "year");
+}
+
+function SessionCard({ session }: { session: SessionSummary }) {
+  const href = `?view=run-view&session=${encodeURIComponent(session.id)}`;
+  const intent = session.intent
+    ? truncate(session.intent, 80)
+    : session.id;
+  const fullIntent = session.intent || session.id;
+  const total = session.feature_total ?? 0;
+  const passed = session.feature_passed ?? 0;
+  const critical = session.critical_findings ?? 0;
+  const quality = session.quality_score;
+  const showCounts = total > 0 || critical > 0 || quality !== null;
+  const lifecycle = session.lifecycle;
+  const isAwaitingReview = session.status === "awaiting_spec_review";
+
+  return (
+    <article
+      className="landing-card"
+      data-testid="landing-card"
+      data-session-id={session.id}
+    >
+      <a className="landing-card-link" href={href} aria-label={`Open run ${session.id}`}>
+        <div className="landing-card-row landing-card-row-top">
+          <StatusPill status={session.status} />
+          <span
+            className="landing-card-intent"
+            title={fullIntent}
+          >
+            {intent}
+          </span>
+        </div>
+        {showCounts ? (
+          <div className="landing-card-row landing-card-counts">
+            {total > 0 ? (
+              <span className="landing-card-counts-item">
+                {passed}/{total} features
+              </span>
+            ) : null}
+            {critical > 0 ? (
+              <span className="landing-card-counts-item landing-card-counts-critical">
+                {critical} critical {critical === 1 ? "finding" : "findings"}
+              </span>
+            ) : null}
+            {quality !== null && quality !== undefined ? (
+              <span className="landing-card-counts-item">
+                q {quality}/5
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="landing-card-row landing-card-metrics">
+          <span>wall {formatDuration(session.wall_s)}</span>
+          <span>cost {formatCost(session.cost_usd)}</span>
+          <span>finished {formatRelative(session.finished_at)}</span>
+        </div>
+      </a>
+      {(isAwaitingReview || lifecycle === "draft") && (
+        <div className="landing-card-actions">
+          <a
+            className="landing-card-action"
+            href={`?view=spec-review&spec=${encodeURIComponent(session.id)}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            Review spec
+          </a>
+        </div>
+      )}
+    </article>
+  );
 }
 
 export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
-  const [runs, setRuns] = useState<string[] | null>(null);
+  const [payload, setPayload] = useState<ListResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -35,7 +204,7 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
       })
       .then((body) => {
         if (cancelled) return;
-        setRuns(body.runs ?? []);
+        setPayload(body);
       })
       .catch((err: Error) => {
         if (cancelled) return;
@@ -46,6 +215,30 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
     };
   }, [endpoint]);
 
+  const sessions = useMemo<SessionSummary[]>(() => {
+    if (!payload) return [];
+    if (payload.sessions && payload.sessions.length > 0) {
+      return payload.sessions;
+    }
+    // Backwards compatibility: if backend only returned `runs: string[]`
+    // (older fixture, pre-B4), synthesize stub summaries so the cards
+    // still render with the session id as the headline.
+    return (payload.runs || []).map((id) => ({
+      id,
+      intent: null,
+      status: null,
+      verdict: null,
+      cost_usd: null,
+      wall_s: null,
+      feature_total: null,
+      feature_passed: null,
+      critical_findings: null,
+      quality_score: null,
+      finished_at: null,
+      lifecycle: null,
+    }));
+  }, [payload]);
+
   if (error) {
     return (
       <div className="run-list-landing run-list-landing--error" data-testid="run-list-error">
@@ -55,7 +248,7 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
     );
   }
 
-  if (runs === null) {
+  if (payload === null) {
     return (
       <div className="run-list-landing run-list-landing--loading" data-testid="run-list-loading">
         <h1>Otto Mission Control</h1>
@@ -64,7 +257,7 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
     );
   }
 
-  if (runs.length === 0) {
+  if (sessions.length === 0) {
     return (
       <div className="run-list-landing run-list-landing--empty" data-testid="run-list-empty">
         <h1>Otto Mission Control</h1>
@@ -76,16 +269,14 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
   return (
     <div className="run-list-landing" data-testid="run-list">
       <h1>Otto Mission Control</h1>
-      <p>{runs.length} session{runs.length === 1 ? "" : "s"}</p>
-      <ul>
-        {runs.map((sessionId) => (
-          <li key={sessionId}>
-            <a href={`?view=run-view&session=${encodeURIComponent(sessionId)}`}>
-              {sessionId}
-            </a>
-          </li>
+      <p className="run-list-landing-count">
+        {sessions.length} session{sessions.length === 1 ? "" : "s"}
+      </p>
+      <div className="landing-card-list" role="list">
+        {sessions.map((session) => (
+          <SessionCard key={session.id} session={session} />
         ))}
-      </ul>
+      </div>
     </div>
   );
 }

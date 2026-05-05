@@ -59,7 +59,7 @@ def test_list_runs_empty_when_no_sessions(tmp_path: Path) -> None:
     client = _app_with_project(project)
     resp = client.get("/api/run-view")
     assert resp.status_code == 200
-    assert resp.json() == {"runs": []}
+    assert resp.json() == {"runs": [], "sessions": []}
 
 
 def test_get_run_returns_run_view(project_with_session: tuple[Path, str]) -> None:

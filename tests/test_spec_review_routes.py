@@ -371,8 +371,9 @@ def test_diff_rejects_zero_or_negative_versions(
     project, sid, _ = project_with_spec
     client = _client(project)
     resp = client.get(f"/api/specs/{sid}/diff?from=0&to=1")
-    # FastAPI Query(ge=1) → 422 validation error
-    assert resp.status_code == 422
+    # B28: diff endpoint accepts integer or "current" sentinel; the int
+    # range check now lives in the resolver and surfaces as 400.
+    assert resp.status_code == 400
 
 
 def test_edit_warnings_surface_in_response(

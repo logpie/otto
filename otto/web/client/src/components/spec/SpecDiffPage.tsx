@@ -1,9 +1,20 @@
 // SpecDiffPage — wireframe 4d.
 //
-// Compares two archived spec versions (`spec-v<N>.md`) for a session and
-// renders a line-level diff. Versions list is fetched from
-// `GET /api/specs/<session>/versions`; the diff payload from
-// `GET /api/specs/<session>/diff?from=<N>&to=<M>` (lands tick spec-diff).
+// Compares two spec snapshots for a session and renders a line-level
+// diff. Each side may be either an archived version `spec-v<N>.{md,json}`
+// or the live "current" working spec (`spec.json` + `spec.md`).
+//
+// Backend contract:
+//   GET /api/specs/<session>/versions       → {versions: number[]}
+//   GET /api/specs/<session>/diff?from=X&to=Y
+//      where X/Y is an int version OR the literal string "current"
+//
+// Defaults (B28): when at least one archived version exists, the page
+// loads with `From=last archived` and `To=current` — this gives the
+// most useful diff out of the box (what changed since the last save?).
+// When zero archived versions exist (B15), the dropdowns still render
+// but only "current" is selectable; the empty-state explanation is
+// shown above the diff pane.
 //
 // We deliberately avoid heavyweight diff libraries: `diff` is not in the
 // dependency tree, and the spec markdown is small (hundreds of lines at
@@ -11,9 +22,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+type VersionId = number | "current";
+
 interface DiffPayload {
-  from_version: number;
-  to_version: number;
+  from_version: VersionId;
+  to_version: VersionId;
   from_md: string;
   to_md: string;
   from_json: unknown;
@@ -93,11 +106,25 @@ function classFor(op: DiffOp): string {
   return "";
 }
 
+function labelFor(v: VersionId): string {
+  return v === "current" ? "current" : `v${v}`;
+}
+
+function parseVersionId(raw: string): VersionId {
+  if (raw === "current") return "current";
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : "current";
+}
+
+function encodeVersionParam(v: VersionId): string {
+  return v === "current" ? "current" : String(v);
+}
+
 export function SpecDiffPage({ sessionId }: Props) {
   const [versions, setVersions] = useState<number[] | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
-  const [from, setFrom] = useState<number | null>(null);
-  const [to, setTo] = useState<number | null>(null);
+  const [from, setFrom] = useState<VersionId | null>(null);
+  const [to, setTo] = useState<VersionId | null>(null);
   const [diff, setDiff] = useState<DiffPayload | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -114,13 +141,17 @@ export function SpecDiffPage({ sessionId }: Props) {
         if (cancelled) return;
         const list = [...(payload.versions || [])].sort((x, y) => x - y);
         setVersions(list);
-        // Default: compare second-to-last vs last (the most recent edit).
-        if (list.length >= 2) {
-          setFrom(list[list.length - 2] as number);
-          setTo(list[list.length - 1] as number);
-        } else if (list.length === 1) {
-          setFrom(list[0] as number);
-          setTo(list[0] as number);
+        // Default selection (B28): most-recently-archived → current. This
+        // shows "what changed since the last save" out of the box.
+        if (list.length >= 1) {
+          setFrom(list[list.length - 1] as number);
+          setTo("current");
+        } else {
+          // No archived versions yet (B15). Both sides default to
+          // "current" — the no-op message (B29) will surface
+          // immediately, telling the user there's nothing to diff yet.
+          setFrom("current");
+          setTo("current");
         }
       })
       .catch((err: Error) => {
@@ -132,15 +163,23 @@ export function SpecDiffPage({ sessionId }: Props) {
     };
   }, [sessionId]);
 
-  // Re-fetch the diff payload whenever from/to change.
+  // Re-fetch the diff payload whenever from/to change. Skip the fetch
+  // entirely when the two sides are the same — there's no diff to
+  // render and the no-op message (B29) handles the empty state.
   useEffect(() => {
     if (from === null || to === null) return;
+    if (from === to) {
+      setDiff(null);
+      setDiffError(null);
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setDiffError(null);
     const url =
       `/api/specs/${encodeURIComponent(sessionId)}/diff` +
-      `?from=${from}&to=${to}`;
+      `?from=${encodeVersionParam(from)}&to=${encodeVersionParam(to)}`;
     fetch(url)
       .then(async (resp) => {
         if (!resp.ok) {
@@ -175,6 +214,15 @@ export function SpecDiffPage({ sessionId }: Props) {
     return diffLines(diff.from_md, diff.to_md);
   }, [diff]);
 
+  const isNoop = from !== null && to !== null && from === to;
+  // Options always include "current" so the user can compare any
+  // archived version against the live working spec (B28). The list is
+  // ordered "current" first, then v1..vN ascending.
+  const dropdownOptions = useMemo<VersionId[]>(() => {
+    const archived = (versions ?? []).slice().sort((a, b) => a - b);
+    return ["current", ...archived];
+  }, [versions]);
+
   if (versionsError) {
     return (
       <main className="spec-diff-page" style={{ padding: 24 }}>
@@ -194,40 +242,35 @@ export function SpecDiffPage({ sessionId }: Props) {
     );
   }
 
-  if (versions.length === 0) {
-    return (
-      <main className="spec-diff-page" style={{ padding: 24 }}>
-        <h1>Spec diff</h1>
-        <p>
-          No archived spec versions for session{" "}
-          <code>{sessionId}</code>. A version is created each time the
-          spec is edited through the spec-review flow.
-        </p>
-      </main>
-    );
-  }
+  const hasArchived = versions.length > 0;
 
   return (
-    <main className="spec-diff-page" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
-      <header style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+    <main
+      className="spec-diff-page"
+      style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16, height: "100%" }}
+    >
+      <header
+        style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}
+      >
         <h1 style={{ margin: 0 }}>
           Spec diff{" "}
           {from !== null && to !== null ? (
             <span style={{ color: "#94a3b8", fontWeight: 400 }}>
-              · v{from} → v{to}
+              · {labelFor(from)} → {labelFor(to)}
             </span>
           ) : null}
         </h1>
         <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ color: "#94a3b8" }}>From</span>
           <select
-            value={from ?? ""}
-            onChange={(e) => setFrom(Number(e.target.value))}
+            value={from === null ? "" : encodeVersionParam(from)}
+            onChange={(e) => setFrom(parseVersionId(e.target.value))}
             aria-label="Compare from version"
+            data-testid="spec-diff-from"
           >
-            {versions.map((v) => (
-              <option key={v} value={v}>
-                v{v}
+            {dropdownOptions.map((v) => (
+              <option key={String(v)} value={encodeVersionParam(v)}>
+                {labelFor(v)}
               </option>
             ))}
           </select>
@@ -235,37 +278,56 @@ export function SpecDiffPage({ sessionId }: Props) {
         <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ color: "#94a3b8" }}>To</span>
           <select
-            value={to ?? ""}
-            onChange={(e) => setTo(Number(e.target.value))}
+            value={to === null ? "" : encodeVersionParam(to)}
+            onChange={(e) => setTo(parseVersionId(e.target.value))}
             aria-label="Compare to version"
+            data-testid="spec-diff-to"
           >
-            {versions.map((v) => (
-              <option key={v} value={v}>
-                v{v}
+            {dropdownOptions.map((v) => (
+              <option key={String(v)} value={encodeVersionParam(v)}>
+                {labelFor(v)}
               </option>
             ))}
           </select>
         </label>
       </header>
 
-      {diffError ? (
+      {!hasArchived ? (
+        <p className="spec-diff-empty" style={{ color: "#94a3b8", margin: 0 }}>
+          No archived spec versions for session <code>{sessionId}</code>.
+          Versions are created each time the spec is edited through the
+          spec-review flow.
+        </p>
+      ) : null}
+
+      {isNoop ? (
+        <p
+          className="diff-noop-message"
+          data-testid="diff-noop-message"
+          style={{ margin: 0, color: "#94a3b8" }}
+        >
+          Pick two different versions to see a diff.
+        </p>
+      ) : null}
+
+      {diffError && !isNoop ? (
         <p role="alert" style={{ color: "#fca5a5" }}>
           Failed to load diff: {diffError}
         </p>
       ) : null}
 
-      {loading && !diff ? <p>Loading diff…</p> : null}
+      {loading && !diff && !isNoop ? <p>Loading diff…</p> : null}
 
-      {diff ? (
+      {diff && !isNoop ? (
         <pre
           className="diff-pane"
-          aria-label={`Spec diff v${diff.from_version} to v${diff.to_version}`}
+          aria-label={`Spec diff ${labelFor(diff.from_version)} to ${labelFor(diff.to_version)}`}
           style={{ flex: 1, margin: 0 }}
         >
           {lines.length === 0 ? (
             <span style={{ color: "#94a3b8" }}>
-              (no textual differences between v{diff.from_version} and v
-              {diff.to_version})
+              (no textual differences between {labelFor(diff.from_version)} and{" "}
+              {labelFor(diff.to_version)})
             </span>
           ) : (
             lines.map((line, idx) => (

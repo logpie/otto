@@ -8451,3 +8451,928 @@ mark.log-search-match.active {
   color: var(--red);
   font-size: var(--text-xs, 12px);
 }
+
+/* === post-RUA round 1: landing cards + spec diff === */
+/* B4 — RunListLanding session cards (replaces the bullet list of IDs).
+   B15/B28/B29 — SpecDiffPage version dropdowns + no-op message. */
+
+.run-list-landing {
+  padding: 24px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.run-list-landing h1 {
+  font: var(--font-display, 700 28px/1.2 inherit);
+  margin: 0 0 8px;
+  color: var(--text);
+}
+
+.run-list-landing-count {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: var(--text-sm, 14px);
+}
+
+.landing-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.landing-card {
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--card-bg, #ffffff);
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.landing-card:hover,
+.landing-card:focus-within {
+  border-color: var(--accent, #0f766e);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+.landing-card-link {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.landing-card-link:focus-visible {
+  outline: 2px solid var(--accent, #0f766e);
+  outline-offset: -2px;
+}
+
+.landing-card-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+}
+
+.landing-card-row-top {
+  align-items: center;
+}
+
+.landing-card-intent {
+  font-weight: 600;
+  color: var(--text);
+  font-size: var(--text-base, 16px);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.landing-card-counts,
+.landing-card-metrics {
+  font-size: var(--text-sm, 14px);
+  color: var(--muted);
+}
+
+.landing-card-counts-item,
+.landing-card-metrics > span {
+  display: inline-flex;
+  align-items: baseline;
+}
+
+/* Thin middle-dot separator between counts/metrics items. */
+.landing-card-counts-item + .landing-card-counts-item::before,
+.landing-card-metrics > span + span::before {
+  content: "·";
+  margin: 0 8px 0 0;
+  color: var(--border, #cbd5e1);
+}
+
+.landing-card-counts-critical {
+  color: var(--red, #b91c1c);
+  font-weight: 500;
+}
+
+.landing-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: var(--text-xs, 12px);
+  font-weight: 600;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  background: var(--muted-bg, #e2e8f0);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.landing-status-pill--success {
+  background: rgba(21, 128, 61, 0.12);
+  color: var(--green, #15803d);
+}
+
+.landing-status-pill--warning {
+  background: rgba(133, 77, 14, 0.12);
+  color: var(--amber, #854d0e);
+}
+
+.landing-status-pill--danger {
+  background: rgba(185, 28, 28, 0.12);
+  color: var(--red, #b91c1c);
+}
+
+.landing-status-pill--info {
+  background: rgba(15, 118, 110, 0.12);
+  color: var(--accent, #0f766e);
+}
+
+.landing-status-pill--neutral {
+  background: var(--muted-bg, #e2e8f0);
+  color: var(--muted, #5a6473);
+}
+
+.landing-card-actions {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  border-left: 1px solid var(--border, #e2e8f0);
+}
+
+.landing-card-action {
+  font-size: var(--text-sm, 14px);
+  font-weight: 600;
+  color: var(--accent, #0f766e);
+  text-decoration: none;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--accent, #0f766e);
+  background: transparent;
+  white-space: nowrap;
+}
+
+.landing-card-action:hover,
+.landing-card-action:focus-visible {
+  background: var(--accent, #0f766e);
+  color: #ffffff;
+}
+
+.run-list-landing--empty,
+.run-list-landing--loading,
+.run-list-landing--error {
+  padding: 24px;
+}
+
+/* Spec diff — no-op message + empty-state explanation. */
+.diff-noop-message {
+  font-size: var(--text-sm, 14px);
+  font-style: italic;
+}
+
+.spec-diff-empty {
+  font-size: var(--text-sm, 14px);
+}
+
+/* === post-RUA round 1: spec review + add-feature modal === */
+
+/* B10: header — title block on the left (h1 + lifecycle pill + relative
+   timestamp), B11: action buttons pinned to the right. The grid
+   collapses to a single column on narrow viewports so buttons wrap
+   below the title instead of spilling. */
+.spec-review-header.spec-review-header-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.spec-review-header.spec-review-header-grid h1 {
+  margin: 0;
+}
+.spec-review-title-block {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+.spec-review-title-block .spec-review-meta {
+  color: var(--muted);
+  font-size: var(--text-sm, 14px);
+}
+.spec-review-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* B30: success banner — slim, aria-live region. Always rendered so
+   screen readers see the live region, but visually collapses when
+   empty so it doesn't add empty whitespace. */
+.spec-review-success {
+  margin: 0 0 12px;
+  min-height: 0;
+  color: var(--green, #2f6f4a);
+  font-size: var(--text-sm, 14px);
+  font-weight: 500;
+}
+.spec-review-success:empty {
+  margin: 0;
+}
+
+/* B32: read-only banner for approved specs. Uses muted/info palette. */
+.spec-review-readonly-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-alt);
+  color: var(--text);
+  border-radius: 6px;
+  font-size: var(--text-sm, 14px);
+}
+.spec-review-readonly-banner code {
+  background: var(--surface);
+  padding: 0.05em 0.4em;
+  border-radius: 3px;
+}
+
+/* B12: Markdown <-> Form view toggle. Compact segmented-button look. */
+.spec-review-view-toggle {
+  display: inline-flex;
+  gap: 0;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.spec-review-view-toggle button {
+  background: var(--surface);
+  border: none;
+  padding: 6px 14px;
+  font-size: var(--text-sm, 14px);
+  color: var(--muted);
+  cursor: pointer;
+}
+.spec-review-view-toggle button + button {
+  border-left: 1px solid var(--line);
+}
+.spec-review-view-toggle button.view-toggle-active {
+  background: var(--surface-alt);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* B12: Form-view placeholder. */
+.spec-review-form.spec-review-form-placeholder {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 16px 20px;
+  font-size: var(--text-sm, 14px);
+  line-height: 1.5;
+}
+.spec-review-form-note {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+.spec-review-form-empty {
+  margin: 4px 0;
+  color: var(--muted);
+}
+.spec-review-form-groups {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.spec-review-form-groups > li {
+  border-left: 2px solid var(--line);
+  padding-left: 10px;
+}
+.spec-review-form-groups ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+/* B13/B14: AddFeatureModal — plain stacked label + input fields, with
+   right-aligned action group at the bottom. */
+.add-feature-modal {
+  width: min(560px, calc(100vw - 28px));
+  max-height: calc(100vh - 28px);
+  max-height: calc(100dvh - 28px);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 24px 48px rgba(20, 28, 41, 0.18);
+  padding: 18px 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+.add-feature-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 4px;
+}
+.add-feature-modal-header h2 {
+  margin: 0;
+  font-size: var(--text-md, 18px);
+}
+.add-feature-modal-header .modal-close {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.add-feature-modal-header .modal-close:hover {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+.add-feature-field {
+  display: flex;
+  flex-direction: column;
+}
+.add-feature-field > label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: var(--text-sm, 14px);
+  font-weight: 500;
+  color: var(--text);
+}
+.add-feature-field > input,
+.add-feature-field > select,
+.add-feature-field > textarea {
+  font: inherit;
+  font-size: var(--text-sm, 14px);
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+}
+.add-feature-field > textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+.add-feature-field .field-error {
+  display: block;
+  margin-top: 4px;
+  font-size: var(--text-xs, 12px);
+  color: var(--red, #b3261e);
+}
+.add-feature-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+/* === post-RUA round 1: pill + badge + drawer header tokens ===
+ * Closes B1 (text concatenation), B2 (status pills), B3 (severity
+ * badges), B5 (header bar + action row), B6 (horizontal stages),
+ * B7 (group rows wall/cost/actions), B8 (drilldown breadcrumb +
+ * actions), B19 (friendly 404). All rules below are additive — no
+ * existing selectors are redefined. Tokens reuse the
+ * --color-{success,warning,danger,info}-{fg,bg} family already
+ * defined at the top of the stylesheet so dark-mode flips work.
+ */
+
+:root {
+  --pill-ok-bg: var(--color-success-bg);
+  --pill-ok-fg: var(--color-success-fg);
+  --pill-warn-bg: var(--color-warning-bg);
+  --pill-warn-fg: var(--color-warning-fg);
+  --pill-error-bg: var(--color-danger-bg);
+  --pill-error-fg: var(--color-danger-fg);
+  --pill-info-bg: var(--color-info-bg);
+  --pill-info-fg: var(--color-info-fg);
+  --pill-muted-bg: var(--surface-alt);
+  --pill-muted-fg: var(--muted);
+}
+
+/* ---------------- run-pill primitive (B2 + B3) ---------------- */
+.run-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--text-xs, 12px);
+  font-weight: 600;
+  line-height: 1.4;
+  text-transform: lowercase;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  background: var(--pill-muted-bg);
+  color: var(--pill-muted-fg);
+  border: 1px solid transparent;
+}
+.run-pill-ok {
+  background: var(--pill-ok-bg);
+  color: var(--pill-ok-fg);
+}
+.run-pill-warn {
+  background: var(--pill-warn-bg);
+  color: var(--pill-warn-fg);
+}
+.run-pill-error {
+  background: var(--pill-error-bg);
+  color: var(--pill-error-fg);
+}
+.run-pill-info {
+  background: var(--pill-info-bg);
+  color: var(--pill-info-fg);
+}
+.run-pill-muted {
+  background: var(--pill-muted-bg);
+  color: var(--pill-muted-fg);
+}
+.run-badge {
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+/* ---------------- run-drawer header (B5) ---------------- */
+.run-drawer-header {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  margin-bottom: 12px;
+}
+.run-drawer-header .outcome-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: baseline;
+}
+.run-drawer-header .intent-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-drawer-header .metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 0;
+  padding: 0;
+}
+.run-drawer-header .metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.run-drawer-header .metric dt {
+  margin: 0;
+  font-size: var(--text-xs, 12px);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+}
+.run-drawer-header .metric dd {
+  margin: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+}
+.run-drawer-header .metric-sep {
+  color: var(--muted);
+  font-weight: 400;
+}
+.run-drawer-header .metric-unit {
+  font-size: var(--text-xs, 12px);
+  color: var(--muted);
+  font-weight: 500;
+  text-transform: lowercase;
+}
+
+/* ---------------- run quick-actions row (B5) ---------------- */
+.run-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.run-quick-action {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: var(--text-sm, 14px);
+  cursor: pointer;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+.run-quick-action:hover {
+  background: var(--surface-alt);
+  border-color: var(--muted);
+}
+.run-quick-action-primary {
+  background: var(--pill-info-bg);
+  border-color: var(--pill-info-fg);
+  color: var(--pill-info-fg);
+  font-weight: 600;
+}
+.run-quick-action-primary:hover {
+  background: var(--pill-info-bg);
+  filter: brightness(0.97);
+}
+
+/* ---------------- feature-list rows (B1 + B2) ---------------- */
+.feature-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.feature-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+  transition: background 80ms ease;
+}
+.feature-row:hover {
+  background: var(--surface-alt);
+}
+.feature-row .verdict-glyph {
+  flex: 0 0 auto;
+  font-weight: 700;
+  width: 16px;
+  text-align: center;
+}
+.feature-row .feature-name {
+  font-weight: 600;
+  color: var(--text);
+  flex: 0 0 auto;
+}
+.feature-row .feature-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.feature-row.ok .verdict-glyph { color: var(--color-success-fg); }
+.feature-row.warn .verdict-glyph { color: var(--color-warning-fg); }
+.feature-row.fail .verdict-glyph { color: var(--color-danger-fg); }
+.feature-row.info .verdict-glyph { color: var(--color-info-fg); }
+.feature-row.pending .verdict-glyph { color: var(--muted); }
+
+/* ---------------- group-list rows (B1 + B7) ---------------- */
+.group-list {
+  margin: 0;
+  padding: 0;
+}
+.group-list > summary {
+  cursor: pointer;
+  padding: 6px 0;
+  font-weight: 600;
+  color: var(--text);
+}
+.group-list ul {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.group-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.group-row .group-name {
+  font-weight: 600;
+  color: var(--text);
+}
+.group-row .feature-count,
+.group-row .group-wall,
+.group-row .group-cost {
+  font-size: var(--text-xs, 12px);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.group-row .group-actions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.group-row .group-action-button,
+.group-row .group-abort-button {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: var(--text-xs, 12px);
+  cursor: pointer;
+}
+.group-row .group-action-button:hover {
+  background: var(--surface-alt);
+}
+.group-row .group-abort-button {
+  border-color: var(--color-danger-fg);
+  color: var(--color-danger-fg);
+}
+.group-row .group-abort-button:hover:not(:disabled) {
+  background: var(--color-danger-bg);
+}
+.group-row .group-abort-button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* ---------------- horizontal stage timeline (B6) ---------------- */
+.stage-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.stage-timeline > li.stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+.stage-timeline .stage-block {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  white-space: nowrap;
+}
+.stage-timeline .stage-dot {
+  font-weight: 700;
+  width: 14px;
+  text-align: center;
+  flex: 0 0 auto;
+}
+.stage-timeline .stage-name {
+  font-weight: 600;
+  color: var(--text);
+  text-transform: capitalize;
+}
+.stage-timeline .stage-status {
+  font-size: var(--text-xs, 12px);
+  color: var(--muted);
+}
+.stage-timeline .stage-duration,
+.stage-timeline .stage-cost {
+  font-size: var(--text-xs, 12px);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.stage-timeline .stage-arrow {
+  color: var(--muted);
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.stage-timeline .stage-done .stage-block {
+  border-color: var(--color-success-border, var(--color-success-fg));
+}
+.stage-timeline .stage-done .stage-dot { color: var(--color-success-fg); }
+.stage-timeline .stage-active .stage-block {
+  border-color: var(--color-info-border, var(--color-info-fg));
+  background: var(--color-info-bg);
+}
+.stage-timeline .stage-active .stage-dot { color: var(--color-info-fg); }
+.stage-timeline .stage-failed .stage-block {
+  border-color: var(--color-danger-border, var(--color-danger-fg));
+}
+.stage-timeline .stage-failed .stage-dot { color: var(--color-danger-fg); }
+.stage-timeline .stage-skipped .stage-block { opacity: 0.65; }
+.stage-timeline .stage-pending .stage-dot { color: var(--muted); }
+
+/* ---------------- feature-drilldown breadcrumb + actions (B8) ---------------- */
+.feature-drilldown {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.feature-drilldown-breadcrumb {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.feature-drilldown-breadcrumb .feature-drilldown-back {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: var(--text-sm, 14px);
+  margin-right: auto; /* B8: left-align the back button */
+  margin-left: 0;
+}
+.feature-drilldown-breadcrumb .feature-drilldown-back:hover {
+  background: var(--surface-alt);
+}
+.feature-drilldown-breadcrumb .breadcrumb-trail {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: var(--text-sm, 14px);
+}
+.feature-drilldown-breadcrumb .breadcrumb-link {
+  color: var(--blue);
+  text-decoration: none;
+  cursor: pointer;
+}
+.feature-drilldown-breadcrumb .breadcrumb-link:hover {
+  text-decoration: underline;
+}
+.feature-drilldown-breadcrumb .breadcrumb-sep {
+  color: var(--muted);
+}
+.feature-drilldown-breadcrumb .breadcrumb-current {
+  color: var(--text);
+  font-weight: 600;
+}
+.feature-drilldown-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.feature-drilldown-header h2 {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.feature-drilldown-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.feature-drilldown-actions .feature-action-button {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: var(--text-sm, 14px);
+}
+.feature-drilldown-actions .feature-action-button:hover {
+  background: var(--surface-alt);
+}
+.feature-drilldown .finding {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+}
+.feature-drilldown .finding-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.feature-drilldown .evidence-ref-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.feature-drilldown .evidence-ref-row .evidence-summary {
+  color: var(--muted);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ---------------- friendly error state (B19) ---------------- */
+.run-view-error,
+.run-view-not-found {
+  max-width: 520px;
+  margin: 48px auto;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.run-view-error h2,
+.run-view-not-found h2 {
+  margin: 0;
+  font-size: var(--text-md, 18px);
+  color: var(--text);
+}
+.run-view-error p,
+.run-view-not-found p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.run-view-error code,
+.run-view-not-found code {
+  background: var(--surface-alt);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.92em;
+}
+.run-view-error-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.run-view-error-actions .primary-action {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: var(--pill-info-bg);
+  color: var(--pill-info-fg);
+  border: 1px solid var(--pill-info-fg);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: var(--text-sm, 14px);
+}
+.run-view-error-actions .primary-action:hover {
+  filter: brightness(0.97);
+}
+.run-view-error-actions .secondary-action {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: var(--text-sm, 14px);
+}
+.run-view-error-actions .secondary-action:hover {
+  background: var(--surface-alt);
+}
+.run-view-error-detail {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs, 12px);
+  color: var(--muted);
+  word-break: break-word;
+}

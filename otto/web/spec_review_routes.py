@@ -275,21 +275,28 @@ def install_spec_review_routes(
     @router.get("/{session_id}/diff")
     def get_diff(
         session_id: str,
-        from_version: int = Query(..., alias="from", ge=1),
-        to_version: int = Query(..., alias="to", ge=1),
+        from_version: str = Query(..., alias="from"),
+        to_version: str = Query(..., alias="to"),
     ) -> JSONResponse:
         """Return paired markdown + parsed JSON for two spec versions
-        (wireframe 4d). Both ``from`` and ``to`` must reference
-        archived `spec-v<N>.{md,json}` files. The frontend is
+        (wireframe 4d). Each side may be:
+
+        * an integer ``N`` referencing an archived ``spec-v<N>.{md,json}``
+        * the literal string ``"current"`` referencing the live working
+          ``spec.{json,md}`` (B28)
+
+        ``from_version``/``to_version`` in the response are the integer
+        version when archived, or the string ``"current"`` for the live
+        working spec — the frontend renders both. The frontend is
         responsible for rendering the line-level diff.
         """
         project = _resolve_project_dir()
         sd = _resolve_spec_dir(project, session_id)
-        from_md, from_json = _read_archived_version(sd, from_version)
-        to_md, to_json = _read_archived_version(sd, to_version)
+        from_md, from_json, from_label = _resolve_diff_side(sd, from_version)
+        to_md, to_json, to_label = _resolve_diff_side(sd, to_version)
         return JSONResponse({
-            "from_version": from_version,
-            "to_version": to_version,
+            "from_version": from_label,
+            "to_version": to_label,
             "from_md": from_md,
             "to_md": to_md,
             "from_json": from_json,
@@ -372,6 +379,64 @@ def _list_archived_versions(sd: Path) -> list[int]:
         except ValueError:
             continue
     return nums
+
+
+def _resolve_diff_side(sd: Path, value: str) -> tuple[str, dict, int | str]:
+    """Resolve a diff-side query value to (markdown, parsed_json, label).
+
+    ``value`` may be:
+      * an integer string referencing an archived ``spec-v<N>.{md,json}``
+      * the literal ``"current"`` referencing the live working spec
+        (``spec.json`` + ``spec.md``)
+
+    Returns a 3-tuple where the third element is either the int version
+    (for archived sides) or the string ``"current"`` so the response
+    payload echoes back exactly what the client requested.
+    """
+    if value == "current":
+        spec_path = sd / SPEC_JSON_FILENAME
+        md_path = sd / SPEC_MD_FILENAME
+        if not spec_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"current spec.json missing in {sd.name}",
+            )
+        try:
+            parsed = json.loads(spec_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"current spec.json is malformed: {exc}",
+            ) from exc
+        if md_path.exists():
+            md = md_path.read_text(encoding="utf-8")
+        else:
+            # Fall back to rendering from the parsed spec when spec.md is
+            # absent — keeps the diff endpoint functional even when the
+            # markdown shadow file was never written.
+            try:
+                spec_obj = load_spec(spec_path)
+                md = render_spec_md(spec_obj)
+            except Exception:
+                md = ""
+        return md, parsed, "current"
+    try:
+        n = int(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"invalid version {value!r}; expected an integer or "
+                f"the literal 'current'"
+            ),
+        ) from exc
+    if n < 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"version must be >= 1, got {n}",
+        )
+    md, parsed = _read_archived_version(sd, n)
+    return md, parsed, n
 
 
 def _read_archived_version(sd: Path, n: int) -> tuple[str, dict]:

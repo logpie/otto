@@ -7,12 +7,14 @@
 //
 // Mounted by RunViewPage when the user clicks a Feature row. A "Back"
 // link lets the user return to the drawer without a full reload.
+//
+// Post-RUA round 1 (B8): added breadcrumb (Run › group › feature),
+// per-Feature action stubs (Open evidence dir / Re-audit / Logs),
+// and left-aligned the back button. Status pill + severity badges
+// route through the scoped <Pill>/<Badge> primitives (B2, B3).
 
-import type {
-  FeatureView,
-  FindingView,
-  RunView,
-} from "../../types/run";
+import type { FeatureView, FeatureVerdict, RunView } from "../../types/run";
+import { Badge, Pill, type PillTone } from "./Pill";
 
 interface Props {
   feature: FeatureView;
@@ -20,7 +22,7 @@ interface Props {
   onBack: () => void;
 }
 
-function verdictTone(verdict: FeatureView["verdict"]): "ok" | "warn" | "fail" | "pending" | "info" {
+function verdictTone(verdict: FeatureVerdict | null): "ok" | "warn" | "fail" | "pending" | "info" {
   if (verdict === null) return "pending";
   if (verdict === "passed") return "ok";
   if (verdict === "partial") return "warn";
@@ -28,10 +30,12 @@ function verdictTone(verdict: FeatureView["verdict"]): "ok" | "warn" | "fail" | 
   return "fail";
 }
 
-function severityTone(severity: FindingView["severity"]): "fail" | "warn" | "info" {
-  if (severity === "critical") return "fail";
-  if (severity === "important") return "warn";
-  return "info";
+function verdictPillTone(verdict: FeatureVerdict | null): PillTone {
+  if (verdict === null) return "muted";
+  if (verdict === "passed") return "ok";
+  if (verdict === "partial") return "warn";
+  if (verdict === "missing") return "info";
+  return "error";
 }
 
 export function FeatureDrilldown({ feature, view, onBack }: Props) {
@@ -39,29 +43,105 @@ export function FeatureDrilldown({ feature, view, onBack }: Props) {
     (f) => f.feature_id === feature.id,
   );
   const groupForFeature = view.groups.find((g) => g.id === feature.group_id);
+  const sessionId = view.meta.session_id;
 
   return (
     <article
       className={`feature-drilldown ${verdictTone(feature.verdict)}`}
       data-testid="feature-drilldown"
     >
-      <header className="feature-drilldown-header">
+      <nav className="feature-drilldown-breadcrumb" aria-label="Breadcrumb">
         <button
           type="button"
-          className="back-link"
+          className="back-link feature-drilldown-back"
           data-testid="feature-drilldown-back"
           onClick={onBack}
         >
           ← Back to run
         </button>
+        <span className="breadcrumb-trail" data-testid="feature-drilldown-breadcrumb">
+          <a
+            className="breadcrumb-link"
+            href={`/?view=run-view&session=${encodeURIComponent(sessionId)}`}
+            onClick={(e) => {
+              e.preventDefault();
+              onBack();
+            }}
+          >
+            Run
+          </a>
+          <span className="breadcrumb-sep" aria-hidden>›</span>
+          {groupForFeature ? (
+            <a
+              className="breadcrumb-link"
+              href={`/?view=run-view&session=${encodeURIComponent(sessionId)}`}
+              onClick={(e) => {
+                e.preventDefault();
+                onBack();
+              }}
+              data-testid="feature-drilldown-breadcrumb-group"
+            >
+              {groupForFeature.name}
+            </a>
+          ) : (
+            <span className="breadcrumb-current">Ungrouped</span>
+          )}
+          <span className="breadcrumb-sep" aria-hidden>›</span>
+          <span className="breadcrumb-current" data-testid="feature-drilldown-breadcrumb-feature">
+            {feature.name}
+          </span>
+        </span>
+      </nav>
+
+      <header className="feature-drilldown-header">
         <h2 data-testid="feature-drilldown-name">{feature.name}</h2>
-        <span
+        <Pill
+          tone={verdictPillTone(feature.verdict)}
           className="verdict-pill"
-          data-testid="feature-drilldown-verdict"
+          testId="feature-drilldown-verdict"
         >
           {feature.verdict ?? "pending"}
-        </span>
+        </Pill>
       </header>
+
+      <div className="feature-drilldown-actions" data-testid="feature-drilldown-actions">
+        <button
+          type="button"
+          className="feature-action-button"
+          data-testid="feature-action-evidence"
+          onClick={() => {
+            // TODO: wire to /api/run-view/<sid>/features/<fid>/evidence-dir
+            // eslint-disable-next-line no-console
+            console.log("[FeatureDrilldown] open evidence dir stub", feature.id);
+          }}
+        >
+          Open evidence dir
+        </button>
+        <button
+          type="button"
+          className="feature-action-button"
+          data-testid="feature-action-reaudit"
+          onClick={() => {
+            // TODO: wire to /api/run-view/<sid>/features/<fid>/reaudit
+            // eslint-disable-next-line no-console
+            console.log("[FeatureDrilldown] re-audit stub", feature.id);
+          }}
+        >
+          Re-audit just this Feature
+        </button>
+        <button
+          type="button"
+          className="feature-action-button"
+          data-testid="feature-action-logs"
+          onClick={() => {
+            // TODO: wire to /api/run-view/<sid>/features/<fid>/logs
+            // eslint-disable-next-line no-console
+            console.log("[FeatureDrilldown] logs stub", feature.id);
+          }}
+        >
+          Logs
+        </button>
+      </div>
 
       {feature.description && (
         <section className="feature-drilldown-description">
@@ -125,7 +205,7 @@ export function FeatureDrilldown({ feature, view, onBack }: Props) {
         ) : (
           <ul>
             {feature.evidence_refs.map((ref, i) => (
-              <li key={`${ref.kind}-${ref.path}-${i}`}>
+              <li key={`${ref.kind}-${ref.path}-${i}`} className="evidence-ref-row">
                 <span className="evidence-kind">{ref.kind}</span>
                 <code className="evidence-path">{ref.path}</code>
                 <span className="evidence-summary">{ref.summary}</span>
@@ -144,10 +224,10 @@ export function FeatureDrilldown({ feature, view, onBack }: Props) {
             {findingsForFeature.map((f, i) => (
               <li
                 key={`${f.severity}-${i}`}
-                className={`finding ${severityTone(f.severity)}`}
+                className={`finding finding-${f.severity}`}
                 data-testid="feature-drilldown-finding"
               >
-                <span className="severity-pill">{f.severity}</span>
+                <Badge severity={f.severity} testId="feature-drilldown-finding-severity" />
                 <span className="finding-message">{f.text}</span>
               </li>
             ))}

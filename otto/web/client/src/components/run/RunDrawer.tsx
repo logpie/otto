@@ -138,9 +138,68 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
     [sessionId, onAfterAction],
   );
 
+  // B5 — action button row stub. No-op for now; logs intent so a real
+  // wiring pass can grep for these handlers later. The buttons live
+  // directly under the VerdictHeader to mirror wireframe screen 3
+  // (Open proof packet / View spec / Logs / Files).
+  const onOpenProofPacket = useCallback(() => {
+    // TODO: link to view.meta.proof_packet_html when populated
+    // eslint-disable-next-line no-console
+    console.log("[RunDrawer] open proof packet stub", sessionId);
+  }, [sessionId]);
+  const onViewSpec = useCallback(() => {
+    // TODO: navigate to spec-review for the run's spec id
+    // eslint-disable-next-line no-console
+    console.log("[RunDrawer] view spec stub", sessionId);
+  }, [sessionId]);
+  const onOpenLogs = useCallback(() => {
+    // TODO: open the build narrative log viewer
+    // eslint-disable-next-line no-console
+    console.log("[RunDrawer] logs stub", sessionId);
+  }, [sessionId]);
+  const onOpenFiles = useCallback(() => {
+    // TODO: open the session-dir file browser
+    // eslint-disable-next-line no-console
+    console.log("[RunDrawer] files stub", sessionId);
+  }, [sessionId]);
+
   return (
     <article className="run-drawer" data-testid="run-drawer">
       <VerdictHeader view={view} />
+      <div className="run-quick-actions" data-testid="run-quick-actions">
+        <button
+          type="button"
+          className="run-quick-action run-quick-action-primary"
+          data-testid="run-quick-action-proof"
+          onClick={onOpenProofPacket}
+        >
+          Open proof packet
+        </button>
+        <button
+          type="button"
+          className="run-quick-action"
+          data-testid="run-quick-action-spec"
+          onClick={onViewSpec}
+        >
+          View spec
+        </button>
+        <button
+          type="button"
+          className="run-quick-action"
+          data-testid="run-quick-action-logs"
+          onClick={onOpenLogs}
+        >
+          Logs
+        </button>
+        <button
+          type="button"
+          className="run-quick-action"
+          data-testid="run-quick-action-files"
+          onClick={onOpenFiles}
+        >
+          Files
+        </button>
+      </div>
       {inFlight && (
         <div className="run-action-bar" data-testid="run-action-bar">
           <button
