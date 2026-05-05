@@ -249,14 +249,41 @@ shared_paths works.
   - `Guardrail` dataclass with `id`, `text`, `applies_to`.
   - `compile_spec(intent, project_kind, base=None) -> Spec` — LLM call.
     Reuses tightened `otto/prompts/compile.md`.
-  - `compile_validator(spec) -> ValidationResult` — schema check.
+  - `validate_spec(spec) -> ValidationResult` — broader-than-schema-only
+    validator. The plan originally promised a `compile_validator(spec)`
+    symbol scoped to schema-pass alone; reality is `validate_spec` and it
+    additionally enforces dep-cycle detection, vagueness flagging, and
+    duplicate-id checks. The "schema-only" framing was a premature
+    constraint — those structural checks must happen before the spec
+    reaches Build (a cycle in `dependencies[]` or duplicate Feature ids
+    would silently corrupt the merge queue), so folding them into the
+    same call is correct. Keeping the broader name avoids cargoing a
+    stub `compile_validator = validate_spec` alias just for plan
+    fidelity.
 - `otto/checks.py`: `Check` base + kinds (`RepoTestCheck`, `ApiProbe`,
   `StateInvariant`, `BrowserJourney`); `run_check(check, project_dir,
   *, feature_id) -> Evidence`. Evidence carries `feature_id`.
 - `otto/build.py`: `build_groups(spec, session_dir)` dispatches per
-  `Group` to a long-lived agent on its own worktree/branch. Internal
+  `Group` to an agent attached to a worktree/branch. Internal
   Check loop bounded by `defaults.retries.check_loop.max_attempts_per_group`.
+  **Implementation note**: the agent is "long-lived" only at the
+  worktree+branch level; each retry constructs a fresh `BuildAgentInput`
+  and spawns a new SDK subprocess (no PID reuse, no conversation continuity).
+  "Fresh prompt on retry = clear conversation" is satisfied incidentally
+  by the fresh subprocess. The original plan's "long-lived process"
+  framing oversells process continuity; what's delivered is
+  same-logical-role + persistent worktree+branch + fresh prompt+process
+  per attempt. See `otto/build.py:1574-1599, 2229-2294`.
 - `otto/merge.py`: eligibility-gated FIFO merge queue per Group.
+  **Implementation note**: lives at `otto/merge_queue.py` (not
+  `otto/merge.py`) to avoid name-clash with the legacy `otto/merge/`
+  package that was deleted in Phase C.4. Phase A simplification:
+  single-worktree mode (default per-slice worktree =
+  `lambda _s: project_dir`); multi-worktree extension (where
+  "base not stale" + "not superseded" eligibility checks become
+  load-bearing) is deferred. No `git rebase` — replaced with
+  merge-first-then-verify-with-rollback. See `merge_queue.py:8-22`
+  for the documented Phase A simplification.
 
 ### Files
 
@@ -264,6 +291,22 @@ shared_paths works.
 - Modified: `otto/cli.py` — `otto run` routes through these
 - New: `tests/test_spec.py`, `tests/test_checks.py`, `tests/test_build.py`,
   `tests/test_merge.py`
+
+**File naming drift from this list (post-implementation):**
+- `otto/spec.py` → `otto/spec_compile.py` (Phase C.1d deleted the legacy
+  `otto/spec.py` markdown gate; the new compile lives in `spec_compile.py`)
+- `otto/state.py` → `otto/spec_state.py` (with `<session>/spec-state.jsonl`
+  artifact, not `<session>/state.jsonl`)
+- `otto/merge.py` → `otto/merge_queue.py` (avoids clash with legacy
+  `otto/merge/` package preserved for a few helpers)
+- `otto/certifier.py` → `otto/audit.py` + `otto/audit_loop.py` (split
+  into the single-pass audit and the L2 repair loop)
+- `tests/test_spec.py` → `tests/test_spec_compile.py`
+- `tests/test_state.py` → `tests/test_spec_state.py`
+- `tests/test_merge.py` → `tests/test_merge_queue.py`
+- `tests/test_certifier.py` → `tests/test_audit.py` + `tests/test_audit_loop_repair.py`
+
+Contracts preserved; names diverged. Update consumers accordingly.
 
 ### Verification
 
@@ -590,6 +633,15 @@ high to gate on a single pass):
 - Audit verdict = `passed`
 - Browser private evaluator passes
 - Hidden evaluator passes
+
+**Mono baseline note**: the original plan said the bench would "adapt
+`scripts/bench_microfeed_real_webapp.py`" to compare against. That
+baseline script does NOT exist in the cc-i2p-2 worktree — it lived
+on the codex-i2p branch which was never merged. As a result, the
+"≤ 1.5× mono baseline" criterion in `scripts/bench_microfeed_i2p.py`
+is implemented against a hard-coded ceiling (1500s for wall) rather
+than a re-run mono comparison. If you need a true comparison, you
+must port the script from codex-i2p first.
 - **Human check:** landing page loads, ≥ 2 Features visible in UI,
   no console errors in browser DevTools (reviewer captures
   screenshot for `review.md` evidence)
@@ -618,7 +670,7 @@ Single PR. Big diff. Codex implementation gate is mandatory.
 | Vocabulary refactor breaks running benches | Phase A0 lands before any new behavior; full bench rerun confirms baseline |
 | Audit Feature-tagging rate is < 100% (some actions untagged) | Audit prompt enforces tagging; parser rejects untagged-non-exploration; audit loop fails-fast on parser violation |
 | Per-Feature audit cost balloons | Default to whole-product audit with Feature anchors; per-Feature only on demand |
-| Phase B cutover breaks user automation | Keep `otto build` as alias for one minor version with `DeprecationWarning`, delete in Phase C |
+| Phase B cutover breaks user automation | **Implementation note (post-Phase C):** legacy `build_agentic_v3` / `run_certify_fix_loop` / `run_agentic_certifier` are NOT importable — `otto/pipeline.py:59` and `otto/certifier/__init__.py:65-75` raise `RuntimeError` with a Phase-C migration message. The original "deprecated, still importable" plan was upgraded to hard-error during Phase C deletion to fail fast on stale callers. |
 | Legacy MC users see broken panels post-rename | Phase A is purely additive; legacy panel components untouched |
 | Multi-Group runs with file overlap deadlock | Merge queue test coverage for owned_paths overlap; eligibility ordering with deps |
 | User edits to Spec break Feature id stability | Edit operations use stable id generator; renaming a Feature changes `name`, not `id` |
