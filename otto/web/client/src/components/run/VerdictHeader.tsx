@@ -13,11 +13,24 @@
 // `.metric-num` and `.metric-val` defends against future markup changes
 // where the dd wrapper may not be the immediate parent.
 
+import { useState } from "react";
 import type { RunVerdict, RunView } from "../../types/run";
 import { Pill, type PillTone } from "./Pill";
 
 interface Props {
   view: RunView;
+}
+
+// R3-B22: long intents truncate via CSS ellipsis on the header row,
+// which hid context behind a tooltip-only affordance. Render an
+// inline "View full intent ▸" toggle when the intent exceeds a
+// reasonable inline-length budget; clicking expands the full text
+// in-place so the user never has to hover/copy the title attribute.
+const INTENT_INLINE_LIMIT = 120;
+
+function truncateIntent(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1).trimEnd() + "…";
 }
 
 function verdictTone(verdict: RunVerdict | null): "ok" | "warn" | "fail" | "pending" {
@@ -51,6 +64,13 @@ export function VerdictHeader({ view }: Props) {
   const totalFeatures = view.features.length;
   const criticalCount = view.findings.filter((f) => f.severity === "critical").length;
   const label = view.verdict ?? view.status;
+  const [intentExpanded, setIntentExpanded] = useState(false);
+  const intentRaw = view.intent ?? "";
+  const intentNeedsToggle = intentRaw.length > INTENT_INLINE_LIMIT;
+  const intentVisible =
+    !intentNeedsToggle || intentExpanded
+      ? intentRaw
+      : truncateIntent(intentRaw, INTENT_INLINE_LIMIT);
 
   return (
     <header className={`run-drawer-header ${tone}`} data-testid="verdict-header">
@@ -62,9 +82,26 @@ export function VerdictHeader({ view }: Props) {
         >
           {label}
         </Pill>
-        <span className="intent-text" title={view.intent}>
-          {view.intent}
+        <span
+          className={`intent-text${
+            intentNeedsToggle && intentExpanded ? " intent-text--expanded" : ""
+          }`}
+          title={intentRaw}
+          data-testid="intent-text"
+        >
+          {intentVisible}
         </span>
+        {intentNeedsToggle && (
+          <button
+            type="button"
+            className="intent-toggle"
+            data-testid="intent-toggle"
+            aria-expanded={intentExpanded}
+            onClick={() => setIntentExpanded((v) => !v)}
+          >
+            {intentExpanded ? "Hide full intent ▾" : "View full intent ▸"}
+          </button>
+        )}
       </div>
       <dl className="metrics" data-testid="metrics">
         <div className="metric">

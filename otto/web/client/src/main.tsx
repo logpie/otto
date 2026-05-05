@@ -65,10 +65,15 @@ function renderRoute() {
 // Truncate session ids in the page-label so the topbar reads cleanly
 // regardless of full id length. Format: <date>-<HHMMSS>-<6hex>; the
 // trailing hex is the most useful disambiguator at a glance.
+//
+// R3-B49: always truncate to "...<last 6 chars>" — even short or
+// otherwise-shaped ids (e.g. the "DOES-NOT-EXIST" 404 fixture). The
+// pre-fix `length <= 14` short-circuit caused real session ids to
+// render as "...abc123" while invalid/short ids rendered in full,
+// which read as inconsistent chrome.
 function shortSession(id: string): string {
-  if (id.length <= 14) return id;
   const tail = id.slice(-6);
-  return `…${tail}`;
+  return `...${tail}`;
 }
 
 createRoot(root).render(

@@ -375,7 +375,13 @@ export function SpecDiffPage({ sessionId }: Props) {
             </select>
           </label>
           {/* R2-B26: show-only-changes toggle. Default unchecked →
-              preserves prior behavior (full diff with all context). */}
+              preserves prior behavior (full diff with all context).
+              R3-B45: re-styled as a clearly-toggle button — outlined
+              when inactive, filled-blue when active. `aria-pressed`
+              is already set so screen readers + assistive tech read
+              the toggle state correctly.
+              R3-B47: when disabled (no diff to filter), surface a
+              title tooltip explaining why. */}
           <button
             type="button"
             className="spec-diff-fold-toggle"
@@ -383,21 +389,37 @@ export function SpecDiffPage({ sessionId }: Props) {
             aria-pressed={onlyChanges}
             onClick={() => setOnlyChanges((v) => !v)}
             disabled={!diff || isNoop}
+            title={!diff || isNoop ? "No diff to filter" : undefined}
           >
             {onlyChanges ? "Show full diff" : "Show only changes"}
           </button>
         </div>
       </header>
 
+      {/* R3-B44: collapse the previously-stacked empty-state messages
+          into a single block when there are no archived versions. The
+          `!hasArchived` case used to render BOTH the spec-diff-empty
+          paragraph AND the diff-noop-message (since from === to ===
+          "current"), which read as two separate empties. We now show
+          one unified message and an Edit-spec CTA (R3-B46). */}
       {!hasArchived ? (
-        <p className="spec-diff-empty">
-          No archived spec versions for session <code>{sessionId}</code>.
-          Versions are created each time the spec is edited through the
-          spec-review flow.
-        </p>
-      ) : null}
-
-      {isNoop ? (
+        <div className="spec-diff-empty-block" data-testid="spec-diff-empty">
+          <p className="spec-diff-empty">
+            No archived spec versions for this session yet. Spec versions
+            are created each time the spec is edited and saved through
+            the spec-review flow.
+          </p>
+          <p className="spec-diff-empty-cta">
+            <a
+              className="spec-diff-empty-cta-link"
+              data-testid="spec-diff-edit-spec-cta"
+              href={`?view=spec-review&spec=${encodeURIComponent(sessionId)}`}
+            >
+              Edit spec to create a version
+            </a>
+          </p>
+        </div>
+      ) : isNoop ? (
         <p
           className="diff-noop-message"
           data-testid="diff-noop-message"

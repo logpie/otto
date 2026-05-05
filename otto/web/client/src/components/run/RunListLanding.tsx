@@ -199,8 +199,13 @@ function SessionCard({ session }: { session: SessionSummary }) {
       </a>
       {(isAwaitingReview || lifecycle === "draft") && (
         <div className="landing-card-actions">
+          {/* R3-B7: Review-spec is a secondary action on the landing
+              card. The card row already routes to the run detail; the
+              landing's primary affordance lives elsewhere. Use the
+              neutral `.secondary` outlined style so this link doesn't
+              compete with the future primary CTA via the teal tone. */}
           <a
-            className="landing-card-action"
+            className="landing-card-action secondary"
             href={`?view=spec-review&spec=${encodeURIComponent(session.id)}`}
             onClick={(e) => e.stopPropagation()}
           >
@@ -265,7 +270,7 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
   if (error) {
     return (
       <div className="run-list-landing run-list-landing--error" data-testid="run-list-error">
-        <h1>Otto Mission Control</h1>
+        <h1>Runs</h1>
         <p>Failed to load sessions: {error}</p>
       </div>
     );
@@ -274,7 +279,7 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
   if (payload === null) {
     return (
       <div className="run-list-landing run-list-landing--loading" data-testid="run-list-loading">
-        <h1>Otto Mission Control</h1>
+        <h1>Runs</h1>
         <p>Loading sessions…</p>
       </div>
     );
@@ -283,7 +288,7 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
   if (sessions.length === 0) {
     return (
       <div className="run-list-landing run-list-landing--empty" data-testid="run-list-empty">
-        <h1>Otto Mission Control</h1>
+        <h1>Runs</h1>
         <p>No sessions yet. Run <code>otto build</code> to create one.</p>
       </div>
     );
@@ -292,7 +297,7 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
   return (
     <div className="run-list-landing" data-testid="run-list">
       <header className="run-list-landing-heading">
-        <h1>Otto Mission Control</h1>
+        <h1>Runs</h1>
         <span
           className="run-list-landing-count-badge"
           data-testid="run-list-landing-count"

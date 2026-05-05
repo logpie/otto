@@ -36,6 +36,10 @@ export function RunViewPage({ sessionId, onSelectFeature }: Props) {
     // calls reload — those failures are usually transient.
     const isNotFound = errorStatus === 404;
     if (isNotFound) {
+      // R3-B50: AppShell topbar already renders "← Back to runs" on
+      // every non-landing route. Drop the in-card duplicate so the
+      // 404 surface stays focused on the explanation; navigation
+      // belongs to the chrome.
       return (
         <div
           className="run-view-error run-view-not-found"
@@ -47,11 +51,6 @@ export function RunViewPage({ sessionId, onSelectFeature }: Props) {
             Session ID <code>{sessionId}</code> doesn{"’"}t exist. It may
             have been deleted, or the URL is wrong.
           </p>
-          <div className="run-view-error-actions">
-            <a className="primary-action" href="/" data-testid="run-view-back-to-runs">
-              Back to runs
-            </a>
-          </div>
         </div>
       );
     }

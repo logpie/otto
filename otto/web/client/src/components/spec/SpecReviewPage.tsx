@@ -419,12 +419,30 @@ export function SpecReviewPage({ specId, onApproved }: Props) {
         <div className="spec-review-title-block">
           <div className="spec-review-title-row">
             <h1>Spec review</h1>
+            {/* R3-B38: lifecycle pill uses a neutral grey tone for the
+                draft state so it isn't confused with the primary blue
+                Approve button. The `success` tone (green) is reserved
+                for the terminal "approved" state. */}
             <Pill
-              tone={isApproved ? "success" : "info"}
+              tone={isApproved ? "success" : "neutral"}
               className="spec-review-lifecycle"
             >
               <span data-testid="spec-lifecycle">{data.lifecycle}</span>
             </Pill>
+            {/* R3-B39: surface the working version number near the
+                lifecycle pill. `versions` lists ARCHIVED prior versions;
+                the live working draft is one ahead, so we display
+                `versions.length + 1` as the current version. We render
+                only after the version list has resolved (versions !==
+                null) to avoid a flash of "v1". */}
+            {versions !== null && (
+              <span
+                className="spec-review-version"
+                data-testid="spec-review-version"
+              >
+                Version v{versions.length + 1}
+              </span>
+            )}
             {/* R2-B21: explicit bullet separator between the lifecycle
                 pill and the relative timestamp so the two visually
                 distinct items don't run together. */}

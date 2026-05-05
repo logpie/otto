@@ -59,9 +59,18 @@ export function GroupList({ groups, onAbort, pendingAbortId }: Props) {
     return <p className="empty">No groups dispatched.</p>;
   }
   return (
+    // R3-B29: <summary> is now styled as a section subheader so the
+    // "▶ N groups" disclosure has the same visual weight as the
+    // surrounding "Features" / "Stages" headings. The native <details>
+    // marker is replaced by a custom chevron rendered via CSS.
     <details className="group-list" data-testid="group-list">
-      <summary>
-        {groups.length} group{groups.length === 1 ? "" : "s"}
+      <summary className="group-list-summary">
+        <span className="group-list-summary-caret" aria-hidden>
+          ▸
+        </span>
+        <span className="group-list-summary-label">
+          {groups.length} group{groups.length === 1 ? "" : "s"}
+        </span>
       </summary>
       <ul>
         {groups.map((g) => {

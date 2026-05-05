@@ -9171,7 +9171,10 @@ mark.log-search-match.active {
 .stage-timeline .stage-name {
   font-weight: 600;
   color: var(--text);
-  text-transform: capitalize;
+  /* R3-B19: humanizeStage() in StageTimeline.tsx now produces the
+     final cased label (e.g. "Spec review"). Drop the CSS
+     `capitalize` rule so multi-word labels keep their lower-case
+     follower words ("Spec review" rather than "Spec Review"). */
 }
 .stage-timeline .stage-status {
   font-size: var(--text-xs, 12px);
@@ -9827,4 +9830,366 @@ mark.log-search-match.active {
 .run-pill.run-pill-outlined.run-pill-muted {
   border-color: var(--line);
   color: var(--muted);
+}
+
+/* === RUA round-3 cluster 1 fixes (R3-B7, R3-B17, R3-B22) === */
+
+/* R3-B7: secondary outlined-neutral action style for landing cards.
+ * The base `.landing-card-action` rule still uses --accent (teal),
+ * which fights with the new neutral-blue primary. Override to a
+ * neutral border + muted text so Review-spec reads as a secondary
+ * affordance, not as the primary CTA. Hover keeps the surface
+ * neutral and only deepens the border/text. */
+.landing-card-action.secondary {
+  color: var(--text);
+  border-color: var(--line);
+  background: transparent;
+}
+.landing-card-action.secondary:hover,
+.landing-card-action.secondary:focus-visible {
+  background: var(--surface-alt, rgba(15, 23, 42, 0.04));
+  color: var(--text);
+  border-color: var(--muted, #5a6473);
+}
+
+/* R3-B17: defence-in-depth so the stage stepper actually scrolls
+ * horizontally instead of clipping mid-word at constrained widths.
+ * `.stage-timeline` already has `overflow-x: auto`, but the parent
+ * flex chain (`.run-drawer-section` → drawer card) can pin the
+ * intrinsic min-content width at the widest stage block, blocking
+ * the overflow box from collapsing to its container. Setting
+ * `min-width: 0` on the section + the timeline lets the scroll
+ * container honour its own overflow rule on narrow viewports. */
+.stage-section,
+.stage-section > .stage-timeline {
+  min-width: 0;
+}
+
+/* R3-B22: "View full intent" toggle. Renders as a quiet inline
+ * affordance next to the (truncated) intent text so the user can
+ * expand the full intent in-place. When expanded, the intent-text
+ * span drops the ellipsis truncation and wraps onto multiple lines
+ * so the full prose is readable without leaving the page. */
+.run-drawer-header .intent-toggle {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm, 13px);
+  font-weight: 600;
+  color: var(--primary-action-bg, #2557d4);
+  text-decoration: none;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.run-drawer-header .intent-toggle:hover,
+.run-drawer-header .intent-toggle:focus-visible {
+  text-decoration: underline;
+  outline: none;
+}
+.run-drawer-header .intent-text.intent-text--expanded {
+  flex: 1 1 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-word;
+}
+
+/* ====================================================================
+ * RUA round 3 — CLUSTER 2 (feature row + drilldown polish)
+ * Bugs: R3-B5, R3-B15, R3-B23, R3-B24, R3-B28, R3-B29, R3-B32, R3-B33
+ * ==================================================================== */
+
+/* R3-B15: card-content sections (status+intent / counts / metrics) need
+ * a visible row gap. The flex container already declared `gap: 6px` but
+ * sub-rows could collapse against each other if line-height crowded them.
+ * We re-assert gap and add a small vertical breathing margin between
+ * .landing-card-row siblings as belt-and-suspenders. */
+.landing-card-link {
+  gap: 6px;
+}
+.landing-card-row + .landing-card-row {
+  margin-top: 2px;
+}
+
+/* R3-B5: critical-finding count in the landing card carries weight 600
+ * so it reads as severity, not as another muted metric. */
+.landing-card-counts-critical {
+  font-weight: 600;
+}
+
+/* R3-B23: trailing chevron makes the drilldown affordance discoverable.
+ * The whole .feature-row is clickable; the chevron is purely visual.
+ * Row stacks the main line + optional inline critical-finding preview. */
+.feature-row {
+  cursor: pointer;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.feature-row .feature-row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.feature-row .feature-row-chevron {
+  margin-left: auto;
+  color: var(--muted);
+  font-weight: 600;
+  flex: 0 0 auto;
+  transition: transform 80ms ease, color 80ms ease;
+}
+.feature-row:hover .feature-row-chevron {
+  color: var(--text);
+  transform: translateX(2px);
+}
+
+/* R3-B24: verdict-grouping subheads. Only emitted when more than one
+ * verdict bucket is present. Subheads sit above each .feature-list ul. */
+.feature-list-grouped {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.feature-list-bucket {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.feature-list-subhead {
+  margin: 0;
+  font-size: var(--text-xs, 12px);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.feature-list-bucket--blocked .feature-list-subhead {
+  color: var(--color-danger-fg);
+}
+.feature-list-bucket--partial .feature-list-subhead {
+  color: var(--color-warning-fg);
+}
+.feature-list-bucket--passing .feature-list-subhead {
+  color: var(--color-success-fg);
+}
+
+/* R3-B32: inline first-line preview of the first critical finding for
+ * blocked features. Italic red body text below the row's main line.
+ * Truncation happens in the component (~80 chars); CSS adds the styling. */
+.feature-row-critical-preview {
+  display: block;
+  margin-left: 24px;
+  color: var(--color-danger-fg, #b91c1c);
+  font-style: italic;
+  font-size: var(--text-sm, 14px);
+  line-height: 1.4;
+}
+
+/* R3-B33: critical-finding count badge. Red-bg pill placed adjacent to
+ * the verdict pill — visual parity with the QUALITY KPI's "2 critical". */
+.feature-critical-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 9999px;
+  background: var(--color-danger-bg, rgba(185, 28, 28, 0.12));
+  color: var(--color-danger-fg, #b91c1c);
+  font-size: var(--text-xs, 12px);
+  font-weight: 600;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+/* R3-B28: section dividers between drawer's major sections. The first
+ * section gets no top border — only siblings. Margin/padding give
+ * breathing room around the divider line. */
+.run-drawer > .run-drawer-section + .run-drawer-section {
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+/* R3-B29: GroupList summary reads as a section disclosure header with
+ * the same h3 weight as "Features" / "Stages". The native <details>
+ * marker is suppressed and a custom chevron rotates on open. */
+.group-list > summary.group-list-summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 4px 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.group-list > summary.group-list-summary::-webkit-details-marker {
+  display: none;
+}
+.group-list-summary-caret {
+  display: inline-block;
+  color: var(--muted);
+  font-weight: 600;
+  transition: transform 100ms ease;
+}
+.group-list[open] > summary .group-list-summary-caret {
+  transform: rotate(90deg);
+}
+.group-list-summary-label {
+  color: var(--text);
+}
+
+/* === RUA round-3 cluster 3 fixes — spec review + spec diff polish ===
+ * Closes:
+ *   R3-B37 (markdown body header sizes/weights have visible scale —
+ *           h2..h6 ladder after the in-render heading demotion)
+ *   R3-B38 (lifecycle [draft] pill styled neutral grey, not info blue;
+ *           handled via JSX tone change to "neutral")
+ *   R3-B39 (working-version label near the lifecycle pill)
+ *   R3-B40/R3-B35 (body card auto-fits — no min-height stretch
+ *                  matching the sidebar)
+ *   R3-B43 (subtle 1px divider between header and body card)
+ *   R3-B44 (single combined empty-state on spec-diff)
+ *   R3-B45 (Show-only-changes toggle: outlined inactive, filled-blue
+ *           active, with aria-pressed already wired in JSX)
+ *   R3-B46 (Edit-spec CTA visible on the spec-diff empty state)
+ *   R3-B47 (disabled toggle gets a "No diff to filter" title tooltip;
+ *           handled in JSX)
+ * R3-B42 (tab style harmonisation with run-drawer section nav) is
+ * deferred — the spec view-toggle and run-drawer section-nav use
+ * different layout primitives and unifying them is a larger refactor
+ * than this cluster warrants. Filed as follow-up.
+ *
+ * All rules are additive; the more-specific compound selectors
+ * (e.g. .spec-review-markdown h2) win over the earlier .spec-markdown
+ * rules without `!important`. */
+
+/* R3-B37: explicit sizing/weight ladder for the rendered markdown
+ * inside the spec-review surface. The render path demotes the
+ * source markdown by one level (h1 -> h2, h2 -> h3, …, h5 -> h6,
+ * h6 stays h6). The sizes here target the DEMOTED levels:
+ *   h2 — page-section heading       24 / 700
+ *   h3 — sub-section                18 / 700
+ *   h4 — sub-sub-section            16 / 600
+ *   h5 — meta heading (muted)       14 / 600
+ *   h6 — tertiary meta (muted)      13 / 500
+ * The earlier `.spec-markdown h1/h2/h3` ladder gave a flat
+ * 22/18/16 with no weight differentiation — the round-3 RUA flagged
+ * that as poor visual hierarchy. */
+.spec-review-markdown h2 {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 1.2em 0 0.5em;
+}
+.spec-review-markdown h3 {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 1.1em 0 0.4em;
+}
+.spec-review-markdown h4 {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 1em 0 0.35em;
+}
+.spec-review-markdown h5 {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 0.9em 0 0.3em;
+  color: var(--text-muted, var(--muted));
+}
+.spec-review-markdown h6 {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  margin: 0.8em 0 0.3em;
+  color: var(--text-muted, var(--muted));
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* R3-B39: working-version label adjacent to the lifecycle pill —
+ * supporting metadata, no chrome, muted tone. */
+.spec-review-version {
+  font-size: var(--text-sm, 14px);
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* R3-B43: subtle 1px divider between the header and the body card
+ * so the seam reads as a deliberate elevation cue, not empty space. */
+.spec-review-body {
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+/* R3-B40 / R3-B35: keep the body card sized to its own content. The
+ * grid (defined earlier) already uses `align-items: start`; this is
+ * defence-in-depth — explicitly null any min-height the markdown
+ * column could inherit, and pin `align-self: start` so it doesn't
+ * stretch to match the sidebar's content height. AppShell owns the
+ * page-level min-height, so the body never collapses. */
+.spec-review-markdown.spec-markdown {
+  min-height: 0;
+  align-self: start;
+}
+
+/* R3-B45: re-style the "Show only changes" toggle with a clear
+ * pressed-vs-released visual contrast.
+ *   inactive  -> outlined chip (transparent bg, --line border)
+ *   active    -> filled primary blue (matches Approve / Back-to-runs)
+ * `aria-pressed` is set on the element in JSX so screen readers and
+ * assistive tech read the toggle state correctly. */
+.spec-diff-fold-toggle {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  font-weight: 500;
+}
+.spec-diff-fold-toggle:hover:not(:disabled) {
+  background: var(--surface-alt);
+}
+.spec-diff-fold-toggle[aria-pressed="true"] {
+  background: var(--primary-action-bg);
+  color: var(--primary-action-fg);
+  border-color: var(--primary-action-border);
+  font-weight: 600;
+}
+.spec-diff-fold-toggle[aria-pressed="true"]:hover:not(:disabled) {
+  background: var(--primary-action-bg-hover);
+  border-color: var(--primary-action-bg-hover);
+}
+
+/* R3-B44 + R3-B46: combined empty-state block on the spec-diff page
+ * — one explanatory paragraph + an Edit-spec CTA. The CTA is styled
+ * as a plain text-link (not a primary button) so it reads as
+ * guidance, not a competing action. */
+.spec-diff-empty-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
+.spec-diff-empty-cta {
+  margin: 0;
+  font-size: var(--text-sm, 14px);
+}
+.spec-diff-empty-cta-link {
+  color: var(--primary-action-bg);
+  text-decoration: underline;
+  font-weight: 500;
+}
+.spec-diff-empty-cta-link:hover {
+  color: var(--primary-action-bg-hover);
 }

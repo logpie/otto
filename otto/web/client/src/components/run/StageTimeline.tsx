@@ -50,6 +50,18 @@ function formatDuration(seconds: number | null): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+// R3-B19: humanize raw stage tokens (e.g. "spec_review" → "Spec
+// review"). The CSS `text-transform: capitalize` rule only fires on
+// word boundaries, which leaves the underscore intact and renders
+// as "Spec_review". Strip the underscore in JS so the visible label
+// reads as ordinary prose.
+function humanizeStage(raw: string): string {
+  if (!raw) return raw;
+  const spaced = raw.replace(/_/g, " ").trim();
+  if (spaced.length === 0) return raw;
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
+}
+
 export function StageTimeline({ stages }: Props) {
   if (stages.length === 0) {
     return <p className="empty">No stage data.</p>;
@@ -66,7 +78,7 @@ export function StageTimeline({ stages }: Props) {
             <span className="stage-dot" aria-hidden>
               {statusGlyph(s.status)}
             </span>
-            <span className="stage-name">{s.name}</span>
+            <span className="stage-name">{humanizeStage(s.name)}</span>
             <span className="stage-status">{s.status}</span>
             <span className="stage-duration">{formatDuration(s.duration_s)}</span>
             {s.cost_usd !== null && (

@@ -230,15 +230,26 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
           )}
         </div>
       )}
-      <section className="feature-section">
+      {/* R3-B28: section dividers between Features / Guardrails / Groups /
+          Stages — major drawer sections each carry a top border + breathing
+          margin so the eye can find boundaries without reading headings. */}
+      <section className="feature-section run-drawer-section">
         <h3>Features</h3>
         <FeatureList
           features={view.features}
+          findings={view.findings}
           {...(onSelectFeature ? { onSelect: onSelectFeature } : {})}
         />
       </section>
-      <Guardrails guardrails={view.guardrails} />
-      <section className="group-section">
+      {view.guardrails.length > 0 && (
+        <section className="guardrail-section run-drawer-section">
+          <Guardrails guardrails={view.guardrails} />
+        </section>
+      )}
+      <section className="group-section run-drawer-section">
+        {/* R3-B29: GroupList's own <summary> is now styled to match the
+            h3 weight of "Features" / "Stages", so it doubles as the
+            section header. No additional <h3> needed here. */}
         <GroupList
           groups={view.groups}
           {...(inFlight
@@ -251,7 +262,7 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
             : {})}
         />
       </section>
-      <section className="stage-section">
+      <section className="stage-section run-drawer-section">
         <h3>Stages</h3>
         <StageTimeline stages={view.stages} />
       </section>
