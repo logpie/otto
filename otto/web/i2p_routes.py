@@ -398,7 +398,7 @@ async function renderDetail(sessionId) {
   const groupCards = groups.map(s => {
     const phase = phaseBy[s.id] || 'pending';
     const statusLine = el('div', { class: 'muted' },
-      'phase: ' + phase + (s.deps && s.deps.length ? ' · deps: ' + s.deps.join(', ') : ''));
+      'phase: ' + phase + (s.dependencies && s.dependencies.length ? ' · deps: ' + s.dependencies.join(', ') : ''));
     const ownedLine = (s.owned_paths && s.owned_paths.length)
       ? el('div', { class: 'muted' }, 'owned: ' + s.owned_paths.join(', '))
       : null;
@@ -407,7 +407,7 @@ async function renderDetail(sessionId) {
           s.checks.map(c => c.kind).join(', '))
       : null;
     return el('div', { class: 'group ' + phase }, [
-      el('strong', {}, s.id + ' — '), el('span', {}, escape(s.title || '')),
+      el('strong', {}, s.id + ' — '), el('span', {}, escape(s.name || '')),
       statusLine, ownedLine, checksLine
     ]);
   });
