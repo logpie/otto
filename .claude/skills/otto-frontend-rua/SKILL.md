@@ -110,7 +110,7 @@ Goal: exhaustive bug-mining per surface.
      a 1000-char intent, a feature with a 500-char acceptance.
    - **Hover** on every interactive element (links, buttons, rows) —
      screenshot the hover state.
-2. **For each screenshot, do 5 vision passes** with different focus
+2. **For each screenshot, do 6 vision passes** with different focus
    questions:
 
    | Pass | Focus | Specific things to look for |
@@ -120,6 +120,33 @@ Goal: exhaustive bug-mining per surface.
    | 3 | Color / tone / contrast | Status pills colored (green/amber/red/blue/grey)? Severity badges (`critical`/`important`/`polish`) colored? Color used as ONLY semantic cue (colorblind fail)? WCAG AA contrast ≥4.5:1 body, ≥3:1 large? Dark mode exist + work? |
    | 4 | Information completeness | Wireframe promises X — is X present? Missing action buttons, breadcrumbs, KPI rollups, evidence-drilldown affordances. Empty states have a CTA? Error states have recovery? |
    | 5 | Edge cases / invisible bugs | Raw ISO timestamps not relativized; raw HTML comments leaking into markdown view; default browser bullets/`<ol>` numbers; raw `display: inline-block` thumbs (vs CSS grid); pointer-events traps; z-index stacking; overflow-x scrollbars; fixed elements covering content |
+   | 6 | **Design system aesthetics** | See dedicated table below — typeface coherence, type scale ratio, palette discipline, spacing rhythm, radius/shadow scale, iconography consistency, density coherence, hierarchy balance, microinteraction quality, brand voice. |
+
+#### Pass 6 — design-system aesthetics deep-dive
+
+The other 5 passes catch bugs. Pass 6 catches the difference between
+"works" and "feels designed". A senior frontend / design-aware
+engineer scans for these:
+
+| Aesthetic dimension | Healthy | Smell |
+|---|---|---|
+| **Typeface coherence** | One sans for body, one mono for IDs/timestamps. Loaded with proper fallback chain (`Inter, system-ui, -apple-system, ...`). Single font family on every screen. | Mixing Helvetica + Inter + Arial on different screens. Display-only fonts (Comic Sans, Pacifico) for body text. FOUT/FOIT flash on load (no `font-display: swap`). |
+| **Type scale ratio** | Heading sizes follow a consistent ratio (1.25 minor third / 1.333 perfect fourth / 1.5 perfect fifth / 1.618 golden). e.g. 12 → 14 → 16 → 20 → 24 → 32. | Arbitrary `px` values (`<h1>` is 28px, `<h2>` is 19px, `<h3>` is 17.5px). Body is 16px on one screen, 14px on another. |
+| **Type weight rhythm** | 400 body, 500/600 emphasis, 700 headers. Don't mix 350 / 450 mid-weights. Avoid `font-style: italic` for emphasis — use weight or color. | Bold-everything (500/600/700 mixed indiscriminately). Underlined non-link body text. ALL CAPS for non-acronym text. |
+| **Color palette discipline** | 3–5 base hues (primary, neutral, success, warning, danger) + a 50/100/.../900 grayscale ramp. Every color is a token, not a hex. Pills are filled-bg + sr-only text. | 12 different greys across screens. Hex literals scattered in CSS. Status conveyed by hue alone (no icon + sr-only). Pill bg low-contrast (`#e6f3ff` on `#f9fafb`). |
+| **Spacing rhythm** | Multiples of a base (4 or 8). e.g. `4 / 8 / 12 / 16 / 24 / 32 / 48 / 64`. Same gap between rows in a list. Same padding inside a card. | Random px values (`padding: 13px 17px`). Two cards with subtly different paddings (`16` vs `18`). Margin-collapse confusion (margins doubling unexpectedly). |
+| **Radius scale** | Tokens (`--radius-sm: 4` / `md: 8` / `lg: 12` / `full: 999`). Buttons consistent. Cards consistent. Pills are full-radius. | Each button has a different radius. Sharp corners on cards next to rounded corners on buttons. |
+| **Shadow / elevation scale** | 3–4 shadow tokens (`sm` / `md` / `lg` / `xl`). Modals/popovers higher than drawers higher than cards higher than rows. | Inline `box-shadow: 0 2px 4px rgba(...)` everywhere. Modal under tooltip. Or no shadows at all where elevation matters. |
+| **Iconography consistency** | One icon family (Lucide, Phosphor, Material — pick one). Same stroke width. Same fill style. ARIA-hidden on decorative; sr-only label on functional. | Mixing emoji `✓ ✗ ⊘` with `lucide-check` SVG with `material-icon-error_outline`. Emoji for status pills (renders as colorful junk on different OSes). |
+| **Density coherence** | Touch targets ≥ 44px tall on mobile, ≥ 32px desktop. Same row height in lists. Same padding in form fields. | Some buttons 24px tall, others 40px. List rows visually different heights based on content (no `min-height`). Squished forms with cramped inputs. |
+| **Information hierarchy** | F-pattern reading. Most important info top-left. Verdict → count → timestamp. Visual weight (size, weight, color) matches semantic priority. | Important info buried under noise. Tiny verdict, huge KPIs. Equal visual weight on everything = nothing stands out. |
+| **Visual weight balance** | Heavy elements (cards, headers) balanced with whitespace. Page doesn't feel either claustrophobic or sparse. | Wall of text. Or 80% empty space with one tiny widget. Cards stacked edge-to-edge with no breathing room. |
+| **Affordances** | Buttons look clickable (filled bg, raised, hover state). Links underlined or distinctly colored + hover state. Disabled state visually distinct (lower contrast, no hover). Drag handles visible. | A `<div>` styled as a button (no cursor, no role). Underline-only links on a body of underlined text. Disabled buttons that look identical to enabled. |
+| **Microinteraction quality** | Transitions 150–250ms ease-out on hover/focus. Active state on click. Subtle animations (color, transform — never width/height). Skeleton loaders smoother than spinners. | No transitions (instant snaps feel cheap). Long animations (>500ms) on every hover (laggy feel). Animated `width` on a 1000-item list (jank). `prefers-reduced-motion` ignored. |
+| **Brand voice through typography** | Otto is a serious dev tool. Geometric sans (Inter, IBM Plex Sans) + monospace (JetBrains Mono, IBM Plex Mono) feels right. Subtle, not playful. | Comic Sans, Pacifico, anything cursive. Display fonts on body. Emoji-heavy UI. |
+| **Cross-screen consistency** | Run drawer + Spec review feel like the same app. Same header bar, same button style, same card chrome, same color tokens. | Each screen looks like a different developer wrote it solo. Drawer uses sentence case headers; Spec review uses Title Case. Different button styles per screen. |
+| **Empty state design** | Illustration (or icon) + headline + body + primary CTA. Tells the user what would be here and how to make it appear. | Just text ("No prior versions yet" — done). No CTA. No visual placeholder. User stares blankly. |
+| **Loading state design** | Skeleton placeholders matching final layout. Or shimmer. Or progress with messaging ("Compiling spec…"). | Generic spinner in middle of page. Or no indicator at all (page just sits blank during fetch). |
 
 3. **Cross-check with `take_snapshot` (a11y tree)**. Pixels lie about
    semantics — the "KPI line is 14 separate `StaticText` nodes"
@@ -332,6 +359,15 @@ When reading screenshots/snapshots, scan for these patterns:
 | **No back-restore** | Forward then back loses form state | `history.state` + restore on `popstate`. |
 | **z-index whack-a-mole** | Modals under tooltips, tooltips under headers | Establish z-index scale tokens; document stacking contexts. |
 | **Mixed scroll containers** | Drawer scrolls inside main scrolls inside modal | One scroll container per region; `overscroll-behavior: contain`. |
+| **Hex literals in CSS** | `#3b82f6` / `#e2e8f0` scattered everywhere | Centralize via CSS custom properties / design tokens. Audit with `grep -rE '#[0-9a-fA-F]{3,6}' otto/web/client/src/`. |
+| **Mid-weight type chaos** | Bold (700) headlines next to semibold (600) callouts next to medium (500) emphasis with no rhythm | Pick 3 weights max (regular/medium/bold). Document as tokens. |
+| **Inconsistent radii** | Buttons rounded 4px, cards rounded 6px, modal rounded 8px, pills rounded 12px — no scale | Token: `--r-sm: 4 / --r-md: 8 / --r-lg: 12 / --r-pill: 999`. |
+| **Inconsistent shadows** | Inline `box-shadow: 0 2px 4px rgba(0,0,0,0.1)` on each card | Tokens: `--shadow-sm/md/lg/xl`. Use them. |
+| **Mixed icon families** | `✓` emoji next to `<lucide-check>` SVG next to Material icons | One family. ARIA-hidden on decorative; sr-only label on functional. |
+| **Density jitter** | Same widget renders 32px tall on one screen, 40px on another | Token: `--row-height: 32` (desktop) / 44 (mobile-touch). Apply via `min-height`. |
+| **No empty-state design** | "No items yet" text, nothing else | Add: icon + headline + body + primary CTA. |
+| **No loading-state design** | Page blank during fetch | Skeleton placeholders matching final shape. Match layout to avoid CLS. |
+| **Cross-screen drift** | Each screen has its own header style/spacing | Shared layout components (`<PageHeader>`, `<Card>`, `<ActionBar>`). |
 
 ## Anti-patterns
 
