@@ -5,6 +5,11 @@ The default pytest suite is intentionally broad and now takes several minutes.
 This helper makes the faster tiers explicit so local development can use the
 smallest gate that matches the change, while release/merge work can still run
 the full suite.
+
+Tier ``i2p-e2e`` is a real-cost gate that drives ``otto build --provider
+claude`` against a throwaway tmp project end-to-end. It is opt-in via
+``OTTO_ALLOW_REAL_COST=1`` (the test self-skips otherwise) and backstops
+every change to the intent-to-proof pipeline with a real Sonnet round-trip.
 """
 
 from __future__ import annotations
@@ -86,6 +91,20 @@ def commands_for_tier(tier: str, pytest_args: Sequence[str]) -> list[tuple[dict[
             (None, ["npm", "run", "web:verify"]),
             (None, pytest_cmd("-q", "--maxfail=10", *extra)),
         ]
+    if tier == "i2p-e2e":
+        # Real-cost intent-to-proof gate. Drives `otto build --provider
+        # claude` against a tmp project end-to-end. Requires
+        # `OTTO_ALLOW_REAL_COST=1` (the test self-skips otherwise).
+        # Backstops every i2p change with a real Sonnet round-trip.
+        return [
+            (None, pytest_cmd(
+                "-q",
+                "tests/integration/test_intent_to_proof.py",
+                "-m",
+                "integration",
+                *extra,
+            )),
+        ]
     raise ValueError(f"unknown tier: {tier}")
 
 
@@ -101,12 +120,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "tier",
-        choices=["smoke", "fast", "default", "full", "integration", "slow", "web", "browser-smoke", "browser", "prepush"],
+        choices=["smoke", "fast", "default", "full", "integration", "slow", "web", "browser-smoke", "browser", "prepush", "i2p-e2e"],
         help=(
             "smoke=smallest confidence gate, fast=non-browser minus slow/integration/heavy, "
             "default=current non-browser suite, full=explicit non-browser full suite, "
             "integration=integration-only, slow=slow-only, web=TS + web backend tests, "
-            "browser-smoke=Playwright smoke, browser=full browser suite, prepush=lint + TS + default"
+            "browser-smoke=Playwright smoke, browser=full browser suite, prepush=lint + TS + default, "
+            "i2p-e2e=real-cost intent-to-proof E2E (requires OTTO_ALLOW_REAL_COST=1)"
         ),
     )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER, help="extra args passed to pytest tiers")
