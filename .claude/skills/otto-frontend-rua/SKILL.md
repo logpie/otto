@@ -271,7 +271,15 @@ Goal: exhaustive bug-mining per surface.
    - **Hover** on every interactive element (links, buttons, rows) —
      screenshot the hover state.
 2. **For each screenshot, do 6 vision passes** with different focus
-   questions:
+   questions. **MULTI-PASS IS MANDATORY, NOT OPTIONAL.** Empirical:
+   in the 2026-05-05 round-2 audit a single-pass review of 8
+   screenshots caught 3 bugs. A re-read of the SAME 8 screenshots
+   with the 6-pass framing surfaced **30+ additional bugs** that the
+   single pass had completely missed (page heading hierarchy
+   inversion, KPI tabular-nums, audit-context pill styling, app
+   shell consistency, diff theme inconsistency, multiple h1 elements
+   on a page, etc.). Don't skip passes. Each pass is a different
+   lens; the overlap is small.
 
    | Pass | Focus | Specific things to look for |
    |------|-------|------------------------------|
@@ -545,6 +553,12 @@ When reading screenshots/snapshots, scan for these patterns:
 
 - **One round and done.** You will miss B25–B32-class bugs every time.
   Always do at least Round 2 + Round 3.
+- **Single-pass per screenshot.** Round-2 of 2026-05-05 caught 3 bugs
+  on single-pass; the same 8 screenshots re-read with proper 6-pass
+  framing surfaced 30+ more. EVERY screenshot needs all 6 passes —
+  layout, typography, color, info-completeness, edge-cases, design-
+  system aesthetics — even when the screenshot looks "fine" at first
+  glance.
 - **Skipping a11y snapshots.** Pixels lie about semantics.
 - **Single viewport.** Mobile + tablet + wide reveal different bugs.
 - **Screenshots without interactions.** B30/B31/B32-class silent

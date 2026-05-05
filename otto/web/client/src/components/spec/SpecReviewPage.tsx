@@ -11,7 +11,7 @@
 // for approved specs, and history sidebar that shows v1+ rows.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import type {
   SpecApproveResult,
   SpecEditResult,
@@ -21,6 +21,20 @@ import { ConfirmDialog, type ConfirmState } from "../ConfirmDialog";
 import { Pill } from "../Pill";
 import { AddFeatureModal } from "./AddFeatureModal";
 import { useSpecMd } from "./useSpecMd";
+
+// R2-B22: the rendered spec markdown often starts with its own `# Title`,
+// which would emit a second <h1> on a page that already has a "Spec
+// review" h1. Demote every heading by one level on the render path so
+// the page has exactly one h1 and the document outline stays valid.
+// `h1 → h2`, `h2 → h3`, ..., `h5 → h6`, `h6` stays h6 (HTML caps at h6).
+const HEADING_DEMOTION_COMPONENTS: Components = {
+  h1: ({ children, ...props }) => <h2 {...props}>{children}</h2>,
+  h2: ({ children, ...props }) => <h3 {...props}>{children}</h3>,
+  h3: ({ children, ...props }) => <h4 {...props}>{children}</h4>,
+  h4: ({ children, ...props }) => <h5 {...props}>{children}</h5>,
+  h5: ({ children, ...props }) => <h6 {...props}>{children}</h6>,
+  // h6 has no lower level — leave it as h6 to avoid losing structure.
+};
 
 // Pull existing Group + Feature ids out of the rendered markdown so the
 // Add Feature modal can populate the Group dropdown and check id collisions.
@@ -403,19 +417,52 @@ export function SpecReviewPage({ specId, onApproved }: Props) {
     <div className="spec-review" data-testid="spec-review">
       <header className="spec-review-header spec-review-header-grid">
         <div className="spec-review-title-block">
-          <h1>Spec review</h1>
-          <Pill
-            tone={isApproved ? "success" : "info"}
-            className="spec-review-lifecycle"
+          <div className="spec-review-title-row">
+            <h1>Spec review</h1>
+            <Pill
+              tone={isApproved ? "success" : "info"}
+              className="spec-review-lifecycle"
+            >
+              <span data-testid="spec-lifecycle">{data.lifecycle}</span>
+            </Pill>
+            {/* R2-B21: explicit bullet separator between the lifecycle
+                pill and the relative timestamp so the two visually
+                distinct items don't run together. */}
+            <span
+              className="spec-review-meta-sep"
+              aria-hidden="true"
+            >
+              ·
+            </span>
+            <span className="spec-review-meta">
+              Updated{" "}
+              <time dateTime={data.updated_at} title={data.updated_at}>
+                {formatRelative(data.updated_at)}
+              </time>
+            </span>
+          </div>
+          {/* R2-B24: small attribution subline. The SpecMdView envelope
+              currently lacks `created_at` / `created_by` metadata, so we
+              fall back to the file mtime (updated_at) and the static
+              author "compile-agent". When the backend grows real spec
+              metadata, swap data.updated_at for data.created_at and
+              read the author from the metadata block. */}
+          <div
+            className="spec-review-attribution"
+            data-testid="spec-review-attribution"
           >
-            <span data-testid="spec-lifecycle">{data.lifecycle}</span>
-          </Pill>
-          <span className="spec-review-meta">
-            Updated{" "}
-            <time dateTime={data.updated_at} title={data.updated_at}>
+            Created{" "}
+            <time
+              dateTime={data.updated_at}
+              title={data.updated_at}
+            >
               {formatRelative(data.updated_at)}
-            </time>
-          </span>
+            </time>{" "}
+            <span className="spec-review-meta-sep" aria-hidden="true">
+              ·
+            </span>{" "}
+            by compile-agent
+          </div>
         </div>
 
         {/* B11: action buttons live in the header (top-right). */}
@@ -610,7 +657,9 @@ export function SpecReviewPage({ specId, onApproved }: Props) {
             className="spec-review-markdown spec-markdown"
             data-testid="spec-review-markdown"
           >
-            <ReactMarkdown>{renderedMarkdown}</ReactMarkdown>
+            <ReactMarkdown components={HEADING_DEMOTION_COMPONENTS}>
+              {renderedMarkdown}
+            </ReactMarkdown>
           </div>
         )}
 

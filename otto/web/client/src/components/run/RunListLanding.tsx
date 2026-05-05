@@ -42,9 +42,20 @@ interface ListResponse {
 // Status pill — local copy. The parallel agent A is also building a
 // Pill component; we duplicate the pattern here intentionally to keep
 // this file independent and reconcile in a future commit.
-function StatusPill({ status }: { status: string | null }) {
-  const label = (status || "unknown").toLowerCase();
-  const tone = pillToneFor(label);
+//
+// R2-B3 fix: when a session has reached a terminal verdict
+// (passed/partial/blocked), surface the VERDICT rather than the
+// lifecycle status — users care whether the run actually delivered,
+// not that it's "completed". Non-terminal runs still render status
+// (running, queued, awaiting_spec_review, etc.).
+function StatusPill({
+  status,
+  verdict,
+}: {
+  status: string | null;
+  verdict: string | null;
+}) {
+  const { label, tone } = pillSourceFor(status, verdict);
   return (
     <span
       className={`landing-status-pill landing-status-pill--${tone}`}
@@ -53,6 +64,18 @@ function StatusPill({ status }: { status: string | null }) {
       {label}
     </span>
   );
+}
+
+function pillSourceFor(
+  status: string | null,
+  verdict: string | null,
+): { label: string; tone: string } {
+  const v = (verdict || "").toLowerCase();
+  if (v === "passed") return { label: "passed", tone: "success" };
+  if (v === "partial") return { label: "partial", tone: "warning" };
+  if (v === "blocked") return { label: "blocked", tone: "danger" };
+  const s = (status || "unknown").toLowerCase();
+  return { label: s, tone: pillToneFor(s) };
 }
 
 function pillToneFor(status: string): string {
@@ -141,7 +164,7 @@ function SessionCard({ session }: { session: SessionSummary }) {
     >
       <a className="landing-card-link" href={href} aria-label={`Open run ${session.id}`}>
         <div className="landing-card-row landing-card-row-top">
-          <StatusPill status={session.status} />
+          <StatusPill status={session.status} verdict={session.verdict} />
           <span
             className="landing-card-intent"
             title={fullIntent}
@@ -268,10 +291,16 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
 
   return (
     <div className="run-list-landing" data-testid="run-list">
-      <h1>Otto Mission Control</h1>
-      <p className="run-list-landing-count">
-        {sessions.length} session{sessions.length === 1 ? "" : "s"}
-      </p>
+      <header className="run-list-landing-heading">
+        <h1>Otto Mission Control</h1>
+        <span
+          className="run-list-landing-count-badge"
+          data-testid="run-list-landing-count"
+          aria-label={`${sessions.length} session${sessions.length === 1 ? "" : "s"}`}
+        >
+          {sessions.length} session{sessions.length === 1 ? "" : "s"}
+        </span>
+      </header>
       <div className="landing-card-list" role="list">
         {sessions.map((session) => (
           <SessionCard key={session.id} session={session} />

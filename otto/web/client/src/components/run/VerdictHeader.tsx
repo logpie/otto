@@ -5,6 +5,13 @@
 // metrics are visually separated; baked-in leading/trailing whitespace
 // has been stripped from the labels (CSS gap handles separation, not
 // the strings). The outcome chip routes through the scoped <Pill>.
+//
+// Post-RUA round 2 (R2-B13): KPI numbers (Wall, Cost, Features) are
+// rendered with `font-variant-numeric: tabular-nums` so columns don't
+// jitter when stacked across runs. The base rule is on
+// `.run-drawer-header .metric dd` in styles.css; an explicit rule on
+// `.metric-num` and `.metric-val` defends against future markup changes
+// where the dd wrapper may not be the immediate parent.
 
 import type { RunVerdict, RunView } from "../../types/run";
 import { Pill, type PillTone } from "./Pill";
@@ -79,11 +86,15 @@ export function VerdictHeader({ view }: Props) {
         )}
         <div className="metric">
           <dt>Wall</dt>
-          <dd className="wall">{formatDuration(view.wall_s)}</dd>
+          <dd className="wall">
+            <span className="metric-num">{formatDuration(view.wall_s)}</span>
+          </dd>
         </div>
         <div className="metric">
           <dt>Cost</dt>
-          <dd className="cost">{formatCost(view.cost_usd)}</dd>
+          <dd className="cost">
+            <span className="metric-num">{formatCost(view.cost_usd)}</span>
+          </dd>
         </div>
       </dl>
     </header>

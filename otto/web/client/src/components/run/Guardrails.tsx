@@ -5,6 +5,12 @@
 //   verified=null   → ⊘ neutral tone (pre-audit, not yet checked)
 // Glyph + tone together give a visual distinction so reviewers don't
 // mistake an unverified guardrail for a satisfied one (RUA tick 62 W6-C).
+//
+// Post-RUA round 2 (R2-B17): the violated card uses the same canonical
+// error-red tokens as the [blocked] verdict pill — `--color-danger-bg`
+// for the fill and `--color-danger-fg` for border + text. Do not
+// hard-code another red shade here; route everything through those
+// tokens so future palette tweaks stay consistent app-wide.
 
 import type { GuardrailView } from "../../types/run";
 

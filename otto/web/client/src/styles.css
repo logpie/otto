@@ -9376,3 +9376,455 @@ mark.log-search-match.active {
   color: var(--muted);
   word-break: break-word;
 }
+
+/* ============================================================ *
+ * Cluster A — page chrome / layout / app shell consistency
+ * (R2-B4, R2-B5, R2-B6, R2-B9, R2-B10, R2-B11, R2-B20, R2-B30,
+ *  R2-B31 from multi-pass round-2 RUA audit).
+ * ============================================================ */
+
+/* AppShell — shared chrome wrapping every top-level route. The
+   shell owns the topbar height (--otto-app-shell-topbar-h) so the
+   main content can claim the rest of the viewport with a
+   min-height: calc(100vh - <topbar>). Without this, landing /
+   spec-review / 404 pages read as unfinished fragments with
+   massive empty whitespace below the content. */
+:root {
+  --otto-app-shell-topbar-h: 56px;
+}
+
+.otto-app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.otto-app-shell-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 12px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line, #e2e8f0);
+  min-height: var(--otto-app-shell-topbar-h);
+  box-sizing: border-box;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.otto-app-shell-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.otto-app-shell-brand-link {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.otto-app-shell-brand-link:hover,
+.otto-app-shell-brand-link:focus-visible {
+  color: var(--accent, #0f766e);
+}
+
+.otto-app-shell-page-label {
+  font-size: 14px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.otto-app-shell-page-label-sep {
+  margin-right: 8px;
+  color: var(--border, #cbd5e1);
+}
+
+.otto-app-shell-back-link {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent, #0f766e);
+  text-decoration: none;
+  white-space: nowrap;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.otto-app-shell-back-link:hover,
+.otto-app-shell-back-link:focus-visible {
+  background: var(--surface-alt, rgba(15, 118, 110, 0.08));
+  outline: none;
+}
+
+.otto-app-shell-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  /* R2-B6/B20/B30: page fills the viewport. The topbar height is
+     already accounted for by the flex layout above; min-height
+     here is a defensive fallback for descendants that detach from
+     the flex flow (e.g. absolute-positioned children). */
+  min-height: calc(100vh - var(--otto-app-shell-topbar-h));
+  /* R2-B9: page-level horizontal padding so RunDrawer and the
+     other route bodies don't sit flush against the viewport edge. */
+  padding-inline: 24px;
+  padding-block: 16px 32px;
+  box-sizing: border-box;
+}
+
+/* R2-B4 / R2-B5: landing heading + count badge.
+   - h1 jumps from body-text size to true display weight.
+   - count moves into a subtle badge sitting next to the title
+     instead of a wispy paragraph below it. */
+.run-list-landing-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0 0 20px;
+}
+
+.run-list-landing-heading h1 {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.run-list-landing-count-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  background: var(--surface-alt, #e2e8f0);
+  color: var(--muted, #475569);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* The landing container is now wrapped by <AppShell/>, which owns
+   horizontal padding. Drop the duplicated padding so the heading
+   aligns with everything else, but keep max-width + auto margin
+   for the centered column treatment. */
+.otto-app-shell .run-list-landing {
+  padding: 0;
+  margin: 0 auto;
+  max-width: 960px;
+  width: 100%;
+}
+
+/* RunDrawer + per-page wrappers inside the shell get the centered
+   max-width treatment too so long content lines stay readable. */
+.otto-app-shell .run-drawer,
+.otto-app-shell .feature-drilldown,
+.otto-app-shell .run-view-loading,
+.otto-app-shell .run-view-empty,
+.otto-app-shell .spec-review,
+.otto-app-shell .spec-diff-page {
+  max-width: 1100px;
+  margin-inline: auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* The not-found / generic-error states already have their own
+   max-width + auto margins; clear the legacy 48px top margin so
+   the AppShell's padding-block owns vertical spacing. */
+.otto-app-shell .run-view-error,
+.otto-app-shell .run-view-not-found {
+  margin-top: 0;
+}
+
+/* SpecDiffPage hardcodes inline padding: 24 in its JSX. Inside the
+   shell that double-pads. The inline style still wins, so the
+   horizontal-padding leak is cosmetic only — flag for the spec
+   agent to clean up but don't fight inline styles here. */
+
+@media (max-width: 720px) {
+  .otto-app-shell-topbar {
+    gap: 12px;
+    padding: 10px 16px;
+  }
+  .otto-app-shell-main {
+    padding-inline: 16px;
+  }
+  .run-list-landing-heading h1 {
+    font-size: 26px;
+  }
+}
+
+/* === RUA round-2 cluster D + E: spec review header polish + spec diff
+       light-theme + collapse-context toggle + swap button. === */
+
+/* R2-B21 + R2-B22 + R2-B24: title-block layout. The h1 + lifecycle pill
+   + relative timestamp share a row, with an explicit `·` bullet
+   separator. The Created-by attribution sits on a smaller subline
+   below. */
+.spec-review-title-block {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.spec-review-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+.spec-review-meta-sep {
+  color: var(--muted);
+  font-size: var(--text-sm, 14px);
+  font-weight: 400;
+  user-select: none;
+}
+.spec-review-attribution {
+  color: var(--muted);
+  font-size: var(--text-xs, 12px);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+/* === R2-B29 (option a) + R2-B26 + R2-B27 + R2-B28: spec diff page === */
+
+/* The page itself uses the app's light-theme tokens — the only dark
+   surface is the diff pane itself, which keeps its existing
+   monospace dark background (intentional embedded code-block read,
+   not a different app). */
+.spec-diff-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+.spec-diff-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.spec-diff-title {
+  margin: 0;
+  color: var(--text);
+}
+/* R2-B28: symmetric version labels — same color + weight on both sides
+   of the arrow. Previously the entire suffix was a muted span which
+   read as a different color/weight from the page heading; now the
+   labels themselves are styled as a unit, distinct from but consistent
+   with the parent h1. */
+.spec-diff-title-versions {
+  font-weight: 400;
+  color: var(--muted);
+  font-size: var(--text-md, 18px);
+}
+.spec-diff-version-label {
+  font-weight: 500;
+  color: var(--muted);
+  font-style: normal;
+}
+.spec-diff-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.spec-diff-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--text-sm, 14px);
+}
+.spec-diff-label select {
+  padding: 4px 8px;
+  font-size: var(--text-sm, 14px);
+}
+
+/* R2-B27: swap button between From and To. Square, monospace glyph. */
+.spec-diff-swap {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.spec-diff-swap:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* R2-B26: collapse-context toggle. */
+.spec-diff-fold-toggle {
+  padding: 6px 10px;
+  font-size: var(--text-sm, 14px);
+  cursor: pointer;
+}
+.spec-diff-fold-toggle[aria-pressed="true"] {
+  background: var(--surface-alt);
+  font-weight: 600;
+}
+.spec-diff-fold-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* No-op + empty-state copy in light theme tokens. */
+.spec-diff-page .spec-diff-empty,
+.spec-diff-page .diff-noop-message {
+  margin: 0;
+  color: var(--muted);
+}
+.spec-diff-page .spec-diff-error {
+  margin: 0;
+  color: var(--red);
+}
+
+/* The diff pane keeps the existing dark monospace styling from
+   `.diff-pane` (defined earlier in this file). We add a light-themed
+   border and subtle outline so the dark block reads as an intentional
+   embedded code surface, framed by the light page chrome. */
+.spec-diff-page .spec-diff-pane {
+  flex: 1;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.diff-line {
+  display: block;
+}
+.spec-diff-pane-empty {
+  color: #94a3b8;
+}
+
+/* R2-B26: fold placeholder rendered in the dark diff pane. Muted,
+   centered-ish, italic to read as a meta line. */
+.diff-fold {
+  display: block;
+  color: #94a3b8;
+  font-style: italic;
+  padding: 2px 0;
+  text-align: center;
+  user-select: none;
+}
+
+/* === post-RUA round 2: cluster B + C design-token sweep ============
+ * Closes R2-B12 (feature-row glyph tone-match for missing → amber),
+ * R2-B13 (KPI tabular-nums explicit on .metric-num), R2-B17 (single
+ * canonical error-red token for [blocked] pill + guardrail-fail card),
+ * R2-B23 (Approve / primary buttons → neutral blue, not verdict
+ * green), R2-B32 (404 "Back to runs" picks up the same primary blue),
+ * R2-B33 (missing glyph ⚠ instead of ?, see FeatureList.tsx),
+ * R2-B34 (audit-context pills render as outlined-only, not filled).
+ * All rules below are additive and override earlier definitions
+ * deliberately — earlier rules remain for back-compat and so that
+ * other surfaces inherit the unified primary tone automatically. */
+
+:root {
+  /* R2-B23/B32: app-wide primary action token. Neutral blue chosen so
+   * primary actions don't collide with verdict-success green or
+   * verdict-error red. Reuses the existing --blue palette token so
+   * dark-mode flips (--blue is redefined in @media dark) work. */
+  --primary-action-bg: var(--blue);
+  --primary-action-fg: #ffffff;
+  --primary-action-border: var(--blue);
+  --primary-action-bg-hover: #1d4ed8;
+
+  /* R2-B17: canonical error-red aliases. These are the ONLY red tokens
+   * any new error surface should reach for. Both the [blocked] verdict
+   * pill (.run-pill-error) and the guardrail-fail card
+   * (.guardrail-violated) already resolve to these via
+   * --color-danger-{bg,fg}. Aliasing makes the intent explicit. */
+  --err-bg: var(--color-danger-bg);
+  --err-fg: var(--color-danger-fg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --primary-action-bg-hover: #3b82f6;
+  }
+}
+
+/* R2-B12: feature-row glyph for `missing` is amber (warn), not blue
+ * (info). Keeps amber-pair semantics with `partial`. This rule
+ * overrides the earlier `.feature-row.info .verdict-glyph` mapping;
+ * the .info class is no longer emitted by FeatureList.tsx (verdictTone
+ * collapses missing→warn), but we keep the override as belt-and-
+ * suspenders in case downstream code re-introduces the .info modifier
+ * for missing rows. */
+.feature-row.info .verdict-glyph {
+  color: var(--color-warning-fg);
+}
+
+/* R2-B13: explicit tabular-nums on the KPI value spans. The parent
+ * .run-drawer-header .metric dd already sets tabular-nums, so this
+ * is defence-in-depth — survives if the dd wrapper is restructured. */
+.run-drawer-header .metric .metric-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* R2-B23: app-wide primary action token. Overrides the earlier
+ * `.primary` rule (which used --accent teal/green and visually
+ * collided with the verdict-passed green pill). Every "primary
+ * action" button — Approve, Back to runs, etc. — picks up this
+ * neutral blue. Box-shadow hue is rebased to the blue family. */
+.primary {
+  border-color: var(--primary-action-border);
+  background: var(--primary-action-bg);
+  color: var(--primary-action-fg);
+  box-shadow: 0 1px 2px rgba(37, 87, 212, 0.2);
+}
+.primary:hover:not(:disabled) {
+  background: var(--primary-action-bg-hover);
+  border-color: var(--primary-action-bg-hover);
+}
+
+/* R2-B32: the 404 / error page "Back to runs" link uses the same
+ * primary blue tone as the rest of the app's primary actions.
+ * Overrides the earlier `.run-view-error-actions .primary-action`
+ * rule, which leaned on the info-pill palette and read as a chip
+ * rather than a CTA. */
+.run-view-error-actions .primary-action {
+  background: var(--primary-action-bg);
+  color: var(--primary-action-fg);
+  border-color: var(--primary-action-border);
+}
+.run-view-error-actions .primary-action:hover {
+  background: var(--primary-action-bg-hover);
+  border-color: var(--primary-action-bg-hover);
+  filter: none;
+}
+
+/* R2-B34: outlined-only pill modifier. Audit-context pills
+ * (`completeness-badge`, `multi-actor-badge`, evidence flags like
+ * `proxy_only`) render as border-only chips so they read as
+ * metadata, not as a verdict. Tone classes still drive the outline
+ * color via currentColor; muted gets a softer line tone. */
+.run-pill.run-pill-outlined {
+  background: transparent;
+  border-color: currentColor;
+}
+.run-pill.run-pill-outlined.run-pill-muted {
+  border-color: var(--line);
+  color: var(--muted);
+}
