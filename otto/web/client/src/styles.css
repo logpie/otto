@@ -829,14 +829,21 @@ textarea:focus-visible,
 }
 
 .launcher-page {
-  width: 100%;
-  max-width: 560px;
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  width: min(1120px, 100%);
+  max-width: 1120px;
+  margin: 0 auto;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  align-items: start;
+  gap: 24px;
+  padding: 48px clamp(24px, 4vw, 56px);
 }
 
 .launcher-hero {
+  grid-column: 1;
   min-height: 132px;
   display: flex;
   flex-direction: column;
@@ -893,6 +900,7 @@ textarea:focus-visible,
 }
 
 .launcher-section {
+  grid-column: 2;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -922,6 +930,7 @@ textarea:focus-visible,
 
 /* Onboarding explainer card on the launcher. mc-audit redesign §7 W7.1. */
 .launcher-explainer {
+  grid-column: 1;
   min-height: 58px;
   display: flex;
   align-items: flex-start;
@@ -6858,6 +6867,18 @@ html, body {
     grid-template-columns: 1fr;
   }
 
+  .launcher-page {
+    width: min(640px, 100%);
+    grid-template-columns: 1fr;
+    padding: 40px 24px;
+  }
+
+  .launcher-hero,
+  .launcher-explainer,
+  .launcher-section {
+    grid-column: 1;
+  }
+
   .sidebar {
     border-right: 0;
     border-bottom: 1px solid var(--line);
@@ -8831,6 +8852,66 @@ mark.log-search-match.active {
   outline: none;
 }
 
+.run-list-drawer-backdrop {
+  position: fixed;
+  inset: 57px 0 0;
+  background: rgba(15, 23, 42, 0.16);
+  z-index: 80;
+}
+
+.run-list-detail-drawer {
+  position: fixed;
+  top: 57px;
+  right: 0;
+  bottom: 0;
+  width: min(720px, calc(100vw - 64px));
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 20px;
+  border-left: 1px solid var(--line, #e2e8f0);
+  background: var(--surface, #ffffff);
+  box-shadow: -16px 0 40px rgba(15, 23, 42, 0.18);
+  animation: drawer-slide-in 0.16s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.run-list-detail-drawer .run-drawer,
+.run-list-detail-drawer .feature-drilldown,
+.run-list-detail-drawer .run-view-loading,
+.run-list-detail-drawer .run-view-empty,
+.run-list-detail-drawer .run-view-error,
+.run-list-detail-drawer .run-view-not-found {
+  max-width: none;
+  width: 100%;
+  margin: 0;
+}
+
+.run-list-detail-drawer-close {
+  align-self: flex-end;
+  margin: 0 0 12px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 6px;
+  background: var(--surface, #ffffff);
+  color: var(--text, #0f172a);
+  font: inherit;
+  font-size: 22px;
+  line-height: 1;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.run-list-detail-drawer-close:hover,
+.run-list-detail-drawer-close:focus-visible {
+  border-color: var(--accent, #0f766e);
+  color: var(--accent, #0f766e);
+  outline: none;
+}
+
 /* Empty-state body when 0 sessions / no filter matches. */
 .run-list-landing-empty-body {
   border: 1px dashed var(--border, #cbd5e1);
@@ -10045,6 +10126,16 @@ button.otto-app-shell-project:focus-visible {
   }
   .otto-app-shell-main {
     padding-inline: 16px;
+  }
+  .run-list-drawer-backdrop {
+    display: none;
+  }
+  .run-list-detail-drawer {
+    inset: 0;
+    width: 100vw;
+    padding: 16px;
+    border-left: 0;
+    box-shadow: none;
   }
   .run-list-landing-heading h1 {
     font-size: 26px;

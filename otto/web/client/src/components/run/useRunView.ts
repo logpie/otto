@@ -69,6 +69,7 @@ export function useRunView(sessionId: string | null): UseRunViewState {
     }
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | null = null;
+    const controllers = new Set<AbortController>();
 
     const fetchOnce = (isInitial: boolean) => {
       if (isInitial) {
@@ -76,7 +77,9 @@ export function useRunView(sessionId: string | null): UseRunViewState {
         setError(null);
         setErrorStatus(null);
       }
-      fetch(`/api/run-view/${encodeURIComponent(sessionId)}`)
+      const controller = new AbortController();
+      controllers.add(controller);
+      fetch(`/api/run-view/${encodeURIComponent(sessionId)}`, { signal: controller.signal })
         .then((resp) => {
           if (!resp.ok) {
             const httpErr = new Error(`HTTP ${resp.status} ${resp.statusText}`);
@@ -101,6 +104,7 @@ export function useRunView(sessionId: string | null): UseRunViewState {
           }
         })
         .catch((err: Error & { status?: number }) => {
+          if (err.name === "AbortError") return;
           if (cancelled) return;
           if (isInitial) {
             setError(err.message || String(err));
@@ -116,6 +120,9 @@ export function useRunView(sessionId: string | null): UseRunViewState {
               `[useRunView] poll refetch failed for ${sessionId}: ${err.message || String(err)}`,
             );
           }
+        })
+        .finally(() => {
+          controllers.delete(controller);
         });
     };
 
@@ -141,6 +148,10 @@ export function useRunView(sessionId: string | null): UseRunViewState {
 
     return () => {
       cancelled = true;
+      for (const controller of controllers) {
+        controller.abort();
+      }
+      controllers.clear();
       if (intervalId !== null) {
         clearInterval(intervalId);
         intervalId = null;

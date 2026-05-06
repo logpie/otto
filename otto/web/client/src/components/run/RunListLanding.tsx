@@ -26,6 +26,8 @@
 //     and metric rows now use distinct typographic weights.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent } from "react";
+import { RunViewPage } from "./RunViewPage";
 
 interface Props {
   // Optional override for tests. Defaults to /api/run-view.
@@ -163,7 +165,13 @@ function formatRelative(iso: string | null): string {
 // is rendered inline as a small secondary link inside the same card,
 // using stopPropagation so clicking it doesn't bubble up and pre-empt
 // its own navigation. Card hover state hints clickability.
-function SessionCard({ session }: { session: SessionSummary }) {
+function SessionCard({
+  session,
+  onOpen,
+}: {
+  session: SessionSummary;
+  onOpen: (sessionId: string) => void;
+}) {
   const href = `?view=run-view&session=${encodeURIComponent(session.id)}`;
   const intent = session.intent
     ? truncate(session.intent, 80)
@@ -179,6 +187,19 @@ function SessionCard({ session }: { session: SessionSummary }) {
   const isAwaitingReview = session.status === "awaiting_spec_review";
   const showReviewLink = isAwaitingReview || lifecycle === "draft";
   const specHref = `?view=spec-review&spec=${encodeURIComponent(session.id)}`;
+  const openInDrawer = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    event.preventDefault();
+    onOpen(session.id);
+  };
 
   return (
     <a
@@ -186,6 +207,7 @@ function SessionCard({ session }: { session: SessionSummary }) {
       data-testid="landing-card"
       data-session-id={session.id}
       href={href}
+      onClick={openInDrawer}
       aria-label={`Open run ${session.id}`}
     >
       <div className="landing-card-row landing-card-row-top">
@@ -243,6 +265,50 @@ function SessionCard({ session }: { session: SessionSummary }) {
         ) : null}
       </div>
     </a>
+  );
+}
+
+function RunDetailOverlay({
+  sessionId,
+  onClose,
+}: {
+  sessionId: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <>
+      <div
+        className="run-list-drawer-backdrop"
+        data-testid="run-list-drawer-backdrop"
+        onClick={onClose}
+      />
+      <aside
+        className="run-list-detail-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Run ${sessionId}`}
+        data-testid="run-list-detail-drawer"
+      >
+        <button
+          type="button"
+          className="run-list-detail-drawer-close"
+          data-testid="run-list-detail-drawer-close"
+          aria-label="Close run details"
+          onClick={onClose}
+        >
+          ×
+        </button>
+        <RunViewPage sessionId={sessionId} />
+      </aside>
+    </>
   );
 }
 
@@ -397,6 +463,7 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
   const [filter, setFilter] = useState<StatusFilter>(() => readInitialFilter());
   const [refreshing, setRefreshing] = useState(false);
   const [showNewRun, setShowNewRun] = useState(false);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   // R3-B9 auto-refresh: bumped each time a poll completes so dependents
   // (the auto-refresh effect) can re-trigger without re-fetching from
   // their own deps.
@@ -481,6 +548,12 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
   const handleManualRefresh = () => {
     void fetchSessions();
   };
+  const openSession = useCallback((sessionId: string) => {
+    setSelectedSessionId(sessionId);
+  }, []);
+  const closeSession = useCallback(() => {
+    setSelectedSessionId(null);
+  }, []);
 
   if (error) {
     return (
@@ -586,11 +659,14 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
       ) : (
         <div className="landing-card-list" role="list">
           {filteredSessions.map((session) => (
-            <SessionCard key={session.id} session={session} />
+            <SessionCard key={session.id} session={session} onOpen={openSession} />
           ))}
         </div>
       )}
       {showNewRun && <NewRunModal onClose={() => setShowNewRun(false)} />}
+      {selectedSessionId ? (
+        <RunDetailOverlay sessionId={selectedSessionId} onClose={closeSession} />
+      ) : null}
     </div>
   );
 }
