@@ -537,8 +537,9 @@ def _synthesized_webapp_walkthrough(
         log_path = log_dir / "synthesized-webapp.log"
 
         # Try to boot via create_app.
+        import shlex
         import subprocess
-        from otto.checks import _subprocess_env
+        from otto.checks import _resolve_subprocess_command, _subprocess_env
 
         # Generalization: a "webapp" can be many shapes (Flask,
         # FastAPI, SSG that emits HTML, etc.). Try create_app first;
@@ -615,15 +616,16 @@ def _synthesized_webapp_walkthrough(
         )
 
         env = _subprocess_env(extra_pythonpath=[project_dir])
-        # Use sys.executable for portability — `python` isn't on PATH
-        # on macOS by default; `_subprocess_env` adds the interpreter
-        # bin dir but the basename varies (python3 vs python). Direct
-        # sys.executable bypasses the lookup entirely.
-        import sys as _sys
+        command = _resolve_subprocess_command(
+            ["python", "-c", boot_script],
+            project_dir,
+            [project_dir],
+        )
+        log_command = [command[0], "-c", "<synthesized-webapp-walkthrough>"]
 
         try:
             completed = subprocess.run(
-                [_sys.executable, "-c", boot_script],
+                command,
                 cwd=project_dir,
                 env=env,
                 capture_output=True,
@@ -643,7 +645,7 @@ def _synthesized_webapp_walkthrough(
             )
 
         log_text = (
-            f"$ python -c <synthesized-webapp-walkthrough>\n"
+            f"$ {shlex.join(log_command)}\n"
             f"exit_code={completed.returncode}\n\n"
             f"STDOUT:\n{completed.stdout}\n\nSTDERR:\n{completed.stderr}"
         )

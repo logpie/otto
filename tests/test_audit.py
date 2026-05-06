@@ -1369,6 +1369,65 @@ def test_synthesized_walkthrough_finds_package_create_app(
     assert "screenshot-home.png" in artifact_names
 
 
+def test_synthesized_walkthrough_uses_linked_worktree_project_python(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Linked worktree apps may depend on the parent project's .venv."""
+    import stat
+    import sys
+
+    from otto.spec_compile import PytestCheck
+
+    project_root = tmp_path / "project"
+    project_dir = project_root / ".worktrees" / "task"
+    package_dir = project_dir / "expense_portal"
+    venv_bin = project_root / ".venv" / "bin"
+    package_dir.mkdir(parents=True)
+    venv_bin.mkdir(parents=True)
+    python_shim = venv_bin / "python"
+    python_shim.write_text(
+        "#!/bin/sh\n"
+        "OTTO_TEST_PROJECT_PYTHON=1 exec "
+        f"{sys.executable!s} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python_shim.chmod(python_shim.stat().st_mode | stat.S_IXUSR)
+    (venv_bin / "python3").symlink_to("python")
+    (package_dir / "__init__.py").write_text(
+        "import os\n"
+        "if os.environ.get('OTTO_TEST_PROJECT_PYTHON') != '1':\n"
+        "    raise ModuleNotFoundError('No module named flask')\n"
+        "class _Response:\n"
+        "    status_code = 200\n"
+        "    def get_data(self, as_text=False):\n"
+        "        body = '<h1>Project runtime home</h1>'\n"
+        "        return body if as_text else body.encode()\n"
+        "class _Client:\n"
+        "    def get(self, path): return _Response()\n"
+        "class _App:\n"
+        "    def test_client(self): return _Client()\n"
+        "def create_app(config=None): return _App()\n",
+        encoding="utf-8",
+    )
+    spec = Spec(
+        intent="x",
+        project_kind="webapp",
+        features=[Feature(id="home", name="Project runtime home")],
+        groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])],
+    )
+    monkeypatch.setattr("otto.audit._capture_playwright_page", _fake_playwright_capture)
+
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(project_dir, tmp_path / "log", 60)
+
+    assert result.succeeded is True
+    log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
+    assert str(python_shim) in log_text
+    assert '"module": "expense_portal"' in log_text
+    assert "Project runtime home" in log_text
+
+
 def test_default_walkthrough_picks_cross_slice_journey_first(tmp_path: Path) -> None:
     """When both cross-slice and slice-level BrowserJourney exist, the
     cross-slice one wins (it's the integrated test)."""

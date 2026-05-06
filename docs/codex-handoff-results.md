@@ -1688,3 +1688,55 @@ Current live-run state:
 Decision:
 - Otto bug fixed. Continue the live run and externally verify the Acme app
   result before counting this pressure test as a product pass.
+
+## 2026-05-06 Fresh Acme Retry 5: Synthesized Walkthrough Runtime Fix
+
+Live project / session:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-743f16`
+- Session: `2026-05-06-173132-2c6bc6`
+
+Bug found:
+- The deterministic synthesized webapp walkthrough skipped the same Acme app
+  even after project-kind detection was fixed:
+  `audit/attempt-00/walkthrough/synthesized-webapp.log` reported
+  `shape="not-applicable"` and `no Flask create_app...`.
+- The skip was false. From the task worktree, importing the package with
+  Otto's own `.venv/bin/python` failed because the target app dependencies live
+  in the parent project `.venv`; importing with
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.venv/bin/python` worked.
+
+Root cause:
+- `_synthesized_webapp_walkthrough` used Otto's `sys.executable` for the
+  create_app probe instead of resolving the target project's runtime the same
+  way required checks do. Linked task worktrees therefore lost the parent
+  project virtualenv and could be misclassified as "not applicable."
+
+Generic fix:
+- `otto/audit.py` now resolves `python -c <synthesized-webapp-walkthrough>` via
+  `otto.checks._resolve_subprocess_command` with the target project directory,
+  while preserving the existing subprocess environment. This reuses the same
+  project-runtime lookup as check execution and is not specific to Acme.
+- The walkthrough log now records the resolved interpreter path, so future
+  skips can be audited from the artifact instead of inferred.
+
+Regression tests added:
+- `tests/test_audit.py::test_synthesized_walkthrough_uses_linked_worktree_project_python`
+  creates a linked `.worktrees/task` app whose package only imports under the
+  parent project `.venv/bin/python` shim, then asserts the synthesized
+  walkthrough succeeds and logs that interpreter.
+
+Verification:
+- `.venv/bin/pytest tests/test_audit.py::test_synthesized_walkthrough_uses_linked_worktree_project_python tests/test_audit.py::test_synthesized_walkthrough_finds_package_create_app tests/test_audit.py::test_default_walkthrough_no_browser_journey_webapp_synthesizes -q`
+  -> `3 passed`.
+- `.venv/bin/pytest tests/test_audit.py -q` -> `46 passed`.
+- `uv run ruff check otto/audit.py tests/test_audit.py` -> passed.
+- Real Acme repro after the fix: `default_walkthrough_from_spec` against
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16`
+  succeeded, used the parent project `.venv/bin/python`, detected
+  `"module": "expense_portal"`, and generated `screenshot-home.png`,
+  `dom-home.html`, `browser-capture.log`, and `walkthrough.webm`.
+
+Decision:
+- Otto bug fixed. This fix improves the generic audit oracle for any linked
+  worktree project whose runnable dependencies live outside the task checkout.
