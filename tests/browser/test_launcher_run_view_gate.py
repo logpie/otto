@@ -578,8 +578,8 @@ def test_run_card_opens_side_drawer_without_route_navigation(
             ),
         )
 
-    page.route("**/api/run-view/run-1/logs", run_logs)
     page.route("**/api/run-view/run-1", run_detail)
+    page.route("**/api/run-view/run-1/logs*", run_logs)
     page.route("**/api/projects", projects)
     page.route("**/api/state", state)
 
@@ -598,7 +598,7 @@ def test_run_card_opens_side_drawer_without_route_navigation(
     assert page.get_by_test_id("run-quick-action-proof").is_disabled()
     page.get_by_test_id("run-quick-action-logs").click()
     page.wait_for_selector('[data-testid="run-resource-panel-logs"]', timeout=10_000)
-    assert page.get_by_text("spec-state.jsonl").is_visible()
+    page.get_by_text("spec-state.jsonl").wait_for(state="visible", timeout=10_000)
     assert page.get_by_text("group.started").is_visible()
 
     page.go_back()
@@ -610,6 +610,151 @@ def test_run_card_opens_side_drawer_without_route_navigation(
     page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
     page.get_by_test_id("run-list-detail-drawer-close").click()
     page.get_by_test_id("run-list-detail-drawer").wait_for(state="detached", timeout=10_000)
+
+
+def test_group_actions_open_filtered_logs_and_diff(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Group row actions must be real navigation into evidence, not inert stubs."""
+
+    project = _project()
+    run_view = _run_view("run-1")
+    run_view.update(
+        {
+            "status": "building",
+            "verdict": None,
+            "features": [
+                {
+                    "id": "f1",
+                    "name": "Scaffold React SPA",
+                    "description": "Part of Foundation.",
+                    "acceptance_detail": "",
+                    "evidence_kinds": [],
+                    "group_id": "foundation",
+                    "verdict": None,
+                    "evidence_completeness": "full",
+                    "coverage_confidence": "high",
+                    "multi_actor_required": False,
+                    "audit_pre_merge": False,
+                    "evidence_refs": [],
+                }
+            ],
+            "groups": [
+                {
+                    "id": "foundation",
+                    "name": "Foundation",
+                    "description": "",
+                    "feature_ids": ["f1"],
+                    "status": "in_progress",
+                    "branch": "build/foundation",
+                    "owned_paths": ["src/App.tsx"],
+                    "dependencies": [],
+                    "cost_usd": 0,
+                    "wall_s": 0,
+                    "repair_attempts": 0,
+                }
+            ],
+            "stages": [
+                {"name": "compile", "status": "done", "duration_s": 1, "cost_usd": None, "started_at": None, "finished_at": None},
+                {"name": "spec_review", "status": "skipped", "duration_s": None, "cost_usd": None, "started_at": None, "finished_at": None},
+                {"name": "seed", "status": "done", "duration_s": 1, "cost_usd": None, "started_at": None, "finished_at": None},
+                {"name": "build", "status": "active", "duration_s": None, "cost_usd": None, "started_at": "2026-05-06T06:02:00Z", "finished_at": None},
+                {"name": "audit", "status": "pending", "duration_s": None, "cost_usd": None, "started_at": None, "finished_at": None},
+                {"name": "render", "status": "pending", "duration_s": None, "cost_usd": None, "started_at": None, "finished_at": None},
+                {"name": "land", "status": "pending", "duration_s": None, "cost_usd": None, "started_at": None, "finished_at": None},
+            ],
+        }
+    )
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def state(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_state(project, live_items=[_live_item()], watcher_running=True)),
+        )
+
+    def run_detail(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(run_view))
+
+    def group_logs(route: Any) -> None:
+        assert "group_id=foundation" in route.request.url
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "session_id": "run-1",
+                    "group_id": "foundation",
+                    "logs": [
+                        {
+                            "label": "build/foundation/attempt-01/live.log",
+                            "path": "build/foundation/attempt-01/live.log",
+                            "size_bytes": 32,
+                            "text": "writing app shell",
+                            "truncated": False,
+                        }
+                    ],
+                    "empty": False,
+                }
+            ),
+        )
+
+    def group_diff(route: Any) -> None:
+        assert "group_id=foundation" in route.request.url
+        route.fulfill(
+            status=200,
+            content_type="text/plain",
+            body="Scope: group foundation\nUntracked files:\nsrc/App.tsx\n+Microfeed\n",
+        )
+
+    page.route("**/api/run-view/run-1", run_detail)
+    page.route("**/api/run-view/run-1/logs*", group_logs)
+    page.route("**/api/run-view/run-1/diff*", group_diff)
+    page.route("**/api/projects", projects)
+    page.route("**/api/state", state)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.get_by_test_id("task-card-build-a-micro-twitter").click()
+    page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
+
+    assert page.get_by_test_id("current-work-panel").is_visible()
+    assert page.get_by_text("Working now").is_visible()
+    assert (
+        page.get_by_test_id("current-work-group-foundation")
+        .get_by_text("Scaffold React SPA")
+        .is_visible()
+    )
+    assert page.get_by_test_id("stage-spec_review").get_by_text("skipped").is_visible()
+    assert page.get_by_test_id("stage-seed").get_by_text("Prepare fixtures").is_visible()
+
+    page.get_by_test_id("group-list").locator("summary").click()
+    page.get_by_test_id("group-logs-foundation").click()
+    page.wait_for_selector('[data-testid="run-resource-panel-logs"]', timeout=10_000)
+    assert page.get_by_text("Logs for Foundation").is_visible()
+    page.wait_for_selector("text=writing app shell", timeout=10_000)
+    assert page.get_by_text("writing app shell").is_visible()
+
+    page.get_by_test_id("group-diff-foundation").click()
+    page.wait_for_selector('[data-testid="run-resource-panel-diff"]', timeout=10_000)
+    assert page.get_by_text("Diff for Foundation").is_visible()
+    page.wait_for_selector("text=Scope: group foundation", timeout=10_000)
+    assert page.get_by_text("Scope: group foundation").is_visible()
+    assert page.get_by_text("src/App.tsx").is_visible()
 
 
 def test_new_run_queues_from_web_and_starts_runner(

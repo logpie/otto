@@ -15,9 +15,9 @@
 // ConfirmDialog so a single mis-click cannot pause a run or throw away
 // a Group's worktree work. Resume is non-destructive and fires inline.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ConfirmDialog, type ConfirmState } from "../ConfirmDialog";
-import type { RunView } from "../../types/run";
+import type { GroupView, RunView } from "../../types/run";
 import { FeatureList } from "./FeatureList";
 import { GroupList } from "./GroupList";
 import { Guardrails } from "./Guardrails";
@@ -33,6 +33,21 @@ interface Props {
 const TERMINAL_STATUSES = new Set(["passed", "partial", "blocked", "landed", "interrupted", "aborted", "failed"]);
 
 type ResourcePanel = "logs" | "artifacts" | "diff";
+
+interface ResourceSelection {
+  kind: ResourcePanel;
+  groupId: string | null;
+}
+
+const STAGE_LABELS: Record<string, string> = {
+  compile: "Compile spec",
+  spec_review: "Spec review",
+  seed: "Prepare fixtures",
+  build: "Build groups",
+  audit: "Audit product",
+  render: "Render proof",
+  land: "Land on main",
+};
 
 interface LogsPayload {
   logs: Array<{
@@ -86,7 +101,7 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [confirmPending, setConfirmPending] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
-  const [resourcePanel, setResourcePanel] = useState<ResourcePanel | null>(null);
+  const [resourcePanel, setResourcePanel] = useState<ResourceSelection | null>(null);
   const inFlight = view.verdict === null && !TERMINAL_STATUSES.has(view.status);
   const sessionId = view.meta.session_id;
 
@@ -176,19 +191,35 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
   const onViewSpec = useCallback(() => {
     window.location.href = `?view=spec-review&spec=${encodeURIComponent(sessionId)}`;
   }, [sessionId]);
+  const openResource = useCallback((kind: ResourcePanel, groupId: string | null = null) => {
+    setResourcePanel((current) =>
+      current?.kind === kind && current.groupId === groupId ? null : {kind, groupId},
+    );
+  }, []);
   const onOpenLogs = useCallback(() => {
-    setResourcePanel((current) => (current === "logs" ? null : "logs"));
-  }, []);
+    openResource("logs");
+  }, [openResource]);
   const onOpenArtifacts = useCallback(() => {
-    setResourcePanel((current) => (current === "artifacts" ? null : "artifacts"));
-  }, []);
+    openResource("artifacts");
+  }, [openResource]);
   const onOpenDiff = useCallback(() => {
-    setResourcePanel((current) => (current === "diff" ? null : "diff"));
-  }, []);
+    openResource("diff");
+  }, [openResource]);
+  const onOpenGroupLogs = useCallback((groupId: string) => {
+    openResource("logs", groupId);
+  }, [openResource]);
+  const onOpenGroupDiff = useCallback((groupId: string) => {
+    openResource("diff", groupId);
+  }, [openResource]);
 
   return (
     <article className="run-drawer" data-testid="run-drawer">
       <VerdictHeader view={view} />
+      <CurrentWorkSummary
+        view={view}
+        onOpenLogs={onOpenGroupLogs}
+        onOpenDiff={onOpenGroupDiff}
+      />
       <div className="run-quick-actions" data-testid="run-quick-actions">
         <button
           type="button"
@@ -234,7 +265,17 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
         </button>
       </div>
       {resourcePanel ? (
-        <RunResourcePanel key={resourcePanel} sessionId={sessionId} kind={resourcePanel} />
+        <RunResourcePanel
+          key={`${resourcePanel.kind}:${resourcePanel.groupId ?? "all"}`}
+          sessionId={sessionId}
+          kind={resourcePanel.kind}
+          groupId={resourcePanel.groupId}
+          groupName={
+            resourcePanel.groupId
+              ? view.groups.find((group) => group.id === resourcePanel.groupId)?.name ?? null
+              : null
+          }
+        />
       ) : null}
       {inFlight && (
         <div className="run-action-bar" data-testid="run-action-bar">
@@ -288,6 +329,8 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
             section header. No additional <h3> needed here. */}
         <GroupList
           groups={view.groups}
+          onOpenDiff={onOpenGroupDiff}
+          onOpenLogs={onOpenGroupLogs}
           {...(inFlight
             ? {
                 onAbort: requestAbortGroup,
@@ -319,7 +362,79 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
 
 export default RunDrawer;
 
-function RunResourcePanel({sessionId, kind}: {sessionId: string; kind: ResourcePanel}) {
+function CurrentWorkSummary({
+  view,
+  onOpenLogs,
+  onOpenDiff,
+}: {
+  view: RunView;
+  onOpenLogs: (groupId: string) => void;
+  onOpenDiff: (groupId: string) => void;
+}) {
+  const activeGroups = view.groups.filter((group) => group.status === "in_progress");
+  const displayGroups = activeGroups.length > 0 ? activeGroups : nextPendingGroups(view.groups);
+  const activeStage = view.stages.find((stage) => stage.status === "active");
+  if (displayGroups.length === 0 && !activeStage) return null;
+  return (
+    <section className="current-work-panel" data-testid="current-work-panel" aria-label="Current work">
+      <div className="current-work-heading">
+        <h3>{activeGroups.length > 0 ? "Working now" : "Up next"}</h3>
+        {activeStage ? (
+          <span className="current-work-stage">
+            Stage: {stageLabel(activeStage.name)}
+          </span>
+        ) : null}
+      </div>
+      {displayGroups.map((group) => {
+        const features = view.features.filter((feature) => feature.group_id === group.id);
+        return (
+          <article key={group.id} className="current-work-group" data-testid={`current-work-group-${group.id}`}>
+            <div className="current-work-group-main">
+              <strong>{group.name}</strong>
+              <span>{features.length} feature{features.length === 1 ? "" : "s"}</span>
+            </div>
+            {features.length > 0 ? (
+              <p title={features.map((feature) => feature.name).join(", ")}>
+                {features.slice(0, 3).map((feature) => feature.name).join(", ")}
+                {features.length > 3 ? ` +${features.length - 3} more` : ""}
+              </p>
+            ) : null}
+            <div className="current-work-actions">
+              <button type="button" onClick={() => onOpenLogs(group.id)}>
+                Logs
+              </button>
+              <button type="button" onClick={() => onOpenDiff(group.id)}>
+                Diff
+              </button>
+            </div>
+          </article>
+        );
+      })}
+    </section>
+  );
+}
+
+function nextPendingGroups(groups: GroupView[]): GroupView[] {
+  const firstPending = groups.find((group) => group.status === "pending");
+  return firstPending ? [firstPending] : [];
+}
+
+function stageLabel(name: string): string {
+  return STAGE_LABELS[name] ?? name;
+}
+
+function RunResourcePanel({
+  sessionId,
+  kind,
+  groupId,
+  groupName,
+}: {
+  sessionId: string;
+  kind: ResourcePanel;
+  groupId: string | null;
+  groupName: string | null;
+}) {
+  const panelRef = useRef<HTMLElement | null>(null);
   const [payload, setPayload] = useState<LogsPayload | FilesPayload | DiffPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -330,7 +445,8 @@ function RunResourcePanel({sessionId, kind}: {sessionId: string; kind: ResourceP
     const endpoint = kind === "artifacts" ? "files" : kind;
     void (async () => {
       try {
-        const resp = await fetch(`/api/run-view/${encodeURIComponent(sessionId)}/${endpoint}`);
+        const query = groupId ? `?group_id=${encodeURIComponent(groupId)}` : "";
+        const resp = await fetch(`/api/run-view/${encodeURIComponent(sessionId)}/${endpoint}${query}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
         let body: LogsPayload | FilesPayload | DiffPayload;
         if (kind === "diff") {
@@ -346,11 +462,27 @@ function RunResourcePanel({sessionId, kind}: {sessionId: string; kind: ResourceP
     return () => {
       cancelled = true;
     };
-  }, [sessionId, kind]);
+  }, [sessionId, kind, groupId]);
+
+  useEffect(() => {
+    panelRef.current?.scrollIntoView({block: "nearest"});
+  }, [kind, groupId]);
+
+  const title =
+    kind === "logs"
+      ? "Logs"
+      : kind === "diff"
+        ? "Diff"
+        : "Artifacts";
+  const scope = groupId ? ` for ${groupName ?? groupId}` : "";
 
   return (
-    <section className="run-resource-panel" data-testid={`run-resource-panel-${kind}`}>
-      <h3>{kind === "logs" ? "Logs" : kind === "diff" ? "Diff" : "Artifacts"}</h3>
+    <section
+      ref={panelRef}
+      className="run-resource-panel"
+      data-testid={`run-resource-panel-${kind}`}
+    >
+      <h3>{title}{scope}</h3>
       {error ? <p role="alert">Failed to load {kind}: {error}</p> : null}
       {!payload && !error ? <p>Loading {kind}...</p> : null}
       {payload && kind === "logs" ? (

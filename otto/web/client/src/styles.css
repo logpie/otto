@@ -9646,6 +9646,80 @@ mark.log-search-match.active {
   background: var(--pill-info-bg);
   filter: brightness(0.97);
 }
+.current-work-panel {
+  border: 1px solid var(--color-info-border, #93c5fd);
+  background: var(--color-info-bg, #dbeafe);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0 0 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.current-work-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.current-work-heading h3 {
+  margin: 0;
+  font-size: var(--text-sm, 14px);
+}
+.current-work-stage {
+  color: var(--muted);
+  font-size: var(--text-xs, 12px);
+}
+.current-work-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  align-items: center;
+}
+.current-work-group-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.current-work-group-main strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.current-work-group-main span,
+.current-work-group p {
+  color: var(--muted);
+  font-size: var(--text-xs, 12px);
+}
+.current-work-group p {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.current-work-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+.current-work-actions button {
+  appearance: none;
+  border: 1px solid var(--color-info-border, #93c5fd);
+  background: var(--surface);
+  color: var(--text);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: var(--text-xs, 12px);
+  cursor: pointer;
+}
+.current-work-actions button:hover,
+.current-work-actions button:focus-visible {
+  border-color: var(--primary-action-bg, #2557d4);
+  color: var(--primary-action-bg, #2557d4);
+  outline: none;
+}
 .run-resource-panel {
   border: 1px solid var(--line);
   background: var(--surface-alt);
@@ -9881,13 +9955,13 @@ mark.log-search-match.active {
 }
 .stage-timeline .stage-block {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   padding: 6px 10px;
   border-radius: 6px;
   border: 1px solid var(--line);
   background: var(--surface);
-  white-space: nowrap;
+  min-width: 190px;
 }
 .stage-timeline .stage-dot {
   font-weight: 700;
@@ -9896,6 +9970,7 @@ mark.log-search-match.active {
   flex: 0 0 auto;
 }
 .stage-timeline .stage-name {
+  display: block;
   font-weight: 600;
   color: var(--text);
   /* R3-B19: humanizeStage() in StageTimeline.tsx now produces the
@@ -9903,9 +9978,21 @@ mark.log-search-match.active {
      `capitalize` rule so multi-word labels keep their lower-case
      follower words ("Spec review" rather than "Spec Review"). */
 }
+.stage-timeline .stage-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.stage-timeline .stage-description {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+}
 .stage-timeline .stage-status {
   font-size: var(--text-xs, 12px);
   color: var(--muted);
+  margin-left: auto;
 }
 .stage-timeline .stage-duration,
 .stage-timeline .stage-cost {

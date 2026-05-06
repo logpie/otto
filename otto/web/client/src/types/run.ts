@@ -11,7 +11,7 @@
 //   GroupView ↔ Group (renamed from Slice)
 //   ComponentView ↔ Component
 //   GuardrailView ↔ Guardrail
-//   StageView ↔ pipeline stage entries (Compile/Build/Audit/Render/Land)
+//   StageView ↔ pipeline stage entries (Compile/Spec review/Seed/Build/Audit/Render/Land)
 //
 // Null semantics:
 //   - In-flight runs have `verdict: null`, `finished_at: null`, etc.
@@ -44,7 +44,7 @@ export interface RunView {
   // Pinned negative scope (research §2 vocab): rendered as ⊘ pills.
   guardrails: GuardrailView[];
 
-  // Stage timeline: Compile → Build → Audit → Render → Land.
+  // Stage timeline: Compile → Spec review → Seed → Build → Audit → Render → Land.
   stages: StageView[];
 
   // Run-level cost + wall.
@@ -215,8 +215,8 @@ export type ComponentStatus =
 export type StageName =
   | "compile"
   | "spec_review"
-  | "build"
   | "seed"
+  | "build"
   | "audit"
   | "render"
   | "land";

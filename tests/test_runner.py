@@ -34,6 +34,7 @@ from otto.runner import (
     RunResult,
     _feature_audits_to_verdicts,
     _invalidated_group_ids,
+    _repair_verdicts_for_audit,
     run_pipeline,
 )
 from otto.seed import SeedResult
@@ -309,6 +310,143 @@ def test_layer2_repair_runs_for_compact_group_feature_ids(
     }
     assert "create cards with title, description, labels, assignee, and due date" in repaired_ids
     assert "move cards between columns with visible controls" in repaired_ids
+    assert result.repair_result is not None
+
+
+def test_repair_verdicts_include_product_quality_findings_when_features_pass() -> None:
+    """Quality-only partial audits must still produce actionable repairs."""
+    from otto.audit import FeatureAudit
+
+    spec = Spec(
+        intent="micro twitter",
+        groups=[
+            Group(
+                id="foundation",
+                name="App shell, backend, database, base styling",
+                feature_ids=["base_styling"],
+            ),
+            Group(
+                id="post-creation",
+                name="Create post form and submission",
+                feature_ids=["character_counter"],
+            ),
+        ],
+        features=[
+            Feature(
+                id="base_styling",
+                name="Setup base styling with responsive layout and cohesive color scheme",
+                group_id="foundation",
+            ),
+            Feature(
+                id="character_counter",
+                name="Show character count indicator as user types",
+                group_id="post-creation",
+            ),
+        ],
+    )
+    audit = AuditResult(
+        verdict=AuditVerdict.PARTIAL,
+        narrative="all stories pass, product quality is still weak",
+        feature_audits=[
+            FeatureAudit(
+                feature_id="base_styling",
+                name="base styling",
+                status="passed",
+                detail="works",
+            ),
+            FeatureAudit(
+                feature_id="character_counter",
+                name="character counter",
+                status="passed",
+                detail="works",
+            ),
+        ],
+        quality_findings=[
+            "Color palette is minimal and needs stronger visual hierarchy.",
+            "Character counter styling is understated near the 280 character limit.",
+        ],
+    )
+
+    verdicts = _repair_verdicts_for_audit(spec, audit)
+    partial_by_id = {
+        str(v["feature_id"]): str(v["detail"])
+        for v in verdicts
+        if v.get("verdict") == "partial"
+    }
+
+    assert set(partial_by_id) == {"base_styling", "character_counter"}
+    assert "Color palette is minimal" in partial_by_id["base_styling"]
+    assert "Character counter styling" in partial_by_id["character_counter"]
+
+
+def test_layer2_repair_runs_for_product_quality_only_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression from live Microfeed: 25/25 stories passed but quality partial stopped."""
+    from otto.spec_compile import parse_spec
+
+    spec, _warnings = parse_spec(
+        {
+            "intent": "build a micro twitter",
+            "project_kind": "webapp",
+            "groups": [
+                {
+                    "id": "foundation",
+                    "name": "App shell, Express backend, database, base styling",
+                    "feature_ids": [
+                        "Setup base styling with responsive layout and cohesive color scheme"
+                    ],
+                },
+                {
+                    "id": "post-creation",
+                    "name": "Create post form and submission",
+                    "feature_ids": [
+                        "Show character count indicator as user types",
+                        "Clear form fields and show brief success message after post creation",
+                    ],
+                },
+            ],
+        }
+    )
+    assert spec.features == []
+
+    audit = AuditResult(
+        verdict=AuditVerdict.PARTIAL,
+        narrative="all functional requirements pass, but polish is weak",
+        quality_findings=[
+            "Color palette is minimal and needs stronger visual hierarchy.",
+            "Character counter styling is understated near the 280 character limit.",
+        ],
+    )
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured = _wire_stubs(monkeypatch, audit=audit, order=order)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x",
+            tmp_path,
+            session_dir,
+            project_kind="webapp",
+            brownfield=False,
+            base_url=None,
+            config={},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_stub_agent,
+            spec=spec,
+        )
+    )
+
+    assert "repair" in order.events
+    assert captured["repair_calls"] == 1
+    repaired_ids = {
+        verdict["feature_id"] for verdict in captured["repair_feature_verdicts"]
+        if verdict["verdict"] == "partial"
+    }
+    assert "Setup base styling with responsive layout and cohesive color scheme" in repaired_ids
+    assert "Show character count indicator as user types" in repaired_ids
     assert result.repair_result is not None
 
 

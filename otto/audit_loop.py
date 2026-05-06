@@ -17,9 +17,10 @@ Caps come from `otto/defaults.py`:
   repairs in one run
 - `retries.audit_loop.max_audit_passes_per_run`: total audit passes including original
 
-Quality findings with severity `critical` flip a Feature verdict to
-`partial` and trigger Layer 2 repair. `important`/`polish` findings
-do NOT trigger repair (research §4 severity ladder).
+Per-Feature quality findings with severity `critical` flip that Feature verdict
+to `partial` and trigger Layer 2 repair. Product-wide quality findings can also
+be routed to relevant Features by the runner when they keep the aggregate audit
+verdict non-PASS even though all explicit Feature audits passed.
 """
 
 from __future__ import annotations

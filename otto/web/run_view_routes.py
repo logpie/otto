@@ -172,16 +172,19 @@ def install_run_view_routes(
         return FileResponse(target)
 
     @router.get("/{session_id}/diff")
-    def get_diff(session_id: str) -> PlainTextResponse:
+    def get_diff(session_id: str, group_id: str | None = None) -> PlainTextResponse:
         project = _resolve_project_dir()
         session_dir = resolve_session_dir(project, session_id)
-        return PlainTextResponse(_session_diff_text(session_dir), media_type="text/plain")
+        return PlainTextResponse(
+            _session_diff_text(session_dir, group_id=group_id),
+            media_type="text/plain",
+        )
 
     @router.get("/{session_id}/logs")
-    def get_logs(session_id: str) -> JSONResponse:
+    def get_logs(session_id: str, group_id: str | None = None) -> JSONResponse:
         project = _resolve_project_dir()
         session_dir = resolve_session_dir(project, session_id)
-        return JSONResponse(_session_logs_payload(session_dir))
+        return JSONResponse(_session_logs_payload(session_dir, group_id=group_id))
 
     @router.get("/{session_id}/files")
     def get_files(session_id: str) -> JSONResponse:
@@ -351,21 +354,30 @@ _LOG_TEXT_LIMIT = 32_000
 _FILE_LIST_LIMIT = 300
 
 
-def _session_logs_payload(session_dir: Path) -> dict[str, Any]:
-    candidates = [
+def _session_logs_payload(session_dir: Path, *, group_id: str | None = None) -> dict[str, Any]:
+    safe_group_id = _safe_resource_id(group_id)
+    candidates = [] if safe_group_id else [
         session_dir / "spec-state.jsonl",
         session_dir / "state.jsonl",
         session_dir / "summary.json",
         session_dir / "proof-packet.json",
     ]
-    for pattern in (
-        "build/**/*.log",
-        "build/**/*.jsonl",
-        "certify/**/*.log",
-        "certify/**/*.jsonl",
-        "audit/**/*.log",
-        "audit/**/*.jsonl",
-    ):
+    patterns = (
+        (
+            f"build/{safe_group_id}/**/*.log",
+            f"build/{safe_group_id}/**/*.jsonl",
+        )
+        if safe_group_id
+        else (
+            "build/**/*.log",
+            "build/**/*.jsonl",
+            "certify/**/*.log",
+            "certify/**/*.jsonl",
+            "audit/**/*.log",
+            "audit/**/*.jsonl",
+        )
+    )
+    for pattern in patterns:
         candidates.extend(sorted(session_dir.glob(pattern)))
 
     seen: set[Path] = set()
@@ -386,7 +398,12 @@ def _session_logs_payload(session_dir: Path) -> dict[str, Any]:
                 "truncated": stat.st_size > _LOG_TEXT_LIMIT,
             }
         )
-    return {"session_id": session_dir.name, "logs": logs, "empty": not logs}
+    return {
+        "session_id": session_dir.name,
+        "group_id": safe_group_id,
+        "logs": logs,
+        "empty": not logs,
+    }
 
 
 def _session_files_payload(session_dir: Path) -> dict[str, Any]:
@@ -466,27 +483,142 @@ def _is_allowed_evidence_target(target: Path, session_dir: Path) -> bool:
     return False
 
 
-def _session_diff_text(session_dir: Path) -> str:
+def _session_diff_text(session_dir: Path, *, group_id: str | None = None) -> str:
     worktree = _session_worktree_root(session_dir)
     if not (worktree / ".git").exists():
         return "No git worktree is available for this session.\n"
+    safe_group_id = _safe_resource_id(group_id)
+    pathspecs = _group_pathspecs(session_dir, safe_group_id) if safe_group_id else []
+    path_args = ["--", *pathspecs] if pathspecs else []
     base = _choose_diff_base(worktree)
+    status = _git_text(["status", "--short", "--untracked-files=all", *path_args], worktree)
+    sections = [
+        f"Scope: group {safe_group_id}" if safe_group_id else "Scope: whole run",
+        f"Base: {base}" if base else "Base: not found",
+        "",
+    ]
+    if status.strip():
+        sections.extend(["Working tree status:", status.rstrip(), ""])
     if not base:
-        status = _git_text(["status", "--short"], worktree)
-        return status or "No diff base found.\n"
-    stat = _git_text(["diff", "--stat", f"{base}...HEAD"], worktree)
-    names = _git_text(["diff", "--name-status", f"{base}...HEAD"], worktree)
-    patch = _git_text(["diff", "--find-renames", f"{base}...HEAD"], worktree)
-    sections = [f"Base: {base}", ""]
+        sections.append("No diff base found.\n")
+        return "\n".join(sections).rstrip() + "\n"
+
+    stat = _git_text(["diff", "--stat", f"{base}...HEAD", *path_args], worktree)
+    names = _git_text(["diff", "--name-status", f"{base}...HEAD", *path_args], worktree)
+    patch = _git_text(["diff", "--find-renames", f"{base}...HEAD", *path_args], worktree)
     if stat.strip():
-        sections.extend(["Summary:", stat.rstrip(), ""])
+        sections.extend(["Committed branch summary:", stat.rstrip(), ""])
     if names.strip():
-        sections.extend(["Files:", names.rstrip(), ""])
+        sections.extend(["Committed branch files:", names.rstrip(), ""])
     if patch.strip():
-        sections.extend(["Patch:", patch.rstrip(), ""])
-    if len(sections) == 2:
-        sections.append("No changes from base.\n")
+        sections.extend(["Committed branch patch:", patch.rstrip(), ""])
+
+    work_stat = _git_text(["diff", "--stat", "HEAD", *path_args], worktree)
+    work_patch = _git_text(["diff", "--find-renames", "HEAD", *path_args], worktree)
+    if work_stat.strip():
+        sections.extend(["Uncommitted tracked summary:", work_stat.rstrip(), ""])
+    if work_patch.strip():
+        sections.extend(["Uncommitted tracked patch:", work_patch.rstrip(), ""])
+
+    untracked = _git_text(["ls-files", "--others", "--exclude-standard", *path_args], worktree)
+    untracked_paths = [line.strip() for line in untracked.splitlines() if line.strip()]
+    if untracked_paths:
+        sections.extend(["Untracked files:", "\n".join(untracked_paths), ""])
+        preview = _untracked_previews(worktree, untracked_paths)
+        if preview:
+            sections.extend(["Untracked file previews:", preview.rstrip(), ""])
+
+    if not any(section.strip() for section in sections[3:]):
+        sections.append("No changes from base or working tree.\n")
     return "\n".join(sections).rstrip() + "\n"
+
+
+_SAFE_RESOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_UNTRACKED_PREVIEW_BYTES = 80_000
+_UNTRACKED_FILE_BYTES = 12_000
+
+
+def _safe_resource_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if not _SAFE_RESOURCE_ID_RE.match(text):
+        raise HTTPException(status_code=400, detail="invalid group_id")
+    return text
+
+
+def _group_pathspecs(session_dir: Path, group_id: str | None) -> list[str]:
+    if not group_id:
+        return []
+    spec = _read_json(session_dir / "spec" / "spec.json") or {}
+    groups = spec.get("groups") if isinstance(spec.get("groups"), list) else []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        raw_id = str(group.get("id") or group.get("group_id") or group.get("slice_id") or "")
+        if raw_id != group_id:
+            continue
+        out: list[str] = []
+        for raw in group.get("owned_paths") or []:
+            pathspec = _safe_pathspec(str(raw))
+            if pathspec:
+                out.append(pathspec)
+        return out
+    return []
+
+
+def _safe_pathspec(value: str) -> str | None:
+    text = value.strip()
+    if not text or text.startswith("/") or "\x00" in text:
+        return None
+    parts = Path(text).parts
+    if any(part == ".." for part in parts):
+        return None
+    return text
+
+
+def _untracked_previews(worktree: Path, paths: list[str]) -> str:
+    chunks: list[str] = []
+    total = 0
+    for rel in paths:
+        if total >= _UNTRACKED_PREVIEW_BYTES:
+            chunks.append("... preview truncated ...")
+            break
+        path = (worktree / rel).resolve(strict=False)
+        if not _is_allowed_worktree_child(path, worktree) or not path.is_file():
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" in raw[:4096]:
+            body = f"diff --git a/{rel} b/{rel}\nnew binary file: {rel}\n"
+        else:
+            text = raw[:_UNTRACKED_FILE_BYTES].decode("utf-8", errors="replace")
+            lines = [f"+{line}" for line in text.splitlines()]
+            if len(raw) > _UNTRACKED_FILE_BYTES:
+                lines.append("+... file preview truncated ...")
+            body = "\n".join([
+                f"diff --git a/{rel} b/{rel}",
+                "new file mode 100644",
+                "--- /dev/null",
+                f"+++ b/{rel}",
+                *lines,
+                "",
+            ])
+        chunks.append(body)
+        total += len(body)
+    return "\n".join(chunks)
+
+
+def _is_allowed_worktree_child(path: Path, worktree: Path) -> bool:
+    try:
+        path.relative_to(worktree.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
 
 
 def _choose_diff_base(worktree: Path) -> str | None:

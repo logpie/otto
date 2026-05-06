@@ -184,6 +184,27 @@ def test_run_view_logs_and_files_resolve_worktree_session(tmp_path: Path) -> Non
     assert "proof-packet.json" in {item["path"] for item in files.json()["files"]}
 
 
+def test_run_view_group_logs_filter_to_group_build_artifacts(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-worktree"
+    session = project / ".worktrees" / "build-task" / "otto_logs" / "sessions" / sid
+    _write_minimal_session(session, intent="worktree micro twitter", project_kind="webapp")
+    foundation_log = session / "build" / "foundation" / "attempt-01" / "live.log"
+    timeline_log = session / "build" / "timeline" / "attempt-01" / "live.log"
+    foundation_log.parent.mkdir(parents=True)
+    timeline_log.parent.mkdir(parents=True)
+    foundation_log.write_text("building foundation\n", encoding="utf-8")
+    timeline_log.write_text("building timeline\n", encoding="utf-8")
+
+    client = _app_with_project(project)
+    logs = client.get(f"/api/run-view/{sid}/logs", params={"group_id": "foundation"})
+
+    assert logs.status_code == 200
+    paths = {item["path"] for item in logs.json()["logs"]}
+    assert paths == {"build/foundation/attempt-01/live.log"}
+    assert "building foundation" in logs.json()["logs"][0]["text"]
+
+
 def test_proof_packet_rewrites_and_serves_worktree_artifact_links(tmp_path: Path) -> None:
     project = tmp_path / "proj"
     sid = "2026-05-04-200000-worktree"
@@ -244,6 +265,57 @@ def test_run_view_diff_returns_worktree_diff_against_main(tmp_path: Path) -> Non
     assert diff.status_code == 200
     assert "Base: main" in diff.text
     assert "app.py" in diff.text
+
+
+def test_run_view_diff_includes_live_untracked_group_files(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.email", "test@otto.local"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Otto Tester"], cwd=project, check=True)
+    (project / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=project, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=project, check=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/task", ".worktrees/build-task", "main"],
+        cwd=project,
+        check=True,
+    )
+    worktree = project / ".worktrees" / "build-task"
+    sid = "2026-05-04-200000-worktree"
+    session = worktree / "otto_logs" / "sessions" / sid
+    (session / "spec").mkdir(parents=True)
+    (session / "spec" / "spec.json").write_text(
+        json.dumps(
+            {
+                "intent": "build a micro twitter",
+                "project_kind": "webapp",
+                "groups": [
+                    {
+                        "id": "foundation",
+                        "name": "Foundation",
+                        "owned_paths": ["src/App.tsx", "server.js"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app_file = worktree / "src" / "App.tsx"
+    app_file.parent.mkdir(parents=True)
+    app_file.write_text("export default function App() { return <main>Microfeed</main>; }\n", encoding="utf-8")
+    (worktree / "outside.txt").write_text("not in this group\n", encoding="utf-8")
+
+    client = _app_with_project(project)
+    diff = client.get(f"/api/run-view/{sid}/diff", params={"group_id": "foundation"})
+
+    assert diff.status_code == 200
+    assert "Scope: group foundation" in diff.text
+    assert "Untracked files:" in diff.text
+    assert "src/App.tsx" in diff.text
+    assert "+export default function App()" in diff.text
+    assert "outside.txt" not in diff.text
 
 
 def test_run_view_skips_symlinked_session_escape(tmp_path: Path) -> None:

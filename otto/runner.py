@@ -59,6 +59,7 @@ from otto.audit_loop import (
     FailingFeature,
     RepairAttempt,
     RepairResult,
+    features_to_repair,
     repair_failing_features,
 )
 from otto.build import (
@@ -498,7 +499,7 @@ async def run_pipeline(
         # do not rewrite the persisted spec just to repair a legacy shape.
         spec = repair_spec
         result.spec = spec
-        feature_verdicts = _feature_audits_to_verdicts(spec, audit_result)
+        feature_verdicts = _repair_verdicts_for_audit(spec, audit_result)
         if feature_verdicts:
             _phase("repair")
             bridge = _make_layer2_fix_agent(
@@ -544,7 +545,7 @@ async def run_pipeline(
                 audit_cost_total += float(recheck.cost_usd or 0.0)
                 audit_result = replace(recheck, cost_usd=audit_cost_total)
                 result.audit_result = audit_result
-                return _feature_audits_to_verdicts(spec, audit_result)
+                return _repair_verdicts_for_audit(spec, audit_result)
 
             try:
                 repair_result = await repair_failing_features(
@@ -1159,6 +1160,110 @@ def _feature_audits_to_verdicts(
             out.append(_feature_verdict_payload(feature_id, fa))
             seen_feature_ids.add(feature_id)
     return out
+
+
+def _repair_verdicts_for_audit(
+    spec: Spec, audit_result: AuditResult
+) -> list[dict[str, Any]]:
+    """Return feature verdict payloads that should be considered for repair.
+
+    Feature audits are the primary signal. Product-wide quality findings are a
+    secondary signal: if the product verdict is still non-PASS and no feature
+    audit is actionable, route those quality findings to the most relevant
+    Features so Layer 2 can improve product quality instead of ending as an
+    opaque "25/25 stories passed but run failed" result.
+    """
+    verdicts = _feature_audits_to_verdicts(spec, audit_result)
+    if (
+        audit_result.verdict == AuditVerdict.PASSED
+        or not audit_result.quality_findings
+        or features_to_repair(spec, verdicts, max_attempts_per_run=1)
+    ):
+        return verdicts
+
+    return [
+        *verdicts,
+        *_quality_findings_to_feature_verdicts(spec, audit_result.quality_findings),
+    ]
+
+
+def _quality_findings_to_feature_verdicts(
+    spec: Spec, quality_findings: list[str]
+) -> list[dict[str, Any]]:
+    if not spec.features or not quality_findings:
+        return []
+
+    findings_by_feature: dict[str, list[str]] = {
+        feature.id: [] for feature in spec.features
+    }
+    for finding in quality_findings:
+        text = str(finding or "").strip()
+        if not text:
+            continue
+        for feature_id in _feature_ids_for_quality_finding(spec, text):
+            findings_by_feature.setdefault(feature_id, []).append(text)
+
+    if not any(findings_by_feature.values()):
+        for feature in _first_feature_per_group(spec):
+            findings_by_feature.setdefault(feature.id, []).extend(
+                str(f).strip() for f in quality_findings if str(f).strip()
+            )
+
+    verdicts: list[dict[str, Any]] = []
+    for feature in spec.features:
+        findings = findings_by_feature.get(feature.id) or []
+        if not findings:
+            continue
+        detail = "Product-wide quality finding requires repair for this feature:\n" + "\n".join(
+            f"- {finding}" for finding in findings[:5]
+        )
+        verdicts.append(
+            {
+                "feature_id": feature.id,
+                "verdict": "partial",
+                "detail": detail,
+                "evidence_refs": [],
+                "quality_findings": findings,
+            }
+        )
+    return verdicts
+
+
+def _feature_ids_for_quality_finding(spec: Spec, finding: str) -> list[str]:
+    finding_tokens = _audit_match_tokens(finding)
+    if not finding_tokens:
+        return []
+
+    scored: list[tuple[int, int, str]] = []
+    for index, feature in enumerate(spec.features):
+        feature_tokens = _audit_match_tokens(
+            " ".join(
+                [
+                    feature.id,
+                    feature.name,
+                    feature.description,
+                    feature.acceptance_detail,
+                ]
+            )
+        )
+        score = len(finding_tokens & feature_tokens)
+        if score > 0:
+            scored.append((score, index, feature.id))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [feature_id for _score, _index, feature_id in scored]
+
+
+def _first_feature_per_group(spec: Spec) -> list[Feature]:
+    first_by_group: dict[str, Feature] = {}
+    for feature in spec.features:
+        if not feature.group_id:
+            continue
+        first_by_group.setdefault(feature.group_id, feature)
+    return [
+        first_by_group[group.id]
+        for group in spec.groups
+        if group.id in first_by_group
+    ]
 
 
 def _spec_with_group_feature_fallbacks(spec: Spec) -> Spec:

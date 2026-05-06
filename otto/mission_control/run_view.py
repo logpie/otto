@@ -17,6 +17,7 @@ to refresh the RunView shape.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -100,6 +101,7 @@ def build_run_view(
         proof.get("wall_s") if proof else None,
         live_state.get("wall_s") if live_state else None,
         live_state.get("duration_s") if live_state else None,
+        _active_wall_s(live_state),
         aggregate_group_wall_s,
     )
 
@@ -595,7 +597,7 @@ def _build_stages(
     """Emit StageView list from state events.
 
     Each Stage's name comes from the canonical pipeline order:
-    compile → spec_review → build → seed → audit → render → land.
+    compile → spec_review → seed → build → audit → render → land.
     Status is derived from event presence:
       - active if started but not finished
       - done if finished
@@ -603,7 +605,7 @@ def _build_stages(
       - skipped if marked skipped
       - pending if no start event
     """
-    canonical = ("compile", "spec_review", "build", "seed", "audit", "render", "land")
+    canonical = ("compile", "spec_review", "seed", "build", "audit", "render", "land")
     stages: dict[str, dict[str, Any]] = {
         name: {
             "name": name,
@@ -672,6 +674,12 @@ def _build_stages(
         stages["compile"]["finished_at"] = first_ts
     elif compile_active and stages["compile"]["status"] == "pending":
         stages["compile"]["status"] = "active"
+
+    if (
+        stages["spec_review"]["status"] == "pending"
+        and _later_pipeline_started(stages, state_events)
+    ):
+        stages["spec_review"]["status"] = "skipped"
 
     live_status = _normalize_live_status(live_state)
     if live_status in {"interrupted", "aborted", "failed"}:
@@ -997,6 +1005,46 @@ def _finished_at(
 # ---------------------------------------------------------------------------
 # Small utils
 # ---------------------------------------------------------------------------
+
+
+def _active_wall_s(live_state: dict[str, Any] | None) -> float | None:
+    if not live_state:
+        return None
+    live_status = _normalize_live_status(live_state)
+    if live_status in {"interrupted", "aborted", "failed", "landed"}:
+        return None
+    started_at = live_state.get("started_at")
+    if not started_at:
+        return None
+    started = _parse_iso_datetime(str(started_at))
+    if started is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _later_pipeline_started(
+    stages: dict[str, dict[str, Any]],
+    state_events: list[dict[str, Any]],
+) -> bool:
+    for name in ("seed", "build", "audit", "render", "land"):
+        if stages[name]["status"] != "pending":
+            return True
+    return _has_group_events(state_events)
 
 
 def _str_or_empty(value: Any) -> str:

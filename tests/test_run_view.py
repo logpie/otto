@@ -179,7 +179,7 @@ def test_build_run_view_emits_canonical_stages(tmp_path: Path) -> None:
     session = _setup_session(tmp_path)
     view = build_run_view(session)
     stage_names = [s["name"] for s in view["stages"]]
-    assert stage_names == ["compile", "spec_review", "build", "seed", "audit", "render", "land"]
+    assert stage_names == ["compile", "spec_review", "seed", "build", "audit", "render", "land"]
     for s in view["stages"]:
         assert s["status"] == "pending"
         assert s["duration_s"] is None
@@ -370,7 +370,30 @@ def test_build_run_view_group_started_drives_group_and_build_status(tmp_path: Pa
     assert view["status"] == "building"
     assert view["groups"][0]["status"] == "in_progress"
     assert next(s for s in view["stages"] if s["name"] == "compile")["status"] == "done"
+    assert next(s for s in view["stages"] if s["name"] == "spec_review")["status"] == "skipped"
     assert next(s for s in view["stages"] if s["name"] == "build")["status"] == "active"
+
+
+def test_build_run_view_skips_spec_review_once_later_pipeline_started(tmp_path: Path) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [{"id": "g1", "name": "G1", "feature_ids": ["f1"]}],
+    }
+    state = [
+        {"event": "stage.compile.finished", "ts": "2026-05-04T20:00:30Z"},
+        {"kind": "seed.started", "ts": "2026-05-04T20:00:31Z"},
+        {"kind": "seed.finished", "ts": "2026-05-04T20:00:33Z", "extra": {"succeeded": True}},
+        {"kind": "group.started", "group_id": "g1", "ts": "2026-05-04T20:00:34Z"},
+    ]
+    session = _setup_session(tmp_path, spec=spec, state_events=state)
+
+    view = build_run_view(session)
+
+    stages = {stage["name"]: stage for stage in view["stages"]}
+    assert stages["spec_review"]["status"] == "skipped"
+    assert stages["seed"]["status"] == "done"
+    assert stages["build"]["status"] == "active"
 
 
 def test_build_run_view_uses_group_event_metrics_for_progress(tmp_path: Path) -> None:
