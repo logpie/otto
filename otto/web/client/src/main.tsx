@@ -1,10 +1,13 @@
-import React from "react";
+import React, {useCallback, useEffect, useState} from "react";
 import {createRoot} from "react-dom/client";
+import {api} from "./api";
 import {AppShell} from "./components/AppShell";
+import {ProjectLauncher} from "./components/launcher/ProjectLauncher";
 import {RunListLanding} from "./components/run/RunListLanding";
 import {RunViewPage} from "./components/run/RunViewPage";
 import {SpecDiffPage} from "./components/spec/SpecDiffPage";
 import {SpecReviewPage} from "./components/spec/SpecReviewPage";
+import type {ProjectsResponse} from "./types";
 import "./styles.css";
 
 const root = document.querySelector("#root");
@@ -77,6 +80,71 @@ function renderRoute() {
   );
 }
 
+function RootRouter() {
+  const [projectsState, setProjectsState] = useState<ProjectsResponse | null>(null);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [refreshPending, setRefreshPending] = useState(false);
+
+  const refreshProjects = useCallback(async () => {
+    setRefreshPending(true);
+    try {
+      const body = await api<ProjectsResponse>("/api/projects");
+      setProjectsState(body);
+      setProjectsError(null);
+    } catch (error) {
+      setProjectsError((error as Error).message || String(error));
+    } finally {
+      setRefreshPending(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshProjects();
+  }, [refreshProjects]);
+
+  async function createProject(name: string) {
+    await api("/api/projects/create", {
+      method: "POST",
+      body: JSON.stringify({name}),
+    });
+    await refreshProjects();
+  }
+
+  async function selectProject(path: string) {
+    await api("/api/projects/select", {
+      method: "POST",
+      body: JSON.stringify({path}),
+    });
+    await refreshProjects();
+  }
+
+  if (projectsState === null) {
+    return (
+      <div className="app-shell boot-loading" data-testid="boot-loading">
+        <div className="boot-loading-panel">
+          <div className="boot-loading-mark" aria-hidden>o</div>
+          <p>{projectsError ? `Failed to load projects: ${projectsError}` : "Loading Mission Control..."}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (projectsState.launcher_enabled && projectsState.current === null) {
+    return (
+      <ProjectLauncher
+        projectsState={projectsState}
+        refreshStatus={refreshPending ? "refreshing" : "idle"}
+        refreshPending={refreshPending}
+        onCreate={createProject}
+        onSelect={selectProject}
+        onRefresh={() => void refreshProjects()}
+      />
+    );
+  }
+
+  return renderRoute();
+}
+
 // Truncate session ids in the page-label so the topbar reads cleanly
 // regardless of full id length. Format: <date>-<HHMMSS>-<6hex>; the
 // trailing hex is the most useful disambiguator at a glance.
@@ -96,6 +164,6 @@ function shortSession(id: string): string {
 
 createRoot(root).render(
   <React.StrictMode>
-    {renderRoute()}
+    <RootRouter />
   </React.StrictMode>,
 );
