@@ -90,6 +90,14 @@ False-confidence blockers for Mission Control Web:
   changes visibly. Especially cover run-level and group-level Logs, Diff,
   Artifacts, and Proof actions. A visible button whose click only logs to the
   console or leaves the same page content is a hard failure.
+- Evidence checks must be panel-specific. An already-open drawer, unchanged
+  route, or generic page shell is not proof that Logs, Diff, Artifacts, or
+  Proof opened. Diff must resolve out of loading state, and "no changes" is
+  acceptable only when git/API/disk evidence agrees.
+- Cancel, merge, retry, pause/resume, approve, reject, and similar operations
+  must be driven by visible UI controls in true-web scenarios. API calls,
+  disk reads, and git commands are verification layers after the click, not
+  substitutes for the user action.
 - If Mission Control shows a running job, compare active stage, elapsed time,
   current group, and evidence panels against each other. `Build active` with
   `Spec review pending`, a stale `WALL 0s` after a nontrivial wait, or
@@ -101,6 +109,16 @@ False-confidence blockers for Mission Control Web:
 - Top-level PASS/FAIL for the true-web run must be derived from the expectation
   ledger and semantic contradictions, not only from whether the script reached
   the end or Otto produced a terminal run packet.
+- The harness wrapper must honor scenario-level FAIL/INFRA results and any
+  collected failures. INFRA is not green unless the user explicitly asks to
+  ignore infra. Summary-level errors, Playwright timeouts, console/page errors,
+  and network failures cannot coexist with a PASS.
+- Recovery and outage scenarios must actually perform the claimed recovery
+  action. "Could not simulate outage" is a FAIL/INFRA finding, not a note.
+- Product-verification scenarios must verify the generated product as a user:
+  launch the app or service, interact with core behavior, inspect layout/UX,
+  and run native tests where available. Scanning for source files is smoke
+  evidence only.
 
 Use bounded randomness only for realistic Mission Control exploration:
 
