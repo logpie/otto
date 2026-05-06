@@ -1354,6 +1354,394 @@ def _mc_refresh(
         _record_mc_user_action(ctx, phase=phase, action="reload-failed", error=str(exc))
 
 
+def _mc_click_ui_refresh(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    log_fn: Callable[[str], None],
+) -> None:
+    clicked = _mc_click_first(
+        page,
+        [
+            '[data-testid="project-workspace-refresh"]',
+            '[data-testid="launcher-refresh-button"]',
+        ],
+        log_fn=log_fn,
+    )
+    if not clicked:
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="ui-refresh-skipped",
+            expectation="A visible refresh control can be used when the user wants fresh state.",
+            reason="no visible enabled Mission Control refresh control",
+            url=page.url,
+        )
+        return
+    time.sleep(0.8)
+    screenshot = _safe_screenshot(page, ctx.artifact_dir, f"mc-user-{_mc_slug(phase)}-ui-refresh")
+    _record_mc_user_action(
+        ctx,
+        phase=phase,
+        action="ui-refresh",
+        expectation="Clicking the visible refresh control keeps the current Mission Control context actionable.",
+        selector=clicked,
+        url=page.url,
+        screenshot=screenshot.name if screenshot else None,
+    )
+    _mc_check_expectation(
+        page,
+        ctx,
+        phase=phase,
+        action="click UI refresh",
+        expectation="Mission Control remains actionable after using its visible refresh control.",
+        any_visible=[
+            '[data-mc-shell="ready"]',
+            '[data-testid="launcher-subhead"]',
+            '[data-testid="project-workspace"]',
+            '[data-testid="task-board"]',
+        ],
+        log_fn=log_fn,
+        failures=ctx.failures,
+    )
+
+
+def _mc_project_roundtrip(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> None:
+    """Visit the launcher/project switcher and return through visible UI."""
+    switchers = page.locator('[data-testid="switch-project-button"]')
+    switcher = None
+    try:
+        for idx in range(switchers.count()):
+            candidate = switchers.nth(idx)
+            if candidate.is_visible():
+                switcher = candidate
+                break
+    except Exception:  # noqa: BLE001
+        switcher = None
+    if switcher is None:
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="project-roundtrip-skipped",
+            expectation="A launcher-enabled project can be left and reopened without losing the work context.",
+            reason="project switch control is not visible in this scenario",
+            url=page.url,
+        )
+        return
+    if not switcher.is_enabled():
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="project-roundtrip-skipped",
+            expectation="A launcher-enabled project can be left and reopened without losing the work context.",
+            reason="project switch control is disabled, likely because launcher mode is off",
+            url=page.url,
+        )
+        return
+
+    current_name = ""
+    current_path = ""
+    if ctx.web_url:
+        status, body = _api_get(ctx.web_url, "/api/projects", timeout=5.0)
+        if status == 200 and isinstance(body, dict):
+            current = body.get("current") or {}
+            current_name = str(current.get("name") or "")
+            current_path = str(current.get("path") or "")
+            projects = body.get("projects") or []
+            if current_path and not any(str(project.get("path") or "") == current_path for project in projects):
+                _record_mc_user_action(
+                    ctx,
+                    phase=phase,
+                    action="project-roundtrip-skipped",
+                    expectation="The current project appears in the launcher so a user can come back to it.",
+                    reason="current project is not listed by the launcher project payload",
+                    current_name=current_name,
+                    current_path=current_path,
+                    url=page.url,
+                )
+                return
+    if not current_name:
+        try:
+            current_name = (switcher.inner_text(timeout=500) or "").replace("Projects", "").strip()
+        except Exception:  # noqa: BLE001
+            current_name = ""
+
+    before_url = page.url
+    try:
+        switcher.click(timeout=5_000)
+        page.wait_for_selector('[data-testid="launcher-subhead"]', timeout=10_000)
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"project switcher did not open launcher: {exc}")
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="project-roundtrip-open-failed",
+            expectation="Clicking Projects opens the launcher.",
+            before=before_url,
+            error=str(exc),
+        )
+        return
+
+    launcher_screenshot = _safe_screenshot(page, ctx.artifact_dir, f"mc-user-{_mc_slug(phase)}-launcher")
+    _record_mc_user_action(
+        ctx,
+        phase=phase,
+        action="project-roundtrip-open-launcher",
+        expectation="The project launcher is visible, with project rows the user can choose from.",
+        before=before_url,
+        url=page.url,
+        current_name=current_name,
+        screenshot=launcher_screenshot.name if launcher_screenshot else None,
+    )
+    _mc_check_expectation(
+        page,
+        ctx,
+        phase=phase,
+        action="open project launcher",
+        expectation="The launcher shows project choices after leaving the workspace.",
+        any_visible=[
+            '[data-testid="launcher-subhead"]',
+            ".project-row",
+            '[data-testid="launcher-empty-state"]',
+        ],
+        log_fn=log_fn,
+        failures=failures,
+        hard=True,
+    )
+
+    rows = page.locator(".project-row")
+    target = None
+    if current_name:
+        candidate = rows.filter(has_text=current_name).first
+        if candidate.count() > 0 and candidate.is_visible():
+            target = candidate
+    if target is None:
+        failures.fail(
+            "project roundtrip could not find the original project row in the launcher"
+        )
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="project-roundtrip-return-failed",
+            expectation="The original project row is visible so the user can return.",
+            current_name=current_name,
+            current_path=current_path,
+            url=page.url,
+        )
+        return
+
+    try:
+        target.click(timeout=5_000)
+        page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
+        _wait_for_mc_ready(page, timeout_ms=10_000)
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"project row click did not return to workspace: {exc}")
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="project-roundtrip-return-failed",
+            expectation="Clicking the original project row returns to the workspace.",
+            current_name=current_name,
+            current_path=current_path,
+            error=str(exc),
+        )
+        return
+
+    restored_path = ""
+    if ctx.web_url and current_path:
+        status, body = _api_get(ctx.web_url, "/api/projects", timeout=5.0)
+        if status == 200 and isinstance(body, dict):
+            restored = body.get("current") or {}
+            restored_path = str(restored.get("path") or "")
+            if restored_path != current_path:
+                failures.fail(
+                    f"project roundtrip returned to {restored_path!r}, expected {current_path!r}"
+                )
+    screenshot = _safe_screenshot(page, ctx.artifact_dir, f"mc-user-{_mc_slug(phase)}-project-return")
+    _record_mc_user_action(
+        ctx,
+        phase=phase,
+        action="project-roundtrip-return",
+        expectation="Returning from the launcher restores the original project workspace and live run context.",
+        before=before_url,
+        url=page.url,
+        current_name=current_name,
+        current_path=current_path,
+        restored_path=restored_path,
+        screenshot=screenshot.name if screenshot else None,
+    )
+    _mc_check_expectation(
+        page,
+        ctx,
+        phase=phase,
+        action="return from project launcher",
+        expectation="The original project workspace is visible and actionable after switching away and back.",
+        any_visible=[
+            '[data-testid="project-workspace"]',
+            '[data-testid="task-board"]',
+            ".task-card-main",
+        ],
+        log_fn=log_fn,
+        failures=failures,
+        hard=True,
+    )
+
+
+def _mc_background_return(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    log_fn: Callable[[str], None],
+) -> None:
+    other = None
+    try:
+        other = page.context.new_page()
+        other.goto("about:blank", wait_until="domcontentloaded", timeout=5_000)
+        time.sleep(0.6)
+        page.bring_to_front()
+        time.sleep(0.6)
+        _wait_for_mc_ready(page, timeout_ms=10_000)
+        visibility = ""
+        try:
+            visibility = page.evaluate("() => document.visibilityState")
+        except Exception:  # noqa: BLE001
+            visibility = ""
+        screenshot = _safe_screenshot(page, ctx.artifact_dir, f"mc-user-{_mc_slug(phase)}-background-return")
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="background-return",
+            expectation="After the user visits another tab and returns, Mission Control resumes with honest current state.",
+            url=page.url,
+            visibility=visibility,
+            screenshot=screenshot.name if screenshot else None,
+        )
+        _mc_check_expectation(
+            page,
+            ctx,
+            phase=phase,
+            action="background and return",
+            expectation="Mission Control remains actionable after being backgrounded and foregrounded.",
+            any_visible=[
+                '[data-mc-shell="ready"]',
+                '[data-testid="launcher-subhead"]',
+                '[data-testid="project-workspace"]',
+                '[data-testid="task-board"]',
+            ],
+            log_fn=log_fn,
+            failures=ctx.failures,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_fn(f"  mc-user background/return failed: {exc}")
+        _record_mc_user_action(ctx, phase=phase, action="background-return-failed", error=str(exc))
+    finally:
+        if other is not None:
+            try:
+                other.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _mc_keyboard_probe(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> None:
+    workspace = page.locator('[data-testid="project-workspace"]').first
+    if workspace.count() == 0 or not workspace.is_visible():
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="keyboard-probe-skipped",
+            expectation="Keyboard users can reach primary Mission Control actions without the mouse.",
+            reason="project workspace is not visible",
+            url=page.url,
+        )
+        return
+
+    try:
+        page.keyboard.press("Escape")
+        page.evaluate("() => document.body.focus()")
+        time.sleep(0.1)
+        landed = _kbd_focus_testid(page, "mission-new-job-button", max_tabs=80)
+        chain = list(getattr(page, "_w8_focus_chain", []))
+        if not landed:
+            page.evaluate("() => document.body.focus()")
+            landed = _kbd_focus_testid(page, "new-job-button", max_tabs=80)
+            chain = list(getattr(page, "_w8_focus_chain", []))
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="keyboard-focus-primary-action",
+            expectation="Tab navigation can reach the primary new-job action.",
+            matched=landed,
+            focus_chain=chain[:80],
+            url=page.url,
+        )
+        if not landed:
+            failures.fail(
+                f"keyboard probe could not Tab to a new-job button (focus chain length={len(chain)})"
+            )
+            return
+
+        page.keyboard.press("Enter")
+        page.wait_for_selector('[data-testid="job-dialog-intent"]', timeout=10_000)
+        if _kbd_focused_testid(page) != "job-dialog-intent":
+            landed_intent = _kbd_focus_testid(page, "job-dialog-intent", max_tabs=20)
+            if not landed_intent:
+                failures.fail("keyboard probe opened JobDialog but could not focus the intent field")
+                return
+        page.keyboard.type("Maybe add another follow-up later, but not now.", delay=2)
+        screenshot = _safe_screenshot(page, ctx.artifact_dir, f"mc-user-{_mc_slug(phase)}-keyboard-dialog")
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="keyboard-open-type-cancel-job-dialog",
+            expectation="A keyboard user can open the job dialog, type an intent, and cancel without queuing accidental work.",
+            url=page.url,
+            screenshot=screenshot.name if screenshot else None,
+        )
+        page.keyboard.press("Escape")
+        time.sleep(0.4)
+        if page.locator('[data-testid="job-dialog-intent"]').count() > 0:
+            close_button = page.locator('[data-testid="job-dialog-close-button"]').first
+            if close_button.count() > 0 and close_button.is_visible() and close_button.is_enabled():
+                close_button.click(timeout=3_000)
+        _mc_check_expectation(
+            page,
+            ctx,
+            phase=phase,
+            action="keyboard cancel job dialog",
+            expectation="Closing the keyboard-opened dialog returns to the workspace without submitting.",
+            any_visible=[
+                '[data-testid="project-workspace"]',
+                '[data-testid="task-board"]',
+                '[data-testid="mission-new-job-button"]',
+                '[data-testid="new-job-button"]',
+            ],
+            log_fn=log_fn,
+            failures=failures,
+            hard=True,
+        )
+        if page.locator('[data-testid="job-dialog-intent"]').count() > 0:
+            failures.fail("keyboard probe could not close the job dialog after typing")
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"keyboard probe raised: {exc}")
+        _record_mc_user_action(ctx, phase=phase, action="keyboard-probe-failed", error=str(exc))
+
+
 def _mc_running_poll_index(phase: str) -> Optional[int]:
     match = re.search(r"running-poll-(\d+)", phase)
     if not match:
@@ -1366,13 +1754,30 @@ def _mc_probe_actions(ctx: ScenarioContext, phase: str) -> list[str]:
 
     Pure randomness can miss whole classes of behavior. Keep the exact order
     seeded/replayable, but force coverage across evidence inspection,
-    reloads, back/forward navigation, scroll, and layout checks.
+    reloads, project switching, background/return, keyboard paths, UI refresh,
+    back/forward navigation, scroll, and layout checks.
     """
     actions = ["layout", "inspect-run", "scroll"]
     if "running" in phase or "terminal" in phase:
-        actions.extend(["back-forward", "reload"])
+        actions.extend([
+            "back-forward",
+            "reload",
+            "ui-refresh",
+            "project-roundtrip",
+            "background-return",
+            "keyboard-probe",
+        ])
     if ctx.user_behavior == "mc-stress":
-        actions.extend(["inspect-run", "scroll", "back-forward", "reload"])
+        actions.extend([
+            "inspect-run",
+            "scroll",
+            "back-forward",
+            "reload",
+            "ui-refresh",
+            "project-roundtrip",
+            "background-return",
+            "keyboard-probe",
+        ])
 
     rng = _mc_phase_rng(ctx, phase)
     rng.shuffle(actions)
@@ -1389,7 +1794,18 @@ def _mc_probe_actions(ctx: ScenarioContext, phase: str) -> list[str]:
     else:
         poll_index = _mc_running_poll_index(phase)
         if poll_index is not None:
-            cycle = ["inspect-run", "reload", "inspect-run", "back-forward", "scroll", "layout"]
+            cycle = [
+                "inspect-run",
+                "reload",
+                "project-roundtrip",
+                "inspect-run",
+                "background-return",
+                "back-forward",
+                "keyboard-probe",
+                "scroll",
+                "ui-refresh",
+                "layout",
+            ]
             forced = [cycle[poll_index % len(cycle)]]
 
     for action in unique_actions:
@@ -1428,6 +1844,14 @@ def _mc_user_probe(
                 _mc_browser_back_forward(page, ctx, phase=phase, log_fn=log_fn)
             elif action == "reload":
                 _mc_refresh(page, ctx, phase=phase, log_fn=log_fn)
+            elif action == "ui-refresh":
+                _mc_click_ui_refresh(page, ctx, phase=phase, log_fn=log_fn)
+            elif action == "project-roundtrip":
+                _mc_project_roundtrip(page, ctx, phase=phase, log_fn=log_fn, failures=failures)
+            elif action == "background-return":
+                _mc_background_return(page, ctx, phase=phase, log_fn=log_fn)
+            elif action == "keyboard-probe":
+                _mc_keyboard_probe(page, ctx, phase=phase, log_fn=log_fn, failures=failures)
         except Exception as exc:  # noqa: BLE001
             failures.note(f"mc-user {phase}/{action} raised: {exc}")
             _record_mc_user_action(
@@ -6440,8 +6864,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         choices=["off", "mc-realistic", "mc-stress"],
         default="mc-realistic",
         help=(
-            "seeded Mission Control user exploration: mc-realistic, "
-            "mc-stress, or off"
+            "seeded Mission Control user exploration; defaults to the true-web "
+            "mc-realistic path for normal user confidence (or use mc-stress/off)"
         ),
     )
     parser.add_argument(

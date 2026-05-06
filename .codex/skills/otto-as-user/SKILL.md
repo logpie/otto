@@ -22,9 +22,16 @@ that is in scope, add regression coverage, and rerun a meaningful scenario. Only
 defer a finding when the remaining work is explicitly tracked with evidence and
 a reason it cannot be fixed in the current pass.
 
-The primary entry is **Mission Control Web**. Use CLI as a secondary surface
-for power users, agents, scripted runs, direct `otto run` pressure tests, queue
-runners, proof inspection, and recovery/debug work.
+The primary entry is **Mission Control Web**. Most users experience Mission
+Control as Otto's main product, not as an optional dashboard, so the default
+Mission Control mode is a true browser test. Use CLI as a secondary surface
+for power users, agents, scripted runs, direct `otto run` pressure tests,
+queue runners, proof inspection, and recovery/debug work.
+
+Default rule: if the claim is about Mission Control usability, real-user
+confidence, or whether Otto works for a person, run the true Web path unless
+the scenario explicitly says CLI/API/backend diagnostics are the realistic user
+path. Non-Web as-user work must say why it is valid for that scenario.
 
 Do not treat this as a command cookbook. Treat it as a real-user simulation
 protocol.
@@ -33,7 +40,8 @@ protocol.
 
 When the scenario is Mission Control Web, behave like a real person using the
 product. The browser is the interface under test. What the user would see and
-do is what the agent should see and do.
+do is what the agent should see and do. This is the default for Mission
+Control-facing `otto-as-user` work, not an optional higher tier.
 
 Focus true-user Web runs on **Mission Control itself**. Generated-app browsing
 is external product verification after Otto finishes; it must not replace the
@@ -57,6 +65,9 @@ Exercise normal user behavior, including behavior during waits:
 
 - click through visible tabs, logs, diffs, proof, artifacts, and history while a
   job is queued or running
+- use Mission Control's visible refresh controls, not only browser reload
+- move through the project launcher or project switcher and return to the
+  original project when that surface is enabled
 - use browser back/forward and verify the UI recovers honestly
 - reload during a long wait when a real user might wonder whether progress is
   stale
@@ -124,8 +135,11 @@ Use bounded randomness only for realistic Mission Control exploration:
 
 - keep golden scenarios deterministic unless user-behavior variance is
   explicitly enabled
-- randomize within a fixed set of plausible Mission Control actions, not blind
-  page clicks
+- randomize within a fixed, stratified set of plausible Mission Control
+  actions, not blind page clicks
+- force coverage across categories over time: evidence inspection, UI refresh,
+  browser reload, back/forward, project switcher/launcher round trip,
+  background/return, keyboard open/type/cancel, scrolling, and layout checks
 - record the seed, phase, chosen action, user expectation, observation,
   selector, URL, verdict, and screenshot/artifact path so the run can be
   replayed
@@ -199,8 +213,8 @@ that only proves elements exist or routes click.
 
 ## Surface Selection
 
-Default to Mission Control Web when the task is about how a person would use
-Otto:
+Default to true Mission Control Web when the task is about how a person would
+use Otto:
 
 - create or open a project
 - submit build/improve/certify work

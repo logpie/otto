@@ -296,7 +296,7 @@ def test_artifact_mine_does_not_require_manifest_for_running_queue_task(tmp_path
 
 
 def test_mc_realistic_probe_actions_are_stratified_not_pure_random(tmp_path: Path) -> None:
-    """Realistic mode must force varied wait-time behaviors, including evidence inspection."""
+    """Realistic mode must force varied wait-time behaviors, not sample blindly."""
     sys.path.insert(0, str(SCRIPTS_DIR))
     try:
         import web_as_user  # type: ignore[import-not-found]
@@ -326,10 +326,21 @@ def test_mc_realistic_probe_actions_are_stratified_not_pure_random(tmp_path: Pat
         user_seed=42,
     )
 
-    plans = [web_as_user._mc_probe_actions(ctx, f"running-poll-{1 + idx * 12}") for idx in range(6)]
+    plans = [web_as_user._mc_probe_actions(ctx, f"running-poll-{1 + idx * 12}") for idx in range(10)]
     first_actions = [plan[0] for plan in plans]
 
-    assert first_actions == ["inspect-run", "reload", "inspect-run", "back-forward", "scroll", "layout"]
+    assert first_actions == [
+        "inspect-run",
+        "reload",
+        "project-roundtrip",
+        "inspect-run",
+        "background-return",
+        "back-forward",
+        "keyboard-probe",
+        "scroll",
+        "ui-refresh",
+        "layout",
+    ]
     assert all(len(plan) == 2 for plan in plans)
     assert "inspect-run" in web_as_user._mc_probe_actions(ctx, "terminal-state")
 
