@@ -1090,11 +1090,10 @@ def _exit_legacy_certify_removed() -> None:
     help="Wall-clock cap (seconds) on --review-gate before timing out.",
 )
 def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budget, max_turns, model, provider, effort, build_provider, build_model, build_effort, certifier_provider, certifier_model, certifier_effort, fix_provider, fix_model, fix_effort, strict, verbose, debug_unredacted, resume, reset_budget, force_cross_command_resume, spec, spec_file, yes, spec_review_mode, force, in_worktree, allow_dirty, break_lock, i2p, legacy, review_gate, auto_approve, gate_timeout_s):
-    """Build a product from a natural language intent.
+    """Compatibility build command.
 
-    One agent builds, certifies, and fixes autonomously. The certifier
-    verifies the product works by running real user stories (HTTP, CLI,
-    import, WebSocket — any product type).
+    Prefer `otto run` for direct intent-to-product runs. `otto build --i2p`
+    routes to the same i2p stack while preserving older script entrypoints.
 
     If a prior build was interrupted, pass --resume to continue it. Intent
     is optional on resume and is inherited from the checkpoint.
@@ -1346,11 +1345,12 @@ def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model,
     ),
 )
 def render_command(session: Path, project_dir: Path | None, rewrite_json: bool) -> None:
-    """Re-render proof-packet.html for an existing i2p session without LLM cost."""
+    """Compatibility alias for `otto proof render`."""
     try:
-        session_dir = _resolve_render_session_dir(session, project_dir=project_dir)
+        from otto.cli_proof import resolve_render_session_dir
         from otto.render import rerender_proof_packet
 
+        session_dir = resolve_render_session_dir(session, project_dir=project_dir)
         html_path, json_path = rerender_proof_packet(
             session_dir,
             rewrite_json=rewrite_json,
@@ -1361,32 +1361,6 @@ def render_command(session: Path, project_dir: Path | None, rewrite_json: bool) 
     console.print(f"  Rendered proof packet: {html_path}")
     if rewrite_json:
         console.print(f"  Rewrote JSON packet: {json_path}")
-
-
-def _resolve_render_session_dir(
-    session: Path,
-    *,
-    project_dir: Path | None = None,
-) -> Path:
-    """Resolve a CLI render argument to an i2p session directory."""
-    expanded = session.expanduser()
-    if expanded.exists():
-        if not expanded.is_dir():
-            raise ValueError(f"render target is not a directory: {expanded}")
-        return expanded.resolve()
-    if any(part in ("..", "") for part in expanded.parts):
-        raise ValueError(f"invalid session id: {session}")
-    root = project_dir.expanduser().resolve() if project_dir is not None else resolve_project_dir(Path.cwd())
-    candidate = (root / "otto_logs" / "sessions" / str(session)).resolve()
-    sessions_root = (root / "otto_logs" / "sessions").resolve()
-    try:
-        candidate.relative_to(sessions_root)
-    except ValueError as exc:
-        raise ValueError(f"invalid session id: {session}") from exc
-    if not candidate.exists() or not candidate.is_dir():
-        raise FileNotFoundError(f"session not found: {candidate}")
-    return candidate
-
 
 # Setup command (registered from otto/cli_setup.py)
 from otto.cli_setup import register_setup_command  # noqa: E402
@@ -1400,6 +1374,11 @@ register_replay_command(main)
 # PoW command (registered from otto/cli_pow.py)
 from otto.cli_pow import register_pow_command  # noqa: E402
 register_pow_command(main)
+
+# Proof/debug commands (canonical artifact and diagnostic namespaces)
+from otto.cli_proof import register_debug_command, register_proof_command  # noqa: E402
+register_proof_command(main)
+register_debug_command(main)
 
 # Improve commands (registered from otto/cli_improve.py)
 from otto.cli_improve import register_improve_commands  # noqa: E402

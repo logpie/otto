@@ -77,6 +77,30 @@ from otto.theme import error_console
 logger = logging.getLogger("otto.cli_run")
 
 
+def _positive_budget_option(
+    _ctx: click.Context,
+    _param: click.Parameter,
+    value: int | None,
+) -> int | None:
+    if value is not None and value <= 0:
+        raise click.BadParameter("must be > 0")
+    return value
+
+
+def _max_turns_option(
+    _ctx: click.Context,
+    _param: click.Parameter,
+    value: int | None,
+) -> int | None:
+    if value is None:
+        return None
+    if value < 1:
+        raise click.BadParameter("must be >= 1")
+    if value > 200:
+        raise click.BadParameter("must be <= 200")
+    return value
+
+
 def resolve_pipeline_choice(
     *,
     i2p_flag: bool,
@@ -404,6 +428,52 @@ def register_run_command(main: click.Group) -> None:
         help="On --resume, bypass the spec-hash check.",
     )
     @click.option(
+        "--budget",
+        default=None,
+        type=int,
+        callback=_positive_budget_option,
+        help=(
+            "Total wall-clock budget in seconds, must be > 0 "
+            "(default from otto.yaml or 3600)."
+        ),
+    )
+    @click.option(
+        "--max-turns",
+        default=None,
+        type=int,
+        callback=_max_turns_option,
+        help="Max agent turns per call, 1-200 (default from otto.yaml or 200).",
+    )
+    @click.option("--model", default=None, help="Override model for every agent.")
+    @click.option(
+        "--provider",
+        default=None,
+        help="Override provider for every agent: claude | codex.",
+    )
+    @click.option(
+        "--effort",
+        default=None,
+        help="Override effort level for every agent: low | medium | high | max.",
+    )
+    @click.option("--build-provider", default=None, help="Override provider for build agents.")
+    @click.option("--build-model", default=None, help="Override model for build agents.")
+    @click.option("--build-effort", default=None, help="Override effort for build agents.")
+    @click.option("--certifier-provider", default=None, help="Override provider for certifier agents.")
+    @click.option("--certifier-model", default=None, help="Override model for certifier agents.")
+    @click.option("--certifier-effort", default=None, help="Override effort for certifier agents.")
+    @click.option("--fix-provider", default=None, help="Override provider for fix agents.")
+    @click.option("--fix-model", default=None, help="Override model for fix agents.")
+    @click.option("--fix-effort", default=None, help="Override effort for fix agents.")
+    @click.option("--verbose", is_flag=True, help="Show provider command details.")
+    @click.option(
+        "--debug-unredacted",
+        is_flag=True,
+        help=(
+            "Also write unredacted raw logs under sessions/<id>/raw/ "
+            "(do not share)."
+        ),
+    )
+    @click.option(
         "--review-gate",
         "review_gate",
         is_flag=True,
@@ -442,6 +512,22 @@ def register_run_command(main: click.Group) -> None:
         resume: bool,
         reset_budget: bool,
         force: bool,
+        budget: int | None,
+        max_turns: int | None,
+        model: str | None,
+        provider: str | None,
+        effort: str | None,
+        build_provider: str | None,
+        build_model: str | None,
+        build_effort: str | None,
+        certifier_provider: str | None,
+        certifier_model: str | None,
+        certifier_effort: str | None,
+        fix_provider: str | None,
+        fix_model: str | None,
+        fix_effort: str | None,
+        verbose: bool,
+        debug_unredacted: bool,
         review_gate: bool,
         auto_approve: bool,
         gate_timeout_s: float,
@@ -453,6 +539,7 @@ def register_run_command(main: click.Group) -> None:
 
         Examples:
             otto run "a bookmark manager"
+            otto run --provider codex --budget 3600 "a bookmark manager"
             otto run --project-kind cli "a small linter"
             otto run --no-build "review-only mode"
             otto run --from-spec otto_logs/sessions/x/spec/spec.json
@@ -476,6 +563,22 @@ def register_run_command(main: click.Group) -> None:
             force=force,
             review_gate=review_gate,
             gate_timeout_s=gate_timeout_s,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            build_provider=build_provider,
+            build_model=build_model,
+            build_effort=build_effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
+            fix_provider=fix_provider,
+            fix_model=fix_model,
+            fix_effort=fix_effort,
+            verbose=verbose,
+            debug_unredacted=debug_unredacted,
         )
 
 

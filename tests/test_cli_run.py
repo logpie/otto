@@ -1016,6 +1016,77 @@ def test_run_review_gate_flag_threads_into_orchestrate_run(
     assert captured.get("gate_timeout_s") == 60.0
 
 
+def test_run_threads_runtime_overrides(tmp_path: Path, monkeypatch) -> None:
+    """`otto run` is the direct i2p surface, so it must expose the same
+    provider/budget controls as the compatibility build/improve/certify paths."""
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_run(**kwargs):
+        captured.update(kwargs)
+        import sys
+
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+
+    code, out = _run(
+        [
+            "run",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-test",
+            "--effort",
+            "high",
+            "--budget",
+            "1800",
+            "--max-turns",
+            "120",
+            "--build-provider",
+            "codex",
+            "--build-model",
+            "gpt-build",
+            "--build-effort",
+            "medium",
+            "--certifier-provider",
+            "codex",
+            "--certifier-model",
+            "gpt-cert",
+            "--certifier-effort",
+            "low",
+            "--fix-provider",
+            "codex",
+            "--fix-model",
+            "gpt-fix",
+            "--fix-effort",
+            "high",
+            "--verbose",
+            "--debug-unredacted",
+            "intent text",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert code == 0, out
+    assert captured["provider"] == "codex"
+    assert captured["model"] == "gpt-test"
+    assert captured["effort"] == "high"
+    assert captured["budget"] == 1800
+    assert captured["max_turns"] == 120
+    assert captured["build_provider"] == "codex"
+    assert captured["build_model"] == "gpt-build"
+    assert captured["build_effort"] == "medium"
+    assert captured["certifier_provider"] == "codex"
+    assert captured["certifier_model"] == "gpt-cert"
+    assert captured["certifier_effort"] == "low"
+    assert captured["fix_provider"] == "codex"
+    assert captured["fix_model"] == "gpt-fix"
+    assert captured["fix_effort"] == "high"
+    assert captured["verbose"] is True
+    assert captured["debug_unredacted"] is True
+
+
 def test_run_default_omits_review_gate(tmp_path: Path, monkeypatch) -> None:
     """Without the flag, review_gate=False is forwarded (preserves the
     existing CI/script default)."""
@@ -1081,3 +1152,21 @@ def test_run_help_lists_review_gate_options() -> None:
     assert result.exit_code == 0
     assert "--review-gate" in result.output
     assert "--auto-approve" in result.output
+
+
+def test_run_help_lists_runtime_overrides() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["run", "--help"], catch_exceptions=False)
+    assert result.exit_code == 0
+    for option in (
+        "--provider",
+        "--model",
+        "--effort",
+        "--budget",
+        "--max-turns",
+        "--build-provider",
+        "--certifier-provider",
+        "--fix-provider",
+        "--debug-unredacted",
+    ):
+        assert option in result.output

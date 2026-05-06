@@ -44,6 +44,29 @@ def test_cleanup_cli_removes_terminal_live_record_and_writes_tombstone(tmp_path:
     assert "atomic-run" in tombstones
 
 
+def test_proof_cleanup_cli_removes_terminal_live_record_and_writes_tombstone(tmp_path: Path, monkeypatch) -> None:
+    record = make_run_record(
+        project_dir=tmp_path,
+        run_id="atomic-run",
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="build",
+        status="failed",
+        cwd=tmp_path,
+        adapter_key="atomic.build",
+    )
+    write_record(tmp_path, record)
+    monkeypatch.setattr("otto.runs.registry.writer_identity_gone_or_stale", lambda writer: True)
+
+    code, out = _run(["proof", "cleanup", "atomic-run"], cwd=tmp_path)
+
+    assert code == 0, out
+    assert read_live_records(tmp_path) == []
+    tombstones = paths.run_gc_tombstones_jsonl(tmp_path).read_text(encoding="utf-8")
+    assert "atomic-run" in tombstones
+
+
 def test_cleanup_live_record_removes_abandoned_non_terminal(tmp_path: Path, monkeypatch) -> None:
     record = make_run_record(
         project_dir=tmp_path,
