@@ -1842,3 +1842,69 @@ Decision:
   UX defect in the produced app. With the fixes above, future runs should time
   out audit judges correctly, surface severe quality findings as non-pass, and
   avoid queue false-failure when i2p summary artifacts exist.
+
+## 2026-05-06 Mission Control Product Audit: Landing Flow Repair
+
+Context:
+- Follow-up product-level Mission Control audit on patched server
+  `http://127.0.0.1:9000/`, selected project
+  `/Users/yuxuan/otto-projects/acme-expense-portal`.
+- Browser evidence:
+  `bench-results/as-user/2026-05-06-ui-round/launcher-1440x900.png`,
+  `bench-results/as-user/2026-05-06-ui-round/acme-tasks-after-repair-1280x800.png`,
+  `bench-results/as-user/2026-05-06-ui-round/acme-land-button-enabled-1280x800.png`,
+  `bench-results/as-user/2026-05-06-ui-round/acme-land-confirm-fixed-1280x800.png`.
+
+Bug found: stale failed queue state could not self-heal
+- Evidence: after synthesizing the missing manifest for
+  `add-a-manager-sla-aging-dashboard-743f16`, the live state still remained
+  `failed` with the old `exited 0 but no manifest` reason.
+- Root cause: queue finalization checked `ts.status == failed` after the
+  clean-worktree verifier returned. That conflated a newly discovered dirty
+  worktree with a stale pre-existing failure status.
+- Generic fix: `_verify_success_worktree_clean` now returns a boolean and
+  callers only stop when the current cleanliness check fails.
+- Live repair result: task state now reports `status=done`,
+  `stories_passed=3`, `stories_tested=3`; Mission Control shows
+  `add-a-manager-sla-aging-dashboard-743f16` as `Ready` with `3/3` stories.
+
+Bug found: project workspace landing CTA was disabled/inert
+- Evidence: Acme project workspace showed `Land 2 ready` but the button was
+  disabled even though `/api/state` returned `landing.counts.ready=2` and
+  `merge_blocked=false`.
+- Root cause: the redesigned `ProjectWorkspace` rendered `TaskQueueList`
+  without passing `onLandReady`, so the table had a visible landing CTA but no
+  handler.
+- Generic fix: `ProjectWorkspace` now opens the existing `ConfirmDialog`,
+  renders `BulkLandingConfirmList`, carries the verification-policy selector,
+  and posts to `/api/actions/merge-all` with the selected policy.
+
+Bug found: bulk landing confirmation rows visually concatenated critical fields
+- Evidence: live confirm dialog showed text like
+  `add-a-manager...743f16build/... -> main6 files`.
+- Root cause: the bulk row header had no layout separation between task id,
+  route, and file-count spans. Long-token wrapping avoided overflow but not
+  readability.
+- Generic fix: bulk landing rows now use block/grid layout for task id, route,
+  and file count.
+
+Regression tests added:
+- `tests/test_queue_runner.py::test_finalize_missing_queue_manifest_uses_i2p_session_summary`
+  now covers repairing a stale failed status after a synthesized manifest.
+- `tests/browser/test_modal_backdrop_cleanup.py::test_project_workspace_land_ready_posts_merge_all`
+  covers an enabled project-workspace landing CTA, confirmation layout
+  separation, verification-policy propagation, and `/api/actions/merge-all`.
+
+Verification:
+- `npm run web:typecheck` -> passed.
+- `npm run web:build` -> passed; static bundle regenerated.
+- `.venv/bin/pytest tests/test_queue_runner.py::test_finalize_missing_queue_manifest_uses_i2p_session_summary -q`
+  -> passed.
+- `OTTO_BROWSER_SKIP_BUILD=1 .venv/bin/pytest tests/browser/test_modal_backdrop_cleanup.py::test_project_workspace_land_ready_posts_merge_all -m browser -p playwright -q`
+  -> passed.
+
+Decision:
+- Classify as `Otto UX/control-plane bugs fixed`.
+- Do not count this as another pressure-test pass. It was a repair/audit round
+  against the same Acme evidence, and it found real product-flow gaps in the
+  Mission Control surface after the backend queue false-failure was repaired.

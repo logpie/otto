@@ -8094,6 +8094,33 @@ details > summary:focus-visible {
   word-break: break-word;
 }
 
+.confirm-bulk-list > ul,
+.confirm-bulk-row-files {
+  display: grid;
+  gap: 10px;
+}
+
+.confirm-bulk-row {
+  display: grid;
+  gap: 6px;
+}
+
+.confirm-bulk-row-head {
+  display: grid;
+  gap: 4px;
+}
+
+.confirm-bulk-row-head strong,
+.confirm-bulk-row-route,
+.confirm-bulk-row-count {
+  display: block;
+}
+
+.confirm-bulk-row-count {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .confirm-bulk-row-head code,
 .confirm-bulk-row-files code {
   display: inline;

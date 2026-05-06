@@ -372,3 +372,74 @@ def test_backdrop_removed_after_confirm_dialog_escape(
     )
     land_btn.click(timeout=2_000)
     page.wait_for_selector(".confirm-dialog", timeout=5_000)
+
+
+def test_project_workspace_land_ready_posts_merge_all(
+    mc_backend: Any, page: Any, disable_animations: Any
+) -> None:
+    """The project workspace Land CTA must drive the real merge-all action."""
+
+    payload = _state(ready_count=2)
+    _install_projects_route(page)
+    _install_state_route(page, payload)
+
+    def merge_handler(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "ok": True,
+                "message": "landing queued",
+                "severity": "information",
+                "modal_title": None,
+                "modal_message": None,
+                "refresh": True,
+                "clear_banner": False,
+            }),
+        )
+
+    page.route("**/api/actions/merge-all", merge_handler)
+    _hydrate(mc_backend, page, disable_animations)
+
+    land_btn = page.get_by_test_id("mission-land-ready-button")
+    land_btn.wait_for(state="visible", timeout=5_000)
+    page.wait_for_function(
+        "() => { const b = document.querySelector('[data-testid=mission-land-ready-button]'); return b && !b.disabled; }",
+        timeout=5_000,
+    )
+    land_btn.click()
+    page.wait_for_selector(".confirm-dialog", timeout=5_000)
+    row_layout = page.evaluate(
+        """() => {
+          const row = document.querySelector('[data-testid="confirm-bulk-row-task-01"]');
+          const title = row?.querySelector('strong');
+          const route = row?.querySelector('.confirm-bulk-row-route');
+          const count = row?.querySelector('.confirm-bulk-row-count');
+          if (!row || !title || !route || !count) return null;
+          const tr = title.getBoundingClientRect();
+          const rr = route.getBoundingClientRect();
+          const cr = count.getBoundingClientRect();
+          return {
+            titleBottom: tr.bottom,
+            routeTop: rr.top,
+            routeBottom: rr.bottom,
+            countTop: cr.top,
+          };
+        }"""
+    )
+    assert row_layout is not None, "bulk landing row layout parts must render"
+    assert row_layout["routeTop"] >= row_layout["titleBottom"] - 1, (
+        f"task id and branch route are visually concatenated: {row_layout}"
+    )
+    assert row_layout["countTop"] >= row_layout["routeBottom"] - 1, (
+        f"branch route and file count are visually concatenated: {row_layout}"
+    )
+    page.get_by_test_id("confirm-verification-policy-select").select_option("full")
+
+    with page.expect_request("**/api/actions/merge-all") as request_info:
+        page.get_by_test_id("confirm-dialog-confirm-button").click()
+
+    request = request_info.value
+    assert json.loads(request.post_data or "{}") == {"verification_policy": "full"}
+    page.wait_for_selector(".confirm-dialog", state="detached", timeout=5_000)
+    assert "landing queued" in page.get_by_test_id("run-list-queue-banner").inner_text()

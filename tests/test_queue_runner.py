@@ -532,7 +532,8 @@ def test_finalize_missing_queue_manifest_uses_i2p_session_summary(tmp_path: Path
     )
     runner = Runner(repo, RunnerConfig(on_watcher_restart="resume"), otto_bin="/bin/true")
     ts = {
-        "status": "running",
+        "status": "failed",
+        "failure_reason": "exited 0 but no manifest at otto_logs/queue/t1/manifest.json",
         "started_at": "2026-05-06T17:31:32Z",
         "child": {"pid": 123456, "pgid": 123456},
         "attempt_run_id": run_id,
@@ -555,6 +556,14 @@ def test_finalize_missing_queue_manifest_uses_i2p_session_summary(tmp_path: Path
     mirror = json.loads(queue_manifest.read_text(encoding="utf-8"))
     assert mirror["mirror_of"] == str(canonical_manifest.resolve())
     assert mirror["proof_of_work_path"] == str(session_dir / "proof-packet.json")
+
+    # A later reconciliation pass must also be able to repair a stale failed
+    # state now that the synthesized queue manifest exists.
+    ts["status"] = "failed"
+    ts["failure_reason"] = "exited 0 but no manifest at otto_logs/queue/t1/manifest.json"
+    runner._finalize_task_from_manifest(ts, "t1", exit_code=0)
+    assert ts["status"] == "done"
+    assert ts["failure_reason"] is None
 
 
 def test_finalize_build_success_auto_commits_generated_lockfile(tmp_path: Path) -> None:

@@ -1,14 +1,16 @@
-import {useCallback, useEffect, useMemo, useState} from "react";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {api} from "../../api";
+import {ConfirmDialog, type ConfirmState} from "../ConfirmDialog";
 import {JobDialog, collectPriorRunOptions} from "../new-job/JobDialog";
 import {TaskQueueList} from "../tasks/TaskQueueList";
 import {ProjectOverview} from "../overview/Overview";
 import {RunViewPage} from "../run/RunViewPage";
 import {DiagnosticsSummary} from "../health/SystemHealth";
+import {BulkLandingConfirmList} from "../review/ConfirmDetails";
 import {defaultFilters} from "../../uiTypes";
 import type {BoardTask} from "../../uiTypes";
-import type {AutopilotDecision, AutopilotIncident, ProjectInfo, StateResponse} from "../../types";
-import {errorMessage, refreshIntervalMs} from "../../utils/missionControl";
+import type {ActionResult, AutopilotDecision, AutopilotIncident, ProjectInfo, StateResponse, VerificationPolicy} from "../../types";
+import {canMerge, errorMessage, landingBulkConfirmation, refreshIntervalMs} from "../../utils/missionControl";
 
 interface Props {
   project?: ProjectInfo | null;
@@ -24,8 +26,13 @@ export function ProjectWorkspace({project}: Props) {
   const [jobOpen, setJobOpen] = useState(false);
   const [banner, setBanner] = useState<{kind: "info" | "error"; message: string} | null>(null);
   const [recoveryPending, setRecoveryPending] = useState<string | null>(null);
+  const [landPending, setLandPending] = useState(false);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [confirmAck, setConfirmAck] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedQueuedTask, setSelectedQueuedTask] = useState<BoardTask | null>(null);
+  const verificationPolicyRef = useRef<VerificationPolicy>("smart");
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -136,6 +143,62 @@ export function ProjectWorkspace({project}: Props) {
       setRecoveryPending(null);
     }
   }, [refresh]);
+
+  const closeConfirm = useCallback(() => {
+    setConfirm(null);
+    setConfirmError(null);
+    setConfirmAck(false);
+  }, []);
+
+  const runConfirm = useCallback(async () => {
+    if (!confirm) return;
+    setLandPending(true);
+    setConfirmError(null);
+    try {
+      await confirm.onConfirm();
+      closeConfirm();
+    } catch (error) {
+      setConfirmError(errorMessage(error));
+    } finally {
+      setLandPending(false);
+    }
+  }, [closeConfirm, confirm]);
+
+  const landReady = useCallback(async () => {
+    const body = await api<ActionResult>("/api/actions/merge-all", {
+      method: "POST",
+      body: JSON.stringify({verification_policy: verificationPolicyRef.current || "smart"}),
+    });
+    if (!body.ok) {
+      throw new Error(body.message || "Landing did not start.");
+    }
+    setBanner({
+      kind: body.severity === "error" ? "error" : "info",
+      message: body.message || "Landing ready work.",
+    });
+    await refresh();
+  }, [refresh]);
+
+  const requestLandReady = useCallback(() => {
+    if (!data || !canMerge(data.landing)) return;
+    const ready = data.landing.items.filter((item) => item.landing_state === "ready");
+    verificationPolicyRef.current = "smart";
+    setConfirmError(null);
+    setConfirmAck(false);
+    setConfirm({
+      title: "Land Ready Work",
+      body: landingBulkConfirmation(data.landing),
+      bodyContent: (
+        <BulkLandingConfirmList
+          items={ready}
+          target={data.landing.target || data.project?.branch || project?.branch || "main"}
+          verificationPolicyRef={verificationPolicyRef}
+        />
+      ),
+      confirmLabel: "Land ready work",
+      onConfirm: landReady,
+    });
+  }, [data, landReady, project?.branch]);
 
   const currentProject = data?.project || project || null;
   const projectName = currentProject?.name || currentProject?.path || "Project";
@@ -258,6 +321,7 @@ export function ProjectWorkspace({project}: Props) {
                 selectedQueuedTaskId={selectedQueuedTask?.id ?? null}
                 onSelect={openRun}
                 onSelectQueued={openQueuedTask}
+                onLandReady={requestLandReady}
                 onNewJob={() => setJobOpen(true)}
                 onStartWatcher={() => void startWatcher()}
               />
@@ -291,6 +355,18 @@ export function ProjectWorkspace({project}: Props) {
 
       {selectedRunId ? (
         <RunDetailOverlay sessionId={selectedRunId} onClose={closeRun} />
+      ) : null}
+
+      {confirm ? (
+        <ConfirmDialog
+          confirm={confirm}
+          pending={landPending}
+          error={confirmError}
+          checkboxAck={confirmAck}
+          onChangeCheckboxAck={setConfirmAck}
+          onCancel={closeConfirm}
+          onConfirm={runConfirm}
+        />
       ) : null}
     </div>
   );

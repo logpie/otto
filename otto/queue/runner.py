@@ -1947,8 +1947,7 @@ class Runner:
                     _mark_failed(ts, f"manifest exit_status={manifest_exit_status}")
                     return
                 if _task_success_requires_clean_worktree(manifest):
-                    self._verify_success_worktree_clean(ts, task_id, manifest)
-                    if ts.get("status") == "failed":
+                    if not self._verify_success_worktree_clean(ts, task_id, manifest):
                         return
                 ts["status"] = "done"
                 ts["duration_s"] = _terminal_duration_s(ts)
@@ -1994,8 +1993,7 @@ class Runner:
             _mark_failed(ts, f"manifest exit_status={manifest_exit_status}")
             return
         if _task_success_requires_clean_worktree(manifest):
-            self._verify_success_worktree_clean(ts, task_id, manifest)
-            if ts.get("status") == "failed":
+            if not self._verify_success_worktree_clean(ts, task_id, manifest):
                 return
 
         ts["status"] = "done"
@@ -2007,19 +2005,21 @@ class Runner:
         ts: dict[str, Any],
         task_id: str,
         manifest: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         task = next(
             (candidate for candidate in self._load_queue_or_empty(context="finalize manifest") if candidate.id == task_id),
             None,
         ) or self._task_from_state_snapshot(task_id, ts)
         if task is None or not task.worktree:
-            return
+            return True
         worktree = self.project_dir / task.worktree
         if _task_success_can_commit_generated_lockfiles(manifest):
             _auto_commit_generated_lockfiles(worktree)
         dirty_reason = _dirty_successful_worktree_reason(worktree)
         if dirty_reason:
             _mark_failed(ts, dirty_reason)
+            return False
+        return True
 
     def _synthesize_missing_manifest_from_session_summary(
         self,
