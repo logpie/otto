@@ -112,6 +112,26 @@ def test_web_as_user_dry_run_W1_does_not_spawn_browser() -> None:
     assert "dry-run" in combined.lower() or "skipped" in combined.lower()
 
 
+def test_web_as_user_dry_run_accepts_custom_intent() -> None:
+    """`--intent` enables varied pressure projects without hardcoding one benchmark."""
+    result = _run_script(
+        WEB_AS_USER,
+        [
+            "--dry-run",
+            "--scenario",
+            "W1",
+            "--intent",
+            "Build a micro Twitter.",
+            "--build-timeout-s",
+            "1800",
+        ],
+    )
+    assert result.returncode == 0, (
+        f"dry-run W1 custom intent should succeed without real cost; "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
 def test_web_record_fixture_dry_run_R1_does_not_invoke_llm() -> None:
     """`--dry-run --recording R1` should not need OTTO_ALLOW_REAL_COST."""
     result = _run_script(WEB_RECORD_FIXTURE, ["--dry-run", "--recording", "R1"])
@@ -251,6 +271,67 @@ def test_web_as_user_summary_treats_infra_as_nonzero(tmp_path: Path) -> None:
     )
 
     assert exit_code == 1
+
+
+def test_artifact_mine_does_not_require_manifest_for_running_queue_task(tmp_path: Path) -> None:
+    """Running queue tasks may not have written the completion manifest yet."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".otto-queue-state.json").write_text(
+        '{"tasks": {"build-micro-twitter": {"status": "running"}}}',
+        encoding="utf-8",
+    )
+    failures = web_as_user.RunFailures()
+
+    web_as_user.artifact_mine_pass(project, failures)
+
+    assert failures.failures == []
+
+
+def test_mc_realistic_probe_actions_are_stratified_not_pure_random(tmp_path: Path) -> None:
+    """Realistic mode must force varied wait-time behaviors, including evidence inspection."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    scenario = web_as_user.Scenario(
+        id="WX",
+        description="probe action regression",
+        tier="nightly",
+        estimated_cost=0.0,
+        estimated_seconds=0,
+        needs_product_verification=False,
+        target_recordings=[],
+        run_fn=lambda _ctx: web_as_user.ScenarioRunResult("PASS", "ok", 0.0),
+    )
+    ctx = web_as_user.ScenarioContext(
+        scenario=scenario,
+        project_dir=tmp_path,
+        artifact_dir=tmp_path,
+        provider="codex",
+        failures=web_as_user.RunFailures(),
+        debug_log=tmp_path / "debug.log",
+        run_id="probe-run",
+        user_behavior="mc-realistic",
+        user_seed=42,
+    )
+
+    plans = [web_as_user._mc_probe_actions(ctx, f"running-poll-{1 + idx * 12}") for idx in range(6)]
+    first_actions = [plan[0] for plan in plans]
+
+    assert first_actions == ["inspect-run", "reload", "inspect-run", "back-forward", "scroll", "layout"]
+    assert all(len(plan) == 2 for plan in plans)
+    assert "inspect-run" in web_as_user._mc_probe_actions(ctx, "terminal-state")
 
 
 def test_web_as_user_semantic_audit_flags_obvious_false_confidence() -> None:

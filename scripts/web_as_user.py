@@ -196,11 +196,16 @@ def artifact_mine_pass(project_dir: Path, failures: RunFailures) -> None:
         except json.JSONDecodeError as exc:
             failures.fail(f"queue state JSON malformed at {queue_state}: {exc}")
             state = {}
-        for task_id in (state.get("tasks") or {}):
+        for task_id, task_state in (state.get("tasks") or {}).items():
             try:
                 manifest = paths.queue_manifest_path(project_dir, task_id)
             except ValueError as exc:
                 failures.fail(f"queue task ID {task_id!r} invalid: {exc}")
+                continue
+            status = ""
+            if isinstance(task_state, dict):
+                status = str(task_state.get("status") or "").lower()
+            if status not in {"done", "failed", "cancelled", "interrupted", "removed"}:
                 continue
             if not manifest.is_file():
                 failures.fail(
@@ -280,6 +285,8 @@ class ScenarioContext:
     web_port: Optional[int] = None
     web_url: Optional[str] = None
     backend: Any = None
+    intent_override: Optional[str] = None
+    build_timeout_s: Optional[int] = None
 
 
 @dataclass
@@ -484,6 +491,10 @@ def _mc_user_seed(ctx: ScenarioContext) -> int:
         return ctx.user_seed
     source = f"{ctx.run_id}:{ctx.scenario.id}:{ctx.user_behavior}"
     return int(hashlib.sha256(source.encode("utf-8")).hexdigest()[:16], 16)
+
+
+def _scenario_intent(ctx: ScenarioContext, default: str) -> str:
+    return ctx.intent_override or default
 
 
 def _mc_phase_rng(ctx: ScenarioContext, phase: str) -> random.Random:
@@ -778,6 +789,174 @@ def _mc_assert_evidence_panel(
             failures.fail("diff evidence panel stayed on Loading diff... instead of resolving")
             matched = False
     return matched
+
+
+_RUN_ACTION_SELECTORS: dict[str, list[str]] = {
+    "cancel": [
+        '[data-testid^="task-card-cancel-"]',
+        '[data-testid="recovery-action-cancel"]',
+        '[data-testid="advanced-action-cancel"]',
+        '[data-testid="review-next-action-button"]',
+    ],
+    "merge": [
+        '[data-testid="review-next-action-button"]',
+        '[data-testid="advanced-action-merge"]',
+    ],
+    "retry": [
+        '[data-testid="recovery-action-retry"]',
+        '[data-testid="advanced-action-retry"]',
+        '[data-testid="review-next-action-button"]',
+        '[data-testid="log-retry-button"]',
+    ],
+}
+
+_RUN_ACTION_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "cancel": ("cancel", "stop", "interrupt"),
+    "merge": ("merge", "land"),
+    "retry": ("retry", "requeue", "try again"),
+}
+
+
+def _mc_action_button_text(locator: Any) -> str:
+    parts: list[str] = []
+    for getter in (
+        lambda: locator.text_content(timeout=500),
+        lambda: locator.get_attribute("aria-label", timeout=500),
+        lambda: locator.get_attribute("title", timeout=500),
+        lambda: locator.get_attribute("data-testid", timeout=500),
+    ):
+        try:
+            value = getter()
+        except Exception:  # noqa: BLE001
+            value = None
+        if value:
+            parts.append(str(value))
+    return " ".join(parts).strip()
+
+
+def _mc_open_run_by_id(
+    page: Any,
+    run_id: str,
+    *,
+    failures: RunFailures,
+    log_fn: Callable[[str], None],
+) -> bool:
+    selectors = [
+        f'[data-run-id="{run_id}"] .queue-list-row-main',
+        f'[data-testid="history-row-activator-{run_id}"]',
+        f'[data-testid="live-row-activator-{run_id}"]',
+    ]
+    clicked = _mc_click_first(page, selectors, log_fn=log_fn, timeout_ms=5_000)
+    if not clicked:
+        failures.fail(f"could not open run {run_id} from a visible row/card")
+        return False
+    time.sleep(0.7)
+    if not _mc_wait_for_visible_selector(
+        page,
+        [
+            '[data-testid="run-drawer"]',
+            '[data-testid="run-list-detail-drawer"]',
+            '[data-testid="run-detail-panel"]',
+        ],
+        timeout_s=6.0,
+    ):
+        failures.fail(f"clicking visible row for run {run_id} did not open a run detail surface")
+        return False
+    return True
+
+
+def _mc_confirm_dialog_if_present(
+    page: Any,
+    *,
+    failures: RunFailures,
+    log_fn: Callable[[str], None],
+) -> None:
+    try:
+        dialog = page.locator(".confirm-dialog").first
+        if dialog.count() == 0:
+            try:
+                page.wait_for_selector(".confirm-dialog", timeout=2_000)
+            except Exception:  # noqa: BLE001
+                return
+            dialog = page.locator(".confirm-dialog").first
+        if not dialog.is_visible():
+            return
+        ack = page.locator('[data-testid="confirm-dialog-ack-checkbox"]').first
+        if ack.count() > 0 and ack.is_visible() and ack.is_enabled():
+            ack.check(timeout=3_000)
+        confirm = page.locator('[data-testid="confirm-dialog-confirm-button"]').first
+        if confirm.count() == 0:
+            failures.fail("confirm dialog opened but confirm button is missing")
+            return
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if confirm.is_enabled():
+                break
+            time.sleep(0.2)
+        if not confirm.is_enabled():
+            failures.fail("confirm dialog confirm button stayed disabled")
+            return
+        confirm.click(timeout=5_000)
+        time.sleep(0.7)
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"confirm dialog interaction failed: {exc}")
+        log_fn(f"  confirm dialog interaction failed: {exc}")
+
+
+def _mc_click_run_action_from_ui(
+    page: Any,
+    run_id: str,
+    action: Literal["cancel", "merge", "retry"],
+    *,
+    failures: RunFailures,
+    log_fn: Callable[[str], None],
+) -> bool:
+    """Drive a run action through visible Mission Control controls."""
+    selectors = list(_RUN_ACTION_SELECTORS[action])
+    scoped_selectors = [
+        f'[data-run-id="{run_id}"] [data-testid^="task-card-cancel-"]',
+        *selectors,
+    ] if action == "cancel" else selectors
+
+    for selector in scoped_selectors:
+        try:
+            loc = page.locator(selector).first
+            if loc.count() == 0 or not loc.is_visible() or not loc.is_enabled():
+                continue
+            label = _mc_action_button_text(loc).lower()
+            if selector == '[data-testid="review-next-action-button"]':
+                if not any(keyword in label for keyword in _RUN_ACTION_KEYWORDS[action]):
+                    continue
+            loc.click(timeout=5_000)
+            log_fn(f"  clicked visible {action} control {selector} for run {run_id}")
+            _mc_confirm_dialog_if_present(page, failures=failures, log_fn=log_fn)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log_fn(f"  visible {action} control {selector} failed: {exc}")
+
+    if action == "cancel":
+        failures.fail(f"no visible cancel control was usable for run {run_id}")
+        return False
+
+    if not _mc_open_run_by_id(page, run_id, failures=failures, log_fn=log_fn):
+        return False
+    for selector in selectors:
+        try:
+            loc = page.locator(selector).first
+            if loc.count() == 0 or not loc.is_visible() or not loc.is_enabled():
+                continue
+            label = _mc_action_button_text(loc).lower()
+            if selector == '[data-testid="review-next-action-button"]':
+                if not any(keyword in label for keyword in _RUN_ACTION_KEYWORDS[action]):
+                    continue
+            loc.click(timeout=5_000)
+            log_fn(f"  clicked visible {action} control {selector} for run {run_id}")
+            _mc_confirm_dialog_if_present(page, failures=failures, log_fn=log_fn)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log_fn(f"  visible {action} control {selector} failed: {exc}")
+    failures.fail(f"no visible {action} control was usable for run {run_id}")
+    return False
 
 
 def _mc_layout_snapshot(
@@ -1175,6 +1354,52 @@ def _mc_refresh(
         _record_mc_user_action(ctx, phase=phase, action="reload-failed", error=str(exc))
 
 
+def _mc_running_poll_index(phase: str) -> Optional[int]:
+    match = re.search(r"running-poll-(\d+)", phase)
+    if not match:
+        return None
+    return max(0, (int(match.group(1)) - 1) // 12)
+
+
+def _mc_probe_actions(ctx: ScenarioContext, phase: str) -> list[str]:
+    """Return a stratified user-behavior plan for this phase.
+
+    Pure randomness can miss whole classes of behavior. Keep the exact order
+    seeded/replayable, but force coverage across evidence inspection,
+    reloads, back/forward navigation, scroll, and layout checks.
+    """
+    actions = ["layout", "inspect-run", "scroll"]
+    if "running" in phase or "terminal" in phase:
+        actions.extend(["back-forward", "reload"])
+    if ctx.user_behavior == "mc-stress":
+        actions.extend(["inspect-run", "scroll", "back-forward", "reload"])
+
+    rng = _mc_phase_rng(ctx, phase)
+    rng.shuffle(actions)
+    unique_actions = list(dict.fromkeys(actions))
+
+    if ctx.user_behavior == "mc-stress":
+        return unique_actions[: min(4, len(unique_actions))]
+
+    forced: list[str] = []
+    if "terminal" in phase:
+        forced = ["inspect-run", "reload"]
+    elif "running-start" in phase:
+        forced = ["inspect-run", "layout"]
+    else:
+        poll_index = _mc_running_poll_index(phase)
+        if poll_index is not None:
+            cycle = ["inspect-run", "reload", "inspect-run", "back-forward", "scroll", "layout"]
+            forced = [cycle[poll_index % len(cycle)]]
+
+    for action in unique_actions:
+        if action not in forced:
+            forced.append(action)
+        if len(forced) >= 2:
+            break
+    return forced[:2]
+
+
 def _mc_user_probe(
     page: Any,
     ctx: ScenarioContext,
@@ -1186,17 +1411,11 @@ def _mc_user_probe(
     if ctx.user_behavior == "off":
         return
 
-    rng = _mc_phase_rng(ctx, phase)
     _record_mc_user_action(ctx, phase=phase, action="probe-start", url=page.url)
-    actions = ["layout", "inspect-run", "scroll"]
-    if "running" in phase or "terminal" in phase:
-        actions.extend(["back-forward", "reload"])
-    if ctx.user_behavior == "mc-stress":
-        actions.extend(["inspect-run", "scroll", "back-forward", "reload"])
-    rng.shuffle(actions)
-    count = 1 if ctx.user_behavior == "mc-realistic" else min(3, len(actions))
+    actions = _mc_probe_actions(ctx, phase)
+    _record_mc_user_action(ctx, phase=phase, action="probe-plan", actions=actions)
 
-    for action in actions[:count]:
+    for action in actions:
         log_fn(f"  mc-user {phase}: {action}")
         try:
             if action == "layout":
@@ -1253,6 +1472,21 @@ def _api_get(base_url: str, path: str, *, timeout: float = 10.0) -> tuple[int, A
                 return resp.status, body
     except Exception as exc:  # noqa: BLE001
         return 0, {"error": str(exc)}
+
+
+def _web_watcher_running(base_url: Optional[str]) -> bool:
+    if not base_url:
+        return False
+    _, body = _api_get(base_url, "/api/state", timeout=5.0)
+    if not isinstance(body, dict):
+        return False
+    watcher = body.get("watcher") or {}
+    health = watcher.get("health") or {}
+    return bool(
+        watcher.get("alive")
+        or str(health.get("state") or "").lower() == "running"
+        or health.get("watcher_process_alive")
+    )
 
 
 def _start_otto_web_in_process(project_dir: Path, artifact_dir: Path) -> Any:
@@ -1418,7 +1652,7 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             intent_field = page.locator('[data-testid="job-dialog-intent"]')
             if intent_field.count() > 0:
                 try:
-                    intent_field.fill(W1_INTENT, timeout=5_000)
+                    intent_field.fill(_scenario_intent(ctx, W1_INTENT), timeout=5_000)
                 except Exception as exc:  # noqa: BLE001
                     failures.fail(f"intent fill failed: {exc}")
             # Set provider in advanced options (optional — server picks default if blank)
@@ -1466,25 +1700,7 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             # ---------- Step 7: start watcher (queue won't run otherwise) ----------
             _log("Step 7: start watcher")
             time.sleep(1.5)  # let dialog close + state refresh
-            start_watcher = page.locator(
-                '[data-testid="mission-start-watcher-button"], [data-testid="start-watcher-button"]'
-            ).first
-            if start_watcher.count() == 0:
-                failures.fail("no start-watcher button after submitting first job")
-            else:
-                # Watch out: button may be disabled until queue has items
-                start_attempt_deadline = time.monotonic() + 30
-                while time.monotonic() < start_attempt_deadline:
-                    try:
-                        if start_watcher.is_enabled():
-                            break
-                    except Exception:  # noqa: BLE001
-                        pass
-                    time.sleep(0.5)
-                try:
-                    start_watcher.click(timeout=5_000)
-                except Exception as exc:  # noqa: BLE001
-                    failures.fail(f"start watcher click failed: {exc}")
+            _click_start_watcher(page, failures=failures, label="W1", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "06-watcher-started")
             if ctx.user_behavior != "off":
                 _mc_check_expectation(
@@ -1511,7 +1727,8 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
 
             # ---------- Step 8: wait for terminal state ----------
             _log("Step 8: poll /api/state for terminal status")
-            deadline = time.monotonic() + W1_BUILD_TIMEOUT_S
+            build_timeout_s = ctx.build_timeout_s or W1_BUILD_TIMEOUT_S
+            deadline = time.monotonic() + build_timeout_s
             terminal_outcome: Optional[str] = None
             poll_count = 0
             while time.monotonic() < deadline:
@@ -1547,7 +1764,7 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             _log(f"terminal_outcome={terminal_outcome}")
             failures.soft_assert(
                 terminal_outcome is not None,
-                f"build did not reach terminal in {W1_BUILD_TIMEOUT_S}s",
+                f"build did not reach terminal in {build_timeout_s}s",
             )
             if terminal_outcome and terminal_outcome != "success":
                 failures.fail(f"build terminal_outcome={terminal_outcome!r} (expected success)")
@@ -1570,6 +1787,9 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             # ---------- Step 10: walk inspector tabs ----------
             _log("Step 10: walk inspector tabs")
             try:
+                if terminal_outcome is None:
+                    failures.note("skipping final evidence controls because the build never reached terminal")
+                    raise StopIteration
                 # Click first task card if present
                 task_cards = page.locator(".task-card-main").first
                 if task_cards.count() > 0 and task_cards.is_enabled():
@@ -1607,6 +1827,8 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                         hard=True,
                         clicked_selector=clicked,
                     )
+            except StopIteration:
+                pass
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"walking inspector tabs raised: {exc}")
 
@@ -1819,25 +2041,7 @@ def _run_w11(ctx: ScenarioContext) -> ScenarioRunResult:
 
             # ---------- Step 6: start watcher from web ----------
             _log("Step 6: start watcher")
-            start_watcher = page.locator(
-                '[data-testid="mission-start-watcher-button"], [data-testid="start-watcher-button"]'
-            ).first
-            if start_watcher.count() == 0:
-                failures.fail("start-watcher button missing")
-            else:
-                # Wait for it to enable
-                deadline = time.monotonic() + 30
-                while time.monotonic() < deadline:
-                    try:
-                        if start_watcher.is_enabled():
-                            break
-                    except Exception:  # noqa: BLE001
-                        pass
-                    time.sleep(0.5)
-                try:
-                    start_watcher.click(timeout=5_000)
-                except Exception as exc:  # noqa: BLE001
-                    failures.fail(f"start watcher click failed: {exc}")
+            _click_start_watcher(page, failures=failures, label="W11", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "06-watcher")
 
             # ---------- Step 7: heartbeat / events streaming ----------
@@ -1859,7 +2063,7 @@ def _run_w11(ctx: ScenarioContext) -> ScenarioRunResult:
 
             # ---------- Step 8: cancel one queue task via UI ----------
             # We rely on the queue's task IDs surfacing in /api/state.
-            _log("Step 8: cancel one queue task via API actions")
+            _log("Step 8: cancel one queue task through visible UI")
             cancelled_task_id: Optional[str] = None
             cancelled_run_id: Optional[str] = None
             _, state_body = _api_get(ctx.web_url, "/api/state")
@@ -1875,20 +2079,13 @@ def _run_w11(ctx: ScenarioContext) -> ScenarioRunResult:
                 cancelled_run_id = victim.get("run_id")
                 cancelled_task_id = victim.get("queue_task_id")
                 _log(f"  cancelling task={cancelled_task_id} run={cancelled_run_id}")
-                # POST /api/runs/<run_id>/actions/cancel
-                import urllib.request
-
-                req = urllib.request.Request(
-                    ctx.web_url.rstrip("/") + f"/api/runs/{cancelled_run_id}/actions/cancel",
-                    data=b"{}", method="POST",
-                    headers={"Content-Type": "application/json"},
+                _mc_click_run_action_from_ui(
+                    page,
+                    cancelled_run_id,
+                    "cancel",
+                    failures=failures,
+                    log_fn=_log,
                 )
-                try:
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        body = resp.read().decode("utf-8")
-                        _log(f"  cancel response status={resp.status}: {body[:200]}")
-                except Exception as exc:  # noqa: BLE001
-                    failures.fail(f"cancel POST failed: {exc}")
 
             # ---------- Step 9-11: wait for jobs ----------
             _log("Step 9-11: wait for queue/standalone to settle (≤25min total)")
@@ -1936,23 +2133,15 @@ def _run_w11(ctx: ScenarioContext) -> ScenarioRunResult:
                 failures.fail("no succeeded queue row found to merge")
             else:
                 _log(f"  merging run_id={merge_target_run_id}")
-                import urllib.request
-
-                req = urllib.request.Request(
-                    ctx.web_url.rstrip("/") + f"/api/runs/{merge_target_run_id}/actions/merge",
-                    data=b"{}", method="POST",
-                    headers={"Content-Type": "application/json"},
+                merge_clicked = _mc_click_run_action_from_ui(
+                    page,
+                    merge_target_run_id,
+                    "merge",
+                    failures=failures,
+                    log_fn=_log,
                 )
-                try:
-                    with urllib.request.urlopen(req, timeout=60) as resp:
-                        body = resp.read().decode("utf-8")
-                        _log(f"  merge response status={resp.status}: {body[:200]}")
-                        merge_status = resp.status
-                except Exception as exc:  # noqa: BLE001
-                    failures.fail(f"merge POST failed: {exc}")
-                    merge_status = 0
                 # Wait briefly for merge live record
-                if merge_status == 200:
+                if merge_clicked:
                     deadline = time.monotonic() + 60
                     saw_merge_history = False
                     while time.monotonic() < deadline:
@@ -2114,11 +2303,21 @@ def _enqueue_via_dialog(
         return False
 
 
-def _click_start_watcher(page: Any, *, failures: RunFailures, label: str = "watcher") -> None:
+def _click_start_watcher(
+    page: Any,
+    *,
+    failures: RunFailures,
+    label: str = "watcher",
+    base_url: Optional[str] = None,
+) -> None:
+    if _web_watcher_running(base_url):
+        return
     btn = page.locator(
         '[data-testid="mission-start-watcher-button"], [data-testid="start-watcher-button"]'
     ).first
     if btn.count() == 0:
+        if _web_watcher_running(base_url):
+            return
         failures.fail(f"start-watcher button missing ({label})")
         return
     deadline = time.monotonic() + 30
@@ -2132,24 +2331,9 @@ def _click_start_watcher(page: Any, *, failures: RunFailures, label: str = "watc
     try:
         btn.click(timeout=5_000)
     except Exception as exc:  # noqa: BLE001
+        if _web_watcher_running(base_url):
+            return
         failures.fail(f"start watcher click failed ({label}): {exc}")
-
-
-def _post_action(base_url: str, run_id: str, action: str, *, timeout: float = 30.0) -> tuple[int, str]:
-    import urllib.request
-
-    req = urllib.request.Request(
-        base_url.rstrip("/") + f"/api/runs/{run_id}/actions/{action}",
-        data=b"{}",
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            return resp.status, body
-    except Exception as exc:  # noqa: BLE001
-        return 0, str(exc)
 
 
 def _state(base_url: str) -> Optional[dict[str, Any]]:
@@ -2291,7 +2475,7 @@ def _run_w2(ctx: ScenarioContext) -> ScenarioRunResult:
 
             # ---------- Step 4: start watcher ----------
             _log("Step 4: start watcher")
-            _click_start_watcher(page, failures=failures, label="W2")
+            _click_start_watcher(page, failures=failures, label="W2", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "06-watcher")
 
             # ---------- Step 5: wait for one to actually start, then cancel another ----------
@@ -2330,12 +2514,14 @@ def _run_w2(ctx: ScenarioContext) -> ScenarioRunResult:
                 _log(f"  running_run_id={running_run_id} cancelling={cancelled_run_id}")
 
             if cancelled_run_id is not None:
-                status, body = _post_action(ctx.web_url, cancelled_run_id, "cancel")
-                _log(f"  cancel POST status={status} body={body[:200]}")
-                failures.soft_assert(
-                    status == 200,
-                    f"cancel returned {status}: {body[:120]}",
+                cancelled = _mc_click_run_action_from_ui(
+                    page,
+                    cancelled_run_id,
+                    "cancel",
+                    failures=failures,
+                    log_fn=_log,
                 )
+                failures.soft_assert(cancelled, f"could not cancel run {cancelled_run_id} through visible UI")
             _safe_screenshot(page, artifact_dir, "07-after-cancel")
 
             # ---------- Step 6: wait for queue to drain ----------
@@ -2573,14 +2759,16 @@ def _run_w12a(ctx: ScenarioContext) -> ScenarioRunResult:
                 failures.note(f"task-card click failed: {exc}")
 
             # ---------- Step 5: cancel from UI ----------
-            _log("Step 5: cancel from UI via /api/runs/<id>/actions/cancel")
+            _log("Step 5: cancel from visible UI")
             if atomic_run_id is not None:
-                status, body = _post_action(ctx.web_url, atomic_run_id, "cancel")
-                _log(f"  cancel POST status={status} body={body[:200]}")
-                failures.soft_assert(
-                    status == 200,
-                    f"cancel returned {status}: {body[:160]}",
+                cancelled = _mc_click_run_action_from_ui(
+                    page,
+                    atomic_run_id,
+                    "cancel",
+                    failures=failures,
+                    log_fn=_log,
                 )
+                failures.soft_assert(cancelled, f"could not cancel atomic run {atomic_run_id} through visible UI")
             _safe_screenshot(page, artifact_dir, "05-after-cancel")
 
             # ---------- Step 6: verify subprocess dies ----------
@@ -2773,7 +2961,7 @@ def _run_w12b(ctx: ScenarioContext) -> ScenarioRunResult:
 
             # ---------- Step 4: start watcher ----------
             _log("Step 4: start watcher")
-            _click_start_watcher(page, failures=failures, label="W12b")
+            _click_start_watcher(page, failures=failures, label="W12b", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "03-watcher")
 
             # ---------- Step 5: wait for queue task to complete ----------
@@ -2817,22 +3005,21 @@ def _run_w12b(ctx: ScenarioContext) -> ScenarioRunResult:
             _safe_screenshot(page, artifact_dir, "04-terminal")
 
             # ---------- Step 6: merge from UI ----------
-            _log("Step 6: merge from UI via API")
+            _log("Step 6: merge from visible UI")
             merge_run_id = history_run_id or queue_run_id
-            merge_status = 0
-            merge_body = ""
+            merge_clicked = False
             if merge_run_id and terminal_outcome == "success":
-                merge_status, merge_body = _post_action(
-                    ctx.web_url, merge_run_id, "merge", timeout=120,
+                merge_clicked = _mc_click_run_action_from_ui(
+                    page,
+                    merge_run_id,
+                    "merge",
+                    failures=failures,
+                    log_fn=_log,
                 )
-                _log(f"  merge POST status={merge_status} body={merge_body[:200]}")
-                failures.soft_assert(
-                    merge_status == 200,
-                    f"merge returned {merge_status}: {merge_body[:160]}",
-                )
+                failures.soft_assert(merge_clicked, f"could not merge run {merge_run_id} through visible UI")
 
             # ---------- Step 7: verify merge live → terminal ----------
-            if merge_status == 200:
+            if merge_clicked:
                 _log("Step 7: poll for merge history row")
                 deadline = time.monotonic() + 90
                 saw_merge_history = False
@@ -2983,7 +3170,7 @@ def _run_w13(ctx: ScenarioContext) -> ScenarioRunResult:
             )
             failures.soft_assert(submitted, "could not submit W13 build")
             time.sleep(1.5)
-            _click_start_watcher(page, failures=failures, label="W13-pre")
+            _click_start_watcher(page, failures=failures, label="W13-pre", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "03-pre-outage")
 
             # ---------- Step 2: wait until build is actually in-flight ----------
@@ -3380,7 +3567,7 @@ def _run_w3(ctx: ScenarioContext) -> ScenarioRunResult:
 
             # ---------- Step 3: start watcher, wait for build terminal ----------
             _log("Step 3: start watcher; wait for prior-build terminal")
-            _click_start_watcher(page, failures=failures, label="W3-build")
+            _click_start_watcher(page, failures=failures, label="W3-build", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "03-watcher-build")
 
             outcome, build_run_id = _wait_for_terminal(
@@ -3420,7 +3607,7 @@ def _run_w3(ctx: ScenarioContext) -> ScenarioRunResult:
             time.sleep(2)
 
             # Refresh / restart watcher so improve picks up
-            _click_start_watcher(page, failures=failures, label="W3-improve")
+            _click_start_watcher(page, failures=failures, label="W3-improve", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "06-watcher-improve")
 
             # ---------- Step 5: poll for build-journal updates ----------
@@ -3679,7 +3866,7 @@ def _run_w4(ctx: ScenarioContext) -> ScenarioRunResult:
 
             # ---------- Step 3: start watcher, wait terminal ----------
             _log("Step 3: start watcher; wait for build terminal")
-            _click_start_watcher(page, failures=failures, label="W4")
+            _click_start_watcher(page, failures=failures, label="W4", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "03-watcher")
 
             outcome, build_run_id = _wait_for_terminal(
@@ -3706,8 +3893,8 @@ def _run_w4(ctx: ScenarioContext) -> ScenarioRunResult:
             except Exception as exc:  # noqa: BLE001
                 failures.note(f"pre-merge git log failed: {exc}")
 
-            # ---------- Step 5: merge from UI (POST action) ----------
-            _log("Step 5: POST /api/runs/<id>/actions/merge")
+            # ---------- Step 5: merge from UI ----------
+            _log("Step 5: merge through visible UI")
             if build_run_id:
                 # Verify legal_actions includes merge
                 _, detail_body = _api_get(
@@ -3721,17 +3908,14 @@ def _run_w4(ctx: ScenarioContext) -> ScenarioRunResult:
                     f"merge action not in legal_actions: {legal_keys}",
                 )
 
-                merge_status, merge_body = _post_action(
-                    ctx.web_url, build_run_id, "merge", timeout=120,
+                merge_clicked = _mc_click_run_action_from_ui(
+                    page,
+                    build_run_id,
+                    "merge",
+                    failures=failures,
+                    log_fn=_log,
                 )
-                _log(f"  merge status={merge_status} body={merge_body[:200]}")
-                failures.soft_assert(
-                    merge_status == 200,
-                    f"merge returned {merge_status}: {merge_body[:160]}",
-                )
-                (artifact_dir / "merge-response.json").write_text(
-                    merge_body, encoding="utf-8",
-                )
+                failures.soft_assert(merge_clicked, f"could not merge run {build_run_id} through visible UI")
 
             # ---------- Step 6: wait merge history row ----------
             _log("Step 6: poll for merge history row")
@@ -3891,7 +4075,7 @@ def _run_w5(ctx: ScenarioContext) -> ScenarioRunResult:
             )
             failures.soft_assert(ok, "could not enqueue W5 build")
             time.sleep(1.5)
-            _click_start_watcher(page, failures=failures, label="W5")
+            _click_start_watcher(page, failures=failures, label="W5", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "03-watcher")
 
             # ---------- Step 2: wait for build success ----------
@@ -3931,22 +4115,25 @@ def _run_w5(ctx: ScenarioContext) -> ScenarioRunResult:
             except Exception as exc:  # noqa: BLE001
                 failures.note(f"git status failed: {exc}")
 
-            # ---------- Step 4: POST merge — expect 409 with reason ----------
-            _log("Step 4: attempt merge — expect blocked")
-            merge_status = 0
+            # ---------- Step 4: attempt merge in UI — expect visible blocked reason ----------
+            _log("Step 4: attempt merge through visible UI — expect blocked")
+            merge_attempted = False
             merge_body = ""
             if build_run_id:
-                merge_status, merge_body = _post_action(
-                    ctx.web_url, build_run_id, "merge", timeout=60,
+                merge_attempted = _mc_click_run_action_from_ui(
+                    page,
+                    build_run_id,
+                    "merge",
+                    failures=failures,
+                    log_fn=_log,
                 )
-                _log(f"  merge status={merge_status} body={merge_body[:300]}")
-                (artifact_dir / "merge-response.json").write_text(
-                    merge_body, encoding="utf-8",
-                )
+                time.sleep(1)
+                merge_body = _mc_visible_text(page)
+                (artifact_dir / "merge-blocked-visible-text.txt").write_text(merge_body, encoding="utf-8")
 
             failures.soft_assert(
-                merge_status in (409, 400),
-                f"expected 409/400 (merge blocked); got {merge_status}",
+                merge_attempted,
+                "could not attempt merge through visible UI",
             )
             # Reason should mention dirty / blocked / repository / merge-ready
             body_lower = merge_body.lower()
@@ -4116,7 +4303,7 @@ def _run_w6(ctx: ScenarioContext) -> ScenarioRunResult:
             # failure happens when the watcher reads otto.yaml.
             failures.soft_assert(ok, "could not enqueue W6 broken build")
             time.sleep(1.5)
-            _click_start_watcher(page, failures=failures, label="W6-fail")
+            _click_start_watcher(page, failures=failures, label="W6-fail", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "03-watcher-fail")
 
             # ---------- Step 3: wait for failure ----------
@@ -4164,21 +4351,19 @@ def _run_w6(ctx: ScenarioContext) -> ScenarioRunResult:
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"could not repair otto.yaml: {exc}")
 
-            # ---------- Step 5: click Retry from UI (POST action) ----------
-            _log("Step 5: POST retry action for failed run")
-            retry_status = 0
-            retry_body = ""
+            # ---------- Step 5: click Retry from UI ----------
+            _log("Step 5: retry from visible UI")
             if fail_run_id:
-                retry_status, retry_body = _post_action(
-                    ctx.web_url, fail_run_id, "retry", timeout=60,
-                )
-                _log(f"  retry status={retry_status} body={retry_body[:300]}")
-                (artifact_dir / "retry-response.json").write_text(
-                    retry_body, encoding="utf-8",
+                retry_clicked = _mc_click_run_action_from_ui(
+                    page,
+                    fail_run_id,
+                    "retry",
+                    failures=failures,
+                    log_fn=_log,
                 )
                 failures.soft_assert(
-                    retry_status == 200,
-                    f"retry returned {retry_status}: {retry_body[:160]}",
+                    retry_clicked,
+                    f"could not retry run {fail_run_id} through visible UI",
                 )
 
             # Restart watcher (it may have exited after empty queue)
@@ -4188,7 +4373,7 @@ def _run_w6(ctx: ScenarioContext) -> ScenarioRunResult:
             except Exception as exc:  # noqa: BLE001
                 failures.note(f"reload after retry failed: {exc}")
             time.sleep(1)
-            _click_start_watcher(page, failures=failures, label="W6-retry")
+            _click_start_watcher(page, failures=failures, label="W6-retry", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "05-after-retry")
 
             # ---------- Step 6: wait for success ----------
@@ -4456,7 +4641,7 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
             intent_field = page.locator('[data-testid="job-dialog-intent"]')
             if intent_field.count() > 0:
                 try:
-                    intent_field.fill(W7_INTENT, timeout=5_000)
+                    intent_field.fill(_scenario_intent(ctx, W7_INTENT), timeout=5_000)
                 except Exception as exc:  # noqa: BLE001
                     failures.fail(f"intent fill failed on mobile: {exc}")
 
@@ -4506,7 +4691,7 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
             # ---------- Step 5: start watcher ----------
             _log("Step 5: start watcher")
             time.sleep(1.5)
-            _click_start_watcher(page, failures=failures, label="W7")
+            _click_start_watcher(page, failures=failures, label="W7", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "05-mobile-watcher")
             if ctx.user_behavior != "off":
                 _mc_check_expectation(
@@ -4532,9 +4717,10 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
             )
 
             # ---------- Step 6: wait for terminal ----------
-            _log(f"Step 6: wait ≤{W7_BUILD_TIMEOUT_S}s for terminal")
+            build_timeout_s = ctx.build_timeout_s or W7_BUILD_TIMEOUT_S
+            _log(f"Step 6: wait ≤{build_timeout_s}s for terminal")
             outcome, run_id = _wait_for_terminal(
-                ctx.web_url, timeout_s=W7_BUILD_TIMEOUT_S, log_fn=_log,
+                ctx.web_url, timeout_s=build_timeout_s, log_fn=_log,
                 domain_filter={"queue"},
                 on_poll=lambda poll: _mc_user_probe(
                     page,
@@ -4547,7 +4733,7 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
             _log(f"  outcome={outcome} run_id={run_id}")
             failures.soft_assert(
                 outcome is not None,
-                f"build did not reach terminal in {W7_BUILD_TIMEOUT_S}s",
+                f"build did not reach terminal in {build_timeout_s}s",
             )
             if outcome and outcome != "success":
                 failures.fail(f"build outcome={outcome!r} (expected success)")
@@ -4998,10 +5184,6 @@ def _run_w8(ctx: ScenarioContext) -> ScenarioRunResult:
                         "no cancel affordance reachable via keyboard Tab — "
                         "queue rows lack a per-row cancel button in tab order"
                     )
-                    # Fall back to API POST so the rest of the scenario can verify behaviors
-                    status, body = _post_action(ctx.web_url, cancelled_run_id, "cancel")
-                    cancel_via = f"api(status={status})"
-                    _log(f"  fallback POST cancel status={status}")
             else:
                 failures.fail("no cancellation candidate appeared within 5 min — cannot test cancel via keyboard")
 
@@ -5297,7 +5479,7 @@ def _run_w9(ctx: ScenarioContext) -> ScenarioRunResult:
             # ---------- Step 3: start watcher ----------
             _log("Step 3: start watcher")
             time.sleep(1.5)
-            _click_start_watcher(page, failures=failures, label="W9")
+            _click_start_watcher(page, failures=failures, label="W9", base_url=ctx.web_url)
             _safe_screenshot(page, artifact_dir, "03-watcher-started")
 
             # ---------- Step 4: wait for the build to actually start ----------
@@ -5557,7 +5739,7 @@ def _run_w10(ctx: ScenarioContext) -> ScenarioRunResult:
             # users will exercise before cancelling.
             _log("Step 2b: start watcher from tab A")
             time.sleep(1.5)
-            _click_start_watcher(page_a, failures=failures, label="W10-A")
+            _click_start_watcher(page_a, failures=failures, label="W10-A", base_url=ctx.web_url)
             _safe_screenshot(page_a, artifact_dir / "tab-a", "02b-watcher-started")
 
             # ---------- Step 3: tab B should pick up the new task within poll window ----------
@@ -5634,40 +5816,20 @@ def _run_w10(ctx: ScenarioContext) -> ScenarioRunResult:
                 )
             _safe_screenshot(page_b, artifact_dir / "tab-b", "03-after-propagation")
 
-            # ---------- Step 4: cancel from tab B (via API — keeps logic deterministic) ----------
-            _log("Step 4: cancel from tab B")
-            cancel_status: Optional[int] = None
-            cancel_body: Optional[str] = None
+            # ---------- Step 4: cancel from tab B through visible UI ----------
+            _log("Step 4: cancel from tab B through visible UI")
+            cancel_clicked = False
             if target_run_id is not None:
-                # Drive the cancel from tab B's PAGE so it counts as
-                # "originated from B". The MC client maps cancel UI to the
-                # same /api/runs/<id>/actions/cancel endpoint. We use fetch()
-                # via page.evaluate so the request goes through the tab's
-                # JS context (proves B can issue it; cookies/headers/origin
-                # all match B).
-                try:
-                    res = page_b.evaluate(
-                        """
-                        async (rid) => {
-                            const r = await fetch('/api/runs/' + rid + '/actions/cancel', {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: '{}',
-                            });
-                            const text = await r.text();
-                            return {status: r.status, body: text};
-                        }
-                        """,
-                        target_run_id,
-                    )
-                    cancel_status = res.get("status") if isinstance(res, dict) else None
-                    cancel_body = res.get("body") if isinstance(res, dict) else None
-                except Exception as exc:  # noqa: BLE001
-                    failures.fail(f"cancel from tab B failed: {exc}")
-                _log(f"  cancel status={cancel_status} body={(cancel_body or '')[:160]}")
+                cancel_clicked = _mc_click_run_action_from_ui(
+                    page_b,
+                    target_run_id,
+                    "cancel",
+                    failures=failures,
+                    log_fn=_log,
+                )
                 failures.soft_assert(
-                    cancel_status == 200,
-                    f"cancel from tab B returned {cancel_status}",
+                    cancel_clicked,
+                    f"could not cancel run {target_run_id} from tab B through visible UI",
                 )
             _safe_screenshot(page_b, artifact_dir / "tab-b", "04-after-cancel")
 
@@ -5746,7 +5908,7 @@ def _run_w10(ctx: ScenarioContext) -> ScenarioRunResult:
                     "target_run_id": target_run_id,
                     "queue_task_id": queue_task_id,
                     "propagation_to_B_s": propagation_s,
-                    "cancel_status": cancel_status,
+                    "cancel_clicked": cancel_clicked,
                     "cancel_propagation_to_A_s": cancel_propagation_s,
                     "terminal_outcome": terminal_outcome,
                 }, indent=2),
@@ -6075,6 +6237,8 @@ def run_one_scenario(
     dry_run: bool,
     user_behavior: UserBehaviorMode,
     user_seed: Optional[int],
+    intent_override: Optional[str] = None,
+    build_timeout_s: Optional[int] = None,
 ) -> ScenarioOutcome:
     """Drive one W-scenario end-to-end.
 
@@ -6127,6 +6291,8 @@ def run_one_scenario(
             web_port=getattr(backend, "port", None),
             web_url=getattr(backend, "url", None),
             backend=backend,
+            intent_override=intent_override,
+            build_timeout_s=build_timeout_s,
         )
         _record_mc_user_action(ctx, phase="scenario-start", action="config")
         result: Optional[ScenarioRunResult] = None
@@ -6284,6 +6450,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="seed for replaying --user-behavior choices",
     )
     parser.add_argument(
+        "--intent",
+        help=(
+            "override the primary build intent for single-project scenarios "
+            "such as W1/W7; useful for pressure-testing varied projects"
+        ),
+    )
+    parser.add_argument(
+        "--build-timeout-s",
+        type=int,
+        help="override the build terminal wait timeout for scenarios that support it",
+    )
+    parser.add_argument(
         "--scenario-delay",
         type=float,
         default=DEFAULT_SCENARIO_DELAY_S,
@@ -6318,6 +6496,8 @@ def main(argv: list[str]) -> int:
         raise SystemExit("--scenario-delay must be >= 0")
     if args.user_seed is not None and args.user_seed < 0:
         raise SystemExit("--user-seed must be >= 0")
+    if args.build_timeout_s is not None and args.build_timeout_s <= 0:
+        raise SystemExit("--build-timeout-s must be > 0")
 
     if not args.dry_run:
         try:
@@ -6342,6 +6522,8 @@ def main(argv: list[str]) -> int:
                 dry_run=args.dry_run,
                 user_behavior=args.user_behavior,
                 user_seed=args.user_seed,
+                intent_override=args.intent,
+                build_timeout_s=args.build_timeout_s,
             )
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
