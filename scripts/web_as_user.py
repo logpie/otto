@@ -44,6 +44,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import shutil
 import signal
 import subprocess
@@ -510,6 +511,61 @@ def _mc_observe_page(page: Any, selectors: list[str]) -> dict[str, Any]:
     }
 
 
+def _mc_visible_text(page: Any, *, timeout_ms: int = 1_000) -> str:
+    try:
+        return page.locator("body").inner_text(timeout=timeout_ms).strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _mc_run_detail_semantic_findings(body_text: str) -> list[str]:
+    """Find user-visible Mission Control contradictions that selectors miss."""
+    text = " ".join(body_text.split())
+    if not text:
+        return []
+    lower = text.casefold()
+    findings: list[str] = []
+
+    if "spec review pending" in lower and (
+        "build active" in lower
+        or "audit active" in lower
+        or "render active" in lower
+        or "land active" in lower
+    ):
+        findings.append(
+            "stage contradiction: Spec review is pending while a later stage is active"
+        )
+
+    if re.search(r"\bstages?\b", lower) and re.search(r"\bseed\b", lower):
+        findings.append(
+            "internal stage label exposed: Seed is visible instead of a user-facing fixture/setup label"
+        )
+
+    max_elapsed_s = _mc_max_visible_elapsed_seconds(text)
+    if re.search(r"\bwall\s+0s\b", lower) and max_elapsed_s >= 30:
+        findings.append(
+            f"active run wall time is stale: drawer shows WALL 0s while page shows elapsed time around {max_elapsed_s}s"
+        )
+
+    if (
+        "no changes from base" in lower
+        and max_elapsed_s >= 30
+        and any(marker in lower for marker in (" running", " building", "● running"))
+    ):
+        findings.append(
+            "diff evidence is misleading: active long-running job shows 'No changes from base'"
+        )
+
+    return findings
+
+
+def _mc_max_visible_elapsed_seconds(text: str) -> int:
+    max_seen = 0
+    for minutes, seconds in re.findall(r"(?<!\d)(\d{1,3}):([0-5]\d)\b", text):
+        max_seen = max(max_seen, int(minutes) * 60 + int(seconds))
+    return max_seen
+
+
 def _mc_check_expectation(
     page: Any,
     ctx: ScenarioContext,
@@ -545,7 +601,8 @@ def _mc_check_expectation(
     if text_any:
         body = str(observation.get("text_sample", "")).lower()
         text_ok = any(fragment.lower() in body for fragment in text_any)
-    matched = any_ok and all_ok and text_ok
+    semantic_findings = _mc_run_detail_semantic_findings(_mc_visible_text(page))
+    matched = any_ok and all_ok and text_ok and not semantic_findings
     verdict = "expected" if matched else ("blocked" if hard else "confusing UX")
     screenshot = None
     if not matched:
@@ -563,6 +620,9 @@ def _mc_check_expectation(
         else:
             failures.note(msg)
         log_fn(f"  {msg}")
+    for finding in semantic_findings:
+        failures.fail(f"mc-user semantic contradiction after {action}: {finding}")
+        log_fn(f"  mc-user semantic contradiction after {action}: {finding}")
     _record_mc_user_action(
         ctx,
         phase=phase,
@@ -572,6 +632,7 @@ def _mc_check_expectation(
         matched=matched,
         verdict=verdict,
         observation=observation,
+        semantic_findings=semantic_findings,
         screenshot=screenshot.name if screenshot else None,
     )
     return matched
@@ -765,6 +826,7 @@ def _mc_inspect_run_surface(
             log_fn=log_fn,
             failures=failures,
         )
+        _mc_inspect_group_evidence(page, ctx, phase=phase, log_fn=log_fn, failures=failures)
 
     buttons = [
         ("logs", ['[data-testid="open-logs-button"]', '[data-testid="run-quick-action-logs"]', '[data-testid="run-detail-open-logs-button"]']),
@@ -812,6 +874,75 @@ def _mc_inspect_run_surface(
         )
     if opened and not clicked_any:
         failures.note(f"mc-user {phase}: opened run detail but no logs/proof/diff/artifact controls were available")
+
+
+def _mc_inspect_group_evidence(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> None:
+    try:
+        group_list = page.locator('[data-testid="group-list"]').first
+        if group_list.count() == 0 or not group_list.is_visible():
+            return
+        summary = page.locator('[data-testid="group-list"] summary').first
+        if summary.count() > 0 and summary.is_visible():
+            try:
+                summary.click(timeout=2_000)
+                time.sleep(0.3)
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"could not expand group list for evidence inspection: {exc}")
+                return
+
+        actions = [
+            ("group logs", '[data-testid^="group-logs-"]', '[data-testid="run-resource-panel-logs"]'),
+            ("group diff", '[data-testid^="group-diff-"]', '[data-testid="run-resource-panel-diff"]'),
+        ]
+        for label, button_selector, panel_selector in actions:
+            button = page.locator(button_selector).first
+            if button.count() == 0:
+                failures.fail(f"{label} button missing from visible group list")
+                continue
+            if not button.is_visible() or not button.is_enabled():
+                failures.fail(f"{label} button is not usable from visible group list")
+                continue
+            before = _mc_visible_text(page)
+            try:
+                button.click(timeout=3_000)
+                time.sleep(0.6)
+            except Exception as exc:  # noqa: BLE001
+                failures.fail(f"{label} click failed: {exc}")
+                continue
+            after = _mc_visible_text(page)
+            screenshot = _safe_screenshot(
+                page,
+                ctx.artifact_dir,
+                f"mc-user-{_mc_slug(phase)}-{_mc_slug(label)}",
+            )
+            panel = page.locator(panel_selector).first
+            panel_visible = panel.count() > 0 and panel.is_visible()
+            _record_mc_user_action(
+                ctx,
+                phase=phase,
+                action=f"inspect-{_mc_slug(label)}",
+                expectation=f"Clicking {label} opens group-scoped evidence, not an inert button.",
+                selector=button_selector,
+                panel_selector=panel_selector,
+                panel_visible=panel_visible,
+                before_excerpt=before[:500],
+                after_excerpt=after[:500],
+                screenshot=screenshot.name if screenshot else None,
+            )
+            if not panel_visible:
+                failures.fail(f"{label} click did not open {panel_selector}")
+            elif before == after:
+                failures.fail(f"{label} click did not visibly change the run detail surface")
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"group evidence inspection raised: {exc}")
+        log_fn(f"  group evidence inspection raised: {exc}")
 
 
 def _mc_browser_back_forward(

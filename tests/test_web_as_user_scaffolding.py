@@ -147,6 +147,54 @@ def test_web_as_user_scenario_registry_completeness() -> None:
         assert sid in web_as_user.SCENARIOS, f"TIER_WEEKLY references unknown scenario {sid!r}"
 
 
+def test_web_as_user_semantic_audit_flags_obvious_false_confidence() -> None:
+    """The true-web harness must fail contradictions selectors alone would miss."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    findings = web_as_user._mc_run_detail_semantic_findings(
+        """
+        Tasks 1 task on main STATUS TASK STORIES ● RUNNING build-a-micro-twitter
+        Running0 files3:50
+        × building build a micro twitter FEATURES 0 / 19 WALL 0s COST $0.00
+        Stages ● Compile done → ○ Spec review pending → ◐ Build active →
+        ● Seed done → ○ Audit pending
+        Diff Base: main No changes from base.
+        """
+    )
+
+    assert any("Spec review is pending" in finding for finding in findings)
+    assert any("Seed is visible" in finding for finding in findings)
+    assert any("WALL 0s" in finding for finding in findings)
+    assert any("No changes from base" in finding for finding in findings)
+
+
+def test_web_as_user_semantic_audit_accepts_fixed_stage_language() -> None:
+    """Fixed Mission Control stage labels should not trip false blockers."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    findings = web_as_user._mc_run_detail_semantic_findings(
+        """
+        Tasks 1 task on main STATUS TASK STORIES ● RUNNING build-a-micro-twitter
+        Running0 files0:12
+        × building build a micro twitter FEATURES 0 / 19 WALL 12s COST $0.00
+        Stages ● Compile spec done → ○ Spec review skipped →
+        ● Prepare fixtures done → ◐ Build groups active → ○ Audit product pending
+        """
+    )
+
+    assert findings == []
+
+
 def test_web_record_fixture_recording_registry_completeness() -> None:
     """Every R1..R14 has a registry entry."""
     sys.path.insert(0, str(SCRIPTS_DIR))

@@ -84,6 +84,24 @@ must inspect the post-action page against the user's expectation. API, disk,
 and git checks can confirm durable truth, but they do not replace the visible
 expectation check.
 
+False-confidence blockers for Mission Control Web:
+
+- If a button exists, click it and assert the requested evidence surface
+  changes visibly. Especially cover run-level and group-level Logs, Diff,
+  Artifacts, and Proof actions. A visible button whose click only logs to the
+  console or leaves the same page content is a hard failure.
+- If Mission Control shows a running job, compare active stage, elapsed time,
+  current group, and evidence panels against each other. `Build active` with
+  `Spec review pending`, a stale `WALL 0s` after a nontrivial wait, or
+  activity text that does not identify the active work is a hard failure.
+- User-facing stage names must explain the work. Internal terms such as `seed`
+  must be flagged unless the UI also explains them in user language.
+- A Diff panel that says there are no changes while supporting evidence or the
+  worktree shows active uncommitted/untracked product files is a hard failure.
+- Top-level PASS/FAIL for the true-web run must be derived from the expectation
+  ledger and semantic contradictions, not only from whether the script reached
+  the end or Otto produced a terminal run packet.
+
 Use bounded randomness only for realistic Mission Control exploration:
 
 - keep golden scenarios deterministic unless user-behavior variance is
