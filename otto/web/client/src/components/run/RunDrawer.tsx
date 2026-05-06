@@ -284,6 +284,7 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
       <section className="group-section run-drawer-section">
         <GroupList
           groups={view.groups}
+          dispatch={view.dispatch}
           onOpenDiff={onOpenGroupDiff}
           onOpenLogs={onOpenGroupLogs}
           {...(inFlight

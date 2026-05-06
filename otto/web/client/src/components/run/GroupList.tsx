@@ -12,11 +12,12 @@
 // whitespace), status renders through the scoped <Pill>, and per-Group
 // wall + cost + diff/log actions are surfaced.
 
-import type { GroupStatus, GroupView } from "../../types/run";
+import type { DispatchView, GroupStatus, GroupView } from "../../types/run";
 import { Pill, type PillTone } from "./Pill";
 
 interface Props {
   groups: GroupView[];
+  dispatch?: DispatchView | undefined;
   onAbort?: (groupId: string) => void;
   onOpenDiff?: (groupId: string) => void;
   onOpenLogs?: (groupId: string) => void;
@@ -57,10 +58,12 @@ function formatCost(usd: number): string {
   return `$${usd.toFixed(2)}`;
 }
 
-export function GroupList({ groups, onAbort, onOpenDiff, onOpenLogs, pendingAbortId }: Props) {
+export function GroupList({ groups, dispatch, onAbort, onOpenDiff, onOpenLogs, pendingAbortId }: Props) {
   if (groups.length === 0) {
     return <p className="empty">No groups dispatched.</p>;
   }
+  const ready = new Set(dispatch?.ready_group_ids ?? []);
+  const waiting = new Set(dispatch?.waiting_group_ids ?? []);
   return (
     // R3-B29: <summary> is now styled as a section subheader so the
     // "▶ N groups" disclosure has the same visual weight as the
@@ -78,6 +81,24 @@ export function GroupList({ groups, onAbort, onOpenDiff, onOpenLogs, pendingAbor
           {groups.length} group{groups.length === 1 ? "" : "s"}
         </span>
       </summary>
+      {dispatch && (
+        <div
+          className="group-dispatch-status"
+          data-testid="group-dispatch-status"
+          title={dispatch.summary}
+        >
+          <span>
+            Running {dispatch.running_group_ids.length}
+            {dispatch.max_concurrent ? `/${dispatch.max_concurrent}` : ""}
+          </span>
+          <span>Ready now {dispatch.ready_group_ids.length}</span>
+          <span>Waiting {dispatch.waiting_group_ids.length}</span>
+          <span>Blocked {dispatch.blocked_group_ids.length}</span>
+          {dispatch.parallelizable_group_ids.length > 1 && (
+            <span>{dispatch.parallelizable_group_ids.length} can run now</span>
+          )}
+        </div>
+      )}
       <ul>
         {groups.map((g) => {
           const canAbort =
@@ -99,6 +120,16 @@ export function GroupList({ groups, onAbort, onOpenDiff, onOpenLogs, pendingAbor
               {g.dependencies.length > 0 && (
                 <span className="group-deps" title={`Runs after ${g.dependencies.join(", ")}`}>
                   after {g.dependencies.join(", ")}
+                </span>
+              )}
+              {ready.has(g.id) && (
+                <Pill tone="info" className="group-ready-pill">
+                  ready
+                </Pill>
+              )}
+              {waiting.has(g.id) && (
+                <span className="group-waiting" title="Waiting for dependency groups">
+                  waiting
                 </span>
               )}
               <span className="group-wall" title="Group wall time">

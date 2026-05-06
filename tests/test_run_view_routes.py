@@ -85,6 +85,22 @@ def test_get_run_returns_run_view(project_with_session: tuple[Path, str]) -> Non
     assert "guardrails" in body
 
 
+def test_get_run_includes_project_queue_concurrency(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-abc123"
+    _write_minimal_session(
+        project / "otto_logs" / "sessions" / sid,
+        intent="tiny webapp",
+        project_kind="webapp",
+    )
+    (project / "otto.yaml").write_text("queue:\n  concurrent: 4\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=project, check=True)
+
+    body = _app_with_project(project).get(f"/api/run-view/{sid}").json()
+
+    assert body["dispatch"]["max_concurrent"] == 4
+
+
 def test_list_runs_includes_queue_worktree_sessions(tmp_path: Path) -> None:
     """Queue/i2p sessions live inside per-task worktrees and must be visible."""
 

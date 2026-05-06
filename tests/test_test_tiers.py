@@ -17,7 +17,8 @@ def test_smoke_tier_uses_smoke_marker_and_disables_playwright() -> None:
 
 
 def test_web_tier_typechecks_before_pytest() -> None:
-    commands = _argvs("web")
+    tier_commands = commands_for_tier("web", [])
+    commands = [argv for _env, argv in tier_commands]
 
     assert commands[0] == ["npm", "run", "web:typecheck"]
     assert {
@@ -38,6 +39,13 @@ def test_web_tier_typechecks_before_pytest() -> None:
         "tests/test_web_bundle_freshness.py",
         "tests/test_web_cache_headers.py",
     }.issubset(commands[1])
+    assert commands[2][1:3] == ["-m", "pytest"]
+    assert (
+        "tests/browser/test_launcher_run_view_gate.py::"
+        "test_mission_control_product_smoke_launch_and_group_run_view"
+    ) in commands[2]
+    assert "playwright" in commands[2]
+    assert tier_commands[2][0] == {"OTTO_BROWSER_SKIP_BUILD": "1"}
 
 
 def test_fast_tier_excludes_slow_and_integration() -> None:

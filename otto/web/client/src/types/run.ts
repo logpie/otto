@@ -38,6 +38,7 @@ export interface RunView {
 
   // Atomic units of dispatch (research §3): collapsible "Built in N groups".
   groups: GroupView[];
+  dispatch?: DispatchView;
 
   // Shared infrastructure dispatch units (research §2.6): collapsible
   // "Components" section in the drawer.
@@ -111,6 +112,17 @@ export interface GroupView {
 
   // Repair attempts during Check loop (Layer 1 retries).
   repair_attempts: number;
+}
+
+export interface DispatchView {
+  max_concurrent: number | null;
+  running_group_ids: string[];
+  ready_group_ids: string[];
+  waiting_group_ids: string[];
+  blocked_group_ids: string[];
+  completed_group_ids: string[];
+  parallelizable_group_ids: string[];
+  summary: string;
 }
 
 export interface ComponentView {

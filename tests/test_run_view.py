@@ -120,6 +120,7 @@ def test_build_run_view_happy_path_post_render(tmp_path: Path) -> None:
     assert len(view["groups"]) == 1
     assert view["groups"][0]["id"] == "auth"
     assert view["groups"][0]["status"] == "passing"
+    assert view["dispatch"]["completed_group_ids"] == ["auth"]
     assert len(view["guardrails"]) == 1
     assert view["guardrails"][0]["verified"] is True
     assert len(view["findings"]) == 1
@@ -140,6 +141,35 @@ def test_build_run_view_legacy_session_no_artifacts(tmp_path: Path) -> None:
     assert view["findings"] == []
     assert view["token_usage"] == {}
     assert view["agent_usage_top"] == []
+
+
+def test_build_run_view_explains_group_dispatch_concurrency(tmp_path: Path) -> None:
+    session = _setup_session(
+        tmp_path,
+        spec={
+            "intent": "x",
+            "project_kind": "webapp",
+            "groups": [
+                {"id": "foundation", "name": "Foundation", "feature_ids": ["f1"]},
+                {"id": "feed", "name": "Feed", "dependencies": ["foundation"]},
+                {"id": "search", "name": "Search", "dependencies": ["foundation"]},
+                {"id": "admin", "name": "Admin", "dependencies": ["feed"]},
+            ],
+        },
+        state_events=[
+            {"event": "group.check.finished", "group_id": "foundation"},
+            {"event": "group.started", "group_id": "feed"},
+        ],
+    )
+
+    view = build_run_view(session, runtime_defaults={"queue_concurrent": 3})
+
+    assert view["dispatch"]["max_concurrent"] == 3
+    assert view["dispatch"]["running_group_ids"] == ["feed"]
+    assert view["dispatch"]["ready_group_ids"] == ["search"]
+    assert view["dispatch"]["waiting_group_ids"] == ["admin"]
+    assert view["dispatch"]["parallelizable_group_ids"] == ["feed", "search"]
+    assert "running 1/3" in view["dispatch"]["summary"]
 
 
 def test_build_run_view_recovers_usage_from_nested_messages(tmp_path: Path) -> None:

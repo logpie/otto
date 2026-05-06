@@ -19,7 +19,18 @@ def test_web_queue_build_enqueues_without_click_context(tmp_path: Path) -> None:
         json={
             "intent": "add saved searches",
             "as": "saved-searches",
-            "extra_args": ["--provider", "codex", "--model", "gpt-5.4", "--effort", "medium"],
+            "extra_args": [
+                "--provider",
+                "codex",
+                "--model",
+                "gpt-5.4",
+                "--effort",
+                "medium",
+                "--budget",
+                "900",
+                "--max-turns",
+                "80",
+            ],
         },
     )
     assert response.status_code == 200
@@ -35,6 +46,10 @@ def test_web_queue_build_enqueues_without_click_context(tmp_path: Path) -> None:
         "gpt-5.4",
         "--effort",
         "medium",
+        "--budget",
+        "900",
+        "--max-turns",
+        "80",
     ]
 
     state = client.get("/api/state?type=queue").json()
@@ -44,6 +59,8 @@ def test_web_queue_build_enqueues_without_click_context(tmp_path: Path) -> None:
     assert row["model"] == "gpt-5.4"
     assert row["reasoning_effort"] == "medium"
     assert row["build_config"]["provider"] == "codex"
+    assert row["build_config"]["run_budget_seconds"] == 900
+    assert row["build_config"]["max_turns_per_call"] == 80
     assert row["build_config"]["certifier_mode"] == "fast"
     assert row["build_config"]["queue"]["task_timeout_s"] == 4200.0
 

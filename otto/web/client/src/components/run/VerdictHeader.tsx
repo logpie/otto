@@ -93,6 +93,7 @@ export function VerdictHeader({ view }: Props) {
   const completedGroups = view.groups.filter((g) => g.status === "passing" || g.status === "landed").length;
   const totalGroups = view.groups.length;
   const activeGroup = view.groups.find((g) => g.status === "in_progress") ?? null;
+  const dispatch = view.dispatch;
   const criticalCount = view.findings.filter((f) => f.severity === "critical").length;
   const label = view.verdict ?? view.status;
   const [intentExpanded, setIntentExpanded] = useState(false);
@@ -155,7 +156,18 @@ export function VerdictHeader({ view }: Props) {
       )}
       {!view.verdict && totalGroups > 0 && (
         <div className="run-drawer-active-line" data-testid="run-drawer-active-line">
-          {activeGroup ? (
+          {dispatch && dispatch.running_group_ids.length > 0 ? (
+            <>
+              Running {dispatch.running_group_ids.length}
+              {dispatch.max_concurrent ? `/${dispatch.max_concurrent}` : ""} groups
+              {dispatch.ready_group_ids.length > 0
+                ? ` · ${dispatch.ready_group_ids.length} ready`
+                : ""}
+              {dispatch.waiting_group_ids.length > 0
+                ? ` · ${dispatch.waiting_group_ids.length} waiting on dependencies`
+                : ""}
+            </>
+          ) : activeGroup ? (
             <>
               Building group: <strong>{activeGroup.name}</strong>
               {activeGroup.dependencies.length > 0

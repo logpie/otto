@@ -26,6 +26,7 @@ from otto.mission_control.actions import (
     execute_resume_run,
 )
 from otto.mission_control.run_view import build_run_view
+from otto.mission_control.serializers import serialize_project
 from otto.web.session_resolver import (
     queue_state_for_session,
     resolve_session_dir,
@@ -103,6 +104,7 @@ def install_run_view_routes(
         view = build_run_view(
             session_dir,
             live_state=queue_state_for_session(project, session_id),
+            runtime_defaults=_run_view_runtime_defaults(project),
         )
         return JSONResponse(view)
 
@@ -175,6 +177,7 @@ def install_run_view_routes(
         view = build_run_view(
             session_dir,
             live_state=queue_state_for_session(project, session_id),
+            runtime_defaults=_run_view_runtime_defaults(project),
         )
         group = next(
             (g for g in view.get("groups", []) if g.get("id") == safe_group_id),
@@ -191,6 +194,14 @@ def install_run_view_routes(
         return JSONResponse(_session_files_payload(session_dir))
 
     app.include_router(router)
+
+
+def _run_view_runtime_defaults(project: Path) -> dict[str, Any]:
+    try:
+        defaults = serialize_project(project).get("defaults")
+    except Exception:
+        return {}
+    return defaults if isinstance(defaults, dict) else {}
 
 
 def _action_to_json(result) -> dict:

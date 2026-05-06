@@ -143,6 +143,8 @@ export function buildQueuePayload(args: {
   provider: string;
   model: string;
   effort: string;
+  budget: string;
+  maxTurns: string;
   buildProvider: string;
   buildModel: string;
   buildEffort: string;
@@ -165,6 +167,10 @@ export function buildQueuePayload(args: {
   if (args.provider) payload.extra_args.push("--provider", args.provider);
   if (args.model) payload.extra_args.push("--model", args.model);
   if (args.effort) payload.extra_args.push("--effort", args.effort);
+  const budget = args.budget.trim();
+  if (budget) payload.extra_args.push("--budget", budget);
+  const maxTurns = args.maxTurns.trim();
+  if (maxTurns) payload.extra_args.push("--max-turns", maxTurns);
   const rounds = args.rounds.trim();
   if (args.command === "improve" && rounds) payload.extra_args.push("--rounds", rounds);
   if (args.command === "build") {

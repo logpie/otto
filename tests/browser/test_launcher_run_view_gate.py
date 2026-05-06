@@ -1065,6 +1065,258 @@ def test_new_run_queues_from_web_and_starts_runner(
     assert page.get_by_test_id("run-list-queue-banner").is_visible()
 
 
+def test_mission_control_product_smoke_launch_and_group_run_view(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Product smoke: launch controls, queue POST, grouped RunView, logs, diff."""
+
+    project = _project()
+    project["defaults"] = {
+        "provider": "claude",
+        "model": "sonnet",
+        "reasoning_effort": None,
+        "certifier_mode": "fast",
+        "skip_product_qa": False,
+        "run_budget_seconds": 3600,
+        "spec_timeout": 600,
+        "max_certify_rounds": 8,
+        "max_turns_per_call": 200,
+        "strict_mode": False,
+        "split_mode": True,
+        "allow_dirty_repo": False,
+        "default_branch": "main",
+        "test_command": None,
+        "queue_concurrent": 3,
+        "queue_task_timeout_s": 4200.0,
+        "queue_worktree_dir": ".worktrees",
+        "queue_on_watcher_restart": "resume",
+        "queue_merge_certifier_mode": "standard",
+        "config_file_exists": True,
+        "config_error": None,
+    }
+    queue_posts: list[dict[str, Any]] = []
+    run_view = _run_view("run-1")
+    run_view.update(
+        {
+            "status": "building",
+            "verdict": None,
+            "token_usage": {"input_tokens": 1200, "output_tokens": 240, "total_tokens": 1440},
+            "dispatch": {
+                "max_concurrent": 3,
+                "running_group_ids": ["feed"],
+                "ready_group_ids": ["profile"],
+                "waiting_group_ids": ["notifications"],
+                "blocked_group_ids": [],
+                "completed_group_ids": ["foundation"],
+                "parallelizable_group_ids": ["feed", "profile"],
+                "summary": "running 1/3; ready 1; waiting on dependencies 1; blocked 0",
+            },
+            "features": [
+                {
+                    "id": "feed-list",
+                    "name": "Feed list",
+                    "description": "Shows posts in reverse chronological order.",
+                    "acceptance_detail": "Browser can see the newest post first.",
+                    "evidence_kinds": ["BrowserJourney"],
+                    "group_id": "feed",
+                    "group_name": "Feed",
+                    "build_status": "in_progress",
+                    "verdict": None,
+                    "evidence_completeness": "full",
+                    "coverage_confidence": "high",
+                    "multi_actor_required": False,
+                    "audit_pre_merge": False,
+                    "evidence_refs": [],
+                }
+            ],
+            "groups": [
+                {
+                    "id": "foundation",
+                    "name": "Foundation",
+                    "description": "",
+                    "feature_ids": [],
+                    "status": "passing",
+                    "branch": "i2p/run-1/foundation",
+                    "owned_paths": ["src/db.ts"],
+                    "dependencies": [],
+                    "cost_usd": 0.03,
+                    "wall_s": 12.0,
+                    "repair_attempts": 0,
+                },
+                {
+                    "id": "feed",
+                    "name": "Feed",
+                    "description": "",
+                    "feature_ids": ["feed-list"],
+                    "status": "in_progress",
+                    "branch": "i2p/run-1/feed",
+                    "owned_paths": ["src/feed.tsx"],
+                    "dependencies": ["foundation"],
+                    "cost_usd": 0.05,
+                    "wall_s": 18.0,
+                    "repair_attempts": 0,
+                },
+                {
+                    "id": "profile",
+                    "name": "Profile",
+                    "description": "",
+                    "feature_ids": [],
+                    "status": "pending",
+                    "branch": "",
+                    "owned_paths": ["src/profile.tsx"],
+                    "dependencies": ["foundation"],
+                    "cost_usd": 0.0,
+                    "wall_s": 0.0,
+                    "repair_attempts": 0,
+                },
+                {
+                    "id": "notifications",
+                    "name": "Notifications",
+                    "description": "",
+                    "feature_ids": [],
+                    "status": "pending",
+                    "branch": "",
+                    "owned_paths": ["src/notifications.tsx"],
+                    "dependencies": ["feed"],
+                    "cost_usd": 0.0,
+                    "wall_s": 0.0,
+                    "repair_attempts": 0,
+                },
+            ],
+        }
+    )
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def state(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_state(project, watcher_running=True)),
+        )
+
+    def queue_build(route: Any) -> None:
+        queue_posts.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "ok": True,
+                    "message": "queued build-social-feed",
+                    "task": {"id": "build-social-feed"},
+                    "warnings": [],
+                    "refresh": True,
+                }
+            ),
+        )
+
+    def run_detail(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(run_view))
+
+    def group_logs(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "logs": [
+                        {
+                            "label": "build/feed/narrative.log",
+                            "path": "build/feed/narrative.log",
+                            "size_bytes": 21,
+                            "text": "feed group is building",
+                            "truncated": False,
+                        }
+                    ],
+                    "empty": False,
+                }
+            ),
+        )
+
+    def group_diff(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "group_id": "feed",
+                    "branch": "i2p/run-1/feed",
+                    "diff": "diff --git a/src/feed.tsx b/src/feed.tsx\n+render feed\n",
+                    "truncated": False,
+                    "error": None,
+                }
+            ),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/state", state)
+    page.route("**/api/queue/build", queue_build)
+    page.route("**/api/run-view/run-1/groups/feed/logs", group_logs)
+    page.route("**/api/run-view/run-1/groups/feed/diff", group_diff)
+    page.route("**/api/run-view/run-1", run_detail)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
+    page.get_by_test_id("new-job-button").click()
+    page.wait_for_selector('[data-testid="job-dialog"]', timeout=10_000)
+
+    assert page.get_by_test_id("job-provider-select").is_visible()
+    assert page.get_by_test_id("job-budget-input").is_visible()
+    assert page.get_by_test_id("job-max-turns-input").is_visible()
+
+    page.get_by_test_id("job-provider-select").select_option("codex")
+    page.get_by_test_id("job-budget-input").fill("900")
+    page.get_by_test_id("job-max-turns-input").fill("80")
+    page.get_by_test_id("job-dialog-intent").fill("build a browser-verified social feed")
+    page.get_by_test_id("job-dialog-submit-button").click()
+    page.wait_for_selector('[data-testid="job-grace-banner"]', timeout=10_000)
+    page.wait_for_timeout(3_600)
+
+    assert len(queue_posts) == 1
+    assert queue_posts[0]["intent"] == "build a browser-verified social feed"
+    assert queue_posts[0]["extra_args"][:6] == [
+        "--provider",
+        "codex",
+        "--budget",
+        "900",
+        "--max-turns",
+        "80",
+    ]
+
+    page.goto(f"{mc_backend.url}?view=run-view&session=run-1", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
+
+    expect_line = page.get_by_test_id("run-drawer-active-line")
+    assert "Running 1/3 groups" in (expect_line.text_content() or "")
+    dispatch = page.get_by_test_id("group-dispatch-status")
+    dispatch_text = dispatch.text_content() or ""
+    assert "Ready now 1" in dispatch_text
+    assert "Waiting 1" in dispatch_text
+    assert "2 can run now" in dispatch_text
+    assert page.get_by_test_id("metrics").get_by_text("Tokens", exact=True).is_visible()
+
+    page.get_by_test_id("group-logs-feed").click()
+    page.wait_for_selector('[data-testid="run-resource-panel-group-logs-feed"]', timeout=10_000)
+    page.get_by_text("feed group is building").wait_for(timeout=10_000)
+    page.get_by_test_id("group-diff-feed").click()
+    page.wait_for_selector('[data-testid="run-resource-panel-group-diff-feed"]', timeout=10_000)
+    page.get_by_text("render feed").wait_for(timeout=10_000)
+
+
 def test_project_workspace_shows_active_queue_from_state_when_run_view_is_empty(
     mc_backend: Any,
     page: Any,

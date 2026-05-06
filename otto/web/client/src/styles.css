@@ -6624,6 +6624,39 @@ tbody tr.selected {
   color: var(--accent-strong);
 }
 
+.job-launch-controls {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.1fr) repeat(2, minmax(110px, 0.7fr));
+  gap: 10px;
+  padding: 10px 0 12px;
+  border-top: 1px solid var(--line);
+}
+
+.job-launch-controls label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.job-launch-controls select,
+.job-launch-controls input {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.job-launch-controls [aria-invalid="true"] {
+  border-color: var(--color-danger-fg);
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.1);
+}
+
 .job-palette-target {
   display: grid;
   grid-template-columns: minmax(0, auto) minmax(280px, 1fr);
@@ -7313,6 +7346,9 @@ html, body {
 
   .job-palette-target-summary {
     text-align: left;
+  }
+  .job-launch-controls {
+    grid-template-columns: 1fr;
   }
 
   /* Old sidebar fallback rules below — irrelevant in topbar layout but
@@ -11062,6 +11098,31 @@ button.otto-app-shell-project:focus-visible {
 .group-list-summary-count {
   color: var(--muted);
   font-size: var(--text-sm, 14px);
+}
+
+.group-dispatch-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 8px 24px;
+  color: var(--muted);
+  font-size: var(--text-xs, 12px);
+}
+
+.group-dispatch-status span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-alt);
+  font-variant-numeric: tabular-nums;
+}
+
+.group-row .group-waiting {
+  font-size: var(--text-xs, 12px);
+  color: var(--muted);
 }
 
 /* === RUA round-3 cluster 3 fixes — spec review + spec diff polish ===

@@ -37,6 +37,7 @@ def build_run_view(
     session_dir: Path,
     *,
     live_state: dict[str, Any] | None = None,
+    runtime_defaults: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return RunView-shaped dict for a session.
 
@@ -79,6 +80,7 @@ def build_run_view(
     )
 
     groups = _build_groups(spec, proof, state_events, live_state)
+    dispatch = _build_dispatch(groups, live_state, runtime_defaults)
     features = _build_features(spec, proof, live_state, state_events)
     components = _build_components(spec, proof, state_events, live_state)
     guardrails = _build_guardrails(spec, proof)
@@ -126,6 +128,7 @@ def build_run_view(
         "verdict": verdict_field,
         "features": features,
         "groups": groups,
+        "dispatch": dispatch,
         "components": components,
         "guardrails": guardrails,
         "stages": stages,
@@ -185,6 +188,118 @@ def _read_state_events(session_dir: Path) -> list[dict[str, Any]]:
     except OSError:
         return []
     return events
+
+
+def _build_dispatch(
+    groups: list[dict[str, Any]],
+    live_state: dict[str, Any] | None,
+    runtime_defaults: dict[str, Any] | None,
+) -> dict[str, Any]:
+    status_by_id = {
+        str(group.get("id") or ""): str(group.get("status") or "pending")
+        for group in groups
+        if str(group.get("id") or "")
+    }
+    completed = {
+        gid
+        for gid, status in status_by_id.items()
+        if status in {"passing", "landed"}
+    }
+    running = [
+        gid
+        for gid, status in status_by_id.items()
+        if status == "in_progress"
+    ]
+    blocked = [
+        gid
+        for gid, status in status_by_id.items()
+        if status in {"blocked", "failed_scope"}
+    ]
+    pending = [
+        gid
+        for gid, status in status_by_id.items()
+        if status == "pending"
+    ]
+    ready: list[str] = []
+    waiting: list[str] = []
+    for group in groups:
+        gid = str(group.get("id") or "")
+        if gid not in pending:
+            continue
+        dependencies = [
+            str(dep)
+            for dep in (group.get("dependencies") or [])
+            if str(dep or "").strip()
+        ]
+        if all(dep in completed for dep in dependencies):
+            ready.append(gid)
+        else:
+            waiting.append(gid)
+    parallelizable = [*running, *ready]
+    max_concurrent = _dispatch_max_concurrent(live_state, runtime_defaults)
+    return {
+        "max_concurrent": max_concurrent,
+        "running_group_ids": running,
+        "ready_group_ids": ready,
+        "waiting_group_ids": waiting,
+        "blocked_group_ids": blocked,
+        "completed_group_ids": sorted(completed),
+        "parallelizable_group_ids": parallelizable,
+        "summary": _dispatch_summary(
+            running=len(running),
+            ready=len(ready),
+            waiting=len(waiting),
+            blocked=len(blocked),
+            max_concurrent=max_concurrent,
+        ),
+    }
+
+
+def _dispatch_max_concurrent(
+    live_state: dict[str, Any] | None,
+    runtime_defaults: dict[str, Any] | None,
+) -> int | None:
+    candidates = [
+        (live_state or {}).get("queue_concurrent"),
+        (live_state or {}).get("concurrent"),
+        (runtime_defaults or {}).get("queue_concurrent"),
+        (runtime_defaults or {}).get("concurrent"),
+    ]
+    queue_defaults = (runtime_defaults or {}).get("queue")
+    if isinstance(queue_defaults, dict):
+        candidates.append(queue_defaults.get("concurrent"))
+    for value in candidates:
+        parsed = _positive_int_or_none(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _dispatch_summary(
+    *,
+    running: int,
+    ready: int,
+    waiting: int,
+    blocked: int,
+    max_concurrent: int | None,
+) -> str:
+    running_text = (
+        f"running {running}/{max_concurrent}"
+        if max_concurrent is not None
+        else f"running {running}"
+    )
+    return (
+        f"{running_text}; ready {ready}; "
+        f"waiting on dependencies {waiting}; blocked {blocked}"
+    )
 
 
 def _build_phase_usage(
