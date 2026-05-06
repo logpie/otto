@@ -1,4 +1,4 @@
 interface:
   display_name: "Otto As User"
-  short_description: "Run Otto CLI and web Mission Control as a user"
-  default_prompt: "Use $otto-as-user to run the smallest real Otto as-user scenario set that verifies this change."
+  short_description: "Simulate real Otto users through Web, CLI, logs, and external verification"
+  default_prompt: "Use $otto-as-user to simulate a real user completing this Otto workflow end to end, define success measures, inspect evidence, verify externally, and report bugs."
