@@ -225,6 +225,22 @@ def _summarize_session(session_dir: Path, session_id: str) -> dict[str, Any]:
 
     quality_score = proof.get("quality_score") or summary.get("quality_score")
 
+    # R3-B10: surface the wireframe's "Built in N groups" subline. Prefer the
+    # spec.json count (concrete, set at compile time); fall back to the
+    # proof packet's landed_group_ids when spec.json is absent on legacy
+    # sessions. Returns None when neither source exists so the frontend can
+    # suppress the subline rather than rendering "0 groups".
+    spec_groups = spec.get("groups") if isinstance(spec.get("groups"), list) else None
+    if spec_groups is not None:
+        group_count: int | None = len(spec_groups)
+    else:
+        landed = proof.get("landed_group_ids")
+        blocked = proof.get("blocked_group_ids")
+        if isinstance(landed, list) or isinstance(blocked, list):
+            group_count = len(landed or []) + len(blocked or [])
+        else:
+            group_count = None
+
     return {
         "id": session_id,
         "intent": intent,
@@ -236,6 +252,7 @@ def _summarize_session(session_dir: Path, session_id: str) -> dict[str, Any]:
         "feature_passed": feature_passed,
         "critical_findings": critical_findings,
         "quality_score": quality_score,
+        "group_count": group_count,
         "finished_at": _session_finished_at(session_dir, summary, verdict),
         "lifecycle": lifecycle.get("lifecycle"),
     }

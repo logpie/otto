@@ -58,6 +58,30 @@ function formatCost(usd: number): string {
   return `$${usd.toFixed(2)}`;
 }
 
+// R3-B26: relative-time formatter for the run's finished_at. Mirrors
+// the SpecReviewPage formatter so spelling stays consistent ("4m ago",
+// "2h ago"). Returns null for in-flight runs (caller suppresses).
+const RTF =
+  typeof Intl !== "undefined" && Intl.RelativeTimeFormat
+    ? new Intl.RelativeTimeFormat(undefined, { numeric: "auto" })
+    : null;
+
+function formatRelative(iso: string | null): string | null {
+  if (!iso) return null;
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return null;
+  const diffMs = ts - Date.now();
+  const absSec = Math.abs(diffMs) / 1000;
+  if (!RTF) return iso;
+  if (absSec < 45) return "just now";
+  if (absSec < 60 * 60) return RTF.format(Math.round(diffMs / 60000), "minute");
+  if (absSec < 60 * 60 * 24) return RTF.format(Math.round(diffMs / 3600000), "hour");
+  if (absSec < 60 * 60 * 24 * 30) return RTF.format(Math.round(diffMs / 86400000), "day");
+  if (absSec < 60 * 60 * 24 * 365)
+    return RTF.format(Math.round(diffMs / (86400000 * 30)), "month");
+  return RTF.format(Math.round(diffMs / (86400000 * 365)), "year");
+}
+
 export function VerdictHeader({ view }: Props) {
   const tone = verdictTone(view.verdict);
   const passedFeatures = view.features.filter((f) => f.verdict === "passed").length;
@@ -71,6 +95,13 @@ export function VerdictHeader({ view }: Props) {
     !intentNeedsToggle || intentExpanded
       ? intentRaw
       : truncateIntent(intentRaw, INTENT_INLINE_LIMIT);
+  // R3-B26: human-readable "finished N ago" for terminal runs. We
+  // suppress the timestamp on in-flight runs (finished_at is null
+  // until the run lands) so the header doesn't show a stale or empty
+  // value. The full ISO timestamp lives on the <time> element's
+  // dateTime + title attributes for hover/inspection.
+  const finishedAt = view.meta.finished_at;
+  const finishedRelative = formatRelative(finishedAt);
 
   return (
     <header className={`run-drawer-header ${tone}`} data-testid="verdict-header">
@@ -103,6 +134,17 @@ export function VerdictHeader({ view }: Props) {
           </button>
         )}
       </div>
+      {finishedRelative && finishedAt && (
+        <div
+          className="run-drawer-finished-line"
+          data-testid="run-drawer-finished-line"
+        >
+          Finished{" "}
+          <time dateTime={finishedAt} title={finishedAt}>
+            {finishedRelative}
+          </time>
+        </div>
+      )}
       <dl className="metrics" data-testid="metrics">
         <div className="metric">
           <dt>Features</dt>

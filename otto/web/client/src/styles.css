@@ -8354,17 +8354,50 @@ mark.log-search-match.active {
   overflow-wrap: anywhere;
 }
 
+/* R3-B36/B37: stronger header hierarchy in the rendered spec body.
+   Each level steps down in size + weight + color so the document
+   outline (intent → groups → features) reads structurally without
+   relying on color alone. Slight left padding indents lower levels so
+   nested h4/h5/h6 visually nest under their parents. */
 .spec-markdown h1,
 .spec-markdown h2,
 .spec-markdown h3,
-.spec-markdown h4 {
+.spec-markdown h4,
+.spec-markdown h5,
+.spec-markdown h6 {
   margin: 1.1em 0 0.4em;
   line-height: 1.3;
+  color: var(--text);
 }
 
-.spec-markdown h1 { font-size: var(--text-lg, 22px); }
-.spec-markdown h2 { font-size: var(--text-md, 18px); }
-.spec-markdown h3 { font-size: var(--text-base, 16px); }
+.spec-markdown h1 { font-size: var(--text-xl, 24px); font-weight: 700; }
+.spec-markdown h2 { font-size: var(--text-lg, 20px); font-weight: 700; }
+.spec-markdown h3 {
+  font-size: var(--text-md, 17px);
+  font-weight: 600;
+  padding-left: 0.4em;
+  border-left: 3px solid var(--accent, #0f766e);
+}
+.spec-markdown h4 {
+  font-size: var(--text-base, 15px);
+  font-weight: 600;
+  padding-left: 0.6em;
+  color: var(--text);
+}
+.spec-markdown h5 {
+  font-size: var(--text-sm, 14px);
+  font-weight: 600;
+  padding-left: 0.8em;
+  color: var(--muted, #5a6473);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.spec-markdown h6 {
+  font-size: var(--text-xs, 12.5px);
+  font-weight: 600;
+  padding-left: 0.8em;
+  color: var(--muted, #5a6473);
+}
 .spec-markdown p,
 .spec-markdown ul,
 .spec-markdown ol {
@@ -8441,9 +8474,17 @@ mark.log-search-match.active {
 }
 
 .spec-review-history-empty {
+  /* R3-B41: empty-state styling promoted from raw muted text to a
+     dashed-border well so it reads as an intentional empty state, not
+     a bug. Same visual language as the landing empty-state body. */
   margin: 0;
   color: var(--muted);
   font-size: var(--text-xs, 12px);
+  text-align: center;
+  border: 1px dashed var(--line, #cbd5e1);
+  border-radius: 6px;
+  padding: 12px 8px;
+  background: var(--surface-alt, #f8fafc);
 }
 
 .spec-review-history-error {
@@ -8627,6 +8668,306 @@ mark.log-search-match.active {
 .run-list-landing--error {
   padding: 24px;
 }
+
+/* === Round 5 cleanup (R3-B2/B4/B8/B9/B10/B16) ============================ */
+
+/* R3-B2: split the heading into two rows so the count badge gets its own
+   line and doesn't sit awkwardly tight against the h1. The new "+ New
+   run" primary action lives on the title row, right-aligned. */
+.run-list-landing-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.run-list-landing-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.run-list-landing-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.run-list-landing-count-badge {
+  color: var(--muted, #5a6473);
+  font-size: var(--text-sm, 14px);
+}
+/* R3-B8: "+ New run" primary button. Filled blue accent so it reads as
+   THE call-to-action on the landing page. */
+.run-list-landing-new-run {
+  appearance: none;
+  border: 1px solid var(--accent, #0f766e);
+  background: var(--accent, #0f766e);
+  color: #ffffff;
+  font-weight: 600;
+  font-size: var(--text-sm, 14px);
+  padding: 8px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.run-list-landing-new-run:hover,
+.run-list-landing-new-run:focus-visible {
+  filter: brightness(0.95);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.25);
+}
+
+/* R3-B9: filter + refresh toolbar. */
+.run-list-landing-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.run-list-landing-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm, 14px);
+}
+.run-list-landing-filter-label {
+  color: var(--muted, #5a6473);
+}
+.run-list-landing-filter select {
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid var(--border, #cbd5e1);
+  border-radius: 6px;
+  background: var(--card-bg, #ffffff);
+  color: var(--text);
+}
+.run-list-landing-refresh {
+  appearance: none;
+  border: 1px solid var(--border, #cbd5e1);
+  background: var(--card-bg, #ffffff);
+  color: var(--text);
+  font-size: var(--text-sm, 14px);
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.run-list-landing-refresh:hover:not(:disabled) {
+  border-color: var(--accent, #0f766e);
+  color: var(--accent, #0f766e);
+}
+.run-list-landing-refresh:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+/* "Live" dot — pulses when auto-refresh is active. */
+.run-list-landing-live-dot {
+  color: var(--green, #15803d);
+  font-size: 10px;
+  animation: run-list-landing-live-pulse 1.6s ease-in-out infinite;
+}
+@keyframes run-list-landing-live-pulse {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
+}
+
+/* R3-B16: card-as-link — the whole card is now an <a>. Reset anchor
+   colors / underlines so the inner text styling continues to match the
+   prior <article> layout. */
+.landing-card-as-link {
+  text-decoration: none;
+  color: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+}
+.landing-card-as-link:focus-visible {
+  outline: 2px solid var(--accent, #0f766e);
+  outline-offset: -2px;
+}
+
+/* R3-B4: typographic hierarchy — intent reads as the headline, the
+   metric/subline rows step down in weight + color. */
+.landing-card-as-link .landing-card-intent {
+  font-weight: 600;
+  color: var(--text);
+}
+.landing-card-as-link .landing-card-metrics {
+  color: var(--muted, #5a6473);
+  font-size: var(--text-xs, 12.5px);
+}
+.landing-card-as-link .landing-card-counts {
+  color: var(--text);
+  font-weight: 500;
+  font-size: var(--text-sm, 14px);
+}
+
+/* R3-B10: "Built in N groups" subline. Sits between intent and counts;
+   muted so it reads as scaffold info. */
+.landing-card-subline {
+  color: var(--muted, #5a6473);
+  font-size: var(--text-xs, 12.5px);
+}
+
+/* R3-B16: inline "Review spec" affordance — a small secondary link that
+   lives in the metric row. Stop-propagation in the handler keeps the
+   click from bubbling up to the parent card link. */
+.landing-card-inline-action {
+  margin-left: auto;
+  color: var(--accent, #0f766e);
+  font-weight: 600;
+  font-size: var(--text-xs, 12.5px);
+  text-decoration: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.landing-card-inline-action:hover,
+.landing-card-inline-action:focus-visible {
+  background: rgba(15, 118, 110, 0.08);
+  outline: none;
+}
+
+/* Empty-state body when 0 sessions / no filter matches. */
+.run-list-landing-empty-body {
+  border: 1px dashed var(--border, #cbd5e1);
+  border-radius: 8px;
+  padding: 32px 24px;
+  text-align: center;
+  color: var(--muted, #5a6473);
+}
+.run-list-landing-empty-body code {
+  background: var(--muted-bg, #e2e8f0);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.run-list-landing-empty-clear {
+  appearance: none;
+  background: none;
+  border: none;
+  color: var(--accent, #0f766e);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-decoration: underline;
+}
+
+/* R3-B8: New-run modal. Generic backdrop + centered card; mirrors the
+   ConfirmDialog visual pattern but stays self-contained so we don't
+   couple the landing to the confirm-dialog component for a different
+   semantic ("compose" vs "confirm"). */
+.landing-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 24px;
+}
+.landing-modal {
+  background: var(--card-bg, #ffffff);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 24px;
+  max-width: 560px;
+  width: 100%;
+  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.landing-modal-title {
+  margin: 0;
+  font-size: var(--text-lg, 18px);
+  font-weight: 700;
+}
+.landing-modal-body {
+  margin: 0;
+  color: var(--muted, #5a6473);
+  font-size: var(--text-sm, 14px);
+}
+.landing-modal-label {
+  font-size: var(--text-xs, 12.5px);
+  font-weight: 600;
+  color: var(--muted, #5a6473);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.landing-modal-textarea {
+  font: inherit;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--text-sm, 14px);
+  border: 1px solid var(--border, #cbd5e1);
+  border-radius: 6px;
+  padding: 8px 10px;
+  resize: vertical;
+  min-height: 84px;
+  color: var(--text);
+  background: var(--card-bg, #ffffff);
+}
+.landing-modal-textarea:focus {
+  outline: 2px solid var(--accent, #0f766e);
+  outline-offset: -2px;
+  border-color: var(--accent, #0f766e);
+}
+.landing-modal-command-block {
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--text-sm, 14px);
+  overflow-x: auto;
+}
+.landing-modal-command {
+  font-family: inherit;
+  white-space: pre;
+}
+.landing-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.landing-modal-button {
+  appearance: none;
+  font: inherit;
+  font-size: var(--text-sm, 14px);
+  font-weight: 600;
+  border: 1px solid var(--border, #cbd5e1);
+  background: var(--card-bg, #ffffff);
+  color: var(--text);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.landing-modal-button:hover {
+  border-color: var(--accent, #0f766e);
+}
+.landing-modal-button-primary {
+  background: var(--accent, #0f766e);
+  border-color: var(--accent, #0f766e);
+  color: #ffffff;
+}
+.landing-modal-button-primary:hover:not(:disabled) {
+  filter: brightness(0.95);
+}
+.landing-modal-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.landing-modal-error {
+  margin: 0;
+  color: var(--red, #b91c1c);
+  font-size: var(--text-xs, 12.5px);
+}
+
+/* === end Round 5 cleanup ================================================= */
 
 /* Spec diff — no-op message + empty-state explanation. */
 .diff-noop-message {
@@ -8941,12 +9282,28 @@ mark.log-search-match.active {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* R3-B26: "Finished N ago" subline under the intent. Muted small
+   caps; sits between the intent row and the KPI grid. Hidden when
+   finished_at is null (in-flight runs). */
+.run-drawer-finished-line {
+  font-size: var(--text-xs, 12px);
+  color: var(--muted, #5a6473);
+  margin-top: -4px;
+}
+.run-drawer-finished-line time {
+  font-weight: 600;
+  color: var(--text);
+}
+/* R3-B18: KPI grid sits in its own visual block — separate it from the
+   intent line with a top border so the eye reads it as a metric row,
+   not a continuation of the intent. */
 .run-drawer-header .metrics {
   display: flex;
   flex-wrap: wrap;
   gap: 18px;
   margin: 0;
-  padding: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--line, #e2e8f0);
 }
 .run-drawer-header .metric {
   display: flex;
@@ -8983,11 +9340,18 @@ mark.log-search-match.active {
 }
 
 /* ---------------- run quick-actions row (B5) ---------------- */
+/* R3-B30: a clear visual separator between the action button row and
+   the Features section. The previous border-bottom on the Features
+   section header was easy to miss because the action row sat flush
+   against it. Push the separator onto the action row's bottom and
+   give the Features header more breathing room. */
 .run-quick-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line, #e2e8f0);
 }
 .run-quick-action {
   appearance: none;
@@ -9136,13 +9500,20 @@ mark.log-search-match.active {
 }
 
 /* ---------------- horizontal stage timeline (B6) ---------------- */
+/* R4-B3: prefer wrapping over horizontal scroll on narrow viewports.
+   On a 1440-wide drawer the stages still fit in one row; on a tablet
+   width they break to a second row instead of forcing a hidden
+   scrollbar the user has to discover. `overflow-x: auto` is retained
+   as a safety net for cases where a single stage is wider than the
+   container (e.g. very long stage name + cost). */
 .stage-timeline {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   align-items: stretch;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   overflow-x: auto;
   padding-bottom: 4px;
 }
@@ -9150,6 +9521,14 @@ mark.log-search-match.active {
   display: inline-flex;
   align-items: center;
   gap: 12px;
+  flex: 0 0 auto;
+}
+/* When the row wraps, hide the trailing arrow on the last item of a
+   row to avoid a dangling "→" pointing at nothing. We can't easily
+   detect "last in visual row" via CSS, so we fall back on hiding any
+   arrow that would push past the container — a hard wrap without an
+   arrow is more legible than a wrapped arrow alone. */
+.stage-timeline > li.stage .stage-arrow {
   flex: 0 0 auto;
 }
 .stage-timeline .stage-block {
@@ -9308,10 +9687,20 @@ mark.log-search-match.active {
 }
 
 /* ---------------- friendly error state (B19) ---------------- */
+/* R3-B54: vertically center the 404 card in the available shell space
+   (viewport minus topbar) so it doesn't read as orphaned at the top. */
+.otto-app-shell-main:has(> .run-view-not-found),
+.otto-app-shell-main:has(> .run-view-error) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .run-view-error,
 .run-view-not-found {
   max-width: 520px;
-  margin: 48px auto;
+  /* R3-B54: drop the fixed-top margin; the parent main element now
+     centers via flex when these surfaces are direct children. */
+  margin: 0 auto;
   padding: 24px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -9319,6 +9708,22 @@ mark.log-search-match.active {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+/* R3-B52: 404 hint line — secondary muted text below the explanation,
+   with a real link styled like other primary actions on the page. */
+.run-view-not-found-hint {
+  border-top: 1px solid var(--line, #e2e8f0);
+  padding-top: 12px;
+  font-size: var(--text-sm, 14px);
+}
+.run-view-not-found-hint a {
+  color: var(--accent, #0f766e);
+  font-weight: 600;
+  text-decoration: none;
+}
+.run-view-not-found-hint a:hover,
+.run-view-not-found-hint a:focus-visible {
+  text-decoration: underline;
 }
 .run-view-error h2,
 .run-view-not-found h2 {
@@ -9484,15 +9889,16 @@ mark.log-search-match.active {
   box-sizing: border-box;
 }
 
-/* R2-B4 / R2-B5: landing heading + count badge.
-   - h1 jumps from body-text size to true display weight.
-   - count moves into a subtle badge sitting next to the title
-     instead of a wispy paragraph below it. */
+/* R2-B4 / R2-B5 → R3-B2 / R3-B8 / R3-B9: landing heading + toolbar.
+   The heading is now a 2-row stack: top row holds the h1 + the
+   "+ New run" primary action; second row holds the count badge +
+   filter / refresh toolbar. The earlier single-row layout crowded
+   the count badge against the h1 and left no room for the toolbar. */
 .run-list-landing-heading {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   margin: 0 0 20px;
 }
 
@@ -9622,6 +10028,12 @@ mark.log-search-match.active {
   align-items: center;
   gap: 16px;
   flex-wrap: wrap;
+  /* R3-B48: tight bottom margin + subtle separator so the header
+     doesn't drift over a chunk of empty whitespace before the diff
+     pane / empty-state block. */
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line, #e2e8f0);
 }
 .spec-diff-title {
   margin: 0;

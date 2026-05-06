@@ -22,12 +22,18 @@ interface Props {
   // · abc123"). Lets per-page context surface in the chrome instead of
   // re-implementing a separate header inside each route component.
   pageLabel?: string | null;
+  // R3-B25: optional full text for the page-label tooltip. Set when
+  // `pageLabel` contains a truncated session id ("...abc123") so the
+  // user can hover to recover the full id without selecting / copying
+  // from the URL bar. Omit to fall back to `pageLabel` itself.
+  pageLabelTitle?: string | null;
 }
 
 export function AppShell({
   children,
   showBackToRuns = false,
   pageLabel = null,
+  pageLabelTitle = null,
 }: Props) {
   return (
     <div className="otto-app-shell" data-testid="otto-app-shell">
@@ -41,7 +47,11 @@ export function AppShell({
             Otto Mission Control
           </a>
           {pageLabel ? (
-            <span className="otto-app-shell-page-label" data-testid="otto-app-shell-page-label">
+            <span
+              className="otto-app-shell-page-label"
+              data-testid="otto-app-shell-page-label"
+              title={pageLabelTitle ?? pageLabel}
+            >
               <span className="otto-app-shell-page-label-sep" aria-hidden>
                 ·
               </span>

@@ -35,22 +35,37 @@ const specId = params.get("spec");
 // disconnected fragment.
 function renderRoute() {
   if (view === "run-view" && sessionId) {
+    // R3-B25: pass the full session id as the tooltip target so users
+    // can hover the truncated "...abc123" label and recover the full id
+    // without copying from the URL bar.
     return (
-      <AppShell showBackToRuns pageLabel={`Run detail · ${shortSession(sessionId)}`}>
+      <AppShell
+        showBackToRuns
+        pageLabel={`Run detail · ${shortSession(sessionId)}`}
+        pageLabelTitle={`Run detail · ${sessionId}`}
+      >
         <RunViewPage sessionId={sessionId} />
       </AppShell>
     );
   }
   if (view === "spec-review" && specId) {
     return (
-      <AppShell showBackToRuns pageLabel="Spec review">
+      <AppShell
+        showBackToRuns
+        pageLabel="Spec review"
+        pageLabelTitle={`Spec review · ${specId}`}
+      >
         <SpecReviewPage specId={specId} />
       </AppShell>
     );
   }
   if (view === "spec-diff" && sessionId) {
     return (
-      <AppShell showBackToRuns pageLabel="Spec diff">
+      <AppShell
+        showBackToRuns
+        pageLabel="Spec diff"
+        pageLabelTitle={`Spec diff · ${sessionId}`}
+      >
         <SpecDiffPage sessionId={sessionId} />
       </AppShell>
     );
@@ -67,12 +82,15 @@ function renderRoute() {
 // trailing hex is the most useful disambiguator at a glance.
 //
 // R3-B49: always truncate to "...<last 6 chars>" — even short or
-// otherwise-shaped ids (e.g. the "DOES-NOT-EXIST" 404 fixture). The
-// pre-fix `length <= 14` short-circuit caused real session ids to
-// render as "...abc123" while invalid/short ids rendered in full,
-// which read as inconsistent chrome.
+// otherwise-shaped ids (e.g. the "DOES-NOT-EXIST" 404 fixture).
+//
+// R4-B4: when the trimmed tail starts with a hyphen / dot / underscore
+// (e.g. "DOES-NOT-EXIST" → "-EXIST"), the resulting "...-EXIST" reads
+// as awkward leading punctuation. Strip leading non-alphanumerics from
+// the tail so we always render "...EXIST" / "...abc123" — no orphan
+// separator hugging the ellipsis.
 function shortSession(id: string): string {
-  const tail = id.slice(-6);
+  const tail = id.slice(-6).replace(/^[^A-Za-z0-9]+/, "");
   return `...${tail}`;
 }
 

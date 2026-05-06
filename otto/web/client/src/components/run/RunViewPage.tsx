@@ -51,6 +51,15 @@ export function RunViewPage({ sessionId, onSelectFeature }: Props) {
             Session ID <code>{sessionId}</code> doesn{"’"}t exist. It may
             have been deleted, or the URL is wrong.
           </p>
+          {/* R3-B52: tell the user concretely what to do next.
+              Session ids are auto-generated, so a typo is the most
+              common cause; copying from the browser's URL bar back
+              into a known-good list (Runs landing) recovers fast. */}
+          <p className="run-view-not-found-hint">
+            Check the URL — session ids look like{" "}
+            <code>2026-05-05-141532-a1b2c3</code>. Or pick a session from
+            the <a href="/">Runs list</a>.
+          </p>
         </div>
       );
     }
