@@ -27,6 +27,7 @@ from otto.mission_control.actions import (
     execute_resume_run,
 )
 from otto.mission_control.run_view import build_run_view
+from otto.mission_control.serializers import serialize_project
 from otto.web.session_resolver import (
     queue_state_for_session,
     resolve_session_dir,
@@ -104,6 +105,7 @@ def install_run_view_routes(
         view = build_run_view(
             session_dir,
             live_state=queue_state_for_session(project, session_id),
+            runtime_defaults=_run_view_runtime_defaults(project),
         )
         return JSONResponse(view)
 
@@ -186,6 +188,33 @@ def install_run_view_routes(
         session_dir = resolve_session_dir(project, session_id)
         return JSONResponse(_session_logs_payload(session_dir, group_id=group_id))
 
+    @router.get("/{session_id}/groups/{group_id}/logs")
+    def get_group_logs(session_id: str, group_id: str) -> JSONResponse:
+        project = _resolve_project_dir()
+        session_dir = resolve_session_dir(project, session_id)
+        safe_group_id = _safe_group_id(group_id)
+        return JSONResponse(
+            _session_logs_payload(session_dir, group_id=safe_group_id)
+        )
+
+    @router.get("/{session_id}/groups/{group_id}/diff")
+    def get_group_diff(session_id: str, group_id: str) -> JSONResponse:
+        project = _resolve_project_dir()
+        session_dir = resolve_session_dir(project, session_id)
+        safe_group_id = _safe_group_id(group_id)
+        view = build_run_view(
+            session_dir,
+            live_state=queue_state_for_session(project, session_id),
+            runtime_defaults=_run_view_runtime_defaults(project),
+        )
+        group = next(
+            (g for g in view.get("groups", []) if g.get("id") == safe_group_id),
+            None,
+        )
+        if group is None:
+            raise HTTPException(status_code=404, detail="group not found")
+        return JSONResponse(_group_diff_payload(session_dir, group))
+
     @router.get("/{session_id}/files")
     def get_files(session_id: str) -> JSONResponse:
         project = _resolve_project_dir()
@@ -193,6 +222,14 @@ def install_run_view_routes(
         return JSONResponse(_session_files_payload(session_dir))
 
     app.include_router(router)
+
+
+def _run_view_runtime_defaults(project: Path) -> dict[str, Any]:
+    try:
+        defaults = serialize_project(project).get("defaults")
+    except Exception:
+        return {}
+    return defaults if isinstance(defaults, dict) else {}
 
 
 def _action_to_json(result) -> dict:
@@ -352,33 +389,49 @@ def _session_finished_at(
 _LOG_NAME_LIMIT = 64
 _LOG_TEXT_LIMIT = 32_000
 _FILE_LIST_LIMIT = 300
+_DIFF_TEXT_LIMIT = 120_000
+_SAFE_GROUP_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _safe_group_id(group_id: str) -> str:
+    normalized = str(group_id or "").strip()
+    if not normalized or not _SAFE_GROUP_RE.fullmatch(normalized):
+        raise HTTPException(status_code=404, detail="group not found")
+    return normalized
 
 
 def _session_logs_payload(session_dir: Path, *, group_id: str | None = None) -> dict[str, Any]:
     safe_group_id = _safe_resource_id(group_id)
-    candidates = [] if safe_group_id else [
+    candidates = [
         session_dir / "spec-state.jsonl",
         session_dir / "state.jsonl",
-        session_dir / "summary.json",
-        session_dir / "proof-packet.json",
     ]
-    patterns = (
-        (
+    if safe_group_id:
+        for pattern in (
             f"build/{safe_group_id}/**/*.log",
             f"build/{safe_group_id}/**/*.jsonl",
-        )
-        if safe_group_id
-        else (
+            f"build/{safe_group_id}/**/*.md",
+            f"audit/{safe_group_id}/**/*.log",
+            f"audit/{safe_group_id}/**/*.jsonl",
+        ):
+            candidates.extend(sorted(session_dir.glob(pattern)))
+    else:
+        candidates.extend([
+            session_dir / "summary.json",
+            session_dir / "proof-packet.json",
+        ])
+        for pattern in (
+            "spec/**/*.log",
+            "spec/**/*.jsonl",
+            "spec/**/*.md",
             "build/**/*.log",
             "build/**/*.jsonl",
             "certify/**/*.log",
             "certify/**/*.jsonl",
             "audit/**/*.log",
             "audit/**/*.jsonl",
-        )
-    )
-    for pattern in patterns:
-        candidates.extend(sorted(session_dir.glob(pattern)))
+        ):
+            candidates.extend(sorted(session_dir.glob(pattern)))
 
     seen: set[Path] = set()
     logs: list[dict[str, Any]] = []
@@ -398,11 +451,40 @@ def _session_logs_payload(session_dir: Path, *, group_id: str | None = None) -> 
                 "truncated": stat.st_size > _LOG_TEXT_LIMIT,
             }
         )
-    return {
+    payload: dict[str, Any] = {
         "session_id": session_dir.name,
-        "group_id": safe_group_id,
         "logs": logs,
         "empty": not logs,
+    }
+    if safe_group_id:
+        payload["group_id"] = safe_group_id
+    return payload
+
+
+def _group_diff_payload(session_dir: Path, group: dict[str, Any]) -> dict[str, Any]:
+    group_id = str(group.get("id") or "")
+    branch = str(group.get("branch") or "").strip()
+    try:
+        text = _session_diff_text(session_dir, group_id=group_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return {
+            "session_id": session_dir.name,
+            "group_id": group_id,
+            "branch": branch,
+            "diff": "",
+            "truncated": False,
+            "error": str(exc),
+        }
+    truncated = len(text) > _DIFF_TEXT_LIMIT
+    return {
+        "session_id": session_dir.name,
+        "group_id": group_id,
+        "branch": branch,
+        "diff": text[:_DIFF_TEXT_LIMIT],
+        "truncated": truncated,
+        "error": None,
     }
 
 

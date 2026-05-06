@@ -179,55 +179,232 @@ def token_usage_from_mapping(mapping: Any) -> dict[str, int]:
     return prune_zero_token_usage(totals) if any(totals.values()) else {}
 
 
+def phase_breakdown_from_messages(session_dir: Path) -> dict[str, dict[str, Any]]:
+    """Read phase duration/token totals from ``messages.jsonl`` files.
+
+    New i2p runs nest provider streams under paths such as
+    ``spec/compile-agent/messages.jsonl``,
+    ``build/<group>/attempt-01/messages.jsonl`` and
+    ``audit/attempt-00/judge/messages.jsonl``. Scan recursively and infer
+    the canonical phase from the top-level directory so an audit judge whose
+    SDK logger reports ``phase=build`` is still accounted to ``audit``.
+    """
+    by_phase: dict[str, dict[str, Any]] = {}
+    if not session_dir.exists():
+        return by_phase
+    for entry in message_file_breakdown_from_messages(session_dir):
+        phase = str(entry.get("phase") or "")
+        if not phase:
+            continue
+        aggregate = by_phase.setdefault(phase, {})
+        add_token_usage(aggregate, _token_fields(entry))
+        if entry.get("duration_s") is not None:
+            aggregate["duration_s"] = (
+                float(aggregate.get("duration_s", 0.0) or 0.0)
+                + float(entry.get("duration_s") or 0.0)
+            )
+        if entry.get("cost_usd") is not None:
+            aggregate["cost_usd"] = (
+                float(aggregate.get("cost_usd", 0.0) or 0.0)
+                + float(entry.get("cost_usd") or 0.0)
+            )
+    return {
+        phase: _prune_phase_breakdown(data)
+        for phase, data in by_phase.items()
+        if _phase_has_data(data)
+    }
+
+
+def message_file_breakdown_from_messages(session_dir: Path) -> list[dict[str, Any]]:
+    """Return compact per-provider-call metrics from session JSONL logs.
+
+    This is deliberately metadata-only. It never returns prompt text,
+    assistant text, tool payloads, or raw transcript content, which keeps
+    summaries safe to pass through product surfaces without dragging large
+    ``messages.jsonl`` blobs back into model context.
+    """
+    entries: list[dict[str, Any]] = []
+    if not session_dir.exists():
+        return entries
+    for messages_path in _message_paths(session_dir):
+        phase_events: list[tuple[str, dict[str, int], dict[str, Any]]] = []
+        result_events: list[dict[str, Any]] = []
+        fallback = empty_token_usage()
+        fallback_seen = False
+        default_phase = _phase_from_message_path(session_dir, messages_path, messages_path.parent.name)
+        try:
+            fh = messages_path.open("r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                try:
+                    event = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                usage = token_usage_from_mapping(event.get("usage"))
+                event_type = event.get("type")
+                if event_type == "phase_end":
+                    phase = _phase_from_message_path(
+                        session_dir,
+                        messages_path,
+                        str(event.get("phase") or default_phase),
+                    )
+                    phase_events.append((phase, usage, event))
+                elif event_type == "result" and usage:
+                    result_events.append(event)
+                    add_token_usage(fallback, usage)
+                    fallback_seen = True
+        per_file: dict[str, dict[str, Any]] = {}
+        if phase_events:
+            resolved_phase_events = _prefer_subset_cached_result_usage(phase_events, result_events)
+            for (phase, usage), (_raw_phase, _phase_usage, event) in zip(
+                resolved_phase_events,
+                phase_events,
+                strict=False,
+            ):
+                _merge_metric_event(
+                    per_file.setdefault(
+                        phase,
+                        {
+                            "phase": phase,
+                            "path": _relative_message_path(session_dir, messages_path),
+                        },
+                    ),
+                    usage=usage,
+                    event=event,
+                )
+        elif fallback_seen:
+            entry = per_file.setdefault(
+                default_phase,
+                {
+                    "phase": default_phase,
+                    "path": _relative_message_path(session_dir, messages_path),
+                },
+            )
+            add_token_usage(entry, fallback)
+        entries.extend(
+            _prune_phase_breakdown(entry)
+            for entry in per_file.values()
+            if _phase_has_data(entry)
+        )
+    entries.sort(
+        key=lambda item: (
+            -int(item.get("total_tokens", 0) or 0),
+            -float(item.get("duration_s", 0.0) or 0.0),
+            str(item.get("path") or ""),
+        )
+    )
+    return entries
+
+
 def phase_token_usage_from_messages(session_dir: Path) -> dict[str, dict[str, int]]:
-    """Read phase token totals from ``*/messages.jsonl`` under a session.
+    """Read phase token totals from ``messages.jsonl`` under a session.
 
     Claude/Codex split-mode runs can emit accurate usage only in the phase
     message streams. Prefer explicit ``phase_end`` events to avoid double
     counting intermediate assistant/result events.
     """
-    by_phase: dict[str, dict[str, int]] = {}
-    if not session_dir.exists():
-        return by_phase
-    message_paths = []
+    return {
+        phase: prune_zero_token_usage(_token_fields(data))
+        for phase, data in phase_breakdown_from_messages(session_dir).items()
+        if any(_token_fields(data).values())
+    }
+
+
+_TOP_LEVEL_PHASES = frozenset({
+    "audit",
+    "build",
+    "certify",
+    "compile",
+    "fix",
+    "improve",
+    "merge",
+    "repair",
+    "seed",
+    "spec",
+})
+
+
+def _message_paths(session_dir: Path) -> list[Path]:
     root_messages = session_dir / "messages.jsonl"
+    paths: list[Path] = []
     if root_messages.exists():
-        message_paths.append(root_messages)
-    message_paths.extend(sorted(session_dir.glob("*/messages.jsonl")))
-    for messages_path in message_paths:
-        phase_events: list[tuple[str, dict[str, int], dict[str, Any]]] = []
-        result_events: list[dict[str, Any]] = []
-        fallback = empty_token_usage()
-        fallback_seen = False
-        default_phase = messages_path.parent.name
-        try:
-            lines = messages_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            try:
-                event = json.loads(line)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(event, dict):
-                continue
-            usage = token_usage_from_mapping(event.get("usage"))
-            if not usage:
-                continue
-            if event.get("type") == "phase_end":
-                phase = str(event.get("phase") or default_phase)
-                phase_events.append((phase, usage, event))
-            elif event.get("type") == "result":
-                result_events.append(event)
-                add_token_usage(fallback, usage)
-                fallback_seen = True
-        if phase_events:
-            resolved_phase_events = _prefer_subset_cached_result_usage(phase_events, result_events)
-            for phase, usage in resolved_phase_events:
-                add_token_usage(by_phase.setdefault(phase, empty_token_usage()), usage)
-        elif fallback_seen:
-            add_token_usage(by_phase.setdefault(default_phase, empty_token_usage()), fallback)
-    return {phase: prune_zero_token_usage(usage) for phase, usage in by_phase.items() if any(usage.values())}
+        paths.append(root_messages)
+    paths.extend(
+        path
+        for path in sorted(session_dir.rglob("messages.jsonl"))
+        if path != root_messages
+    )
+    return paths
+
+
+def _phase_from_message_path(session_dir: Path, messages_path: Path, fallback: str) -> str:
+    try:
+        parts = messages_path.relative_to(session_dir).parts
+    except ValueError:
+        return str(fallback or "build")
+    if len(parts) > 1 and parts[0] in _TOP_LEVEL_PHASES:
+        return parts[0]
+    fallback = str(fallback or "").strip().lower()
+    return fallback if fallback else "build"
+
+
+def _relative_message_path(session_dir: Path, messages_path: Path) -> str:
+    try:
+        return str(messages_path.relative_to(session_dir))
+    except ValueError:
+        return str(messages_path)
+
+
+def _merge_metric_event(
+    target: dict[str, Any],
+    *,
+    usage: dict[str, int],
+    event: dict[str, Any],
+) -> None:
+    if usage:
+        add_token_usage(target, usage)
+    duration_s = _coerce_float(event.get("duration_s"))
+    if duration_s is not None:
+        target["duration_s"] = float(target.get("duration_s", 0.0) or 0.0) + duration_s
+    raw_usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+    cost_usd = _coerce_float(raw_usage.get("cost_usd") or event.get("cost_usd"))
+    if cost_usd is not None:
+        target["cost_usd"] = float(target.get("cost_usd", 0.0) or 0.0) + cost_usd
+
+
+def _token_fields(mapping: dict[str, Any]) -> dict[str, int]:
+    return {
+        key: _coerce_int(mapping.get(key))
+        for key in TOKEN_USAGE_KEYS
+    }
+
+
+def _phase_has_data(mapping: dict[str, Any]) -> bool:
+    if any(_coerce_int(mapping.get(key)) for key in TOKEN_USAGE_KEYS):
+        return True
+    duration_s = _coerce_float(mapping.get("duration_s"))
+    cost_usd = _coerce_float(mapping.get("cost_usd"))
+    return bool((duration_s is not None and duration_s > 0) or (cost_usd is not None and cost_usd > 0))
+
+
+def _prune_phase_breakdown(mapping: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in ("phase", "path"):
+        if mapping.get(key):
+            out[key] = str(mapping[key])
+    for key in TOKEN_USAGE_KEYS:
+        value = _coerce_int(mapping.get(key))
+        if value:
+            out[key] = value
+    for key in ("duration_s", "cost_usd"):
+        value = _coerce_float(mapping.get(key))
+        if value is not None and value > 0:
+            out[key] = round(value, 4 if key == "cost_usd" else 3)
+    return out
 
 
 def _prefer_subset_cached_result_usage(
@@ -308,3 +485,12 @@ def _coerce_int(value: Any) -> int:
         return max(int(value or 0), 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return max(float(value), 0.0)
+    except (TypeError, ValueError):
+        return None

@@ -845,6 +845,13 @@ class MissionControlService:
                 ready_tasks.append(task)
 
             counts["total"] += 1
+            derived_stories_passed, derived_stories_tested = _i2p_story_counts_for_landing_task(
+                self.project_dir,
+                task,
+                raw_state if isinstance(raw_state, dict) else None,
+            )
+            stories_passed = _number_from_mapping(raw_state, "stories_passed")
+            stories_tested = _number_from_mapping(raw_state, "stories_tested")
             item = {
                 "task_id": task.id,
                 "run_id": _task_run_id(raw_state),
@@ -865,8 +872,8 @@ class MissionControlService:
                 "duration_s": _number_from_mapping(raw_state, "duration_s"),
                 "cost_usd": _number_from_mapping(raw_state, "cost_usd"),
                 "token_usage": _token_usage_from_mapping(raw_state) if isinstance(raw_state, dict) else {},
-                "stories_passed": _number_from_mapping(raw_state, "stories_passed"),
-                "stories_tested": _number_from_mapping(raw_state, "stories_tested"),
+                "stories_passed": stories_passed if stories_passed is not None else derived_stories_passed,
+                "stories_tested": stories_tested if stories_tested is not None else derived_stories_tested,
             }
             item["changed_file_count"] = len(diff["files"])
             item["changed_files"] = diff["files"][:8]
@@ -4764,6 +4771,89 @@ def _task_run_id(raw_state: Any) -> str | None:
 
 def _empty_landing_counts() -> dict[str, int]:
     return {**{key: 0 for key in LANDING_COUNT_KEYS}, "total": 0}
+
+
+def _i2p_story_counts_for_landing_task(
+    project_dir: Path,
+    task: Any,
+    raw_state: dict[str, Any] | None,
+) -> tuple[int | None, int | None]:
+    """Return feature-story counts for in-flight i2p queue tasks.
+
+    Queue state only gets ``stories_*`` fields after terminal summaries are
+    written. During active i2p work the compiled spec already names the user
+    visible features, and the task board should not show ``0``/``-`` while the
+    run drawer can show the real feature count.
+    """
+    session_dir = _landing_task_session_dir(project_dir, task, raw_state)
+    if session_dir is None:
+        return None, None
+    proof = _read_json_object(session_dir / "proof-packet.json")
+    if isinstance(proof, dict):
+        tested = _int_or_none(proof.get("stories_tested"))
+        passed = _int_or_none(proof.get("stories_passed"))
+        features = proof.get("features")
+        if tested is None and isinstance(features, list):
+            tested = len([item for item in features if isinstance(item, dict)])
+        if passed is None and isinstance(features, list):
+            passed = sum(
+                1
+                for item in features
+                if isinstance(item, dict)
+                and str(item.get("verdict") or "").lower() in {"passed", "warn", "warning"}
+            )
+        if tested:
+            return passed or 0, tested
+    spec = _read_json_object(session_dir / "spec" / "spec.json")
+    feature_count = _feature_count_from_i2p_spec(spec)
+    if feature_count:
+        return 0, feature_count
+    return None, None
+
+
+def _landing_task_session_dir(
+    project_dir: Path,
+    task: Any,
+    raw_state: dict[str, Any] | None,
+) -> Path | None:
+    ready = _read_json_object(paths.queue_ready_path(project_dir, str(task.id)))
+    if isinstance(ready, dict):
+        session_dir = _optional_str(ready.get("session_dir"))
+        if session_dir:
+            return Path(session_dir)
+    if isinstance(raw_state, dict):
+        session_dir = _optional_str(raw_state.get("session_dir"))
+        if session_dir:
+            return Path(session_dir)
+        run_id = _optional_str(raw_state.get("child_run_id")) or _optional_str(raw_state.get("attempt_run_id"))
+        if run_id:
+            worktree = _optional_str(getattr(task, "worktree", None))
+            if worktree:
+                worktree_path = Path(worktree)
+                if not worktree_path.is_absolute():
+                    worktree_path = project_dir / worktree_path
+                return paths.session_dir(worktree_path, run_id)
+    return None
+
+
+def _feature_count_from_i2p_spec(spec: Any) -> int | None:
+    if not isinstance(spec, dict):
+        return None
+    features = spec.get("features")
+    if isinstance(features, list) and features:
+        return len([item for item in features if isinstance(item, dict)])
+    raw_groups = spec.get("groups") or spec.get("slices") or []
+    if not isinstance(raw_groups, list):
+        return None
+    feature_ids: set[str] = set()
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            continue
+        for feature_id in group.get("feature_ids") or []:
+            text = str(feature_id).strip()
+            if text:
+                feature_ids.add(text)
+    return len(feature_ids) or None
 
 
 def _landing_task_diff(

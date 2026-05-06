@@ -14,6 +14,7 @@ The build agent is mocked throughout; the LLM never runs.
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from otto.build import (
     GroupStatus,
     _build_agent_prompt,
     _commit_group_work,
+    _write_build_context_packet,
     default_build_agent,
     detect_dependency_scope_extensions,
     detect_scope_violations,
@@ -34,6 +36,7 @@ from otto.spec_compile import (
     Feature,
     RepoTestCheck,
     Group,
+    PytestCheck,
     Spec,
     StateInvariant,
     StructureDecisions,
@@ -174,6 +177,43 @@ def test_scope_violations_allows_shared_scaffold() -> None:
     )
     s2 = spec.groups[1]
     violations = detect_scope_violations(s2, spec, ["package.json", "tsconfig.json"])
+    assert violations == []
+
+
+def test_scope_violations_warns_on_existing_unowned_file(tmp_path: Path) -> None:
+    """Existing config files must be declared own/shared/dependency scope."""
+    spec = _spec(
+        [
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app.py"], feature_ids=[], checks=[]),
+        ]
+    )
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+
+    violations = detect_scope_violations(
+        spec.groups[0],
+        spec,
+        ["pyproject.toml"],
+        project_root=tmp_path,
+    )
+
+    assert violations == ["pyproject.toml"]
+
+
+def test_scope_violations_allows_new_unowned_file(tmp_path: Path) -> None:
+    """New supporting files remain allowed as implicit shared scaffold."""
+    spec = _spec(
+        [
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app.py"], feature_ids=[], checks=[]),
+        ]
+    )
+
+    violations = detect_scope_violations(
+        spec.groups[0],
+        spec,
+        ["README.md"],
+        project_root=tmp_path,
+    )
+
     assert violations == []
 
 
@@ -834,6 +874,80 @@ def test_build_agent_prompt_writeable_paths_only(tmp_path: Path) -> None:
     )
 
 
+def test_build_agent_prompt_allows_explicit_shared_entrypoint_edits(tmp_path: Path) -> None:
+    """Brownfield apps often need a small route/bootstrap edit.
+
+    If the compiler put an entry point in shared_scaffold, the prompt
+    should not contradict itself with blanket read-only language.
+    """
+    group = Group(
+        id="dashboard",
+        name="Dashboard",
+        owned_paths=["templates/dashboard.html"],
+        feature_ids=["pass SLA summary to dashboard template"],
+        checks=[],
+    )
+    spec = _spec([group])
+    spec.shared_scaffold = ["app.py"]
+    inp = BuildAgentInput(
+        spec=spec,
+        group=group,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="x",
+        attempt=1,
+    )
+
+    prompt = _build_agent_prompt(inp)
+
+    assert "**Shared scaffold (any slice may extend):**" in prompt
+    assert "`app.py`" in prompt
+    assert "If one is listed under **Yours** or **Shared scaffold**" in prompt
+    assert "may make the smallest necessary edit" in prompt
+    assert "DO NOT modify them" not in prompt
+
+
+def test_build_agent_prompt_steers_dep_owned_entrypoints_to_registration_points(
+    tmp_path: Path,
+) -> None:
+    """Dep-owned entry points remain merge hot spots.
+
+    The prompt should ask downstream slices to use a registration seam or
+    amendment instead of freely editing a transitive dependency entry point.
+    """
+    shell = Group(
+        id="shell",
+        name="Shell",
+        owned_paths=["app.py"],
+        feature_ids=[],
+        checks=[],
+    )
+    widget = Group(
+        id="widget",
+        name="Widget",
+        dependencies=["shell"],
+        owned_paths=["templates/widget.html"],
+        feature_ids=["register widget route"],
+        checks=[],
+    )
+    spec = _spec([shell, widget])
+    inp = BuildAgentInput(
+        spec=spec,
+        group=widget,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="x",
+        attempt=1,
+    )
+
+    prompt = _build_agent_prompt(inp)
+
+    assert "`app.py` (owned by `shell`)" in prompt
+    assert "appears only through **Dep-owned**" in prompt
+    assert "prefer the dependency's registration point" in prompt
+    assert "request an amendment via `.otto/amendment_request.json`" in prompt
+
+
 def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:
     s = Group(
         id="s1",
@@ -861,6 +975,57 @@ def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:
     assert "app/auth/*" in prompt
     assert "social network MVP" in prompt
     assert "Previous attempt failed" not in prompt
+
+
+def test_build_context_packet_keeps_full_structure_available_without_prompt_dump(
+    tmp_path: Path,
+) -> None:
+    s = Group(
+        id="reports",
+        name="Reports",
+        owned_paths=["app/reports/*"],
+        feature_ids=["f-reports"],
+        checks=[_no_op_passing_check()],
+    )
+    spec = _spec([s])
+    spec.structure = StructureDecisions(
+        payload={
+            "huge_contract": "X" * 5000,
+            "api_shape": {"field": "manager_sla_age_days"},
+        }
+    )
+    spec.features = [
+        Feature(
+            id="f-reports",
+            name="Manager SLA report",
+            description="Show aged approvals",
+            group_id="reports",
+        )
+    ]
+    packet_path = tmp_path / "session" / "build" / "reports" / "attempt-01" / "context-packet.json"
+    full_spec_path = tmp_path / "session" / "spec" / "spec.json"
+    inp = BuildAgentInput(
+        spec=spec,
+        group=s,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="i2p/x/reports",
+        attempt=1,
+        context_packet_path=packet_path,
+        full_spec_path=full_spec_path,
+    )
+
+    _write_build_context_packet(inp, packet_path)
+    prompt = _build_agent_prompt(inp)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+
+    assert packet["full_spec_path"] == str(full_spec_path)
+    assert packet["structure"]["payload"]["huge_contract"] == "X" * 5000
+    assert packet["features_for_group"][0]["id"] == "f-reports"
+    assert str(packet_path) in prompt
+    assert str(full_spec_path) in prompt
+    assert "huge_contract" in prompt
+    assert "X" * 1000 not in prompt
 
 
 def test_build_agent_prompt_includes_last_failure_on_retry(tmp_path: Path) -> None:
@@ -961,6 +1126,29 @@ def test_build_agent_prompt_surfaces_seeded_test_files(tmp_path: Path) -> None:
     prompt = _build_agent_prompt(inp)
     assert "tests/run_acceptance.py" in prompt
     assert "tests/conftest.py" in prompt
+
+
+def test_build_agent_prompt_uses_target_runtime_for_pytest_checks(tmp_path: Path) -> None:
+    s = Group(
+        id="sla",
+        name="SLA",
+        checks=[PytestCheck(selector="tests/test_sla_aging.py", timeout_s=120)],
+    )
+    spec = _spec([s])
+    inp = BuildAgentInput(
+        spec=spec,
+        group=s,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="x",
+        attempt=1,
+    )
+
+    prompt = _build_agent_prompt(inp)
+
+    assert "python -m pytest tests/test_sla_aging.py" in prompt
+    assert "global pytest executable" in prompt
+    assert "pytest selector `tests/test_sla_aging.py`" not in prompt
 
 
 def test_build_agent_prompt_omits_contract_section_when_no_contract(tmp_path: Path) -> None:

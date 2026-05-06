@@ -12,9 +12,8 @@
 // Defaults (B28): when at least one archived version exists, the page
 // loads with `From=last archived` and `To=current` — this gives the
 // most useful diff out of the box (what changed since the last save?).
-// When zero archived versions exist (B15), the dropdowns still render
-// but only "current" is selectable; the empty-state explanation is
-// shown above the diff pane.
+// When zero archived versions exist, the page hides the no-op comparison
+// controls and shows one focused empty state.
 //
 // We deliberately avoid heavyweight diff libraries: `diff` is not in the
 // dependency tree, and the spec markdown is small (hundreds of lines at
@@ -300,6 +299,7 @@ export function SpecDiffPage({ sessionId }: Props) {
   }
 
   const hasArchived = versions.length > 0;
+  const showVersionControls = hasArchived;
 
   return (
     // R2-B29 (option a): the page now uses the app's light-theme tokens
@@ -310,7 +310,7 @@ export function SpecDiffPage({ sessionId }: Props) {
       <header className="spec-diff-header">
         <h1 className="spec-diff-title">
           Spec diff
-          {from !== null && to !== null ? (
+          {showVersionControls && from !== null && to !== null ? (
             <>
               {" "}
               {/* R2-B28: render the version labels with identical
@@ -330,70 +330,62 @@ export function SpecDiffPage({ sessionId }: Props) {
             </>
           ) : null}
         </h1>
-        <div className="spec-diff-controls">
-          <label className="spec-diff-label">
-            <span>From</span>
-            <select
-              value={from === null ? "" : encodeVersionParam(from)}
-              onChange={(e) => setFrom(parseVersionId(e.target.value))}
-              aria-label="Compare from version"
-              data-testid="spec-diff-from"
+        {showVersionControls ? (
+          <div className="spec-diff-controls">
+            <label className="spec-diff-label">
+              <span>From</span>
+              <select
+                value={from === null ? "" : encodeVersionParam(from)}
+                onChange={(e) => setFrom(parseVersionId(e.target.value))}
+                aria-label="Compare from version"
+                data-testid="spec-diff-from"
+              >
+                {dropdownOptions.map((v) => (
+                  <option key={String(v)} value={encodeVersionParam(v)}>
+                    {labelFor(v)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="spec-diff-swap"
+              data-testid="spec-diff-swap"
+              aria-label="Swap From and To versions"
+              title="Swap versions"
+              onClick={handleSwap}
+              disabled={from === null || to === null}
             >
-              {dropdownOptions.map((v) => (
-                <option key={String(v)} value={encodeVersionParam(v)}>
-                  {labelFor(v)}
-                </option>
-              ))}
-            </select>
-          </label>
-          {/* R2-B27: swap From and To. Disabled when either side is
-              unset (shouldn't happen post-load, but defensive). */}
-          <button
-            type="button"
-            className="spec-diff-swap"
-            data-testid="spec-diff-swap"
-            aria-label="Swap From and To versions"
-            title="Swap versions"
-            onClick={handleSwap}
-            disabled={from === null || to === null}
-          >
-            ⇄
-          </button>
-          <label className="spec-diff-label">
-            <span>To</span>
-            <select
-              value={to === null ? "" : encodeVersionParam(to)}
-              onChange={(e) => setTo(parseVersionId(e.target.value))}
-              aria-label="Compare to version"
-              data-testid="spec-diff-to"
+              ⇄
+            </button>
+            <label className="spec-diff-label">
+              <span>To</span>
+              <select
+                value={to === null ? "" : encodeVersionParam(to)}
+                onChange={(e) => setTo(parseVersionId(e.target.value))}
+                aria-label="Compare to version"
+                data-testid="spec-diff-to"
+              >
+                {dropdownOptions.map((v) => (
+                  <option key={String(v)} value={encodeVersionParam(v)}>
+                    {labelFor(v)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="spec-diff-fold-toggle"
+              data-testid="spec-diff-fold-toggle"
+              aria-pressed={onlyChanges}
+              onClick={() => setOnlyChanges((v) => !v)}
+              disabled={!diff || isNoop}
+              title={!diff || isNoop ? "No diff to filter" : undefined}
             >
-              {dropdownOptions.map((v) => (
-                <option key={String(v)} value={encodeVersionParam(v)}>
-                  {labelFor(v)}
-                </option>
-              ))}
-            </select>
-          </label>
-          {/* R2-B26: show-only-changes toggle. Default unchecked →
-              preserves prior behavior (full diff with all context).
-              R3-B45: re-styled as a clearly-toggle button — outlined
-              when inactive, filled-blue when active. `aria-pressed`
-              is already set so screen readers + assistive tech read
-              the toggle state correctly.
-              R3-B47: when disabled (no diff to filter), surface a
-              title tooltip explaining why. */}
-          <button
-            type="button"
-            className="spec-diff-fold-toggle"
-            data-testid="spec-diff-fold-toggle"
-            aria-pressed={onlyChanges}
-            onClick={() => setOnlyChanges((v) => !v)}
-            disabled={!diff || isNoop}
-            title={!diff || isNoop ? "No diff to filter" : undefined}
-          >
-            {onlyChanges ? "Show full diff" : "Show only changes"}
-          </button>
-        </div>
+              {onlyChanges ? "Show full diff" : "Show only changes"}
+            </button>
+          </div>
+        ) : null}
       </header>
 
       {/* R3-B44: collapse the previously-stacked empty-state messages

@@ -143,6 +143,8 @@ export function buildQueuePayload(args: {
   provider: string;
   model: string;
   effort: string;
+  budget: string;
+  maxTurns: string;
   buildProvider: string;
   buildModel: string;
   buildEffort: string;
@@ -162,24 +164,25 @@ export function buildQueuePayload(args: {
   const after = splitCsv(args.after);
   if (args.taskId) payload.as = args.taskId;
   if (after.length) payload.after = after;
-  if (args.command !== "certify") {
-    payload.extra_args.push(args.executionMode === "agentic" ? "--agentic" : "--split");
-  }
   if (args.provider) payload.extra_args.push("--provider", args.provider);
   if (args.model) payload.extra_args.push("--model", args.model);
   if (args.effort) payload.extra_args.push("--effort", args.effort);
+  const budget = args.budget.trim();
+  if (budget) payload.extra_args.push("--budget", budget);
+  const maxTurns = args.maxTurns.trim();
+  if (maxTurns) payload.extra_args.push("--max-turns", maxTurns);
   const rounds = args.rounds.trim();
-  if (rounds) payload.extra_args.push("--rounds", rounds);
-  if (args.command === "build" && args.executionMode === "split") {
+  if (args.command === "improve" && rounds) payload.extra_args.push("--rounds", rounds);
+  if (args.command === "build") {
     pushPhaseArgs(payload.extra_args, "build", args.buildProvider, args.buildModel, args.buildEffort);
   }
-  if (args.command === "certify" || args.executionMode === "split") {
+  if (args.command === "certify" || args.command === "build" || args.command === "improve") {
     pushPhaseArgs(payload.extra_args, "certifier", args.certifierProvider, args.certifierModel, args.certifierEffort);
   }
-  if (args.command !== "certify" && args.executionMode === "split") {
+  if (args.command === "build" || args.command === "improve") {
     pushPhaseArgs(
       payload.extra_args,
-      args.command === "improve" ? "improver" : "fix",
+      "fix",
       args.fixProvider,
       args.fixModel,
       args.fixEffort,

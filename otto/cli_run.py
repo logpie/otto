@@ -41,6 +41,7 @@ from otto.build import (
     BuildBudget,
     BuildResult,
     default_build_agent,
+    resolve_integration_base_branch,
     run_build,
 )
 from otto.config import (
@@ -59,6 +60,7 @@ from otto.merge_queue import (
     MergeQueueResult,
     run_merge_queue,
 )
+from otto.queue.runtime import mark_queue_child_ready
 from otto.resume import (
     ResumeError,
     ResumePlan,
@@ -68,7 +70,6 @@ from otto.resume import (
     verify_spec_hash_matches,
 )
 from otto.runner import RunResult, run_pipeline
-from otto.queue.runtime import mark_queue_child_ready
 from otto.spec_compile import (
     PROJECT_KINDS,
     Spec,
@@ -377,6 +378,7 @@ async def _drive_full_pipeline(
     # exceed the documented "$30 total" ceiling because nobody owns
     # the shared accounting.
     shared_budget = BuildBudget()
+    base_branch = resolve_integration_base_branch(project_dir)
     console.print("  [bold]Build phase[/bold] — dispatching group agents")
     build_result = await run_build(
         spec,
@@ -385,6 +387,7 @@ async def _drive_full_pipeline(
         build_agent=default_build_agent,
         base_url=base_url,
         budget=shared_budget,
+        base_branch=base_branch,
     )
     console.print(
         f"  Build: {len(build_result.passing_ids)}/{len(build_result.group_results)} "
@@ -407,6 +410,7 @@ async def _drive_full_pipeline(
         build_agent=default_build_agent,
         budget=MergeBudget(),
         shared_budget=shared_budget,
+        base_branch=base_branch,
     )
     console.print(
         f"  Merge: {len(merge_result.landed_ids)} landed, "
@@ -1011,6 +1015,14 @@ def orchestrate_run(
         except SpecValidationError as exc:
             error_console.print(f"[error]Spec compile failed:[/error]\n{exc}")
             sys.exit(1)
+
+    mark_queue_child_ready(
+        project_dir,
+        run_id=session_id,
+        phase="i2p",
+        session_dir=session_dir,
+        checkpoint_path=session_dir / "checkpoint.json",
+    )
 
     # Drive seed → build → merge → audit → repair → render via runner.
     try:

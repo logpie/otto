@@ -43,7 +43,6 @@ from otto.spec_compile import (
     Group,
     Spec,
     _iso_now,
-    append_amendment,
     spec_content_sha256,
 )
 from otto.spec_state import find_event

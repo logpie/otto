@@ -48,6 +48,36 @@ logger = logging.getLogger("otto.build")
 
 
 # ---------------------------------------------------------------------------
+# Git branch helpers
+# ---------------------------------------------------------------------------
+
+
+def resolve_integration_base_branch(project_dir: Path, fallback: str = "main") -> str:
+    """Return the branch that should receive this i2p run's slice merges.
+
+    Otto runs inside ordinary git worktrees and queue-managed linked
+    worktrees. In the latter case, the parent project may already have
+    `main` checked out, so a hard-coded `git checkout main` from the queue
+    worktree fails with "already used by worktree". The integration target
+    is the branch the operator/queue task started on.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return fallback
+    branch = (proc.stdout or "").strip()
+    if proc.returncode == 0 and branch and branch != "HEAD":
+        return branch
+    return fallback
+
+
+# ---------------------------------------------------------------------------
 # Status + budgets
 # ---------------------------------------------------------------------------
 
@@ -284,6 +314,7 @@ class BuildResult:
     component_results: list[ComponentResult] = field(default_factory=list)
     total_cost_usd: float = 0.0
     total_wall_s: float = 0.0
+    base_branch: str = ""
 
     @property
     def all_passing(self) -> bool:
@@ -358,6 +389,8 @@ class BuildAgentInput:
     feature_id: str = ""  # Layer 2 narrowing: fix only this feature in the slice
     agent_session_id: str = ""  # resume same provider conversation across attempts
     config: dict[str, Any] = field(default_factory=dict)
+    context_packet_path: Path | None = None
+    full_spec_path: Path | None = None
 
 
 @dataclass
@@ -459,8 +492,8 @@ def detect_scope_violations(
       slice's transitive deps. (Downstream slices extend foundations
       they depend on. Peers cannot trample each other.)
     - A path is allowed if it was newly created (file did not exist before).
-    - Otherwise: violation if it matches a peer slice's `owned_paths`
-      (a slice not in this slice's transitive deps).
+    - Otherwise: warning if it is an existing unowned path or if it matches a
+      peer slice's `owned_paths` (a slice not in this slice's transitive deps).
 
     Newness is approximated: if `project_root` is provided, a path is
     "newly created" iff it does not currently exist on disk. In tests,
@@ -506,8 +539,11 @@ def detect_scope_violations(
             # downstream slices extend foundations they depend on.
             continue
         if not _matches_any(path, peer_globs):
-            # Not under any slice's ownership — implicitly shared
-            # (agents may add new top-level files like README.md).
+            # Newly created unowned paths are implicitly shared scaffold. Edits
+            # to existing unowned files are still scope-relevant because the
+            # compiler failed to declare them as own/shared/dependency scope.
+            if project_root is not None and (project_root / path).exists():
+                violations.append(path)
             continue
         # Peer-slice ownership. Check if it's newly created.
         if project_root is not None:
@@ -605,10 +641,9 @@ def _matches_any(path: str, globs: list[str]) -> bool:
                 # zero (so a/**/b matches a/b)
                 for depth in range(0, 6):
                     middle = "/".join(["*"] * depth) if depth else ""
-                    if middle:
-                        candidate = f"{left}/{middle}/{right}".replace("//", "/")
-                    else:
-                        candidate = f"{left}/{right}".replace("//", "/")
+                    candidate = "/".join(
+                        part for part in (left, middle, right) if part
+                    )
                     if fnmatch(path, candidate):
                         return True
     return False
@@ -1099,7 +1134,7 @@ async def run_build(
     config: dict[str, Any] | None = None,
     base_url: str | None = None,
     budget: BuildBudget | None = None,
-    base_branch: str = "main",
+    base_branch: str | None = None,
     branch_for_group: Callable[[Group], str] | None = None,
     worktree_for_group: Callable[[Group], Path] | None = None,
     on_state_change: Callable[[str, str, dict[str, Any]], None] | None = None,
@@ -1130,6 +1165,7 @@ async def run_build(
     follow-up; the readiness logic is structured to support it.
     """
     config = dict(config or {})
+    base_branch = base_branch or resolve_integration_base_branch(project_dir)
     budget = budget or BuildBudget()
     branch_for_group = branch_for_group or (
         lambda s: f"i2p/{session_dir.name}/{s.id}"
@@ -1543,6 +1579,7 @@ async def run_build(
         component_results=component_results,
         total_cost_usd=total_cost,
         total_wall_s=time.monotonic() - total_t0,
+        base_branch=base_branch,
     )
 
 
@@ -1764,6 +1801,8 @@ async def _run_slice(
         prior_diff_hash = current_diff_hash
 
         attempt_t0 = time.monotonic()
+        prompt_dir = session_dir / "build" / group_obj.id / f"attempt-{attempt:02d}"
+        full_spec_path = session_dir / "spec" / "spec.json"
         agent_input = BuildAgentInput(
             spec=spec,
             group=group_obj,
@@ -1775,19 +1814,22 @@ async def _run_slice(
             log_dir=raw_log_dir,
             agent_session_id=agent_session_id,
             config=config,
+            context_packet_path=prompt_dir / "context-packet.json",
+            full_spec_path=full_spec_path if full_spec_path.exists() else None,
         )
 
-        # v2 phase 4 (observability): archive the rendered prompt
-        # alongside the agent's narrative log so post-hoc review can
-        # answer "did the agent see X instruction?" without parsing
-        # messages.jsonl. Cheap; one file per attempt.
+        # v2 phase 4 (observability): archive the compact context packet
+        # and rendered prompt alongside the agent's narrative log so
+        # post-hoc review can answer "did the agent see X instruction?"
+        # without parsing messages.jsonl. Cheap; one pair per attempt.
         try:
-            prompt_dir = session_dir / "build" / group_obj.id / f"attempt-{attempt:02d}"
             prompt_dir.mkdir(parents=True, exist_ok=True)
+            _write_build_context_packet(agent_input, agent_input.context_packet_path)
             (prompt_dir / "prompt.md").write_text(
                 _build_agent_prompt(agent_input), encoding="utf-8"
             )
         except OSError as exc:
+            agent_input.context_packet_path = None
             logger.warning("failed to archive prompt for %s attempt %d: %s",
                            group_obj.id, attempt, exc)
         try:
@@ -2073,6 +2115,86 @@ async def _run_component(
 # ---------------------------------------------------------------------------
 
 
+def _write_build_context_packet(
+    agent_input: BuildAgentInput,
+    packet_path: Path | None,
+) -> None:
+    """Write the durable context packet referenced by the build prompt.
+
+    Slice-critical contracts stay inline in ``_build_agent_prompt``. Broad
+    product context that can become large — full structure payload,
+    cross-group checks, non-goals, and peer/dependency details — lives in
+    this JSON file. Agents retain full capability because the packet also
+    points at the canonical full ``spec.json``.
+    """
+    if packet_path is None:
+        return
+    import json as _json
+    from otto.spec_compile import spec_to_dict
+
+    spec_dict = spec_to_dict(agent_input.spec)
+    group_id = agent_input.group.id
+    group = next(
+        (g for g in spec_dict.get("groups", []) if isinstance(g, dict) and g.get("id") == group_id),
+        None,
+    ) or {
+        "id": agent_input.group.id,
+        "name": agent_input.group.name,
+        "feature_ids": list(agent_input.group.feature_ids),
+        "dependencies": list(agent_input.group.dependencies),
+        "owned_paths": list(agent_input.group.owned_paths),
+        "checks": [_describe_check(c) for c in agent_input.group.checks],
+    }
+    features = [
+        feature for feature in spec_dict.get("features", [])
+        if isinstance(feature, dict)
+        and (
+            feature.get("group_id") == group_id
+            or feature.get("id") in set(agent_input.group.feature_ids)
+        )
+    ]
+    dependency_ids = set(agent_input.group.dependencies or [])
+    dependency_groups = [
+        g for g in spec_dict.get("groups", [])
+        if isinstance(g, dict) and g.get("id") in dependency_ids
+    ]
+    dependency_components = [
+        c for c in spec_dict.get("components", [])
+        if isinstance(c, dict) and c.get("id") in dependency_ids
+    ]
+    packet = {
+        "schema_version": 1,
+        "kind": "build_context_packet",
+        "project_dir": str(agent_input.project_dir),
+        "worktree": str(agent_input.worktree),
+        "branch": agent_input.branch,
+        "attempt": agent_input.attempt,
+        "full_spec_path": str(agent_input.full_spec_path or ""),
+        "group": group,
+        "features_for_group": features,
+        "dependencies": {
+            "groups": dependency_groups,
+            "components": dependency_components,
+        },
+        "shared_scaffold": list(agent_input.spec.shared_scaffold),
+        "shared_paths": list(getattr(agent_input.spec, "shared_paths", []) or []),
+        "cross_group_checks": spec_dict.get("cross_group_checks", []),
+        "done_means": list(agent_input.spec.done_means),
+        "non_goals": list(agent_input.spec.non_goals),
+        "structure": spec_dict.get("structure", {}),
+        "notes": [
+            "This packet is a compact durable context file for the current build slice.",
+            "The prompt contains the slice-critical task/scope/check contract inline.",
+            "Open full_spec_path when broader product context or exact peer contracts are needed.",
+        ],
+    }
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(
+        _json.dumps(packet, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     """Compose the per-attempt prompt for the build agent.
 
@@ -2230,27 +2352,26 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         "silently over-reaching."
     )
     lines.append("")
-    # V16b: even when the scope check would allow modifying a transitive
-    # dep's owned file (the "downstream slices extend foundations"
-    # exception), specific FILE PATTERNS are extension points where
-    # modification by sibling slices causes unrecoverable merge
-    # conflicts. Spell this out so the agent treats them as read-only.
+    # V16b: entry points are high-contention files, but the compiler may
+    # intentionally classify one as a slice-owned or shared-scaffold path
+    # for brownfield apps where the only honest implementation is a small
+    # route/bootstrap edit. Avoid the old blanket "never edit app.py" rule:
+    # it contradicted the Scope section and pushed agents into template-only
+    # workarounds that hid real route/data changes.
     lines.append(
-        "**App entry points are read-only across slices.** Even if a "
-        "transitive dep's `owned_paths` includes one of these — "
+        "**Entry-point files need extra care.** Files such as "
         "`app.py`, `app/__init__.py`, `wsgi.py`, `main.py`, `cli.py`, "
         "`models.py`, `db/__init__.py`, `routes.py`, `urls.py`, "
-        "`server.py`, `index.ts`, `index.js`, `cmd/main.go` — DO NOT "
-        "modify them. Multiple slices each editing the same entry-point "
-        "to register their own routes/blueprints/models will hit a "
-        "merge conflict that Otto's fix-loop cannot reliably resolve. "
-        "Instead: the foundation slice provides a registration point "
-        "(auto-discovery loop or explicit list); your slice creates a "
-        "NEW file in your own subdirectory (e.g. `routes/<your_slice>.py`, "
-        "`blueprints/<your_slice>.py`, `app/<your_feature>.py`) that "
-        "exports `bp`/`router`/`Model` per the convention. If foundation "
-        "didn't establish a registration point, request an amendment "
-        "rather than editing the entry point yourself."
+        "`server.py`, `index.ts`, `index.js`, `cmd/main.go` are often "
+        "merge hot spots. If one is listed under **Yours** or **Shared "
+        "scaffold** above and your slice's tasks/checks require it, you "
+        "may make the smallest necessary edit there. If an entry-point "
+        "file appears only through **Dep-owned**, prefer the dependency's "
+        "registration point (auto-discovery loop or explicit list) and add "
+        "new slice-local files such as `routes/<your_slice>.py`, "
+        "`blueprints/<your_slice>.py`, or `app/<your_feature>.py`. If no "
+        "registration point exists and the task cannot be implemented "
+        "honestly, request an amendment via `.otto/amendment_request.json`."
     )
     lines.append("")
     # V8 fix: build agents had unrestricted git/bash and one slice in
@@ -2311,6 +2432,29 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     )
     lines.append("")
 
+    if agent_input.context_packet_path or agent_input.full_spec_path:
+        lines.append("### Durable context files (authoritative; read as needed)")
+        lines.append(
+            "The prompt keeps your slice-critical task/scope/check contract inline. "
+            "Broader product context is persisted on disk so it remains available "
+            "without pasting large JSON into every agent turn."
+        )
+        if agent_input.context_packet_path:
+            lines.append(
+                f"- Build context packet for this slice: `{agent_input.context_packet_path}`"
+            )
+        if agent_input.full_spec_path:
+            lines.append(
+                f"- Full canonical product spec: `{agent_input.full_spec_path}`"
+            )
+        lines.append(
+            "If you need exact peer contracts, full structure payload, cross-group "
+            "checks, or broader acceptance context, read those files. Do not bulk-read "
+            "`messages.jsonl` transcripts for context; use the prompt, context packet, "
+            "spec, checks, and source files first."
+        )
+        lines.append("")
+
     # Original intent — collapsed under context.
     lines.append("### Original intent (whole product)")
     lines.append(f"> {spec.intent}")
@@ -2348,15 +2492,23 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     payload = (spec.structure.payload or {}) if spec.structure else {}
     if payload:
         lines.append("### Project structure (binding contracts)")
-        lines.append(
-            "Naming and shape decisions for the whole product. "
-            "Reference these when writing code that touches them. "
-            "Other slices use the same source of truth."
-        )
-        lines.append("```json")
-        import json as _json
-        lines.append(_json.dumps(payload, indent=2, sort_keys=True))
-        lines.append("```")
+        if agent_input.context_packet_path:
+            keys = ", ".join(sorted(str(k) for k in payload.keys())[:20])
+            suffix = "..." if len(payload) > 20 else ""
+            lines.append(
+                "Full structure payload is in the build context packet above. "
+                f"Top-level keys: {keys}{suffix}"
+            )
+        else:
+            lines.append(
+                "Naming and shape decisions for the whole product. "
+                "Reference these when writing code that touches them. "
+                "Other slices use the same source of truth."
+            )
+            lines.append("```json")
+            import json as _json
+            lines.append(_json.dumps(payload, indent=2, sort_keys=True))
+            lines.append("```")
         lines.append("")
 
     # Final instruction — reinforces narrowness.
@@ -2438,7 +2590,11 @@ def _describe_check(check: CheckKind) -> str:
         cmd = " ".join(getattr(check, "command", ()) or ())
         return f"RepoTestCheck: `{cmd}` exits 0"
     if name == "PytestCheck":
-        return f"PytestCheck: pytest selector `{getattr(check, 'selector', '')}`"
+        selector = getattr(check, "selector", "")
+        return (
+            f"PytestCheck: `python -m pytest {selector}` exits 0 "
+            "(use the target project runtime; do not rely on a global pytest executable)"
+        )
     if name == "BrowserJourney":
         cmd = " ".join(getattr(check, "command", ()) or ())
         return f"BrowserJourney: `{cmd}` succeeds and produces evidence"

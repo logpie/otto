@@ -117,6 +117,8 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
+  const [budget, setBudget] = useState("");
+  const [maxTurns, setMaxTurns] = useState("");
   const [buildProvider, setBuildProvider] = useState("");
   const [buildModel, setBuildModel] = useState("");
   const [buildEffort, setBuildEffort] = useState("");
@@ -164,17 +166,32 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
   // codex-first-time-user.md #8.
   const intentRequired = !intent.trim();
   const specFileRequired = command === "build" && planning === "spec-file" && !specFilePath.trim();
+  const budgetInvalid = invalidPositiveInteger(budget);
+  const maxTurnsInvalid = invalidMaxTurns(maxTurns);
   const submitDisabled =
     submitting
     || intentRequired
     || specFileRequired
+    || budgetInvalid
+    || maxTurnsInvalid
     || (targetNeedsConfirmation && !targetConfirmed)
     || priorRunMissing;
 
   // Pre-submit summary fields. We resolve the visible "will run with" line
   // by combining the user's selection with the project's defaults. mc-audit
   // codex-first-time-user.md #2.
-  const summary = jobRunSummary({command, subcommand, project, provider, model, effort, certification, rounds});
+  const summary = jobRunSummary({
+    command,
+    subcommand,
+    project,
+    provider,
+    model,
+    effort,
+    budget,
+    maxTurns,
+    certification,
+    rounds,
+  });
   const effectiveRounds = effectiveRoundLimit(project, rounds);
   const improveOneRoundWarning =
     command === "improve"
@@ -272,6 +289,8 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
         provider,
         model,
         effort,
+        budget,
+        maxTurns,
         buildProvider,
         buildModel,
         buildEffort,
@@ -332,6 +351,10 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
       );
       return;
     }
+    if (budgetInvalid || maxTurnsInvalid) {
+      setStatus("Fix the launch budget controls before starting.");
+      return;
+    }
     // mc-audit codex-destructive-action-safety #7: 3-second grace window.
     // Show a banner with countdown; user can hit [Cancel] to abort before
     // the POST fires. Form fields stay editable so the user can fix a typo
@@ -383,6 +406,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
         ref={dialogRef}
         className="job-dialog job-palette"
         role="dialog"
+        data-testid="job-dialog"
         aria-modal="true"
         aria-labelledby="jobDialogHeading"
         aria-describedby={status ? "jobDialogStatus" : undefined}
@@ -469,6 +493,47 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
           <p className="field-hint job-command-help" data-testid="job-command-help">
             {commandHelpMap[command]}
           </p>
+          <section className="job-launch-controls" aria-label="Launch controls">
+            <label>Provider
+              <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
+                <option value="">{providerDefaultLabel(project)}</option>
+                <option value="codex">Codex</option>
+                <option value="claude">Claude</option>
+              </select>
+            </label>
+            <label>Budget
+              <input
+                data-testid="job-budget-input"
+                value={budget}
+                type="number"
+                min={1}
+                step={1}
+                placeholder={budgetDefaultPlaceholder(project)}
+                aria-invalid={budgetInvalid ? true : undefined}
+                onChange={(event) => setBudget(event.target.value)}
+              />
+            </label>
+            <label>Max turns
+              <input
+                data-testid="job-max-turns-input"
+                value={maxTurns}
+                type="number"
+                min={1}
+                max={200}
+                step={1}
+                placeholder={maxTurnsDefaultPlaceholder(project)}
+                aria-invalid={maxTurnsInvalid ? true : undefined}
+                onChange={(event) => setMaxTurns(event.target.value)}
+              />
+            </label>
+          </section>
+          {(budgetInvalid || maxTurnsInvalid) && (
+            <p className="job-dialog-validation" data-testid="job-launch-controls-validation" aria-live="polite">
+              {budgetInvalid
+                ? "Budget must be a positive whole number of seconds."
+                : "Max turns must be a whole number from 1 to 200."}
+            </p>
+          )}
           {/* Compact target line — shown subtly. Dirty confirm flow stays. */}
           <div className={`job-palette-target ${project?.dirty ? "is-dirty" : ""}`} data-testid="job-dialog-summary">
             <span className="job-palette-target-main">
@@ -546,6 +611,10 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
                   : "Describe what Otto should do before starting."
                 : specFileRequired
                 ? "Enter the spec file path."
+                : budgetInvalid
+                ? "Enter a positive budget."
+                : maxTurnsInvalid
+                ? "Enter max turns from 1 to 200."
                 : targetNeedsConfirmation && !targetConfirmed
                 ? "Confirm the dirty target project above."
                 : priorRunMissing
@@ -563,15 +632,6 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
             onToggle={(event) => setAdvancedOpen((event.target as HTMLDetailsElement).open)}
           >
             <summary>Advanced options</summary>
-            {command !== "certify" && (
-              <label>Execution mode
-                <select data-testid="job-execution-mode-select" value={executionMode} onChange={(event) => setExecutionMode(event.target.value as ExecutionMode)}>
-                  <option value="split">Reliable split mode</option>
-                  <option value="agentic">Agentic single session</option>
-                </select>
-                <span className="field-hint">{executionModeHelp(executionMode, command)}</span>
-              </label>
-            )}
             {command === "build" && (
               <label>Planning
                 <select data-testid="job-planning-select" value={planning} onChange={(event) => setPlanning(event.target.value as PlanningMode)}>
@@ -602,30 +662,25 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
                 <input value={after} type="text" placeholder="optional dependencies" onChange={(event) => setAfter(event.target.value)} />
               </label>
             </div>
-            <label>Max rounds
-              <input
-                data-testid="job-rounds-input"
-                value={rounds}
-                type="number"
-                min={1}
-                max={50}
-                placeholder={project?.defaults?.max_certify_rounds ? `inherit: ${project.defaults.max_certify_rounds}` : "inherit"}
-                onChange={(event) => setRounds(event.target.value)}
-              />
-              <span className={`field-hint ${improveOneRoundWarning ? "field-warning" : ""}`} data-testid="job-rounds-help">
-                {improveOneRoundWarning
-                  ? "One split improve round only evaluates existing work. Use 2+ rounds to let Otto fix/improve and re-check."
-                  : "Maximum certify/evaluate rounds for this queued job."}
-              </span>
-            </label>
-            <div className="field-grid">
-              <label>Default provider
-                <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
-                  <option value="">{providerDefaultLabel(project)}</option>
-                  <option value="codex">Codex</option>
-                  <option value="claude">Claude</option>
-                </select>
+            {command === "improve" && (
+              <label>Max improve rounds
+                <input
+                  data-testid="job-rounds-input"
+                  value={rounds}
+                  type="number"
+                  min={1}
+                  max={50}
+                  placeholder={project?.defaults?.max_certify_rounds ? `inherit: ${project.defaults.max_certify_rounds}` : "inherit"}
+                  onChange={(event) => setRounds(event.target.value)}
+                />
+                <span className={`field-hint ${improveOneRoundWarning ? "field-warning" : ""}`} data-testid="job-rounds-help">
+                  {improveOneRoundWarning
+                    ? "One improve round only evaluates existing work. Use 2+ rounds to let Otto fix/improve and re-check."
+                    : "Maximum improve/evaluate rounds for this queued job."}
+                </span>
               </label>
+            )}
+            <div className="field-grid">
               <label>Default reasoning
                 <select data-testid="job-effort-select" value={effort} onChange={(event) => setEffort(event.target.value)}>
                   <option value="">{effortDefaultLabel(project)}</option>
@@ -640,20 +695,11 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
               <input value={model} type="text" placeholder={modelDefaultPlaceholder(project)} onChange={(event) => setModel(event.target.value)} />
             </label>
             <details className="job-agent-routing">
-              <summary>{executionMode === "agentic" && command !== "certify" ? "Agent session" : "Per-phase overrides"}</summary>
-              {executionMode === "split" && (
-                <p className="field-hint job-routing-hint">
-                  Leave these inherited unless a phase should use a different provider, model, or reasoning effort.
-                </p>
-              )}
-            {command !== "certify" && executionMode === "agentic" && (
-              <div className="static-field">
-                <span>Routing model</span>
-                <strong>Single session</strong>
-                <p className="field-hint">Use Provider, Model, and Reasoning above for the main agent. Split-only phase overrides are hidden because agentic mode does not run separate build/certify/fix calls.</p>
-              </div>
-            )}
-            {command === "build" && executionMode === "split" && (
+              <summary>Agent routing</summary>
+              <p className="field-hint job-routing-hint">
+                Leave these inherited unless a phase should use a different provider, model, or reasoning effort.
+              </p>
+            {command === "build" && (
               <PhaseRoutingFields
                 label="Build"
                 testKey="build"
@@ -665,7 +711,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
                 onEffort={setBuildEffort}
               />
             )}
-            {(command === "certify" || executionMode === "split") && (
+            {(command === "certify" || command === "build" || command === "improve") && (
               <PhaseRoutingFields
                 label={command === "improve" ? "Certifier / evaluator" : "Certifier"}
                 testKey="certifier"
@@ -677,9 +723,9 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
                 onEffort={setCertifierEffort}
               />
             )}
-            {command !== "certify" && executionMode === "split" && (
+            {command !== "certify" && (
               <PhaseRoutingFields
-                label={command === "improve" ? "Improver / fixer" : "Fix"}
+                label={command === "improve" ? "Fix / improve" : "Fix"}
                 testKey="fix"
                 provider={fixProvider}
                 model={fixModel}
@@ -744,6 +790,10 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
                 ? "Describe what Otto should do before starting."
                 : specFileRequired
                 ? "Enter the spec file path."
+                : budgetInvalid
+                ? "Enter a positive budget."
+                : maxTurnsInvalid
+                ? "Enter max turns from 1 to 200."
                 : priorRunMissing
                 ? (priorRunOptionsAvailable
                     ? "Select a prior run to improve."
@@ -811,25 +861,44 @@ export function planningHelp(planning: PlanningMode): string {
   return "Build directly from the intent.";
 }
 
-export function jobRunSummary({command, subcommand, project, provider, model, effort, certification, rounds}: {
+export function jobRunSummary({command, subcommand, project, provider, model, effort, budget, maxTurns, certification, rounds}: {
   command: JobCommand;
   subcommand: ImproveSubcommand;
   project: StateResponse["project"] | undefined;
   provider: string;
   model: string;
   effort: string;
+  budget: string;
+  maxTurns: string;
   certification: CertificationPolicy;
   rounds: string;
 }): string {
   const defaults = project?.defaults;
   const providerLabel = provider || defaults?.provider || "default";
-  const defaultModel = provider && provider !== defaults?.provider ? null : defaults?.model;
-  const modelLabel = model.trim() || defaultModel || "provider default";
+  const modelLabel = effectiveModelLabel({project, provider, model});
   const effortLabel = effort || defaults?.reasoning_effort || "default";
+  const budgetLabel = effectiveBudgetLabel(project, budget);
+  const maxTurnsLabel = effectiveMaxTurnsLabel(project, maxTurns);
   const verificationLabel = describeVerificationPolicy(command, subcommand, certification, project);
   const roundLimit = effectiveRoundLimit(project, rounds);
-  const roundLabel = roundLimit ? ` · rounds ${roundLimit}` : "";
-  return `${providerLabel} · model ${modelLabel} · effort=${effortLabel} · verification=${verificationLabel}${roundLabel}`;
+  const roundLabel = command === "improve" && roundLimit ? ` · rounds ${roundLimit}` : "";
+  return `${providerLabel} · model ${modelLabel} · effort=${effortLabel} · budget=${budgetLabel} · turns=${maxTurnsLabel} · verification=${verificationLabel}${roundLabel}`;
+}
+
+export function effectiveModelLabel({project, provider, model}: {
+  project: StateResponse["project"] | undefined;
+  provider: string;
+  model: string;
+}): string {
+  const explicitModel = model.trim();
+  if (explicitModel) return explicitModel;
+  const defaults = project?.defaults;
+  const requestedProvider = provider.trim();
+  const defaultProvider = defaults?.provider || "";
+  if (!requestedProvider || requestedProvider === defaultProvider) {
+    return defaults?.model || "provider default";
+  }
+  return "provider default";
 }
 
 export function effectiveRoundLimit(project: StateResponse["project"] | undefined, rounds: string): number | null {
@@ -837,6 +906,34 @@ export function effectiveRoundLimit(project: StateResponse["project"] | undefine
   if (Number.isFinite(requested) && requested > 0) return requested;
   const inherited = project?.defaults?.max_certify_rounds;
   return typeof inherited === "number" && inherited > 0 ? inherited : null;
+}
+
+export function effectiveBudgetLabel(project: StateResponse["project"] | undefined, budget: string): string {
+  const requested = Number.parseInt(budget, 10);
+  if (Number.isFinite(requested) && requested > 0) return `${requested}s`;
+  const inherited = project?.defaults?.run_budget_seconds;
+  return typeof inherited === "number" && inherited > 0 ? `${inherited}s` : "default";
+}
+
+export function effectiveMaxTurnsLabel(project: StateResponse["project"] | undefined, maxTurns: string): string {
+  const requested = Number.parseInt(maxTurns, 10);
+  if (Number.isFinite(requested) && requested > 0) return String(requested);
+  const inherited = project?.defaults?.max_turns_per_call;
+  return typeof inherited === "number" && inherited > 0 ? String(inherited) : "default";
+}
+
+export function invalidPositiveInteger(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (!/^\d+$/.test(trimmed)) return true;
+  return Number.parseInt(trimmed, 10) <= 0;
+}
+
+export function invalidMaxTurns(value: string): boolean {
+  if (invalidPositiveInteger(value)) return true;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return Number.parseInt(trimmed, 10) > 200;
 }
 
 export function describeVerificationPolicy(
@@ -898,6 +995,16 @@ export function effortDefaultLabel(project: StateResponse["project"] | undefined
 export function modelDefaultPlaceholder(project: StateResponse["project"] | undefined): string {
   const model = project?.defaults?.model;
   return model ? `default: ${model}` : "provider default";
+}
+
+export function budgetDefaultPlaceholder(project: StateResponse["project"] | undefined): string {
+  const budget = project?.defaults?.run_budget_seconds;
+  return typeof budget === "number" && budget > 0 ? `inherit: ${budget}s` : "inherit";
+}
+
+export function maxTurnsDefaultPlaceholder(project: StateResponse["project"] | undefined): string {
+  const maxTurns = project?.defaults?.max_turns_per_call;
+  return typeof maxTurns === "number" && maxTurns > 0 ? `inherit: ${maxTurns}` : "inherit";
 }
 
 export function certificationDefaultLabel(project: StateResponse["project"] | undefined): string {

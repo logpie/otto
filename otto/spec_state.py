@@ -24,6 +24,7 @@ Event kinds (mirror the design doc):
   group.merge.started     — merge runner started landing this group
   group.merge.landed      — group merged into target
   group.blocked           — group exhausted retries / merge repair budget
+  run.started             — entire run entered the pipeline
   audit.started           — final audit pass began
   audit.finished          — final audit pass produced verdict
   run.started             — entire run started
@@ -78,6 +79,7 @@ EVENT_KINDS: tuple[str, ...] = (
     "group.merge.landed",
     "group.merge.redundant",   # Pattern A: group produced no new diff (over-reach symptom)
     "group.blocked",
+    "run.started",
     "audit.started",
     "audit.finished",
     "audit.attempt.finished",  # Pattern A: per-attempt audit verdict in retry loop
@@ -124,6 +126,7 @@ EventKind = Literal[
     "group.merge.landed",
     "group.merge.redundant",   # Pattern A — group produced no diff
     "group.blocked",
+    "run.started",
     "audit.started",
     "audit.finished",
     "audit.attempt.finished",  # Pattern A — per-attempt audit verdict in retry loop
@@ -231,6 +234,7 @@ _PHASE_FOR_KIND: dict[str, str] = {
 _RUN_SCOPED_NO_PHASE_KINDS: frozenset[str] = frozenset({
     "run.paused_by_user",       # session pause flag (poll predicate, not phase)
     "run.resumed_by_user",      # clears pause flag (poll predicate, not phase)
+    "run.started",              # session lifecycle marker, not a group phase
     "spec.review.opened",       # operator opened the review surface
     "spec.review_pending",      # A13 review-gate engaged
     "spec.review_approved",     # A13 review-gate cleared
@@ -497,7 +501,9 @@ def replay(
     for event in iter_events(session_dir):
         if event.kind == "group.merge.landed" and event.group_id and event.detail:
             landed_events.append((event.group_id, event.detail.strip().split()[0] if event.detail.strip() else ""))
-        if event.kind in {"audit.started", "audit.finished", "audit.attempt.finished", "run.finished"}:
+        if event.kind in {"run.started", "audit.started", "audit.finished", "audit.attempt.finished", "run.finished"}:
+            if event.kind == "run.started":
+                continue
             if event.kind == "audit.started":
                 state.audit_started = True
             elif event.kind == "audit.attempt.finished":

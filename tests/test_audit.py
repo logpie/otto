@@ -16,6 +16,7 @@ import asyncio
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 from otto.audit import (
     AuditAgentInput,
@@ -25,6 +26,7 @@ from otto.audit import (
     FeatureAudit,
     GroupVerdict,
     WalkthroughResult,
+    _audit_prompt,
     _fallback_contract_test_argv,
     _parse_audit_output,
     _run_project_contract_test,
@@ -528,6 +530,114 @@ def test_run_audit_walkthrough_artifacts_passed_to_agent(tmp_path: Path) -> None
     assert len(result.walkthrough_artifacts) == 1
 
 
+def test_run_audit_writes_compact_evidence_packet_for_judge(tmp_path: Path) -> None:
+    (tmp_path / "otto.yaml").write_text("", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    spec_dir = session_dir / "spec"
+    spec_dir.mkdir(parents=True)
+    spec_path = spec_dir / "spec.json"
+    spec_path.write_text(json.dumps({"intent": "test intent"}), encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    async def passing_agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        captured["prompt"] = _audit_prompt(input_)
+        captured["packet_path"] = str(input_.evidence_packet_path)
+        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="ok")
+
+    asyncio.run(
+        run_audit(
+            _spec(["s1"]),
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=passing_agent,
+            budget=AuditBudget(audit_retries=0),
+        )
+    )
+
+    packet_path = Path(captured["packet_path"])
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert packet["kind"] == "audit_evidence_packet"
+    assert packet["full_spec_path"] == str(spec_path)
+    assert packet["deterministic_first_order"][:3] == [
+        "contract_test",
+        "cross_slice_evidence",
+        "walkthrough_artifacts",
+    ]
+    assert "messages.jsonl" in " ".join(packet["notes"])
+    assert str(packet_path) in captured["prompt"]
+    assert "Do not bulk-read `messages.jsonl`" in captured["prompt"]
+    assert "Deterministic-first rule" in captured["prompt"]
+    assert "Project contract test" in captured["prompt"]
+
+
+def test_run_audit_passes_judge_timeout_to_agent_input(tmp_path: Path) -> None:
+    spec = _spec(["s1"])
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    seen: dict[str, int | None] = {}
+
+    async def timeout_aware_agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        seen["timeout"] = input_.judge_timeout_s
+        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="ok")
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=timeout_aware_agent,
+            budget=AuditBudget(judge_timeout_s=17),
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert seen["timeout"] == 17
+
+
+def test_default_audit_agent_uses_judge_timeout_from_input(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import default_audit_agent
+
+    captured: dict[str, int | None] = {}
+
+    def fake_make_agent_options(*_args, **_kwargs):
+        return SimpleNamespace(cwd="", permission_mode="")
+
+    async def fake_run_agent_with_timeout(*_args, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        return (
+            '```json\n{"verdict":"passed","narrative":"ok","quality_score":3}\n```',
+            0.0,
+            "session-1",
+            {},
+        )
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_agent_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+
+    result = asyncio.run(
+        default_audit_agent(
+            AuditAgentInput(
+                spec=_spec(["s1"]),
+                project_dir=tmp_path,
+                integrated_worktree=tmp_path,
+                build_summary={},
+                merge_summary={},
+                cross_slice_evidence=[],
+                walkthrough_artifacts=[],
+                config={"agents": {}},
+                judge_timeout_s=23,
+            )
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert captured["timeout"] == 23
+
+
 # ---------------------------------------------------------------------------
 # _parse_audit_output
 # ---------------------------------------------------------------------------
@@ -801,6 +911,9 @@ def test_audit_prompt_requests_quality_assessment(tmp_path: Path) -> None:
     assert "3/5" in prompt or "3 = MVP" in prompt or "3=MVP" in prompt
     # Required minimum-2-findings rule.
     assert "at least 2" in prompt or "Empty list is NOT" in prompt
+    assert "horizontal overflow" in prompt
+    assert "clipped primary controls" in prompt
+    assert "affected Feature MUST be marked partial or blocked" in prompt
 
 
 def test_audit_prompt_requires_exact_edge_case_evidence(tmp_path: Path) -> None:
@@ -879,6 +992,61 @@ def test_audit_parser_clamps_quality_score() -> None:
     absent = _parse_audit_output('```json\n{"verdict":"passed"}\n```')
     assert absent.quality_score == 0
     assert absent.quality_findings == []
+
+
+def test_compose_verdict_caps_severe_quality_findings_to_partial() -> None:
+    from otto.audit import _compose_verdict
+    from otto.spec_amend import ChainVerification
+
+    agent_output = AuditAgentOutput(
+        verdict=AuditVerdict.PASSED,
+        narrative="functional pass",
+        group_verdicts=[],
+        feature_audits=[],
+        quality_score=3,
+        quality_findings=[
+            "At 390px viewport width, the filter bar overflows horizontally: "
+            "document scrollWidth was 662 against innerWidth 390, and the "
+            "Assignee control is clipped.",
+            "The row click affordance could be clearer.",
+        ],
+    )
+
+    verdict, narrative = _compose_verdict(
+        agent_output=agent_output,
+        contract_passed=True,
+        contract_detail="",
+        chain_review=ChainVerification(verdict_cap="passed", findings=[]),
+    )
+
+    assert verdict == AuditVerdict.PARTIAL
+    assert "quality severity cap" in narrative
+    assert "overflows horizontally" in narrative
+
+
+def test_compose_verdict_does_not_cap_negated_quality_terms() -> None:
+    from otto.audit import _compose_verdict
+    from otto.spec_amend import ChainVerification
+
+    agent_output = AuditAgentOutput(
+        verdict=AuditVerdict.PASSED,
+        narrative="functional pass",
+        quality_score=3,
+        quality_findings=[
+            "No horizontal overflow was observed at 390px.",
+            "The visual hierarchy could be stronger.",
+        ],
+    )
+
+    verdict, narrative = _compose_verdict(
+        agent_output=agent_output,
+        contract_passed=True,
+        contract_detail="",
+        chain_review=ChainVerification(verdict_cap="passed", findings=[]),
+    )
+
+    assert verdict == AuditVerdict.PASSED
+    assert "quality severity cap" not in narrative
 
 
 def test_audit_prompt_requests_feature_audits(tmp_path: Path) -> None:
@@ -1310,6 +1478,122 @@ def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Pat
     # The synthesized log captures the home-page response.
     log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
     assert "Hello synthesized walkthrough" in log_text or '"status": 200' in log_text
+
+
+def test_synthesized_walkthrough_finds_package_create_app(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Brownfield Flask apps often expose create_app from a package."""
+    from otto.spec_compile import PytestCheck
+
+    spec = Spec(
+        intent="x",
+        project_kind="webapp",
+        features=[Feature(id="home", name="Package Flask home")],
+        groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])],
+    )
+    (tmp_path / "flask.py").write_text(
+        "class _Response:\n"
+        "    status_code = 200\n"
+        "    def __init__(self, body): self._body = body\n"
+        "    def get_data(self, as_text=False):\n"
+        "        return self._body if as_text else self._body.encode()\n"
+        "class Flask:\n"
+        "    def __init__(self, name): self.routes = {}\n"
+        "    def get(self, path):\n"
+        "        def decorator(fn):\n"
+        "            self.routes[path] = fn\n"
+        "            return fn\n"
+        "        return decorator\n"
+        "    def test_client(self):\n"
+        "        app = self\n"
+        "        class Client:\n"
+        "            def get(self, path): return _Response(app.routes[path]())\n"
+        "        return Client()\n",
+        encoding="utf-8",
+    )
+    package_dir = tmp_path / "expense_portal"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text(
+        "from flask import Flask\n"
+        "def create_app(config=None):\n"
+        "    app = Flask(__name__)\n"
+        "    @app.get('/')\n"
+        "    def home(): return '<h1>Package Flask home</h1>'\n"
+        "    return app\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("otto.audit._capture_playwright_page", _fake_playwright_capture)
+
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(tmp_path, tmp_path / "log", 60)
+
+    assert result.succeeded is True
+    log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
+    assert '"module": "expense_portal"' in log_text
+    assert "Package Flask home" in log_text
+    artifact_names = {path.name for path in result.artifacts}
+    assert "screenshot-home.png" in artifact_names
+
+
+def test_synthesized_walkthrough_uses_linked_worktree_project_python(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Linked worktree apps may depend on the parent project's .venv."""
+    import stat
+    import sys
+
+    from otto.spec_compile import PytestCheck
+
+    project_root = tmp_path / "project"
+    project_dir = project_root / ".worktrees" / "task"
+    package_dir = project_dir / "expense_portal"
+    venv_bin = project_root / ".venv" / "bin"
+    package_dir.mkdir(parents=True)
+    venv_bin.mkdir(parents=True)
+    python_shim = venv_bin / "python"
+    python_shim.write_text(
+        "#!/bin/sh\n"
+        "OTTO_TEST_PROJECT_PYTHON=1 exec "
+        f"{sys.executable!s} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python_shim.chmod(python_shim.stat().st_mode | stat.S_IXUSR)
+    (venv_bin / "python3").symlink_to("python")
+    (package_dir / "__init__.py").write_text(
+        "import os\n"
+        "if os.environ.get('OTTO_TEST_PROJECT_PYTHON') != '1':\n"
+        "    raise ModuleNotFoundError('No module named flask')\n"
+        "class _Response:\n"
+        "    status_code = 200\n"
+        "    def get_data(self, as_text=False):\n"
+        "        body = '<h1>Project runtime home</h1>'\n"
+        "        return body if as_text else body.encode()\n"
+        "class _Client:\n"
+        "    def get(self, path): return _Response()\n"
+        "class _App:\n"
+        "    def test_client(self): return _Client()\n"
+        "def create_app(config=None): return _App()\n",
+        encoding="utf-8",
+    )
+    spec = Spec(
+        intent="x",
+        project_kind="webapp",
+        features=[Feature(id="home", name="Project runtime home")],
+        groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])],
+    )
+    monkeypatch.setattr("otto.audit._capture_playwright_page", _fake_playwright_capture)
+
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(project_dir, tmp_path / "log", 60)
+
+    assert result.succeeded is True
+    log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
+    assert str(python_shim) in log_text
+    assert '"module": "expense_portal"' in log_text
+    assert "Project runtime home" in log_text
 
 
 def test_default_walkthrough_picks_cross_slice_journey_first(tmp_path: Path) -> None:

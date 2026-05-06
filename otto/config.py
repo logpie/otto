@@ -316,10 +316,28 @@ def effective_agent_model(config: dict[str, Any], agent_type: str | None = None)
     ``None = provider default``. Agent execution should use this helper so
     provider defaults do not silently drift under Otto.
     """
-    explicit = agent_model(config, agent_type)
-    if explicit:
-        return explicit
-    return provider_default_model(agent_provider(config, agent_type), agent_type)
+    cli_override = _cli_agent_override(config, "model", agent_type)
+    if cli_override == PROVIDER_DEFAULT_MODEL_OVERRIDE:
+        return provider_default_model(agent_provider(config, agent_type), agent_type)
+    if cli_override:
+        return str(cli_override)
+    if agent_type:
+        per_agent = (config.get("agents", {}) or {}).get(agent_type, {}) or {}
+        if per_agent.get("model"):
+            return str(per_agent["model"])
+    provider = agent_provider(config, agent_type)
+    global_model = config.get("model")
+    if global_model and provider == _configured_global_provider(config):
+        return str(global_model)
+    return provider_default_model(provider, agent_type)
+
+
+def _configured_global_provider(config: dict[str, Any]) -> str:
+    return normalize_provider(
+        config.get("provider"),
+        default=DEFAULTS["provider"],
+        key="provider",
+    ) or DEFAULTS["provider"]
 
 
 def agent_effort(config: dict[str, Any], agent_type: str | None = None) -> str | None:
@@ -1287,7 +1305,8 @@ def detect_project_kind(project_dir: Path) -> str:
     pyproject = project_dir / "pyproject.toml"
     setup_py = project_dir / "setup.py"
     setup_cfg = project_dir / "setup.cfg"
-    if pyproject.exists() or setup_py.exists() or setup_cfg.exists():
+    requirement_files = tuple(project_dir.glob("requirements*.txt"))
+    if pyproject.exists() or setup_py.exists() or setup_cfg.exists() or requirement_files:
         py_text = ""
         if pyproject.exists():
             try:
@@ -1301,7 +1320,13 @@ def detect_project_kind(project_dir: Path) -> str:
                     setup_text += "\n" + path.read_text(encoding="utf-8").casefold()
                 except OSError:
                     pass
-        combined = f"{py_text}\n{setup_text}"
+        requirements_text = ""
+        for path in requirement_files:
+            try:
+                requirements_text += "\n" + path.read_text(encoding="utf-8").casefold()
+            except OSError:
+                pass
+        combined = f"{py_text}\n{setup_text}\n{requirements_text}"
         if (
             "[project.scripts]" in combined
             or "console_scripts" in combined
@@ -1330,7 +1355,9 @@ def detect_project_kind(project_dir: Path) -> str:
         if any(marker in combined for marker in ("flask", "django")):
             return "webapp" if has_template_or_static else "api"
         if "fastapi" in combined:
-            return "api"
+            return "webapp" if has_template_or_static else "api"
+        if has_template_or_static:
+            return "webapp"
         return "library"
 
     pkg_json = project_dir / "package.json"

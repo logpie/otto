@@ -22,6 +22,7 @@ from otto.spec_compile import (
     Spec,
     compile_spec,
     spec_to_dict,
+    write_repo_index_packet,
 )
 
 
@@ -56,6 +57,10 @@ def _seed_python_project(project_dir: Path) -> None:
     )
     (project_dir / "linter.py").write_text(
         "def main():\n    print('hello')\n"
+    )
+    (project_dir / "tests").mkdir()
+    (project_dir / "tests" / "test_linter.py").write_text(
+        "def test_smoke():\n    assert True\n"
     )
     _git_add_commit(project_dir)
 
@@ -163,6 +168,12 @@ def test_brownfield_compile_uses_brownfield_prompt(
     # Preamble file names interpolated
     assert "linter.py" in rendered
     assert "pyproject.toml" in rendered
+    assert "repo-index.json" in rendered
+    repo_index = json.loads((run_dir / "repo-index.json").read_text(encoding="utf-8"))
+    assert repo_index["kind"] == "repo_index_packet"
+    assert "linter.py" in repo_index["entrypoint_candidates"]
+    assert "pyproject.toml" in repo_index["manifests"]
+    assert "tests/test_linter.py" in repo_index["test_files"]
     # Anti-derivation guidance present
     assert "scope hint" in rendered.lower() or "scope hint" in rendered
     # Regression: Codex should not burn turns reverse-engineering Otto's
@@ -175,6 +186,25 @@ def test_brownfield_compile_uses_brownfield_prompt(
     assert "do not leave the target project to inspect" in rendered
     assert "baseline verification Spec" in rendered
     assert "current-state behavior" in rendered
+
+
+def test_repo_index_packet_is_metadata_not_source_dump(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    _seed_python_project(project)
+    output_path = tmp_path / "session" / "spec" / "repo-index.json"
+
+    packet = write_repo_index_packet(
+        project,
+        project_kind="cli",
+        output_path=output_path,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert packet["file_count"] >= 3
+    assert "linter.py" in packet["entrypoint_candidates"]
+    assert "tests/test_linter.py" in packet["test_files"]
+    assert "def main" not in text
+    assert "raise SystemExit" not in text
 
 
 def test_brownfield_target_mode_treats_intent_as_future_contract(

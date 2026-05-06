@@ -17,8 +17,6 @@ from otto.spec_amend import (
     AMENDMENT_REQUEST_PATH,
     AMENDMENT_RESPONSE_PATH,
     AmendmentRejection,
-    InvalidationEntry,
-    InvalidationPlan,
     compute_invalidation,
     consume_amendment_request,
     request_amendment,

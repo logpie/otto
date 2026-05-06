@@ -951,6 +951,61 @@ def test_run_full_pipeline_drives_build_audit_render(tmp_path: Path, monkeypatch
     assert (session_dir / "proof-packet.json").exists()
 
 
+def test_run_full_pipeline_publishes_queue_child_ready_marker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from otto.audit import AuditResult, AuditVerdict
+    from otto.queue.runtime import set_queue_runner_child
+    from otto.runner import RunResult
+
+    _init_project(tmp_path)
+    fake_spec = _fixture_spec("queue child pipe")
+
+    async def fake_compile(intent, *, project_dir, run_dir, config, project_kind, **kwargs):
+        from otto.spec_compile import persist_spec
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+        persist_spec(fake_spec, run_dir / "spec.json", allow_initial=True)
+        return fake_spec
+
+    async def fake_pipeline(*args, **kwargs):
+        return RunResult(
+            spec=fake_spec,
+            audit_result=AuditResult(
+                verdict=AuditVerdict.PASSED,
+                narrative="stub audit",
+            ),
+            wall_s=1.0,
+        )
+
+    monkeypatch.setattr("otto.cli_run.compile_spec", fake_compile)
+    monkeypatch.setattr("otto.cli_run.run_pipeline", fake_pipeline)
+
+    env = {
+        "OTTO_INTERNAL_QUEUE_RUNNER": "1",
+        "OTTO_QUEUE_TASK_ID": "task-1",
+        "OTTO_QUEUE_PROJECT_DIR": str(tmp_path),
+        "OTTO_RUN_ID": "2026-05-06-120000-ready",
+    }
+    try:
+        code, out = _run(["run", "build it"], cwd=tmp_path, env=env)
+    finally:
+        set_queue_runner_child(False)
+
+    assert code == 0, out
+    ready_path = tmp_path / "otto_logs" / "queue" / "task-1" / "ready.json"
+    payload = json.loads(ready_path.read_text(encoding="utf-8"))
+    session_dir = tmp_path / "otto_logs" / "sessions" / env["OTTO_RUN_ID"]
+    assert payload["schema_version"] == 1
+    assert payload["task_id"] == "task-1"
+    assert payload["run_id"] == env["OTTO_RUN_ID"]
+    assert payload["phase"] == "i2p"
+    assert Path(payload["session_dir"]).resolve() == session_dir.resolve()
+    assert Path(payload["checkpoint_path"]).resolve() == (
+        session_dir / "checkpoint.json"
+    ).resolve()
+
+
 def test_run_full_pipeline_returns_nonzero_on_partial_audit(tmp_path: Path, monkeypatch) -> None:
     from otto.audit import AuditResult, AuditVerdict
     from otto.build import BuildResult, GroupResult, GroupStatus

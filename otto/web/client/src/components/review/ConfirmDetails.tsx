@@ -31,7 +31,7 @@ export function BulkLandingConfirmList({items, target, verificationPolicyRef}: {
               >
                 <div className="confirm-bulk-row-head">
                   <strong>{item.task_id}</strong>
-                  <span>
+                  <span className="confirm-bulk-row-route">
                     <code>{branch}</code> &rarr; <code>{target}</code>
                   </span>
                   <span className="confirm-bulk-row-count">

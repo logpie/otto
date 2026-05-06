@@ -85,6 +85,22 @@ def test_get_run_returns_run_view(project_with_session: tuple[Path, str]) -> Non
     assert "guardrails" in body
 
 
+def test_get_run_includes_project_queue_concurrency(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-abc123"
+    _write_minimal_session(
+        project / "otto_logs" / "sessions" / sid,
+        intent="tiny webapp",
+        project_kind="webapp",
+    )
+    (project / "otto.yaml").write_text("queue:\n  concurrent: 4\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=project, check=True)
+
+    body = _app_with_project(project).get(f"/api/run-view/{sid}").json()
+
+    assert body["dispatch"]["max_concurrent"] == 4
+
+
 def test_list_runs_includes_queue_worktree_sessions(tmp_path: Path) -> None:
     """Queue/i2p sessions live inside per-task worktrees and must be visible."""
 
@@ -167,17 +183,75 @@ def test_get_run_merges_queue_state_for_worktree_session(tmp_path: Path) -> None
     assert body["wall_s"] == 200.0
 
 
+def test_get_run_derives_active_queue_duration(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-worktree"
+    session = project / ".worktrees" / "build-task" / "otto_logs" / "sessions" / sid
+    _write_minimal_session(session, intent="worktree micro twitter", project_kind="webapp")
+    proof = session / "proof-packet.json"
+    proof.unlink()
+    (session / "spec").mkdir()
+    (session / "spec" / "spec.json").write_text(
+        json.dumps(
+            {
+                "intent": "worktree micro twitter",
+                "project_kind": "webapp",
+                "groups": [{"id": "g1", "name": "G1", "feature_ids": ["f1"]}],
+            }
+        )
+    )
+    (session / "spec-state.jsonl").write_text(
+        json.dumps(
+            {
+                "kind": "group.started",
+                "group_id": "g1",
+                "ts": "2026-05-04T20:00:02Z",
+            }
+        )
+        + "\n"
+    )
+    (project / ".otto-queue-state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tasks": {
+                    "build-task": {
+                        "status": "initializing",
+                        "attempt_run_id": sid,
+                        "started_at": "2000-01-01T00:00:00Z",
+                    }
+                },
+            }
+        )
+    )
+
+    client = _app_with_project(project)
+    resp = client.get(f"/api/run-view/{sid}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "building"
+    assert body["wall_s"] > 1.0
+    assert body["groups"][0]["status"] == "in_progress"
+
+
 def test_run_view_logs_and_files_resolve_worktree_session(tmp_path: Path) -> None:
     project = tmp_path / "proj"
     sid = "2026-05-04-200000-worktree"
     session = project / ".worktrees" / "build-task" / "otto_logs" / "sessions" / sid
     _write_minimal_session(session, intent="worktree micro twitter", project_kind="webapp")
     (session / "spec-state.jsonl").write_text('{"kind":"group.started"}\n')
+    compile_agent = session / "spec" / "compile-agent"
+    compile_agent.mkdir(parents=True)
+    (compile_agent / "narrative.log").write_text("compile log\n")
+    (compile_agent / "messages.jsonl").write_text('{"message":"compile"}\n')
 
     client = _app_with_project(project)
     logs = client.get(f"/api/run-view/{sid}/logs")
     assert logs.status_code == 200
-    assert logs.json()["logs"][0]["path"] == "spec-state.jsonl"
+    log_paths = [item["path"] for item in logs.json()["logs"]]
+    assert log_paths[0] == "spec-state.jsonl"
+    assert "spec/compile-agent/narrative.log" in log_paths
+    assert "spec/compile-agent/messages.jsonl" in log_paths
 
     files = client.get(f"/api/run-view/{sid}/files")
     assert files.status_code == 200
@@ -316,6 +390,65 @@ def test_run_view_diff_includes_live_untracked_group_files(tmp_path: Path) -> No
     assert "src/App.tsx" in diff.text
     assert "+export default function App()" in diff.text
     assert "outside.txt" not in diff.text
+
+
+def test_group_logs_and_diff_are_real_endpoints(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-groups"
+    session = project / "otto_logs" / "sessions" / sid
+    session.mkdir(parents=True)
+    (session / "spec").mkdir()
+    (session / "spec" / "spec.json").write_text(
+        json.dumps(
+            {
+                "intent": "group endpoints",
+                "project_kind": "webapp",
+                "groups": [{"id": "g1", "name": "G1", "feature_ids": ["f1"]}],
+            }
+        )
+    )
+    (session / "spec-state.jsonl").write_text(
+        json.dumps(
+            {
+                "kind": "group.started",
+                "group_id": "g1",
+                "extra": {"branch": "i2p/session/g1"},
+            }
+        )
+        + "\n"
+    )
+    g1_logs = session / "build" / "g1" / "attempt-01"
+    g1_logs.mkdir(parents=True)
+    (g1_logs / "narrative.log").write_text("g1 log\n")
+    g2_logs = session / "build" / "g2" / "attempt-01"
+    g2_logs.mkdir(parents=True)
+    (g2_logs / "narrative.log").write_text("g2 log\n")
+
+    project.mkdir(exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    subprocess.run(["git", "-C", str(project), "config", "user.email", "test@otto.local"], check=True)
+    subprocess.run(["git", "-C", str(project), "config", "user.name", "Otto Tester"], check=True)
+    (project / "README.md").write_text("base\n")
+    subprocess.run(["git", "-C", str(project), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(project), "commit", "-qm", "base"], check=True)
+    subprocess.run(["git", "-C", str(project), "checkout", "-qb", "i2p/session/g1"], check=True)
+    (project / "README.md").write_text("base\ng1\n")
+    subprocess.run(["git", "-C", str(project), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(project), "commit", "-qm", "g1"], check=True)
+
+    client = _app_with_project(project)
+    logs = client.get(f"/api/run-view/{sid}/groups/g1/logs")
+    assert logs.status_code == 200
+    log_paths = {item["path"] for item in logs.json()["logs"]}
+    assert "build/g1/attempt-01/narrative.log" in log_paths
+    assert "build/g2/attempt-01/narrative.log" not in log_paths
+
+    diff = client.get(f"/api/run-view/{sid}/groups/g1/diff")
+    assert diff.status_code == 200
+    body = diff.json()
+    assert body["error"] is None
+    assert body["branch"] == "i2p/session/g1"
+    assert "+g1" in body["diff"]
 
 
 def test_run_view_skips_symlinked_session_escape(tmp_path: Path) -> None:

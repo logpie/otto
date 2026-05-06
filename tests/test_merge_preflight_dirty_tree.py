@@ -136,6 +136,9 @@ def test_preflight_clean_when_only_otto_owned_untracked_files(tmp_path: Path) ->
     (repo / ".worktrees" / "task-1").mkdir()
     (repo / ".worktrees" / "task-1" / "scratch.txt").write_text("", encoding="utf-8")
     (repo / ".watcher.log").write_text("", encoding="utf-8")
+    (repo / ".playwright-cli").mkdir()
+    (repo / ".playwright-cli" / "page.yml").write_text("browser artifact\n", encoding="utf-8")
+    (repo / "__audit_home_body__.html").write_text("<h1>audit artifact</h1>", encoding="utf-8")
 
     issues = repo_preflight_issues(repo)
 

@@ -1229,3 +1229,768 @@ Fast-gate addendum:
   `do not invent` / `never invent` anti-derivation wording. This was fixed in
   the prompt, preserving the existing test because the guidance matters for
   brownfield correctness.
+
+## 2026-05-06 Mission Control Live Product Audit Addendum
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Session: `2026-05-06-151701-0fa37f`
+- Task: add a manager SLA dashboard widget to an existing Flask/SQLite expense
+  portal while preserving submission, approval, saved-filter, CSV, and PDF
+  behavior.
+- Web artifacts: `/tmp/otto-live-audit-20260506/`
+- Proof packet:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-dashboard-widget-to-763c11/otto_logs/sessions/2026-05-06-151701-0fa37f/proof-packet.json`
+
+Live bugs found and fixed generically:
+- Mission Control displayed `codex · model sonnet` when the project default was
+  Claude but the user selected Codex. Root cause: provider overrides inherited a
+  global model from another provider in both config/model resolution and
+  Mission Control serialization. Fix: provider-safe model resolution now only
+  inherits a global model when the effective provider still matches the global
+  provider.
+- Web build queue payloads exposed/submitted legacy `--split`, `--agentic`, and
+  build `--rounds` controls that the current i2p path ignores. Fix: the job
+  dialog hides those controls for build, and the queue payload only sends i2p
+  phase/provider controls that are actually honored.
+- Active i2p sessions looked merely queued while compile-agent logs already
+  existed. Fix: RunView now treats compile-agent log presence as active
+  compile state before spec-state events arrive.
+- Task-board story counts showed `0` while the compiled i2p spec already had
+  grouped feature IDs. Fix: landing status derives in-flight feature counts
+  from `spec/spec.json` or proof-packet features when terminal queue summaries
+  do not have `stories_*` yet.
+- Pytest slice checks used `uv run pytest`, which created a clean env without
+  brownfield requirements and falsely blocked the Acme run even though native
+  `pytest` passed. Fix: `PytestCheck` now prefers the target project venv or
+  user PATH pytest, skipping Otto's own venv, and uses `uv run pytest` only as a
+  fallback.
+- The Acme worktree also contained a pre-existing `pyproject.toml` edit outside
+  the group's declared owned paths. Root cause: build-time scope detection only
+  warned on peer-owned paths, while pre-existing unowned files were treated as
+  invisible shared scaffold. Fix: existing unowned edits now produce scope
+  warnings unless the spec declares them as own/shared/dependency scope; newly
+  created support files remain allowed.
+
+External verifier:
+- In the Acme worktree, native verifier passed:
+  `pytest tests/test_manager_sla_widget.py tests/test_saved_filters.py::test_dashboard_filter_by_assignee`
+  -> `5 passed`.
+- Reproduced the fixed checker path outside Otto:
+  `PytestCheck` now runs `/opt/homebrew/bin/pytest -q ...` for the Acme selectors
+  and both checks pass.
+
+Regression tests added or updated:
+- `tests/test_config.py::TestProviderHelpers::test_effective_agent_model_does_not_cross_provider_override`
+- `tests/test_config.py::TestProviderHelpers::test_effective_agent_model_preserves_explicit_model_override`
+- `tests/test_config.py::TestProviderHelpers::test_effective_agent_model_does_not_inherit_global_model_for_phase_provider`
+- `tests/test_web_queue_actions.py::test_web_queue_provider_override_does_not_inherit_other_provider_model`
+- `tests/test_web_queue_actions.py::test_landing_item_derives_active_i2p_feature_count_from_compiled_spec`
+- `tests/test_run_view.py::test_build_run_view_initializing_compile_agent_is_compiling`
+- `tests/test_checks.py::test_pytest_check_uses_project_venv_pytest_before_uv`
+- `tests/test_checks.py::test_pytest_command_prefers_path_pytest_over_uv`
+- `tests/test_checks.py::test_pytest_command_skips_current_otto_venv_on_user_path`
+- `tests/test_build.py::test_scope_violations_warns_on_existing_unowned_file`
+- `tests/test_build.py::test_scope_violations_allows_new_unowned_file`
+- Browser checks for provider/default-model summary and Web queue payloads.
+
+Skill updates:
+- `.codex/skills/otto-as-user/SKILL.md` and
+  `.claude/skills/otto-as-user/SKILL.md` now require a live Mission Control
+  lifecycle truth smoke.
+- `.codex/skills/otto-frontend-rua/SKILL.md` and
+  `.claude/skills/otto-frontend-rua/SKILL.md` now include provider/model,
+  compile-state, feature-count, log/diff action, and ignored-control checks as
+  product-level RUA requirements.
+
+Gates run:
+- `uv run ruff check otto/checks.py otto/config.py otto/mission_control/serializers.py otto/mission_control/run_view.py otto/mission_control/service.py tests/test_checks.py tests/test_config.py tests/test_web_queue_actions.py tests/test_run_view.py`
+  -> passed.
+- `uv run pytest -q tests/test_checks.py tests/test_config.py::TestProviderHelpers tests/test_web_queue_actions.py tests/test_run_view.py`
+  -> `102 passed`.
+- `npm run web:typecheck` -> passed.
+- `npm run web:build` -> passed and regenerated `otto/web/static`.
+- `uv run python scripts/test_tiers.py web` -> `208 passed`.
+- Browser iteration with fresh bundle:
+  `OTTO_BROWSER_SKIP_BUILD=1 uv run pytest -q tests/browser/test_first_run_clarity.py::test_job_dialog_provider_override_uses_provider_default_model tests/browser/test_launcher_run_view_gate.py::test_new_run_queues_from_web_and_starts_runner -m browser -p playwright`
+  -> `2 passed`.
+
+Decision:
+- Generic Otto bugs fixed. The Acme run's terminal blocked verdict is now
+  classified as an Otto verifier-environment bug fixed in this pass; the target
+  product selectors pass externally.
+
+## 2026-05-06 Fresh Acme Web Lifecycle Retry
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-dashboard-widget-to-85d320`
+- Session: `2026-05-06-155735-34ba33`
+- Provider: Codex, submitted through Mission Control Web.
+- Intent: add a manager SLA dashboard widget to the existing Flask/SQLite
+  expense portal while preserving submission, approval, saved-filter, CSV, and
+  PDF behavior.
+
+Mission Control evidence:
+- Browser artifacts: `/tmp/otto-acme-fresh-20260506-085727/`
+- Queue payload captured from Web: `extra_args=["--provider","codex"]`; no
+  ignored `--split`, `--agentic`, or build `--rounds` flags.
+- Screenshots captured for launcher, project workspace, Codex job dialog,
+  queued task, running task, active run detail, group logs, and group diff.
+- RunView API showed compile -> build transition with 2 groups and 6 features.
+- Logs and diffs actions opened real evidence panes instead of silent clicks.
+
+Bug found:
+- Deterministic checks and provider child shells could inherit Otto's own
+  virtualenv as their default `python`. In this Acme run, `python -m pytest`
+  used `/Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2/.venv/bin/python`,
+  which had pytest but not Flask/ReportLab. The first group failed real checks
+  before collection and then spent retries adding project-local test bootstraps
+  to compensate.
+
+Classification:
+- Otto bug fixed. The active run was cancelled after evidence collection because
+  it was running the pre-fix process and would keep burning retries on the stale
+  environment behavior.
+
+Generic fix:
+- Provider agent env no longer prepends or exports Otto's own current virtualenv
+  into target project child agents. Target project `.venv` is preferred when it
+  exists; otherwise agents inherit the user/tool PATH without Otto's venv as the
+  default `python`.
+- `RepoTestCheck` command execution now resolves bare `python` and `pytest`
+  through the target project venv or user PATH while explicitly skipping Otto's
+  own venv. Raw evidence records both the original command and resolved command.
+
+Regression tests added:
+- `tests/test_checks.py::test_repo_test_check_resolves_bare_python_away_from_otto_venv`
+- `tests/test_checks.py::test_repo_test_check_prefers_project_venv_python`
+- `tests/test_hardening.py::TestSubprocessEnv::test_current_otto_venv_is_not_child_agent_default`
+- `tests/test_hardening.py::TestSubprocessEnv::test_project_venv_is_child_agent_default`
+
+Gates run:
+- `.venv/bin/python -m py_compile otto/checks.py otto/testing.py` -> passed.
+- `.venv/bin/pytest tests/test_checks.py::test_repo_test_check_resolves_bare_python_away_from_otto_venv tests/test_checks.py::test_repo_test_check_prefers_project_venv_python tests/test_hardening.py::TestSubprocessEnv::test_current_otto_venv_is_not_child_agent_default tests/test_hardening.py::TestSubprocessEnv::test_project_venv_is_child_agent_default -q` -> `4 passed`.
+- `.venv/bin/pytest tests/test_checks.py tests/test_hardening.py::TestSubprocessEnv tests/test_agent.py::test_make_agent_options_env_prefers_target_project_src -q` -> `58 passed`.
+
+Decision:
+- Fix and retry. This run does not count as a product pass; it is evidence for
+  the generic environment bug and the recovery/cancel path.
+
+## 2026-05-06 Fresh Acme Retry 2: Queue Worktree Runtime Discovery
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-0fb7b9`
+- Session: `2026-05-06-162654-35ac28`
+- Provider: Codex, submitted through Mission Control Web.
+
+Mission Control evidence:
+- Browser artifacts: `/tmp/otto-acme-retry-20260506-0920/`
+- Web payload captured:
+  `extra_args=["--provider","codex"]`; no ignored split/agentic/rounds
+  controls were submitted.
+- RunView showed three i2p groups with compile complete and build active:
+  `sla-aging-data`, `sla-aging-widget`, `preserve-core-flows`.
+
+Bug found:
+- The first environment fix correctly removed Otto's own venv from child
+  shells, but queue task worktrees do not contain the target project's `.venv`.
+  The Acme dependency venv lives at the parent project root:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.venv`.
+- In the queued linked worktree, the build agent had no `python` command,
+  fell back to `python3`, missed `reportlab`, and then searched sibling
+  worktree virtualenvs. That is not a valid real-user/runtime contract.
+
+Classification:
+- Otto bug fixed. The run was cancelled after evidence collection because the
+  active process had loaded the stale environment code.
+
+Generic fix:
+- Provider child-agent env now detects Otto-managed linked worktrees under
+  `<project>/.worktrees/<task>` and prepends `<project>/.venv/bin` when present.
+- Deterministic check execution uses the same linked-worktree runtime lookup
+  for bare `python`, `pytest`, and subprocess PATH/VIRTUAL_ENV setup.
+- Otto's own current venv remains explicitly excluded.
+
+Regression tests added:
+- `tests/test_hardening.py::TestSubprocessEnv::test_parent_project_venv_is_used_for_queue_worktree`
+- `tests/test_checks.py::test_pytest_check_uses_parent_project_venv_for_queue_worktree`
+- `tests/test_checks.py::test_repo_test_check_prefers_parent_project_venv_python_for_queue_worktree`
+
+Gates run:
+- `.venv/bin/python -m py_compile otto/checks.py otto/testing.py` -> passed.
+- `.venv/bin/pytest tests/test_checks.py::test_pytest_check_uses_parent_project_venv_for_queue_worktree tests/test_checks.py::test_repo_test_check_prefers_parent_project_venv_python_for_queue_worktree tests/test_hardening.py::TestSubprocessEnv::test_parent_project_venv_is_used_for_queue_worktree -q`
+  -> `3 passed`.
+- `.venv/bin/pytest tests/test_checks.py tests/test_hardening.py::TestSubprocessEnv tests/test_agent.py::test_make_agent_options_env_prefers_target_project_src -q`
+  -> `61 passed`.
+- `uv run ruff check otto/checks.py otto/testing.py tests/test_checks.py tests/test_hardening.py`
+  -> passed.
+
+Decision:
+- Fix and retry from a fresh Mission Control process. This run does not count
+  as a product pass; it is evidence for the linked-worktree runtime discovery
+  bug and the cancel/retry recovery path.
+
+## 2026-05-06 Fresh Acme Retry 3: Prompt Truth + Active Worktree Merge Base
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-09936c`
+- Session: `2026-05-06-164439-20ca92`
+- Provider: Codex, submitted through Mission Control Web.
+- Intent: add a manager SLA aging dashboard widget to the existing Flask/SQLite
+  expense portal, grouped by assignee, while preserving submission, approval,
+  saved-filter, CSV, and PDF behavior.
+
+Mission Control and log evidence:
+- Queue payload captured by Web:
+  `/tmp/otto-acme-retry-20260506-1010/submit-result-2.json`
+  with `extra_args=["--provider","codex"]`.
+- Session artifacts:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-09936c/otto_logs/sessions/2026-05-06-164439-20ca92`
+- Compile produced 2 groups:
+  `sla-aging-query` and `dashboard-widget`.
+- `sla-aging-query` deterministic check passed using the target project venv:
+  `build/sla-aging-query/attempt-01/000-PytestCheck.log`
+  -> `/Users/yuxuan/otto-projects/acme-expense-portal/.venv/bin/pytest -q tests/test_sla_aging.py`, `2 passed`.
+- `dashboard-widget` checks passed:
+  `build/dashboard-widget/attempt-01/000-PytestCheck.log`
+  -> `4 passed`;
+  `build/dashboard-widget/attempt-01/001-RepoTestCheck.log`
+  -> full project `42 passed`.
+- Merge then blocked before integration:
+  `spec-state.jsonl` event `group.merge.started` had
+  `branch=i2p/2026-05-06-164439-20ca92/sla-aging-query base=main kind=group`;
+  the next group event blocked with
+  `checkout main failed: fatal: 'main' is already used by worktree at '/Users/yuxuan/otto-projects/acme-expense-portal'`.
+- Audit still ran and wrote browser/product evidence:
+  `audit/attempt-00/feature-verdicts.json`,
+  `audit/attempt-00/walkthrough/walkthrough.jsonl`,
+  screenshots `dashboard-home.png` and `dashboard-assignee-maya.png`.
+- Cross-session status after intentional stale-process stop:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/otto_logs/cross-sessions/runs/live/2026-05-06-164439-20ca92.json`
+  -> `status=failed`, `last_event=exit_code=-15`.
+
+External verifier:
+- Native project tests passed inside the generated worktree:
+  `audit/attempt-00/contract/test_command.log` -> `pytest`, `39 passed`.
+- Browser/API audit found product failure despite green tests:
+  `dashboard-widget` was `blocked`; the dashboard did not render or wire an SLA
+  aging widget, and the expected pending-by-assignee URL for Maya Chen returned
+  zero rows despite three pending assigned expenses.
+- The synthesized walkthrough incorrectly skipped first-party Flask evidence:
+  `audit/attempt-00/walkthrough/synthesized-webapp.log`
+  -> `shape=not-applicable`, `note=no Flask create_app and no static index.html`.
+  The audit judge compensated by launching the Flask app manually and saving
+  screenshots plus durable API artifacts.
+
+Bugs found and classification:
+- Build-agent check prompt mismatch: Otto executed `PytestCheck` with the
+  target runtime, but the prompt still told agents to run bare `pytest
+  selector`. Classification: Otto bug fixed.
+- Entry-point scope contradiction: the prompt listed entry points such as
+  `app.py` as shared scaffold while also saying all entry points were read-only,
+  pushing the agent into template-only SQL/workaround behavior instead of a
+  small honest route integration. Classification: Otto bug fixed.
+- Linked worktree merge base: i2p build/merge defaulted to `main`, but a queue
+  task linked worktree starts on its task branch while the parent project holds
+  `main`, so `git checkout main` fails and triggers irrelevant merge repair.
+  Classification: Otto bug fixed.
+- Audit walkthrough shape detection missed this Flask app. Classification:
+  design gap still open; the judge-level browser audit caught the failure, but
+  the default synthesized webapp walkthrough should learn this project shape.
+
+Generic fixes:
+- `PytestCheck` prompt now describes `python -m pytest <selector>` and tells the
+  agent to use the target project runtime instead of relying on global pytest.
+- Entry-point prompt guidance now treats entry points as high-contention files,
+  not blanket read-only files: if listed under Yours or Shared scaffold and the
+  slice requires it, the agent may make the smallest necessary edit; if only
+  Dep-owned, it should use a registration point or request an amendment.
+- Build, runner, CLI `otto run`, and merge queue now resolve one integration
+  base branch from the active branch in `project_dir`, falling back to `main`
+  only when branch resolution fails. `BuildResult.base_branch` carries that
+  decision into merge so linked queue worktrees merge into the task branch.
+
+Regression tests added:
+- `tests/test_build.py::test_build_agent_prompt_uses_target_runtime_for_pytest_checks`
+- `tests/test_build.py::test_build_agent_prompt_allows_explicit_shared_entrypoint_edits`
+- `tests/test_build.py::test_build_agent_prompt_steers_dep_owned_entrypoints_to_registration_points`
+- `tests/test_merge_queue.py::test_build_and_merge_use_active_branch_in_linked_worktree`
+
+Gates run:
+- `.venv/bin/python -m py_compile otto/build.py otto/merge_queue.py otto/runner.py otto/cli_run.py`
+  -> passed.
+- `.venv/bin/pytest tests/test_build.py::test_build_agent_prompt_uses_target_runtime_for_pytest_checks -q`
+  -> `1 passed`.
+- `.venv/bin/pytest tests/test_build.py::test_build_agent_prompt_uses_target_runtime_for_pytest_checks tests/test_build.py::test_build_agent_prompt_allows_explicit_shared_entrypoint_edits tests/test_build.py::test_build_agent_prompt_steers_dep_owned_entrypoints_to_registration_points tests/test_merge_queue.py::test_build_and_merge_use_active_branch_in_linked_worktree -q`
+  -> `4 passed`.
+- `.venv/bin/pytest tests/test_build.py -q` -> `50 passed`.
+- `.venv/bin/pytest tests/test_merge_queue.py tests/test_build.py -q`
+  -> `79 passed`.
+- `uv run ruff check otto/build.py otto/merge_queue.py otto/runner.py otto/cli_run.py tests/test_build.py tests/test_merge_queue.py`
+  -> passed.
+
+Decision:
+- Fix and retry from a fresh Mission Control process. This run does not count
+  as a product pass because it ran stale pre-fix code, blocked on the hard-coded
+  `main` merge base, and the browser audit found the produced dashboard
+  incomplete despite green native tests.
+
+## 2026-05-06 Fresh Acme Retry 4: Project-Kind + Walkthrough Shape Fix
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-8bb288`
+- Session: `2026-05-06-172058-0a57ca`
+- Provider: Codex, submitted through Mission Control Web from a freshly
+  restarted server after commit `1f39410d1`.
+
+Doorway / Web evidence:
+- Mission Control server restarted from this worktree on port 9000.
+- Browser artifacts: `/tmp/otto-mc-doorway-20260506-1018/`.
+- Project selected through Mission Control Web; job dialog provider changed
+  from inherited Claude to Codex, and the visible summary updated to
+  `codex · model provider default · effort=default · verification=fast`.
+- Web submission created task `add-a-manager-sla-aging-dashboard-8bb288`;
+  queue row showed it as running within seconds.
+- Cross-session payload:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/otto_logs/cross-sessions/runs/live/2026-05-06-172058-0a57ca.json`
+  includes `argv=["build", ..., "--provider", "codex"]`.
+
+Bug found:
+- The compile prompt for a real Flask/SQLite app still said
+  `project_kind=library`.
+- Direct reproduction before the fix:
+  `detect_project_kind(/Users/yuxuan/otto-projects/acme-expense-portal)`
+  returned `library` even though the project has `requirements.txt` with
+  Flask and package-level `expense_portal/templates` / `expense_portal/static`.
+- This is the same root cause behind the previous audit walkthrough message:
+  `shape=not-applicable`, `note=no Flask create_app and no static index.html`.
+  The default synthesized walkthrough only tried `from app import create_app`;
+  it did not discover packaged factories such as `expense_portal:create_app`.
+- A broader audit test sweep exposed one more runtime gap: the audit-level
+  `otto.yaml` `test_command` path used the sanitized subprocess env but did
+  not resolve bare `python`, so macOS environments without `python` on PATH
+  failed the contract gate even though deterministic checks had been fixed.
+
+Classification:
+- Otto bugs fixed. The run was intentionally stopped at 99 seconds because it
+  had already compiled from stale `project_kind=library` context.
+
+Generic fixes:
+- `detect_project_kind` now reads `requirements*.txt` in addition to Python
+  package metadata, treats package-level `templates/` or `static/` as a webapp
+  signal, and classifies Flask/Django/FastAPI package apps correctly.
+- The synthesized webapp walkthrough now tries root modules plus top-level
+  Python packages for `create_app`, including package factories such as
+  `expense_portal:create_app` and `expense_portal.app:create_app`.
+- Audit contract tests now use the same subprocess executable resolver as
+  deterministic checks, so bare `python` / `pytest` in `otto.yaml` run through
+  the target project runtime or user PATH rather than failing at launch.
+
+External verifier:
+- Direct detection after the fix:
+  `detect_project_kind(/Users/yuxuan/otto-projects/acme-expense-portal)`
+  -> `webapp`.
+- The queued linked worktree for `add-a-manager-sla-aging-dashboard-8bb288`
+  also detects as `webapp`.
+
+Regression tests added or expanded:
+- `tests/test_config.py::TestDetectProjectKind::test_detects_requirements_flask_package_app_as_webapp`
+- `tests/test_config.py::TestDetectProjectKind::test_template_package_without_manifest_deps_is_webapp`
+- `tests/test_audit.py::test_synthesized_walkthrough_finds_package_create_app`
+- Existing audit contract tests now cover the executable resolver path because
+  the full `tests/test_audit.py` sweep includes bare `python` `test_command`
+  cases.
+
+Gates run:
+- `.venv/bin/python -m py_compile otto/config.py otto/audit.py` -> passed.
+- `.venv/bin/pytest tests/test_config.py::TestDetectProjectKind::test_detects_requirements_flask_package_app_as_webapp tests/test_config.py::TestDetectProjectKind::test_template_package_without_manifest_deps_is_webapp tests/test_audit.py::test_synthesized_walkthrough_finds_package_create_app -q`
+  -> `3 passed`.
+- `.venv/bin/pytest tests/test_config.py::TestDetectProjectKind tests/test_audit.py -q`
+  -> `54 passed`.
+- `uv run ruff check otto/config.py otto/audit.py tests/test_config.py tests/test_audit.py`
+  -> passed.
+
+Decision:
+- Fix and retry from a fresh Mission Control process again. This run does not
+  count as a product pass; it is evidence for the project-kind/walkthrough
+  shape bug and the audit contract-runtime bug.
+
+## 2026-05-06 Fresh Acme Retry 5: Live Mission Control Run + Run-View Logs Fix
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-743f16`
+- Session: `2026-05-06-173132-2c6bc6`
+- Provider: Codex, submitted through Mission Control Web after commit
+  `168533c99`.
+
+Doorway / Web evidence:
+- Mission Control Web on port 9000 selected `acme-expense-portal`.
+- The Build from intent dialog provider was changed from inherited Claude to
+  Codex and visibly showed `codex · model provider default · effort=default ·
+  verification=fast`.
+- `/api/queue/build` returned task `add-a-manager-sla-aging-dashboard-743f16`;
+  `/api/watcher/start` returned success and the task row became running.
+- Cross-session payload:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/otto_logs/cross-sessions/runs/live/2026-05-06-173132-2c6bc6.json`
+  includes `argv=["build", ..., "--provider", "codex"]`.
+- Compile prompt:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16/otto_logs/sessions/2026-05-06-173132-2c6bc6/prompts/compile-spec-e609c916c80a.md`
+  correctly contains `project_kind=webapp`.
+- Patched Mission Control verification on port 9001 used the same live session
+  and selected project. Browser screenshot:
+  `/tmp/.playwright-cli/page-2026-05-06T17-41-21-917Z.png`.
+
+Bug found:
+- During compile, the Run drawer Logs tab claimed no logs existed even though
+  the active compile agent had written:
+  `spec/compile-agent/narrative.log` and
+  `spec/compile-agent/messages.jsonl`.
+- Root cause: `/api/run-view/{session_id}/logs` only globbed build, certify,
+  and audit phase logs. It omitted `spec/**/*.log`, `spec/**/*.jsonl`, and
+  `spec/**/*.md`, so active compile/spec-generation work was invisible in the
+  primary product surface.
+
+Generic fix:
+- `otto/web/run_view_routes.py` now includes spec-phase logs and markdown in
+  session-level Run View logs. This is phase-generic and is not tied to the
+  Acme project.
+
+Regression tests added:
+- `tests/test_run_view_routes.py::test_run_view_logs_and_files_resolve_worktree_session`
+  now covers worktree sessions with `spec/compile-agent/narrative.log` and
+  `spec/compile-agent/messages.jsonl`.
+
+Verification:
+- `.venv/bin/pytest tests/test_run_view_routes.py::test_run_view_logs_and_files_resolve_worktree_session -q`
+  -> `1 passed`.
+- `.venv/bin/pytest tests/test_run_view_routes.py -q` -> `16 passed`.
+- `uv run ruff check otto/web/run_view_routes.py tests/test_run_view_routes.py`
+  -> passed.
+- Patched `/api/run-view/2026-05-06-173132-2c6bc6/logs` on port 9001 returned
+  `empty=False`, including `spec/compile-agent/live.log` and
+  `spec/compile-agent/messages.jsonl`.
+- Browser drawer on port 9001 showed 3 build groups, 10 features, session Logs
+  with compile-agent logs, group logs for `sla-aging-data`, and group diff for
+  `sla-aging-data`.
+
+Current live-run state:
+- Compile produced `spec/spec.json` with 3 groups:
+  `sla-aging-data`, `sla-aging-dashboard-ui`, and
+  `behavior-regression-tests`.
+- At the last checkpoint, `sla-aging-data` was actively building through Codex
+  and the drawer showed its three features under `Building`.
+
+Decision:
+- Otto bug fixed. Continue the live run and externally verify the Acme app
+  result before counting this pressure test as a product pass.
+
+## 2026-05-06 Fresh Acme Retry 5: Synthesized Walkthrough Runtime Fix
+
+Live project / session:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-743f16`
+- Session: `2026-05-06-173132-2c6bc6`
+
+Bug found:
+- The deterministic synthesized webapp walkthrough skipped the same Acme app
+  even after project-kind detection was fixed:
+  `audit/attempt-00/walkthrough/synthesized-webapp.log` reported
+  `shape="not-applicable"` and `no Flask create_app...`.
+- The skip was false. From the task worktree, importing the package with
+  Otto's own `.venv/bin/python` failed because the target app dependencies live
+  in the parent project `.venv`; importing with
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.venv/bin/python` worked.
+
+Root cause:
+- `_synthesized_webapp_walkthrough` used Otto's `sys.executable` for the
+  create_app probe instead of resolving the target project's runtime the same
+  way required checks do. Linked task worktrees therefore lost the parent
+  project virtualenv and could be misclassified as "not applicable."
+
+Generic fix:
+- `otto/audit.py` now resolves `python -c <synthesized-webapp-walkthrough>` via
+  `otto.checks._resolve_subprocess_command` with the target project directory,
+  while preserving the existing subprocess environment. This reuses the same
+  project-runtime lookup as check execution and is not specific to Acme.
+- The walkthrough log now records the resolved interpreter path, so future
+  skips can be audited from the artifact instead of inferred.
+
+Regression tests added:
+- `tests/test_audit.py::test_synthesized_walkthrough_uses_linked_worktree_project_python`
+  creates a linked `.worktrees/task` app whose package only imports under the
+  parent project `.venv/bin/python` shim, then asserts the synthesized
+  walkthrough succeeds and logs that interpreter.
+
+Verification:
+- `.venv/bin/pytest tests/test_audit.py::test_synthesized_walkthrough_uses_linked_worktree_project_python tests/test_audit.py::test_synthesized_walkthrough_finds_package_create_app tests/test_audit.py::test_default_walkthrough_no_browser_journey_webapp_synthesizes -q`
+  -> `3 passed`.
+- `.venv/bin/pytest tests/test_audit.py -q` -> `46 passed`.
+- `uv run ruff check otto/audit.py tests/test_audit.py` -> passed.
+- Real Acme repro after the fix: `default_walkthrough_from_spec` against
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16`
+  succeeded, used the parent project `.venv/bin/python`, detected
+  `"module": "expense_portal"`, and generated `screenshot-home.png`,
+  `dom-home.html`, `browser-capture.log`, and `walkthrough.webm`.
+
+Decision:
+- Otto bug fixed. This fix improves the generic audit oracle for any linked
+  worktree project whose runnable dependencies live outside the task checkout.
+
+## 2026-05-06 Fresh Acme Retry 5: Final Live Verdict Bugs
+
+Live project / session:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-743f16`
+- Session: `2026-05-06-173132-2c6bc6`
+- Exact command launched by Mission Control queue:
+  `otto build <Acme SLA aging dashboard intent> --provider codex`
+
+What Otto produced:
+- 3 groups landed:
+  `sla-aging-data` (`b779c8b`),
+  `sla-aging-dashboard-ui` (`411eaf8`), and
+  `behavior-regression-tests` (`684dac6`).
+- Native project tests in the final audit passed:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16/otto_logs/sessions/2026-05-06-173132-2c6bc6/audit/attempt-00/contract/test_command.log`
+  -> `46 passed`.
+- Audit walkthrough evidence:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16/otto_logs/sessions/2026-05-06-173132-2c6bc6/audit/attempt-00/walkthrough/walkthrough.jsonl`
+  covers dashboard render, row-link filters, submission, approval,
+  saved-filter CRUD, CSV/PDF exports, native tests, and a mobile viewport
+  inspection.
+- Proof packet:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16/otto_logs/sessions/2026-05-06-173132-2c6bc6/proof-packet.json`.
+
+Bug found: audit judge timeout ignored
+- Evidence: the Codex audit judge ran for about 10m44s even though
+  `AuditBudget.judge_timeout_s` defaults to 300 seconds.
+- Root cause: `run_audit` never put the budget value into `AuditAgentInput`,
+  and `default_audit_agent` called `run_agent_with_timeout(..., timeout=None)`.
+- Generic fix: `AuditAgentInput` now carries `judge_timeout_s`, `run_audit`
+  sets it from `AuditBudget`, and `default_audit_agent` passes it to
+  `run_agent_with_timeout`.
+
+Bug found: severe product-quality finding under-gated
+- Evidence: the live audit reported:
+  `At 390px viewport width, the filter bar overflows horizontally:
+  document scrollWidth was 662 against innerWidth 390, and the Assignee
+  control is clipped.`
+- The judge still returned `verdict=passed`, `quality_score=3`, and all
+  feature audits passed. With the user's product-quality bar, this should not
+  be a clean pass.
+- Root cause: the prompt allowed severe responsive failures to live only in
+  `quality_findings`, and `_compose_verdict` only capped quality scores below
+  3. A judge could identify a user-visible layout break and still call the
+  run passed.
+- Generic fix: the audit prompt now requires horizontal overflow, clipped
+  controls, overlapping text, or hidden primary actions to score 2 or lower
+  and mark the affected feature partial/blocked. `_compose_verdict` also adds
+  a deterministic severity cap for severe quality findings so a known layout
+  break cannot remain a full pass solely because the judge under-scored it.
+
+Bug found: queue surface marked successful i2p run as failed
+- Evidence: `spec-state.jsonl` ended with `run.finished verdict=passed`, but
+  the cross-session queue record ended as:
+  `status=failed`, `terminal_outcome=failure`, `last_event=exited 0 but no
+  manifest at .../otto_logs/queue/add-a-manager-sla-aging-dashboard-743f16/manifest.json`.
+- The session had a valid `summary.json`, `proof-packet.json`, and
+  `checkpoint.json`, but no queue manifest mirror.
+- Root cause: the redesigned i2p path writes per-session summary/proof
+  artifacts, while the queue finalizer still treated
+  `otto_logs/queue/<task>/manifest.json` as mandatory even when the child
+  exited 0 with a completed session summary.
+- Generic fix: queue finalization now synthesizes the missing canonical
+  session manifest and queue mirror from `summary.json` before failing a
+  zero-exit i2p child for missing manifest.
+
+Bug found: audit/browser artifacts classified inconsistently
+- Evidence: the live audit left `.playwright-cli/` and
+  `__audit_home_body__.html` untracked in the target worktree.
+- Root cause: `__audit_*` files were already treated as Otto-owned, but
+  `.playwright-cli/` was not in the centralized Otto-owned dirty-path list.
+- Generic fix: `.playwright-cli/` is now classified as Otto-owned runtime
+  evidence in `otto/setup_gitignore.py`.
+
+Regression tests added:
+- `tests/test_audit.py::test_run_audit_passes_judge_timeout_to_agent_input`
+- `tests/test_audit.py::test_default_audit_agent_uses_judge_timeout_from_input`
+- `tests/test_audit.py::test_audit_prompt_requests_quality_assessment`
+  updated for the severity-consistency rule.
+- `tests/test_audit.py::test_compose_verdict_caps_severe_quality_findings_to_partial`
+- `tests/test_audit.py::test_compose_verdict_does_not_cap_negated_quality_terms`
+- `tests/test_queue_runner.py::test_finalize_missing_queue_manifest_uses_i2p_session_summary`
+- `tests/test_merge_preflight_dirty_tree.py::test_preflight_clean_when_only_otto_owned_untracked_files`
+  updated to cover `.playwright-cli/` and `__audit_home_body__.html`.
+
+Verification:
+- `.venv/bin/pytest tests/test_audit.py -q` -> `50 passed`.
+- `.venv/bin/pytest tests/test_queue_runner.py -q` -> `105 passed`.
+- `.venv/bin/pytest tests/test_merge_preflight_dirty_tree.py -q` -> `7 passed`.
+- `uv run ruff check otto/audit.py otto/setup_gitignore.py otto/queue/runner.py tests/test_audit.py tests/test_merge_preflight_dirty_tree.py tests/test_queue_runner.py`
+  -> passed.
+- `git diff --check` -> passed.
+
+Decision:
+- Classify this pressure run as `Otto bugs fixed`, not as a clean product pass.
+  Otto generated a mostly functional brownfield app change and tested it, but
+  the live run exposed core orchestration/audit issues plus a genuine responsive
+  UX defect in the produced app. With the fixes above, future runs should time
+  out audit judges correctly, surface severe quality findings as non-pass, and
+  avoid queue false-failure when i2p summary artifacts exist.
+
+## 2026-05-06 Mission Control Product Audit: Landing Flow Repair
+
+Context:
+- Follow-up product-level Mission Control audit on patched server
+  `http://127.0.0.1:9000/`, selected project
+  `/Users/yuxuan/otto-projects/acme-expense-portal`.
+- Browser evidence:
+  `bench-results/as-user/2026-05-06-ui-round/launcher-1440x900.png`,
+  `bench-results/as-user/2026-05-06-ui-round/acme-tasks-after-repair-1280x800.png`,
+  `bench-results/as-user/2026-05-06-ui-round/acme-land-button-enabled-1280x800.png`,
+  `bench-results/as-user/2026-05-06-ui-round/acme-land-confirm-fixed-1280x800.png`.
+
+Bug found: stale failed queue state could not self-heal
+- Evidence: after synthesizing the missing manifest for
+  `add-a-manager-sla-aging-dashboard-743f16`, the live state still remained
+  `failed` with the old `exited 0 but no manifest` reason.
+- Root cause: queue finalization checked `ts.status == failed` after the
+  clean-worktree verifier returned. That conflated a newly discovered dirty
+  worktree with a stale pre-existing failure status.
+- Generic fix: `_verify_success_worktree_clean` now returns a boolean and
+  callers only stop when the current cleanliness check fails.
+- Live repair result: task state now reports `status=done`,
+  `stories_passed=3`, `stories_tested=3`; Mission Control shows
+  `add-a-manager-sla-aging-dashboard-743f16` as `Ready` with `3/3` stories.
+
+Bug found: project workspace landing CTA was disabled/inert
+- Evidence: Acme project workspace showed `Land 2 ready` but the button was
+  disabled even though `/api/state` returned `landing.counts.ready=2` and
+  `merge_blocked=false`.
+- Root cause: the redesigned `ProjectWorkspace` rendered `TaskQueueList`
+  without passing `onLandReady`, so the table had a visible landing CTA but no
+  handler.
+- Generic fix: `ProjectWorkspace` now opens the existing `ConfirmDialog`,
+  renders `BulkLandingConfirmList`, carries the verification-policy selector,
+  and posts to `/api/actions/merge-all` with the selected policy.
+
+Bug found: bulk landing confirmation rows visually concatenated critical fields
+- Evidence: live confirm dialog showed text like
+  `add-a-manager...743f16build/... -> main6 files`.
+- Root cause: the bulk row header had no layout separation between task id,
+  route, and file-count spans. Long-token wrapping avoided overflow but not
+  readability.
+- Generic fix: bulk landing rows now use block/grid layout for task id, route,
+  and file count.
+
+Regression tests added:
+- `tests/test_queue_runner.py::test_finalize_missing_queue_manifest_uses_i2p_session_summary`
+  now covers repairing a stale failed status after a synthesized manifest.
+- `tests/browser/test_modal_backdrop_cleanup.py::test_project_workspace_land_ready_posts_merge_all`
+  covers an enabled project-workspace landing CTA, confirmation layout
+  separation, verification-policy propagation, and `/api/actions/merge-all`.
+
+Verification:
+- `npm run web:typecheck` -> passed.
+- `npm run web:build` -> passed; static bundle regenerated.
+- `.venv/bin/pytest tests/test_queue_runner.py::test_finalize_missing_queue_manifest_uses_i2p_session_summary -q`
+  -> passed.
+- `OTTO_BROWSER_SKIP_BUILD=1 .venv/bin/pytest tests/browser/test_modal_backdrop_cleanup.py::test_project_workspace_land_ready_posts_merge_all -m browser -p playwright -q`
+  -> passed.
+
+Decision:
+- Classify as `Otto UX/control-plane bugs fixed`.
+- Do not count this as another pressure-test pass. It was a repair/audit round
+  against the same Acme evidence, and it found real product-flow gaps in the
+  Mission Control surface after the backend queue false-failure was repaired.
+
+## 2026-05-06 Mission Control Product Audit: Run Truthfulness Repair
+
+Context:
+- Follow-up product-level browser/API audit on restarted Mission Control
+  `http://127.0.0.1:9000/`, selected project
+  `/Users/yuxuan/otto-projects/acme-expense-portal`.
+- Real session inspected:
+  `2026-05-06-173132-2c6bc6` in
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16/otto_logs/sessions/`.
+- Browser evidence:
+  `bench-results/as-user/2026-05-06-ui-round/round3-acme-run-detail-fixed-stages-1280x800.png`,
+  `bench-results/as-user/2026-05-06-ui-round/round3-acme-feature-evidence-1280x800.png`,
+  `bench-results/as-user/2026-05-06-ui-round/round3-acme-spec-features-1280x800.png`.
+
+Bug found: passed i2p run showed a stale/in-flight stage timeline
+- Evidence: the Acme run header reported `passed`, `Groups 3/3`, `Features
+  10/10`, and `Wall 22:31`, while the stage timeline still showed spec review
+  pending, build active, audit/render/land pending.
+- Logs-first evidence: `spec-state.jsonl` contained group checks, merge landed
+  events, `audit.finished`, and `run.finished verdict=passed`; the proof packet
+  also reported `verdict=passed` with all groups landed.
+- Root cause: `RunView` only treated bare `seed.*` lifecycle events as stage
+  events. Bare `audit.*` events were ignored, completed group/merge/proof
+  evidence did not reconcile later stages, and the runner had been using
+  `audit.started detail="run start"` as a fake run-start event.
+- Generic fix: future journals emit `run.started`; `RunView` skips the legacy
+  fake audit-start event, recognizes bare audit lifecycle events, and
+  reconciles terminal passed/partial/blocked runs from proof, group merge
+  evidence, lifecycle state, and `run.finished`.
+
+Bug found: synthesized group features showed no evidence
+- Evidence: opening feature `Derive pending expenses submitted more than 7
+  days ago` showed `No evidence kinds declared` and `No evidence collected yet`
+  even though the group had a real pytest check and passed evidence.
+- Root cause: group-only i2p specs synthesize feature rows from
+  `Group.feature_ids`, but `RunView` did not map `pytest` / `PytestCheck` to the
+  canonical `RepoTestCheck` evidence kind and dropped group check evidence refs.
+- Generic fix: synthesized feature rows now inherit declared group check kinds
+  and evidence refs from proof-packet `check_evidence` plus
+  `group.check.finished` journal details.
+
+Bug found: spec review hid concrete group feature scope
+- Evidence: `GET /api/specs/2026-05-06-173132-2c6bc6/markdown` rendered only
+  three group headings before the fix, despite the compiled spec containing ten
+  concrete `groups[*].feature_ids`.
+- Root cause: `render_spec_md` only rendered top-level `Spec.features`; legacy
+  group-only i2p specs had `features=[]`.
+- Generic fix: markdown rendering now synthesizes readable feature headings
+  from group feature ids when top-level features are absent. Parsing also
+  derives `Group.feature_ids` from parsed feature comments so edited markdown
+  stays internally coherent.
+
+Live verification after fix:
+- `curl /api/run-view/2026-05-06-173132-2c6bc6` -> `status=passed`,
+  `verdict=passed`, and all stages `compile`, `spec_review`, `build`, `seed`,
+  `audit`, `render`, `land` are `done`.
+- First synthesized feature now reports `evidence_kinds=["RepoTestCheck"]` and
+  evidence ref `tests/test_sla_aging_data.py`.
+- `curl /api/specs/2026-05-06-173132-2c6bc6/markdown` -> rendered all ten group
+  feature headings.
+- Browser snapshot confirmed the run detail, feature drilldown, and spec review
+  surfaces show groups/features/stages/evidence truthfully.
+
+Regression tests added:
+- `tests/test_run_view.py::test_passed_i2p_run_marks_terminal_stages_done`
+- `tests/test_run_view.py::test_group_feature_ids_inherit_pytest_evidence_refs`
+- `tests/test_a1a_dataclasses.py::test_render_spec_md_group_feature_ids_when_features_empty`
+- `tests/test_a1a_dataclasses.py::test_parse_spec_md_features_with_metadata_comments`
+
+Verification:
+- `.venv/bin/pytest tests/test_run_view.py tests/test_a1a_dataclasses.py::test_render_spec_md_group_feature_ids_when_features_empty tests/test_a1a_dataclasses.py::test_parse_spec_md_features_with_metadata_comments tests/test_a1a_dataclasses.py::test_round_trip_render_parse_full tests/test_spec_state.py::test_append_and_iter_roundtrips_every_event_kind -q`
+  -> `26 passed`.
+- `uv run ruff check otto/mission_control/run_view.py otto/runner.py otto/spec_state.py otto/spec_compile.py tests/test_run_view.py tests/test_a1a_dataclasses.py`
+  -> passed.
+- `uv run python scripts/test_tiers.py smoke` -> `252 passed, 1800 deselected`.
+- `uv run python scripts/test_tiers.py web` -> `210 passed`.
+- `git diff --check` -> passed.
+- Direct serializer check against the real Acme session -> all stages done and
+  pytest evidence visible.
+- Restarted Mission Control on port 9000 and rechecked the live API/browser.
+
+Decision:
+- Classify as `Otto UI/API truthfulness bugs fixed`.
+- This remains an audit/repair round against the Acme pressure-test evidence,
+  not a new pressure-test tier.

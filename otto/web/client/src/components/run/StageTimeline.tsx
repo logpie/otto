@@ -6,6 +6,7 @@
 // description + duration + optional cost) separated by arrows.
 
 import type { StageStatus, StageView } from "../../types/run";
+import { formatTokenSpend, tokenBreakdownLine } from "../../utils/format";
 
 interface Props {
   stages: StageView[];
@@ -132,6 +133,11 @@ export function StageTimeline({ stages }: Props) {
               <span className="stage-duration">{formatDuration(s.duration_s, s.started_at, s.status)}</span>
               {s.cost_usd !== null && (
                 <span className="stage-cost">${s.cost_usd.toFixed(2)}</span>
+              )}
+              {formatTokenSpend(s.token_usage) && (
+                <span className="stage-token" title={tokenBreakdownLine(s.token_usage)}>
+                  {formatTokenSpend(s.token_usage)}
+                </span>
               )}
             </span>
             {i < stages.length - 1 && (

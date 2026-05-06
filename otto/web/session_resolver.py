@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -138,6 +139,7 @@ def queue_state_for_session(project_dir: Path, session_id: str) -> dict[str, Any
         out = dict(raw_state)
         out.setdefault("task_id", str(task_id))
         out.setdefault("run_id", safe_id)
+        _fill_live_duration(out)
         return out
     return None
 
@@ -149,6 +151,33 @@ def _queue_session_ids(raw_state: dict[str, Any]) -> set[str]:
         raw_state.get("run_id"),
     )
     return {str(value).strip() for value in values if str(value or "").strip()}
+
+
+def _fill_live_duration(state: dict[str, Any]) -> None:
+    if state.get("duration_s") is not None or state.get("wall_s") is not None:
+        return
+    if state.get("finished_at"):
+        return
+    status = str(state.get("status") or "").strip().lower()
+    if status not in {"starting", "initializing", "running"}:
+        return
+    started_at = _parse_utc(state.get("started_at"))
+    if started_at is None:
+        return
+    state["duration_s"] = max(0.0, (datetime.now(timezone.utc) - started_at).total_seconds())
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

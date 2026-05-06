@@ -515,7 +515,7 @@ def _format_report(report: dict[str, Any]) -> str:
     lines.append(f"- quality_score: {s.get('quality_score', 0)}/5")
     lines.append(f"- evaluator_aggregate: {s.get('evaluator_aggregate', 'skipped')}")
     lines.append(
-        f"- evaluator_summary: " + ", ".join(
+        "- evaluator_summary: " + ", ".join(
             f"{k}={v}" for k, v in (s.get('evaluator_summary') or {}).items()
         )
     )

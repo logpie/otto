@@ -3,13 +3,14 @@
 // Top-level layout:
 //   - VerdictHeader (outcome + intent + counts + wall+cost)
 //   - Run-level action bar: Pause / Resume / Cancel (A7)
-//   - FeatureList (primary surface)
+//   - GroupList (current dispatch state)
+//   - FeatureList (value breakdown)
 //   - Guardrails (pinned negative scope)
-//   - GroupList (secondary, collapsed by default; per-Group Abort buttons)
 //   - StageTimeline (Compile → Build → Audit → Render → Land)
 //
-// Per the user directive (priority on Feature, not Group), FeatureList
-// is the primary surface; GroupList is one click below.
+// During live builds, GroupList leads because groups are the actual dispatch
+// unit. Features inherit group build state until Audit produces per-feature
+// verdicts.
 //
 // Destructive actions (Pause and per-Group Abort) are gated behind a
 // ConfirmDialog so a single mis-click cannot pause a run or throw away
@@ -70,7 +71,12 @@ interface FilesPayload {
 }
 
 interface DiffPayload {
-  text: string;
+  text?: string;
+  group_id?: string;
+  branch?: string;
+  diff?: string;
+  truncated?: boolean;
+  error?: string | null;
 }
 
 async function postSessionAction(
@@ -307,9 +313,25 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
           )}
         </div>
       )}
-      {/* R3-B28: section dividers between Features / Guardrails / Groups /
+      {/* R3-B28: section dividers between Groups / Features / Guardrails /
           Stages — major drawer sections each carry a top border + breathing
           margin so the eye can find boundaries without reading headings. */}
+      <section className="group-section run-drawer-section">
+        <GroupList
+          groups={view.groups}
+          dispatch={view.dispatch}
+          onOpenDiff={onOpenGroupDiff}
+          onOpenLogs={onOpenGroupLogs}
+          {...(inFlight
+            ? {
+                onAbort: requestAbortGroup,
+                pendingAbortId: pending?.startsWith("abort:")
+                  ? pending.slice("abort:".length)
+                  : null,
+              }
+            : {})}
+        />
+      </section>
       <section className="feature-section run-drawer-section">
         <h3>Features</h3>
         <FeatureList
@@ -323,24 +345,6 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
           <Guardrails guardrails={view.guardrails} />
         </section>
       )}
-      <section className="group-section run-drawer-section">
-        {/* R3-B29: GroupList's own <summary> is now styled to match the
-            h3 weight of "Features" / "Stages", so it doubles as the
-            section header. No additional <h3> needed here. */}
-        <GroupList
-          groups={view.groups}
-          onOpenDiff={onOpenGroupDiff}
-          onOpenLogs={onOpenGroupLogs}
-          {...(inFlight
-            ? {
-                onAbort: requestAbortGroup,
-                pendingAbortId: pending?.startsWith("abort:")
-                  ? pending.slice("abort:".length)
-                  : null,
-              }
-            : {})}
-        />
-      </section>
       <section className="stage-section run-drawer-section">
         <h3>Stages</h3>
         <StageTimeline stages={view.stages} />
@@ -437,22 +441,23 @@ function RunResourcePanel({
   const panelRef = useRef<HTMLElement | null>(null);
   const [payload, setPayload] = useState<LogsPayload | FilesPayload | DiffPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const endpoint = resourceEndpoint(sessionId, kind, groupId);
+  const title = resourceTitle(kind, groupName ?? groupId);
 
   useEffect(() => {
     let cancelled = false;
     setPayload(null);
     setError(null);
-    const endpoint = kind === "artifacts" ? "files" : kind;
     void (async () => {
       try {
-        const query = groupId ? `?group_id=${encodeURIComponent(groupId)}` : "";
-        const resp = await fetch(`/api/run-view/${encodeURIComponent(sessionId)}/${endpoint}${query}`);
+        const resp = await fetch(endpoint);
         if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+        const contentType = resp.headers.get("content-type") || "";
         let body: LogsPayload | FilesPayload | DiffPayload;
-        if (kind === "diff") {
+        if (kind === "diff" && !contentType.includes("application/json")) {
           body = {text: await resp.text()};
         } else {
-          body = await resp.json() as LogsPayload | FilesPayload;
+          body = await resp.json() as LogsPayload | FilesPayload | DiffPayload;
         }
         if (!cancelled) setPayload(body);
       } catch (err) {
@@ -462,19 +467,11 @@ function RunResourcePanel({
     return () => {
       cancelled = true;
     };
-  }, [sessionId, kind, groupId]);
+  }, [endpoint, kind]);
 
   useEffect(() => {
     panelRef.current?.scrollIntoView({block: "nearest"});
   }, [kind, groupId]);
-
-  const title =
-    kind === "logs"
-      ? "Logs"
-      : kind === "diff"
-        ? "Diff"
-        : "Artifacts";
-  const scope = groupId ? ` for ${groupName ?? groupId}` : "";
 
   return (
     <section
@@ -482,9 +479,9 @@ function RunResourcePanel({
       className="run-resource-panel"
       data-testid={`run-resource-panel-${kind}`}
     >
-      <h3>{title}{scope}</h3>
-      {error ? <p role="alert">Failed to load {kind}: {error}</p> : null}
-      {!payload && !error ? <p>Loading {kind}...</p> : null}
+      <h3>{title}</h3>
+      {error ? <p role="alert">Failed to load {title.toLowerCase()}: {error}</p> : null}
+      {!payload && !error ? <p>Loading {title.toLowerCase()}...</p> : null}
       {payload && kind === "logs" ? (
         <LogsPanel payload={payload as LogsPayload} />
       ) : null}
@@ -496,6 +493,22 @@ function RunResourcePanel({
       ) : null}
     </section>
   );
+}
+
+function resourceEndpoint(sessionId: string, kind: ResourcePanel, groupId: string | null): string {
+  const encodedSession = encodeURIComponent(sessionId);
+  if (kind === "artifacts") return `/api/run-view/${encodedSession}/files`;
+  if (!groupId) return `/api/run-view/${encodedSession}/${kind}`;
+  const encodedGroup = encodeURIComponent(groupId);
+  if (kind === "logs") {
+    return `/api/run-view/${encodedSession}/groups/${encodedGroup}/logs`;
+  }
+  return `/api/run-view/${encodedSession}/groups/${encodedGroup}/diff`;
+}
+
+function resourceTitle(kind: ResourcePanel, scope: string | null): string {
+  const base = kind === "logs" ? "Logs" : kind === "diff" ? "Diff" : "Artifacts";
+  return scope ? `${base} for ${scope}` : base;
 }
 
 function LogsPanel({payload}: {payload: LogsPayload}) {
@@ -537,11 +550,24 @@ function FilesPanel({payload}: {payload: FilesPayload}) {
 }
 
 function DiffPanel({payload}: {payload: DiffPayload}) {
-  const text = payload.text.trimEnd();
+  const text = (payload.text ?? payload.diff ?? "").trimEnd();
+  if (payload.error) {
+    return <p role="alert">{payload.error}</p>;
+  }
   if (!text) {
     return <p>No diff is available yet.</p>;
   }
-  return <pre className="run-resource-diff">{text}</pre>;
+  return (
+    <>
+      {(payload.branch || payload.group_id || payload.truncated) ? (
+        <p className="run-resource-note">
+          {payload.branch ? `Branch ${payload.branch}` : payload.group_id ? `Group ${payload.group_id}` : "Diff"}
+          {payload.truncated ? " · truncated" : ""}
+        </p>
+      ) : null}
+      <pre className="run-resource-diff">{text}</pre>
+    </>
+  );
 }
 
 function formatBytes(value: number): string {

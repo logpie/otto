@@ -71,6 +71,7 @@ from otto.build import (
     ComponentStatus,
     GroupResult,
     GroupStatus,
+    resolve_integration_base_branch,
     run_build,
 )
 from otto.merge_queue import (
@@ -140,7 +141,7 @@ async def run_pipeline(
     audit_agent: AuditAgentCallable,
     fix_agent: BuildAgentCallable | None = None,
     walkthrough: WalkthroughCallable | None = None,
-    base_branch: str = "main",
+    base_branch: str | None = None,
     spec: Spec | None = None,
     audit_budget: AuditBudget | None = None,
     on_phase: "Callable[[str], None] | None" = None,
@@ -178,7 +179,8 @@ async def run_pipeline(
             (certify mode: judge what's there, no repair).
         walkthrough: Optional walkthrough hook (default: derived from
             spec via ``default_walkthrough_from_spec``).
-        base_branch: Integration branch for build/merge (default ``main``).
+        base_branch: Integration branch for build/merge. Defaults to the
+            active git branch in ``project_dir`` and falls back to ``main``.
         spec: If non-None, the runner skips the compile phase and uses
             this spec directly. Caller still owns writing it to disk.
         audit_budget: Audit phase bounds. ``None`` uses library default.
@@ -193,6 +195,7 @@ async def run_pipeline(
     ``audit_result.verdict``. Programmer errors (bad arguments) DO
     raise, since they indicate a bug in the caller.
     """
+    base_branch = base_branch or resolve_integration_base_branch(project_dir)
     # config is required only when we actually need to compile.
     if spec is None and config is None:
         raise ValueError(

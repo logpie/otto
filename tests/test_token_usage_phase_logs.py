@@ -7,7 +7,12 @@ from otto import paths
 from otto.mission_control.model import _token_usage_from_summary_paths
 from otto.runs.lifecycle import _write_session_summary
 from otto.queue.runner import _token_usage_from_summary
-from otto.token_usage import format_token_spend, token_spend_summary
+from otto.token_usage import (
+    format_token_spend,
+    message_file_breakdown_from_messages,
+    phase_breakdown_from_messages,
+    token_spend_summary,
+)
 from tests._helpers import init_repo
 
 
@@ -132,6 +137,87 @@ def test_session_summary_includes_tokens_from_phase_messages(tmp_path: Path) -> 
     }
     assert summary["breakdown"]["build"]["cache_read_input_tokens"] == 30
     assert summary["breakdown"]["certify"]["cached_input_tokens"] == 7
+
+
+def test_i2p_nested_phase_messages_are_recovered_and_rephased(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    run_id = "nested-i2p-token-run"
+    session_dir = paths.session_dir(repo, run_id)
+    _write_phase_usage(
+        session_dir / "spec",
+        "compile-agent",
+        {"input_tokens": 10, "output_tokens": 1},
+    )
+    _write_phase_usage(
+        session_dir / "build" / "dashboard",
+        "attempt-01",
+        {"input_tokens": 20, "cached_input_tokens": 15, "output_tokens": 2},
+    )
+    audit_messages = session_dir / "audit" / "attempt-00" / "judge" / "messages.jsonl"
+    audit_messages.parent.mkdir(parents=True, exist_ok=True)
+    audit_messages.write_text(
+        json.dumps({
+            "type": "phase_end",
+            # The SDK logger historically labels AUDIT calls as build.
+            # The session path is the source of truth for i2p phase grouping.
+            "phase": "build",
+            "duration_s": 12.5,
+            "usage": {"input_tokens": 30, "cached_input_tokens": 25, "output_tokens": 3},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    breakdown = phase_breakdown_from_messages(session_dir)
+
+    assert breakdown["spec"]["input_tokens"] == 10
+    assert breakdown["build"]["cached_input_tokens"] == 15
+    assert breakdown["audit"]["input_tokens"] == 30
+    assert breakdown["audit"]["duration_s"] == 12.5
+
+    _write_session_summary(
+        repo,
+        run_id,
+        verdict="passed",
+        passed=True,
+        cost=0.0,
+        duration=100.0,
+        stories_passed=1,
+        stories_tested=1,
+        rounds=1,
+    )
+    summary = json.loads(paths.session_summary(repo, run_id).read_text(encoding="utf-8"))
+    assert summary["token_usage"]["total_tokens"] == 66
+    assert set(summary["breakdown"]) >= {"spec", "build", "audit"}
+
+
+def test_message_file_breakdown_is_metadata_only(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    session_dir = paths.session_dir(repo, "metadata-only-run")
+    messages = session_dir / "audit" / "attempt-00" / "judge" / "messages.jsonl"
+    messages.parent.mkdir(parents=True, exist_ok=True)
+    messages.write_text(
+        "\n".join([
+            json.dumps({"type": "assistant", "content": "large prompt text should not leak"}),
+            json.dumps({
+                "type": "phase_end",
+                "phase": "build",
+                "duration_s": 1.25,
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    entries = message_file_breakdown_from_messages(session_dir)
+
+    assert entries == [{
+        "phase": "audit",
+        "path": "audit/attempt-00/judge/messages.jsonl",
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "duration_s": 1.25,
+    }]
 
 
 def test_mission_control_recovers_tokens_from_existing_phase_messages(tmp_path: Path) -> None:

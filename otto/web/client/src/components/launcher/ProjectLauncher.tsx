@@ -139,7 +139,7 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
   }
 
   return (
-    <section className="launcher-page" aria-labelledby="projectLauncherHeading">
+    <section className="launcher-page" aria-labelledby="projectLauncherHeading" data-testid="project-launcher">
       <header className="launcher-hero">
         <BrandMark size={32} />
         <div className="launcher-hero-copy">
@@ -212,7 +212,7 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
                     {project.last_activity_at ? `Updated ${formatDateTime(project.last_activity_at)}` : "No recent activity"}
                   </span>
                   <span className="project-row-branch" title="Branch">{project.branch || "-"}</span>
-                  {project.dirty ? <span className="project-row-dirty" title="Local changes">●</span> : null}
+                  {project.dirty ? <span className="project-row-dirty" title="Local changes">Local changes</span> : null}
                 </span>
                 <span className="project-row-arrow" aria-hidden="true">→</span>
               </button>

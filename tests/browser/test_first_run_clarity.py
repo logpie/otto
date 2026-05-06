@@ -399,6 +399,33 @@ def test_job_dialog_shows_pre_submit_summary(mc_backend: Any, page: Any, disable
     assert edit.is_visible()
 
 
+def test_job_dialog_provider_override_uses_provider_default_model(
+    mc_backend: Any,
+    page: Any,
+    disable_animations: Any,
+) -> None:
+    """Selecting Codex must not display the project's Claude model default."""
+
+    payload = _state_idle_first_run()
+    _install_projects_route(page)
+    _install_state_route(page, payload)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
+    disable_animations(page)
+
+    page.get_by_test_id("new-job-button").click()
+    page.get_by_test_id("job-dialog-summary-edit").click()
+    page.get_by_test_id("job-provider-select").select_option("codex")
+
+    summary_text = page.get_by_test_id("job-dialog-summary-text").text_content() or ""
+    assert "codex" in summary_text
+    assert "provider default" in summary_text
+    assert "sonnet-4-7" not in summary_text
+    assert page.get_by_test_id("job-execution-mode-select").count() == 0
+    assert page.get_by_test_id("job-rounds-input").count() == 0
+
+
 def test_certify_certification_select_updates_summary(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
@@ -607,7 +634,6 @@ def test_project_switch_button_returns_to_launcher(
         "current": current,
         "projects": projects,
     }
-    launcher_payload = {**project_payload, "current": None}
     state_payload = _state_idle_first_run()
     state_payload["project"] = {
         **state_payload["project"],

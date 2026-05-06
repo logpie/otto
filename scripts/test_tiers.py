@@ -65,6 +65,15 @@ def commands_for_tier(tier: str, pytest_args: Sequence[str]) -> list[tuple[dict[
                 "tests/test_web_cache_headers.py",
                 *extra,
             )),
+            ({"OTTO_BROWSER_SKIP_BUILD": "1"}, pytest_cmd(
+                "-q",
+                "tests/browser/test_launcher_run_view_gate.py::test_mission_control_product_smoke_launch_and_group_run_view",
+                "-m",
+                "browser",
+                "-p",
+                "playwright",
+                *extra,
+            )),
         ]
     if tier == "browser-smoke":
         return [

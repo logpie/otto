@@ -1125,9 +1125,12 @@ textarea:focus-visible,
 }
 
 .project-row-dirty {
-  color: var(--amber);
-  font-size: 14px;
-  line-height: 1;
+  border-color: var(--color-warning-border, #f59e0b);
+  background: var(--color-warning-bg, rgba(245, 158, 11, 0.12));
+  color: var(--color-warning-fg, #92400e);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
 }
 
 .project-row-arrow {
@@ -1209,6 +1212,12 @@ textarea:focus-visible,
   border: 1px solid var(--line);
   border-radius: 999px;
   background: #f8fafc;
+}
+
+.project-row-meta .project-row-dirty {
+  border-color: var(--color-warning-border, #f59e0b);
+  background: var(--color-warning-bg, rgba(245, 158, 11, 0.12));
+  color: var(--color-warning-fg, #92400e);
 }
 
 .launcher-empty {
@@ -1437,6 +1446,41 @@ textarea {
 .project-workspace-refresh {
   min-height: 40px;
   white-space: nowrap;
+}
+
+.project-workspace-tabs {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.project-workspace-tabs button {
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  min-height: 30px;
+  padding: 4px 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.project-workspace-tabs button.active,
+.project-workspace-tabs button:hover,
+.project-workspace-tabs button:focus-visible {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.workspace-diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .project-workspace-state-error,
@@ -6580,6 +6624,39 @@ tbody tr.selected {
   color: var(--accent-strong);
 }
 
+.job-launch-controls {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.1fr) repeat(2, minmax(110px, 0.7fr));
+  gap: 10px;
+  padding: 10px 0 12px;
+  border-top: 1px solid var(--line);
+}
+
+.job-launch-controls label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.job-launch-controls select,
+.job-launch-controls input {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.job-launch-controls [aria-invalid="true"] {
+  border-color: var(--color-danger-fg);
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.1);
+}
+
 .job-palette-target {
   display: grid;
   grid-template-columns: minmax(0, auto) minmax(280px, 1fr);
@@ -7269,6 +7346,9 @@ html, body {
 
   .job-palette-target-summary {
     text-align: left;
+  }
+  .job-launch-controls {
+    grid-template-columns: 1fr;
   }
 
   /* Old sidebar fallback rules below — irrelevant in topbar layout but
@@ -8048,6 +8128,33 @@ details > summary:focus-visible {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.confirm-bulk-list > ul,
+.confirm-bulk-row-files {
+  display: grid;
+  gap: 10px;
+}
+
+.confirm-bulk-row {
+  display: grid;
+  gap: 6px;
+}
+
+.confirm-bulk-row-head {
+  display: grid;
+  gap: 4px;
+}
+
+.confirm-bulk-row-head strong,
+.confirm-bulk-row-route,
+.confirm-bulk-row-count {
+  display: block;
+}
+
+.confirm-bulk-row-count {
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .confirm-bulk-row-head code,
@@ -9553,6 +9660,15 @@ mark.log-search-match.active {
   font-weight: 600;
   color: var(--text);
 }
+.run-drawer-active-line {
+  font-size: var(--text-sm, 14px);
+  color: var(--muted);
+  margin-top: -2px;
+}
+.run-drawer-active-line strong {
+  color: var(--text);
+  font-weight: 600;
+}
 /* R3-B18: KPI grid sits in its own visual block — separate it from the
    intent line with a top border so the eye reads it as a metric row,
    not a continuation of the intent. */
@@ -9760,9 +9876,10 @@ mark.log-search-match.active {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.run-resource-diff {
+.run-resource-diff,
+.run-diff-text {
   margin: 0;
-  max-height: 360px;
+  max-height: 420px;
   overflow: auto;
   padding: 10px;
   border: 1px solid var(--line);
@@ -9833,7 +9950,9 @@ mark.log-search-match.active {
 .feature-row .feature-name {
   font-weight: 600;
   color: var(--text);
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .feature-row .feature-detail {
   flex: 1 1 auto;
@@ -9883,6 +10002,7 @@ mark.log-search-match.active {
   color: var(--text);
 }
 .group-row .feature-count,
+.group-row .group-deps,
 .group-row .group-wall,
 .group-row .group-cost {
   font-size: var(--text-xs, 12px);
@@ -9995,10 +10115,16 @@ mark.log-search-match.active {
   margin-left: auto;
 }
 .stage-timeline .stage-duration,
-.stage-timeline .stage-cost {
+.stage-timeline .stage-cost,
+.stage-timeline .stage-token {
   font-size: var(--text-xs, 12px);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+.stage-timeline .stage-token {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .stage-timeline .stage-arrow {
   color: var(--muted);
@@ -10025,13 +10151,15 @@ mark.log-search-match.active {
 .feature-drilldown {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 .feature-drilldown-breadcrumb {
   display: flex;
   align-items: baseline;
   gap: 12px;
   flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
 }
 .feature-drilldown-breadcrumb .feature-drilldown-back {
   appearance: none;
@@ -10042,7 +10170,6 @@ mark.log-search-match.active {
   border-radius: 4px;
   cursor: pointer;
   font-size: var(--text-sm, 14px);
-  margin-right: auto; /* B8: left-align the back button */
   margin-left: 0;
 }
 .feature-drilldown-breadcrumb .feature-drilldown-back:hover {
@@ -10072,14 +10199,19 @@ mark.log-search-match.active {
 }
 .feature-drilldown-header {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 12px;
   flex-wrap: wrap;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
 }
 .feature-drilldown-header h2 {
   margin: 0;
   flex: 1 1 auto;
   min-width: 0;
+  line-height: 1.3;
 }
 .feature-drilldown-actions {
   display: flex;
@@ -10098,6 +10230,70 @@ mark.log-search-match.active {
 }
 .feature-drilldown-actions .feature-action-button:hover {
   background: var(--surface-alt);
+}
+.feature-drilldown-description,
+.feature-drilldown-acceptance,
+.feature-drilldown-honesty,
+.feature-drilldown-evidence-kinds,
+.feature-drilldown-evidence-refs,
+.feature-drilldown-findings {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--surface);
+}
+.feature-drilldown-description h3,
+.feature-drilldown-acceptance h3,
+.feature-drilldown-honesty h3,
+.feature-drilldown-evidence-kinds h3,
+.feature-drilldown-evidence-refs h3,
+.feature-drilldown-findings h3 {
+  margin-top: 0;
+}
+.feature-drilldown-honesty dl {
+  display: grid;
+  grid-template-columns: minmax(150px, max-content) minmax(0, 1fr);
+  gap: 8px 20px;
+  margin: 0;
+}
+.feature-drilldown-honesty dt {
+  color: var(--muted);
+  font-size: var(--text-sm, 14px);
+}
+.feature-drilldown-honesty dd {
+  margin: 0;
+  min-width: 0;
+}
+.feature-resource-panel {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  background: var(--surface);
+}
+.feature-resource-panel h3 {
+  margin-top: 0;
+}
+.feature-resource-list {
+  display: grid;
+  gap: 8px;
+}
+.feature-resource-log {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-alt);
+}
+.feature-resource-log summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-weight: 600;
+}
+.feature-resource-log pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border-top: 1px solid var(--line);
+  white-space: pre-wrap;
 }
 .feature-drilldown .finding {
   display: flex;
@@ -10271,6 +10467,15 @@ mark.log-search-match.active {
   color: var(--text);
   text-decoration: none;
   white-space: nowrap;
+}
+
+.otto-app-shell-brand-button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
 }
 
 .otto-app-shell-brand-link:hover,
@@ -10870,6 +11075,7 @@ button.otto-app-shell-project:focus-visible {
   align-items: baseline;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 .feature-row .feature-row-chevron {
   margin-left: auto;
@@ -10977,6 +11183,35 @@ button.otto-app-shell-project:focus-visible {
 }
 .group-list-summary-label {
   color: var(--text);
+}
+.group-list-summary-count {
+  color: var(--muted);
+  font-size: var(--text-sm, 14px);
+}
+
+.group-dispatch-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 8px 24px;
+  color: var(--muted);
+  font-size: var(--text-xs, 12px);
+}
+
+.group-dispatch-status span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-alt);
+  font-variant-numeric: tabular-nums;
+}
+
+.group-row .group-waiting {
+  font-size: var(--text-xs, 12px);
+  color: var(--muted);
 }
 
 /* === RUA round-3 cluster 3 fixes — spec review + spec diff polish ===
@@ -11114,6 +11349,14 @@ button.otto-app-shell-project:focus-visible {
   flex-direction: column;
   gap: 8px;
   margin: 0;
+  max-width: 720px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.spec-diff-empty-block .spec-diff-empty {
+  line-height: 1.5;
 }
 .spec-diff-empty-cta {
   margin: 0;

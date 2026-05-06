@@ -336,7 +336,7 @@ def test_launcher_mode_without_project_shows_launcher_not_run_error(
     page.route("**/api/projects", projects)
     page.route("**/api/run-view", run_view)
 
-    page.goto(mc_backend.url, wait_until="networkidle")
+    page.goto(mc_backend.url, wait_until="domcontentloaded")
     page.wait_for_selector('[data-testid="launcher-empty-state"]', timeout=10_000)
 
     assert page.get_by_text("Create your first project").is_visible()
@@ -442,11 +442,11 @@ def test_selecting_project_allows_run_list_to_load(
     assert project_get_calls["count"] == 1
 
 
-def test_selected_project_brand_returns_to_project_home(
+def test_selected_project_brand_returns_to_project_launcher(
     mc_backend: Any,
     page: Any,
 ) -> None:
-    """The top-left brand should keep the selected project and return home."""
+    """In launcher mode, the top-left brand should return to project selection."""
 
     selected = {"value": True}
     project = _project()
@@ -466,10 +466,11 @@ def test_selected_project_brand_returns_to_project_home(
         )
 
     def clear_project(route: Any) -> None:
+        selected["value"] = False
         route.fulfill(
-            status=500,
+            status=200,
             content_type="application/json",
-            body=json.dumps({"detail": "brand must not clear the project"}),
+            body=json.dumps({"ok": True, "current": None}),
         )
 
     def state(route: Any) -> None:
@@ -486,11 +487,42 @@ def test_selected_project_brand_returns_to_project_home(
     page.goto(mc_backend.url, wait_until="networkidle")
     page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
 
-    page.get_by_label("Otto Mission Control — project home").click()
-    page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
+    page.get_by_label("Otto Mission Control — project launcher").click()
+    page.wait_for_selector('[data-testid="project-launcher"]', timeout=10_000)
 
-    assert selected["value"] is True
-    assert page.get_by_text("Project workspace").is_visible()
+    assert selected["value"] is False
+    assert page.get_by_text("Open a project").is_visible()
+
+
+def test_launcher_dirty_project_uses_text_badge(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Dirty projects need a readable badge, not an unlabeled color dot."""
+
+    project = _project()
+    project["dirty"] = True
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": None,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    page.route("**/api/projects", projects)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-testid="project-launcher"]', timeout=10_000)
+
+    assert page.get_by_text("Local changes").is_visible()
 
 
 def test_run_card_opens_side_drawer_without_route_navigation(
@@ -633,6 +665,8 @@ def test_group_actions_open_filtered_logs_and_diff(
                     "acceptance_detail": "",
                     "evidence_kinds": [],
                     "group_id": "foundation",
+                    "group_name": "Foundation",
+                    "build_status": "in_progress",
                     "verdict": None,
                     "evidence_completeness": "full",
                     "coverage_confidence": "high",
@@ -693,7 +727,6 @@ def test_group_actions_open_filtered_logs_and_diff(
         route.fulfill(status=200, content_type="application/json", body=json.dumps(run_view))
 
     def group_logs(route: Any) -> None:
-        assert "group_id=foundation" in route.request.url
         route.fulfill(
             status=200,
             content_type="application/json",
@@ -716,16 +749,24 @@ def test_group_actions_open_filtered_logs_and_diff(
         )
 
     def group_diff(route: Any) -> None:
-        assert "group_id=foundation" in route.request.url
         route.fulfill(
             status=200,
-            content_type="text/plain",
-            body="Scope: group foundation\nUntracked files:\nsrc/App.tsx\n+Microfeed\n",
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "session_id": "run-1",
+                    "group_id": "foundation",
+                    "branch": "build/foundation",
+                    "diff": "Scope: group foundation\nUntracked files:\nsrc/App.tsx\n+Microfeed\n",
+                    "truncated": False,
+                    "error": None,
+                }
+            ),
         )
 
     page.route("**/api/run-view/run-1", run_detail)
-    page.route("**/api/run-view/run-1/logs*", group_logs)
-    page.route("**/api/run-view/run-1/diff*", group_diff)
+    page.route("**/api/run-view/run-1/groups/foundation/logs", group_logs)
+    page.route("**/api/run-view/run-1/groups/foundation/diff", group_diff)
     page.route("**/api/projects", projects)
     page.route("**/api/state", state)
 
@@ -743,7 +784,6 @@ def test_group_actions_open_filtered_logs_and_diff(
     assert page.get_by_test_id("stage-spec_review").get_by_text("skipped").is_visible()
     assert page.get_by_test_id("stage-seed").get_by_text("Prepare fixtures").is_visible()
 
-    page.get_by_test_id("group-list").locator("summary").click()
     page.get_by_test_id("group-logs-foundation").click()
     page.wait_for_selector('[data-testid="run-resource-panel-logs"]', timeout=10_000)
     assert page.get_by_text("Logs for Foundation").is_visible()
@@ -752,10 +792,249 @@ def test_group_actions_open_filtered_logs_and_diff(
 
     page.get_by_test_id("group-diff-foundation").click()
     page.wait_for_selector('[data-testid="run-resource-panel-diff"]', timeout=10_000)
-    assert page.get_by_text("Diff for Foundation").is_visible()
+    assert page.get_by_role("heading", name="Diff for Foundation").is_visible()
     page.wait_for_selector("text=Scope: group foundation", timeout=10_000)
     assert page.get_by_text("Scope: group foundation").is_visible()
     assert page.get_by_text("src/App.tsx").is_visible()
+
+
+def test_run_view_wraps_long_feature_names_without_page_overflow(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Issue-sized feature names must wrap instead of widening the whole app."""
+
+    project = _project()
+    run_view = _run_view("long-run")
+    run_view["status"] = "blocked"
+    run_view["verdict"] = "blocked"
+    long_name = (
+        "Feature with an extremely long title that should wrap without covering "
+        "actions or breaking the drawer layout "
+        * 2
+    )
+    run_view["features"] = [
+        {
+            "id": f"f-{index}",
+            "name": f"{long_name}{index}",
+            "description": "Long feature description.",
+            "acceptance_detail": "The UI wraps all text and leaves controls clickable.",
+            "evidence_kinds": ["RepoTestCheck", "BrowserCheck"],
+            "group_id": "foundation",
+            "group_name": "Foundation",
+            "build_status": "blocked" if index < 2 else "passed",
+            "verdict": None,
+            "evidence_completeness": "full",
+            "coverage_confidence": "high",
+            "multi_actor_required": False,
+            "audit_pre_merge": False,
+            "evidence_refs": [],
+        }
+        for index in range(8)
+    ]
+    run_view["groups"] = [
+        {
+            "id": "foundation",
+            "name": "Foundation",
+            "description": "",
+            "feature_ids": [feature["id"] for feature in run_view["features"]],
+            "status": "blocked",
+            "branch": "i2p/long-run/foundation",
+            "owned_paths": ["src/App.tsx"],
+            "dependencies": [],
+            "cost_usd": 0.1,
+            "wall_s": 12.0,
+            "repair_attempts": 0,
+        }
+    ]
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def detail(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(run_view))
+
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.route("**/api/projects", projects)
+    page.route("**/api/run-view/long-run", detail)
+
+    page.goto(f"{mc_backend.url}?view=run-view&session=long-run", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
+
+    widths = page.evaluate(
+        """() => ({
+            viewport: innerWidth,
+            body: document.body.scrollWidth,
+            document: document.documentElement.scrollWidth,
+        })"""
+    )
+    assert widths["body"] <= widths["viewport"] + 2
+    assert widths["document"] <= widths["viewport"] + 2
+
+    first_name = page.locator(".feature-row .feature-name").first.bounding_box()
+    first_row = page.locator(".feature-row").first.bounding_box()
+    assert first_name is not None
+    assert first_row is not None
+    assert first_name["width"] <= first_row["width"]
+
+
+def test_feature_drilldown_uses_build_state_and_real_group_resources(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Feature detail must not show stale pending status or fake action stubs."""
+
+    project = _project()
+    run_view = _run_view("run-1")
+    run_view["status"] = "blocked"
+    run_view["verdict"] = "blocked"
+    run_view["features"] = [
+        {
+            "id": "f1",
+            "name": "Scaffold checkout flow",
+            "description": "Part of Foundation.",
+            "acceptance_detail": "",
+            "evidence_kinds": ["RepoTestCheck"],
+            "group_id": "foundation",
+            "group_name": "Foundation",
+            "build_status": "blocked",
+            "verdict": None,
+            "evidence_completeness": "full",
+            "coverage_confidence": "high",
+            "multi_actor_required": False,
+            "audit_pre_merge": False,
+            "evidence_refs": [],
+        }
+    ]
+    run_view["groups"] = [
+        {
+            "id": "foundation",
+            "name": "Foundation",
+            "description": "",
+            "feature_ids": ["f1"],
+            "status": "blocked",
+            "branch": "i2p/run-1/foundation",
+            "owned_paths": ["src/App.tsx"],
+            "dependencies": [],
+            "cost_usd": 0.1,
+            "wall_s": 12.0,
+            "repair_attempts": 0,
+        }
+    ]
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def detail(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(run_view))
+
+    def group_logs(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "session_id": "run-1",
+                    "group_id": "foundation",
+                    "logs": [
+                        {
+                            "label": "build/foundation/live.log",
+                            "path": "build/foundation/live.log",
+                            "size_bytes": 12,
+                            "text": "real group log",
+                            "truncated": False,
+                        }
+                    ],
+                    "empty": False,
+                }
+            ),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/run-view/run-1/groups/foundation/logs", group_logs)
+    page.route("**/api/run-view/run-1", detail)
+
+    page.goto(f"{mc_backend.url}?view=run-view&session=run-1", wait_until="networkidle")
+    page.get_by_test_id("feature-f1").click()
+    page.wait_for_selector('[data-testid="feature-drilldown"]', timeout=10_000)
+
+    assert page.get_by_test_id("feature-drilldown-verdict").inner_text() == "blocked"
+    back_box = page.get_by_test_id("feature-drilldown-back").bounding_box()
+    crumb_box = page.get_by_test_id("feature-drilldown-breadcrumb").bounding_box()
+    assert back_box is not None
+    assert crumb_box is not None
+    assert crumb_box["x"] <= back_box["x"] + back_box["width"] + 80
+    assert page.locator(".feature-drilldown-honesty").evaluate(
+        "node => getComputedStyle(node).borderStyle"
+    ) != "none"
+    assert page.locator(".feature-drilldown-honesty dl").evaluate(
+        "node => getComputedStyle(node).display"
+    ) == "grid"
+    assert page.get_by_test_id("feature-action-evidence").count() == 0
+    assert page.get_by_test_id("feature-action-reaudit").count() == 0
+
+    page.get_by_test_id("feature-action-group-logs").click()
+    page.wait_for_selector('[data-testid="feature-resource-logs"]', timeout=10_000)
+    page.get_by_text("build/foundation/live.log").wait_for(timeout=10_000)
+
+
+def test_diagnostics_query_route_opens_health_surface(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    project = _project()
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def state(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_state(project)),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/state", state)
+
+    page.goto(f"{mc_backend.url}?view=diagnostics", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="diagnostics-view"]', timeout=10_000)
+
+    assert page.get_by_test_id("diagnostics-tab").get_attribute("aria-pressed") == "true"
+    assert page.get_by_text("Health").first.is_visible()
 
 
 def test_run_drawer_group_diff_click_uses_real_run_view_diff_route(
@@ -824,15 +1103,20 @@ def test_run_drawer_group_diff_click_uses_real_run_view_diff_route(
             ],
             "features": [
                 {
-                    "feature_id": "feed",
+                    "id": "feed",
                     "name": "Timeline feed",
+                    "description": "",
+                    "acceptance_detail": "",
+                    "evidence_kinds": [],
                     "group_id": "foundation",
+                    "group_name": "Foundation",
+                    "build_status": "in_progress",
                     "verdict": "pending",
-                    "stories_passed": 0,
-                    "stories_total": 1,
-                    "stories": [],
-                    "findings": [],
-                    "repair_attempts": 0,
+                    "evidence_completeness": "partial",
+                    "coverage_confidence": "medium",
+                    "multi_actor_required": False,
+                    "audit_pre_merge": False,
+                    "evidence_refs": [],
                 }
             ],
         }
@@ -869,7 +1153,6 @@ def test_run_drawer_group_diff_click_uses_real_run_view_diff_route(
     page.goto(mc_backend.url, wait_until="networkidle")
     page.get_by_test_id("task-card-build-a-micro-twitter").click()
     page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
-    page.get_by_test_id("group-list").locator("summary").click()
     page.get_by_test_id("group-diff-foundation").click()
 
     page.wait_for_selector('[data-testid="run-resource-panel-diff"]', timeout=10_000)
@@ -879,6 +1162,101 @@ def test_run_drawer_group_diff_click_uses_real_run_view_diff_route(
     assert page.get_by_text("+export default function App()").is_visible()
     assert page.get_by_text("No diff is available yet").count() == 0
     assert page.get_by_text("No changes from base").count() == 0
+
+
+def test_spec_diff_without_versions_hides_noop_controls(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    project = _project()
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def versions(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"session_id": "run-1", "versions": []}),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/specs/run-1/versions", versions)
+
+    page.goto(f"{mc_backend.url}?view=spec-diff&session=run-1", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="spec-diff-empty"]', timeout=10_000)
+
+    assert page.get_by_test_id("spec-diff-from").count() == 0
+    assert page.get_by_test_id("spec-diff-fold-toggle").count() == 0
+    assert page.get_by_text("No archived spec versions").is_visible()
+
+
+def test_spec_review_approved_banner_stays_web_native(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """The primary Web UI should not tell users to paste a CLI command."""
+
+    project = _project()
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def markdown(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "spec_id": "run-1",
+                    "session_id": "run-1",
+                    "markdown": "# Build app\n\n## Features\n\n### Auth\n",
+                    "intent_hash": "abc123",
+                    "lifecycle": "approved",
+                    "updated_at": "2026-05-06T00:00:00Z",
+                }
+            ),
+        )
+
+    def versions(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"session_id": "run-1", "versions": []}),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/specs/run-1/versions", versions)
+    page.route("**/api/specs/run-1/markdown", markdown)
+
+    page.goto(f"{mc_backend.url}?view=spec-review&spec=run-1", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="spec-review-readonly-banner"]', timeout=10_000)
+
+    banner = page.get_by_test_id("spec-review-readonly-banner")
+    assert "Queue an improvement or new build" in banner.inner_text()
+    assert "otto build" not in banner.inner_text()
 
 
 def test_new_run_queues_from_web_and_starts_runner(
@@ -965,8 +1343,263 @@ def test_new_run_queues_from_web_and_starts_runner(
 
     assert len(queue_posts) == 1
     assert queue_posts[0]["intent"].startswith("build a webapp")
+    assert "--split" not in queue_posts[0]["extra_args"]
+    assert "--agentic" not in queue_posts[0]["extra_args"]
+    assert "--rounds" not in queue_posts[0]["extra_args"]
     assert watcher_starts["count"] == 1
     assert page.get_by_test_id("run-list-queue-banner").is_visible()
+
+
+def test_mission_control_product_smoke_launch_and_group_run_view(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Product smoke: launch controls, queue POST, grouped RunView, logs, diff."""
+
+    project = _project()
+    project["defaults"] = {
+        "provider": "claude",
+        "model": "sonnet",
+        "reasoning_effort": None,
+        "certifier_mode": "fast",
+        "skip_product_qa": False,
+        "run_budget_seconds": 3600,
+        "spec_timeout": 600,
+        "max_certify_rounds": 8,
+        "max_turns_per_call": 200,
+        "strict_mode": False,
+        "split_mode": True,
+        "allow_dirty_repo": False,
+        "default_branch": "main",
+        "test_command": None,
+        "queue_concurrent": 3,
+        "queue_task_timeout_s": 4200.0,
+        "queue_worktree_dir": ".worktrees",
+        "queue_on_watcher_restart": "resume",
+        "queue_merge_certifier_mode": "standard",
+        "config_file_exists": True,
+        "config_error": None,
+    }
+    queue_posts: list[dict[str, Any]] = []
+    run_view = _run_view("run-1")
+    run_view.update(
+        {
+            "status": "building",
+            "verdict": None,
+            "token_usage": {"input_tokens": 1200, "output_tokens": 240, "total_tokens": 1440},
+            "dispatch": {
+                "max_concurrent": 3,
+                "running_group_ids": ["feed"],
+                "ready_group_ids": ["profile"],
+                "waiting_group_ids": ["notifications"],
+                "blocked_group_ids": [],
+                "completed_group_ids": ["foundation"],
+                "parallelizable_group_ids": ["feed", "profile"],
+                "summary": "running 1/3; ready 1; waiting on dependencies 1; blocked 0",
+            },
+            "features": [
+                {
+                    "id": "feed-list",
+                    "name": "Feed list",
+                    "description": "Shows posts in reverse chronological order.",
+                    "acceptance_detail": "Browser can see the newest post first.",
+                    "evidence_kinds": ["BrowserJourney"],
+                    "group_id": "feed",
+                    "group_name": "Feed",
+                    "build_status": "in_progress",
+                    "verdict": None,
+                    "evidence_completeness": "full",
+                    "coverage_confidence": "high",
+                    "multi_actor_required": False,
+                    "audit_pre_merge": False,
+                    "evidence_refs": [],
+                }
+            ],
+            "groups": [
+                {
+                    "id": "foundation",
+                    "name": "Foundation",
+                    "description": "",
+                    "feature_ids": [],
+                    "status": "passing",
+                    "branch": "i2p/run-1/foundation",
+                    "owned_paths": ["src/db.ts"],
+                    "dependencies": [],
+                    "cost_usd": 0.03,
+                    "wall_s": 12.0,
+                    "repair_attempts": 0,
+                },
+                {
+                    "id": "feed",
+                    "name": "Feed",
+                    "description": "",
+                    "feature_ids": ["feed-list"],
+                    "status": "in_progress",
+                    "branch": "i2p/run-1/feed",
+                    "owned_paths": ["src/feed.tsx"],
+                    "dependencies": ["foundation"],
+                    "cost_usd": 0.05,
+                    "wall_s": 18.0,
+                    "repair_attempts": 0,
+                },
+                {
+                    "id": "profile",
+                    "name": "Profile",
+                    "description": "",
+                    "feature_ids": [],
+                    "status": "pending",
+                    "branch": "",
+                    "owned_paths": ["src/profile.tsx"],
+                    "dependencies": ["foundation"],
+                    "cost_usd": 0.0,
+                    "wall_s": 0.0,
+                    "repair_attempts": 0,
+                },
+                {
+                    "id": "notifications",
+                    "name": "Notifications",
+                    "description": "",
+                    "feature_ids": [],
+                    "status": "pending",
+                    "branch": "",
+                    "owned_paths": ["src/notifications.tsx"],
+                    "dependencies": ["feed"],
+                    "cost_usd": 0.0,
+                    "wall_s": 0.0,
+                    "repair_attempts": 0,
+                },
+            ],
+        }
+    )
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def state(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_state(project, watcher_running=True)),
+        )
+
+    def queue_build(route: Any) -> None:
+        queue_posts.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "ok": True,
+                    "message": "queued build-social-feed",
+                    "task": {"id": "build-social-feed"},
+                    "warnings": [],
+                    "refresh": True,
+                }
+            ),
+        )
+
+    def run_detail(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(run_view))
+
+    def group_logs(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "logs": [
+                        {
+                            "label": "build/feed/narrative.log",
+                            "path": "build/feed/narrative.log",
+                            "size_bytes": 21,
+                            "text": "feed group is building",
+                            "truncated": False,
+                        }
+                    ],
+                    "empty": False,
+                }
+            ),
+        )
+
+    def group_diff(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "group_id": "feed",
+                    "branch": "i2p/run-1/feed",
+                    "diff": "diff --git a/src/feed.tsx b/src/feed.tsx\n+render feed\n",
+                    "truncated": False,
+                    "error": None,
+                }
+            ),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/state", state)
+    page.route("**/api/queue/build", queue_build)
+    page.route("**/api/run-view/run-1/groups/feed/logs", group_logs)
+    page.route("**/api/run-view/run-1/groups/feed/diff", group_diff)
+    page.route("**/api/run-view/run-1", run_detail)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
+    page.get_by_test_id("new-job-button").click()
+    page.wait_for_selector('[data-testid="job-dialog"]', timeout=10_000)
+
+    assert page.get_by_test_id("job-provider-select").is_visible()
+    assert page.get_by_test_id("job-budget-input").is_visible()
+    assert page.get_by_test_id("job-max-turns-input").is_visible()
+
+    page.get_by_test_id("job-provider-select").select_option("codex")
+    page.get_by_test_id("job-budget-input").fill("900")
+    page.get_by_test_id("job-max-turns-input").fill("80")
+    page.get_by_test_id("job-dialog-intent").fill("build a browser-verified social feed")
+    page.get_by_test_id("job-dialog-submit-button").click()
+    page.wait_for_selector('[data-testid="job-grace-banner"]', timeout=10_000)
+    page.wait_for_timeout(3_600)
+
+    assert len(queue_posts) == 1
+    assert queue_posts[0]["intent"] == "build a browser-verified social feed"
+    assert queue_posts[0]["extra_args"][:6] == [
+        "--provider",
+        "codex",
+        "--budget",
+        "900",
+        "--max-turns",
+        "80",
+    ]
+
+    page.goto(f"{mc_backend.url}?view=run-view&session=run-1", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
+
+    expect_line = page.get_by_test_id("run-drawer-active-line")
+    assert "Running 1/3 groups" in (expect_line.text_content() or "")
+    dispatch = page.get_by_test_id("group-dispatch-status")
+    dispatch_text = dispatch.text_content() or ""
+    assert "Ready now 1" in dispatch_text
+    assert "Waiting 1" in dispatch_text
+    assert "2 can run now" in dispatch_text
+    assert page.get_by_test_id("metrics").get_by_text("Tokens", exact=True).is_visible()
+
+    page.get_by_test_id("group-logs-feed").click()
+    page.wait_for_selector('[data-testid="run-resource-panel-logs"]', timeout=10_000)
+    page.get_by_text("feed group is building").wait_for(timeout=10_000)
+    page.get_by_test_id("group-diff-feed").click()
+    page.wait_for_selector('[data-testid="run-resource-panel-diff"]', timeout=10_000)
+    page.get_by_text("render feed").wait_for(timeout=10_000)
 
 
 def test_project_workspace_shows_active_queue_from_state_when_run_view_is_empty(

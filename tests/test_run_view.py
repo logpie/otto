@@ -50,6 +50,26 @@ def test_build_run_view_happy_path_post_render(tmp_path: Path) -> None:
         "verdict": "passed",
         "wall_s": 215.0,
         "cost_usd": 1.42,
+        "token_usage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 80,
+            "output_tokens": 10,
+            "total_tokens": 110,
+        },
+        "phase_usage": {
+            "spec": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+            "audit": {"input_tokens": 90, "cached_input_tokens": 80, "output_tokens": 8, "total_tokens": 98},
+        },
+        "agent_usage_top": [
+            {
+                "phase": "audit",
+                "path": "audit/attempt-00/judge/messages.jsonl",
+                "input_tokens": 90,
+                "cached_input_tokens": 80,
+                "output_tokens": 8,
+                "total_tokens": 98,
+            }
+        ],
         "groups": [
             {
                 "id": "auth",
@@ -89,6 +109,10 @@ def test_build_run_view_happy_path_post_render(tmp_path: Path) -> None:
     assert view["status"] == "passed"
     assert view["cost_usd"] == 1.42
     assert view["wall_s"] == 215.0
+    assert view["token_usage"]["total_tokens"] == 110
+    assert view["agent_usage_top"][0]["path"] == "audit/attempt-00/judge/messages.jsonl"
+    assert next(s for s in view["stages"] if s["name"] == "compile")["token_usage"]["total_tokens"] == 12
+    assert next(s for s in view["stages"] if s["name"] == "audit")["token_usage"]["cached_input_tokens"] == 80
     assert len(view["features"]) == 1
     assert view["features"][0]["id"] == "login"
     assert view["features"][0]["verdict"] == "passed"
@@ -96,6 +120,7 @@ def test_build_run_view_happy_path_post_render(tmp_path: Path) -> None:
     assert len(view["groups"]) == 1
     assert view["groups"][0]["id"] == "auth"
     assert view["groups"][0]["status"] == "passing"
+    assert view["dispatch"]["completed_group_ids"] == ["auth"]
     assert len(view["guardrails"]) == 1
     assert view["guardrails"][0]["verified"] is True
     assert len(view["findings"]) == 1
@@ -114,6 +139,93 @@ def test_build_run_view_legacy_session_no_artifacts(tmp_path: Path) -> None:
     assert view["components"] == []
     assert view["guardrails"] == []
     assert view["findings"] == []
+    assert view["token_usage"] == {}
+    assert view["agent_usage_top"] == []
+
+
+def test_build_run_view_explains_group_dispatch_concurrency(tmp_path: Path) -> None:
+    session = _setup_session(
+        tmp_path,
+        spec={
+            "intent": "x",
+            "project_kind": "webapp",
+            "groups": [
+                {"id": "foundation", "name": "Foundation", "feature_ids": ["f1"]},
+                {"id": "feed", "name": "Feed", "dependencies": ["foundation"]},
+                {"id": "search", "name": "Search", "dependencies": ["foundation"]},
+                {"id": "admin", "name": "Admin", "dependencies": ["feed"]},
+            ],
+        },
+        state_events=[
+            {"event": "group.check.finished", "group_id": "foundation"},
+            {"event": "group.started", "group_id": "feed"},
+        ],
+    )
+
+    view = build_run_view(session, runtime_defaults={"queue_concurrent": 3})
+
+    assert view["dispatch"]["max_concurrent"] == 3
+    assert view["dispatch"]["running_group_ids"] == ["feed"]
+    assert view["dispatch"]["ready_group_ids"] == ["search"]
+    assert view["dispatch"]["waiting_group_ids"] == ["admin"]
+    assert view["dispatch"]["parallelizable_group_ids"] == ["feed", "search"]
+    assert "running 1/3" in view["dispatch"]["summary"]
+
+
+def test_build_run_view_recovers_usage_from_nested_messages(tmp_path: Path) -> None:
+    session = _setup_session(tmp_path, spec={"intent": "x", "project_kind": "webapp", "groups": []})
+    messages = session / "audit" / "attempt-00" / "judge" / "messages.jsonl"
+    messages.parent.mkdir(parents=True)
+    messages.write_text(
+        json.dumps({
+            "type": "phase_end",
+            "phase": "build",
+            "duration_s": 1.5,
+            "usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 75,
+                "output_tokens": 10,
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    view = build_run_view(session)
+
+    assert view["token_usage"] == {
+        "input_tokens": 100,
+        "cached_input_tokens": 75,
+        "output_tokens": 10,
+        "total_tokens": 110,
+    }
+    audit_stage = next(s for s in view["stages"] if s["name"] == "audit")
+    assert audit_stage["token_usage"]["cached_input_tokens"] == 75
+    assert audit_stage["duration_s"] == 1.5
+    assert view["agent_usage_top"][0]["phase"] == "audit"
+
+
+def test_build_run_view_initializing_compile_agent_is_compiling(tmp_path: Path) -> None:
+    """Active compile-agent logs should not be reported as merely queued."""
+
+    session = _setup_session(tmp_path)
+    compile_dir = session / "spec" / "compile-agent"
+    compile_dir.mkdir(parents=True)
+    (compile_dir / "narrative.log").write_text("[+0:00] COMPILE starting\n", encoding="utf-8")
+
+    view = build_run_view(
+        session,
+        live_state={
+            "status": "initializing",
+            "started_at": "2026-05-04T20:00:00Z",
+            "duration_s": 42,
+        },
+    )
+
+    assert view["status"] == "compiling"
+    assert view["wall_s"] == 42.0
+    compile_stage = next(stage for stage in view["stages"] if stage["name"] == "compile")
+    assert compile_stage["status"] == "active"
+    assert compile_stage["started_at"] == "2026-05-04T20:00:00Z"
 
 
 def test_build_run_view_legacy_slices_key_maps_to_groups(tmp_path: Path) -> None:
@@ -355,6 +467,64 @@ def test_build_run_view_derives_features_from_group_feature_ids(tmp_path: Path) 
     assert view["features"][0]["evidence_kinds"] == ["StateInvariant"]
 
 
+def test_group_feature_ids_inherit_pytest_evidence_refs(tmp_path: Path) -> None:
+    spec = {
+        "intent": "build a micro twitter",
+        "project_kind": "webapp",
+        "features": [],
+        "groups": [
+            {
+                "id": "timeline",
+                "name": "Timeline",
+                "feature_ids": ["post short messages"],
+                "checks": [{"kind": "pytest", "selector": "tests/test_timeline.py"}],
+            }
+        ],
+    }
+    proof = {
+        "intent": "build a micro twitter",
+        "project_kind": "webapp",
+        "verdict": "passed",
+        "features": [],
+        "groups": [
+            {
+                "group_id": "timeline",
+                "name": "Timeline",
+                "landed": True,
+                "check_evidence": [
+                    {
+                        "kind": "PytestCheck",
+                        "detail": "selector='tests/test_timeline.py' exit=0",
+                        "raw": {"selector": "tests/test_timeline.py"},
+                    }
+                ],
+            }
+        ],
+    }
+    state = [
+        {
+            "kind": "group.check.finished",
+            "group_id": "timeline",
+            "detail": "pass",
+            "extra": {"details": ["selector='tests/test_timeline.py' exit=0"]},
+            "ts": "2026-05-04T20:00:02Z",
+        }
+    ]
+    session = _setup_session(tmp_path, proof=proof, spec=spec, state_events=state)
+
+    view = build_run_view(session)
+
+    feature = view["features"][0]
+    assert feature["evidence_kinds"] == ["RepoTestCheck"]
+    assert feature["evidence_refs"] == [
+        {
+            "kind": "RepoTestCheck",
+            "path": "tests/test_timeline.py",
+            "summary": "selector='tests/test_timeline.py' exit=0",
+        }
+    ]
+
+
 def test_build_run_view_group_started_drives_group_and_build_status(tmp_path: Path) -> None:
     spec = {
         "intent": "test",
@@ -452,6 +622,123 @@ def test_build_run_view_queued_live_state_does_not_mask_session_progress(tmp_pat
     assert view["status"] == "auditing"
 
 
+def test_in_flight_features_inherit_group_build_state(tmp_path: Path) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [
+            {"id": "shell", "name": "App shell", "feature_ids": ["route", "nav"]},
+            {"id": "posts", "name": "Posts", "feature_ids": ["create post"]},
+        ],
+    }
+    state = [
+        {
+            "kind": "group.started",
+            "group_id": "shell",
+            "ts": "2026-05-04T20:00:02Z",
+            "extra": {"branch": "i2p/session-1/shell"},
+        },
+        {
+            "kind": "group.merge.eligible",
+            "group_id": "shell",
+            "ts": "2026-05-04T20:01:02Z",
+            "extra": {"wall_s": 60, "cost_usd": 0.2},
+        },
+        {
+            "kind": "group.started",
+            "group_id": "posts",
+            "ts": "2026-05-04T20:01:03Z",
+            "extra": {"branch": "i2p/session-1/posts"},
+        },
+    ]
+    session = _setup_session(tmp_path, spec=spec, state_events=state)
+
+    view = build_run_view(session)
+
+    features = {feature["id"]: feature for feature in view["features"]}
+    assert features["route"]["build_status"] == "passing"
+    assert features["route"]["group_name"] == "App shell"
+    assert features["create post"]["build_status"] == "in_progress"
+    groups = {group["id"]: group for group in view["groups"]}
+    assert groups["shell"]["branch"] == "i2p/session-1/shell"
+    assert groups["shell"]["wall_s"] == 60.0
+    assert groups["shell"]["cost_usd"] == 0.2
+    assert groups["posts"]["branch"] == "i2p/session-1/posts"
+
+
+def test_proof_group_id_maps_to_group_view_and_blocked_event_wins(
+    tmp_path: Path,
+) -> None:
+    proof = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "verdict": "blocked",
+        "groups": [
+            {
+                "group_id": "foundation",
+                "name": "Foundation",
+                "status": "passing",
+                "landed": False,
+                "branch": "i2p/session-1/foundation",
+                "failure_narrative": "checkout main failed",
+            }
+        ],
+    }
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [
+            {
+                "id": "foundation",
+                "name": "Foundation",
+                "feature_ids": ["scaffold", "routing"],
+                "dependencies": ["seed"],
+            }
+        ],
+    }
+    state = [
+        {
+            "kind": "group.blocked",
+            "group_id": "foundation",
+            "detail": "checkout main failed",
+            "ts": "2026-05-04T20:01:02Z",
+        }
+    ]
+    session = _setup_session(tmp_path, proof=proof, spec=spec, state_events=state)
+
+    view = build_run_view(session)
+
+    assert view["groups"][0]["id"] == "foundation"
+    assert view["groups"][0]["status"] == "blocked"
+    assert view["groups"][0]["branch"] == "i2p/session-1/foundation"
+    assert view["groups"][0]["feature_ids"] == ["scaffold", "routing"]
+    assert view["groups"][0]["dependencies"] == ["seed"]
+
+
+def test_build_run_view_initializing_live_state_does_not_hide_started_group(
+    tmp_path: Path,
+) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [{"id": "g1", "name": "G1", "feature_ids": ["f1"]}],
+    }
+    state = [{"kind": "group.started", "group_id": "g1", "ts": "2026-05-04T20:00:02Z"}]
+    session = _setup_session(tmp_path, spec=spec, state_events=state)
+    view = build_run_view(
+        session,
+        live_state={
+            "status": "initializing",
+            "started_at": "2026-05-04T20:00:00Z",
+            "duration_s": 90,
+        },
+    )
+    assert view["status"] == "building"
+    assert view["wall_s"] == 90.0
+    assert view["groups"][0]["status"] == "in_progress"
+    assert next(s for s in view["stages"] if s["name"] == "build")["status"] == "active"
+
+
 def test_build_run_view_terminal_proof_closes_build_audit_and_render(tmp_path: Path) -> None:
     proof = {"verdict": "passed", "groups": [{"group_id": "g1", "landed": True}]}
     state = [
@@ -474,7 +761,7 @@ def test_build_run_view_terminal_proof_closes_build_audit_and_render(tmp_path: P
     assert stages["audit"]["finished_at"] == "2026-05-04T20:01:30Z"
     assert stages["render"]["status"] == "done"
     assert stages["render"]["finished_at"] == "2026-05-04T20:01:31Z"
-    assert stages["land"]["status"] == "pending"
+    assert stages["land"]["status"] == "done"
 
 
 def test_build_run_view_interrupted_queue_state_is_terminal(tmp_path: Path) -> None:
@@ -501,3 +788,80 @@ def test_build_run_view_interrupted_queue_state_is_terminal(tmp_path: Path) -> N
     assert view["meta"]["started_at"] == "2026-05-04T20:00:00Z"
     assert view["meta"]["finished_at"] == "2026-05-04T20:05:00Z"
     assert next(s for s in view["stages"] if s["name"] == "build")["status"] == "failed"
+
+
+def test_passed_i2p_run_marks_terminal_stages_done(tmp_path: Path) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "features": [],
+        "groups": [
+            {
+                "id": "g1",
+                "name": "G1",
+                "feature_ids": ["f1"],
+                "checks": [{"kind": "pytest"}],
+            }
+        ],
+    }
+    proof = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "verdict": "passed",
+        "features": [],
+        "groups": [{"group_id": "g1", "landed": True, "status": "landed"}],
+    }
+    state = [
+        {"kind": "audit.started", "detail": "run start", "ts": "2026-05-04T20:00:00Z"},
+        {"kind": "seed.started", "ts": "2026-05-04T20:00:01Z"},
+        {
+            "kind": "seed.finished",
+            "ts": "2026-05-04T20:00:02Z",
+            "extra": {"succeeded": True},
+        },
+        {"kind": "group.started", "group_id": "g1", "ts": "2026-05-04T20:00:03Z"},
+        {
+            "kind": "group.check.finished",
+            "group_id": "g1",
+            "detail": "pass",
+            "extra": {"details": ["selector='tests/test_g1.py' exit=0"]},
+            "ts": "2026-05-04T20:00:04Z",
+        },
+        {
+            "kind": "group.merge.eligible",
+            "group_id": "g1",
+            "ts": "2026-05-04T20:00:05Z",
+        },
+        {
+            "kind": "group.merge.landed",
+            "group_id": "g1",
+            "detail": "abc123",
+            "ts": "2026-05-04T20:00:06Z",
+        },
+        {"kind": "audit.started", "ts": "2026-05-04T20:00:07Z"},
+        {
+            "kind": "audit.finished",
+            "ts": "2026-05-04T20:00:08Z",
+            "extra": {"verdict": "passed"},
+        },
+        {
+            "kind": "run.finished",
+            "detail": "verdict=passed",
+            "ts": "2026-05-04T20:00:08Z",
+            "extra": {"verdict": "passed"},
+        },
+    ]
+    session = _setup_session(tmp_path, proof=proof, spec=spec, state_events=state)
+    lifecycle = session / "spec" / "lifecycle.json"
+    lifecycle.write_text('{"lifecycle": "approved"}\n')
+
+    view = build_run_view(session)
+
+    stages = {stage["name"]: stage for stage in view["stages"]}
+    assert stages["compile"]["status"] == "done"
+    assert stages["spec_review"]["status"] == "done"
+    assert stages["build"]["status"] == "done"
+    assert stages["seed"]["status"] == "done"
+    assert stages["audit"]["status"] == "done"
+    assert stages["render"]["status"] == "done"
+    assert stages["land"]["status"] == "done"

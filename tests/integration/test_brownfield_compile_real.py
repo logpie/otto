@@ -176,7 +176,7 @@ def test_brownfield_compile_against_real_fixture_no_base(
     captured: dict[str, object] = {}
     _stub_compile_internals(monkeypatch, captured, _agent_emits_three_features())
 
-    spec = asyncio.run(
+    asyncio.run(
         compile_spec(
             "document this CLI tool",
             project,

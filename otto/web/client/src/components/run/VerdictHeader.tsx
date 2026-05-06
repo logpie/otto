@@ -15,6 +15,7 @@
 
 import { useState } from "react";
 import type { RunVerdict, RunView } from "../../types/run";
+import { formatTokenSpend, tokenBreakdownLine } from "../../utils/format";
 import { Pill, type PillTone } from "./Pill";
 
 interface Props {
@@ -84,8 +85,15 @@ function formatRelative(iso: string | null): string | null {
 
 export function VerdictHeader({ view }: Props) {
   const tone = verdictTone(view.verdict);
-  const passedFeatures = view.features.filter((f) => f.verdict === "passed").length;
+  const hasFeatureAudit = view.features.some((f) => f.verdict !== null);
+  const passedFeatures = hasFeatureAudit
+    ? view.features.filter((f) => f.verdict === "passed").length
+    : view.features.filter((f) => f.build_status === "passing" || f.build_status === "landed").length;
   const totalFeatures = view.features.length;
+  const completedGroups = view.groups.filter((g) => g.status === "passing" || g.status === "landed").length;
+  const totalGroups = view.groups.length;
+  const activeGroup = view.groups.find((g) => g.status === "in_progress") ?? null;
+  const dispatch = view.dispatch;
   const criticalCount = view.findings.filter((f) => f.severity === "critical").length;
   const label = view.verdict ?? view.status;
   const [intentExpanded, setIntentExpanded] = useState(false);
@@ -102,6 +110,7 @@ export function VerdictHeader({ view }: Props) {
   // dateTime + title attributes for hover/inspection.
   const finishedAt = view.meta.finished_at;
   const finishedRelative = formatRelative(finishedAt);
+  const tokenSpend = formatTokenSpend(view.token_usage);
 
   return (
     <header className={`run-drawer-header ${tone}`} data-testid="verdict-header">
@@ -145,7 +154,42 @@ export function VerdictHeader({ view }: Props) {
           </time>
         </div>
       )}
+      {!view.verdict && totalGroups > 0 && (
+        <div className="run-drawer-active-line" data-testid="run-drawer-active-line">
+          {dispatch && dispatch.running_group_ids.length > 0 ? (
+            <>
+              Running {dispatch.running_group_ids.length}
+              {dispatch.max_concurrent ? `/${dispatch.max_concurrent}` : ""} groups
+              {dispatch.ready_group_ids.length > 0
+                ? ` · ${dispatch.ready_group_ids.length} ready`
+                : ""}
+              {dispatch.waiting_group_ids.length > 0
+                ? ` · ${dispatch.waiting_group_ids.length} waiting on dependencies`
+                : ""}
+            </>
+          ) : activeGroup ? (
+            <>
+              Building group: <strong>{activeGroup.name}</strong>
+              {activeGroup.dependencies.length > 0
+                ? ` · after ${activeGroup.dependencies.join(", ")}`
+                : ""}
+            </>
+          ) : (
+            <>Dispatching groups in dependency order.</>
+          )}
+        </div>
+      )}
       <dl className="metrics" data-testid="metrics">
+        {totalGroups > 0 && (
+          <div className="metric">
+            <dt>Groups</dt>
+            <dd className="groups">
+              <span className="metric-num">{completedGroups}</span>
+              <span className="metric-sep" aria-hidden>/</span>
+              <span className="metric-num">{totalGroups}</span>
+            </dd>
+          </div>
+        )}
         <div className="metric">
           <dt>Features</dt>
           <dd className="features">
@@ -175,6 +219,14 @@ export function VerdictHeader({ view }: Props) {
             <span className="metric-num">{formatCost(view.cost_usd)}</span>
           </dd>
         </div>
+        {tokenSpend && (
+          <div className="metric">
+            <dt>Tokens</dt>
+            <dd className="tokens" title={tokenBreakdownLine(view.token_usage)}>
+              <span className="metric-num">{tokenSpend}</span>
+            </dd>
+          </div>
+        )}
       </dl>
     </header>
   );

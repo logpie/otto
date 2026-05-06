@@ -478,6 +478,42 @@ def test_render_run_end_to_end(tmp_path: Path) -> None:
     assert len(parsed["groups"]) == 2
 
 
+def test_render_run_embeds_compact_usage_telemetry(tmp_path: Path) -> None:
+    messages = tmp_path / "audit" / "attempt-00" / "judge" / "messages.jsonl"
+    messages.parent.mkdir(parents=True)
+    messages.write_text(
+        json.dumps({
+            "type": "phase_end",
+            "phase": "build",
+            "duration_s": 2.5,
+            "usage": {"input_tokens": 100, "cached_input_tokens": 80, "output_tokens": 10},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    html_path, json_path = render_run(
+        _two_slice_spec(tmp_path),
+        session_dir=tmp_path,
+        build_result=_build_result_passing(tmp_path),
+        merge_result=_merge_result_landed(tmp_path),
+        audit_result=_audit_passed(),
+        wall_s=180.0,
+        cost_usd=0.72,
+    )
+
+    parsed = json.loads(json_path.read_text(encoding="utf-8"))
+    html = html_path.read_text(encoding="utf-8")
+    assert parsed["token_usage"] == {
+        "input_tokens": 100,
+        "cached_input_tokens": 80,
+        "output_tokens": 10,
+        "total_tokens": 110,
+    }
+    assert parsed["phase_usage"]["audit"]["duration_s"] == 2.5
+    assert parsed["agent_usage_top"][0]["path"] == "audit/attempt-00/judge/messages.jsonl"
+    assert "30 fresh + 80 cached" in html
+
+
 def test_render_run_end_to_end_combines_landed_and_blocked_groups(tmp_path: Path) -> None:
     """Lifecycle fixture covers passed/landed and blocked groups together."""
     spec = _two_slice_spec(tmp_path)

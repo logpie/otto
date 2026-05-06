@@ -30,6 +30,8 @@ _KNOWN_PLACEHOLDERS = frozenset({
     "story_evidence_scope",
     # A6.2 — brownfield compile preamble (research §9.4)
     "project_preamble",
+    "repo_index_path",
+    "repo_index_summary",
     "brownfield_mode_guidance",
 })
 

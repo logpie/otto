@@ -46,6 +46,25 @@ export function AppShell({
   onSwitchProject,
 }: Props) {
   const canSwitchProject = launcherEnabled && onSwitchProject;
+  const brand = canSwitchProject ? (
+    <button
+      type="button"
+      className="otto-app-shell-brand-link otto-app-shell-brand-button"
+      aria-label="Otto Mission Control — project launcher"
+      title="Open project launcher"
+      onClick={onSwitchProject}
+    >
+      Otto Mission Control
+    </button>
+  ) : (
+    <a
+      className="otto-app-shell-brand-link"
+      href="/"
+      aria-label="Otto Mission Control — project home"
+    >
+      Otto Mission Control
+    </a>
+  );
   const projectControl = projectName ? (
     canSwitchProject ? (
       <button
@@ -80,13 +99,7 @@ export function AppShell({
     <div className="otto-app-shell" data-testid="otto-app-shell">
       <header className="otto-app-shell-topbar" data-testid="otto-app-shell-topbar">
         <div className="otto-app-shell-brand">
-          <a
-            className="otto-app-shell-brand-link"
-            href="/"
-            aria-label="Otto Mission Control — project home"
-          >
-            Otto Mission Control
-          </a>
+          {brand}
           {pageLabel ? (
             <span
               className="otto-app-shell-page-label"

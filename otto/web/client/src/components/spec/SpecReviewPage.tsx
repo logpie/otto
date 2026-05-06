@@ -557,8 +557,9 @@ export function SpecReviewPage({ specId, onApproved }: Props) {
           data-testid="spec-review-readonly-banner"
           role="status"
         >
-          <span aria-hidden="true">⚠</span> Spec is approved (read-only). Re-run
-          with <code>otto build --resume --force</code> to edit again.
+          <span aria-hidden="true">⚠</span> This spec is approved and locked for
+          this run. Queue an improvement or new build from Mission Control to
+          change product scope.
         </div>
       )}
 

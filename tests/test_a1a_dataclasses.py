@@ -2102,6 +2102,41 @@ def test_render_spec_md_features_grouped() -> None:
     assert "#### Line-anchored comments" in md
 
 
+def test_render_spec_md_group_feature_ids_when_features_empty() -> None:
+    from otto.spec_compile import render_spec_md
+
+    s = Spec(
+        intent="A webapp",
+        project_kind="webapp",
+        groups=[
+            Group(
+                id="sla-aging-data",
+                name="SLA aging data",
+                feature_ids=[
+                    "derive pending expenses submitted more than 7 days ago",
+                    "derive pending expenses submitted more than 7 days ago",
+                    "support dashboard links",
+                ],
+            )
+        ],
+        features=[],
+    )
+
+    md = render_spec_md(s)
+
+    assert "### SLA aging data" in md
+    assert "#### derive pending expenses submitted more than 7 days ago" in md
+    assert (
+        "<!-- feature: derive-pending-expenses-submitted-more-than-7-days-ago -->"
+        in md
+    )
+    assert (
+        "<!-- feature: derive-pending-expenses-submitted-more-than-7-days-ago-2 -->"
+        in md
+    )
+    assert "<!-- feature: support-dashboard-links -->" in md
+
+
 def test_render_spec_md_acceptance_detail_emitted() -> None:
     from otto.spec_compile import render_spec_md
 
@@ -2272,6 +2307,7 @@ Persist drafts.
     f2 = spec.features[1]
     assert f2.id == "save-load"
     assert f2.evidence_kinds == ["ApiProbe"]
+    assert spec.groups[0].feature_ids == ["md-render", "save-load"]
 
 
 def test_parse_spec_md_guardrails() -> None:

@@ -18,6 +18,8 @@
 //   - Stage entries have `duration_s: null` until that stage finishes.
 //   - Per-Feature `verdict: null` means audit hasn't run for that Feature.
 
+import type { TokenUsage } from "../types";
+
 // ---------------------------------------------------------------------------
 // Top-level RunView
 // ---------------------------------------------------------------------------
@@ -36,6 +38,7 @@ export interface RunView {
 
   // Atomic units of dispatch (research §3): collapsible "Built in N groups".
   groups: GroupView[];
+  dispatch?: DispatchView;
 
   // Shared infrastructure dispatch units (research §2.6): collapsible
   // "Components" section in the drawer.
@@ -50,6 +53,9 @@ export interface RunView {
   // Run-level cost + wall.
   cost_usd: number;
   wall_s: number;
+  token_usage?: TokenUsage;
+  phase_usage?: Record<string, PhaseUsage>;
+  agent_usage_top?: AgentUsageEntry[];
 
   // Run metadata: collapsed dl in drawer.
   meta: RunMeta;
@@ -72,6 +78,8 @@ export interface FeatureView {
   acceptance_detail: string;
   evidence_kinds: string[];
   group_id: string;
+  group_name: string;
+  build_status: GroupStatus;
 
   // Verdict — null pre-Audit, populated post-Render.
   verdict: FeatureVerdict | null;
@@ -106,6 +114,17 @@ export interface GroupView {
   repair_attempts: number;
 }
 
+export interface DispatchView {
+  max_concurrent: number | null;
+  running_group_ids: string[];
+  ready_group_ids: string[];
+  waiting_group_ids: string[];
+  blocked_group_ids: string[];
+  completed_group_ids: string[];
+  parallelizable_group_ids: string[];
+  summary: string;
+}
+
 export interface ComponentView {
   id: string;
   name: string;
@@ -136,8 +155,19 @@ export interface StageView {
   status: StageStatus;
   duration_s: number | null;   // null until stage finishes
   cost_usd: number | null;     // null until stage finishes
+  token_usage?: TokenUsage;
   started_at: string | null;   // ISO 8601, null if not yet started
   finished_at: string | null;  // ISO 8601, null if not yet finished
+}
+
+export interface PhaseUsage extends TokenUsage {
+  duration_s?: number;
+  cost_usd?: number;
+}
+
+export interface AgentUsageEntry extends PhaseUsage {
+  phase: string;
+  path: string;
 }
 
 export interface EvidenceRef {

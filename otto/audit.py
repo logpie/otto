@@ -201,6 +201,11 @@ class AuditAgentInput:
     walkthrough_jsonl_path: Path | None = None
     feature_scope_ids: tuple[str, ...] = ()
     config: dict[str, Any] = field(default_factory=dict)
+    judge_timeout_s: int | None = None
+    contract_test_passed: bool | None = None
+    contract_test_detail: str = ""
+    evidence_packet_path: Path | None = None
+    full_spec_path: Path | None = None
 
 
 @dataclass
@@ -537,8 +542,9 @@ def _synthesized_webapp_walkthrough(
         log_path = log_dir / "synthesized-webapp.log"
 
         # Try to boot via create_app.
+        import shlex
         import subprocess
-        from otto.checks import _subprocess_env
+        from otto.checks import _resolve_subprocess_command, _subprocess_env
 
         # Generalization: a "webapp" can be many shapes (Flask,
         # FastAPI, SSG that emits HTML, etc.). Try create_app first;
@@ -547,31 +553,56 @@ def _synthesized_webapp_walkthrough(
         # way, missing infrastructure is "walkthrough not applicable",
         # not "audit failure".
         boot_script = (
-            "import json, sys, traceback, os\n"
+            "import importlib, json, sys, traceback, os\n"
             "from pathlib import Path\n"
             "ROOT = Path(os.getcwd())\n"
             "result = {}\n"
-            "# Attempt 1: Flask/FastAPI-style create_app.\n"
-            "try:\n"
-            "    from app import create_app  # type: ignore[import-not-found]\n"
-            "    app = create_app({'TESTING': True})\n"
-            "    client = app.test_client()\n"
-            "    r = client.get('/')\n"
-            "    body = r.get_data(as_text=True) or ''\n"
-            "    result = {'shape': 'flask-create_app', 'status': r.status_code,\n"
-            "              'body_len': len(body), 'body_preview': body[:500]}\n"
-            "    with open('__audit_home_body__.html', 'w') as f:\n"
-            "        f.write(body)\n"
-            "    print(json.dumps(result))\n"
-            "    sys.exit(0)\n"
-            "except (ImportError, ModuleNotFoundError):\n"
-            "    pass  # not Flask-shaped\n"
-            "except Exception as exc:\n"
-            "    # create_app exists but boot failed → real audit signal.\n"
-            "    result = {'shape': 'flask-create_app', 'error': f'{type(exc).__name__}: {exc}',\n"
-            "              'traceback': traceback.format_exc()}\n"
-            "    print(json.dumps(result))\n"
-            "    sys.exit(2)\n"
+            "# Attempt 1: Flask/FastAPI-style create_app. Try root modules and\n"
+            "# top-level packages because brownfield Flask apps commonly expose\n"
+            "# create_app from package __init__.py rather than app.py.\n"
+            "candidates = ['app', 'main', 'wsgi', 'asgi']\n"
+            "for child in sorted(ROOT.iterdir()):\n"
+            "    if not child.is_dir() or child.name.startswith(('.', '_')):\n"
+            "        continue\n"
+            "    if (child / '__init__.py').is_file():\n"
+            "        candidates.append(child.name)\n"
+            "        candidates.append(f'{child.name}.app')\n"
+            "seen = set()\n"
+            "for module_name in candidates:\n"
+            "    if module_name in seen:\n"
+            "        continue\n"
+            "    seen.add(module_name)\n"
+            "    try:\n"
+            "        module = importlib.import_module(module_name)\n"
+            "    except (ImportError, ModuleNotFoundError):\n"
+            "        continue\n"
+            "    create_app = getattr(module, 'create_app', None)\n"
+            "    if not callable(create_app):\n"
+            "        continue\n"
+            "    try:\n"
+            "        try:\n"
+            "            app = create_app({'TESTING': True})\n"
+            "        except TypeError:\n"
+            "            app = create_app()\n"
+            "        if not hasattr(app, 'test_client'):\n"
+            "            raise TypeError(f'{module_name}.create_app returned object without test_client')\n"
+            "        client = app.test_client()\n"
+            "        r = client.get('/')\n"
+            "        body = r.get_data(as_text=True) or ''\n"
+            "        result = {'shape': 'flask-create_app', 'module': module_name,\n"
+            "                  'status': r.status_code, 'body_len': len(body),\n"
+            "                  'body_preview': body[:500]}\n"
+            "        with open('__audit_home_body__.html', 'w') as f:\n"
+            "            f.write(body)\n"
+            "        print(json.dumps(result))\n"
+            "        sys.exit(0)\n"
+            "    except Exception as exc:\n"
+            "        # create_app exists but boot failed -> real audit signal.\n"
+            "        result = {'shape': 'flask-create_app', 'module': module_name,\n"
+            "                  'error': f'{type(exc).__name__}: {exc}',\n"
+            "                  'traceback': traceback.format_exc()}\n"
+            "        print(json.dumps(result))\n"
+            "        sys.exit(2)\n"
             "# Attempt 2: static-site or CLI shape — look for produced output.\n"
             "for candidate in ('output/index.html', 'dist/index.html', 'build/index.html', 'site/index.html', 'index.html'):\n"
             "    p = ROOT / candidate\n"
@@ -590,15 +621,16 @@ def _synthesized_webapp_walkthrough(
         )
 
         env = _subprocess_env(extra_pythonpath=[project_dir])
-        # Use sys.executable for portability — `python` isn't on PATH
-        # on macOS by default; `_subprocess_env` adds the interpreter
-        # bin dir but the basename varies (python3 vs python). Direct
-        # sys.executable bypasses the lookup entirely.
-        import sys as _sys
+        command = _resolve_subprocess_command(
+            ["python", "-c", boot_script],
+            project_dir,
+            [project_dir],
+        )
+        log_command = [command[0], "-c", "<synthesized-webapp-walkthrough>"]
 
         try:
             completed = subprocess.run(
-                [_sys.executable, "-c", boot_script],
+                command,
                 cwd=project_dir,
                 env=env,
                 capture_output=True,
@@ -618,7 +650,7 @@ def _synthesized_webapp_walkthrough(
             )
 
         log_text = (
-            f"$ python -c <synthesized-webapp-walkthrough>\n"
+            f"$ {shlex.join(log_command)}\n"
             f"exit_code={completed.returncode}\n\n"
             f"STDOUT:\n{completed.stdout}\n\nSTDERR:\n{completed.stderr}"
         )
@@ -975,7 +1007,21 @@ async def run_audit(
             walkthrough_jsonl_path=walk_log_dir / "walkthrough.jsonl",
             feature_scope_ids=scoped_feature_ids,
             config=config,
+            judge_timeout_s=budget.judge_timeout_s,
+            contract_test_passed=contract_passed,
+            contract_test_detail=contract_detail,
+            evidence_packet_path=attempt_dir / "evidence-packet.json",
+            full_spec_path=(
+                session_dir / "spec" / "spec.json"
+                if (session_dir / "spec" / "spec.json").exists()
+                else None
+            ),
         )
+        try:
+            _write_audit_evidence_packet(agent_input)
+        except OSError as exc:
+            agent_input.evidence_packet_path = None
+            logger.warning("audit evidence packet write failed: %s", exc)
         # C1 fix: bail out before invoking the audit agent if the
         # shared cost pool is exhausted. Prevents an audit retry
         # loop from blowing past the global $30 ceiling. Returns
@@ -1426,8 +1472,8 @@ def _run_project_contract_test(
     if not test_command:
         return None, "no test_command configured in otto.yaml"
 
-    # Use the same PATH+venv augmentation as checks.py.
-    from otto.checks import _subprocess_env
+    # Use the same PATH+venv augmentation and executable resolution as checks.py.
+    from otto.checks import _resolve_subprocess_command, _subprocess_env
 
     try:
         argv = shlex.split(test_command)
@@ -1444,9 +1490,13 @@ def _run_project_contract_test(
         argv = fallback_argv
         command_for_output = shlex.join(argv)
         fallback_note = f"; fallback from {test_command!r}"
+    resolved_argv = _resolve_subprocess_command(argv, project_dir, [project_dir])
+    if resolved_argv != argv:
+        command_for_output = shlex.join(resolved_argv)
+        fallback_note = f"{fallback_note}; resolved from {test_command!r}"
     try:
         completed = _sp.run(
-            argv,
+            resolved_argv,
             cwd=project_dir,
             env=env,
             capture_output=True,
@@ -1597,6 +1647,94 @@ def _load_feature_tagging_contract() -> str:
         )
 
 
+def _write_audit_evidence_packet(agent_input: AuditAgentInput) -> None:
+    """Write compact deterministic/browser evidence for the audit judge.
+
+    Raw logs and screenshots stay on disk. The packet gives the judge a
+    bounded index and one-line summaries so it can inspect the right files
+    without reading huge provider transcripts or dumping entire logs into
+    context.
+    """
+    if agent_input.evidence_packet_path is None:
+        return
+    packet = {
+        "schema_version": 1,
+        "kind": "audit_evidence_packet",
+        "project_dir": str(agent_input.project_dir),
+        "integrated_worktree": str(agent_input.integrated_worktree),
+        "full_spec_path": str(agent_input.full_spec_path or ""),
+        "walkthrough_jsonl_path": str(agent_input.walkthrough_jsonl_path or ""),
+        "contract_test": {
+            "passed": agent_input.contract_test_passed,
+            "detail": agent_input.contract_test_detail,
+        },
+        "deterministic_first_order": [
+            "contract_test",
+            "cross_slice_evidence",
+            "walkthrough_artifacts",
+            "source_inspection",
+            "provider_transcript_excerpt_only_if_needed",
+        ],
+        "build_summary": agent_input.build_summary,
+        "merge_summary": agent_input.merge_summary,
+        "cross_slice_evidence": [
+            _compact_evidence(ev) for ev in agent_input.cross_slice_evidence
+        ],
+        "walkthrough_artifacts": [
+            {
+                "path": str(path),
+                "kind": _artifact_kind(path),
+                "exists": Path(path).exists(),
+            }
+            for path in agent_input.walkthrough_artifacts
+        ],
+        "notes": [
+            "Read this packet first, then inspect referenced artifacts as needed.",
+            "Prefer deterministic contract/cross-slice results and browser artifacts over provider transcript text.",
+            "A failed deterministic contract is a blocker or partial cap unless direct evidence proves the oracle is invalid.",
+            "Avoid bulk-reading messages.jsonl; if needed, inspect bounded relevant excerpts only.",
+        ],
+    }
+    agent_input.evidence_packet_path.parent.mkdir(parents=True, exist_ok=True)
+    agent_input.evidence_packet_path.write_text(
+        json.dumps(packet, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _compact_evidence(evidence: Evidence) -> dict[str, Any]:
+    raw = evidence.raw if isinstance(evidence.raw, dict) else {}
+    compact_raw: dict[str, Any] = {}
+    for key in ("exit_code", "status_code", "stdout_match", "stderr_match", "timeout", "command"):
+        if key in raw:
+            compact_raw[key] = raw[key]
+    for key in ("stdout", "stderr", "response_text", "error"):
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            compact_raw[key] = value[:1200] + ("...[truncated]" if len(value) > 1200 else "")
+    return {
+        "passed": evidence.passed,
+        "detail": evidence.detail,
+        "duration_s": evidence.duration_s,
+        "started_at": evidence.started_at,
+        "artifacts": [str(path) for path in evidence.artifacts],
+        "raw": compact_raw,
+    }
+
+
+def _artifact_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        return "image"
+    if suffix in {".webm", ".mp4", ".mov"}:
+        return "video"
+    if suffix in {".html", ".htm"}:
+        return "html"
+    if suffix in {".json", ".jsonl"}:
+        return "json"
+    return "file"
+
+
 def _audit_prompt(agent_input: AuditAgentInput) -> str:
     """Compose the audit-agent prompt.
 
@@ -1618,6 +1756,28 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     lines.append(f"Project kind: {spec.project_kind}")
     lines.append(f"Integrated worktree: {agent_input.integrated_worktree}")
     lines.append("")
+    if agent_input.evidence_packet_path or agent_input.full_spec_path:
+        lines.append("## Audit evidence packet (read first)")
+        if agent_input.evidence_packet_path:
+            lines.append(f"- Compact evidence index: `{agent_input.evidence_packet_path}`")
+        if agent_input.full_spec_path:
+            lines.append(f"- Full canonical product spec: `{agent_input.full_spec_path}`")
+        lines.append(
+            "Use the packet as your starting point. It indexes deterministic "
+            "contract results, cross-slice checks, and browser artifacts without "
+            "embedding raw logs. Do not bulk-read `messages.jsonl` provider "
+            "transcripts; if a raw transcript is genuinely needed, inspect only "
+            "bounded relevant excerpts after the deterministic and browser "
+            "evidence has been reviewed."
+        )
+        lines.append(
+            "Deterministic-first rule: evaluate contract_test, cross-slice "
+            "checks, and browser/walkthrough artifacts before source-reading "
+            "or judging product polish. A failed deterministic check is not "
+            "overridden by code inspection unless you can cite why that oracle "
+            "is invalid; in that case call out the oracle issue explicitly."
+        )
+        lines.append("")
     lines.append("## Spec Groups")
     for s in spec.groups:
         lines.append(f"- {s.id}: {s.name}")
@@ -1644,6 +1804,13 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     lines.append("```json")
     lines.append(_json.dumps(agent_input.merge_summary, indent=2, default=str))
     lines.append("```")
+    lines.append("## Project contract test")
+    if agent_input.contract_test_passed is None:
+        lines.append(f"- SKIPPED — {agent_input.contract_test_detail or 'not configured'}")
+    else:
+        label = "PASS" if agent_input.contract_test_passed else "FAIL"
+        lines.append(f"- {label} — {agent_input.contract_test_detail}")
+    lines.append("")
     lines.append("## Cross-slice deterministic check evidence")
     for ev in agent_input.cross_slice_evidence:
         lines.append(f"- {'PASS' if ev.passed else 'FAIL'} — {ev.detail}")
@@ -1755,7 +1922,8 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     lines.append(
         "     - **2/5 = broken UX**: things work but UX is wrong — "
         "missing labels, no error states, controls hidden where users "
-        "won't find them."
+        "won't find them, horizontal page overflow on normal mobile "
+        "viewports, or clipped primary controls."
     )
     lines.append(
         "     - **3/5 = MVP**: this is the DEFAULT for a project that "
@@ -1796,6 +1964,15 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "into a single section instead of three sections at top of "
         "home\"). Empty list is NOT acceptable for a real product — if "
         "you can't find ANY improvement, you're not looking hard enough."
+    )
+    lines.append("")
+    lines.append(
+        "     **Severity consistency rule**: if any standard desktop or "
+        "mobile viewport has horizontal overflow, clipped primary controls, "
+        "overlapping text, or a hidden/unreachable primary action, the "
+        "quality_score MUST be 2 or lower and the affected Feature MUST be "
+        "marked partial or blocked. Do not bury a severe product-quality "
+        "failure only in `quality_findings` or an untagged exploration row."
     )
     lines.append("")
     lines.append("Quality criteria by project_kind (use as a checklist):")
@@ -1845,10 +2022,45 @@ _VERDICT_RANK = {
     AuditVerdict.BLOCKED: 2,
 }
 
+_SEVERE_QUALITY_FINDING_TERMS = (
+    "horizontal overflow",
+    "overflows horizontally",
+    "scrollwidth",
+    "clipped",
+    "primary action hidden",
+    "primary actions hidden",
+    "can't complete primary action",
+    "cannot complete primary action",
+    "broken layout",
+    "overlapping text",
+    "unusable",
+)
+
+_QUALITY_NEGATION_TERMS = (
+    "no horizontal overflow",
+    "without horizontal overflow",
+    "not clipped",
+    "no clipped",
+    "no broken layout",
+    "no overlapping text",
+)
+
 
 def _strictest(a: AuditVerdict, b: AuditVerdict) -> AuditVerdict:
     """Return the stricter of two verdicts (BLOCKED > PARTIAL > PASSED)."""
     return a if _VERDICT_RANK[a] >= _VERDICT_RANK[b] else b
+
+
+def _severe_quality_findings(findings: Iterable[str]) -> list[str]:
+    severe: list[str] = []
+    for finding in findings:
+        text = str(finding or "")
+        lower = text.lower()
+        if any(negation in lower for negation in _QUALITY_NEGATION_TERMS):
+            continue
+        if any(term in lower for term in _SEVERE_QUALITY_FINDING_TERMS):
+            severe.append(text)
+    return severe
 
 
 def _compose_verdict(
@@ -1919,12 +2131,21 @@ def _compose_verdict(
     qs = agent_output.quality_score
     if qs and qs < 3:
         verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+    severe_quality = _severe_quality_findings(agent_output.quality_findings)
+    if severe_quality:
+        verdict = _strictest(verdict, AuditVerdict.PARTIAL)
     # Always narrate quality if assessed and either the score is low OR
     # findings exist. Doesn't gate on verdict — every active cap surfaces.
     if qs and (qs < 3 or agent_output.quality_findings):
         sections.append(
             f"[quality assessment: {qs}/5]\n"
             + "\n".join(f"  - {f}" for f in agent_output.quality_findings[:10])
+        )
+    if severe_quality:
+        sections.append(
+            "[quality severity cap]\n"
+            "Severe user-facing quality finding(s) require at least PARTIAL:\n"
+            + "\n".join(f"  - {f}" for f in severe_quality[:5])
         )
 
     # Capability cap.
@@ -2093,7 +2314,7 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
             log_dir=log_dir,
             phase_name="AUDIT",
             phase_label="audit",
-            timeout=None,
+            timeout=agent_input.judge_timeout_s,
             project_dir=agent_input.project_dir,
         )
         parsed = _parse_audit_output(text)

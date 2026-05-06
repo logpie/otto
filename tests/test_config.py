@@ -16,6 +16,7 @@ from otto.config import (
     detect_default_branch,
     detect_project_kind,
     detect_test_command,
+    effective_agent_model,
     get_max_rounds,
     get_max_turns_per_call,
     get_spec_timeout,
@@ -253,6 +254,35 @@ class TestLoadConfig:
 class TestProviderHelpers:
     def test_agent_provider_defaults_to_claude(self):
         assert agent_provider({}) == "claude"
+
+    def test_effective_agent_model_does_not_cross_provider_override(self):
+        config = {
+            "provider": "claude",
+            "model": "sonnet",
+            "_cli_overrides": {"provider": "codex"},
+        }
+
+        assert agent_provider(config, "build") == "codex"
+        assert effective_agent_model(config, "build") is None
+
+    def test_effective_agent_model_preserves_explicit_model_override(self):
+        config = {
+            "provider": "claude",
+            "model": "sonnet",
+            "_cli_overrides": {"provider": "codex", "model": "gpt-5.4"},
+        }
+
+        assert effective_agent_model(config, "build") == "gpt-5.4"
+
+    def test_effective_agent_model_does_not_inherit_global_model_for_phase_provider(self):
+        config = {
+            "provider": "claude",
+            "model": "sonnet",
+            "agents": {"build": {"provider": "codex"}},
+        }
+
+        assert agent_provider(config, "build") == "codex"
+        assert effective_agent_model(config, "build") is None
 
     def test_resolve_intent_for_enqueue_prefers_explicit_value(self, tmp_bare_git_repo):
         (tmp_bare_git_repo / "intent.md").write_text("from project")
@@ -534,6 +564,29 @@ class TestDetectProjectKind:
         )
         (tmp_bare_git_repo / "flaskr" / "templates").mkdir(parents=True)
         (tmp_bare_git_repo / "flaskr" / "static").mkdir()
+
+        assert detect_project_kind(tmp_bare_git_repo) == "webapp"
+
+    def test_detects_requirements_flask_package_app_as_webapp(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\ntestpaths = ['tests']\n",
+            encoding="utf-8",
+        )
+        (tmp_bare_git_repo / "requirements.txt").write_text(
+            "Flask>=3.1,<4\npytest>=9,<10\n",
+            encoding="utf-8",
+        )
+        (tmp_bare_git_repo / "expense_portal" / "templates").mkdir(parents=True)
+        (tmp_bare_git_repo / "expense_portal" / "static").mkdir()
+
+        assert detect_project_kind(tmp_bare_git_repo) == "webapp"
+
+    def test_template_package_without_manifest_deps_is_webapp(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\ntestpaths = ['tests']\n",
+            encoding="utf-8",
+        )
+        (tmp_bare_git_repo / "portal" / "templates").mkdir(parents=True)
 
         assert detect_project_kind(tmp_bare_git_repo) == "webapp"
 

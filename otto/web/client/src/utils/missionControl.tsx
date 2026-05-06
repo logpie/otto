@@ -1276,7 +1276,7 @@ export function projectConfigLine(config: RunBuildConfig | null | undefined): st
   return [
     config.default_branch ? `target ${config.default_branch}` : "",
     config.test_command ? `tests: ${config.test_command}` : "",
-    config.queue?.concurrent ? `${config.queue.concurrent} parallel` : "",
+    config.queue?.concurrent ? `queue concurrency ${config.queue.concurrent}` : "",
     config.queue?.worktree_dir ? `worktrees ${config.queue.worktree_dir}` : "",
     config.queue?.merge_certifier_mode ? `merge cert ${config.queue.merge_certifier_mode}` : "",
   ].filter(Boolean).join(" · ") || "-";

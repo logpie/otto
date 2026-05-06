@@ -48,6 +48,7 @@ from otto.build import (
     GroupResult,
     GroupStatus,
     detect_scope_violations,
+    resolve_integration_base_branch,
 )
 from otto.checks import Evidence, run_checks
 from otto.spec_compile import Group, Spec
@@ -76,7 +77,8 @@ class MergeCandidate:
     group_id: str
     branch: str
     base_branch: str  # the integration target (typically "main")
-    worktree: Path
+    worktree: Path  # slice branch worktree used for repair
+    merge_worktree: Path | None = None  # integration target worktree
 
 
 @dataclass
@@ -308,7 +310,7 @@ async def run_merge_queue(
     *,
     project_dir: Path,
     session_dir: Path,
-    base_branch: str = "main",
+    base_branch: str | None = None,
     base_url: str | None = None,
     build_agent: BuildAgentCallable | None = None,
     config: dict[str, Any] | None = None,
@@ -339,6 +341,11 @@ async def run_merge_queue(
             units can proceed without re-merging prior work.
     """
     config = dict(config or {})
+    base_branch = (
+        base_branch
+        or build_result.base_branch
+        or resolve_integration_base_branch(project_dir)
+    )
     budget = budget or MergeBudget()
     branch_for_group = branch_for_group or (lambda s: f"i2p/{session_dir.name}/{s.id}")
     git = git_runner or _git
@@ -430,6 +437,7 @@ async def run_merge_queue(
                 latest_group_results=latest_group_results,
                 latest_component_results=latest_component_results,
             ),
+            merge_worktree=project_dir,
         )
         emit(
             session_dir,
@@ -524,6 +532,11 @@ async def _process_candidate(
     last_failure = ""
     repair_session_id = ""
     raw_log_dir = session_dir / "merge" / group_obj.id
+    merge_worktree = candidate.merge_worktree or candidate.worktree
+    shared_merge_and_repair_worktree = _same_worktree(
+        candidate.worktree,
+        merge_worktree,
+    )
 
     while True:
         wall = time.monotonic() - t0
@@ -549,7 +562,8 @@ async def _process_candidate(
         group_evidence: list[Evidence] = []
         cross_evidence: list[Evidence] = []
         outcome = _merge_group_branch(
-            git, candidate.worktree,
+            git,
+            merge_worktree,
             group_id=group_obj.id, branch=candidate.branch,
             base_branch=candidate.base_branch,
         )
@@ -570,7 +584,7 @@ async def _process_candidate(
             slice_pairs = run_checks(
                 list(group_obj.checks),
                 project_dir=project_dir,
-                cwd=candidate.worktree,
+                cwd=merge_worktree,
                 base_url=base_url,
                 raw_log_dir=raw_log_dir / f"slice-attempt-{repair_attempts:02d}",
             )
@@ -580,7 +594,7 @@ async def _process_candidate(
             cross_pairs = run_checks(
                 list(spec.cross_group_checks),
                 project_dir=project_dir,
-                cwd=candidate.worktree,
+                cwd=merge_worktree,
                 base_url=base_url,
                 raw_log_dir=raw_log_dir / f"cross-attempt-{repair_attempts:02d}",
             )
@@ -605,7 +619,7 @@ async def _process_candidate(
             # bad merge stays on base_branch and corrupts subsequent
             # slices' parent state.
             if outcome.head_before and outcome.status == MergeStatus.LANDED:
-                git(["reset", "--hard", outcome.head_before], candidate.worktree)
+                git(["reset", "--hard", outcome.head_before], merge_worktree)
             slice_failed_summaries = None
             cross_failed_summaries = None
         else:
@@ -701,7 +715,7 @@ async def _process_candidate(
                 session_dir, "group.attempt.failed",
                 group_id=group_obj.id, attempt=repair_attempts, detail=last_failure,
             )
-            if on_slice_branch:
+            if on_slice_branch and shared_merge_and_repair_worktree:
                 git(["checkout", candidate.base_branch], candidate.worktree)
             continue
         try:
@@ -720,7 +734,7 @@ async def _process_candidate(
                     attempt=repair_attempts,
                     detail=last_failure,
                 )
-                if on_slice_branch:
+                if on_slice_branch and shared_merge_and_repair_worktree:
                     git(["checkout", candidate.base_branch], candidate.worktree)
                 # Loop back to retry verification (which will fail again
                 # and either re-invoke the agent or block).
@@ -761,7 +775,8 @@ async def _process_candidate(
                         detail=last_failure,
                     )
                     _discard_uncommitted_repair(git, candidate.worktree)
-                    git(["checkout", candidate.base_branch], candidate.worktree)
+                    if shared_merge_and_repair_worktree:
+                        git(["checkout", candidate.base_branch], candidate.worktree)
                     return MergeResult(
                         group_id=group_obj.id,
                         status=MergeStatus.BLOCKED,
@@ -790,7 +805,8 @@ async def _process_candidate(
                                 "repair commit failed for slice %s: %s",
                                 group_obj.id, commit.stderr,
                             )
-                git(["checkout", candidate.base_branch], candidate.worktree)
+                if shared_merge_and_repair_worktree:
+                    git(["checkout", candidate.base_branch], candidate.worktree)
         except Exception as exc:
             last_failure = (
                 f"merge repair agent crashed on attempt {repair_attempts}: "
@@ -803,7 +819,7 @@ async def _process_candidate(
                 attempt=repair_attempts,
                 detail=last_failure,
             )
-            if on_slice_branch:
+            if on_slice_branch and shared_merge_and_repair_worktree:
                 git(["checkout", candidate.base_branch], candidate.worktree)
             continue
 
@@ -1035,6 +1051,14 @@ def _merge_group_branch(
         head_after=head_after,
         detail="",
     )
+
+
+def _same_worktree(left: Path, right: Path) -> bool:
+    """Return True when two paths identify the same working tree root."""
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return Path(left) == Path(right)
 
 
 def _commit_integration(

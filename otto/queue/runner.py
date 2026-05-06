@@ -41,6 +41,7 @@ from typing import Any, Callable
 from otto.config import DEFAULTS
 from otto.manifest import queue_index_path_for
 from otto import paths
+from otto.observability import write_json_atomic
 from otto.queue.artifacts import preserve_queue_session_artifacts, queue_primary_log_path
 from otto.token_usage import (
     TOKEN_USAGE_KEYS,
@@ -1933,6 +1934,30 @@ class Runner:
             _mark_failed(ts, f"missing queue task id for manifest lookup: {task_id!r}")
             return
         if not manifest_p.exists():
+            manifest = self._synthesize_missing_manifest_from_session_summary(
+                ts,
+                task_id,
+                queue_manifest_path=manifest_p,
+            )
+            if manifest is not None:
+                ts["manifest_path"] = str(manifest_p)
+                ts["cost_usd"] = manifest.get("cost_usd")
+                ts["duration_s"] = manifest.get("duration_s")
+                self._record_summary_usage(ts, manifest)
+                manifest_exit_status = str(manifest.get("exit_status") or "success")
+                if exit_code not in (None, 0):
+                    _mark_failed(ts, f"exit_code={exit_code}")
+                    return
+                if manifest_exit_status != "success":
+                    _mark_failed(ts, f"manifest exit_status={manifest_exit_status}")
+                    return
+                if _task_success_requires_clean_worktree(manifest):
+                    if not self._verify_success_worktree_clean(ts, task_id, manifest):
+                        return
+                ts["status"] = "done"
+                ts["duration_s"] = _terminal_duration_s(ts)
+                ts["failure_reason"] = None
+                return
             if self.shutdown_level == "immediate":
                 _mark_interrupted(ts, self._shutdown_interrupted_reason(task_id))
                 return
@@ -1973,22 +1998,118 @@ class Runner:
             _mark_failed(ts, f"manifest exit_status={manifest_exit_status}")
             return
         if _task_success_requires_clean_worktree(manifest):
-            task = next(
-                (candidate for candidate in self._load_queue_or_empty(context="finalize manifest") if candidate.id == task_id),
-                None,
-            )
-            if task is not None and task.worktree:
-                worktree = self.project_dir / task.worktree
-                if _task_success_can_commit_generated_lockfiles(manifest):
-                    _auto_commit_generated_lockfiles(worktree)
-                dirty_reason = _dirty_successful_worktree_reason(worktree)
-                if dirty_reason:
-                    _mark_failed(ts, dirty_reason)
-                    return
+            if not self._verify_success_worktree_clean(ts, task_id, manifest):
+                return
 
         ts["status"] = "done"
         ts["duration_s"] = _terminal_duration_s(ts)
         ts["failure_reason"] = None
+
+    def _verify_success_worktree_clean(
+        self,
+        ts: dict[str, Any],
+        task_id: str,
+        manifest: dict[str, Any],
+    ) -> bool:
+        task = next(
+            (candidate for candidate in self._load_queue_or_empty(context="finalize manifest") if candidate.id == task_id),
+            None,
+        ) or self._task_from_state_snapshot(task_id, ts)
+        if task is None or not task.worktree:
+            return True
+        worktree = self.project_dir / task.worktree
+        if _task_success_can_commit_generated_lockfiles(manifest):
+            _auto_commit_generated_lockfiles(worktree)
+        dirty_reason = _dirty_successful_worktree_reason(worktree)
+        if dirty_reason:
+            _mark_failed(ts, dirty_reason)
+            return False
+        return True
+
+    def _synthesize_missing_manifest_from_session_summary(
+        self,
+        ts: dict[str, Any],
+        task_id: str,
+        *,
+        queue_manifest_path: Path,
+    ) -> dict[str, Any] | None:
+        """Backfill a queue manifest from an i2p session summary.
+
+        The redesigned i2p runner writes ``summary.json`` and proof artifacts
+        under the per-session directory. Queue control-plane code still keys
+        terminal status off ``otto_logs/queue/<task>/manifest.json``. If a child
+        exits 0 after producing a successful session summary but no queue
+        manifest, synthesize the missing mirror instead of marking the task
+        failed.
+        """
+        raw_session_dir = str(ts.get("session_dir") or "").strip()
+        if not raw_session_dir:
+            return None
+        session_dir = Path(raw_session_dir).expanduser()
+        summary_path = session_dir / "summary.json"
+        if not summary_path.exists():
+            return None
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "task %s has unreadable session summary at %s: %s",
+                task_id,
+                summary_path,
+                exc,
+            )
+            return None
+        if not isinstance(summary, dict):
+            return None
+
+        task = next(
+            (candidate for candidate in self._load_queue_or_empty(context="synthesize manifest") if candidate.id == task_id),
+            None,
+        ) or self._task_from_state_snapshot(task_id, ts)
+        command_argv = list(task.command_argv) if task is not None else []
+        command = str(summary.get("command") or (command_argv[0] if command_argv else "") or "")
+        run_id = str(summary.get("run_id") or ts.get("child_run_id") or ts.get("attempt_run_id") or "")
+        passed = (
+            summary.get("passed") is True
+            or str(summary.get("verdict") or "").lower() == "passed"
+            or str(summary.get("status") or "").lower() in {"completed", "success", "done"}
+        )
+        if not run_id:
+            return None
+        proof_path = session_dir / "proof-packet.json"
+        checkpoint_path = session_dir / "checkpoint.json"
+        canonical_path = session_dir / "manifest.json"
+        payload: dict[str, Any] = {
+            "command": command,
+            "argv": command_argv,
+            "queue_task_id": task_id,
+            "run_id": run_id,
+            "branch": summary.get("branch"),
+            "checkpoint_path": str(checkpoint_path) if checkpoint_path.exists() else None,
+            "proof_of_work_path": str(proof_path) if proof_path.exists() else None,
+            "cost_usd": float(summary.get("cost_usd") or 0.0),
+            "duration_s": float(summary.get("duration_s") or _terminal_duration_s(ts) or 0.0),
+            "started_at": str(ts.get("started_at") or summary.get("started_at") or ""),
+            "finished_at": str(summary.get("completed_at") or ts.get("finished_at") or now_iso()),
+            "head_sha": summary.get("head_sha"),
+            "resolved_intent": summary.get("intent") or (task.resolved_intent if task is not None else None),
+            "focus": task.focus if task is not None else None,
+            "target": task.target if task is not None else None,
+            "exit_status": "success" if passed else "failure",
+            "schema_version": 1,
+            "extra": {
+                "synthesized_from_summary": str(summary_path),
+                "status": summary.get("status"),
+                "verdict": summary.get("verdict"),
+                "stories_passed": summary.get("stories_passed"),
+                "stories_tested": summary.get("stories_tested"),
+            },
+        }
+        write_json_atomic(canonical_path, payload, sort_keys=False)
+        mirror_payload = dict(payload)
+        mirror_payload["mirror_of"] = str(canonical_path.resolve())
+        write_json_atomic(queue_manifest_path, mirror_payload, sort_keys=False)
+        return mirror_payload
 
     def _shutdown_interrupted_reason(self, task_id: str) -> str:
         task = next(

@@ -1,27 +1,38 @@
-import {useCallback, useEffect, useMemo, useState} from "react";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {api} from "../../api";
+import {ConfirmDialog, type ConfirmState} from "../ConfirmDialog";
 import {JobDialog, collectPriorRunOptions} from "../new-job/JobDialog";
 import {TaskQueueList} from "../tasks/TaskQueueList";
 import {ProjectOverview} from "../overview/Overview";
 import {RunViewPage} from "../run/RunViewPage";
+import {DiagnosticsSummary} from "../health/SystemHealth";
+import {BulkLandingConfirmList} from "../review/ConfirmDetails";
 import {defaultFilters} from "../../uiTypes";
 import type {BoardTask} from "../../uiTypes";
-import type {AutopilotDecision, AutopilotIncident, ProjectInfo, StateResponse} from "../../types";
-import {errorMessage, refreshIntervalMs} from "../../utils/missionControl";
+import type {ActionResult, AutopilotDecision, AutopilotIncident, ProjectInfo, StateResponse, VerificationPolicy} from "../../types";
+import {canMerge, errorMessage, landingBulkConfirmation, refreshIntervalMs} from "../../utils/missionControl";
 
 interface Props {
   project?: ProjectInfo | null;
 }
 
 export function ProjectWorkspace({project}: Props) {
+  const [workspaceView, setWorkspaceView] = useState<"tasks" | "diagnostics">(
+    () => readWorkspaceView(),
+  );
   const [data, setData] = useState<StateResponse | null>(null);
   const [stateError, setStateError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [jobOpen, setJobOpen] = useState(false);
   const [banner, setBanner] = useState<{kind: "info" | "error"; message: string} | null>(null);
   const [recoveryPending, setRecoveryPending] = useState<string | null>(null);
+  const [landPending, setLandPending] = useState(false);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [confirmAck, setConfirmAck] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedQueuedTask, setSelectedQueuedTask] = useState<BoardTask | null>(null);
+  const verificationPolicyRef = useRef<VerificationPolicy>("smart");
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -76,6 +87,27 @@ export function ProjectWorkspace({project}: Props) {
     return () => window.removeEventListener("popstate", syncDrawerFromHistory);
   }, []);
 
+  useEffect(() => {
+    const onPop = () => setWorkspaceView(readWorkspaceView());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const changeWorkspaceView = useCallback((next: "tasks" | "diagnostics") => {
+    setWorkspaceView(next);
+    const url = new URL(window.location.href);
+    if (next === "diagnostics") {
+      url.searchParams.set("view", "diagnostics");
+    } else if (url.searchParams.get("view") === "diagnostics") {
+      url.searchParams.delete("view");
+    }
+    const target = `${url.pathname}${url.search}${url.hash}`;
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (target !== current) {
+      window.history.pushState({...window.history.state, workspaceView: next}, "", target);
+    }
+  }, []);
+
   const startWatcher = useCallback(async () => {
     try {
       const body = await api<{message?: string}>("/api/watcher/start", {
@@ -115,6 +147,62 @@ export function ProjectWorkspace({project}: Props) {
       setRecoveryPending(null);
     }
   }, [refresh]);
+
+  const closeConfirm = useCallback(() => {
+    setConfirm(null);
+    setConfirmError(null);
+    setConfirmAck(false);
+  }, []);
+
+  const runConfirm = useCallback(async () => {
+    if (!confirm) return;
+    setLandPending(true);
+    setConfirmError(null);
+    try {
+      await confirm.onConfirm();
+      closeConfirm();
+    } catch (error) {
+      setConfirmError(errorMessage(error));
+    } finally {
+      setLandPending(false);
+    }
+  }, [closeConfirm, confirm]);
+
+  const landReady = useCallback(async () => {
+    const body = await api<ActionResult>("/api/actions/merge-all", {
+      method: "POST",
+      body: JSON.stringify({verification_policy: verificationPolicyRef.current || "smart"}),
+    });
+    if (!body.ok) {
+      throw new Error(body.message || "Landing did not start.");
+    }
+    setBanner({
+      kind: body.severity === "error" ? "error" : "info",
+      message: body.message || "Landing ready work.",
+    });
+    await refresh();
+  }, [refresh]);
+
+  const requestLandReady = useCallback(() => {
+    if (!data || !canMerge(data.landing)) return;
+    const ready = data.landing.items.filter((item) => item.landing_state === "ready");
+    verificationPolicyRef.current = "smart";
+    setConfirmError(null);
+    setConfirmAck(false);
+    setConfirm({
+      title: "Land Ready Work",
+      body: landingBulkConfirmation(data.landing),
+      bodyContent: (
+        <BulkLandingConfirmList
+          items={ready}
+          target={data.landing.target || data.project?.branch || project?.branch || "main"}
+          verificationPolicyRef={verificationPolicyRef}
+        />
+      ),
+      confirmLabel: "Land ready work",
+      onConfirm: landReady,
+    });
+  }, [data, landReady, project?.branch]);
 
   const currentProject = data?.project || project || null;
   const projectName = currentProject?.name || currentProject?.path || "Project";
@@ -197,22 +285,58 @@ export function ProjectWorkspace({project}: Props) {
 
       {data ? (
         <>
-          <TaskQueueList
-            data={data}
-            filters={defaultFilters}
-            selectedRunId={selectedRunId}
-            selectedQueuedTaskId={selectedQueuedTask?.id ?? null}
-            onSelect={openRun}
-            onSelectQueued={openQueuedTask}
-            onNewJob={() => setJobOpen(true)}
-            onStartWatcher={() => void startWatcher()}
-          />
-          <details className="tasks-supplementary" data-testid="tasks-supplementary" open={!hasWork}>
-            <summary><span>Project info & activity</span></summary>
-            <div className="tasks-supplementary-body">
+          <div className="project-workspace-tabs" role="group" aria-label="Project workspace views">
+            <button
+              type="button"
+              className={workspaceView === "tasks" ? "active" : ""}
+              aria-pressed={workspaceView === "tasks"}
+              data-testid="tasks-tab"
+              onClick={() => changeWorkspaceView("tasks")}
+            >
+              Tasks
+            </button>
+            <button
+              type="button"
+              className={workspaceView === "diagnostics" ? "active" : ""}
+              aria-pressed={workspaceView === "diagnostics"}
+              data-testid="diagnostics-tab"
+              onClick={() => changeWorkspaceView("diagnostics")}
+            >
+              Health
+            </button>
+          </div>
+          {workspaceView === "diagnostics" ? (
+            <section className="workspace-diagnostics" data-testid="diagnostics-view" aria-labelledby="workspaceDiagnosticsHeading">
+              <div className="panel-heading">
+                <div>
+                  <h2 id="workspaceDiagnosticsHeading">Health</h2>
+                  <p className="panel-subtitle">Project state, watcher health, recovery actions, and recent run history.</p>
+                </div>
+              </div>
               <ProjectOverview data={data} />
-            </div>
-          </details>
+              <DiagnosticsSummary data={data} onSelect={openRun} />
+            </section>
+          ) : (
+            <>
+              <TaskQueueList
+                data={data}
+                filters={defaultFilters}
+                selectedRunId={selectedRunId}
+                selectedQueuedTaskId={selectedQueuedTask?.id ?? null}
+                onSelect={openRun}
+                onSelectQueued={openQueuedTask}
+                onLandReady={requestLandReady}
+                onNewJob={() => setJobOpen(true)}
+                onStartWatcher={() => void startWatcher()}
+              />
+              <details className="tasks-supplementary" data-testid="tasks-supplementary" open={!hasWork}>
+                <summary><span>Project info & activity</span></summary>
+                <div className="tasks-supplementary-body">
+                  <ProjectOverview data={data} />
+                </div>
+              </details>
+            </>
+          )}
         </>
       ) : null}
 
@@ -235,6 +359,18 @@ export function ProjectWorkspace({project}: Props) {
 
       {selectedRunId ? (
         <RunDetailOverlay sessionId={selectedRunId} onClose={closeRun} />
+      ) : null}
+
+      {confirm ? (
+        <ConfirmDialog
+          confirm={confirm}
+          pending={landPending}
+          error={confirmError}
+          checkboxAck={confirmAck}
+          onChangeCheckboxAck={setConfirmAck}
+          onCancel={closeConfirm}
+          onConfirm={runConfirm}
+        />
       ) : null}
     </div>
   );
@@ -338,3 +474,10 @@ function RunDetailOverlay({sessionId, onClose}: {sessionId: string; onClose: () 
 }
 
 export default ProjectWorkspace;
+
+function readWorkspaceView(): "tasks" | "diagnostics" {
+  if (typeof window === "undefined") return "tasks";
+  return new URLSearchParams(window.location.search).get("view") === "diagnostics"
+    ? "diagnostics"
+    : "tasks";
+}

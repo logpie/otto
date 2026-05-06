@@ -499,6 +499,14 @@ def run_config_from_argv(
         metrics.get("command_family"),
         _argv_command_family(argv),
     )
+    if command_family in {"build", "certify"}:
+        max_certify_rounds = None
+    if command_family in {"build", "improve", "certify"}:
+        split_mode = _first_bool(
+            source.get("split_mode"),
+            metrics.get("split_mode"),
+            defaults.get("split_mode"),
+        )
     allow_dirty_repo = _first_bool(
         source.get("allow_dirty_repo"),
         metrics.get("allow_dirty_repo"),
@@ -525,15 +533,20 @@ def run_config_from_argv(
     if command_family == "improve" and split_mode:
         primary_agent_name = "fix"
     build_agent = agents.get(primary_agent_name, {})
-    resolved_provider = _first_string(build_agent.get("provider"), provider_override, defaults.get("provider"))
-    model_fallback = None if (
-        not model_override
-        and _provider_changed(_first_string(defaults.get("provider")), resolved_provider)
-    ) else defaults.get("model")
+    provider_value = _first_string(
+        build_agent.get("provider"),
+        provider_override,
+        defaults.get("provider"),
+    )
     return {
         "command_family": command_family,
-        "provider": resolved_provider,
-        "model": _first_string(build_agent.get("model"), model_override, model_fallback),
+        "provider": provider_value,
+        "model": _model_for_effective_provider(
+            explicit_model=_first_string(build_agent.get("model"), model_override),
+            effective_provider=provider_value,
+            default_provider=_first_string(defaults.get("provider")),
+            default_model=_first_string(defaults.get("model")),
+        ),
         "reasoning_effort": _first_string(
             build_agent.get("reasoning_effort"),
             effort_override,
@@ -571,6 +584,20 @@ def _first_string(*values: Any) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _model_for_effective_provider(
+    *,
+    explicit_model: str | None,
+    effective_provider: str | None,
+    default_provider: str | None,
+    default_model: str | None,
+) -> str | None:
+    if explicit_model:
+        return explicit_model
+    if effective_provider and default_provider and effective_provider != default_provider:
+        return None
+    return default_model
 
 
 def _first_int(*values: Any) -> int | None:
@@ -871,21 +898,23 @@ def _agents_with_overrides(
     try:
         config = load_config(config_path)
     except Exception:
-        fallback_model = None if provider and not model and _provider_changed(
-            _first_string(fallback.get("provider")),
-            provider,
-        ) else fallback.get("model")
-        return {
-            name: {
-                "provider": _first_string(
-                    agent_overrides.get(name, {}).get("provider"),
-                    provider,
-                    fallback.get("provider"),
-                ),
-                "model": _first_string(
-                    agent_overrides.get(name, {}).get("model"),
-                    model,
-                    fallback_model,
+        agents: dict[str, dict[str, str | None]] = {}
+        for name in ("build", "certifier", "spec", "fix"):
+            agent_provider_value = _first_string(
+                agent_overrides.get(name, {}).get("provider"),
+                provider,
+                fallback.get("provider"),
+            )
+            agents[name] = {
+                "provider": agent_provider_value,
+                "model": _model_for_effective_provider(
+                    explicit_model=_first_string(
+                        agent_overrides.get(name, {}).get("model"),
+                        model,
+                    ),
+                    effective_provider=agent_provider_value,
+                    default_provider=_first_string(fallback.get("provider")),
+                    default_model=_first_string(fallback.get("model")),
                 ),
                 "reasoning_effort": _first_string(
                     agent_overrides.get(name, {}).get("effort"),
@@ -893,8 +922,7 @@ def _agents_with_overrides(
                     fallback.get("reasoning_effort"),
                 ),
             }
-            for name in ("build", "certifier", "spec", "fix")
-        }
+        return agents
     overrides = {key: value for key, value in {"provider": provider, "model": model, "effort": effort}.items() if value}
     if provider and not model and _provider_changed(agent_provider(config), provider):
         overrides["model"] = PROVIDER_DEFAULT_MODEL_OVERRIDE

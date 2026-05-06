@@ -35,9 +35,7 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -99,7 +97,6 @@ def eval_contract_test(ctx: EvaluatorContext) -> EvalResult:
     test_command) and report pass/fail. The cheapest, most fundamental
     evaluator — does the project's own test pass?"""
     t0 = time.monotonic()
-    findings: list[EvalFinding] = []
 
     test_script = ctx.project_dir / "tests" / "run_acceptance.py"
     if not test_script.exists():

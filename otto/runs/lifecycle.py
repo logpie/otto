@@ -24,7 +24,7 @@ from typing import Any
 from otto.logstream import normalize_phase_breakdown
 from otto.token_usage import (
     TOKEN_USAGE_KEYS,
-    phase_token_usage_from_messages,
+    phase_breakdown_from_messages,
     total_token_usage_from_phases,
 )
 
@@ -34,7 +34,7 @@ logger = logging.getLogger("otto.runs.lifecycle")
 
 def _merge_phase_token_usage(
     breakdown: dict[str, dict[str, Any]],
-    phase_usage: dict[str, dict[str, int]],
+    phase_usage: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     merged = {
         str(phase): dict(data)
@@ -49,6 +49,10 @@ def _merge_phase_token_usage(
             value = usage.get(key)
             if value:
                 entry[key] = int(value)
+        for key in ("duration_s", "cost_usd"):
+            value = usage.get(key)
+            if isinstance(value, int | float) and value > 0:
+                entry[key] = float(value)
     return merged
 
 
@@ -104,7 +108,7 @@ def _write_session_summary(
         summary["head_sha"] = head_sha
     if runtime_path:
         summary["runtime_path"] = runtime_path
-    message_phase_usage = phase_token_usage_from_messages(paths.session_dir(project_dir, session_id))
+    message_phase_usage = phase_breakdown_from_messages(paths.session_dir(project_dir, session_id))
     if breakdown is not None or message_phase_usage:
         if breakdown is None:
             breakdown = {}

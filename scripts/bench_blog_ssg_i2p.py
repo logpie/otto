@@ -29,12 +29,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
 import subprocess
 import sys
 import tempfile
-import textwrap
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -546,7 +544,7 @@ def main() -> int:
         f"- audit verdict: {summary.get('audit_verdict')}",
         f"- quality_score: {summary.get('quality_score', 0)}/5",
         f"- evaluator_aggregate: {summary.get('evaluator_aggregate')}",
-        f"- evaluator_summary: " + ", ".join(
+        "- evaluator_summary: " + ", ".join(
             f"{k}={v}" for k, v in (summary.get('evaluator_summary') or {}).items()
         ),
         f"- amendments: {summary.get('amendments_count')}",
