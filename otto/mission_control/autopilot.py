@@ -1136,7 +1136,15 @@ def _landing_attention_detail(item: dict[str, Any], *, status: str, action: str)
     summary = raw_summary.rstrip(". ")
     if action == "requeue":
         state = status or "blocked"
-        return f"{summary} was {state} before producing code changes. Requeue it to get a fresh run."
+        state_phrase = {
+            "failed": "failed",
+            "interrupted": "was interrupted",
+            "cancelled": "was cancelled",
+        }.get(state, f"was {state}")
+        return (
+            f"{summary} {state_phrase} before verified changes were ready to land. "
+            "Requeue it to get a fresh run."
+        )
     if action == "pilot_triage":
         return f"{summary} needs a quick diagnosis before Otto chooses the recovery action."
     return f"{summary} needs manual review before Otto can continue."
@@ -1153,6 +1161,7 @@ def _with_recovery_plan(decision: dict[str, Any], incident: dict[str, Any]) -> d
         }
     if action == "requeue" and "start_watcher" in follow_up_actions:
         title = _requeue_plan_title(str(incident.get("title") or ""))
+        step_label = _requeue_step_label(str(incident.get("title") or ""))
         reason = str(decision.get("reason") or "").rstrip()
         plan_reason = (
             f"{reason} Otto will also start the queue runner so the retry actually begins."
@@ -1169,7 +1178,7 @@ def _with_recovery_plan(decision: dict[str, Any], incident: dict[str, Any]) -> d
             "plan_steps": [
                 {
                     "action": "requeue",
-                    "label": "Requeue interrupted task",
+                    "label": step_label,
                     "status": "pending",
                     "detail": "Create a fresh queued run from the original task definition.",
                 },
@@ -1228,6 +1237,17 @@ def _requeue_plan_title(title: str) -> str:
     if "failed" in lowered:
         return "Recover failed task"
     return "Recover task"
+
+
+def _requeue_step_label(title: str) -> str:
+    lowered = title.lower()
+    if "interrupted" in lowered:
+        return "Requeue interrupted task"
+    if "cancelled" in lowered:
+        return "Requeue cancelled task"
+    if "failed" in lowered:
+        return "Requeue failed task"
+    return "Requeue task"
 
 
 def _normalize_mode(value: Any) -> str:

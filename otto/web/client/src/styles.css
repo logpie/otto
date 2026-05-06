@@ -1125,9 +1125,12 @@ textarea:focus-visible,
 }
 
 .project-row-dirty {
-  color: var(--amber);
-  font-size: 14px;
-  line-height: 1;
+  border-color: var(--color-warning-border, #f59e0b);
+  background: var(--color-warning-bg, rgba(245, 158, 11, 0.12));
+  color: var(--color-warning-fg, #92400e);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
 }
 
 .project-row-arrow {
@@ -1209,6 +1212,12 @@ textarea:focus-visible,
   border: 1px solid var(--line);
   border-radius: 999px;
   background: #f8fafc;
+}
+
+.project-row-meta .project-row-dirty {
+  border-color: var(--color-warning-border, #f59e0b);
+  background: var(--color-warning-bg, rgba(245, 158, 11, 0.12));
+  color: var(--color-warning-fg, #92400e);
 }
 
 .launcher-empty {
@@ -9802,7 +9811,9 @@ mark.log-search-match.active {
 .feature-row .feature-name {
   font-weight: 600;
   color: var(--text);
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .feature-row .feature-detail {
   flex: 1 1 auto;
@@ -9982,13 +9993,15 @@ mark.log-search-match.active {
 .feature-drilldown {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 .feature-drilldown-breadcrumb {
   display: flex;
   align-items: baseline;
   gap: 12px;
   flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
 }
 .feature-drilldown-breadcrumb .feature-drilldown-back {
   appearance: none;
@@ -9999,7 +10012,6 @@ mark.log-search-match.active {
   border-radius: 4px;
   cursor: pointer;
   font-size: var(--text-sm, 14px);
-  margin-right: auto; /* B8: left-align the back button */
   margin-left: 0;
 }
 .feature-drilldown-breadcrumb .feature-drilldown-back:hover {
@@ -10029,14 +10041,19 @@ mark.log-search-match.active {
 }
 .feature-drilldown-header {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 12px;
   flex-wrap: wrap;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
 }
 .feature-drilldown-header h2 {
   margin: 0;
   flex: 1 1 auto;
   min-width: 0;
+  line-height: 1.3;
 }
 .feature-drilldown-actions {
   display: flex;
@@ -10055,6 +10072,39 @@ mark.log-search-match.active {
 }
 .feature-drilldown-actions .feature-action-button:hover {
   background: var(--surface-alt);
+}
+.feature-drilldown-description,
+.feature-drilldown-acceptance,
+.feature-drilldown-honesty,
+.feature-drilldown-evidence-kinds,
+.feature-drilldown-evidence-refs,
+.feature-drilldown-findings {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--surface);
+}
+.feature-drilldown-description h3,
+.feature-drilldown-acceptance h3,
+.feature-drilldown-honesty h3,
+.feature-drilldown-evidence-kinds h3,
+.feature-drilldown-evidence-refs h3,
+.feature-drilldown-findings h3 {
+  margin-top: 0;
+}
+.feature-drilldown-honesty dl {
+  display: grid;
+  grid-template-columns: minmax(150px, max-content) minmax(0, 1fr);
+  gap: 8px 20px;
+  margin: 0;
+}
+.feature-drilldown-honesty dt {
+  color: var(--muted);
+  font-size: var(--text-sm, 14px);
+}
+.feature-drilldown-honesty dd {
+  margin: 0;
+  min-width: 0;
 }
 .feature-resource-panel {
   border: 1px solid var(--line);
@@ -10867,6 +10917,7 @@ button.otto-app-shell-project:focus-visible {
   align-items: baseline;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 .feature-row .feature-row-chevron {
   margin-left: auto;

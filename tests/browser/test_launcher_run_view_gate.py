@@ -493,6 +493,37 @@ def test_selected_project_brand_returns_to_project_launcher(
     assert page.get_by_text("Open a project").is_visible()
 
 
+def test_launcher_dirty_project_uses_text_badge(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Dirty projects need a readable badge, not an unlabeled color dot."""
+
+    project = _project()
+    project["dirty"] = True
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": None,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    page.route("**/api/projects", projects)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-testid="project-launcher"]', timeout=10_000)
+
+    assert page.get_by_text("Local changes").is_visible()
+
+
 def test_run_card_opens_side_drawer_without_route_navigation(
     mc_backend: Any,
     page: Any,
@@ -613,6 +644,97 @@ def test_run_card_opens_side_drawer_without_route_navigation(
     page.get_by_test_id("run-list-detail-drawer").wait_for(state="detached", timeout=10_000)
 
 
+def test_run_view_wraps_long_feature_names_without_page_overflow(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Issue-sized feature names must wrap instead of widening the whole app."""
+
+    project = _project()
+    run_view = _run_view("long-run")
+    run_view["status"] = "blocked"
+    run_view["verdict"] = "blocked"
+    long_name = (
+        "Feature with an extremely long title that should wrap without covering "
+        "actions or breaking the drawer layout "
+        * 2
+    )
+    run_view["features"] = [
+        {
+            "id": f"f-{index}",
+            "name": f"{long_name}{index}",
+            "description": "Long feature description.",
+            "acceptance_detail": "The UI wraps all text and leaves controls clickable.",
+            "evidence_kinds": ["RepoTestCheck", "BrowserCheck"],
+            "group_id": "foundation",
+            "group_name": "Foundation",
+            "build_status": "blocked" if index < 2 else "passed",
+            "verdict": None,
+            "evidence_completeness": "full",
+            "coverage_confidence": "high",
+            "multi_actor_required": False,
+            "audit_pre_merge": False,
+            "evidence_refs": [],
+        }
+        for index in range(8)
+    ]
+    run_view["groups"] = [
+        {
+            "id": "foundation",
+            "name": "Foundation",
+            "description": "",
+            "feature_ids": [feature["id"] for feature in run_view["features"]],
+            "status": "blocked",
+            "branch": "i2p/long-run/foundation",
+            "owned_paths": ["src/App.tsx"],
+            "dependencies": [],
+            "cost_usd": 0.1,
+            "wall_s": 12.0,
+            "repair_attempts": 0,
+        }
+    ]
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def detail(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(run_view))
+
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.route("**/api/projects", projects)
+    page.route("**/api/run-view/long-run", detail)
+
+    page.goto(f"{mc_backend.url}?view=run-view&session=long-run", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
+
+    widths = page.evaluate(
+        """() => ({
+            viewport: innerWidth,
+            body: document.body.scrollWidth,
+            document: document.documentElement.scrollWidth,
+        })"""
+    )
+    assert widths["body"] <= widths["viewport"] + 2
+    assert widths["document"] <= widths["viewport"] + 2
+
+    first_name = page.locator(".feature-row .feature-name").first.bounding_box()
+    first_row = page.locator(".feature-row").first.bounding_box()
+    assert first_name is not None
+    assert first_row is not None
+    assert first_name["width"] <= first_row["width"]
+
+
 def test_feature_drilldown_uses_build_state_and_real_group_resources(
     mc_backend: Any,
     page: Any,
@@ -705,6 +827,17 @@ def test_feature_drilldown_uses_build_state_and_real_group_resources(
     page.wait_for_selector('[data-testid="feature-drilldown"]', timeout=10_000)
 
     assert page.get_by_test_id("feature-drilldown-verdict").inner_text() == "blocked"
+    back_box = page.get_by_test_id("feature-drilldown-back").bounding_box()
+    crumb_box = page.get_by_test_id("feature-drilldown-breadcrumb").bounding_box()
+    assert back_box is not None
+    assert crumb_box is not None
+    assert crumb_box["x"] <= back_box["x"] + back_box["width"] + 80
+    assert page.locator(".feature-drilldown-honesty").evaluate(
+        "node => getComputedStyle(node).borderStyle"
+    ) != "none"
+    assert page.locator(".feature-drilldown-honesty dl").evaluate(
+        "node => getComputedStyle(node).display"
+    ) == "grid"
     assert page.get_by_test_id("feature-action-evidence").count() == 0
     assert page.get_by_test_id("feature-action-reaudit").count() == 0
 
@@ -782,6 +915,63 @@ def test_spec_diff_without_versions_hides_noop_controls(
     assert page.get_by_test_id("spec-diff-from").count() == 0
     assert page.get_by_test_id("spec-diff-fold-toggle").count() == 0
     assert page.get_by_text("No archived spec versions").is_visible()
+
+
+def test_spec_review_approved_banner_stays_web_native(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """The primary Web UI should not tell users to paste a CLI command."""
+
+    project = _project()
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def markdown(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "spec_id": "run-1",
+                    "session_id": "run-1",
+                    "markdown": "# Build app\n\n## Features\n\n### Auth\n",
+                    "intent_hash": "abc123",
+                    "lifecycle": "approved",
+                    "updated_at": "2026-05-06T00:00:00Z",
+                }
+            ),
+        )
+
+    def versions(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"session_id": "run-1", "versions": []}),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/specs/run-1/versions", versions)
+    page.route("**/api/specs/run-1/markdown", markdown)
+
+    page.goto(f"{mc_backend.url}?view=spec-review&spec=run-1", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="spec-review-readonly-banner"]', timeout=10_000)
+
+    banner = page.get_by_test_id("spec-review-readonly-banner")
+    assert "Queue an improvement or new build" in banner.inner_text()
+    assert "otto build" not in banner.inner_text()
 
 
 def test_new_run_queues_from_web_and_starts_runner(

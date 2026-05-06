@@ -164,6 +164,38 @@ def test_autopilot_proposes_requeue_for_interrupted_landing_task(tmp_path: Path)
         "start_watcher",
         "watch_retry",
     ]
+    assert status["pending_decisions"][0]["plan_steps"][0]["label"] == "Requeue interrupted task"
+
+
+def test_autopilot_requeue_failed_copy_is_truthful(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    status = AutopilotController(repo).status({
+        "watcher": {"health": {"state": "stopped"}, "counts": {"queued": 0, "running": 0}},
+        "runtime": {"command_backlog": {"processing": 0}, "supervisor": {"can_start": True}},
+        "landing": {
+            "merge_blocked": False,
+            "counts": {"ready": 0, "blocked": 1},
+            "items": [{
+                "task_id": "build-microfeed",
+                "run_id": "run-failed",
+                "summary": "Build a microfeed.",
+                "build_config": {"command_family": "build"},
+                "queue_status": "failed",
+                "landing_state": "blocked",
+                "changed_file_count": 0,
+            }],
+        },
+        "live": {"items": []},
+    })
+
+    decision = status["pending_decisions"][0]
+    assert decision["title"] == "Recover failed task"
+    assert decision["plan_steps"][0]["label"] == "Requeue failed task"
+    assert "failed before verified changes were ready to land" in decision["reason"]
+    assert "before producing code changes" not in decision["reason"]
+    assert "was failed" not in decision["reason"]
 
 
 def test_autopilot_ignores_superseded_interrupted_landing_task(tmp_path: Path) -> None:
