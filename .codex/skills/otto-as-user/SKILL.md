@@ -32,6 +32,33 @@ real user goal -> Otto workflow -> inspect evidence -> external verification -> 
 
 An Otto PASS, a harness PASS, or a screenshot alone is not enough.
 
+## Doorway Smoke
+
+Before claiming Mission Control Web is usable for a real user, run a doorway
+smoke in the same mode the user will use. This is a skill-level requirement,
+not a separate script requirement.
+
+Minimum doorway smoke:
+
+1. Start the real server with launcher mode and remote access:
+
+   ```bash
+   uv run --extra dev python -m otto.cli web --host 0.0.0.0 --port 9000 --allow-remote --project-launcher --projects-root /Users/yuxuan/otto-projects --no-open
+   ```
+
+2. Open the actual URL in a browser with Playwright or agent-browser.
+3. Assert the first screen is actionable:
+   - project launcher is visible when no project is selected
+   - no raw backend error such as "Failed to load sessions"
+   - no unexpected first-load 4xx/5xx in normal UI requests
+   - static bundle is fresh and served from the running server
+4. Create or open a managed project.
+5. Confirm the UI transitions into the project workflow.
+6. Save at least one screenshot and the server log path.
+
+Doorway smoke proves the entrance works. It does not prove Otto can build or
+repair a real product; continue with a real scenario for that.
+
 ## Surface Selection
 
 Default to Mission Control Web when the task is about how a person would use
