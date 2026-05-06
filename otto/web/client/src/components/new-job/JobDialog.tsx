@@ -182,19 +182,24 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
     && effectiveRounds !== null
     && effectiveRounds <= 1;
   const intentLabelMap: Record<JobCommand, string> = {
-    build: "Intent",
-    improve: "Focus",
-    certify: "Focus",
+    build: "What should Otto build?",
+    improve: "What should Otto improve?",
+    certify: "What should Otto verify?",
   };
   const intentPlaceholderMap: Record<JobCommand, string> = {
-    build: "Describe what you want Otto to build.",
+    build: "Example: Build a micro Twitter for this project with posts, follows, profiles, and a browser-verifiable feed.",
     improve: "Describe what to refine, fix, or extend in the existing run.",
     certify: "Describe what to verify in the existing run.",
   };
   const commandHelpMap: Record<JobCommand, string> = {
-    build: "Build new work from your description.",
+    build: "Otto turns this intent into a spec, groups, feature work, certification, and a review packet.",
     improve: "Iterate on an existing run (refine, fix bugs, extend feature).",
     certify: "Verify an existing run against acceptance criteria.",
+  };
+  const submitLabelMap: Record<JobCommand, string> = {
+    build: "Build with Otto",
+    improve: "Improve with Otto",
+    certify: "Certify with Otto",
   };
 
   useEffect(() => {
@@ -312,7 +317,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (intentRequired) {
-      setStatus(`${intentLabelMap[command]} is required.`);
+      setStatus("Describe what Otto should do before starting.");
       return;
     }
     if (targetNeedsConfirmation && !targetConfirmed) {
@@ -385,7 +390,9 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
         onSubmit={(event) => void submit(event)}
       >
         <header className="job-palette-head">
-          <h2 id="jobDialogHeading">{command === "improve" ? "Improve" : command === "certify" ? "Certify" : "New job"}</h2>
+          <h2 id="jobDialogHeading">
+            {command === "improve" ? "Improve existing work" : command === "certify" ? "Certify existing work" : "Build with Otto"}
+          </h2>
           <button
             type="button"
             className="job-palette-close"
@@ -535,8 +542,8 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
             <p id="jobDialogValidationHint" className="job-dialog-validation" data-testid="job-dialog-validation-hint" aria-live="polite">
               {intentRequired
                 ? command === "build"
-                  ? "Describe the requested outcome to queue."
-                  : `Describe the ${intentLabelMap[command].toLowerCase()} to queue.`
+                  ? "Describe the outcome Otto should build."
+                  : "Describe what Otto should do before starting."
                 : specFileRequired
                 ? "Enter the spec file path."
                 : targetNeedsConfirmation && !targetConfirmed
@@ -734,7 +741,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
             aria-busy={submitting}
             title={!submitting && submitDisabled ? (
               intentRequired
-                ? `Describe the ${intentLabelMap[command].toLowerCase()} to queue.`
+                ? "Describe what Otto should do before starting."
                 : specFileRequired
                 ? "Enter the spec file path."
                 : priorRunMissing
@@ -744,7 +751,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
                 : "Confirm the dirty target project above."
             ) : undefined}
           >
-            {submitting ? <><Spinner /> Queueing…</> : "Queue job"}
+            {submitting ? <><Spinner /> Queueing…</> : submitLabelMap[command]}
           </button>
         </footer>
       </form>

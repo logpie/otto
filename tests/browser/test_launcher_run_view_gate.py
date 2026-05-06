@@ -50,6 +50,258 @@ def _run_view(session_id: str = "run-1") -> dict[str, Any]:
     }
 
 
+def _build_config() -> dict[str, Any]:
+    return {
+        "command_family": "build",
+        "provider": "codex",
+        "model": "gpt-5.4",
+        "reasoning_effort": "medium",
+        "certifier_mode": "fast",
+        "skip_product_qa": False,
+        "certification": "fast certification",
+        "planning": "direct",
+        "spec_file_path": None,
+        "run_budget_seconds": 3600,
+        "spec_timeout": 600,
+        "max_certify_rounds": 8,
+        "max_turns_per_call": 200,
+        "strict_mode": False,
+        "split_mode": True,
+        "allow_dirty_repo": False,
+        "default_branch": "main",
+        "test_command": None,
+        "queue": {
+            "concurrent": 3,
+            "task_timeout_s": 4200.0,
+            "worktree_dir": ".worktrees",
+            "on_watcher_restart": "resume",
+            "merge_certifier_mode": "standard",
+        },
+        "agents": {
+            "build": {"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"},
+            "certifier": {"provider": "codex", "model": "gpt-5.4-mini", "reasoning_effort": "low"},
+            "spec": {"provider": "codex", "model": "gpt-5.4-mini", "reasoning_effort": "low"},
+            "fix": {"provider": "codex", "model": "gpt-5.4", "reasoning_effort": "medium"},
+        },
+        "config_file_exists": True,
+        "config_error": None,
+    }
+
+
+def _state(
+    project: dict[str, Any] | None = None,
+    *,
+    live_items: list[dict[str, Any]] | None = None,
+    landing_items: list[dict[str, Any]] | None = None,
+    history_items: list[dict[str, Any]] | None = None,
+    watcher_running: bool = False,
+) -> dict[str, Any]:
+    live_items = live_items or []
+    landing_items = landing_items or []
+    history_items = history_items or []
+    return {
+        "project": project or _project(),
+        "project_stats": {
+            "active_count": len(live_items),
+            "history_count": len(history_items),
+            "success_count": 0,
+            "failed_count": 0,
+            "total_duration_s": 0,
+            "duration_display": "-",
+            "reported_cost_usd": None,
+            "cost_display": "-",
+            "token_usage": {},
+            "total_tokens": 0,
+            "token_display": "-",
+            "stories_passed": 0,
+            "stories_tested": 0,
+        },
+        "watcher": {
+            "alive": watcher_running,
+            "watcher": {"pid": 1234} if watcher_running else None,
+            "counts": {
+                "queued": 0,
+                "starting": 0,
+                "initializing": len(live_items),
+                "running": 0,
+            },
+            "health": {
+                "state": "running" if watcher_running else "stopped",
+                "blocking_pid": 1234 if watcher_running else None,
+                "watcher_pid": 1234 if watcher_running else None,
+                "watcher_process_alive": watcher_running,
+                "lock_pid": 1234 if watcher_running else None,
+                "lock_process_alive": watcher_running,
+                "heartbeat": "2026-05-06T06:02:53Z" if watcher_running else None,
+                "heartbeat_age_s": 1.0 if watcher_running else None,
+                "started_at": "2026-05-06T06:01:47Z" if watcher_running else None,
+                "log_path": "/tmp/watcher.log",
+                "next_action": "Stop queue runner." if watcher_running else "Start queue runner.",
+            },
+        },
+        "autopilot": {
+            "mode": "assisted",
+            "enabled": True,
+            "policy": {
+                "mode": "assisted",
+                "max_actions_per_hour": 8,
+                "max_pilot_calls_per_hour": 2,
+                "allow_auto_land": False,
+                "verification_policy": "smart",
+                "pilot_enabled": True,
+                "pilot_timeout_s": 300,
+            },
+            "health": "idle",
+            "last_tick_at": None,
+            "next_tick_hint": "Idle.",
+            "incidents": [],
+            "decisions": [],
+            "pending_decisions": [],
+            "recent_events": [],
+            "budgets": {
+                "actions_used_last_hour": 0,
+                "actions_limit_per_hour": 8,
+                "pilot_calls_used_last_hour": 0,
+                "pilot_calls_limit_per_hour": 2,
+            },
+            "counters": {
+                "incidents_open": 0,
+                "decisions_pending": 0,
+                "actions_executed": 0,
+                "actions_failed": 0,
+            },
+        },
+        "runtime": {
+            "status": "healthy",
+            "generated_at": "2026-05-06T06:02:54Z",
+            "queue_tasks": len(landing_items),
+            "state_tasks": len(landing_items),
+            "command_backlog": {"pending": 0, "processing": 0, "malformed": 0, "items": []},
+            "files": {},
+            "supervisor": {
+                "mode": "local-single-user",
+                "path": "",
+                "metadata": None,
+                "metadata_error": None,
+                "supervised_pid": 1234 if watcher_running else None,
+                "matches_blocking_pid": watcher_running,
+                "can_start": not watcher_running,
+                "can_stop": watcher_running,
+                "start_blocked_reason": None,
+                "stop_blocked_reason": None,
+                "stop_target_pid": 1234 if watcher_running else None,
+                "watcher_log_path": "/tmp/watcher.log",
+                "web_log_exists": True,
+                "queue_lock_holder_pid": 1234 if watcher_running else None,
+            },
+            "issues": [],
+        },
+        "events": {"path": "", "items": [], "total_count": 0, "malformed_count": 0, "limit": 50, "truncated": False},
+        "landing": {
+            "target": "main",
+            "items": landing_items,
+            "counts": {
+                "ready": 0,
+                "merged": len(history_items),
+                "blocked": len(landing_items),
+                "reviewed": 0,
+                "total": len(landing_items) + len(history_items),
+            },
+            "collisions": [],
+            "merge_blocked": False,
+            "merge_blockers": [],
+            "dirty_files": [],
+        },
+        "live": {
+            "items": live_items,
+            "total_count": len(live_items),
+            "active_count": len([item for item in live_items if item.get("active")]),
+            "refresh_interval_s": 1.0,
+        },
+        "history": {
+            "items": history_items,
+            "page": 0,
+            "page_size": 50,
+            "total_rows": len(history_items),
+            "total_pages": 1,
+        },
+    }
+
+
+def _landing_item(task_id: str = "build-a-micro-twitter", run_id: str = "run-1") -> dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "run_id": run_id,
+        "branch": "build/micro-twitter",
+        "worktree": ".worktrees/build-a-micro-twitter",
+        "summary": "build a micro twitter",
+        "build_config": _build_config(),
+        "queue_status": "initializing",
+        "landing_state": "blocked",
+        "label": "In progress",
+        "merge_id": None,
+        "merge_status": None,
+        "merge_run_status": None,
+        "started_at": "2026-05-06T06:01:47Z",
+        "finished_at": None,
+        "updated_at": "2026-05-06T06:02:53Z",
+        "queued_at": None,
+        "duration_s": None,
+        "cost_usd": None,
+        "token_usage": {},
+        "stories_passed": None,
+        "stories_tested": None,
+        "changed_file_count": 0,
+        "changed_files": [],
+        "diff_error": None,
+    }
+
+
+def _live_item(task_id: str = "build-a-micro-twitter", run_id: str = "run-1") -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "domain": "queue",
+        "run_type": "queue",
+        "command": "build build a micro twitter",
+        "display_name": "build-a-micro-twitter: build a micro twitter",
+        "status": "initializing",
+        "terminal_outcome": None,
+        "started_at": "2026-05-06T06:01:47Z",
+        "updated_at": "2026-05-06T06:02:53Z",
+        "heartbeat_at": "2026-05-06T06:02:53Z",
+        "finished_at": None,
+        "queued_at": None,
+        "project_dir": "/tmp/managed/existing-app",
+        "cwd": "/tmp/managed/existing-app/.worktrees/build-a-micro-twitter",
+        "queue_task_id": task_id,
+        "merge_id": None,
+        "branch": "build/micro-twitter",
+        "worktree": ".worktrees/build-a-micro-twitter",
+        "provider": "codex",
+        "model": "gpt-5.4",
+        "reasoning_effort": "medium",
+        "certifier_mode": "fast",
+        "skip_product_qa": False,
+        "build_config": _build_config(),
+        "run_config": _build_config(),
+        "adapter_key": "queue.attempt",
+        "version": 3,
+        "display_status": "initializing",
+        "active": True,
+        "display_id": task_id,
+        "branch_task": "build/micro-twitter",
+        "elapsed_s": 67.0,
+        "elapsed_display": "1:07",
+        "cost_usd": None,
+        "cost_display": "...",
+        "token_usage": {},
+        "last_event": "Build phase — dispatching group agents",
+        "progress": "",
+        "row_label": "build-a-micro-twitter: build a micro twitter",
+        "overlay": None,
+    }
+
+
 def test_launcher_mode_without_project_shows_launcher_not_run_error(
     mc_backend: Any,
     page: Any,
@@ -136,18 +388,18 @@ def test_selecting_project_allows_run_list_to_load(
             body=json.dumps({"ok": True, "current": None}),
         )
 
-    def run_view(route: Any) -> None:
+    def state(route: Any) -> None:
         run_view_calls["count"] += 1
         route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps({"runs": [], "sessions": []}),
+            body=json.dumps(_state(project)),
         )
 
     page.route("**/api/projects/clear**", clear_project)
     page.route("**/api/projects/select**", select_project)
     page.route("**/api/projects", projects)
-    page.route("**/api/run-view", run_view)
+    page.route("**/api/state", state)
 
     page.goto(mc_backend.url, wait_until="networkidle")
     page.wait_for_selector(".project-row", timeout=10_000)
@@ -171,11 +423,12 @@ def test_selecting_project_allows_run_list_to_load(
     assert create_box["x"] > project_box["x"] + project_box["width"]
 
     page.get_by_role("button", name="existing-app").click()
-    page.wait_for_selector('[data-testid="run-list-empty"]', timeout=10_000)
+    page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
 
     assert selected["value"] is True
     assert run_view_calls["count"] >= 1
     assert page.get_by_text("Failed to load sessions").count() == 0
+    assert page.get_by_text("Project workspace").is_visible()
     assert page.get_by_test_id("switch-project-button").is_visible()
     assert page.get_by_text("existing-app").first.is_visible()
 
@@ -219,19 +472,19 @@ def test_selected_project_brand_returns_to_launcher(
             body=json.dumps({"ok": True, "current": None, "projects": [project]}),
         )
 
-    def run_view(route: Any) -> None:
+    def state(route: Any) -> None:
         route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps({"runs": [], "sessions": []}),
+            body=json.dumps(_state(project)),
         )
 
     page.route("**/api/projects/clear**", clear_project)
     page.route("**/api/projects", projects)
-    page.route("**/api/run-view", run_view)
+    page.route("**/api/state", state)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_selector('[data-testid="run-list-empty"]', timeout=10_000)
+    page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
 
     page.get_by_label("Otto Mission Control").click()
     page.wait_for_selector('[data-testid="launcher-empty-state"], .project-row', timeout=10_000)
@@ -263,33 +516,38 @@ def test_run_card_opens_side_drawer_without_route_navigation(
             ),
         )
 
-    def run_list(route: Any) -> None:
+    def state(route: Any) -> None:
         run_view_calls["list"] += 1
+        history_item = {
+            "run_id": "run-1",
+            "domain": "build",
+            "run_type": "build",
+            "command": "build",
+            "status": "completed",
+            "terminal_outcome": "success",
+            "timestamp": "2026-05-06T00:00:04Z",
+            "started_at": "2026-05-06T00:00:00Z",
+            "finished_at": "2026-05-06T00:00:04Z",
+            "queue_task_id": "verify-expense-export",
+            "merge_id": None,
+            "branch": "build/expense-export",
+            "worktree": None,
+            "summary": "Verify the expense export flow",
+            "intent": "Verify the expense export flow",
+            "completed_at_display": "just now",
+            "outcome_display": "success",
+            "duration_s": 4.0,
+            "duration_display": "4s",
+            "cost_usd": 0.12,
+            "cost_display": "$0.12",
+            "token_usage": {},
+            "resumable": False,
+            "adapter_key": "build",
+        }
         route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps(
-                {
-                    "runs": ["run-1"],
-                    "sessions": [
-                        {
-                            "id": "run-1",
-                            "intent": "Verify the expense export flow",
-                            "status": "passed",
-                            "verdict": "passed",
-                            "cost_usd": 0.12,
-                            "wall_s": 4.0,
-                            "feature_total": 0,
-                            "feature_passed": 0,
-                            "critical_findings": 0,
-                            "quality_score": None,
-                            "group_count": 0,
-                            "finished_at": "2026-05-06T00:00:04Z",
-                            "lifecycle": "approved",
-                        }
-                    ],
-                }
-            ),
+            body=json.dumps(_state(project, history_items=[history_item])),
         )
 
     def run_detail(route: Any) -> None:
@@ -302,12 +560,12 @@ def test_run_card_opens_side_drawer_without_route_navigation(
 
     page.route("**/api/run-view/run-1", run_detail)
     page.route("**/api/projects", projects)
-    page.route("**/api/run-view", run_list)
+    page.route("**/api/state", state)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_selector('[data-testid="landing-card"]', timeout=10_000)
+    page.wait_for_selector('[data-testid="task-card-verify-expense-export"]', timeout=10_000)
 
-    page.get_by_test_id("landing-card").click()
+    page.get_by_test_id("task-card-verify-expense-export").click()
     page.wait_for_selector('[data-testid="run-list-detail-drawer"]', timeout=10_000)
     page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
 
@@ -315,13 +573,13 @@ def test_run_card_opens_side_drawer_without_route_navigation(
     assert run_view_calls["list"] >= 1
     assert run_view_calls["detail"] == 1
     assert page.get_by_test_id("run-drawer").is_visible()
-    assert page.get_by_test_id("run-list").is_visible()
+    assert page.get_by_test_id("project-workspace").is_visible()
 
     page.go_back()
     page.get_by_test_id("run-list-detail-drawer").wait_for(state="detached", timeout=10_000)
-    assert page.get_by_test_id("run-list").is_visible()
+    assert page.get_by_test_id("project-workspace").is_visible()
 
-    page.get_by_test_id("landing-card").click()
+    page.get_by_test_id("task-card-verify-expense-export").click()
     page.wait_for_selector('[data-testid="run-list-detail-drawer"]', timeout=10_000)
     page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
     page.get_by_test_id("run-list-detail-drawer-close").click()
@@ -352,11 +610,11 @@ def test_new_run_queues_from_web_and_starts_runner(
             ),
         )
 
-    def run_list(route: Any) -> None:
+    def state(route: Any) -> None:
         route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps({"runs": [], "sessions": []}),
+            body=json.dumps(_state(project)),
         )
 
     def queue_build(route: Any) -> None:
@@ -384,18 +642,20 @@ def test_new_run_queues_from_web_and_starts_runner(
         )
 
     page.route("**/api/projects", projects)
-    page.route("**/api/run-view", run_list)
+    page.route("**/api/state", state)
     page.route("**/api/queue/build", queue_build)
     page.route("**/api/watcher/start", watcher_start)
 
     page.goto(mc_backend.url, wait_until="networkidle")
-    page.wait_for_selector('[data-testid="run-list-empty"]', timeout=10_000)
+    page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
 
-    page.get_by_test_id("landing-new-run-button").click()
+    page.get_by_test_id("new-job-button").click()
     page.wait_for_selector('[data-testid="job-dialog-submit-button"]', timeout=10_000)
 
     assert page.get_by_text("Copy command").count() == 0
     assert page.get_by_text("Otto runs are launched from the CLI").count() == 0
+    assert page.get_by_role("heading", name="Build with Otto").is_visible()
+    assert page.get_by_text("spec, groups, feature work").is_visible()
 
     page.get_by_test_id("job-dialog-intent").fill(
         "build a webapp like a micro twitter with social and post features"
@@ -412,6 +672,66 @@ def test_new_run_queues_from_web_and_starts_runner(
     assert queue_posts[0]["intent"].startswith("build a webapp")
     assert watcher_starts["count"] == 1
     assert page.get_by_test_id("run-list-queue-banner").is_visible()
+
+
+def test_project_workspace_shows_active_queue_from_state_when_run_view_is_empty(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Queued i2p work must not disappear just because it has no completed run-view session."""
+
+    project = _project()
+    run_view_calls = {"count": 0}
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def state(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                _state(
+                    project,
+                    live_items=[_live_item()],
+                    landing_items=[_landing_item()],
+                    watcher_running=True,
+                )
+            ),
+        )
+
+    def run_view(route: Any) -> None:
+        run_view_calls["count"] += 1
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"runs": [], "sessions": []}),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/state", state)
+    page.route("**/api/run-view", run_view)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
+
+    body = page.locator("body").text_content() or ""
+    assert "build-a-micro-twitter" in body
+    assert "Build phase" in body
+    assert "No sessions yet" not in body
+    assert page.get_by_test_id("task-card-build-a-micro-twitter").is_visible()
+    assert run_view_calls["count"] == 0
 
 
 def test_missing_run_deep_link_error_is_near_top(

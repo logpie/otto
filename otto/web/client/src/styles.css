@@ -1384,6 +1384,89 @@ textarea {
   gap: 16px;
 }
 
+.project-workspace {
+  width: min(1280px, 100%);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.project-workspace-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 24px;
+  align-items: end;
+  padding: 8px 0 4px;
+}
+
+.project-workspace-title {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.project-workspace-kicker {
+  color: var(--accent);
+  font: var(--font-meta);
+  letter-spacing: var(--eyebrow-letter-spacing);
+  text-transform: uppercase;
+}
+
+.project-workspace-title h1 {
+  margin: 0;
+  font: var(--font-display);
+  color: var(--text);
+}
+
+.project-workspace-title p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-base);
+  line-height: 1.45;
+}
+
+.project-workspace-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-workspace-build,
+.project-workspace-refresh {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+.project-workspace-state-error,
+.project-workspace-loading {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.project-workspace-state-error {
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+}
+
+@media (max-width: 760px) {
+  .project-workspace-head {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .project-workspace-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
 .mission-focus {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) auto minmax(220px, 0.75fr);

@@ -3,8 +3,8 @@ import {createRoot} from "react-dom/client";
 import {api} from "./api";
 import {AppShell} from "./components/AppShell";
 import {ProjectLauncher} from "./components/launcher/ProjectLauncher";
-import {RunListLanding} from "./components/run/RunListLanding";
 import {RunViewPage} from "./components/run/RunViewPage";
+import {ProjectWorkspace} from "./components/workspace/ProjectWorkspace";
 import {SpecDiffPage} from "./components/spec/SpecDiffPage";
 import {SpecReviewPage} from "./components/spec/SpecReviewPage";
 import type {ProjectInfo, ProjectMutationResponse, ProjectsResponse} from "./types";
@@ -87,7 +87,7 @@ function renderRoute(shellProps: ShellRouteProps = {}) {
   }
   return (
     <AppShell {...shellProps}>
-      <RunListLanding project={shellProps.project ?? undefined} />
+      <ProjectWorkspace project={shellProps.project ?? null} />
     </AppShell>
   );
 }

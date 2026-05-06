@@ -78,16 +78,11 @@ def install_run_view_routes(
         finished_at, and lifecycle.
         """
         project = _resolve_project_dir()
-        sessions_dir = project / "otto_logs" / "sessions"
-        if not sessions_dir.exists():
+        session_dirs = _session_dirs(project)
+        if not session_dirs:
             return JSONResponse({"runs": [], "sessions": []})
-        ids = sorted(
-            (entry.name for entry in sessions_dir.iterdir() if entry.is_dir()),
-            reverse=True,
-        )
-        sessions = [
-            _summarize_session(sessions_dir / sid, sid) for sid in ids
-        ]
+        ids = sorted(session_dirs.keys(), reverse=True)
+        sessions = [_summarize_session(session_dirs[sid], sid) for sid in ids]
         return JSONResponse({"runs": ids, "sessions": sessions})
 
     @router.get("/{session_id}")
@@ -150,26 +145,52 @@ def _action_to_json(result) -> dict:
 
 
 def _resolve_session_dir(project_dir: Path, session_id: str) -> Path:
-    """Resolve a session id to a path under `<project>/otto_logs/sessions/`.
+    """Resolve a session id to a session path for the selected project.
 
-    Rejects path-traversal attempts (e.g. "../etc"). Returns the
-    canonical path or raises HTTP 404 if the session doesn't exist.
+    Queue/i2p runs execute in per-task worktrees, so their proof packets live
+    under `<project>/.worktrees/<task>/otto_logs/sessions/<session>`, not the
+    selected project's root `otto_logs/sessions`. Search both bounded roots
+    while still rejecting path-traversal attempts.
     """
-    sessions_dir = (project_dir / "otto_logs" / "sessions").resolve()
-    candidate = (sessions_dir / session_id).resolve()
-    try:
-        candidate.relative_to(sessions_dir)
-    except ValueError as exc:
+    if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
         raise HTTPException(
             status_code=404,
             detail=f"session id rejected: {session_id!r}",
-        ) from exc
-    if not candidate.exists() or not candidate.is_dir():
+        )
+    found = _session_dirs(project_dir).get(session_id)
+    if found is None:
         raise HTTPException(
             status_code=404,
             detail=f"session not found: {session_id!r}",
         )
-    return candidate
+    return found
+
+
+def _session_dirs(project_dir: Path) -> dict[str, Path]:
+    """Return session-id → session-dir for project-root and queue worktrees."""
+    roots = [(project_dir / "otto_logs" / "sessions").resolve()]
+    worktrees = (project_dir / ".worktrees").resolve()
+    if worktrees.exists() and worktrees.is_dir():
+        for child in worktrees.iterdir():
+            if not child.is_dir():
+                continue
+            roots.append((child / "otto_logs" / "sessions").resolve())
+
+    found: dict[str, Path] = {}
+    project_root = project_dir.resolve()
+    for sessions_root in roots:
+        try:
+            sessions_root.relative_to(project_root)
+        except ValueError:
+            continue
+        if not sessions_root.exists() or not sessions_root.is_dir():
+            continue
+        for entry in sessions_root.iterdir():
+            if not entry.is_dir():
+                continue
+            # Root project sessions win ties; worktree duplicates are ignored.
+            found.setdefault(entry.name, entry.resolve())
+    return found
 
 
 def _summarize_session(session_dir: Path, session_id: str) -> dict[str, Any]:

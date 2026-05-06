@@ -16,6 +16,20 @@ from fastapi.testclient import TestClient
 from otto.web.run_view_routes import install_run_view_routes
 
 
+def _write_minimal_session(session_dir: Path, *, intent: str, project_kind: str) -> None:
+    session_dir.mkdir(parents=True)
+    proof = {
+        "intent": intent,
+        "project_kind": project_kind,
+        "verdict": "passed",
+        "wall_s": 200.0,
+        "cost_usd": 1.0,
+        "groups": [{"id": "g", "title": "G"}],
+        "features": [{"feature_id": "f1", "name": "F1", "verdict": "passed"}],
+    }
+    (session_dir / "proof-packet.json").write_text(json.dumps(proof))
+
+
 @pytest.fixture
 def project_with_session(tmp_path: Path) -> tuple[Path, str]:
     """Create a project with one session containing a minimal proof packet."""
@@ -24,17 +38,7 @@ def project_with_session(tmp_path: Path) -> tuple[Path, str]:
     sessions.mkdir(parents=True)
     session_id = "2026-05-04-200000-abc123"
     sdir = sessions / session_id
-    sdir.mkdir()
-    proof = {
-        "intent": "tiny webapp",
-        "project_kind": "webapp",
-        "verdict": "passed",
-        "wall_s": 200.0,
-        "cost_usd": 1.0,
-        "groups": [{"id": "g", "title": "G"}],
-        "features": [{"feature_id": "f1", "name": "F1", "verdict": "passed"}],
-    }
-    (sdir / "proof-packet.json").write_text(json.dumps(proof))
+    _write_minimal_session(sdir, intent="tiny webapp", project_kind="webapp")
     return project, session_id
 
 
@@ -78,6 +82,52 @@ def test_get_run_returns_run_view(project_with_session: tuple[Path, str]) -> Non
     assert "stages" in body
     assert "groups" in body
     assert "guardrails" in body
+
+
+def test_list_runs_includes_queue_worktree_sessions(tmp_path: Path) -> None:
+    """Queue/i2p sessions live inside per-task worktrees and must be visible."""
+
+    project = tmp_path / "proj"
+    root_sid = "2026-05-04-200000-root"
+    worktree_sid = "2026-05-04-200000-worktree"
+    _write_minimal_session(
+        project / "otto_logs" / "sessions" / root_sid,
+        intent="root session",
+        project_kind="cli",
+    )
+    _write_minimal_session(
+        project / ".worktrees" / "build-task" / "otto_logs" / "sessions" / worktree_sid,
+        intent="worktree session",
+        project_kind="webapp",
+    )
+
+    client = _app_with_project(project)
+    resp = client.get("/api/run-view")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert root_sid in body["runs"]
+    assert worktree_sid in body["runs"]
+    assert {row["id"] for row in body["sessions"]} >= {root_sid, worktree_sid}
+
+
+def test_get_run_returns_queue_worktree_session(tmp_path: Path) -> None:
+    """Task rows from `/api/state` link to sessions stored under `.worktrees`."""
+
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-worktree"
+    _write_minimal_session(
+        project / ".worktrees" / "build-task" / "otto_logs" / "sessions" / sid,
+        intent="worktree micro twitter",
+        project_kind="webapp",
+    )
+
+    client = _app_with_project(project)
+    resp = client.get(f"/api/run-view/{sid}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == sid
+    assert body["intent"] == "worktree micro twitter"
+    assert body["project_kind"] == "webapp"
 
 
 def test_get_run_404_for_missing_session(project_with_session: tuple[Path, str]) -> None:
