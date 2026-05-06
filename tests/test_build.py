@@ -1048,6 +1048,39 @@ def test_build_agent_prompt_includes_last_failure_on_retry(tmp_path: Path) -> No
     assert "do NOT widen scope" in prompt.lower() or "do not widen scope" in prompt.lower()
 
 
+def test_build_agent_prompt_has_merge_repair_framing(tmp_path: Path) -> None:
+    s = Group(
+        id="feed",
+        name="Feed",
+        dependencies=[],
+        owned_paths=["src/feed.ts"],
+        feature_ids=["render micro-post feed"],
+        checks=[],
+    )
+    spec = _spec([s])
+    inp = BuildAgentInput(
+        spec=spec,
+        group=s,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="i2p/session/feed",
+        attempt=1,
+        last_failure_narrative="merge conflict on slice branch i2p/session/feed",
+        merge_repair=True,
+    )
+
+    prompt = _build_agent_prompt(inp)
+
+    assert "Merge repair mode" in prompt
+    assert "branch-winner choice" in prompt
+    assert "Do not resolve by blindly choosing" in prompt
+    assert "Compose both sides where compatible" in prompt
+    assert "already-integrated product behavior" in prompt
+    assert "incompatible product decision" in prompt
+    assert "Integration failure detail" in prompt
+    assert "merge conflict on slice branch i2p/session/feed" in prompt
+
+
 def test_layer2_build_prompt_requires_regression_tests(tmp_path: Path) -> None:
     (tmp_path / "tests").mkdir()
     s = Group(id="number", name="Number", owned_paths=["src/number.py"])

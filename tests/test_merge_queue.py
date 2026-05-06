@@ -812,8 +812,9 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
         ],
     )
 
-    # Track which branch the repair agent saw.
+    # Track which branch and mode the repair agent saw.
     seen_branches: list[str] = []
+    seen_merge_repair_modes: list[bool] = []
 
     async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
         # Record what branch is checked out at the moment the agent runs.
@@ -822,6 +823,7 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
             cwd=input_.worktree, capture_output=True, text=True, check=True,
         )
         seen_branches.append(proc.stdout.strip())
+        seen_merge_repair_modes.append(input_.merge_repair)
         # "Repair" by aligning shared.txt with main.
         (input_.worktree / "shared.txt").write_text("A", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
@@ -839,6 +841,7 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
     assert all(b == "i2p/_session/s1" for b in seen_branches), (
         f"repair must run on slice branch; saw {seen_branches}"
     )
+    assert all(seen_merge_repair_modes), "repair agent should receive merge_repair mode"
 
 
 def test_merge_repair_blocks_out_of_scope_changes(tmp_path: Path) -> None:

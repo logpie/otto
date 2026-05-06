@@ -391,6 +391,7 @@ class BuildAgentInput:
     config: dict[str, Any] = field(default_factory=dict)
     context_packet_path: Path | None = None
     full_spec_path: Path | None = None
+    merge_repair: bool = False  # true when merge_queue asks this slice to integrate
 
 
 @dataclass
@@ -2214,6 +2215,38 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     lines: list[str] = []
     lines.append(f"# Build slice `{s.id}` — {s.name}")
     lines.append("")
+
+    if agent_input.merge_repair:
+        lines.append("## Merge repair mode")
+        lines.append("")
+        lines.append(
+            "You are repairing this slice so it integrates cleanly with the "
+            "current target branch. Treat this as an integration task, not a "
+            "branch-winner choice."
+        )
+        lines.append("")
+        lines.append(
+            "- Understand both the slice behavior and the already-landed target "
+            "behavior before editing."
+        )
+        lines.append(
+            "- Do not resolve by blindly choosing one side, the newer side, or "
+            "the larger diff."
+        )
+        lines.append(
+            "- Compose both sides where compatible so this slice's accepted "
+            "tasks and already-integrated product behavior both survive."
+        )
+        lines.append(
+            "- If the conflict is an incompatible product decision, make the "
+            "smallest safe integration and call out the remaining decision in "
+            "your final response instead of silently erasing behavior."
+        )
+        if agent_input.last_failure_narrative:
+            lines.append("")
+            lines.append("**Integration failure detail:**")
+            lines.append(agent_input.last_failure_narrative)
+        lines.append("")
 
     # === LAYER 2 NARROWING (when feature_id is set) ===
     # If this dispatch targets a single failing Feature within the Group,

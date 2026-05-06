@@ -53,9 +53,10 @@ Both the structural validation AND the project's tests should pass.
   when the merge would otherwise leave adjacent code or tests incoherent.
 - For each conflict region in a file: text above `=======` is from the
   earlier-merged side, text below is from the later-merged side. Decide
-  per region — preserve both where compatible, prefer the LATER side on
-  direct contradictions, ALWAYS preserve any behavior listed in the
-  stories above.
+  per semantic unit, not per branch. Preserve both where compatible. When
+  direct contradictions remain, preserve behavior required by the stories
+  and tests; call out unresolved product decisions instead of silently
+  choosing a side.
 - Don't commit, don't reset, don't run any git command that changes HEAD.
   The orchestrator handles all git state changes.
 - Take the most efficient path. You decide when you're done.

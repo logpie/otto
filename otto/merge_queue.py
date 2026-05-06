@@ -702,6 +702,7 @@ async def _process_candidate(
             log_dir=raw_log_dir / f"repair-attempt-{repair_attempts:02d}",
             agent_session_id=repair_session_id,
             config=config,
+            merge_repair=True,
         )
         # C1 fix: bail out if the shared cost pool is exhausted.
         # Without this, repair retries can drain past the global cap.
