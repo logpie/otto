@@ -2,7 +2,20 @@
 
 Date: 2026-05-02
 Branch: `cc-i2p-2`
-Status: Design — not yet implemented
+Status: Historical design context — baseline implemented May 2026
+
+> Current runtime reference: see `docs/architecture.md`.
+>
+> This document records the original i2p architecture proposal. The shipped
+> runtime follows the same compile -> build -> merge -> audit -> render shape,
+> but several names and surfaces changed during implementation:
+>
+> - Runtime and UI use **Group** where this document says "slice".
+> - `otto run` is the canonical direct intent-to-product CLI.
+> - `otto proof ...` is the canonical proof/artifact namespace; `pow`,
+>   `render`, and `history` are compatibility aliases.
+> - The committed Mission Control frontend reflects the post-RUA redesign
+>   documented under `docs/rua/`.
 
 ## What Otto is
 
