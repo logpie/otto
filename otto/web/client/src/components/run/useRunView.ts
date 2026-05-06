@@ -9,7 +9,7 @@
 // rendering/landing), we refetch every POLL_INTERVAL_MS so the drawer reflects
 // new feature/component status without user-driven refreshes. Polling stops
 // once the run reaches a terminal status (passed/partial/blocked/landed/
-// aborted/failed) — no infinite loop on the terminal frame. Network blips
+// interrupted/aborted/failed) — no infinite loop on the terminal frame. Network blips
 // during polling are logged but do NOT clobber the last successful snapshot.
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -35,6 +35,7 @@ const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   "blocked",
   "partial",
   "passed",
+  "interrupted",
   "aborted",
   "failed",
 ]);

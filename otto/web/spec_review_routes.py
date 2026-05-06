@@ -32,7 +32,6 @@ from fastapi import APIRouter, FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from otto.paths import session_dir, spec_dir
 from otto.spec_amend import compute_invalidation
 from otto.spec_compile import (
     Spec,
@@ -42,6 +41,10 @@ from otto.spec_compile import (
     spec_to_dict,
 )
 from otto.spec_state import emit as emit_state_event, is_run_paused_by_user
+from otto.web.session_resolver import (
+    resolve_session_dir as _resolve_session_dir,
+    resolve_spec_dir as _shared_resolve_spec_dir,
+)
 
 logger = logging.getLogger("otto.web.spec_review")
 
@@ -105,6 +108,7 @@ def install_spec_review_routes(
     def post_edit(session_id: str, payload: SpecEditPayload) -> JSONResponse:
         project = _resolve_project_dir()
         sd = _resolve_spec_dir(project, session_id)
+        sess_dir = _resolve_session_dir(project, session_id)
         spec = _load_or_404(sd)
 
         if payload.intent_hash != spec.intent_hash:
@@ -137,7 +141,7 @@ def install_spec_review_routes(
         # `group.invalidated_by_spec_edit` against a paused runner just
         # accumulates dead invalidations that the operator must then
         # disentangle on resume.
-        if is_run_paused_by_user(session_dir(project, session_id)):
+        if is_run_paused_by_user(sess_dir):
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -162,7 +166,6 @@ def install_spec_review_routes(
         _archive_current_version(sd)
         _write_spec(sd, edited, payload.markdown)
 
-        sess_dir = session_dir(project, session_id)
         emit_state_event(
             sess_dir,
             "spec.edited",
@@ -192,6 +195,7 @@ def install_spec_review_routes(
     def post_approve(session_id: str) -> JSONResponse:
         project = _resolve_project_dir()
         sd = _resolve_spec_dir(project, session_id)
+        sess_dir = _resolve_session_dir(project, session_id)
         spec = _load_or_404(sd)
         # Round-3 audit gap 2: lifecycle precondition.
         # Approval is only valid from `draft` (initial gate) or `approved`
@@ -217,7 +221,7 @@ def install_spec_review_routes(
         # at a phase boundary; emitting `spec.review_approved` will be
         # delivered eventually but the operator's expectation that
         # approve unblocks "now" is broken. Force them to resume first.
-        if is_run_paused_by_user(session_dir(project, session_id)):
+        if is_run_paused_by_user(sess_dir):
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -232,7 +236,7 @@ def install_spec_review_routes(
         # to spam the journal with duplicate approval events.
         if not was_already_approved:
             emit_state_event(
-                session_dir(project, session_id),
+                sess_dir,
                 "spec.approved",
                 detail=f"intent_hash={spec.intent_hash[:16]}",
             )
@@ -243,7 +247,7 @@ def install_spec_review_routes(
         # spec.review_approved exists" as the resume signal; repeats
         # are bounded by user clicks and harmless at the journal layer.
         emit_state_event(
-            session_dir(project, session_id),
+            sess_dir,
             "spec.review_approved",
             detail=f"intent_hash={spec.intent_hash[:16]}",
         )
@@ -312,26 +316,9 @@ def install_spec_review_routes(
 
 
 def _resolve_spec_dir(project_dir: Path, session_id: str) -> Path:
-    """Resolve `<project>/otto_logs/sessions/<session_id>/spec/`.
+    """Resolve a session's spec dir from root or queue worktree sessions."""
 
-    Rejects path-traversal (e.g. `"../etc"`).
-    """
-    sessions_root = (project_dir / "otto_logs" / "sessions").resolve()
-    candidate_session = (sessions_root / session_id).resolve()
-    try:
-        candidate_session.relative_to(sessions_root)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"session id rejected: {session_id!r}",
-        ) from exc
-    sd = spec_dir(project_dir, session_id).resolve()
-    if not sd.exists() or not sd.is_dir():
-        raise HTTPException(
-            status_code=404,
-            detail=f"spec dir not found for session {session_id!r}",
-        )
-    return sd
+    return _shared_resolve_spec_dir(project_dir, session_id)
 
 
 def _load_or_404(sd: Path) -> Spec:
@@ -520,7 +507,7 @@ def _emit_review_opened_once(project_dir: Path, session_id: str) -> None:
     `spec.review.opened` event already exists. Repeat GETs from the
     frontend (e.g. user reloads the page) must not multiply the event.
     """
-    sd_for_journal = session_dir(project_dir, session_id)
+    sd_for_journal = _resolve_session_dir(project_dir, session_id)
     journal = sd_for_journal / "spec-state.jsonl"
     if journal.exists():
         try:

@@ -139,7 +139,7 @@ structure, groups, dependencies, owned paths, checks, non-goals, and done
 criteria. Runtime terminology is **Group**: older design notes may still use
 "slice" in historical context.
 
-## Providers And Runtime Controls
+## Configuration (`otto.yaml`)
 
 Provider defaults live in `otto.yaml`; CLI flags override them for one run.
 
@@ -150,19 +150,12 @@ effort: null
 run_budget_seconds: 3600
 max_turns_per_call: 200
 
-agents:
-  build:
-    provider: codex
-    model: null
-    effort: null
-  certifier:
-    provider: codex
-    model: null
-    effort: null
-  fix:
-    provider: codex
-    model: null
-    effort: null
+# Optional per-agent overrides inherit the global provider/model/effort.
+# agents:
+#   build:     {provider: codex, model: null, effort: null}
+#   certifier: {provider: codex, model: null, effort: null}
+#   spec:      {provider: codex, model: null, effort: null}
+#   fix:       {provider: codex, model: null, effort: null}
 
 queue:
   concurrent: 3

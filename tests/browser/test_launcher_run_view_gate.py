@@ -441,11 +441,11 @@ def test_selecting_project_allows_run_list_to_load(
     assert project_get_calls["count"] == 1
 
 
-def test_selected_project_brand_returns_to_launcher(
+def test_selected_project_brand_returns_to_project_home(
     mc_backend: Any,
     page: Any,
 ) -> None:
-    """The top-left brand should mean project home in launcher mode."""
+    """The top-left brand should keep the selected project and return home."""
 
     selected = {"value": True}
     project = _project()
@@ -465,11 +465,10 @@ def test_selected_project_brand_returns_to_launcher(
         )
 
     def clear_project(route: Any) -> None:
-        selected["value"] = False
         route.fulfill(
-            status=200,
+            status=500,
             content_type="application/json",
-            body=json.dumps({"ok": True, "current": None, "projects": [project]}),
+            body=json.dumps({"detail": "brand must not clear the project"}),
         )
 
     def state(route: Any) -> None:
@@ -486,11 +485,11 @@ def test_selected_project_brand_returns_to_launcher(
     page.goto(mc_backend.url, wait_until="networkidle")
     page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
 
-    page.get_by_label("Otto Mission Control").click()
-    page.wait_for_selector('[data-testid="launcher-empty-state"], .project-row', timeout=10_000)
+    page.get_by_label("Otto Mission Control — project home").click()
+    page.wait_for_selector('[data-testid="project-workspace"]', timeout=10_000)
 
-    assert selected["value"] is False
-    assert page.get_by_text("Open a project").is_visible()
+    assert selected["value"] is True
+    assert page.get_by_text("Project workspace").is_visible()
 
 
 def test_run_card_opens_side_drawer_without_route_navigation(
@@ -558,6 +557,28 @@ def test_run_card_opens_side_drawer_without_route_navigation(
             body=json.dumps(_run_view("run-1")),
         )
 
+    def run_logs(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "session_id": "run-1",
+                    "logs": [
+                        {
+                            "label": "spec-state.jsonl",
+                            "path": "spec-state.jsonl",
+                            "size_bytes": 24,
+                            "text": '{"kind":"group.started"}',
+                            "truncated": False,
+                        }
+                    ],
+                    "empty": False,
+                }
+            ),
+        )
+
+    page.route("**/api/run-view/run-1/logs", run_logs)
     page.route("**/api/run-view/run-1", run_detail)
     page.route("**/api/projects", projects)
     page.route("**/api/state", state)
@@ -574,6 +595,11 @@ def test_run_card_opens_side_drawer_without_route_navigation(
     assert run_view_calls["detail"] == 1
     assert page.get_by_test_id("run-drawer").is_visible()
     assert page.get_by_test_id("project-workspace").is_visible()
+    assert page.get_by_test_id("run-quick-action-proof").is_disabled()
+    page.get_by_test_id("run-quick-action-logs").click()
+    page.wait_for_selector('[data-testid="run-resource-panel-logs"]', timeout=10_000)
+    assert page.get_by_text("spec-state.jsonl").is_visible()
+    assert page.get_by_text("group.started").is_visible()
 
     page.go_back()
     page.get_by_test_id("run-list-detail-drawer").wait_for(state="detached", timeout=10_000)
@@ -732,6 +758,104 @@ def test_project_workspace_shows_active_queue_from_state_when_run_view_is_empty(
     assert "No sessions yet" not in body
     assert page.get_by_test_id("task-card-build-a-micro-twitter").is_visible()
     assert run_view_calls["count"] == 0
+
+
+def test_project_workspace_surfaces_recovery_plan(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Interrupted queue work must be recoverable from the primary workspace."""
+
+    project = _project()
+    approvals: list[str] = []
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def state(route: Any) -> None:
+        body = _state(
+            project,
+            landing_items=[
+                {
+                    **_landing_item(),
+                    "queue_status": "interrupted",
+                    "run_id": "run-interrupted",
+                    "label": "Needs action",
+                }
+            ],
+            watcher_running=False,
+        )
+        body["autopilot"]["health"] = "attention"
+        body["autopilot"]["pending_decisions"] = [
+            {
+                "id": "decision-1",
+                "incident_id": "incident-1",
+                "created_at": "2026-05-06T06:10:00Z",
+                "title": "Recover interrupted task",
+                "action": "requeue",
+                "action_label": "Recover task",
+                "reason": "The queue runner stopped while this task was in progress.",
+                "severity": "warning",
+                "target": "run-interrupted",
+                "run_id": "run-interrupted",
+                "task_id": "build-a-micro-twitter",
+                "requires_pilot": False,
+                "status": "pending",
+                "requires_approval": True,
+                "includes_actions": ["requeue", "start_watcher"],
+                "plan_steps": [
+                    {"action": "requeue", "label": "Requeue task", "detail": "Create a fresh attempt."},
+                    {"action": "start_watcher", "label": "Start queue runner", "detail": "Process the retry."},
+                ],
+                "result": None,
+                "error": None,
+            }
+        ]
+        body["autopilot"]["incidents"] = [
+            {
+                "id": "incident-1",
+                "kind": "landing_interrupted",
+                "severity": "warning",
+                "title": "Task interrupted",
+                "detail": "Task needs recovery.",
+                "action": "requeue",
+                "run_id": "run-interrupted",
+                "task_id": "build-a-micro-twitter",
+            }
+        ]
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    def approve(route: Any) -> None:
+        approvals.append(route.request.url)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"status": "approved", "message": "Recovery approved."}),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/state", state)
+    page.route("**/api/autopilot/decisions/**/approve", approve)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-testid="workspace-recovery"]', timeout=10_000)
+
+    assert page.get_by_text("Recover interrupted task").is_visible()
+    assert page.get_by_text("Requeue task").is_visible()
+    page.get_by_test_id("workspace-recovery-approve").click()
+    page.wait_for_timeout(250)
+    assert len(approvals) == 1
 
 
 def test_missing_run_deep_link_error_is_near_top(

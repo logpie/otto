@@ -38,9 +38,9 @@ from typing import Any, Callable
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from otto import paths as _paths
 from otto.spec_compile import load_spec, spec_to_dict
 from otto.spec_state import journal_path, replay
+from otto.web.session_resolver import iter_session_dirs, resolve_session_dir
 
 logger = logging.getLogger("otto.web.i2p")
 
@@ -95,22 +95,21 @@ def install_i2p_routes(
 
     @router.get("/sessions")
     def list_sessions() -> JSONResponse:
-        sessions_root = _paths.sessions_root(_resolve_project_dir())
-        if not sessions_root.exists():
-            return JSONResponse({"sessions": []})
         items: list[dict[str, Any]] = []
-        for entry in sorted(sessions_root.iterdir(), reverse=True):
-            if not entry.is_dir():
-                continue
-            spec_path = entry / "spec" / "spec.json"
+        for resolved in sorted(
+            iter_session_dirs(_resolve_project_dir()),
+            key=lambda item: item.session_id,
+            reverse=True,
+        ):
+            spec_path = resolved.path / "spec" / "spec.json"
             if not spec_path.exists():
                 continue  # not an i2p session
-            items.append(_session_summary(entry))
+            items.append(_session_summary(resolved.path))
         return JSONResponse({"sessions": items})
 
     @router.get("/sessions/{session_id}")
     def get_session(session_id: str) -> JSONResponse:
-        session_dir = _resolve_session_dir(_resolve_project_dir(), session_id)
+        session_dir = resolve_session_dir(_resolve_project_dir(), session_id)
         spec_path = session_dir / "spec" / "spec.json"
         if not spec_path.exists():
             raise HTTPException(status_code=404, detail="not an i2p session")
@@ -147,7 +146,7 @@ def install_i2p_routes(
 
     @router.get("/sessions/{session_id}/proof-packet.html")
     def get_proof_packet_html(session_id: str) -> FileResponse:
-        session_dir = _resolve_session_dir(_resolve_project_dir(), session_id)
+        session_dir = resolve_session_dir(_resolve_project_dir(), session_id)
         path = session_dir / "proof-packet.html"
         if not path.exists():
             raise HTTPException(status_code=404, detail="proof-packet.html not yet produced")
@@ -155,7 +154,7 @@ def install_i2p_routes(
 
     @router.get("/sessions/{session_id}/proof-packet.json")
     def get_proof_packet_json(session_id: str) -> FileResponse:
-        session_dir = _resolve_session_dir(_resolve_project_dir(), session_id)
+        session_dir = resolve_session_dir(_resolve_project_dir(), session_id)
         path = session_dir / "proof-packet.json"
         if not path.exists():
             raise HTTPException(status_code=404, detail="proof-packet.json not yet produced")
@@ -163,7 +162,7 @@ def install_i2p_routes(
 
     @router.get("/sessions/{session_id}/evidence/{path:path}")
     def get_evidence(session_id: str, path: str) -> FileResponse:
-        session_dir = _resolve_session_dir(_resolve_project_dir(), session_id)
+        session_dir = resolve_session_dir(_resolve_project_dir(), session_id)
         target = (session_dir / path).resolve()
         # Path traversal guard — must remain inside session_dir.
         try:
@@ -181,21 +180,6 @@ def install_i2p_routes(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _resolve_session_dir(project_dir: Path, session_id: str) -> Path:
-    """Resolve an i2p session dir; reject path traversal attempts."""
-    if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
-        raise HTTPException(status_code=400, detail="invalid session id")
-    sessions_root = _paths.sessions_root(project_dir)
-    session_dir = sessions_root / session_id
-    try:
-        session_dir.resolve().relative_to(sessions_root.resolve())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="invalid session id") from exc
-    if not session_dir.exists():
-        raise HTTPException(status_code=404, detail="session not found")
-    return session_dir
 
 
 def _session_summary(session_dir: Path) -> dict[str, Any]:

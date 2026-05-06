@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Body, FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from otto.mission_control.actions import (
     execute_abort_group,
@@ -24,6 +24,11 @@ from otto.mission_control.actions import (
     execute_resume_run,
 )
 from otto.mission_control.run_view import build_run_view
+from otto.web.session_resolver import (
+    queue_state_for_session,
+    resolve_session_dir,
+    session_dirs,
+)
 
 logger = logging.getLogger("otto.web.run_view")
 
@@ -78,11 +83,11 @@ def install_run_view_routes(
         finished_at, and lifecycle.
         """
         project = _resolve_project_dir()
-        session_dirs = _session_dirs(project)
-        if not session_dirs:
+        discovered = session_dirs(project)
+        if not discovered:
             return JSONResponse({"runs": [], "sessions": []})
-        ids = sorted(session_dirs.keys(), reverse=True)
-        sessions = [_summarize_session(session_dirs[sid], sid) for sid in ids]
+        ids = sorted(discovered.keys(), reverse=True)
+        sessions = [_summarize_session(discovered[sid], sid) for sid in ids]
         return JSONResponse({"runs": ids, "sessions": sessions})
 
     @router.get("/{session_id}")
@@ -92,8 +97,11 @@ def install_run_view_routes(
         404 if the session id doesn't exist or escapes the sessions dir.
         """
         project = _resolve_project_dir()
-        session_dir = _resolve_session_dir(project, session_id)
-        view = build_run_view(session_dir)
+        session_dir = resolve_session_dir(project, session_id)
+        view = build_run_view(
+            session_dir,
+            live_state=queue_state_for_session(project, session_id),
+        )
         return JSONResponse(view)
 
     # ---- A7: pause / resume / abort verbs --------------------------------
@@ -108,7 +116,7 @@ def install_run_view_routes(
     @router.post("/{session_id}/actions/pause")
     def pause_run(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
         project = _resolve_project_dir()
-        session_dir = _resolve_session_dir(project, session_id)
+        session_dir = resolve_session_dir(project, session_id)
         note = str((payload or {}).get("note") or "").strip()
         result = execute_pause_run(session_dir, note=note)
         return JSONResponse(_action_to_json(result), status_code=200 if result.ok else 409)
@@ -116,7 +124,7 @@ def install_run_view_routes(
     @router.post("/{session_id}/actions/resume")
     def resume_run(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
         project = _resolve_project_dir()
-        session_dir = _resolve_session_dir(project, session_id)
+        session_dir = resolve_session_dir(project, session_id)
         note = str((payload or {}).get("note") or "").strip()
         result = execute_resume_run(session_dir, note=note)
         return JSONResponse(_action_to_json(result), status_code=200 if result.ok else 409)
@@ -128,10 +136,31 @@ def install_run_view_routes(
         payload: dict = Body(default_factory=dict),
     ) -> JSONResponse:
         project = _resolve_project_dir()
-        session_dir = _resolve_session_dir(project, session_id)
+        session_dir = resolve_session_dir(project, session_id)
         reason = str((payload or {}).get("reason") or "").strip()
         result = execute_abort_group(session_dir, group_id, reason=reason)
         return JSONResponse(_action_to_json(result), status_code=200 if result.ok else 409)
+
+    @router.get("/{session_id}/proof-packet.html", include_in_schema=False)
+    def proof_packet_html(session_id: str) -> FileResponse:
+        project = _resolve_project_dir()
+        session_dir = resolve_session_dir(project, session_id)
+        path = session_dir / "proof-packet.html"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="proof packet has not been produced")
+        return FileResponse(path, media_type="text/html")
+
+    @router.get("/{session_id}/logs")
+    def get_logs(session_id: str) -> JSONResponse:
+        project = _resolve_project_dir()
+        session_dir = resolve_session_dir(project, session_id)
+        return JSONResponse(_session_logs_payload(session_dir))
+
+    @router.get("/{session_id}/files")
+    def get_files(session_id: str) -> JSONResponse:
+        project = _resolve_project_dir()
+        session_dir = resolve_session_dir(project, session_id)
+        return JSONResponse(_session_files_payload(session_dir))
 
     app.include_router(router)
 
@@ -142,55 +171,6 @@ def _action_to_json(result) -> dict:
         "message": result.message,
         "severity": result.severity,
     }
-
-
-def _resolve_session_dir(project_dir: Path, session_id: str) -> Path:
-    """Resolve a session id to a session path for the selected project.
-
-    Queue/i2p runs execute in per-task worktrees, so their proof packets live
-    under `<project>/.worktrees/<task>/otto_logs/sessions/<session>`, not the
-    selected project's root `otto_logs/sessions`. Search both bounded roots
-    while still rejecting path-traversal attempts.
-    """
-    if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
-        raise HTTPException(
-            status_code=404,
-            detail=f"session id rejected: {session_id!r}",
-        )
-    found = _session_dirs(project_dir).get(session_id)
-    if found is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"session not found: {session_id!r}",
-        )
-    return found
-
-
-def _session_dirs(project_dir: Path) -> dict[str, Path]:
-    """Return session-id → session-dir for project-root and queue worktrees."""
-    roots = [(project_dir / "otto_logs" / "sessions").resolve()]
-    worktrees = (project_dir / ".worktrees").resolve()
-    if worktrees.exists() and worktrees.is_dir():
-        for child in worktrees.iterdir():
-            if not child.is_dir():
-                continue
-            roots.append((child / "otto_logs" / "sessions").resolve())
-
-    found: dict[str, Path] = {}
-    project_root = project_dir.resolve()
-    for sessions_root in roots:
-        try:
-            sessions_root.relative_to(project_root)
-        except ValueError:
-            continue
-        if not sessions_root.exists() or not sessions_root.is_dir():
-            continue
-        for entry in sessions_root.iterdir():
-            if not entry.is_dir():
-                continue
-            # Root project sessions win ties; worktree duplicates are ignored.
-            found.setdefault(entry.name, entry.resolve())
-    return found
 
 
 def _summarize_session(session_dir: Path, session_id: str) -> dict[str, Any]:
@@ -337,6 +317,96 @@ def _session_finished_at(
             except OSError:
                 continue
     return None
+
+
+_LOG_NAME_LIMIT = 64
+_LOG_TEXT_LIMIT = 32_000
+_FILE_LIST_LIMIT = 300
+
+
+def _session_logs_payload(session_dir: Path) -> dict[str, Any]:
+    candidates = [
+        session_dir / "spec-state.jsonl",
+        session_dir / "state.jsonl",
+        session_dir / "summary.json",
+        session_dir / "proof-packet.json",
+    ]
+    for pattern in (
+        "build/**/*.log",
+        "build/**/*.jsonl",
+        "certify/**/*.log",
+        "certify/**/*.jsonl",
+        "audit/**/*.log",
+        "audit/**/*.jsonl",
+    ):
+        candidates.extend(sorted(session_dir.glob(pattern)))
+
+    seen: set[Path] = set()
+    logs: list[dict[str, Any]] = []
+    for path in candidates:
+        resolved = path.resolve(strict=False)
+        if resolved in seen or not path.exists() or not path.is_file():
+            continue
+        seen.add(resolved)
+        label = str(path.relative_to(session_dir))
+        stat = path.stat()
+        logs.append(
+            {
+                "label": label[:_LOG_NAME_LIMIT],
+                "path": label,
+                "size_bytes": stat.st_size,
+                "text": _tail_text(path, _LOG_TEXT_LIMIT),
+                "truncated": stat.st_size > _LOG_TEXT_LIMIT,
+            }
+        )
+    return {"session_id": session_dir.name, "logs": logs, "empty": not logs}
+
+
+def _session_files_payload(session_dir: Path) -> dict[str, Any]:
+    files: list[dict[str, Any]] = []
+    truncated = False
+    for path in sorted(session_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        if len(files) >= _FILE_LIST_LIMIT:
+            truncated = True
+            break
+        rel = str(path.relative_to(session_dir))
+        files.append(
+            {
+                "path": rel,
+                "size_bytes": path.stat().st_size,
+                "kind": _file_kind(path),
+            }
+        )
+    return {
+        "session_id": session_dir.name,
+        "files": files,
+        "truncated": truncated,
+    }
+
+
+def _tail_text(path: Path, limit: int) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(size - limit, 0))
+            data = handle.read(limit)
+    except OSError:
+        return ""
+    return data[-limit:].decode("utf-8", errors="replace")
+
+
+def _file_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".html", ".json", ".jsonl", ".log", ".md", ".txt"}:
+        return suffix.removeprefix(".")
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        return "image"
+    if suffix in {".mp4", ".webm", ".mov"}:
+        return "video"
+    return "file"
 
 
 __all__ = ["install_run_view_routes"]

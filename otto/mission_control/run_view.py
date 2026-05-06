@@ -70,7 +70,7 @@ def build_run_view(
     groups = _build_groups(spec, proof, state_events, live_state)
     components = _build_components(spec, proof, state_events, live_state)
     guardrails = _build_guardrails(spec, proof)
-    stages = _build_stages(state_events, live_state)
+    stages = _build_stages(state_events, live_state, spec)
     findings = _build_findings(proof)
 
     cost_usd = float(
@@ -80,7 +80,8 @@ def build_run_view(
     )
     wall_s = float(
         (proof.get("wall_s") if proof else None)
-        or (live_state.get("wall_s") if live_state else 0.0)
+        or (live_state.get("wall_s") if live_state else None)
+        or (live_state.get("duration_s") if live_state else 0.0)
         or 0.0
     )
 
@@ -90,8 +91,8 @@ def build_run_view(
         "spec_version": int((spec.get("schema_version") or 1) if spec else 1),
         "proof_packet_html": _proof_packet_path(session_dir, "html"),
         "proof_packet_json": _proof_packet_path(session_dir, "json"),
-        "started_at": _started_at(state_events),
-        "finished_at": _finished_at(state_events, verdict_field),
+        "started_at": _started_at(state_events, live_state),
+        "finished_at": _finished_at(state_events, verdict_field, live_state),
         "intent_hash": _str_or_empty(spec.get("intent_hash") if spec else None),
     }
 
@@ -191,9 +192,89 @@ def _build_features(
     if not spec:
         return []
     raw_features = spec.get("features") or []
-    if not isinstance(raw_features, list):
+    if isinstance(raw_features, list) and raw_features:
+        return [_feature_to_view(f, spec_evidence_by_id) for f in raw_features]
+    return _features_from_groups(spec)
+
+
+def _features_from_groups(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Derive user-facing features from Group.feature_ids when needed.
+
+    Some early i2p compiler outputs left top-level ``features`` empty while
+    preserving the product slices in each group's ``feature_ids``. Showing
+    "Features 0/0" for those sessions hides the user's actual requested
+    product work, so we synthesize pre-audit FeatureViews from the grouped
+    feature ids and declared group checks.
+    """
+
+    raw_groups = spec.get("groups") or spec.get("slices") or []
+    if not isinstance(raw_groups, list):
         return []
-    return [_feature_to_view(f, spec_evidence_by_id) for f in raw_features]
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            continue
+        group_id = str(group.get("id") or group.get("slice_id") or "")
+        group_name = str(group.get("name") or group.get("title") or group_id)
+        evidence_kinds = _evidence_kinds_from_checks(group.get("checks"))
+        for raw_feature_id in group.get("feature_ids") or []:
+            feature_id = str(raw_feature_id).strip()
+            if not feature_id or feature_id in seen:
+                continue
+            seen.add(feature_id)
+            out.append(
+                {
+                    "id": feature_id,
+                    "name": _title_from_feature_id(feature_id),
+                    "description": f"Part of {group_name}." if group_name else "",
+                    "acceptance_detail": "",
+                    "evidence_kinds": list(evidence_kinds),
+                    "group_id": group_id,
+                    "verdict": None,
+                    "evidence_completeness": "full",
+                    "coverage_confidence": "high",
+                    "multi_actor_required": False,
+                    "audit_pre_merge": False,
+                    "evidence_refs": [],
+                }
+            )
+    return out
+
+
+def _title_from_feature_id(feature_id: str) -> str:
+    cleaned = feature_id.replace("_", " ").replace("-", " ").strip()
+    if not cleaned:
+        return feature_id
+    return cleaned[:1].upper() + cleaned[1:]
+
+
+def _evidence_kinds_from_checks(raw_checks: Any) -> list[str]:
+    if not isinstance(raw_checks, list):
+        return []
+    mapped: list[str] = []
+    for check in raw_checks:
+        if not isinstance(check, dict):
+            continue
+        raw = str(check.get("kind") or check.get("type") or check.get("check_type") or "")
+        key = raw.replace("-", "_").replace(" ", "_").lower()
+        kind = {
+            "browser_journey": "BrowserJourney",
+            "browser": "BrowserJourney",
+            "api_probe": "ApiProbe",
+            "api": "ApiProbe",
+            "state_invariant": "StateInvariant",
+            "state": "StateInvariant",
+            "repo_test": "RepoTestCheck",
+            "repo_test_check": "RepoTestCheck",
+            "test": "RepoTestCheck",
+            "cli_probe": "CLIProbe",
+            "import_check": "ImportCheck",
+            "type_check": "TypeCheck",
+        }.get(key)
+        if kind and kind not in mapped:
+            mapped.append(kind)
+    return mapped
 
 
 def _spec_evidence_kinds_by_id(
@@ -287,7 +368,7 @@ def _group_to_view(
         "feature_ids": [
             str(fid) for fid in (payload.get("feature_ids") or [])
         ],
-        "status": _group_status(payload),
+        "status": _group_status(payload, group_id, state_events),
         "branch": str(payload.get("branch") or ""),
         "owned_paths": [
             str(p) for p in (payload.get("owned_paths") or [])
@@ -301,14 +382,54 @@ def _group_to_view(
     }
 
 
-def _group_status(payload: dict[str, Any]) -> str:
+def _group_status(
+    payload: dict[str, Any],
+    group_id: str,
+    state_events: list[dict[str, Any]],
+) -> str:
     status = str(payload.get("status") or "").lower()
     landed = bool(payload.get("landed"))
     if landed:
         return "landed"
-    if status in ("passing", "blocked", "in_progress", "pending", "failed_scope"):
+    if status in ("passing", "blocked", "in_progress", "failed_scope"):
+        return status
+    event_status = _group_status_from_events(group_id, state_events)
+    if event_status:
+        return event_status
+    if status == "pending":
         return status
     return "pending"
+
+
+def _group_status_from_events(
+    group_id: str,
+    state_events: list[dict[str, Any]],
+) -> str | None:
+    if not group_id:
+        return None
+    status: str | None = None
+    for event in state_events:
+        if str(event.get("group_id") or "") != group_id:
+            continue
+        kind = str(event.get("event") or event.get("kind") or "")
+        if kind in {"group.started", "group.check.started", "group.repair.started"}:
+            status = "in_progress"
+        elif kind in {"group.check.finished", "group.merge.eligible", "group.scope.passed"}:
+            status = "passing"
+        elif kind in {"group.merge.landed", "group.landed"}:
+            status = "landed"
+        elif kind in {"group.scope.failed"}:
+            status = "failed_scope"
+        elif kind in {
+            "group.blocked",
+            "group.failed",
+            "group.check.failed",
+            "group.merge.failed",
+            "group.aborted_by_user",
+            "group.invalidated_by_spec_edit",
+        }:
+            status = "blocked"
+    return status
 
 
 def _build_components(
@@ -370,6 +491,7 @@ def _build_guardrails(
 def _build_stages(
     state_events: list[dict[str, Any]],
     live_state: dict[str, Any] | None,
+    spec: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     """Emit StageView list from state events.
 
@@ -397,6 +519,18 @@ def _build_stages(
 
     for event in state_events:
         kind = str(event.get("event") or event.get("kind") or "")
+        if kind == "group.started":
+            ts = event.get("ts") or event.get("timestamp")
+            stages["build"]["started_at"] = stages["build"]["started_at"] or ts
+            if stages["build"]["status"] == "pending":
+                stages["build"]["status"] = "active"
+            continue
+        if kind in {"group.merge.eligible", "group.check.finished"}:
+            ts = event.get("ts") or event.get("timestamp")
+            stages["build"]["started_at"] = stages["build"]["started_at"] or ts
+            if stages["build"]["status"] == "pending":
+                stages["build"]["status"] = "active"
+            continue
         stage_name, sub = _stage_event_target(kind)
         if stage_name is None or sub is None:
             continue
@@ -424,6 +558,23 @@ def _build_stages(
             stages[stage_name]["finished_at"] = ts
         elif sub == "skipped":
             stages[stage_name]["status"] = "skipped"
+
+    if spec and stages["compile"]["status"] == "pending":
+        first_ts = _first_event_ts(state_events)
+        stages["compile"]["status"] = "done"
+        stages["compile"]["finished_at"] = first_ts
+
+    live_status = _normalize_live_status(live_state)
+    if live_status in {"interrupted", "aborted", "failed"}:
+        for name in ("build", "audit", "render", "land"):
+            if stages[name]["status"] == "active":
+                stages[name]["status"] = "failed"
+                stages[name]["finished_at"] = str(live_state.get("finished_at") or "") if live_state else None
+                break
+        else:
+            if stages["build"]["status"] == "pending" and _has_group_events(state_events):
+                stages["build"]["status"] = "failed"
+                stages["build"]["finished_at"] = str(live_state.get("finished_at") or "") if live_state else None
 
     return [stages[name] for name in canonical]
 
@@ -465,6 +616,21 @@ def _event_succeeded(event: dict[str, Any]) -> bool:
     if "succeeded" in event:
         return bool(event.get("succeeded"))
     return True
+
+
+def _first_event_ts(state_events: list[dict[str, Any]]) -> str | None:
+    for event in state_events:
+        ts = event.get("ts") or event.get("timestamp")
+        if ts:
+            return str(ts)
+    return None
+
+
+def _has_group_events(state_events: list[dict[str, Any]]) -> bool:
+    return any(
+        str(event.get("event") or event.get("kind") or "").startswith("group.")
+        for event in state_events
+    )
 
 
 # Severity vocabulary normalization (research §4 severity ladder).
@@ -547,12 +713,16 @@ def _derive_status(
         return "partial"
     if verdict == "blocked":
         return "blocked"
+    live_status = _normalize_live_status(live_state)
+    if live_status in {"interrupted", "aborted", "failed", "landed", "queued"}:
+        return live_status
     # In-flight or pre-verdict — derive from latest stage event
-    if live_state and live_state.get("status"):
-        return str(live_state["status"])
     last_started = None
+    saw_group_started = False
     for event in state_events:
         kind = str(event.get("event") or event.get("kind") or "")
+        if kind == "group.started":
+            saw_group_started = True
         stage_name, sub = _stage_event_target(kind)
         if stage_name is not None and sub == "started":
             last_started = stage_name
@@ -567,20 +737,74 @@ def _derive_status(
             "render": "rendering",
             "land": "landing",
         }.get(last_started, "queued")
+    if saw_group_started:
+        return "building"
+    if live_status:
+        return live_status
     return "queued"
 
 
-def _started_at(state_events: list[dict[str, Any]]) -> str:
+def _normalize_live_status(live_state: dict[str, Any] | None) -> str | None:
+    if not live_state:
+        return None
+    raw = str(live_state.get("status") or "").strip().lower()
+    if raw in {"interrupted"}:
+        return "interrupted"
+    if raw in {"cancelled", "canceled", "terminating", "removed"}:
+        return "aborted"
+    if raw in {"failed", "stale"}:
+        return "failed"
+    if raw in {"done"}:
+        return "landed"
+    if raw in {"queued", "starting", "initializing"}:
+        return "queued"
+    if raw == "running":
+        return None
+    if raw in {
+        "compiling",
+        "awaiting_spec_review",
+        "building",
+        "auditing",
+        "rendering",
+        "landing",
+        "blocked",
+        "partial",
+        "passed",
+        "landed",
+        "aborted",
+    }:
+        return raw
+    return None
+
+
+def _started_at(
+    state_events: list[dict[str, Any]],
+    live_state: dict[str, Any] | None,
+) -> str:
+    if live_state and live_state.get("started_at"):
+        return str(live_state["started_at"])
     for event in state_events:
         if str(event.get("event") or event.get("kind") or "") == "run.started":
             return str(event.get("ts") or event.get("timestamp") or "")
+    first = _first_event_ts(state_events)
+    if first:
+        return first
     return ""
 
 
 def _finished_at(
     state_events: list[dict[str, Any]],
     verdict: str | None,
+    live_state: dict[str, Any] | None,
 ) -> str | None:
+    live_status = _normalize_live_status(live_state)
+    if live_state and live_state.get("finished_at") and live_status in {
+        "interrupted",
+        "aborted",
+        "failed",
+        "landed",
+    }:
+        return str(live_state["finished_at"])
     if verdict is None:
         return None
     for event in reversed(state_events):

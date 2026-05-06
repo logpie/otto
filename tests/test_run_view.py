@@ -294,3 +294,71 @@ def test_build_run_view_status_recognises_seed_started(tmp_path: Path) -> None:
     view = build_run_view(session)
     # seed maps to "building" in the RunStatus mapping
     assert view["status"] == "building"
+
+
+def test_build_run_view_derives_features_from_group_feature_ids(tmp_path: Path) -> None:
+    spec = {
+        "intent": "build a micro twitter",
+        "project_kind": "webapp",
+        "features": [],
+        "groups": [
+            {
+                "id": "timeline",
+                "name": "Timeline",
+                "feature_ids": ["post short messages", "view latest posts"],
+                "checks": [{"kind": "state_invariant"}],
+            }
+        ],
+    }
+    session = _setup_session(tmp_path, spec=spec)
+    view = build_run_view(session)
+    assert [f["id"] for f in view["features"]] == [
+        "post short messages",
+        "view latest posts",
+    ]
+    assert view["features"][0]["group_id"] == "timeline"
+    assert view["features"][0]["evidence_kinds"] == ["StateInvariant"]
+
+
+def test_build_run_view_group_started_drives_group_and_build_status(tmp_path: Path) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [{"id": "g1", "name": "G1", "feature_ids": ["f1"]}],
+    }
+    state = [
+        {"kind": "seed.finished", "ts": "2026-05-04T20:00:01Z"},
+        {"kind": "group.started", "group_id": "g1", "ts": "2026-05-04T20:00:02Z"},
+    ]
+    session = _setup_session(tmp_path, spec=spec, state_events=state)
+    view = build_run_view(session)
+    assert view["status"] == "building"
+    assert view["groups"][0]["status"] == "in_progress"
+    assert next(s for s in view["stages"] if s["name"] == "compile")["status"] == "done"
+    assert next(s for s in view["stages"] if s["name"] == "build")["status"] == "active"
+
+
+def test_build_run_view_interrupted_queue_state_is_terminal(tmp_path: Path) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [{"id": "g1", "name": "G1", "feature_ids": ["f1"]}],
+    }
+    state = [{"kind": "group.started", "group_id": "g1", "ts": "2026-05-04T20:00:02Z"}]
+    session = _setup_session(tmp_path, spec=spec, state_events=state)
+    view = build_run_view(
+        session,
+        live_state={
+            "status": "interrupted",
+            "started_at": "2026-05-04T20:00:00Z",
+            "finished_at": "2026-05-04T20:05:00Z",
+            "duration_s": 300,
+            "cost_usd": 0.25,
+        },
+    )
+    assert view["status"] == "interrupted"
+    assert view["wall_s"] == 300.0
+    assert view["cost_usd"] == 0.25
+    assert view["meta"]["started_at"] == "2026-05-04T20:00:00Z"
+    assert view["meta"]["finished_at"] == "2026-05-04T20:05:00Z"
+    assert next(s for s in view["stages"] if s["name"] == "build")["status"] == "failed"

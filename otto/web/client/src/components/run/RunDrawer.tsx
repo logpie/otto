@@ -15,7 +15,7 @@
 // ConfirmDialog so a single mis-click cannot pause a run or throw away
 // a Group's worktree work. Resume is non-destructive and fires inline.
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ConfirmDialog, type ConfirmState } from "../ConfirmDialog";
 import type { RunView } from "../../types/run";
 import { FeatureList } from "./FeatureList";
@@ -30,7 +30,29 @@ interface Props {
   onAfterAction?: () => void;
 }
 
-const TERMINAL_VERDICTS = new Set(["passed", "partial", "blocked"]);
+const TERMINAL_STATUSES = new Set(["passed", "partial", "blocked", "landed", "interrupted", "aborted", "failed"]);
+
+type ResourcePanel = "logs" | "files";
+
+interface LogsPayload {
+  logs: Array<{
+    label: string;
+    path: string;
+    size_bytes: number;
+    text: string;
+    truncated: boolean;
+  }>;
+  empty: boolean;
+}
+
+interface FilesPayload {
+  files: Array<{
+    path: string;
+    size_bytes: number;
+    kind: string;
+  }>;
+  truncated: boolean;
+}
 
 async function postSessionAction(
   sessionId: string,
@@ -60,7 +82,8 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [confirmPending, setConfirmPending] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
-  const inFlight = view.verdict === null || !TERMINAL_VERDICTS.has(view.verdict);
+  const [resourcePanel, setResourcePanel] = useState<ResourcePanel | null>(null);
+  const inFlight = view.verdict === null && !TERMINAL_STATUSES.has(view.status);
   const sessionId = view.meta.session_id;
 
   const closeConfirm = useCallback(() => {
@@ -138,30 +161,23 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
     [sessionId, onAfterAction],
   );
 
-  // B5 — action button row stub. No-op for now; logs intent so a real
-  // wiring pass can grep for these handlers later. The buttons live
-  // directly under the VerdictHeader to mirror wireframe screen 3
-  // (Open proof packet / View spec / Logs / Files).
   const onOpenProofPacket = useCallback(() => {
-    // TODO: link to view.meta.proof_packet_html when populated
-    // eslint-disable-next-line no-console
-    console.log("[RunDrawer] open proof packet stub", sessionId);
-  }, [sessionId]);
+    if (!view.meta.proof_packet_html) return;
+    window.open(
+      `/api/run-view/${encodeURIComponent(sessionId)}/proof-packet.html`,
+      "_blank",
+      "noopener,noreferrer",
+    );
+  }, [sessionId, view.meta.proof_packet_html]);
   const onViewSpec = useCallback(() => {
-    // TODO: navigate to spec-review for the run's spec id
-    // eslint-disable-next-line no-console
-    console.log("[RunDrawer] view spec stub", sessionId);
+    window.location.href = `?view=spec-review&spec=${encodeURIComponent(sessionId)}`;
   }, [sessionId]);
   const onOpenLogs = useCallback(() => {
-    // TODO: open the build narrative log viewer
-    // eslint-disable-next-line no-console
-    console.log("[RunDrawer] logs stub", sessionId);
-  }, [sessionId]);
+    setResourcePanel((current) => (current === "logs" ? null : "logs"));
+  }, []);
   const onOpenFiles = useCallback(() => {
-    // TODO: open the session-dir file browser
-    // eslint-disable-next-line no-console
-    console.log("[RunDrawer] files stub", sessionId);
-  }, [sessionId]);
+    setResourcePanel((current) => (current === "files" ? null : "files"));
+  }, []);
 
   return (
     <article className="run-drawer" data-testid="run-drawer">
@@ -172,6 +188,8 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
           className="run-quick-action run-quick-action-primary"
           data-testid="run-quick-action-proof"
           onClick={onOpenProofPacket}
+          disabled={!view.meta.proof_packet_html}
+          title={view.meta.proof_packet_html ? "Open the rendered proof packet" : "Proof packet has not been produced yet"}
         >
           Open proof packet
         </button>
@@ -200,6 +218,9 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
           Files
         </button>
       </div>
+      {resourcePanel ? (
+        <RunResourcePanel sessionId={sessionId} kind={resourcePanel} />
+      ) : null}
       {inFlight && (
         <div className="run-action-bar" data-testid="run-action-bar">
           <button
@@ -282,3 +303,86 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
 }
 
 export default RunDrawer;
+
+function RunResourcePanel({sessionId, kind}: {sessionId: string; kind: ResourcePanel}) {
+  const [payload, setPayload] = useState<LogsPayload | FilesPayload | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPayload(null);
+    setError(null);
+    fetch(`/api/run-view/${encodeURIComponent(sessionId)}/${kind}`)
+      .then((resp) => {
+        if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+        return resp.json() as Promise<LogsPayload | FilesPayload>;
+      })
+      .then((body) => {
+        if (!cancelled) setPayload(body);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message || String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, kind]);
+
+  return (
+    <section className="run-resource-panel" data-testid={`run-resource-panel-${kind}`}>
+      <h3>{kind === "logs" ? "Logs" : "Session files"}</h3>
+      {error ? <p role="alert">Failed to load {kind}: {error}</p> : null}
+      {!payload && !error ? <p>Loading {kind}...</p> : null}
+      {payload && kind === "logs" ? (
+        <LogsPanel payload={payload as LogsPayload} />
+      ) : null}
+      {payload && kind === "files" ? (
+        <FilesPanel payload={payload as FilesPayload} />
+      ) : null}
+    </section>
+  );
+}
+
+function LogsPanel({payload}: {payload: LogsPayload}) {
+  if (payload.empty || payload.logs.length === 0) {
+    return <p>No session logs have been written yet.</p>;
+  }
+  return (
+    <div className="run-resource-list">
+      {payload.logs.map((log) => (
+        <details key={log.path} className="run-resource-item" open={payload.logs.length === 1}>
+          <summary>
+            <span>{log.label}</span>
+            <small>{formatBytes(log.size_bytes)}{log.truncated ? " · tail" : ""}</small>
+          </summary>
+          <pre>{log.text || "(empty)"}</pre>
+        </details>
+      ))}
+    </div>
+  );
+}
+
+function FilesPanel({payload}: {payload: FilesPayload}) {
+  if (payload.files.length === 0) {
+    return <p>No session files have been written yet.</p>;
+  }
+  return (
+    <>
+      <ul className="run-file-list">
+        {payload.files.map((file) => (
+          <li key={file.path}>
+            <span>{file.path}</span>
+            <small>{file.kind} · {formatBytes(file.size_bytes)}</small>
+          </li>
+        ))}
+      </ul>
+      {payload.truncated ? <p className="run-resource-note">Showing the first 300 files.</p> : null}
+    </>
+  );
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}

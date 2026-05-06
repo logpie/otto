@@ -130,6 +130,25 @@ def test_list_sessions_returns_seeded_session(tmp_path: Path) -> None:
     assert s["has_proof_packet_html"] is False
 
 
+def test_list_sessions_returns_queue_worktree_session(tmp_path: Path) -> None:
+    project_dir = _init_project(tmp_path)
+    worktree = project_dir / ".worktrees" / "build-task"
+    _seed_session(worktree, "2026-05-03-100000-worktree")
+    app = create_app(project_dir, queue_compat=False)
+    client = TestClient(app)
+
+    response = client.get("/api/i2p/sessions")
+    assert response.status_code == 200
+    data = response.json()
+    assert [row["session_id"] for row in data["sessions"]] == [
+        "2026-05-03-100000-worktree"
+    ]
+
+    detail = client.get("/api/i2p/sessions/2026-05-03-100000-worktree")
+    assert detail.status_code == 200
+    assert detail.json()["spec"]["intent"] == "A demo todo app"
+
+
 def test_list_sessions_includes_verdict_when_proof_packet_exists(tmp_path: Path) -> None:
     project_dir = _init_project(tmp_path)
     _seed_session(project_dir, "2026-05-03-100000-aaa111", with_proof=True)

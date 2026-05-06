@@ -130,6 +130,101 @@ def test_get_run_returns_queue_worktree_session(tmp_path: Path) -> None:
     assert body["project_kind"] == "webapp"
 
 
+def test_get_run_merges_queue_state_for_worktree_session(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-worktree"
+    _write_minimal_session(
+        project / ".worktrees" / "build-task" / "otto_logs" / "sessions" / sid,
+        intent="worktree micro twitter",
+        project_kind="webapp",
+    )
+    (project / ".otto-queue-state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "watcher": None,
+                "tasks": {
+                    "build-task": {
+                        "status": "interrupted",
+                        "attempt_run_id": sid,
+                        "started_at": "2026-05-04T20:00:00Z",
+                        "finished_at": "2026-05-04T20:01:00Z",
+                        "duration_s": 60,
+                        "cost_usd": 0.12,
+                    }
+                },
+            }
+        )
+    )
+
+    client = _app_with_project(project)
+    resp = client.get(f"/api/run-view/{sid}")
+    assert resp.status_code == 200
+    body = resp.json()
+    # Proof packets still win terminal verdicts, but queue metrics must merge.
+    assert body["status"] == "passed"
+    assert body["wall_s"] == 200.0
+
+
+def test_run_view_logs_and_files_resolve_worktree_session(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-worktree"
+    session = project / ".worktrees" / "build-task" / "otto_logs" / "sessions" / sid
+    _write_minimal_session(session, intent="worktree micro twitter", project_kind="webapp")
+    (session / "spec-state.jsonl").write_text('{"kind":"group.started"}\n')
+
+    client = _app_with_project(project)
+    logs = client.get(f"/api/run-view/{sid}/logs")
+    assert logs.status_code == 200
+    assert logs.json()["logs"][0]["path"] == "spec-state.jsonl"
+
+    files = client.get(f"/api/run-view/{sid}/files")
+    assert files.status_code == 200
+    assert "proof-packet.json" in {item["path"] for item in files.json()["files"]}
+
+
+def test_run_view_skips_symlinked_session_escape(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-escape"
+    sessions_root = project / "otto_logs" / "sessions"
+    sessions_root.mkdir(parents=True)
+    outside_session = tmp_path / "outside-session"
+    _write_minimal_session(outside_session, intent="escaped", project_kind="webapp")
+    try:
+        (sessions_root / sid).symlink_to(outside_session, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    client = _app_with_project(project)
+    listed = client.get("/api/run-view")
+    assert listed.status_code == 200
+    assert sid not in listed.json()["runs"]
+
+    detail = client.get(f"/api/run-view/{sid}")
+    assert detail.status_code == 404
+
+
+def test_run_view_files_truncated_only_when_more_files_exist(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-files"
+    session = project / "otto_logs" / "sessions" / sid
+    _write_minimal_session(session, intent="file list", project_kind="webapp")
+    for index in range(299):
+        (session / f"extra-{index:03d}.txt").write_text("x")
+
+    client = _app_with_project(project)
+    exact = client.get(f"/api/run-view/{sid}/files")
+    assert exact.status_code == 200
+    assert len(exact.json()["files"]) == 300
+    assert exact.json()["truncated"] is False
+
+    (session / "extra-over-limit.txt").write_text("x")
+    over = client.get(f"/api/run-view/{sid}/files")
+    assert over.status_code == 200
+    assert len(over.json()["files"]) == 300
+    assert over.json()["truncated"] is True
+
+
 def test_get_run_404_for_missing_session(project_with_session: tuple[Path, str]) -> None:
     project, _ = project_with_session
     client = _app_with_project(project)

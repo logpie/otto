@@ -73,3 +73,13 @@ def test_build_stamp_endpoint_no_store(client: TestClient) -> None:
     resp = client.get("/static/build-stamp.json")
     assert resp.status_code == 200
     assert resp.headers.get("cache-control") == "no-store"
+
+
+def test_favicon_does_not_404(client: TestClient) -> None:
+    """Browsers request /favicon.ico automatically; avoid noisy console 404s."""
+    resp = client.get("/favicon.ico")
+    assert resp.status_code == 204
+    assert resp.headers.get("cache-control") == "no-store"
+    head = client.head("/favicon.ico")
+    assert head.status_code == 204
+    assert head.headers.get("cache-control") == "no-store"

@@ -133,6 +133,19 @@ def _exit_legacy_removed() -> None:
     sys.exit(1)
 
 
+def _resolve_pipeline_or_exit(*, i2p: bool, legacy: bool, project_dir: Path) -> str:
+    from otto.cli_run import resolve_pipeline_choice
+
+    pipeline_choice = resolve_pipeline_choice(
+        i2p_flag=i2p,
+        legacy_flag=legacy,
+        project_dir=project_dir,
+    )
+    if pipeline_choice == "legacy":
+        _exit_legacy_removed()
+    return pipeline_choice
+
+
 def _require_intent(
     project_dir: Path,
     *,
@@ -260,21 +273,13 @@ def register_improve_commands(main: click.Group) -> None:
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
+        _resolve_pipeline_or_exit(i2p=i2p, legacy=legacy, project_dir=project_dir)
         intent = _require_intent(
             project_dir,
             fallback=focus,
             fallback_label="focus",
             prefer_fallback=True,
         )
-
-        from otto.cli_run import resolve_pipeline_choice
-        pipeline_choice = resolve_pipeline_choice(
-            i2p_flag=i2p,
-            legacy_flag=legacy,
-            project_dir=project_dir,
-        )
-        if pipeline_choice == "legacy":
-            _exit_legacy_removed()
         # i2p path
         _ignored = [
             name for name, val in (
@@ -387,21 +392,13 @@ def register_improve_commands(main: click.Group) -> None:
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
+        _resolve_pipeline_or_exit(i2p=i2p, legacy=legacy, project_dir=project_dir)
         intent = _require_intent(
             project_dir,
             fallback=focus,
             fallback_label="focus",
             prefer_fallback=True,
         )
-
-        from otto.cli_run import resolve_pipeline_choice
-        pipeline_choice = resolve_pipeline_choice(
-            i2p_flag=i2p,
-            legacy_flag=legacy,
-            project_dir=project_dir,
-        )
-        if pipeline_choice == "legacy":
-            _exit_legacy_removed()
         _ignored = [
             name for name, val in (
                 ("--split", split),
@@ -511,15 +508,7 @@ def register_improve_commands(main: click.Group) -> None:
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
-
-        from otto.cli_run import resolve_pipeline_choice
-        pipeline_choice = resolve_pipeline_choice(
-            i2p_flag=i2p,
-            legacy_flag=legacy,
-            project_dir=project_dir,
-        )
-        if pipeline_choice == "legacy":
-            _exit_legacy_removed()
+        _resolve_pipeline_or_exit(i2p=i2p, legacy=legacy, project_dir=project_dir)
         _ignored = [
             name for name, val in (
                 ("--split", split),

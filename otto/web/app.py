@@ -10,7 +10,7 @@ import subprocess
 from typing import Any, AsyncIterator
 
 from fastapi import Body, FastAPI, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
@@ -165,6 +165,11 @@ def create_app(
             static_dir / "index.html",
             headers={"Cache-Control": _CACHE_NO_STORE},
         )
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    @app.head("/favicon.ico", include_in_schema=False)
+    def favicon() -> Response:
+        return Response(status_code=204, headers={"Cache-Control": _CACHE_NO_STORE})
 
     @app.get("/api/project")
     def project() -> dict[str, Any]:

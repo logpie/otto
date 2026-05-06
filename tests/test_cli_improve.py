@@ -88,3 +88,23 @@ def test_improve_legacy_flag_does_not_invoke_orchestrate(
     )
     assert result.exit_code == 1
     assert sentinel["orchestrate_called"] is False
+
+
+@pytest.mark.parametrize("mode", ["bugs", "feature", "target"])
+def test_improve_legacy_flag_does_not_require_intent(
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--legacy`` should report the migration error before reading intent."""
+
+    def fail_require_intent(*_args, **_kwargs):
+        raise AssertionError("legacy path should not resolve intent")
+
+    monkeypatch.setattr("otto.cli_improve._require_intent", fail_require_intent)
+
+    result = CliRunner().invoke(
+        main,
+        ["improve", mode, "--legacy"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1

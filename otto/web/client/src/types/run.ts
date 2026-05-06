@@ -180,6 +180,7 @@ export type RunStatus =
   | "blocked"
   | "partial"
   | "passed"
+  | "interrupted"
   | "aborted"
   | "failed";
 

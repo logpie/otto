@@ -11,7 +11,7 @@
 // R2-B10 / R2-B11: route-aware "← Back to runs" affordance.
 // R2-B31: 404 page reuses this shell so it doesn't feel orphaned.
 
-import type { MouseEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 interface Props {
   children: ReactNode;
@@ -46,11 +46,6 @@ export function AppShell({
   onSwitchProject,
 }: Props) {
   const canSwitchProject = launcherEnabled && onSwitchProject;
-  const onBrandClick = (event: MouseEvent<HTMLAnchorElement>) => {
-    if (!canSwitchProject) return;
-    event.preventDefault();
-    onSwitchProject();
-  };
   const projectControl = projectName ? (
     canSwitchProject ? (
       <button
@@ -88,8 +83,7 @@ export function AppShell({
           <a
             className="otto-app-shell-brand-link"
             href="/"
-            aria-label={canSwitchProject ? "Otto Mission Control — open project launcher" : "Otto Mission Control — back to runs"}
-            onClick={onBrandClick}
+            aria-label="Otto Mission Control — project home"
           >
             Otto Mission Control
           </a>

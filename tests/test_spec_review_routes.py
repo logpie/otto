@@ -85,6 +85,24 @@ def test_get_markdown_returns_view(
     assert "<!-- feature: md-render" in body["markdown"]
 
 
+def test_get_markdown_resolves_queue_worktree_session(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-203000-worktree"
+    sd = project / ".worktrees" / "build-task" / "otto_logs" / "sessions" / sid / "spec"
+    sd.mkdir(parents=True)
+    spec = _make_spec()
+    (sd / "spec.json").write_text(json.dumps(spec_to_dict(spec)))
+    (sd / "spec.md").write_text(render_spec_md(spec))
+
+    client = _client(project)
+    resp = client.get(f"/api/specs/{sid}/markdown")
+    assert resp.status_code == 200
+    assert resp.json()["intent_hash"] == spec.intent_hash
+    journal = sd.parent / "spec-state.jsonl"
+    assert journal.exists()
+    assert "spec.review.opened" in journal.read_text()
+
+
 def test_get_markdown_404_for_missing_session(tmp_path: Path) -> None:
     project = tmp_path / "proj"
     project.mkdir()

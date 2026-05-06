@@ -6,7 +6,7 @@ import {ProjectOverview} from "../overview/Overview";
 import {RunViewPage} from "../run/RunViewPage";
 import {defaultFilters} from "../../uiTypes";
 import type {BoardTask} from "../../uiTypes";
-import type {ProjectInfo, StateResponse} from "../../types";
+import type {AutopilotDecision, AutopilotIncident, ProjectInfo, StateResponse} from "../../types";
 import {errorMessage, refreshIntervalMs} from "../../utils/missionControl";
 
 interface Props {
@@ -19,6 +19,7 @@ export function ProjectWorkspace({project}: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [jobOpen, setJobOpen] = useState(false);
   const [banner, setBanner] = useState<{kind: "info" | "error"; message: string} | null>(null);
+  const [recoveryPending, setRecoveryPending] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedQueuedTask, setSelectedQueuedTask] = useState<BoardTask | null>(null);
 
@@ -92,6 +93,25 @@ export function ProjectWorkspace({project}: Props) {
     });
   }, []);
 
+  const approveRecovery = useCallback(async (decisionId: string) => {
+    setRecoveryPending(decisionId);
+    try {
+      const body = await api<{message?: string; status?: string}>(
+        `/api/autopilot/decisions/${encodeURIComponent(decisionId)}/approve`,
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        },
+      );
+      setBanner({kind: "info", message: body.message || `Recovery ${body.status || "approved"}.`});
+      await refresh();
+    } catch (error) {
+      setBanner({kind: "error", message: `Could not approve recovery: ${errorMessage(error)}.`});
+    } finally {
+      setRecoveryPending(null);
+    }
+  }, [refresh]);
+
   const currentProject = data?.project || project || null;
   const projectName = currentProject?.name || currentProject?.path || "Project";
   const branch = currentProject?.branch || "main";
@@ -146,6 +166,15 @@ export function ProjectWorkspace({project}: Props) {
         >
           {banner.message}
         </div>
+      ) : null}
+
+      {data ? (
+        <RecoveryPrompt
+          decisions={data.autopilot?.pending_decisions || []}
+          incidents={data.autopilot?.incidents || []}
+          pendingDecisionId={recoveryPending}
+          onApprove={approveRecovery}
+        />
       ) : null}
 
       {stateError && !data ? (
@@ -205,6 +234,65 @@ export function ProjectWorkspace({project}: Props) {
       ) : null}
     </div>
   );
+}
+
+function RecoveryPrompt({
+  decisions,
+  incidents,
+  pendingDecisionId,
+  onApprove,
+}: {
+  decisions: AutopilotDecision[];
+  incidents: AutopilotIncident[];
+  pendingDecisionId: string | null;
+  onApprove: (decisionId: string) => void;
+}) {
+  const decision = decisions.find((item) => item.status === "pending") || decisions[0] || null;
+  const incident = incidents[0] || null;
+  if (!decision && !incident) return null;
+  const planSteps = decision?.plan_steps || [];
+  const pending = decision ? pendingDecisionId === decision.id : false;
+  return (
+    <section className="workspace-recovery" data-testid="workspace-recovery" aria-labelledby="workspaceRecoveryHeading">
+      <div>
+        <span className="workspace-recovery-kicker">Needs action</span>
+        <h2 id="workspaceRecoveryHeading">
+          {decision?.title || incident?.title || "Recovery available"}
+        </h2>
+        <p>{decision?.rationale || decision?.reason || incident?.detail || "Mission Control found recoverable work."}</p>
+        {planSteps.length ? (
+          <ol>
+            {planSteps.map((step, index) => (
+              <li key={`${step.action}-${index}`}>
+                <strong>{step.label}</strong>
+                {step.detail ? <span>{step.detail}</span> : null}
+              </li>
+            ))}
+          </ol>
+        ) : null}
+      </div>
+      {decision?.status === "pending" ? (
+        <button
+          type="button"
+          className="primary"
+          data-testid="workspace-recovery-approve"
+          onClick={() => onApprove(decision.id)}
+          disabled={pending}
+        >
+          {pending ? "Approving..." : recoveryActionLabel(decision)}
+        </button>
+      ) : decision ? (
+        <span className="workspace-recovery-status">{decision.status}</span>
+      ) : null}
+    </section>
+  );
+}
+
+function recoveryActionLabel(decision: AutopilotDecision): string {
+  if ((decision.plan_steps || []).length > 1) return "Approve recovery plan";
+  if (decision.action === "requeue") return "Requeue task";
+  if (decision.action === "start_watcher") return "Start queue runner";
+  return decision.action_label || "Approve recovery";
 }
 
 function RunDetailOverlay({sessionId, onClose}: {sessionId: string; onClose: () => void}) {
