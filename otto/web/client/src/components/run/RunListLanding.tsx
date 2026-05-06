@@ -18,20 +18,25 @@
 //     idle landing isn't burning network.
 //   - "Built in N groups" subline per card (backend now returns
 //     `group_count`).
-//   - "+ New run" primary button opens a modal that displays the
-//     `otto build "<intent>"` CLI invocation. Otto runs are CLI-driven
-//     today; the modal bridges the web UI to the CLI without faking a
-//     non-existent backend endpoint.
+//   - "+ New run" primary button opens the real JobDialog and enqueues
+//     work through `/api/queue/{command}`. Mission Control Web is the
+//     primary product surface; it must not ask users to copy CLI commands
+//     for the normal build flow.
 //   - "3 sessions" badge has its own row with proper spacing; intent
 //     and metric rows now use distinct typographic weights.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MouseEvent } from "react";
+import { api } from "../../api";
+import { JobDialog } from "../new-job/JobDialog";
 import { RunViewPage } from "./RunViewPage";
+import type { StateResponse } from "../../types";
+import { errorMessage } from "../../utils/missionControl";
 
 interface Props {
   // Optional override for tests. Defaults to /api/run-view.
   endpoint?: string;
+  project?: StateResponse["project"] | undefined;
 }
 
 interface SessionSummary {
@@ -312,123 +317,6 @@ function RunDetailOverlay({
   );
 }
 
-// R3-B8: the "+ New run" modal. Otto runs are CLI-driven; rather than
-// stub a fake POST endpoint that doesn't exist, we display the exact
-// `otto build` invocation the user should paste into their terminal.
-// One-click "Copy" lands the command on the clipboard. Honest UX.
-function NewRunModal({ onClose }: { onClose: () => void }) {
-  const [intent, setIntent] = useState("");
-  const [copied, setCopied] = useState<"idle" | "ok" | "err">("idle");
-  const inputRef = useRef<HTMLTextAreaElement | null>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
-
-  // Esc closes; mirrors ConfirmDialog conventions elsewhere in MC.
-  useEffect(() => {
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  // Shell-quote the intent: wrap in single quotes, escape any single
-  // quotes inside via the standard `'\''` trick. Safer than double
-  // quotes which would expand `$VAR` and backticks.
-  const quoted = useMemo(() => {
-    const escaped = intent.replace(/'/g, "'\\''");
-    return `'${escaped}'`;
-  }, [intent]);
-  const command = intent.trim()
-    ? `otto build ${quoted}`
-    : `otto build '<your intent here>'`;
-
-  const handleCopy = async () => {
-    if (!intent.trim()) {
-      setCopied("err");
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopied("ok");
-      setTimeout(() => setCopied("idle"), 2000);
-    } catch {
-      setCopied("err");
-    }
-  };
-
-  return (
-    <div
-      className="landing-modal-backdrop"
-      data-testid="landing-new-run-backdrop"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        className="landing-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="landing-new-run-title"
-        data-testid="landing-new-run-modal"
-      >
-        <h2 id="landing-new-run-title" className="landing-modal-title">
-          Start a new run
-        </h2>
-        <p className="landing-modal-body">
-          Otto runs are launched from the CLI. Paste your intent below
-          and copy the generated command into a terminal.
-        </p>
-        <label className="landing-modal-label" htmlFor="landing-new-run-intent">
-          Intent
-        </label>
-        <textarea
-          id="landing-new-run-intent"
-          ref={inputRef}
-          className="landing-modal-textarea"
-          rows={4}
-          value={intent}
-          onChange={(e) => setIntent(e.target.value)}
-          placeholder="e.g. Build a Microfeed clone with Stripe checkout."
-        />
-        <div className="landing-modal-command-block">
-          <code
-            className="landing-modal-command"
-            data-testid="landing-new-run-command"
-          >
-            {command}
-          </code>
-        </div>
-        <div className="landing-modal-actions">
-          <button
-            type="button"
-            className="landing-modal-button"
-            onClick={onClose}
-          >
-            Close
-          </button>
-          <button
-            type="button"
-            className="landing-modal-button landing-modal-button-primary"
-            onClick={handleCopy}
-            disabled={!intent.trim()}
-            data-testid="landing-new-run-copy"
-          >
-            {copied === "ok" ? "Copied ✓" : "Copy command"}
-          </button>
-        </div>
-        {copied === "err" && (
-          <p className="landing-modal-error" role="alert">
-            Couldn’t access the clipboard — copy manually.
-          </p>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function matchFilter(s: SessionSummary, f: StatusFilter): boolean {
   if (f === "all") return true;
   const v = (s.verdict || "").toLowerCase();
@@ -454,15 +342,17 @@ function writeFilterParam(f: StatusFilter): void {
   const url = new URL(window.location.href);
   if (f === "all") url.searchParams.delete("lf");
   else url.searchParams.set("lf", f);
-  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  window.history.replaceState(window.history.state ?? {}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
-export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
+export function RunListLanding({ endpoint = "/api/run-view", project }: Props) {
   const [payload, setPayload] = useState<ListResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<StatusFilter>(() => readInitialFilter());
   const [refreshing, setRefreshing] = useState(false);
   const [showNewRun, setShowNewRun] = useState(false);
+  const [queueMessage, setQueueMessage] = useState<string | null>(null);
+  const [queueMessageKind, setQueueMessageKind] = useState<"info" | "error">("info");
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   // R3-B9 auto-refresh: bumped each time a poll completes so dependents
   // (the auto-refresh effect) can re-trigger without re-fetching from
@@ -549,10 +439,43 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
     void fetchSessions();
   };
   const openSession = useCallback((sessionId: string) => {
+    window.history.pushState({...window.history.state, runDrawer: sessionId}, "", window.location.href);
     setSelectedSessionId(sessionId);
   }, []);
   const closeSession = useCallback(() => {
+    if (window.history.state?.runDrawer) {
+      window.history.back();
+      return;
+    }
     setSelectedSessionId(null);
+  }, []);
+  useEffect(() => {
+    const onPop = () => setSelectedSessionId(null);
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const handleQueued = useCallback(async (message?: string) => {
+    setShowNewRun(false);
+    const queuedMessage = message || "Job queued.";
+    setQueueMessageKind("info");
+    setQueueMessage(queuedMessage);
+    try {
+      const started = await api<{message?: string}>("/api/watcher/start", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setQueueMessage(`${queuedMessage} ${started.message || "Queue runner started."}`);
+    } catch (error) {
+      setQueueMessageKind("error");
+      setQueueMessage(`${queuedMessage} Could not start queue runner: ${errorMessage(error)}.`);
+    }
+    await fetchSessions();
+  }, [fetchSessions]);
+
+  const handleQueueError = useCallback((message: string) => {
+    setQueueMessageKind("error");
+    setQueueMessage(message);
   }, []);
 
   if (error) {
@@ -636,11 +559,20 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
           </div>
         </div>
       </header>
+      {queueMessage ? (
+        <div
+          className={`run-list-queue-banner run-list-queue-banner--${queueMessageKind}`}
+          data-testid="run-list-queue-banner"
+          role={queueMessageKind === "error" ? "alert" : "status"}
+        >
+          {queueMessage}
+        </div>
+      ) : null}
       {sessions.length === 0 ? (
         <div className="run-list-landing-empty-body" data-testid="run-list-empty">
           <p>
-            No sessions yet. Click <strong>+ New run</strong> above, or run{" "}
-            <code>otto build</code> in your terminal to create one.
+            No sessions yet. Click <strong>+ New run</strong> above to queue
+            work from Mission Control.
           </p>
         </div>
       ) : filteredSessions.length === 0 ? (
@@ -663,7 +595,16 @@ export function RunListLanding({ endpoint = "/api/run-view" }: Props) {
           ))}
         </div>
       )}
-      {showNewRun && <NewRunModal onClose={() => setShowNewRun(false)} />}
+      {showNewRun && (
+        <JobDialog
+          project={project}
+          dirtyFiles={[]}
+          priorRunOptions={[]}
+          onClose={() => setShowNewRun(false)}
+          onQueued={handleQueued}
+          onError={handleQueueError}
+        />
+      )}
       {selectedSessionId ? (
         <RunDetailOverlay sessionId={selectedSessionId} onClose={closeSession} />
       ) : null}

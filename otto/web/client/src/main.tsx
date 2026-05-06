@@ -7,7 +7,7 @@ import {RunListLanding} from "./components/run/RunListLanding";
 import {RunViewPage} from "./components/run/RunViewPage";
 import {SpecDiffPage} from "./components/spec/SpecDiffPage";
 import {SpecReviewPage} from "./components/spec/SpecReviewPage";
-import type {ProjectsResponse} from "./types";
+import type {ProjectInfo, ProjectMutationResponse, ProjectsResponse} from "./types";
 import "./styles.css";
 
 const root = document.querySelector("#root");
@@ -29,6 +29,7 @@ interface ShellRouteProps {
   projectName?: string | null;
   projectBranch?: string | null;
   projectDirty?: boolean;
+  project?: ProjectInfo | null;
   launcherEnabled?: boolean;
   onSwitchProject?: () => void;
 }
@@ -86,7 +87,7 @@ function renderRoute(shellProps: ShellRouteProps = {}) {
   }
   return (
     <AppShell {...shellProps}>
-      <RunListLanding />
+      <RunListLanding project={shellProps.project ?? undefined} />
     </AppShell>
   );
 }
@@ -114,30 +115,41 @@ function RootRouter() {
   }, [refreshProjects]);
 
   async function createProject(name: string) {
-    await api("/api/projects/create", {
+    const body = await api<ProjectMutationResponse>("/api/projects/create", {
       method: "POST",
       body: JSON.stringify({name}),
     });
     window.history.replaceState({}, "", "/");
-    await refreshProjects();
+    applyProjectMutation(body);
   }
 
   async function selectProject(path: string) {
-    await api("/api/projects/select", {
+    const body = await api<ProjectMutationResponse>("/api/projects/select?include_projects=false", {
       method: "POST",
       body: JSON.stringify({path}),
     });
     window.history.replaceState({}, "", "/");
-    await refreshProjects();
+    applyProjectMutation(body);
   }
 
   async function switchProject() {
-    await api("/api/projects/clear", {
+    const body = await api<ProjectMutationResponse>("/api/projects/clear?include_projects=false", {
       method: "POST",
       body: JSON.stringify({}),
     });
     window.history.replaceState({}, "", "/");
-    await refreshProjects();
+    applyProjectMutation(body);
+  }
+
+  function applyProjectMutation(body: ProjectMutationResponse) {
+    setProjectsState((previous) => {
+      if (previous === null) return previous;
+      return {
+        ...previous,
+        current: body.project ?? body.current ?? null,
+        projects: body.projects ?? previous.projects,
+      };
+    });
   }
 
   if (projectsState === null) {
@@ -168,6 +180,7 @@ function RootRouter() {
     projectName: projectsState.current?.name ?? null,
     projectBranch: projectsState.current?.branch ?? null,
     projectDirty: Boolean(projectsState.current?.dirty),
+    project: projectsState.current,
     launcherEnabled: projectsState.launcher_enabled,
     onSwitchProject: switchProject,
   });

@@ -8812,6 +8812,29 @@ mark.log-search-match.active {
   opacity: 0.6;
   cursor: progress;
 }
+
+.run-list-queue-banner {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #cbd5e1);
+  border-radius: 8px;
+  background: var(--surface-alt, #f8fafc);
+  color: var(--muted, #475569);
+  font-size: var(--text-sm, 14px);
+}
+
+.run-list-queue-banner--info {
+  border-color: rgba(15, 118, 110, 0.24);
+  background: rgba(15, 118, 110, 0.08);
+  color: var(--accent-strong, #0f766e);
+}
+
+.run-list-queue-banner--error {
+  border-color: rgba(185, 28, 28, 0.24);
+  background: rgba(185, 28, 28, 0.08);
+  color: var(--red, #b91c1c);
+}
+
 /* "Live" dot — pulses when auto-refresh is active. */
 .run-list-landing-live-dot {
   color: var(--green, #15803d);

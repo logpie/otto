@@ -84,6 +84,32 @@ def test_web_project_launcher_can_clear_selected_project(tmp_path: Path) -> None
     assert "No project selected" in state.json()["message"]
 
 
+def test_project_mutations_can_skip_full_project_list_scan(tmp_path: Path) -> None:
+    host = tmp_path / "host"
+    projects_root = tmp_path / "managed"
+    _init_repo(host)
+
+    client = _client(host, project_launcher=True, projects_root=projects_root)
+    created = client.post("/api/projects/create", json={"name": "Expense Approval Portal"}).json()
+    project_path = created["project"]["path"]
+
+    selected = client.post(
+        "/api/projects/select?include_projects=false",
+        json={"path": project_path},
+    )
+    assert selected.status_code == 200
+    selected_payload = selected.json()
+    assert selected_payload["project"]["path"] == project_path
+    assert selected_payload["current"]["path"] == project_path
+    assert "projects" not in selected_payload
+
+    cleared = client.post("/api/projects/clear?include_projects=false", json={})
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["current"] is None
+    assert "projects" not in cleared_payload
+
+
 def test_web_project_launcher_rejects_selection_outside_managed_root(tmp_path: Path) -> None:
     host = tmp_path / "host"
     outside = tmp_path / "outside"

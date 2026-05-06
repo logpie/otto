@@ -121,7 +121,7 @@ export interface ProjectMutationResponse {
   ok: boolean;
   project?: ProjectInfo;
   current?: ProjectInfo | null;
-  projects: ManagedProjectInfo[];
+  projects?: ManagedProjectInfo[];
 }
 
 export interface WatcherInfo {

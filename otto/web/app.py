@@ -191,7 +191,10 @@ def create_app(
         return {"ok": True, "project": _set_project(path), "projects": _managed_projects(root)}
 
     @app.post("/api/projects/select")
-    def select_project(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    def select_project(
+        payload: dict[str, Any] = Body(default_factory=dict),
+        include_projects: bool = True,
+    ) -> dict[str, Any]:
         root = app.state.projects_root
         raw_path = str(payload.get("path") or "").strip()
         if not raw_path:
@@ -199,13 +202,20 @@ def create_app(
         path = Path(raw_path).expanduser().resolve(strict=False)
         if not _is_relative_to(path, root):
             raise MissionControlServiceError(f"Managed projects must live under {root}", status_code=403)
-        return {"ok": True, "project": _set_project(path), "projects": _managed_projects(root)}
+        selected = _set_project(path)
+        payload_out: dict[str, Any] = {"ok": True, "project": selected, "current": selected}
+        if include_projects:
+            payload_out["projects"] = _managed_projects(root)
+        return payload_out
 
     @app.post("/api/projects/clear")
-    def clear_project() -> dict[str, Any]:
+    def clear_project(include_projects: bool = True) -> dict[str, Any]:
         app.state.project_dir = None
         app.state.service = None
-        return {"ok": True, "current": None, "projects": _managed_projects(app.state.projects_root)}
+        payload_out: dict[str, Any] = {"ok": True, "current": None}
+        if include_projects:
+            payload_out["projects"] = _managed_projects(app.state.projects_root)
+        return payload_out
 
     @app.get("/api/state")
     def state(

@@ -100,9 +100,11 @@ def test_selecting_project_allows_run_list_to_load(
     page.set_viewport_size({"width": 1440, "height": 900})
     selected = {"value": False}
     run_view_calls = {"count": 0}
+    project_get_calls = {"count": 0}
     project = _project()
 
     def projects(route: Any) -> None:
+        project_get_calls["count"] += 1
         route.fulfill(
             status=200,
             content_type="application/json",
@@ -117,19 +119,21 @@ def test_selecting_project_allows_run_list_to_load(
         )
 
     def select_project(route: Any) -> None:
+        assert "include_projects=false" in route.request.url
         selected["value"] = True
         route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps({"ok": True, "project": project, "projects": [project]}),
+            body=json.dumps({"ok": True, "project": project, "current": project}),
         )
 
     def clear_project(route: Any) -> None:
+        assert "include_projects=false" in route.request.url
         selected["value"] = False
         route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps({"ok": True, "current": None, "projects": [project]}),
+            body=json.dumps({"ok": True, "current": None}),
         )
 
     def run_view(route: Any) -> None:
@@ -140,8 +144,8 @@ def test_selecting_project_allows_run_list_to_load(
             body=json.dumps({"runs": [], "sessions": []}),
         )
 
-    page.route("**/api/projects/clear", clear_project)
-    page.route("**/api/projects/select", select_project)
+    page.route("**/api/projects/clear**", clear_project)
+    page.route("**/api/projects/select**", select_project)
     page.route("**/api/projects", projects)
     page.route("**/api/run-view", run_view)
 
@@ -180,6 +184,8 @@ def test_selecting_project_allows_run_list_to_load(
 
     assert selected["value"] is False
     assert page.get_by_text("Open a project").is_visible()
+    assert run_view_calls["count"] >= 1
+    assert project_get_calls["count"] == 1
 
 
 def test_selected_project_brand_returns_to_launcher(
@@ -220,7 +226,7 @@ def test_selected_project_brand_returns_to_launcher(
             body=json.dumps({"runs": [], "sessions": []}),
         )
 
-    page.route("**/api/projects/clear", clear_project)
+    page.route("**/api/projects/clear**", clear_project)
     page.route("**/api/projects", projects)
     page.route("**/api/run-view", run_view)
 
@@ -311,8 +317,101 @@ def test_run_card_opens_side_drawer_without_route_navigation(
     assert page.get_by_test_id("run-drawer").is_visible()
     assert page.get_by_test_id("run-list").is_visible()
 
+    page.go_back()
+    page.get_by_test_id("run-list-detail-drawer").wait_for(state="detached", timeout=10_000)
+    assert page.get_by_test_id("run-list").is_visible()
+
+    page.get_by_test_id("landing-card").click()
+    page.wait_for_selector('[data-testid="run-list-detail-drawer"]', timeout=10_000)
+    page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
     page.get_by_test_id("run-list-detail-drawer-close").click()
     page.get_by_test_id("run-list-detail-drawer").wait_for(state="detached", timeout=10_000)
+
+
+def test_new_run_queues_from_web_and_starts_runner(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """The primary web surface queues real work; it must not emit CLI-copy UX."""
+
+    project = _project()
+    queue_posts: list[dict[str, Any]] = []
+    watcher_starts = {"count": 0}
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def run_list(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"runs": [], "sessions": []}),
+        )
+
+    def queue_build(route: Any) -> None:
+        queue_posts.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "ok": True,
+                    "message": "queued build",
+                    "task": {"id": "build-social-feed"},
+                    "warnings": [],
+                    "refresh": True,
+                }
+            ),
+        )
+
+    def watcher_start(route: Any) -> None:
+        watcher_starts["count"] += 1
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"ok": True, "message": "watcher started", "refresh": True}),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/run-view", run_list)
+    page.route("**/api/queue/build", queue_build)
+    page.route("**/api/watcher/start", watcher_start)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.wait_for_selector('[data-testid="run-list-empty"]', timeout=10_000)
+
+    page.get_by_test_id("landing-new-run-button").click()
+    page.wait_for_selector('[data-testid="job-dialog-submit-button"]', timeout=10_000)
+
+    assert page.get_by_text("Copy command").count() == 0
+    assert page.get_by_text("Otto runs are launched from the CLI").count() == 0
+
+    page.get_by_test_id("job-dialog-intent").fill(
+        "build a webapp like a micro twitter with social and post features"
+    )
+    page.wait_for_function(
+        "() => document.querySelector('[data-testid=job-dialog-submit-button]')?.disabled === false",
+        timeout=5_000,
+    )
+    page.get_by_test_id("job-dialog-submit-button").click()
+    page.wait_for_selector('[data-testid="job-grace-banner"]', timeout=10_000)
+    page.wait_for_timeout(3_600)
+
+    assert len(queue_posts) == 1
+    assert queue_posts[0]["intent"].startswith("build a webapp")
+    assert watcher_starts["count"] == 1
+    assert page.get_by_test_id("run-list-queue-banner").is_visible()
 
 
 def test_missing_run_deep_link_error_is_near_top(
