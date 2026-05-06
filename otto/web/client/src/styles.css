@@ -9857,6 +9857,76 @@ mark.log-search-match.active {
   color: var(--border, #cbd5e1);
 }
 
+.otto-app-shell-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.otto-app-shell-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: min(46vw, 560px);
+  padding: 6px 10px;
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+button.otto-app-shell-project {
+  cursor: pointer;
+}
+
+button.otto-app-shell-project:hover,
+button.otto-app-shell-project:focus-visible {
+  border-color: var(--accent, #0f766e);
+  background: var(--surface-alt, rgba(15, 118, 110, 0.08));
+  outline: none;
+}
+
+.otto-app-shell-project-static {
+  cursor: default;
+}
+
+.otto-app-shell-project-prefix,
+.otto-app-shell-project-branch {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.otto-app-shell-project-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.otto-app-shell-project-dirty {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--warning, #b45309);
+}
+
+.otto-app-shell-project-chevron {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg) translateY(-2px);
+}
+
 .otto-app-shell-back-link {
   font-size: 14px;
   font-weight: 600;
@@ -9965,6 +10035,13 @@ mark.log-search-match.active {
   .otto-app-shell-topbar {
     gap: 12px;
     padding: 10px 16px;
+  }
+  .otto-app-shell-project {
+    max-width: 42vw;
+  }
+  .otto-app-shell-project-prefix,
+  .otto-app-shell-project-branch {
+    display: none;
   }
   .otto-app-shell-main {
     padding-inline: 16px;

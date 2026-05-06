@@ -27,6 +27,11 @@ interface Props {
   // user can hover to recover the full id without selecting / copying
   // from the URL bar. Omit to fall back to `pageLabel` itself.
   pageLabelTitle?: string | null;
+  projectName?: string | null;
+  projectBranch?: string | null;
+  projectDirty?: boolean;
+  launcherEnabled?: boolean;
+  onSwitchProject?: () => void;
 }
 
 export function AppShell({
@@ -34,7 +39,43 @@ export function AppShell({
   showBackToRuns = false,
   pageLabel = null,
   pageLabelTitle = null,
+  projectName = null,
+  projectBranch = null,
+  projectDirty = false,
+  launcherEnabled = false,
+  onSwitchProject,
 }: Props) {
+  const canSwitchProject = launcherEnabled && onSwitchProject;
+  const projectControl = projectName ? (
+    canSwitchProject ? (
+      <button
+        type="button"
+        className="otto-app-shell-project"
+        data-testid="switch-project-button"
+        aria-label="Open project launcher"
+        title="Open project launcher"
+        onClick={onSwitchProject}
+      >
+        <span className="otto-app-shell-project-prefix">Projects</span>
+        <span className="otto-app-shell-project-name">{projectName}</span>
+        {projectBranch ? (
+          <span className="otto-app-shell-project-branch">{projectBranch}</span>
+        ) : null}
+        {projectDirty ? (
+          <span className="otto-app-shell-project-dirty" title="Local changes" aria-label="Local changes" />
+        ) : null}
+        <span className="otto-app-shell-project-chevron" aria-hidden />
+      </button>
+    ) : (
+      <span className="otto-app-shell-project otto-app-shell-project-static">
+        <span className="otto-app-shell-project-name">{projectName}</span>
+        {projectBranch ? (
+          <span className="otto-app-shell-project-branch">{projectBranch}</span>
+        ) : null}
+      </span>
+    )
+  ) : null;
+
   return (
     <div className="otto-app-shell" data-testid="otto-app-shell">
       <header className="otto-app-shell-topbar" data-testid="otto-app-shell-topbar">
@@ -59,15 +100,18 @@ export function AppShell({
             </span>
           ) : null}
         </div>
-        {showBackToRuns ? (
-          <a
-            className="otto-app-shell-back-link"
-            href="/"
-            data-testid="otto-app-shell-back-to-runs"
-          >
-            ← Back to runs
-          </a>
-        ) : null}
+        <div className="otto-app-shell-actions">
+          {projectControl}
+          {showBackToRuns ? (
+            <a
+              className="otto-app-shell-back-link"
+              href="/"
+              data-testid="otto-app-shell-back-to-runs"
+            >
+              ← Back to runs
+            </a>
+          ) : null}
+        </div>
       </header>
       <main className="otto-app-shell-main" data-testid="otto-app-shell-main">
         {children}

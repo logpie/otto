@@ -95,6 +95,14 @@ def test_selecting_project_allows_run_list_to_load(
             body=json.dumps({"ok": True, "project": project, "projects": [project]}),
         )
 
+    def clear_project(route: Any) -> None:
+        selected["value"] = False
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"ok": True, "current": None, "projects": [project]}),
+        )
+
     def run_view(route: Any) -> None:
         run_view_calls["count"] += 1
         route.fulfill(
@@ -103,6 +111,7 @@ def test_selecting_project_allows_run_list_to_load(
             body=json.dumps({"runs": [], "sessions": []}),
         )
 
+    page.route("**/api/projects/clear", clear_project)
     page.route("**/api/projects/select", select_project)
     page.route("**/api/projects", projects)
     page.route("**/api/run-view", run_view)
@@ -114,3 +123,11 @@ def test_selecting_project_allows_run_list_to_load(
     assert selected["value"] is True
     assert run_view_calls["count"] >= 1
     assert page.get_by_text("Failed to load sessions").count() == 0
+    assert page.get_by_test_id("switch-project-button").is_visible()
+    assert page.get_by_text("existing-app").first.is_visible()
+
+    page.get_by_test_id("switch-project-button").click()
+    page.wait_for_selector('[data-testid="launcher-empty-state"], .project-row', timeout=10_000)
+
+    assert selected["value"] is False
+    assert page.get_by_text("Open a project").is_visible()

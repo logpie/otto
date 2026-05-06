@@ -25,10 +25,13 @@ if (!root) {
 //   ?view=run-view&session=<session_id>      → <RunViewPage/>
 //   ?view=spec-review&spec=<spec_id>         → <SpecReviewPage/>
 //   ?view=spec-diff&session=<session_id>     → <SpecDiffPage/> (wireframe 4d)
-const params = new URLSearchParams(window.location.search);
-const view = params.get("view");
-const sessionId = params.get("session");
-const specId = params.get("spec");
+interface ShellRouteProps {
+  projectName?: string | null;
+  projectBranch?: string | null;
+  projectDirty?: boolean;
+  launcherEnabled?: boolean;
+  onSwitchProject?: () => void;
+}
 
 // Cluster A (R2-B6/B9/B10/B11/B20/B30/B31): every top-level route is
 // wrapped in <AppShell/> so the topbar branding, "Back to runs"
@@ -36,13 +39,19 @@ const specId = params.get("spec");
 // consistent across landing, run-view, spec-review, spec-diff, and
 // the 404 fallback. Without the shell each route felt like a
 // disconnected fragment.
-function renderRoute() {
+function renderRoute(shellProps: ShellRouteProps = {}) {
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get("view");
+  const sessionId = params.get("session");
+  const specId = params.get("spec");
+
   if (view === "run-view" && sessionId) {
     // R3-B25: pass the full session id as the tooltip target so users
     // can hover the truncated "...abc123" label and recover the full id
     // without copying from the URL bar.
     return (
       <AppShell
+        {...shellProps}
         showBackToRuns
         pageLabel={`Run detail · ${shortSession(sessionId)}`}
         pageLabelTitle={`Run detail · ${sessionId}`}
@@ -54,6 +63,7 @@ function renderRoute() {
   if (view === "spec-review" && specId) {
     return (
       <AppShell
+        {...shellProps}
         showBackToRuns
         pageLabel="Spec review"
         pageLabelTitle={`Spec review · ${specId}`}
@@ -65,6 +75,7 @@ function renderRoute() {
   if (view === "spec-diff" && sessionId) {
     return (
       <AppShell
+        {...shellProps}
         showBackToRuns
         pageLabel="Spec diff"
         pageLabelTitle={`Spec diff · ${sessionId}`}
@@ -74,7 +85,7 @@ function renderRoute() {
     );
   }
   return (
-    <AppShell>
+    <AppShell {...shellProps}>
       <RunListLanding />
     </AppShell>
   );
@@ -107,6 +118,7 @@ function RootRouter() {
       method: "POST",
       body: JSON.stringify({name}),
     });
+    window.history.replaceState({}, "", "/");
     await refreshProjects();
   }
 
@@ -115,6 +127,16 @@ function RootRouter() {
       method: "POST",
       body: JSON.stringify({path}),
     });
+    window.history.replaceState({}, "", "/");
+    await refreshProjects();
+  }
+
+  async function switchProject() {
+    await api("/api/projects/clear", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    window.history.replaceState({}, "", "/");
     await refreshProjects();
   }
 
@@ -142,7 +164,13 @@ function RootRouter() {
     );
   }
 
-  return renderRoute();
+  return renderRoute({
+    projectName: projectsState.current?.name ?? null,
+    projectBranch: projectsState.current?.branch ?? null,
+    projectDirty: Boolean(projectsState.current?.dirty),
+    launcherEnabled: projectsState.launcher_enabled,
+    onSwitchProject: switchProject,
+  });
 }
 
 // Truncate session ids in the page-label so the topbar reads cleanly
