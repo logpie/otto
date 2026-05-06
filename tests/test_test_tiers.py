@@ -21,12 +21,15 @@ def test_web_tier_typechecks_before_pytest() -> None:
 
     assert commands[0] == ["npm", "run", "web:typecheck"]
     assert {
-        "tests/test_web_mission_control.py",
+        "tests/test_run_view.py",
+        "tests/test_run_view_evidence_kinds.py",
+        "tests/test_run_view_routes.py",
+        "tests/test_run_view_severity.py",
+        "tests/test_spec_review_routes.py",
         "tests/test_web_events_history.py",
-        "tests/test_web_landing.py",
+        "tests/test_web_i2p_routes.py",
         "tests/test_web_project_launcher.py",
         "tests/test_web_queue_actions.py",
-        "tests/test_web_review_packet.py",
         "tests/test_web_watcher_controls.py",
         "tests/test_mission_control_adapters.py",
         "tests/test_mission_control_model.py",
