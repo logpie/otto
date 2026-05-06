@@ -201,6 +201,7 @@ class AuditAgentInput:
     walkthrough_jsonl_path: Path | None = None
     feature_scope_ids: tuple[str, ...] = ()
     config: dict[str, Any] = field(default_factory=dict)
+    judge_timeout_s: int | None = None
 
 
 @dataclass
@@ -1002,6 +1003,7 @@ async def run_audit(
             walkthrough_jsonl_path=walk_log_dir / "walkthrough.jsonl",
             feature_scope_ids=scoped_feature_ids,
             config=config,
+            judge_timeout_s=budget.judge_timeout_s,
         )
         # C1 fix: bail out before invoking the audit agent if the
         # shared cost pool is exhausted. Prevents an audit retry
@@ -1786,7 +1788,8 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     lines.append(
         "     - **2/5 = broken UX**: things work but UX is wrong — "
         "missing labels, no error states, controls hidden where users "
-        "won't find them."
+        "won't find them, horizontal page overflow on normal mobile "
+        "viewports, or clipped primary controls."
     )
     lines.append(
         "     - **3/5 = MVP**: this is the DEFAULT for a project that "
@@ -1827,6 +1830,15 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "into a single section instead of three sections at top of "
         "home\"). Empty list is NOT acceptable for a real product — if "
         "you can't find ANY improvement, you're not looking hard enough."
+    )
+    lines.append("")
+    lines.append(
+        "     **Severity consistency rule**: if any standard desktop or "
+        "mobile viewport has horizontal overflow, clipped primary controls, "
+        "overlapping text, or a hidden/unreachable primary action, the "
+        "quality_score MUST be 2 or lower and the affected Feature MUST be "
+        "marked partial or blocked. Do not bury a severe product-quality "
+        "failure only in `quality_findings` or an untagged exploration row."
     )
     lines.append("")
     lines.append("Quality criteria by project_kind (use as a checklist):")
@@ -1876,10 +1888,45 @@ _VERDICT_RANK = {
     AuditVerdict.BLOCKED: 2,
 }
 
+_SEVERE_QUALITY_FINDING_TERMS = (
+    "horizontal overflow",
+    "overflows horizontally",
+    "scrollwidth",
+    "clipped",
+    "primary action hidden",
+    "primary actions hidden",
+    "can't complete primary action",
+    "cannot complete primary action",
+    "broken layout",
+    "overlapping text",
+    "unusable",
+)
+
+_QUALITY_NEGATION_TERMS = (
+    "no horizontal overflow",
+    "without horizontal overflow",
+    "not clipped",
+    "no clipped",
+    "no broken layout",
+    "no overlapping text",
+)
+
 
 def _strictest(a: AuditVerdict, b: AuditVerdict) -> AuditVerdict:
     """Return the stricter of two verdicts (BLOCKED > PARTIAL > PASSED)."""
     return a if _VERDICT_RANK[a] >= _VERDICT_RANK[b] else b
+
+
+def _severe_quality_findings(findings: Iterable[str]) -> list[str]:
+    severe: list[str] = []
+    for finding in findings:
+        text = str(finding or "")
+        lower = text.lower()
+        if any(negation in lower for negation in _QUALITY_NEGATION_TERMS):
+            continue
+        if any(term in lower for term in _SEVERE_QUALITY_FINDING_TERMS):
+            severe.append(text)
+    return severe
 
 
 def _compose_verdict(
@@ -1950,12 +1997,21 @@ def _compose_verdict(
     qs = agent_output.quality_score
     if qs and qs < 3:
         verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+    severe_quality = _severe_quality_findings(agent_output.quality_findings)
+    if severe_quality:
+        verdict = _strictest(verdict, AuditVerdict.PARTIAL)
     # Always narrate quality if assessed and either the score is low OR
     # findings exist. Doesn't gate on verdict — every active cap surfaces.
     if qs and (qs < 3 or agent_output.quality_findings):
         sections.append(
             f"[quality assessment: {qs}/5]\n"
             + "\n".join(f"  - {f}" for f in agent_output.quality_findings[:10])
+        )
+    if severe_quality:
+        sections.append(
+            "[quality severity cap]\n"
+            "Severe user-facing quality finding(s) require at least PARTIAL:\n"
+            + "\n".join(f"  - {f}" for f in severe_quality[:5])
         )
 
     # Capability cap.
@@ -2124,7 +2180,7 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
             log_dir=log_dir,
             phase_name="AUDIT",
             phase_label="audit",
-            timeout=None,
+            timeout=agent_input.judge_timeout_s,
             project_dir=agent_input.project_dir,
         )
         parsed = _parse_audit_output(text)

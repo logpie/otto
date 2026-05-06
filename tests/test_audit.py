@@ -16,6 +16,7 @@ import asyncio
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 from otto.audit import (
     AuditAgentInput,
@@ -528,6 +529,72 @@ def test_run_audit_walkthrough_artifacts_passed_to_agent(tmp_path: Path) -> None
     assert len(result.walkthrough_artifacts) == 1
 
 
+def test_run_audit_passes_judge_timeout_to_agent_input(tmp_path: Path) -> None:
+    spec = _spec(["s1"])
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    seen: dict[str, int | None] = {}
+
+    async def timeout_aware_agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        seen["timeout"] = input_.judge_timeout_s
+        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="ok")
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=timeout_aware_agent,
+            budget=AuditBudget(judge_timeout_s=17),
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert seen["timeout"] == 17
+
+
+def test_default_audit_agent_uses_judge_timeout_from_input(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import default_audit_agent
+
+    captured: dict[str, int | None] = {}
+
+    def fake_make_agent_options(*_args, **_kwargs):
+        return SimpleNamespace(cwd="", permission_mode="")
+
+    async def fake_run_agent_with_timeout(*_args, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        return (
+            '```json\n{"verdict":"passed","narrative":"ok","quality_score":3}\n```',
+            0.0,
+            "session-1",
+            {},
+        )
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_agent_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+
+    result = asyncio.run(
+        default_audit_agent(
+            AuditAgentInput(
+                spec=_spec(["s1"]),
+                project_dir=tmp_path,
+                integrated_worktree=tmp_path,
+                build_summary={},
+                merge_summary={},
+                cross_slice_evidence=[],
+                walkthrough_artifacts=[],
+                config={"agents": {}},
+                judge_timeout_s=23,
+            )
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert captured["timeout"] == 23
+
+
 # ---------------------------------------------------------------------------
 # _parse_audit_output
 # ---------------------------------------------------------------------------
@@ -801,6 +868,9 @@ def test_audit_prompt_requests_quality_assessment(tmp_path: Path) -> None:
     assert "3/5" in prompt or "3 = MVP" in prompt or "3=MVP" in prompt
     # Required minimum-2-findings rule.
     assert "at least 2" in prompt or "Empty list is NOT" in prompt
+    assert "horizontal overflow" in prompt
+    assert "clipped primary controls" in prompt
+    assert "affected Feature MUST be marked partial or blocked" in prompt
 
 
 def test_audit_prompt_requires_exact_edge_case_evidence(tmp_path: Path) -> None:
@@ -879,6 +949,61 @@ def test_audit_parser_clamps_quality_score() -> None:
     absent = _parse_audit_output('```json\n{"verdict":"passed"}\n```')
     assert absent.quality_score == 0
     assert absent.quality_findings == []
+
+
+def test_compose_verdict_caps_severe_quality_findings_to_partial() -> None:
+    from otto.audit import _compose_verdict
+    from otto.spec_amend import ChainVerification
+
+    agent_output = AuditAgentOutput(
+        verdict=AuditVerdict.PASSED,
+        narrative="functional pass",
+        group_verdicts=[],
+        feature_audits=[],
+        quality_score=3,
+        quality_findings=[
+            "At 390px viewport width, the filter bar overflows horizontally: "
+            "document scrollWidth was 662 against innerWidth 390, and the "
+            "Assignee control is clipped.",
+            "The row click affordance could be clearer.",
+        ],
+    )
+
+    verdict, narrative = _compose_verdict(
+        agent_output=agent_output,
+        contract_passed=True,
+        contract_detail="",
+        chain_review=ChainVerification(verdict_cap="passed", findings=[]),
+    )
+
+    assert verdict == AuditVerdict.PARTIAL
+    assert "quality severity cap" in narrative
+    assert "overflows horizontally" in narrative
+
+
+def test_compose_verdict_does_not_cap_negated_quality_terms() -> None:
+    from otto.audit import _compose_verdict
+    from otto.spec_amend import ChainVerification
+
+    agent_output = AuditAgentOutput(
+        verdict=AuditVerdict.PASSED,
+        narrative="functional pass",
+        quality_score=3,
+        quality_findings=[
+            "No horizontal overflow was observed at 390px.",
+            "The visual hierarchy could be stronger.",
+        ],
+    )
+
+    verdict, narrative = _compose_verdict(
+        agent_output=agent_output,
+        contract_passed=True,
+        contract_detail="",
+        chain_review=ChainVerification(verdict_cap="passed", findings=[]),
+    )
+
+    assert verdict == AuditVerdict.PASSED
+    assert "quality severity cap" not in narrative
 
 
 def test_audit_prompt_requests_feature_audits(tmp_path: Path) -> None:

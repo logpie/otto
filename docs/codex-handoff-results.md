@@ -1740,3 +1740,105 @@ Verification:
 Decision:
 - Otto bug fixed. This fix improves the generic audit oracle for any linked
   worktree project whose runnable dependencies live outside the task checkout.
+
+## 2026-05-06 Fresh Acme Retry 5: Final Live Verdict Bugs
+
+Live project / session:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-743f16`
+- Session: `2026-05-06-173132-2c6bc6`
+- Exact command launched by Mission Control queue:
+  `otto build <Acme SLA aging dashboard intent> --provider codex`
+
+What Otto produced:
+- 3 groups landed:
+  `sla-aging-data` (`b779c8b`),
+  `sla-aging-dashboard-ui` (`411eaf8`), and
+  `behavior-regression-tests` (`684dac6`).
+- Native project tests in the final audit passed:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16/otto_logs/sessions/2026-05-06-173132-2c6bc6/audit/attempt-00/contract/test_command.log`
+  -> `46 passed`.
+- Audit walkthrough evidence:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16/otto_logs/sessions/2026-05-06-173132-2c6bc6/audit/attempt-00/walkthrough/walkthrough.jsonl`
+  covers dashboard render, row-link filters, submission, approval,
+  saved-filter CRUD, CSV/PDF exports, native tests, and a mobile viewport
+  inspection.
+- Proof packet:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16/otto_logs/sessions/2026-05-06-173132-2c6bc6/proof-packet.json`.
+
+Bug found: audit judge timeout ignored
+- Evidence: the Codex audit judge ran for about 10m44s even though
+  `AuditBudget.judge_timeout_s` defaults to 300 seconds.
+- Root cause: `run_audit` never put the budget value into `AuditAgentInput`,
+  and `default_audit_agent` called `run_agent_with_timeout(..., timeout=None)`.
+- Generic fix: `AuditAgentInput` now carries `judge_timeout_s`, `run_audit`
+  sets it from `AuditBudget`, and `default_audit_agent` passes it to
+  `run_agent_with_timeout`.
+
+Bug found: severe product-quality finding under-gated
+- Evidence: the live audit reported:
+  `At 390px viewport width, the filter bar overflows horizontally:
+  document scrollWidth was 662 against innerWidth 390, and the Assignee
+  control is clipped.`
+- The judge still returned `verdict=passed`, `quality_score=3`, and all
+  feature audits passed. With the user's product-quality bar, this should not
+  be a clean pass.
+- Root cause: the prompt allowed severe responsive failures to live only in
+  `quality_findings`, and `_compose_verdict` only capped quality scores below
+  3. A judge could identify a user-visible layout break and still call the
+  run passed.
+- Generic fix: the audit prompt now requires horizontal overflow, clipped
+  controls, overlapping text, or hidden primary actions to score 2 or lower
+  and mark the affected feature partial/blocked. `_compose_verdict` also adds
+  a deterministic severity cap for severe quality findings so a known layout
+  break cannot remain a full pass solely because the judge under-scored it.
+
+Bug found: queue surface marked successful i2p run as failed
+- Evidence: `spec-state.jsonl` ended with `run.finished verdict=passed`, but
+  the cross-session queue record ended as:
+  `status=failed`, `terminal_outcome=failure`, `last_event=exited 0 but no
+  manifest at .../otto_logs/queue/add-a-manager-sla-aging-dashboard-743f16/manifest.json`.
+- The session had a valid `summary.json`, `proof-packet.json`, and
+  `checkpoint.json`, but no queue manifest mirror.
+- Root cause: the redesigned i2p path writes per-session summary/proof
+  artifacts, while the queue finalizer still treated
+  `otto_logs/queue/<task>/manifest.json` as mandatory even when the child
+  exited 0 with a completed session summary.
+- Generic fix: queue finalization now synthesizes the missing canonical
+  session manifest and queue mirror from `summary.json` before failing a
+  zero-exit i2p child for missing manifest.
+
+Bug found: audit/browser artifacts classified inconsistently
+- Evidence: the live audit left `.playwright-cli/` and
+  `__audit_home_body__.html` untracked in the target worktree.
+- Root cause: `__audit_*` files were already treated as Otto-owned, but
+  `.playwright-cli/` was not in the centralized Otto-owned dirty-path list.
+- Generic fix: `.playwright-cli/` is now classified as Otto-owned runtime
+  evidence in `otto/setup_gitignore.py`.
+
+Regression tests added:
+- `tests/test_audit.py::test_run_audit_passes_judge_timeout_to_agent_input`
+- `tests/test_audit.py::test_default_audit_agent_uses_judge_timeout_from_input`
+- `tests/test_audit.py::test_audit_prompt_requests_quality_assessment`
+  updated for the severity-consistency rule.
+- `tests/test_audit.py::test_compose_verdict_caps_severe_quality_findings_to_partial`
+- `tests/test_audit.py::test_compose_verdict_does_not_cap_negated_quality_terms`
+- `tests/test_queue_runner.py::test_finalize_missing_queue_manifest_uses_i2p_session_summary`
+- `tests/test_merge_preflight_dirty_tree.py::test_preflight_clean_when_only_otto_owned_untracked_files`
+  updated to cover `.playwright-cli/` and `__audit_home_body__.html`.
+
+Verification:
+- `.venv/bin/pytest tests/test_audit.py -q` -> `50 passed`.
+- `.venv/bin/pytest tests/test_queue_runner.py -q` -> `105 passed`.
+- `.venv/bin/pytest tests/test_merge_preflight_dirty_tree.py -q` -> `7 passed`.
+- `uv run ruff check otto/audit.py otto/setup_gitignore.py otto/queue/runner.py tests/test_audit.py tests/test_merge_preflight_dirty_tree.py tests/test_queue_runner.py`
+  -> passed.
+- `git diff --check` -> passed.
+
+Decision:
+- Classify this pressure run as `Otto bugs fixed`, not as a clean product pass.
+  Otto generated a mostly functional brownfield app change and tested it, but
+  the live run exposed core orchestration/audit issues plus a genuine responsive
+  UX defect in the produced app. With the fixes above, future runs should time
+  out audit judges correctly, surface severe quality findings as non-pass, and
+  avoid queue false-failure when i2p summary artifacts exist.
