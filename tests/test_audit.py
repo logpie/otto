@@ -26,6 +26,7 @@ from otto.audit import (
     FeatureAudit,
     GroupVerdict,
     WalkthroughResult,
+    _audit_prompt,
     _fallback_contract_test_argv,
     _parse_audit_output,
     _run_project_contract_test,
@@ -527,6 +528,42 @@ def test_run_audit_walkthrough_artifacts_passed_to_agent(tmp_path: Path) -> None
     assert len(captured["walkthrough_artifacts"]) == 1
     assert captured["walkthrough_artifacts"][0].name == "screenshot-001.png"
     assert len(result.walkthrough_artifacts) == 1
+
+
+def test_run_audit_writes_compact_evidence_packet_for_judge(tmp_path: Path) -> None:
+    (tmp_path / "otto.yaml").write_text("", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    spec_dir = session_dir / "spec"
+    spec_dir.mkdir(parents=True)
+    spec_path = spec_dir / "spec.json"
+    spec_path.write_text(json.dumps({"intent": "test intent"}), encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    async def passing_agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        captured["prompt"] = _audit_prompt(input_)
+        captured["packet_path"] = str(input_.evidence_packet_path)
+        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="ok")
+
+    asyncio.run(
+        run_audit(
+            _spec(["s1"]),
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=passing_agent,
+            budget=AuditBudget(audit_retries=0),
+        )
+    )
+
+    packet_path = Path(captured["packet_path"])
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert packet["kind"] == "audit_evidence_packet"
+    assert packet["full_spec_path"] == str(spec_path)
+    assert "messages.jsonl" in " ".join(packet["notes"])
+    assert str(packet_path) in captured["prompt"]
+    assert "Do not bulk-read `messages.jsonl`" in captured["prompt"]
+    assert "Project contract test" in captured["prompt"]
 
 
 def test_run_audit_passes_judge_timeout_to_agent_input(tmp_path: Path) -> None:

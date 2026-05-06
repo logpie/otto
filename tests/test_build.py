@@ -14,6 +14,7 @@ The build agent is mocked throughout; the LLM never runs.
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from otto.build import (
     GroupStatus,
     _build_agent_prompt,
     _commit_group_work,
+    _write_build_context_packet,
     default_build_agent,
     detect_dependency_scope_extensions,
     detect_scope_violations,
@@ -973,6 +975,57 @@ def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:
     assert "app/auth/*" in prompt
     assert "social network MVP" in prompt
     assert "Previous attempt failed" not in prompt
+
+
+def test_build_context_packet_keeps_full_structure_available_without_prompt_dump(
+    tmp_path: Path,
+) -> None:
+    s = Group(
+        id="reports",
+        name="Reports",
+        owned_paths=["app/reports/*"],
+        feature_ids=["f-reports"],
+        checks=[_no_op_passing_check()],
+    )
+    spec = _spec([s])
+    spec.structure = StructureDecisions(
+        payload={
+            "huge_contract": "X" * 5000,
+            "api_shape": {"field": "manager_sla_age_days"},
+        }
+    )
+    spec.features = [
+        Feature(
+            id="f-reports",
+            name="Manager SLA report",
+            description="Show aged approvals",
+            group_id="reports",
+        )
+    ]
+    packet_path = tmp_path / "session" / "build" / "reports" / "attempt-01" / "context-packet.json"
+    full_spec_path = tmp_path / "session" / "spec" / "spec.json"
+    inp = BuildAgentInput(
+        spec=spec,
+        group=s,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="i2p/x/reports",
+        attempt=1,
+        context_packet_path=packet_path,
+        full_spec_path=full_spec_path,
+    )
+
+    _write_build_context_packet(inp, packet_path)
+    prompt = _build_agent_prompt(inp)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+
+    assert packet["full_spec_path"] == str(full_spec_path)
+    assert packet["structure"]["payload"]["huge_contract"] == "X" * 5000
+    assert packet["features_for_group"][0]["id"] == "f-reports"
+    assert str(packet_path) in prompt
+    assert str(full_spec_path) in prompt
+    assert "huge_contract" in prompt
+    assert "X" * 1000 not in prompt
 
 
 def test_build_agent_prompt_includes_last_failure_on_retry(tmp_path: Path) -> None:

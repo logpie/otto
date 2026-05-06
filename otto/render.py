@@ -56,6 +56,12 @@ from otto.spec_compile import (
     feature_proof_blocks_to_dicts,
     spec_to_dict,
 )
+from otto.token_usage import (
+    format_token_spend,
+    message_file_breakdown_from_messages,
+    phase_breakdown_from_messages,
+    total_token_usage_from_phases,
+)
 
 logger = logging.getLogger("otto.render")
 
@@ -124,6 +130,11 @@ class ProofPacket:
     # carries this list; render layer emits per-Feature mini-pages
     # from it.
     features: list[dict[str, Any]] = field(default_factory=list)
+    # Compact usage telemetry recovered from provider JSONL logs. This is
+    # metadata only: no prompt text, transcript text, or tool payloads.
+    token_usage: dict[str, int] = field(default_factory=dict)
+    phase_usage: dict[str, dict[str, Any]] = field(default_factory=dict)
+    agent_usage_top: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +177,7 @@ def compose_proof_packet(
     *,
     wall_s: float,
     cost_usd: float,
+    session_dir: Path | None = None,
 ) -> ProofPacket:
     """Build a ProofPacket from the four pipeline outputs."""
     audit_by_group: dict[str, GroupVerdict] = {
@@ -287,6 +299,14 @@ def compose_proof_packet(
     else:
         feature_dicts = []
 
+    phase_usage: dict[str, dict[str, Any]] = {}
+    token_usage: dict[str, int] = {}
+    agent_usage_top: list[dict[str, Any]] = []
+    if session_dir is not None:
+        phase_usage = phase_breakdown_from_messages(session_dir)
+        token_usage = total_token_usage_from_phases(phase_usage)
+        agent_usage_top = message_file_breakdown_from_messages(session_dir)[:10]
+
     return ProofPacket(
         schema_version=PROOF_PACKET_SCHEMA_VERSION,
         intent=spec.intent,
@@ -307,6 +327,9 @@ def compose_proof_packet(
         quality_findings=list(audit_result.quality_findings),
         feature_audits=feature_audit_render,
         features=feature_dicts,
+        token_usage=token_usage,
+        phase_usage=phase_usage,
+        agent_usage_top=agent_usage_top,
     )
 
 
@@ -341,6 +364,9 @@ def _packet_to_dict(packet: ProofPacket) -> dict[str, Any]:
         # (formerly `capability_verdicts`, dropped post-cutover).
         "feature_audits": packet.feature_audits,
         "features": list(packet.features),  # A3: per-Feature proof blocks
+        "token_usage": packet.token_usage,
+        "phase_usage": packet.phase_usage,
+        "agent_usage_top": packet.agent_usage_top,
         "groups": [
             {
                 "group_id": s.group_id,
@@ -413,6 +439,17 @@ def proof_packet_from_dict(payload: dict[str, Any]) -> ProofPacket:
         quality_findings=_string_list(payload.get("quality_findings")),
         feature_audits=_dict_list(payload.get("feature_audits") or payload.get("capability_verdicts")),
         features=_dict_list(payload.get("features")),
+        token_usage={
+            str(k): int(v)
+            for k, v in (payload.get("token_usage") or {}).items()
+            if isinstance(v, int | float)
+        } if isinstance(payload.get("token_usage"), dict) else {},
+        phase_usage={
+            str(k): dict(v)
+            for k, v in (payload.get("phase_usage") or {}).items()
+            if isinstance(v, dict)
+        } if isinstance(payload.get("phase_usage"), dict) else {},
+        agent_usage_top=_dict_list(payload.get("agent_usage_top")),
     )
 
 
@@ -600,10 +637,20 @@ def _render_header(packet: ProofPacket) -> str:
   <span class="kpi"><span class="label">project_kind</span> <span class="value">{escape(packet.project_kind)}</span></span>
   <span class="kpi"><span class="label">wall</span> <span class="value">{packet.wall_s:.0f} s</span></span>
   <span class="kpi"><span class="label">cost</span> <span class="value">${packet.cost_usd:.2f}</span></span>
+  {_render_token_kpi(packet)}
   <span class="kpi"><span class="label">groups</span>
     <span class="value">{len(packet.landed_group_ids)} landed / {len(packet.groups)} total</span>
   </span>
 </p>"""
+
+
+def _render_token_kpi(packet: ProofPacket) -> str:
+    if not packet.token_usage:
+        return ""
+    return (
+        '<span class="kpi"><span class="label">tokens</span> '
+        f'<span class="value">{escape(format_token_spend(packet.token_usage))}</span></span>'
+    )
 
 
 def _render_spec_summary(packet: ProofPacket) -> str:
@@ -885,7 +932,7 @@ def render_run(
     """Compose + write both formats. Returns (html_path, json_path)."""
     packet = compose_proof_packet(
         spec, build_result, merge_result, audit_result,
-        wall_s=wall_s, cost_usd=cost_usd,
+        wall_s=wall_s, cost_usd=cost_usd, session_dir=session_dir,
     )
     return write_proof_packet(packet, session_dir)
 

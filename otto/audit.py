@@ -202,6 +202,10 @@ class AuditAgentInput:
     feature_scope_ids: tuple[str, ...] = ()
     config: dict[str, Any] = field(default_factory=dict)
     judge_timeout_s: int | None = None
+    contract_test_passed: bool | None = None
+    contract_test_detail: str = ""
+    evidence_packet_path: Path | None = None
+    full_spec_path: Path | None = None
 
 
 @dataclass
@@ -1004,7 +1008,20 @@ async def run_audit(
             feature_scope_ids=scoped_feature_ids,
             config=config,
             judge_timeout_s=budget.judge_timeout_s,
+            contract_test_passed=contract_passed,
+            contract_test_detail=contract_detail,
+            evidence_packet_path=attempt_dir / "evidence-packet.json",
+            full_spec_path=(
+                session_dir / "spec" / "spec.json"
+                if (session_dir / "spec" / "spec.json").exists()
+                else None
+            ),
         )
+        try:
+            _write_audit_evidence_packet(agent_input)
+        except OSError as exc:
+            agent_input.evidence_packet_path = None
+            logger.warning("audit evidence packet write failed: %s", exc)
         # C1 fix: bail out before invoking the audit agent if the
         # shared cost pool is exhausted. Prevents an audit retry
         # loop from blowing past the global $30 ceiling. Returns
@@ -1630,6 +1647,86 @@ def _load_feature_tagging_contract() -> str:
         )
 
 
+def _write_audit_evidence_packet(agent_input: AuditAgentInput) -> None:
+    """Write compact deterministic/browser evidence for the audit judge.
+
+    Raw logs and screenshots stay on disk. The packet gives the judge a
+    bounded index and one-line summaries so it can inspect the right files
+    without reading huge provider transcripts or dumping entire logs into
+    context.
+    """
+    if agent_input.evidence_packet_path is None:
+        return
+    packet = {
+        "schema_version": 1,
+        "kind": "audit_evidence_packet",
+        "project_dir": str(agent_input.project_dir),
+        "integrated_worktree": str(agent_input.integrated_worktree),
+        "full_spec_path": str(agent_input.full_spec_path or ""),
+        "walkthrough_jsonl_path": str(agent_input.walkthrough_jsonl_path or ""),
+        "contract_test": {
+            "passed": agent_input.contract_test_passed,
+            "detail": agent_input.contract_test_detail,
+        },
+        "build_summary": agent_input.build_summary,
+        "merge_summary": agent_input.merge_summary,
+        "cross_slice_evidence": [
+            _compact_evidence(ev) for ev in agent_input.cross_slice_evidence
+        ],
+        "walkthrough_artifacts": [
+            {
+                "path": str(path),
+                "kind": _artifact_kind(path),
+                "exists": Path(path).exists(),
+            }
+            for path in agent_input.walkthrough_artifacts
+        ],
+        "notes": [
+            "Read this packet first, then inspect referenced artifacts as needed.",
+            "Prefer deterministic contract/cross-slice results and browser artifacts over provider transcript text.",
+            "Avoid bulk-reading messages.jsonl; if needed, inspect bounded relevant excerpts only.",
+        ],
+    }
+    agent_input.evidence_packet_path.parent.mkdir(parents=True, exist_ok=True)
+    agent_input.evidence_packet_path.write_text(
+        json.dumps(packet, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _compact_evidence(evidence: Evidence) -> dict[str, Any]:
+    raw = evidence.raw if isinstance(evidence.raw, dict) else {}
+    compact_raw: dict[str, Any] = {}
+    for key in ("exit_code", "status_code", "stdout_match", "stderr_match", "timeout", "command"):
+        if key in raw:
+            compact_raw[key] = raw[key]
+    for key in ("stdout", "stderr", "response_text", "error"):
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            compact_raw[key] = value[:1200] + ("...[truncated]" if len(value) > 1200 else "")
+    return {
+        "passed": evidence.passed,
+        "detail": evidence.detail,
+        "duration_s": evidence.duration_s,
+        "started_at": evidence.started_at,
+        "artifacts": [str(path) for path in evidence.artifacts],
+        "raw": compact_raw,
+    }
+
+
+def _artifact_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        return "image"
+    if suffix in {".webm", ".mp4", ".mov"}:
+        return "video"
+    if suffix in {".html", ".htm"}:
+        return "html"
+    if suffix in {".json", ".jsonl"}:
+        return "json"
+    return "file"
+
+
 def _audit_prompt(agent_input: AuditAgentInput) -> str:
     """Compose the audit-agent prompt.
 
@@ -1651,6 +1748,21 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     lines.append(f"Project kind: {spec.project_kind}")
     lines.append(f"Integrated worktree: {agent_input.integrated_worktree}")
     lines.append("")
+    if agent_input.evidence_packet_path or agent_input.full_spec_path:
+        lines.append("## Audit evidence packet (read first)")
+        if agent_input.evidence_packet_path:
+            lines.append(f"- Compact evidence index: `{agent_input.evidence_packet_path}`")
+        if agent_input.full_spec_path:
+            lines.append(f"- Full canonical product spec: `{agent_input.full_spec_path}`")
+        lines.append(
+            "Use the packet as your starting point. It indexes deterministic "
+            "contract results, cross-slice checks, and browser artifacts without "
+            "embedding raw logs. Do not bulk-read `messages.jsonl` provider "
+            "transcripts; if a raw transcript is genuinely needed, inspect only "
+            "bounded relevant excerpts after the deterministic and browser "
+            "evidence has been reviewed."
+        )
+        lines.append("")
     lines.append("## Spec Groups")
     for s in spec.groups:
         lines.append(f"- {s.id}: {s.name}")
@@ -1677,6 +1789,13 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
     lines.append("```json")
     lines.append(_json.dumps(agent_input.merge_summary, indent=2, default=str))
     lines.append("```")
+    lines.append("## Project contract test")
+    if agent_input.contract_test_passed is None:
+        lines.append(f"- SKIPPED — {agent_input.contract_test_detail or 'not configured'}")
+    else:
+        label = "PASS" if agent_input.contract_test_passed else "FAIL"
+        lines.append(f"- {label} — {agent_input.contract_test_detail}")
+    lines.append("")
     lines.append("## Cross-slice deterministic check evidence")
     for ev in agent_input.cross_slice_evidence:
         lines.append(f"- {'PASS' if ev.passed else 'FAIL'} — {ev.detail}")

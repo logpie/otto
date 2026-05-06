@@ -389,6 +389,8 @@ class BuildAgentInput:
     feature_id: str = ""  # Layer 2 narrowing: fix only this feature in the slice
     agent_session_id: str = ""  # resume same provider conversation across attempts
     config: dict[str, Any] = field(default_factory=dict)
+    context_packet_path: Path | None = None
+    full_spec_path: Path | None = None
 
 
 @dataclass
@@ -1739,6 +1741,8 @@ async def _run_slice(
         prior_diff_hash = current_diff_hash
 
         attempt_t0 = time.monotonic()
+        prompt_dir = session_dir / "build" / group_obj.id / f"attempt-{attempt:02d}"
+        full_spec_path = session_dir / "spec" / "spec.json"
         agent_input = BuildAgentInput(
             spec=spec,
             group=group_obj,
@@ -1750,19 +1754,22 @@ async def _run_slice(
             log_dir=raw_log_dir,
             agent_session_id=agent_session_id,
             config=config,
+            context_packet_path=prompt_dir / "context-packet.json",
+            full_spec_path=full_spec_path if full_spec_path.exists() else None,
         )
 
-        # v2 phase 4 (observability): archive the rendered prompt
-        # alongside the agent's narrative log so post-hoc review can
-        # answer "did the agent see X instruction?" without parsing
-        # messages.jsonl. Cheap; one file per attempt.
+        # v2 phase 4 (observability): archive the compact context packet
+        # and rendered prompt alongside the agent's narrative log so
+        # post-hoc review can answer "did the agent see X instruction?"
+        # without parsing messages.jsonl. Cheap; one pair per attempt.
         try:
-            prompt_dir = session_dir / "build" / group_obj.id / f"attempt-{attempt:02d}"
             prompt_dir.mkdir(parents=True, exist_ok=True)
+            _write_build_context_packet(agent_input, agent_input.context_packet_path)
             (prompt_dir / "prompt.md").write_text(
                 _build_agent_prompt(agent_input), encoding="utf-8"
             )
         except OSError as exc:
+            agent_input.context_packet_path = None
             logger.warning("failed to archive prompt for %s attempt %d: %s",
                            group_obj.id, attempt, exc)
         try:
@@ -2048,6 +2055,86 @@ async def _run_component(
 # ---------------------------------------------------------------------------
 
 
+def _write_build_context_packet(
+    agent_input: BuildAgentInput,
+    packet_path: Path | None,
+) -> None:
+    """Write the durable context packet referenced by the build prompt.
+
+    Slice-critical contracts stay inline in ``_build_agent_prompt``. Broad
+    product context that can become large — full structure payload,
+    cross-group checks, non-goals, and peer/dependency details — lives in
+    this JSON file. Agents retain full capability because the packet also
+    points at the canonical full ``spec.json``.
+    """
+    if packet_path is None:
+        return
+    import json as _json
+    from otto.spec_compile import spec_to_dict
+
+    spec_dict = spec_to_dict(agent_input.spec)
+    group_id = agent_input.group.id
+    group = next(
+        (g for g in spec_dict.get("groups", []) if isinstance(g, dict) and g.get("id") == group_id),
+        None,
+    ) or {
+        "id": agent_input.group.id,
+        "name": agent_input.group.name,
+        "feature_ids": list(agent_input.group.feature_ids),
+        "dependencies": list(agent_input.group.dependencies),
+        "owned_paths": list(agent_input.group.owned_paths),
+        "checks": [_describe_check(c) for c in agent_input.group.checks],
+    }
+    features = [
+        feature for feature in spec_dict.get("features", [])
+        if isinstance(feature, dict)
+        and (
+            feature.get("group_id") == group_id
+            or feature.get("id") in set(agent_input.group.feature_ids)
+        )
+    ]
+    dependency_ids = set(agent_input.group.dependencies or [])
+    dependency_groups = [
+        g for g in spec_dict.get("groups", [])
+        if isinstance(g, dict) and g.get("id") in dependency_ids
+    ]
+    dependency_components = [
+        c for c in spec_dict.get("components", [])
+        if isinstance(c, dict) and c.get("id") in dependency_ids
+    ]
+    packet = {
+        "schema_version": 1,
+        "kind": "build_context_packet",
+        "project_dir": str(agent_input.project_dir),
+        "worktree": str(agent_input.worktree),
+        "branch": agent_input.branch,
+        "attempt": agent_input.attempt,
+        "full_spec_path": str(agent_input.full_spec_path or ""),
+        "group": group,
+        "features_for_group": features,
+        "dependencies": {
+            "groups": dependency_groups,
+            "components": dependency_components,
+        },
+        "shared_scaffold": list(agent_input.spec.shared_scaffold),
+        "shared_paths": list(getattr(agent_input.spec, "shared_paths", []) or []),
+        "cross_group_checks": spec_dict.get("cross_group_checks", []),
+        "done_means": list(agent_input.spec.done_means),
+        "non_goals": list(agent_input.spec.non_goals),
+        "structure": spec_dict.get("structure", {}),
+        "notes": [
+            "This packet is a compact durable context file for the current build slice.",
+            "The prompt contains the slice-critical task/scope/check contract inline.",
+            "Open full_spec_path when broader product context or exact peer contracts are needed.",
+        ],
+    }
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(
+        _json.dumps(packet, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     """Compose the per-attempt prompt for the build agent.
 
@@ -2285,6 +2372,29 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     )
     lines.append("")
 
+    if agent_input.context_packet_path or agent_input.full_spec_path:
+        lines.append("### Durable context files (authoritative; read as needed)")
+        lines.append(
+            "The prompt keeps your slice-critical task/scope/check contract inline. "
+            "Broader product context is persisted on disk so it remains available "
+            "without pasting large JSON into every agent turn."
+        )
+        if agent_input.context_packet_path:
+            lines.append(
+                f"- Build context packet for this slice: `{agent_input.context_packet_path}`"
+            )
+        if agent_input.full_spec_path:
+            lines.append(
+                f"- Full canonical product spec: `{agent_input.full_spec_path}`"
+            )
+        lines.append(
+            "If you need exact peer contracts, full structure payload, cross-group "
+            "checks, or broader acceptance context, read those files. Do not bulk-read "
+            "`messages.jsonl` transcripts for context; use the prompt, context packet, "
+            "spec, checks, and source files first."
+        )
+        lines.append("")
+
     # Original intent — collapsed under context.
     lines.append("### Original intent (whole product)")
     lines.append(f"> {spec.intent}")
@@ -2322,15 +2432,23 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     payload = (spec.structure.payload or {}) if spec.structure else {}
     if payload:
         lines.append("### Project structure (binding contracts)")
-        lines.append(
-            "Naming and shape decisions for the whole product. "
-            "Reference these when writing code that touches them. "
-            "Other slices use the same source of truth."
-        )
-        lines.append("```json")
-        import json as _json
-        lines.append(_json.dumps(payload, indent=2, sort_keys=True))
-        lines.append("```")
+        if agent_input.context_packet_path:
+            keys = ", ".join(sorted(str(k) for k in payload.keys())[:20])
+            suffix = "..." if len(payload) > 20 else ""
+            lines.append(
+                "Full structure payload is in the build context packet above. "
+                f"Top-level keys: {keys}{suffix}"
+            )
+        else:
+            lines.append(
+                "Naming and shape decisions for the whole product. "
+                "Reference these when writing code that touches them. "
+                "Other slices use the same source of truth."
+            )
+            lines.append("```json")
+            import json as _json
+            lines.append(_json.dumps(payload, indent=2, sort_keys=True))
+            lines.append("```")
         lines.append("")
 
     # Final instruction — reinforces narrowness.
