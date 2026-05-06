@@ -60,7 +60,7 @@ export function ProjectMeta({project, watcher, landing, active, firstRun}: {
 }
 
 /**
- * Centered hero launcher page — pick or create a managed project.
+ * Mission Control launcher page — pick or create a managed project.
  * mc-audit redesign Phase E.
  */
 export function ProjectLauncher({projectsState, refreshStatus, refreshPending, onCreate, onSelect, onRefresh}: {
@@ -141,11 +141,13 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
   return (
     <section className="launcher-page" aria-labelledby="projectLauncherHeading">
       <header className="launcher-hero">
-        <BrandMark size={48} />
-        <h1 id="projectLauncherHeading" className="launcher-hero-title">otto</h1>
-        <p className="launcher-hero-tagline" data-testid="launcher-subhead">
-          Describe a feature. Otto builds, verifies, and lands it in an isolated git worktree with logs ready to review.
-        </p>
+        <BrandMark size={32} />
+        <div className="launcher-hero-copy">
+          <h1 id="projectLauncherHeading" className="launcher-hero-title">Mission Control</h1>
+          <p className="launcher-hero-tagline" data-testid="launcher-subhead">
+            Select a project to queue Otto work, review runs, and land verified changes.
+          </p>
+        </div>
         <button
           type="button"
           className="launcher-hero-refresh"
@@ -166,7 +168,7 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
       <LauncherExplainer />
 
       {projects.length > 0 && (
-        <div className="launcher-section">
+        <div className="launcher-section launcher-projects">
           <div className="launcher-section-head">
             <h2>Open a project</h2>
             <span className="muted">

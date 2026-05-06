@@ -809,7 +809,7 @@ textarea:focus-visible,
 }
 
 /* ============================================================================
-   Launcher / onboarding page — sidebar dropped, centered hero + sections.
+   Launcher workspace — projects first, with create/help in a compact rail.
    mc-audit redesign Phase D.
    ============================================================================ */
 .launcher-shell {
@@ -824,57 +824,64 @@ textarea:focus-visible,
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: 56px 24px;
+  padding: 28px 24px;
   overflow: auto;
 }
 
 .launcher-page {
-  min-height: 100vh;
-  min-height: 100dvh;
-  width: min(1120px, 100%);
-  max-width: 1120px;
+  width: min(1240px, 100%);
+  max-width: 1240px;
   margin: 0 auto;
   box-sizing: border-box;
   display: grid;
-  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  grid-template-areas:
+    "hero hero"
+    "projects create"
+    "projects explainer";
   align-items: start;
-  gap: 24px;
-  padding: 48px clamp(24px, 4vw, 56px);
+  gap: 18px 20px;
+  padding: 12px clamp(12px, 2vw, 28px) 28px;
 }
 
 .launcher-hero {
-  grid-column: 1;
-  min-height: 132px;
+  grid-area: hero;
+  min-height: 54px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  text-align: center;
+  text-align: left;
   gap: 12px;
   position: relative;
-  padding: 12px 0 4px;
+  padding: 0 0 6px;
+}
+
+.launcher-hero-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
 }
 
 .launcher-hero-title {
   margin: 0;
-  font-size: 36px;
+  font-size: 24px;
   font-weight: 600;
-  letter-spacing: -0.04em;
+  letter-spacing: 0;
   color: var(--text);
-  text-transform: lowercase;
-  line-height: 1;
+  text-transform: none;
+  line-height: 1.1;
 }
 
 .launcher-hero-tagline {
   margin: 0;
   color: var(--muted);
-  font-size: 15px;
-  max-width: 420px;
+  font-size: 13px;
+  max-width: none;
 }
 
 .launcher-hero-refresh {
-  position: absolute;
-  top: 0;
-  right: 0;
+  flex: 0 0 auto;
+  margin-left: auto;
   width: 32px;
   height: 32px;
   min-height: 32px;
@@ -894,18 +901,25 @@ textarea:focus-visible,
 }
 
 .launcher-hero-refresh-status {
-  min-height: 18px;
+  min-height: 0;
   color: var(--muted);
   font-size: 12px;
 }
 
 .launcher-section {
-  grid-column: 2;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 14px;
   box-shadow: var(--shadow);
   overflow: hidden;
+}
+
+.launcher-projects {
+  grid-area: projects;
+}
+
+.launcher-create {
+  grid-area: create;
 }
 
 .launcher-section-head {
@@ -930,7 +944,7 @@ textarea:focus-visible,
 
 /* Onboarding explainer card on the launcher. mc-audit redesign §7 W7.1. */
 .launcher-explainer {
-  grid-column: 1;
+  grid-area: explainer;
   min-height: 58px;
   display: flex;
   align-items: flex-start;
@@ -1136,7 +1150,7 @@ textarea:focus-visible,
 
 /* Create-project section. Slim when projects exist, hero when empty. */
 .launcher-create-form {
-  display: flex;
+  display: grid;
   gap: 8px;
   padding: 14px 18px 4px;
 }
@@ -1149,7 +1163,7 @@ textarea:focus-visible,
 }
 
 .launcher-create-form button.primary {
-  flex-shrink: 0;
+  width: 100%;
 }
 
 .launcher-create-hint {
@@ -1160,15 +1174,24 @@ textarea:focus-visible,
 }
 
 .launcher-create-hint code {
+  display: inline-block;
+  max-width: 100%;
   font-size: 11px;
   padding: 1px 5px;
   background: var(--surface-alt);
   border-radius: 4px;
   color: var(--text);
+  overflow-wrap: anywhere;
+  vertical-align: bottom;
 }
 
 .launcher-create-hero .launcher-create-form {
   padding: 18px;
+}
+
+.launcher-create-hero {
+  grid-column: 1 / -1;
+  grid-area: auto;
 }
 
 .launcher-create .launcher-status {
@@ -6870,6 +6893,11 @@ html, body {
   .launcher-page {
     width: min(640px, 100%);
     grid-template-columns: 1fr;
+    grid-template-areas:
+      "hero"
+      "projects"
+      "create"
+      "explainer";
     padding: 40px 24px;
   }
 
@@ -7068,9 +7096,9 @@ html, body {
     gap: 20px;
   }
 
-  .launcher-hero-title { font-size: 28px; }
+  .launcher-hero-title { font-size: 22px; }
 
-  .launcher-hero-tagline { font-size: 14px; }
+  .launcher-hero-tagline { font-size: 13px; }
 
   .launcher-hero-refresh {
     width: 28px;
@@ -7079,9 +7107,9 @@ html, body {
     font-size: 14px;
   }
 
-  /* Create form goes vertical on phone. */
+  /* Create form stays single-column on phone. */
   .launcher-create-form {
-    flex-direction: column;
+    grid-template-columns: 1fr;
   }
 
   .launcher-create-form button.primary {

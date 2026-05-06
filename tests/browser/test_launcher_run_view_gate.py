@@ -148,12 +148,23 @@ def test_selecting_project_allows_run_list_to_load(
     page.goto(mc_backend.url, wait_until="networkidle")
     page.wait_for_selector(".project-row", timeout=10_000)
     launcher_box = page.locator(".launcher-page").bounding_box()
-    project_box = page.locator(".launcher-section").first.bounding_box()
+    hero_box = page.locator(".launcher-hero").bounding_box()
+    project_box = page.locator(".launcher-projects").bounding_box()
+    create_box = page.locator(".launcher-create").bounding_box()
+    first_row_box = page.locator(".project-row").first.bounding_box()
     assert launcher_box is not None
+    assert hero_box is not None
     assert project_box is not None
+    assert create_box is not None
+    assert first_row_box is not None
     assert launcher_box["x"] > 80
     assert abs((launcher_box["x"] + launcher_box["width"] / 2) - 720) < 48
-    assert project_box["x"] > launcher_box["x"] + 320
+    assert hero_box["height"] <= 72
+    assert project_box["y"] <= 110
+    assert first_row_box["y"] <= 190
+    assert project_box["width"] >= 700
+    assert project_box["x"] < create_box["x"]
+    assert create_box["x"] > project_box["x"] + project_box["width"]
 
     page.get_by_role("button", name="existing-app").click()
     page.wait_for_selector('[data-testid="run-list-empty"]', timeout=10_000)

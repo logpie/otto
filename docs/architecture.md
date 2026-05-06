@@ -196,8 +196,10 @@ otto/web/static/                     committed production bundle
 ```
 
 The frontend has been through the 2026-05-05 RUA campaign. Audit reports and
-screenshots live under `docs/rua/`. The local skill that drove the audit lives
-at `.claude/skills/otto-frontend-rua/SKILL.md`.
+screenshots live under `docs/rua/`. The local skills that drive the audit live
+at `.codex/skills/otto-frontend-rua/SKILL.md` and
+`.claude/skills/otto-frontend-rua/SKILL.md`; both require product-level
+first-screen inspection, not just component or route checks.
 
 Key UI concepts:
 

@@ -52,12 +52,23 @@ Minimum doorway smoke:
    - no raw backend error such as "Failed to load sessions"
    - no unexpected first-load 4xx/5xx in normal UI requests
    - static bundle is fresh and served from the running server
+   - the primary user job is obvious within five seconds
+   - useful controls appear above the fold on 1280x800 and 1440x900 desktop
+   - decorative or explanatory content does not dominate the first viewport
 4. Create or open a managed project.
-5. Confirm the UI transitions into the project workflow.
-6. Save at least one screenshot and the server log path.
+5. Confirm the UI transitions into the project workflow:
+   - selected project identity is visible
+   - run cards/open actions use the intended drawer or detail surface
+   - project-home/brand navigation returns to the launcher in launcher mode
+6. Save at least one screenshot, the server log path, and any bounding-box or
+   browser evidence used for the first-screen verdict.
 
 Doorway smoke proves the entrance works. It does not prove Otto can build or
 repair a real product; continue with a real scenario for that.
+
+If the work under test changed Mission Control UI, also run the
+`otto-frontend-rua` product-level gate. Do not accept a component-level check
+that only proves elements exist or routes click.
 
 ## Surface Selection
 
