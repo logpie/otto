@@ -62,6 +62,20 @@ _PROJECT_RUNTIME_ENV_SUFFIXES = (
 )
 
 
+def _current_runtime_bins() -> set[str]:
+    bins = {str(Path(sys.executable).parent)}
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env:
+        bins.add(str(Path(virtual_env) / "bin"))
+    return bins
+
+
+def _clean_path(value: str) -> str:
+    skip = _current_runtime_bins()
+    entries = [entry for entry in value.split(os.pathsep) if entry and entry not in skip]
+    return os.pathsep.join(entries)
+
+
 def _allowed_parent_env() -> dict[str, str]:
     """Return the subset of the parent env that child agents are allowed to inherit."""
     allowed: dict[str, str] = {}
@@ -85,15 +99,13 @@ def _allowed_parent_env() -> dict[str, str]:
 def _subprocess_env(project_dir: Path | None = None) -> dict:
     """Return an env dict with Python/tooling paths tuned for the target project.
 
-    This ensures that when otto invokes ``pytest`` (or other venv tools) via
-    shell=True, the subprocess can find them even if the caller's shell did not
-    activate the virtualenv.
+    Child agents operate inside target worktrees. They should not inherit
+    Otto's own virtualenv as their default ``python`` just because Otto itself
+    was launched from that environment.
     """
-    venv_bin = str(Path(sys.executable).parent)
     env = _allowed_parent_env()
-    existing = env.get("PATH", "")
-    if venv_bin not in existing.split(os.pathsep):
-        env["PATH"] = venv_bin + os.pathsep + existing
+    env["PATH"] = _clean_path(env.get("PATH", ""))
+    env.pop("VIRTUAL_ENV", None)
     # Prevent git from hanging on prompts in unattended mode
     env["GIT_TERMINAL_PROMPT"] = "0"
     # CI=true disables interactive test runners (CRA/Jest watch mode)
@@ -118,4 +130,5 @@ def _subprocess_env(project_dir: Path | None = None) -> dict:
             existing = env.get("PATH", "")
             if str(project_venv_bin) not in existing.split(os.pathsep):
                 env["PATH"] = str(project_venv_bin) + os.pathsep + existing
+            env["VIRTUAL_ENV"] = str(project_venv_bin.parent)
     return env

@@ -187,7 +187,10 @@ def _run_repo_test(
         list(check.command), cwd=cwd, timeout_s=check.timeout_s,
         extra_pythonpath=[project_dir, cwd],
     )
-    output = _format_subprocess_output(check.command, completed)
+    resolved_command = (
+        list(completed.args) if isinstance(completed.args, (list, tuple)) else list(check.command)
+    )
+    output = _format_subprocess_output(resolved_command, completed)
     if bootstrap is not None:
         output = (
             _format_subprocess_output(bootstrap.args, bootstrap).rstrip()
@@ -199,6 +202,7 @@ def _run_repo_test(
     passed = completed.returncode == 0
     raw = {
         "command": list(check.command),
+        "resolved_command": resolved_command,
         "exit_code": completed.returncode,
         "stdout": completed.stdout or "",
         "stderr": completed.stderr or "",
@@ -835,8 +839,9 @@ def _run_command(
 
     Raises subprocess.TimeoutExpired on timeout (caller catches in run_check).
     """
+    resolved_command = _resolve_subprocess_command(command, cwd, extra_pythonpath)
     return subprocess.run(
-        command,
+        resolved_command,
         cwd=cwd,
         env=_subprocess_env(extra_pythonpath=extra_pythonpath),
         capture_output=True,
@@ -882,21 +887,16 @@ def _run_node_bootstrap_if_needed(
 
 
 def _subprocess_env(extra_pythonpath: list[Path] | None = None) -> dict[str, str]:
-    """Augment env with interpreter bin and active venv bin on PATH.
+    """Return a subprocess env without preferring Otto's own virtualenv.
 
     If `extra_pythonpath` is provided, those paths are prepended to
     PYTHONPATH (deduplicated, preserving caller order).
     """
     env = os.environ.copy()
     path_entries = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
-    interpreter_bin = str(Path(sys.executable).parent)
-    if interpreter_bin and interpreter_bin not in path_entries:
-        path_entries.insert(0, interpreter_bin)
-    virtual_env = env.get("VIRTUAL_ENV")
-    if virtual_env:
-        venv_bin = str(Path(virtual_env) / "bin")
-        if venv_bin not in path_entries:
-            path_entries.insert(0, venv_bin)
+    skip_bins = _current_runtime_bins()
+    path_entries = [entry for entry in path_entries if entry and entry not in skip_bins]
+    env.pop("VIRTUAL_ENV", None)
     if path_entries:
         env["PATH"] = os.pathsep.join(path_entries)
     if extra_pythonpath:
@@ -910,6 +910,68 @@ def _subprocess_env(extra_pythonpath: list[Path] | None = None) -> dict[str, str
                 seen.add(entry)
         env["PYTHONPATH"] = os.pathsep.join(merged)
     return env
+
+
+def _current_runtime_bins() -> set[str]:
+    bins = {str(Path(sys.executable).parent)}
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env:
+        bins.add(str(Path(virtual_env) / "bin"))
+    return bins
+
+
+def _resolve_subprocess_command(
+    command: list[str],
+    cwd: Path,
+    extra_pythonpath: list[Path] | None,
+) -> list[str]:
+    if not command:
+        return command
+    executable = command[0]
+    if os.sep in executable or (os.altsep and os.altsep in executable):
+        return command
+    name = Path(executable).name.lower()
+    roots = _candidate_project_roots(cwd, extra_pythonpath)
+    if name in {"python", "python.exe", "python3", "python3.exe"}:
+        resolved = _resolve_python_executable(roots, prefer_python3=name.startswith("python3"))
+        return [resolved, *command[1:]]
+    if name in {"pytest", "pytest.exe"}:
+        resolved_pytest = _resolve_project_or_user_tool("pytest", roots)
+        if resolved_pytest:
+            return [resolved_pytest, *command[1:]]
+        if _which("uv"):
+            return ["uv", "run", "pytest", *command[1:]]
+        return [sys.executable, "-m", "pytest", *command[1:]]
+    return command
+
+
+def _candidate_project_roots(cwd: Path, extra_pythonpath: list[Path] | None) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for root in [cwd, *(extra_pythonpath or [])]:
+        path = Path(root)
+        if path not in seen:
+            roots.append(path)
+            seen.add(path)
+    return roots
+
+
+def _resolve_python_executable(roots: list[Path], *, prefer_python3: bool = False) -> str:
+    names = ("python3", "python") if prefer_python3 else ("python", "python3")
+    for name in names:
+        resolved = _resolve_project_or_user_tool(name, roots)
+        if resolved:
+            return resolved
+    return sys.executable
+
+
+def _resolve_project_or_user_tool(name: str, roots: list[Path]) -> str | None:
+    for root in roots:
+        for relative in (f".venv/bin/{name}", f".venv/Scripts/{name}.exe"):
+            candidate = root / relative
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return _which_user_path(name)
 
 
 def _format_subprocess_output(

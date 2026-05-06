@@ -7,6 +7,7 @@ infrastructure that does not exercise the deleted entry points.
 """
 
 import json
+import os
 from unittest.mock import patch
 
 import pytest
@@ -104,6 +105,39 @@ class TestSubprocessEnv:
         assert env["DJANGO_SETTINGS_MODULE"] == "project.settings"
         assert env["SALEOR_API_URL"] == "http://127.0.0.1:8000/graphql/"
         assert "CUSTOM_PASSWORD" not in env
+
+    def test_current_otto_venv_is_not_child_agent_default(self, tmp_path, monkeypatch):
+        otto_bin = tmp_path / "otto-venv" / "bin"
+        user_bin = tmp_path / "user-bin"
+        otto_bin.mkdir(parents=True)
+        user_bin.mkdir()
+        monkeypatch.setattr("otto.testing.sys.executable", str(otto_bin / "python"))
+        monkeypatch.setenv("VIRTUAL_ENV", str(otto_bin.parent))
+        monkeypatch.setenv("PATH", f"{otto_bin}{os.pathsep}{user_bin}")
+
+        env = _subprocess_env(tmp_path)
+
+        assert str(otto_bin) not in env["PATH"].split(os.pathsep)
+        assert str(user_bin) in env["PATH"].split(os.pathsep)
+        assert "VIRTUAL_ENV" not in env
+
+    def test_project_venv_is_child_agent_default(self, tmp_path, monkeypatch):
+        otto_bin = tmp_path / "otto-venv" / "bin"
+        project_bin = tmp_path / "project" / ".venv" / "bin"
+        user_bin = tmp_path / "user-bin"
+        otto_bin.mkdir(parents=True)
+        project_bin.mkdir(parents=True)
+        user_bin.mkdir()
+        monkeypatch.setattr("otto.testing.sys.executable", str(otto_bin / "python"))
+        monkeypatch.setenv("VIRTUAL_ENV", str(otto_bin.parent))
+        monkeypatch.setenv("PATH", f"{otto_bin}{os.pathsep}{user_bin}")
+
+        env = _subprocess_env(project_bin.parents[1])
+
+        path = env["PATH"].split(os.pathsep)
+        assert path[0] == str(project_bin)
+        assert str(otto_bin) not in path
+        assert env["VIRTUAL_ENV"] == str(project_bin.parent)
 
 
 # -- Test: Empty story_id is rejected --

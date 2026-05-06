@@ -271,6 +271,53 @@ def test_repo_test_check_passes_pythonpath_to_subprocess(tmp_path: Path) -> None
     assert evidence.passed is True, evidence.raw
 
 
+def test_repo_test_check_resolves_bare_python_away_from_otto_venv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    otto_bin = tmp_path / "otto-venv" / "bin"
+    user_bin = tmp_path / "user-bin"
+    otto_bin.mkdir(parents=True)
+    user_bin.mkdir()
+    (otto_bin / "python").write_text("#!/bin/sh\necho otto-python >&2\nexit 17\n", encoding="utf-8")
+    (user_bin / "python3").write_text("#!/bin/sh\necho user-python3\nexit 0\n", encoding="utf-8")
+    (otto_bin / "python").chmod(0o755)
+    (user_bin / "python3").chmod(0o755)
+    monkeypatch.setattr("otto.checks.sys.executable", str(otto_bin / "python"))
+    monkeypatch.setenv("VIRTUAL_ENV", str(otto_bin.parent))
+    monkeypatch.setenv("PATH", f"{otto_bin}{os.pathsep}{user_bin}")
+
+    check = RepoTestCheck(command=("python", "-m", "pytest", "tests/test_app.py"), timeout_s=10)
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+
+    assert evidence.passed is True, evidence.raw
+    assert evidence.raw["resolved_command"][0] == str(user_bin / "python3")
+    assert "user-python3" in evidence.raw["stdout"]
+    assert "otto-python" not in evidence.raw["stderr"]
+
+
+def test_repo_test_check_prefers_project_venv_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_bin = tmp_path / ".venv" / "bin"
+    user_bin = tmp_path / "user-bin"
+    project_bin.mkdir(parents=True)
+    user_bin.mkdir()
+    (project_bin / "python").write_text("#!/bin/sh\necho project-python\nexit 0\n", encoding="utf-8")
+    (user_bin / "python3").write_text("#!/bin/sh\necho user-python3\nexit 0\n", encoding="utf-8")
+    (project_bin / "python").chmod(0o755)
+    (user_bin / "python3").chmod(0o755)
+    monkeypatch.setenv("PATH", str(user_bin))
+
+    check = RepoTestCheck(command=("python", "-m", "pytest", "tests/test_app.py"), timeout_s=10)
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+
+    assert evidence.passed is True, evidence.raw
+    assert evidence.raw["resolved_command"][0] == str(project_bin / "python")
+    assert "project-python" in evidence.raw["stdout"]
+
+
 # ---------------------------------------------------------------------------
 # BrowserJourney
 # ---------------------------------------------------------------------------

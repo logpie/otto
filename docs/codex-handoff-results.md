@@ -1319,3 +1319,60 @@ Decision:
 - Generic Otto bugs fixed. The Acme run's terminal blocked verdict is now
   classified as an Otto verifier-environment bug fixed in this pass; the target
   product selectors pass externally.
+
+## 2026-05-06 Fresh Acme Web Lifecycle Retry
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-dashboard-widget-to-85d320`
+- Session: `2026-05-06-155735-34ba33`
+- Provider: Codex, submitted through Mission Control Web.
+- Intent: add a manager SLA dashboard widget to the existing Flask/SQLite
+  expense portal while preserving submission, approval, saved-filter, CSV, and
+  PDF behavior.
+
+Mission Control evidence:
+- Browser artifacts: `/tmp/otto-acme-fresh-20260506-085727/`
+- Queue payload captured from Web: `extra_args=["--provider","codex"]`; no
+  ignored `--split`, `--agentic`, or build `--rounds` flags.
+- Screenshots captured for launcher, project workspace, Codex job dialog,
+  queued task, running task, active run detail, group logs, and group diff.
+- RunView API showed compile -> build transition with 2 groups and 6 features.
+- Logs and diffs actions opened real evidence panes instead of silent clicks.
+
+Bug found:
+- Deterministic checks and provider child shells could inherit Otto's own
+  virtualenv as their default `python`. In this Acme run, `python -m pytest`
+  used `/Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2/.venv/bin/python`,
+  which had pytest but not Flask/ReportLab. The first group failed real checks
+  before collection and then spent retries adding project-local test bootstraps
+  to compensate.
+
+Classification:
+- Otto bug fixed. The active run was cancelled after evidence collection because
+  it was running the pre-fix process and would keep burning retries on the stale
+  environment behavior.
+
+Generic fix:
+- Provider agent env no longer prepends or exports Otto's own current virtualenv
+  into target project child agents. Target project `.venv` is preferred when it
+  exists; otherwise agents inherit the user/tool PATH without Otto's venv as the
+  default `python`.
+- `RepoTestCheck` command execution now resolves bare `python` and `pytest`
+  through the target project venv or user PATH while explicitly skipping Otto's
+  own venv. Raw evidence records both the original command and resolved command.
+
+Regression tests added:
+- `tests/test_checks.py::test_repo_test_check_resolves_bare_python_away_from_otto_venv`
+- `tests/test_checks.py::test_repo_test_check_prefers_project_venv_python`
+- `tests/test_hardening.py::TestSubprocessEnv::test_current_otto_venv_is_not_child_agent_default`
+- `tests/test_hardening.py::TestSubprocessEnv::test_project_venv_is_child_agent_default`
+
+Gates run:
+- `.venv/bin/python -m py_compile otto/checks.py otto/testing.py` -> passed.
+- `.venv/bin/pytest tests/test_checks.py::test_repo_test_check_resolves_bare_python_away_from_otto_venv tests/test_checks.py::test_repo_test_check_prefers_project_venv_python tests/test_hardening.py::TestSubprocessEnv::test_current_otto_venv_is_not_child_agent_default tests/test_hardening.py::TestSubprocessEnv::test_project_venv_is_child_agent_default -q` -> `4 passed`.
+- `.venv/bin/pytest tests/test_checks.py tests/test_hardening.py::TestSubprocessEnv tests/test_agent.py::test_make_agent_options_env_prefers_target_project_src -q` -> `58 passed`.
+
+Decision:
+- Fix and retry. This run does not count as a product pass; it is evidence for
+  the generic environment bug and the recovery/cancel path.
