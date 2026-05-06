@@ -243,6 +243,75 @@ def test_layer2_repair_runs_for_group_level_feature_audit(
     assert result.repair_result is not None
 
 
+def test_layer2_repair_runs_for_compact_group_feature_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: compact specs with no top-level features still repair."""
+    from otto.audit import FeatureAudit
+    from otto.spec_compile import parse_spec
+
+    spec, _warnings = parse_spec(
+        {
+            "intent": "team kanban",
+            "project_kind": "webapp",
+            "groups": [
+                {
+                    "id": "cards_movement",
+                    "name": "Card creation, editing, deletion, and movement",
+                    "feature_ids": [
+                        "create cards with title, description, labels, assignee, and due date",
+                        "move cards between columns with visible controls",
+                    ],
+                    "owned_paths": ["src/features/cards/**"],
+                }
+            ],
+        }
+    )
+    assert spec.features == []
+
+    audit = AuditResult(
+        verdict=AuditVerdict.BLOCKED,
+        narrative="cards missing",
+        feature_audits=[
+            FeatureAudit(
+                feature_id="cards_movement",
+                name="Card creation, editing, deletion, and movement",
+                status="missing",
+                detail="Create/edit/delete card controls are absent.",
+            )
+        ],
+    )
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured = _wire_stubs(monkeypatch, audit=audit, order=order)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x",
+            tmp_path,
+            session_dir,
+            project_kind="webapp",
+            brownfield=False,
+            base_url=None,
+            config={},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_stub_agent,
+            spec=spec,
+        )
+    )
+
+    assert "repair" in order.events
+    assert captured["repair_calls"] == 1
+    repaired_ids = {
+        verdict["feature_id"] for verdict in captured["repair_feature_verdicts"]
+    }
+    assert "create cards with title, description, labels, assignee, and due date" in repaired_ids
+    assert "move cards between columns with visible controls" in repaired_ids
+    assert result.repair_result is not None
+
+
 def _ok_build(spec: Spec, session_dir: Path) -> BuildResult:
     return BuildResult(
         spec_session_dir=session_dir,
@@ -406,6 +475,181 @@ def test_run_pipeline_phases_run_in_order(tmp_path: Path, monkeypatch) -> None:
     assert result.html_path is not None
     assert result.json_path is not None
     assert result.build_result is not None
+
+
+def test_run_pipeline_rebuilds_dependency_setup_blocked_group_after_merge_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A downstream group blocked on raw dep branches gets one post-merge pass."""
+    spec = Spec(
+        intent="team kanban",
+        groups=[
+            Group(id="foundation", name="Foundation"),
+            Group(id="board-editor", name="Board editor", dependencies=["foundation"]),
+            Group(id="filters-search", name="Filters", dependencies=["foundation"]),
+            Group(id="import-export", name="Import/export", dependencies=["foundation"]),
+            Group(
+                id="docs-and-quality",
+                name="Docs and quality",
+                dependencies=["board-editor", "filters-search", "import-export"],
+            ),
+        ],
+    )
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured: dict[str, Any] = {
+        "build_calls": 0,
+        "merge_calls": 0,
+        "second_build_skip": set(),
+        "second_merge_skip": set(),
+    }
+
+    def _seed(spec, project_dir, session_dir=None):
+        order.add("seed")
+        return SeedResult(succeeded=True, detail="ok")
+
+    async def _build(spec, *, project_dir, session_dir, **kwargs):
+        captured["build_calls"] += 1
+        order.add("build")
+        if captured["build_calls"] == 1:
+            return BuildResult(
+                spec_session_dir=session_dir,
+                group_results=[
+                    GroupResult(
+                        group_id="foundation",
+                        status=GroupStatus.PASSING,
+                        attempts=1,
+                        branch="i2p/run/foundation",
+                        worktree=project_dir,
+                    ),
+                    GroupResult(
+                        group_id="board-editor",
+                        status=GroupStatus.PASSING,
+                        attempts=1,
+                        branch="i2p/run/board-editor",
+                        worktree=project_dir,
+                    ),
+                    GroupResult(
+                        group_id="filters-search",
+                        status=GroupStatus.PASSING,
+                        attempts=1,
+                        branch="i2p/run/filters-search",
+                        worktree=project_dir,
+                    ),
+                    GroupResult(
+                        group_id="import-export",
+                        status=GroupStatus.PASSING,
+                        attempts=1,
+                        branch="i2p/run/import-export",
+                        worktree=project_dir,
+                    ),
+                    GroupResult(
+                        group_id="docs-and-quality",
+                        status=GroupStatus.BLOCKED,
+                        attempts=0,
+                        branch="i2p/run/docs-and-quality",
+                        worktree=project_dir,
+                        failure_narrative=(
+                            "dependency branch setup failed: could not create an "
+                            "integrated branch for docs-and-quality"
+                        ),
+                    ),
+                ],
+                total_cost_usd=0.40,
+                total_wall_s=4.0,
+            )
+        captured["second_build_skip"] = set(kwargs.get("skip_components") or [])
+        return BuildResult(
+            spec_session_dir=session_dir,
+            group_results=[
+                GroupResult(
+                    group_id="docs-and-quality",
+                    status=GroupStatus.PASSING,
+                    attempts=1,
+                    branch="i2p/run/docs-and-quality",
+                    worktree=project_dir,
+                )
+            ],
+            total_cost_usd=0.10,
+            total_wall_s=1.0,
+        )
+
+    async def _merge(spec, build_result, *, project_dir, session_dir, **kwargs):
+        captured["merge_calls"] += 1
+        order.add("merge")
+        if captured["merge_calls"] == 1:
+            return MergeQueueResult(
+                landed_ids=[
+                    "foundation",
+                    "board-editor",
+                    "filters-search",
+                    "import-export",
+                ]
+            )
+        captured["second_merge_skip"] = set(kwargs.get("skip_components") or [])
+        return MergeQueueResult(
+            landed_ids=[
+                "foundation",
+                "board-editor",
+                "filters-search",
+                "import-export",
+                "docs-and-quality",
+            ]
+        )
+
+    async def _audit(spec, **kwargs):
+        order.add("audit")
+        return _passing_audit(spec)
+
+    def _render(spec, *, session_dir, **kwargs):
+        order.add("render")
+        html = session_dir / "proof-packet.html"
+        json_ = session_dir / "proof-packet.json"
+        html.write_text("<html/>")
+        json_.write_text("{}")
+        return html, json_
+
+    monkeypatch.setattr("otto.runner.seed_fixtures", _seed)
+    monkeypatch.setattr("otto.runner.run_build", _build)
+    monkeypatch.setattr("otto.runner.run_merge_queue", _merge)
+    monkeypatch.setattr("otto.runner.run_audit", _audit)
+    monkeypatch.setattr("otto.runner.render_run", _render)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x",
+            tmp_path,
+            session_dir,
+            project_kind="webapp",
+            brownfield=False,
+            base_url=None,
+            config={},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=None,
+            spec=spec,
+        )
+    )
+
+    assert order.events == ["seed", "build", "merge", "build", "merge", "audit", "render"]
+    assert captured["build_calls"] == 2
+    assert captured["merge_calls"] == 2
+    assert "docs-and-quality" not in captured["second_build_skip"]
+    assert {"board-editor", "filters-search", "import-export"}.issubset(
+        captured["second_build_skip"]
+    )
+    assert captured["second_merge_skip"] == {
+        "foundation",
+        "board-editor",
+        "filters-search",
+        "import-export",
+    }
+    assert result.build_result is not None
+    latest = {r.group_id: r for r in result.build_result.group_results}
+    assert latest["docs-and-quality"].status == GroupStatus.PASSING
+    assert result.merge_result is not None
+    assert "docs-and-quality" in result.merge_result.landed_ids
 
 
 def test_run_pipeline_writes_resume_checkpoint_and_clears_pointer(

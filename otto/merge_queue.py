@@ -620,9 +620,9 @@ async def _process_candidate(
         # If we fell through from post-merge check failure (rollback path),
         # both summaries are None and we compute them here.
         if slice_failed_summaries is None:
-            slice_failed_summaries = [ev.detail for ev in group_evidence if not ev.passed]
+            slice_failed_summaries = _failed_evidence_summaries(group_evidence)
         if cross_failed_summaries is None:
-            cross_failed_summaries = [ev.detail for ev in cross_evidence if not ev.passed]
+            cross_failed_summaries = _failed_evidence_summaries(cross_evidence)
             last_failure = "post-merge verification failed"
             if slice_failed_summaries:
                 last_failure += f" — slice: {'; '.join(slice_failed_summaries[:3])}"
@@ -843,6 +843,49 @@ def _modified_paths_for_repair(
             if path and path not in paths:
                 paths.append(path)
     return paths
+
+
+def _failed_evidence_summaries(evidence: list[Evidence]) -> list[str]:
+    return [_evidence_failure_summary(ev) for ev in evidence if not ev.passed]
+
+
+def _evidence_failure_summary(evidence: Evidence) -> str:
+    detail = evidence.detail or "check failed"
+    raw = evidence.raw or {}
+    stdout = str(raw.get("stdout") or "")
+    stderr = str(raw.get("stderr") or "")
+    excerpt = _interesting_failure_excerpt(stdout + "\n" + stderr)
+    if not excerpt:
+        return detail
+    return f"{detail} — {excerpt}"
+
+
+def _interesting_failure_excerpt(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    needles = (
+        "error:",
+        "error ",
+        "expected",
+        "received",
+        "timeout",
+        "failed",
+        "failing",
+        "assert",
+        "✘",
+    )
+    picked: list[str] = []
+    for line in lines:
+        lower = line.lower()
+        if any(needle in lower for needle in needles):
+            picked.append(line)
+        if len(picked) >= 10:
+            break
+    if not picked:
+        picked = lines[-10:]
+    excerpt = " | ".join(picked)
+    return excerpt[:1200]
 
 
 def _discard_uncommitted_repair(

@@ -15,6 +15,13 @@ end. This skill is for:
 - finding bugs, UX issues, reliability gaps, and design gaps
 - pressure testing Otto on increasingly complex real-world projects
 
+Pressure tests are not "intended to fail." They are intended to reveal whether
+Otto holds under realistic work. When a pressure project fails, treat the
+failure as evidence: expose the bug or design gap, fix generic root causes when
+that is in scope, add regression coverage, and rerun a meaningful scenario. Only
+defer a finding when the remaining work is explicitly tracked with evidence and
+a reason it cannot be fixed in the current pass.
+
 The primary entry is **Mission Control Web**. Use CLI as a secondary surface
 for power users, agents, scripted runs, direct `otto run` pressure tests, queue
 runners, proof inspection, and recovery/debug work.

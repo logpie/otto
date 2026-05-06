@@ -572,6 +572,15 @@ Example for a library:
    If the foundation group creates a shared store, typed contracts, and
    register-via-discovery extension point, sibling feature groups should
    usually depend only on that foundation and then run concurrently.
+   For local single-page CRUD apps such as kanban boards, micro-feeds,
+   dashboards, recipe boards, and admin panels, do **not** serialize
+   columns -> cards -> filters -> import/export unless a later group truly
+   needs the earlier group's implementation. Prefer a foundation group that
+   defines the store/model plus extension points, then sibling groups for
+   CRUD controls, filtering/search, import/export, docs/tests, and responsive
+   polish that all depend on foundation. If a group has more than 3-4
+   user-visible behaviors or a browser journey that must cover many unrelated
+   actions, split it so one brittle check cannot block the rest of the app.
    Add a dependency only when group X truly needs group Y's completed
    product behavior, data contract, generated file, or test helper.
    Linear chains are a smell unless each later group genuinely consumes

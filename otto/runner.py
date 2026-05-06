@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -65,6 +66,10 @@ from otto.build import (
     BuildAgentInput,
     BuildBudget,
     BuildResult,
+    ComponentResult,
+    ComponentStatus,
+    GroupResult,
+    GroupStatus,
     run_build,
 )
 from otto.merge_queue import (
@@ -75,7 +80,7 @@ from otto.merge_queue import (
 from otto.render import render_run
 from otto.resume import ResumePlan
 from otto.seed import SeedResult, seed_fixtures
-from otto.spec_compile import Group, Spec, compile_spec
+from otto.spec_compile import Feature, Group, Spec, compile_spec
 from otto.spec_state import emit, is_run_paused_by_user, iter_events
 
 logger = logging.getLogger("otto.runner")
@@ -430,6 +435,20 @@ async def run_pipeline(
             shared_budget=shared_budget,
             skip_components=skip_components,
         )
+        build_result, merge_result = await _rebuild_dependency_setup_blocked_units(
+            spec=spec,
+            build_result=build_result,
+            merge_result=merge_result,
+            project_dir=project_dir,
+            session_dir=session_dir,
+            build_agent=build_agent,
+            config=config,
+            base_url=base_url,
+            shared_budget=shared_budget,
+            base_branch=base_branch,
+            skip_components=skip_components,
+        )
+        result.build_result = build_result
     result.merge_result = merge_result
 
     # ---- 5. Audit ----
@@ -469,11 +488,16 @@ async def run_pipeline(
     # Triggered only on non-PASS verdicts and only when a fix_agent is
     # available. ``run_audit`` already does its own slice-level repair;
     # this is the FEATURE-level Layer 2 loop.
+    repair_spec = _spec_with_group_feature_fallbacks(spec)
     if (
         audit_result.verdict != AuditVerdict.PASSED
         and fix_agent is not None
-        and spec.features
+        and repair_spec.features
     ):
+        # Keep downstream proof/render Feature-aware for compact specs, but
+        # do not rewrite the persisted spec just to repair a legacy shape.
+        spec = repair_spec
+        result.spec = spec
         feature_verdicts = _feature_audits_to_verdicts(spec, audit_result)
         if feature_verdicts:
             _phase("repair")
@@ -687,7 +711,6 @@ async def _redispatch_invalidated_groups(
     ids, Component results are preserved from the prior pass.
     """
     from otto.spec_compile import load_spec
-    from otto.build import GroupResult
 
     spec_path = session_dir / "spec" / "spec.json"
     try:
@@ -751,6 +774,245 @@ async def _redispatch_invalidated_groups(
         ),
     )
     return post_edit_spec, merged
+
+
+async def _rebuild_dependency_setup_blocked_units(
+    *,
+    spec: Spec,
+    build_result: BuildResult,
+    merge_result: MergeQueueResult,
+    project_dir: Path,
+    session_dir: Path,
+    build_agent: BuildAgentCallable,
+    config: dict[str, Any],
+    base_url: str | None,
+    shared_budget: BuildBudget,
+    base_branch: str,
+    skip_components: set[str],
+) -> tuple[BuildResult, MergeQueueResult]:
+    """Give downstream units one pass after dependency merge repair.
+
+    The first build pass may block a downstream Group/Component while trying to
+    create a branch from multiple raw sibling dependency branches. The merge
+    queue can later repair and land those sibling branches. Once that happens,
+    the downstream unit should build against the repaired integrated branch
+    instead of staying permanently blocked on stale pre-repair dependency refs.
+    """
+
+    retry_ids = _dependency_setup_retry_ids(
+        spec=spec,
+        build_result=build_result,
+        merge_result=merge_result,
+    )
+    if not retry_ids:
+        return build_result, merge_result
+
+    all_unit_ids = {g.id for g in spec.groups}
+    all_unit_ids.update(c.id for c in (getattr(spec, "components", None) or []))
+    second_skip = set(skip_components)
+    second_skip.update(uid for uid in all_unit_ids if uid not in retry_ids)
+
+    try:
+        retry_build = await run_build(
+            spec,
+            project_dir=project_dir,
+            session_dir=session_dir,
+            build_agent=build_agent,
+            config=config,
+            base_url=base_url,
+            budget=shared_budget,
+            base_branch=base_branch,
+            skip_components=second_skip,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "dependency-retry: run_build raised %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return build_result, merge_result
+
+    merged_build = _merge_retry_build_results(
+        prior=build_result,
+        retry=retry_build,
+        retry_ids=retry_ids,
+    )
+    retry_merge_build = _filter_build_result_for_retry_merge(
+        merged_build,
+        allowed_ids=set(merge_result.landed_ids) | retry_ids,
+    )
+    try:
+        retry_merge = await run_merge_queue(
+            spec,
+            retry_merge_build,
+            project_dir=project_dir,
+            session_dir=session_dir,
+            base_url=base_url,
+            base_branch=base_branch,
+            build_agent=build_agent,
+            config=config,
+            budget=MergeBudget(),
+            shared_budget=shared_budget,
+            skip_components=set(merge_result.landed_ids),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "dependency-retry: run_merge_queue raised %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return merged_build, merge_result
+
+    return merged_build, _combine_merge_results(merge_result, retry_merge)
+
+
+def _dependency_setup_retry_ids(
+    *,
+    spec: Spec,
+    build_result: BuildResult,
+    merge_result: MergeQueueResult,
+) -> set[str]:
+    landed = set(merge_result.landed_ids)
+    latest_groups: dict[str, GroupResult] = {}
+    for result in build_result.group_results:
+        latest_groups[result.group_id] = result
+    latest_components: dict[str, ComponentResult] = {}
+    for result in build_result.component_results:
+        latest_components[result.component_id] = result
+
+    retry: set[str] = set()
+    for group in spec.groups:
+        result = latest_groups.get(group.id)
+        if (
+            result is not None
+            and result.status == GroupStatus.BLOCKED
+            and _is_dependency_setup_failure(result.failure_narrative)
+            and all(dep in landed for dep in (group.dependencies or []))
+        ):
+            retry.add(group.id)
+    for component in (getattr(spec, "components", None) or []):
+        result = latest_components.get(component.id)
+        if (
+            result is not None
+            and result.status == ComponentStatus.BLOCKED
+            and _is_dependency_setup_failure(result.failure_narrative)
+            and all(dep in landed for dep in (component.dependencies or []))
+        ):
+            retry.add(component.id)
+    return retry
+
+
+def _is_dependency_setup_failure(narrative: str | None) -> bool:
+    return (narrative or "").startswith("dependency branch setup failed:")
+
+
+def _merge_retry_build_results(
+    *,
+    prior: BuildResult,
+    retry: BuildResult,
+    retry_ids: set[str],
+) -> BuildResult:
+    retry_groups = {
+        result.group_id: result
+        for result in retry.group_results
+        if result.group_id in retry_ids
+    }
+    retry_components = {
+        result.component_id: result
+        for result in retry.component_results
+        if result.component_id in retry_ids
+    }
+
+    merged_groups: list[GroupResult] = []
+    seen_groups: set[str] = set()
+    for result in prior.group_results:
+        replacement = retry_groups.get(result.group_id)
+        if replacement is not None:
+            merged_groups.append(replacement)
+            seen_groups.add(result.group_id)
+        else:
+            merged_groups.append(result)
+    for group_id, result in retry_groups.items():
+        if group_id not in seen_groups:
+            merged_groups.append(result)
+
+    merged_components: list[ComponentResult] = []
+    seen_components: set[str] = set()
+    for result in prior.component_results:
+        replacement = retry_components.get(result.component_id)
+        if replacement is not None:
+            merged_components.append(replacement)
+            seen_components.add(result.component_id)
+        else:
+            merged_components.append(result)
+    for component_id, result in retry_components.items():
+        if component_id not in seen_components:
+            merged_components.append(result)
+
+    return BuildResult(
+        spec_session_dir=prior.spec_session_dir,
+        group_results=merged_groups,
+        component_results=merged_components,
+        total_cost_usd=prior.total_cost_usd + retry.total_cost_usd,
+        total_wall_s=prior.total_wall_s + retry.total_wall_s,
+    )
+
+
+def _filter_build_result_for_retry_merge(
+    build_result: BuildResult,
+    *,
+    allowed_ids: set[str],
+) -> BuildResult:
+    return BuildResult(
+        spec_session_dir=build_result.spec_session_dir,
+        group_results=[
+            result
+            for result in build_result.group_results
+            if result.group_id in allowed_ids
+        ],
+        component_results=[
+            result
+            for result in build_result.component_results
+            if result.component_id in allowed_ids
+        ],
+        total_cost_usd=0.0,
+        total_wall_s=0.0,
+    )
+
+
+def _combine_merge_results(
+    first: MergeQueueResult,
+    second: MergeQueueResult,
+) -> MergeQueueResult:
+    landed = _dedupe([*first.landed_ids, *second.landed_ids])
+    redundant = _dedupe([*first.redundant_ids, *second.redundant_ids])
+    landed_set = set(landed)
+    blocked = _dedupe(
+        [
+            group_id
+            for group_id in [*first.blocked_ids, *second.blocked_ids]
+            if group_id not in landed_set
+        ]
+    )
+    return MergeQueueResult(
+        landed_ids=landed,
+        blocked_ids=blocked,
+        redundant_ids=redundant,
+        results=[*first.results, *second.results],
+        total_cost_usd=first.total_cost_usd + second.total_cost_usd,
+        total_wall_s=first.total_wall_s + second.total_wall_s,
+    )
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
 
 
 def _wait_while_paused(session_dir: Path) -> None:
@@ -899,6 +1161,37 @@ def _feature_audits_to_verdicts(
     return out
 
 
+def _spec_with_group_feature_fallbacks(spec: Spec) -> Spec:
+    """Return a repair-ready Spec when only Group.feature_ids exist.
+
+    Compact specs can omit top-level Feature rows while still listing concrete
+    user-visible work in each Group's ``feature_ids``. Build can use that
+    shape, but Layer 2 repair routes by Feature. Synthesize in-memory Feature
+    records here so repair does not silently skip compact specs.
+    """
+    if spec.features:
+        return spec
+    features: list[Feature] = []
+    seen: set[str] = set()
+    for group in spec.groups:
+        for raw_feature_id in group.feature_ids or []:
+            feature_id = str(raw_feature_id or "").strip()
+            if not feature_id or feature_id in seen:
+                continue
+            features.append(
+                Feature(
+                    id=feature_id,
+                    name=feature_id,
+                    description=feature_id,
+                    group_id=group.id,
+                )
+            )
+            seen.add(feature_id)
+    if not features:
+        return spec
+    return replace(spec, features=features)
+
+
 def _feature_verdict_payload(feature_id: str, feature_audit: Any) -> dict[str, Any]:
     return {
         "feature_id": feature_id,
@@ -971,8 +1264,12 @@ def _best_matching_features_for_audit(
     if not scored:
         return []
 
-    best_score = max(score for score, _feature in scored)
-    return [feature for score, feature in scored if score == best_score]
+    # Group-level audits often aggregate several missing behaviors in one
+    # sentence. Route every positively matched Feature, highest-signal first,
+    # instead of picking only the top token match and leaving sibling failures
+    # unrepaired.
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [feature for _score, feature in scored]
 
 
 _AUDIT_MATCH_STOPWORDS = {
@@ -1104,7 +1401,7 @@ def _make_layer2_fix_agent(
                     committed = _commit_group_work(
                         project_dir,
                         group_id=group.id,
-                        branch=f"layer2/{failing.feature_id}",
+                        branch=f"layer2/{_branch_slug(failing.feature_id)}",
                     )
                     if not committed:
                         succeeded = False
@@ -1128,6 +1425,11 @@ def _make_layer2_fix_agent(
         )
 
     return bridge
+
+
+def _branch_slug(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._/-]+", "-", str(value or "")).strip("-./")
+    return slug[:80] or "repair"
 
 
 def _audit_result_from_resume_plan(plan: ResumePlan) -> AuditResult:
