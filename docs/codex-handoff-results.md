@@ -1376,3 +1376,58 @@ Gates run:
 Decision:
 - Fix and retry. This run does not count as a product pass; it is evidence for
   the generic environment bug and the recovery/cancel path.
+
+## 2026-05-06 Fresh Acme Retry 2: Queue Worktree Runtime Discovery
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-0fb7b9`
+- Session: `2026-05-06-162654-35ac28`
+- Provider: Codex, submitted through Mission Control Web.
+
+Mission Control evidence:
+- Browser artifacts: `/tmp/otto-acme-retry-20260506-0920/`
+- Web payload captured:
+  `extra_args=["--provider","codex"]`; no ignored split/agentic/rounds
+  controls were submitted.
+- RunView showed three i2p groups with compile complete and build active:
+  `sla-aging-data`, `sla-aging-widget`, `preserve-core-flows`.
+
+Bug found:
+- The first environment fix correctly removed Otto's own venv from child
+  shells, but queue task worktrees do not contain the target project's `.venv`.
+  The Acme dependency venv lives at the parent project root:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.venv`.
+- In the queued linked worktree, the build agent had no `python` command,
+  fell back to `python3`, missed `reportlab`, and then searched sibling
+  worktree virtualenvs. That is not a valid real-user/runtime contract.
+
+Classification:
+- Otto bug fixed. The run was cancelled after evidence collection because the
+  active process had loaded the stale environment code.
+
+Generic fix:
+- Provider child-agent env now detects Otto-managed linked worktrees under
+  `<project>/.worktrees/<task>` and prepends `<project>/.venv/bin` when present.
+- Deterministic check execution uses the same linked-worktree runtime lookup
+  for bare `python`, `pytest`, and subprocess PATH/VIRTUAL_ENV setup.
+- Otto's own current venv remains explicitly excluded.
+
+Regression tests added:
+- `tests/test_hardening.py::TestSubprocessEnv::test_parent_project_venv_is_used_for_queue_worktree`
+- `tests/test_checks.py::test_pytest_check_uses_parent_project_venv_for_queue_worktree`
+- `tests/test_checks.py::test_repo_test_check_prefers_parent_project_venv_python_for_queue_worktree`
+
+Gates run:
+- `.venv/bin/python -m py_compile otto/checks.py otto/testing.py` -> passed.
+- `.venv/bin/pytest tests/test_checks.py::test_pytest_check_uses_parent_project_venv_for_queue_worktree tests/test_checks.py::test_repo_test_check_prefers_parent_project_venv_python_for_queue_worktree tests/test_hardening.py::TestSubprocessEnv::test_parent_project_venv_is_used_for_queue_worktree -q`
+  -> `3 passed`.
+- `.venv/bin/pytest tests/test_checks.py tests/test_hardening.py::TestSubprocessEnv tests/test_agent.py::test_make_agent_options_env_prefers_target_project_src -q`
+  -> `61 passed`.
+- `uv run ruff check otto/checks.py otto/testing.py tests/test_checks.py tests/test_hardening.py`
+  -> passed.
+
+Decision:
+- Fix and retry from a fresh Mission Control process. This run does not count
+  as a product pass; it is evidence for the linked-worktree runtime discovery
+  bug and the cancel/retry recovery path.

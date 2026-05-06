@@ -230,6 +230,26 @@ def test_pytest_check_uses_project_venv_pytest_before_uv(tmp_path: Path) -> None
     assert "project-venv-pytest" in evidence.raw["stdout"]
 
 
+def test_pytest_check_uses_parent_project_venv_for_queue_worktree(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    worktree = project / ".worktrees" / "queued-task"
+    venv_pytest = project / ".venv" / "bin" / "pytest"
+    worktree.mkdir(parents=True)
+    venv_pytest.parent.mkdir(parents=True)
+    venv_pytest.write_text(
+        "#!/bin/sh\nprintf 'parent-project-pytest %s\\n' \"$*\"\nexit 0\n",
+        encoding="utf-8",
+    )
+    venv_pytest.chmod(0o755)
+
+    check = PytestCheck(selector="tests/test_app.py", timeout_s=30)
+    evidence = run_check(check, project_dir=worktree, cwd=worktree)
+
+    assert evidence.passed is True, evidence.raw
+    assert evidence.raw["command"][0] == str(venv_pytest)
+    assert "parent-project-pytest" in evidence.raw["stdout"]
+
+
 def test_pytest_command_prefers_path_pytest_over_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -316,6 +336,31 @@ def test_repo_test_check_prefers_project_venv_python(
     assert evidence.passed is True, evidence.raw
     assert evidence.raw["resolved_command"][0] == str(project_bin / "python")
     assert "project-python" in evidence.raw["stdout"]
+
+
+def test_repo_test_check_prefers_parent_project_venv_python_for_queue_worktree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    worktree = project / ".worktrees" / "queued-task"
+    project_bin = project / ".venv" / "bin"
+    user_bin = tmp_path / "user-bin"
+    project_bin.mkdir(parents=True)
+    worktree.mkdir(parents=True)
+    user_bin.mkdir()
+    (project_bin / "python").write_text("#!/bin/sh\necho parent-project-python\nexit 0\n", encoding="utf-8")
+    (user_bin / "python3").write_text("#!/bin/sh\necho user-python3\nexit 0\n", encoding="utf-8")
+    (project_bin / "python").chmod(0o755)
+    (user_bin / "python3").chmod(0o755)
+    monkeypatch.setenv("PATH", str(user_bin))
+
+    check = RepoTestCheck(command=("python", "-m", "pytest", "tests/test_app.py"), timeout_s=10)
+    evidence = run_check(check, project_dir=worktree, cwd=worktree)
+
+    assert evidence.passed is True, evidence.raw
+    assert evidence.raw["resolved_command"][0] == str(project_bin / "python")
+    assert "parent-project-python" in evidence.raw["stdout"]
 
 
 # ---------------------------------------------------------------------------

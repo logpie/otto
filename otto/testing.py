@@ -76,6 +76,30 @@ def _clean_path(value: str) -> str:
     return os.pathsep.join(entries)
 
 
+def _candidate_project_runtime_roots(project_dir: Path) -> list[Path]:
+    roots = [project_dir]
+    for root in [project_dir, *project_dir.parents]:
+        if root.name == ".worktrees":
+            roots.append(root.parent)
+            break
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for root in roots:
+        if root not in seen:
+            deduped.append(root)
+            seen.add(root)
+    return deduped
+
+
+def _project_venv_bin(project_dir: Path) -> Path | None:
+    for root in _candidate_project_runtime_roots(project_dir):
+        for relative in (".venv/bin", ".venv/Scripts"):
+            candidate = root / relative
+            if candidate.is_dir():
+                return candidate
+    return None
+
+
 def _allowed_parent_env() -> dict[str, str]:
     """Return the subset of the parent env that child agents are allowed to inherit."""
     allowed: dict[str, str] = {}
@@ -125,8 +149,8 @@ def _subprocess_env(project_dir: Path | None = None) -> dict:
             if existing:
                 parts.append(existing)
             env["PYTHONPATH"] = os.pathsep.join(parts)
-        project_venv_bin = project_dir / ".venv" / "bin"
-        if project_venv_bin.is_dir():
+        project_venv_bin = _project_venv_bin(project_dir)
+        if project_venv_bin is not None and str(project_venv_bin) not in _current_runtime_bins():
             existing = env.get("PATH", "")
             if str(project_venv_bin) not in existing.split(os.pathsep):
                 env["PATH"] = str(project_venv_bin) + os.pathsep + existing

@@ -139,6 +139,26 @@ class TestSubprocessEnv:
         assert str(otto_bin) not in path
         assert env["VIRTUAL_ENV"] == str(project_bin.parent)
 
+    def test_parent_project_venv_is_used_for_queue_worktree(self, tmp_path, monkeypatch):
+        otto_bin = tmp_path / "otto-venv" / "bin"
+        project_bin = tmp_path / "project" / ".venv" / "bin"
+        worktree = tmp_path / "project" / ".worktrees" / "queued-task"
+        user_bin = tmp_path / "user-bin"
+        otto_bin.mkdir(parents=True)
+        project_bin.mkdir(parents=True)
+        worktree.mkdir(parents=True)
+        user_bin.mkdir()
+        monkeypatch.setattr("otto.testing.sys.executable", str(otto_bin / "python"))
+        monkeypatch.setenv("VIRTUAL_ENV", str(otto_bin.parent))
+        monkeypatch.setenv("PATH", f"{otto_bin}{os.pathsep}{user_bin}")
+
+        env = _subprocess_env(worktree)
+
+        path = env["PATH"].split(os.pathsep)
+        assert path[0] == str(project_bin)
+        assert str(otto_bin) not in path
+        assert env["VIRTUAL_ENV"] == str(project_bin.parent)
+
 
 # -- Test: Empty story_id is rejected --
 

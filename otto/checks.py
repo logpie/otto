@@ -307,7 +307,7 @@ def _pytest_base_command(cwd: Path, project_dir: Path) -> list[str]:
     the target project's venv or the user's PATH first, matching what a real
     developer and Otto's build agent would run from that checkout.
     """
-    for root in (cwd, project_dir):
+    for root in _candidate_project_roots(cwd, [project_dir]):
         for relative in (".venv/bin/pytest", ".venv/Scripts/pytest.exe"):
             candidate = root / relative
             if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -897,6 +897,15 @@ def _subprocess_env(extra_pythonpath: list[Path] | None = None) -> dict[str, str
     skip_bins = _current_runtime_bins()
     path_entries = [entry for entry in path_entries if entry and entry not in skip_bins]
     env.pop("VIRTUAL_ENV", None)
+    project_venv_bin = _first_project_venv_bin(_candidate_project_roots(Path.cwd(), extra_pythonpath))
+    if project_venv_bin is not None:
+        project_venv_bin_text = str(project_venv_bin)
+        if project_venv_bin_text not in skip_bins:
+            path_entries = [
+                project_venv_bin_text,
+                *[entry for entry in path_entries if entry != project_venv_bin_text],
+            ]
+            env["VIRTUAL_ENV"] = str(project_venv_bin.parent)
     if path_entries:
         env["PATH"] = os.pathsep.join(path_entries)
     if extra_pythonpath:
@@ -950,10 +959,29 @@ def _candidate_project_roots(cwd: Path, extra_pythonpath: list[Path] | None) -> 
     seen: set[Path] = set()
     for root in [cwd, *(extra_pythonpath or [])]:
         path = Path(root)
-        if path not in seen:
-            roots.append(path)
-            seen.add(path)
+        for candidate in [path, *_linked_worktree_runtime_roots(path)]:
+            if candidate not in seen:
+                roots.append(candidate)
+                seen.add(candidate)
     return roots
+
+
+def _linked_worktree_runtime_roots(path: Path) -> list[Path]:
+    roots: list[Path] = []
+    for root in [path, *path.parents]:
+        if root.name == ".worktrees":
+            roots.append(root.parent)
+            break
+    return roots
+
+
+def _first_project_venv_bin(roots: list[Path]) -> Path | None:
+    for root in roots:
+        for relative in (".venv/bin", ".venv/Scripts"):
+            candidate = root / relative
+            if candidate.is_dir():
+                return candidate
+    return None
 
 
 def _resolve_python_executable(roots: list[Path], *, prefer_python3: bool = False) -> str:
