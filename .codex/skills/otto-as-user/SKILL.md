@@ -1,6 +1,6 @@
 ---
 name: otto-as-user
-description: "Run Otto's redesigned intent-to-product flow as a real user would, against throwaway repos or real projects with real Claude or Codex providers when needed. Use for user-level regression passes over compile, build, audit, proof, resume, queue, merge, cancel, cleanup, and Mission Control behavior. Default to the smallest real user-level harness that answers the question, but use real provider/project runs when the user asks for live, paid, redesign, pressure-test, or end-to-end proof."
+description: "Dogfood Otto through its real user surfaces: `otto run`, queue/Mission Control, proof artifacts, browser flows, and real Claude or Codex provider runs. Use when unit tests are not enough and the user wants evidence from live CLI/web workflows, logs, artifacts, external verifiers, or paid end-to-end pressure tests."
 ---
 
 # Otto As User
@@ -9,108 +9,117 @@ description: "Run Otto's redesigned intent-to-product flow as a real user would,
 
 Drive Otto end to end from the user surface, not from unit-test internals.
 
-Use this when ordinary tests are not enough and the user wants evidence that
-Otto works through real commands, real subprocesses, real provider calls, real
-web servers, browser automation, or web Mission Control interactions.
+Use this skill when ordinary tests are not enough and the user wants evidence
+that Otto works through real commands, real subprocesses, real provider calls,
+real web servers, browser automation, queue execution, proof packets, or web
+Mission Control interactions.
 
-For the redesigned i2p stack, the user-facing product path is:
+For the redesigned intent-to-product stack, the core product path is:
 
 ```text
-intent -> compile spec -> build Groups -> audit integrated product -> render proof
+intent -> compile spec -> build Groups -> merge -> audit integrated product -> render proof
 ```
 
-Treat that product path, the live CLI, and `otto_logs/sessions/<session-id>/`
-as authority. Historical scenario harnesses below are useful for Mission
-Control coverage, but they are not a substitute for real i2p runs on real
-projects when the task is about redesign readiness.
+Treat the live CLI, Mission Control, and `otto_logs/sessions/<session-id>/` as
+authority. Historical harness names such as `scripts/otto_as_user.py`,
+`scripts/otto_as_user_nightly.py`, and `otto queue dashboard` are stale and
+must not be used as current evidence.
+
+## Is This Skill Still Useful?
+
+Yes, but only as a dogfooding discipline, not as a fixed scenario cookbook.
+
+Keep it when the question is "does Otto work like a user would use it?" That
+means testing the public CLI/web surface, collecting session logs and proof
+artifacts, and verifying the target project outside Otto. Do not use this skill
+for ordinary unit-test selection, static code review, or one-off internal
+function checks.
 
 ## Ground Rules
 
 - Run from the active worktree. Start with `pwd`, `git branch --show-current`,
-  and `git status --short` if the task involves fixes or long tests.
+  and `git status --short --branch` before long tests or fixes.
 - Prefer `uv run --extra dev python ...` in this repo. Use `.venv/bin/python`
   only when the user or environment clearly requires it.
 - Be explicit about provider choice:
-  - "test with Codex" means add `--provider codex`.
-  - "test with Claude" means add `--provider claude`.
+  - "test with Codex" means pass `--provider codex`.
+  - "test with Claude" means pass `--provider claude`.
   - "compare providers" means run the same scenario set with both providers.
-- For i2p runs, verify the provider actually propagated into compile, build,
-  audit, repair, and merge-repair agents. If a run requested Codex but a
-  run-owned Claude child appears, stop and classify the run as an Otto bug.
+- For i2p runs, verify the provider propagated into compile, build, audit,
+  repair, and merge-repair agents. If a run requested Codex but a run-owned
+  Claude child appears, classify it as an Otto bug.
 - Treat real provider runs as paid/slow. `scripts/web_as_user.py` requires
-  `OTTO_ALLOW_REAL_COST=1`; choose the smallest scenario set that answers the
-  question unless the user asks for broad coverage.
-- After failures, inspect artifacts before classifying them. Do not call a run
-  successful from exit code alone.
-- External verification must run outside Otto before claiming success. Use the
-  target repo's native tests/builds and direct product assertions, not only
-  Otto's final verdict.
+  `OTTO_ALLOW_REAL_COST=1`.
+- After failures, inspect logs and artifacts before classifying them. Do not
+  call a run successful from exit code alone.
+- External verification must run outside Otto before claiming product success.
+  Use the target repo's native tests/builds and direct product assertions, not
+  only Otto's final verdict.
 
-## Redesigned i2p Runs
+## Core i2p CLI
 
-Use the live CLI entrypoints. `otto run` is the direct i2p surface for
-compile/build/merge/audit/render checks:
-
-```bash
-uv run --extra dev python -m otto.cli run "build a product..." --project-kind webapp --review-gate
-uv run --extra dev python -m otto.cli run --from-spec otto_logs/sessions/<id>/spec/spec.json
-uv run --extra dev python -m otto.cli run --resume --auto-approve
-```
-
-For provider-specific pressure tests, use the entrypoints that currently expose
-provider/budget/turn flags and force i2p explicitly:
+Use `otto run` for direct compile/build/merge/audit/render evidence. It exposes
+provider, model, effort, budget, and max-turn controls directly:
 
 ```bash
-uv run --extra dev python -m otto.cli build "build a product..." --i2p --provider codex --budget 1800 --max-turns 120 --verbose
-uv run --extra dev python -m otto.cli improve feature "add/fix behavior..." --i2p --provider codex --budget 1800 --max-turns 120 --verbose
-uv run --extra dev python -m otto.cli certify --i2p --provider codex --budget 1200 --max-turns 80 --verbose
+uv run --extra dev python -m otto.cli run "build a product..." --project-kind webapp --provider codex --budget 3600 --max-turns 160 --verbose
+uv run --extra dev python -m otto.cli run "build a CLI tool..." --project-kind cli --provider codex --effort high --budget 2400
+uv run --extra dev python -m otto.cli run --from-spec otto_logs/sessions/<id>/spec/spec.json --provider codex --budget 2400
+uv run --extra dev python -m otto.cli run --resume --provider codex --auto-approve
 ```
 
-Useful i2p flags:
+Useful `otto run` flags:
 
-- `otto run --resume`: resume the paused direct i2p session.
-- `otto build --resume`: continue an interrupted i2p build checkpoint.
-- `otto certify --resume`: resume a paused i2p audit checkpoint.
-- `otto improve ... --resume` is currently legacy-only/ignored; do not use it
-  as evidence that brownfield improve resume works unless the CLI changes.
-- `--max-turns` is capped at 200 by the CLI.
-- `--reset-budget`: do not count prior attempt spend on resume.
-- `--review-gate`: pause after compile until spec review approves.
+- `--provider`, `--model`, `--effort`: override every agent.
+- `--build-provider`, `--build-model`, `--build-effort`: override build agents.
+- `--certifier-provider`, `--certifier-model`, `--certifier-effort`: override
+  audit/certifier agents.
+- `--fix-provider`, `--fix-model`, `--fix-effort`: override repair agents.
+- `--budget`: total wall-clock budget in seconds.
+- `--max-turns`: max agent turns per call, capped at 200.
+- `--review-gate`: pause after compile until spec review approval.
 - `--auto-approve`: make scripted runs explicit about skipping review gate.
+- `--resume`: resume the paused i2p session at `otto_logs/paused`.
+- `--reset-budget`: on resume, ignore prior attempt spend against the cap.
+- `--force`: on resume, bypass the spec hash check.
 - `--break-lock`: clear a stale project lock before starting.
-- `--allow-dirty`: run in a repo with local changes when the test requires it.
+- `--base-url`: feed HTTP probe checks.
+- `--from-spec`: drive from an existing `spec.json`.
 
-`otto run` does not currently expose provider/budget/turn overrides in its
-CLI help. Do not use it as Codex-provider evidence unless the target project
-configuration already selects Codex and the logs prove all child agents used it.
+`otto build`, `otto improve`, and `otto certify` remain public compatibility or
+specialized surfaces. Use them only when the user specifically wants that
+surface tested. For general redesigned i2p pressure, prefer `otto run`.
+Standalone `otto certify` is diagnostics unless the task explicitly asks to
+test certification as a user command.
 
-For projects that require environment variables (database URLs, API keys,
-server ports), put those variables on the exact Otto command and verify repair
-agents used the same environment in their build/audit logs.
+For projects that require environment variables, put those variables on the
+exact Otto command and verify child agent logs used the same environment:
 
-For real project pressure tests, record at minimum:
-
-- exact Otto command, provider/model if visible, session id, wall time, cost,
-  and Otto verdict
-- project path/source and why it is a real/non-toy workload
-- external verifier command/result
-- proof packet path and relevant browser/video/screenshot artifacts
-- bugs found, logs inspected, root cause, generic fix, regression tests, gates
-  run, and decision to escalate/retry/fix/defer/stop
-
-Primary i2p artifacts:
-
-```text
-otto_logs/sessions/<session-id>/summary.json
-otto_logs/sessions/<session-id>/spec/spec.json
-otto_logs/sessions/<session-id>/spec-state.jsonl
-otto_logs/sessions/<session-id>/proof-packet.html
-otto_logs/sessions/<session-id>/proof-packet.json
-otto_logs/sessions/<session-id>/**/narrative.log
-otto_logs/sessions/<session-id>/audit/**/feature-verdicts.json
-otto_logs/sessions/<session-id>/audit/**/screenshots/
-otto_logs/sessions/<session-id>/audit/**/videos/
+```bash
+DATABASE_URL=postgres://... uv run --extra dev python -m otto.cli run "..." --provider codex --budget 4500
 ```
+
+## Queue And Mission Control
+
+Mission Control is Otto's web app. Use it when the test needs queue behavior,
+review/land, live status, browser evidence, or user workflow proof.
+
+Useful launch forms:
+
+```bash
+uv run --extra dev python -m otto.cli web --no-open
+uv run --extra dev python -m otto.cli web --host 0.0.0.0 --port 9000 --allow-remote --project-launcher --projects-root /Users/yuxuan/otto-projects --no-open
+uv run --extra dev python -m otto.cli dashboard --no-open
+```
+
+Notes:
+
+- `otto dashboard` is a compatibility alias for `otto web`.
+- `otto queue dashboard` has been removed. Use `otto web`.
+- The queue runner remains CLI-driven with `otto queue run --no-dashboard`.
+- When dogfooding queue/Mission Control, queue a real task, let the runner
+  execute build/certify/fix or proof-repair, then review/land through Mission
+  Control instead of only inspecting backend state.
 
 ## Harnesses
 
@@ -119,29 +128,9 @@ otto_logs/sessions/<session-id>/audit/**/videos/
 | Web E2E | `scripts/e2e_web_mission_control.py` | Browser-level Mission Control regressions with seeded local state | minutes, no provider cost |
 | Live web-as-user | `scripts/web_as_user.py` | Real web server plus real LLM/queue/provider workflows | slow and paid; guarded by `OTTO_ALLOW_REAL_COST=1` |
 
-Default to the focused Web E2E scenario for ordinary Mission Control UI bugs.
-Use live web-as-user when the user asks for as-user proof across CLI/web,
-provider, queue runner, merge, outage recovery, or nightly/weekly coverage.
-
-## Mission Control
-
-Mission Control is Otto's web app.
-
-Useful launch forms:
-
-```bash
-otto web --no-open
-otto web --host 0.0.0.0 --port 9000 --allow-remote --project-launcher --projects-root /Users/yuxuan/otto-projects --no-open
-otto dashboard --no-open
-```
-
-Notes:
-
-- `otto dashboard` is only a deprecated compatibility alias for `otto web`.
-- `otto queue dashboard` has been removed. Use `otto web` for Mission Control.
-- The queue runner is still CLI-driven with `otto queue run --no-dashboard`.
-
-## Common Commands
+Default to focused Web E2E for ordinary Mission Control UI bugs. Use live
+web-as-user when the user asks for live, paid, provider, queue-runner, outage
+recovery, nightly/weekly, or end-to-end as-user proof.
 
 List live provider scenarios:
 
@@ -163,7 +152,7 @@ Run live web-as-user scenarios:
 OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --mode quick --provider codex
 OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --scenario W1 --provider claude
 OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --scenario W11 --provider codex --bail-fast --keep-failed-only
-OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --tier nightly --provider claude --scenario-delay 10
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --tier nightly --provider codex --scenario-delay 10
 OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --tier weekly --provider codex
 ```
 
@@ -178,8 +167,10 @@ OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --provid
 
 High-signal browser E2E choices:
 
+- `project-launcher`: create/open projects from the launcher.
 - `fresh-queue`: submit a first build from the web UI before watcher start.
 - `ready-land`: review and land a clean completed task.
+- `dirty-blocked`: verify dirty-worktree blocking behavior.
 - `watcher-stop-ui`: cancel and confirm watcher stop from the visible UI.
 - `job-submit-matrix`: submit improve and certify jobs with advanced options.
 - `bulk-land`: land multiple ready tasks through the bulk action.
@@ -201,13 +192,39 @@ Live tier mappings:
 ```text
 quick   = W1 + W11
 nightly = W11 + W1 + W7
-weekly  = W1..W13
+weekly  = all W scenarios
 ```
 
-Nightly fixtures for hidden-invariant product scenarios live under
-`scripts/fixtures_nightly/<scenario>/`.
+## Real-Project Pressure Tests
+
+For real i2p pressure tests, avoid toy projects unless the user explicitly
+requests a smoke test. Record at minimum:
+
+- exact Otto command, provider/model if visible, session id, wall time, cost,
+  and Otto verdict
+- project path/source and why it is a real workload
+- external verifier command/result
+- proof packet path and browser/video/screenshot artifacts when applicable
+- bugs found, logs inspected, root cause, generic fix, regression tests, gates
+  run, and decision to escalate, retry, fix, defer, or stop
+
+Escalate after passes. Passing one real project proves only that tier.
 
 ## Artifacts
+
+Primary i2p artifacts:
+
+```text
+otto_logs/sessions/<session-id>/summary.json
+otto_logs/sessions/<session-id>/spec/spec.json
+otto_logs/sessions/<session-id>/spec-state.jsonl
+otto_logs/sessions/<session-id>/proof-packet.html
+otto_logs/sessions/<session-id>/proof-packet.json
+otto_logs/sessions/<session-id>/**/narrative.log
+otto_logs/sessions/<session-id>/audit/**/feature-verdicts.json
+otto_logs/sessions/<session-id>/audit/**/screenshots/
+otto_logs/sessions/<session-id>/audit/**/videos/
+```
 
 Web E2E:
 
@@ -247,29 +264,31 @@ Classify carefully:
 
 - `PASS`: verification succeeded.
 - `FAIL`: likely Otto bug, product bug, or scenario bug. Inspect artifacts.
-- `INFRA`: auth, rate limit, network, browser tool, provider outage, or setup failure.
+- `INFRA`: auth, rate limit, network, browser tool, provider outage, or setup
+  failure.
 
 Common infra signatures:
 
 - `Not logged in` or `Please run /login`
 - `rate limit` or `429`
 - provider exits before a meaningful run starts
-- `agent-browser is required`
+- browser automation dependency missing
 - near-zero duration/cost with command-launch failure
 
 Common real failures:
 
-- wrong interpreter/PATH, so Otto is not running from this repo's environment
+- wrong interpreter/PATH, so Otto is not running from this repo environment
 - web server is stale or serving an old static bundle
 - Mission Control row never reaches the expected queued/running/ready state
 - cancel request persisted but no ack arrived
 - resume/retry flow completes before interruption lands
-- CLI and web disagree about run, queue, or merge state
+- CLI and web disagree about run, queue, merge, or proof state
 - provider emits token usage but no USD cost; do not interpret `cost_usd: 0.0`
   as free execution when token usage is present
 
-Triage order: debug log, screenshots, `verify.json`, `final-state.json`, live
-records, command-channel acks, then `history.jsonl`.
+Triage order: session `summary.json`, narrative logs, audit logs, proof packet,
+screenshots/videos, harness `debug.log`, `verify.json`, `final-state.json`,
+live records, command-channel acks, then `history.jsonl`.
 
 ## Adding Scenarios
 

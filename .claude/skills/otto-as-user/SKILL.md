@@ -1,189 +1,308 @@
 ---
 name: otto-as-user
-description: Run Otto's CLI and Mission Control TUI as a real user would, against throwaway repos and a real provider. Two tiers: daily (37 short toy scenarios with asciinema recordings, $10-$15 full) and nightly (5 seeded-fixture scenarios with hidden-test oracles, $12-$18 full). Default to daily unless the user explicitly asks for nightly / seeded / real-world coverage.
+description: "Dogfood Otto through its real user surfaces: `otto run`, queue/Mission Control, proof artifacts, browser flows, and real Claude or Codex provider runs. Use when unit tests are not enough and the user wants evidence from live CLI/web workflows, logs, artifacts, external verifiers, or paid end-to-end pressure tests."
 ---
 
 # Otto As User
 
-## Overview
+## Purpose
 
-Drive Otto end to end as a real user, using real LLM runs and real Otto entrypoints.
+Drive Otto end to end from the user surface, not from unit-test internals.
 
-Mission Control is the primary TUI now: a generic 3-pane app for live runs, history, and detail/logs. `otto queue dashboard` still exists, but it is only a queue-filtered compatibility wrapper around the same Mission Control app.
+Use this skill when ordinary tests are not enough and the user wants evidence
+that Otto works through real commands, real subprocesses, real provider calls,
+real web servers, browser automation, queue execution, proof packets, or web
+Mission Control interactions.
 
-Use this skill when unit tests are not enough and you need a user-level regression pass over build, resume, queue, merge, cancel, cleanup, or Mission Control behavior.
+For the redesigned intent-to-product stack, the core product path is:
 
-## Tiers
-
-| Tier | Harness | Scenarios | Best for | Cost | Wall time |
-|------|---------|-----------|----------|------|-----------|
-| daily | `scripts/otto_as_user.py` | 37 (`A-E`, `U`) | fast CLI/TUI smoke with recordings | `$3-$4` quick, `$10-$15` full | `15m` quick, `60m` full |
-| nightly | `scripts/otto_as_user_nightly.py` | 5 (`N1`, `N2`, `N4`, `N8`, `N9`) | seeded fixtures, hidden invariants, real-world regressions | `$12-$18` full | `85-100m` full |
-
-If the user says "run otto-as-user" without a qualifier, use daily. If they say "nightly", "seeded", "real-world", or want hidden-oracle coverage, use nightly.
-
-## Mission Control
-
-```bash
-otto dashboard
-otto queue dashboard
-otto cleanup <run_id>
+```text
+intent -> compile spec -> build Groups -> merge -> audit integrated product -> render proof
 ```
 
-`otto dashboard` opens the full app. `otto queue dashboard` opens the same app with a queue filter applied. `otto cleanup <run_id>` removes one terminal live record while preserving history.
+Treat the live CLI, Mission Control, and `otto_logs/sessions/<session-id>/` as
+authority. Historical harness names such as `scripts/otto_as_user.py`,
+`scripts/otto_as_user_nightly.py`, and `otto queue dashboard` are stale and
+must not be used as current evidence.
 
-Mission Control keybinds:
+## Is This Skill Still Useful?
 
-| Keys | Action |
-|------|--------|
-| `Tab` / `1` / `2` / `3` | focus Live / History / Detail |
-| `j` / `k` or arrows | move selection |
-| `Enter` | open Detail |
-| `space` | multi-select live queue rows |
-| `/` | filter modal from Live or History |
-| `f` | cycle history outcome filter |
-| `t` | cycle type filter |
-| `[` / `]` | history pagination |
-| `Ctrl-F` | log search in Detail |
-| `n` / `N` | next / previous log match |
-| `o` | cycle log file |
-| `e` | open selected artifact in `$EDITOR` |
-| `c` / `r` / `R` / `x` | cancel / resume / retry-requeue / cleanup |
-| `m` / `M` | merge selected queue rows / merge all done queue rows |
-| `?` | help |
+Yes, but only as a dogfooding discipline, not as a fixed scenario cookbook.
 
-## Commands
+Keep it when the question is "does Otto work like a user would use it?" That
+means testing the public CLI/web surface, collecting session logs and proof
+artifacts, and verifying the target project outside Otto. Do not use this skill
+for ordinary unit-test selection, static code review, or one-off internal
+function checks.
 
-Assume repo root.
+## Ground Rules
 
-Daily harness:
+- Run from the active worktree. Start with `pwd`, `git branch --show-current`,
+  and `git status --short --branch` before long tests or fixes.
+- Prefer `uv run --extra dev python ...` in this repo. Use `.venv/bin/python`
+  only when the user or environment clearly requires it.
+- Be explicit about provider choice:
+  - "test with Codex" means pass `--provider codex`.
+  - "test with Claude" means pass `--provider claude`.
+  - "compare providers" means run the same scenario set with both providers.
+- For i2p runs, verify the provider propagated into compile, build, audit,
+  repair, and merge-repair agents. If a run requested Codex but a run-owned
+  Claude child appears, classify it as an Otto bug.
+- Treat real provider runs as paid/slow. `scripts/web_as_user.py` requires
+  `OTTO_ALLOW_REAL_COST=1`.
+- After failures, inspect logs and artifacts before classifying them. Do not
+  call a run successful from exit code alone.
+- External verification must run outside Otto before claiming product success.
+  Use the target repo's native tests/builds and direct product assertions, not
+  only Otto's final verdict.
+
+## Core i2p CLI
+
+Use `otto run` for direct compile/build/merge/audit/render evidence. It exposes
+provider, model, effort, budget, and max-turn controls directly:
 
 ```bash
-.venv/bin/python scripts/otto_as_user.py --list
-.venv/bin/python scripts/otto_as_user.py --mode quick
-.venv/bin/python scripts/otto_as_user.py --mode full --provider codex
-.venv/bin/python scripts/otto_as_user.py --scenario U2
-.venv/bin/python scripts/otto_as_user.py --scenario A1,B3,C1
-.venv/bin/python scripts/otto_as_user.py --group B,D
-.venv/bin/python scripts/otto_as_user.py --keep-failed-only
-.venv/bin/python scripts/otto_as_user.py --bail-fast
-.venv/bin/python scripts/otto_as_user.py --mode quick --scenario-delay 10
+uv run --extra dev python -m otto.cli run "build a product..." --project-kind webapp --provider codex --budget 3600 --max-turns 160 --verbose
+uv run --extra dev python -m otto.cli run "build a CLI tool..." --project-kind cli --provider codex --effort high --budget 2400
+uv run --extra dev python -m otto.cli run --from-spec otto_logs/sessions/<id>/spec/spec.json --provider codex --budget 2400
+uv run --extra dev python -m otto.cli run --resume --provider codex --auto-approve
 ```
 
-Nightly harness:
+Useful `otto run` flags:
+
+- `--provider`, `--model`, `--effort`: override every agent.
+- `--build-provider`, `--build-model`, `--build-effort`: override build agents.
+- `--certifier-provider`, `--certifier-model`, `--certifier-effort`: override
+  audit/certifier agents.
+- `--fix-provider`, `--fix-model`, `--fix-effort`: override repair agents.
+- `--budget`: total wall-clock budget in seconds.
+- `--max-turns`: max agent turns per call, capped at 200.
+- `--review-gate`: pause after compile until spec review approval.
+- `--auto-approve`: make scripted runs explicit about skipping review gate.
+- `--resume`: resume the paused i2p session at `otto_logs/paused`.
+- `--reset-budget`: on resume, ignore prior attempt spend against the cap.
+- `--force`: on resume, bypass the spec hash check.
+- `--break-lock`: clear a stale project lock before starting.
+- `--base-url`: feed HTTP probe checks.
+- `--from-spec`: drive from an existing `spec.json`.
+
+`otto build`, `otto improve`, and `otto certify` remain public compatibility or
+specialized surfaces. Use them only when the user specifically wants that
+surface tested. For general redesigned i2p pressure, prefer `otto run`.
+Standalone `otto certify` is diagnostics unless the task explicitly asks to
+test certification as a user command.
+
+For projects that require environment variables, put those variables on the
+exact Otto command and verify child agent logs used the same environment:
 
 ```bash
-.venv/bin/python scripts/otto_as_user_nightly.py --list
-.venv/bin/python scripts/otto_as_user_nightly.py --dry-run
-.venv/bin/python scripts/otto_as_user_nightly.py --scenario N4
-.venv/bin/python scripts/otto_as_user_nightly.py --scenario N9
-.venv/bin/python scripts/otto_as_user_nightly.py --scenario N1,N2,N4,N8,N9 --scenario-delay 10
+DATABASE_URL=postgres://... uv run --extra dev python -m otto.cli run "..." --provider codex --budget 4500
 ```
 
-- "test with Claude" -> `--provider claude`
-- "test with Codex" -> `--provider codex`
+## Queue And Mission Control
+
+Mission Control is Otto's web app. Use it when the test needs queue behavior,
+review/land, live status, browser evidence, or user workflow proof.
+
+Useful launch forms:
+
+```bash
+uv run --extra dev python -m otto.cli web --no-open
+uv run --extra dev python -m otto.cli web --host 0.0.0.0 --port 9000 --allow-remote --project-launcher --projects-root /Users/yuxuan/otto-projects --no-open
+uv run --extra dev python -m otto.cli dashboard --no-open
+```
+
+Notes:
+
+- `otto dashboard` is a compatibility alias for `otto web`.
+- `otto queue dashboard` has been removed. Use `otto web`.
+- The queue runner remains CLI-driven with `otto queue run --no-dashboard`.
+- When dogfooding queue/Mission Control, queue a real task, let the runner
+  execute build/certify/fix or proof-repair, then review/land through Mission
+  Control instead of only inspecting backend state.
+
+## Harnesses
+
+| Harness | Command | Best For | Cost/Time |
+| --- | --- | --- | --- |
+| Web E2E | `scripts/e2e_web_mission_control.py` | Browser-level Mission Control regressions with seeded local state | minutes, no provider cost |
+| Live web-as-user | `scripts/web_as_user.py` | Real web server plus real LLM/queue/provider workflows | slow and paid; guarded by `OTTO_ALLOW_REAL_COST=1` |
+
+Default to focused Web E2E for ordinary Mission Control UI bugs. Use live
+web-as-user when the user asks for live, paid, provider, queue-runner, outage
+recovery, nightly/weekly, or end-to-end as-user proof.
+
+List live provider scenarios:
+
+```bash
+uv run --extra dev python scripts/web_as_user.py --list
+```
+
+Run focused browser E2E coverage:
+
+```bash
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario ready-land --artifacts /tmp/otto-web-e2e-ready-land --viewport 1440x900
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario all --artifacts /tmp/otto-web-e2e-mission-control-all --viewport 1440x900
+uv run --extra dev python scripts/e2e_web_mission_control.py --scenario control-tour --artifacts /tmp/otto-web-e2e-control-tour-mobile --viewport 390x844
+```
+
+Run live web-as-user scenarios:
+
+```bash
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --mode quick --provider codex
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --scenario W1 --provider claude
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --scenario W11 --provider codex --bail-fast --keep-failed-only
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --tier nightly --provider codex --scenario-delay 10
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --tier weekly --provider codex
+```
+
+Provider comparison pattern:
+
+```bash
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --provider codex --scenario W1,W11 --scenario-delay 0 --keep-failed-only --bail-fast
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --provider claude --scenario W1,W11 --scenario-delay 0 --keep-failed-only --bail-fast
+```
 
 ## Scenario Focus
 
-Daily high-signal path:
+High-signal browser E2E choices:
 
-- `U2` is the daily Mission Control smoke. It covers one live build, cancel acknowledgment, a cancelled history row, and clean quit behavior. Mention it explicitly when the user wants "the new TUI smoke" without paying nightly cost.
+- `project-launcher`: create/open projects from the launcher.
+- `fresh-queue`: submit a first build from the web UI before watcher start.
+- `ready-land`: review and land a clean completed task.
+- `dirty-blocked`: verify dirty-worktree blocking behavior.
+- `watcher-stop-ui`: cancel and confirm watcher stop from the visible UI.
+- `job-submit-matrix`: submit improve and certify jobs with advanced options.
+- `bulk-land`: land multiple ready tasks through the bulk action.
+- `long-log-layout`: inspect large logs and artifacts in bounded layouts.
+- `control-tour`: click through main controls, dialogs, inspectors, and tabs.
 
-Nightly scenarios:
+High-signal live web-as-user choices:
 
-- `N1` evolving product loop: build feature -> improve bugs -> improve target on a seeded multi-user task tracker. Hidden tests check user-data isolation and query-count regression.
-- `N2` semantic auth merge: queue two overlapping auth branches, run them, merge them, and verify both flows plus baseline login behavior.
-- `N4` certifier trap: build CSV bulk import from product-language intent only. Hidden tests enforce tenant isolation and idempotency.
-- `N8` stale merge context: three-branch queue around a file rename plus stale edits and tests. Hidden tests ensure the final merge keeps all three intents coherent.
-- `N9` realistic operator session: open Mission Control, watch one standalone build finish naturally, enqueue two concurrent queue tasks, inspect heartbeat/log updates mid-flight, cancel one queue task via TUI, open History and `$EDITOR` on the cancelled snapshot, then merge the succeeded queue row via `m`. This is the nightly end-to-end gate for real TUI actions, live registry coherence, terminal history integrity, and post-merge artifact preservation under real LLM runs.
+- `W1`: first-time user, create project, submit build, inspect tabs.
+- `W7`: mobile/iPhone version of the W1 flow.
+- `W11`: operator day, CLI/web interop, queue, watcher, cancel, merge.
+- `W4`: merge happy path.
+- `W5`: merge blocked with a clear reason.
+- `W12b`: CLI-queued task through web start, run, and merge.
+- `W13`: restart `otto web` mid-build and verify recovery.
 
-Nightly fixtures live under `scripts/fixtures_nightly/<scenario>/` and include `intent.md`, `otto.yaml`, app code, visible tests, hidden tests, and `restore.sh`.
-
-## Results
+Live tier mappings:
 
 ```text
-bench-results/as-user/<run-id>/<scenario>/
+quick   = W1 + W11
+nightly = W11 + W1 + W7
+weekly  = all W scenarios
 ```
 
-- `recording.cast`
-- `debug.log`
-- `run_result.json`
-- `verify.json`
+## Real-Project Pressure Tests
+
+For real i2p pressure tests, avoid toy projects unless the user explicitly
+requests a smoke test. Record at minimum:
+
+- exact Otto command, provider/model if visible, session id, wall time, cost,
+  and Otto verdict
+- project path/source and why it is a real workload
+- external verifier command/result
+- proof packet path and browser/video/screenshot artifacts when applicable
+- bugs found, logs inspected, root cause, generic fix, regression tests, gates
+  run, and decision to escalate, retry, fix, defer, or stop
+
+Escalate after passes. Passing one real project proves only that tier.
+
+## Artifacts
+
+Primary i2p artifacts:
 
 ```text
-bench-results/as-user-nightly/<run-id>/<scenario>/
+otto_logs/sessions/<session-id>/summary.json
+otto_logs/sessions/<session-id>/spec/spec.json
+otto_logs/sessions/<session-id>/spec-state.jsonl
+otto_logs/sessions/<session-id>/proof-packet.html
+otto_logs/sessions/<session-id>/proof-packet.json
+otto_logs/sessions/<session-id>/**/narrative.log
+otto_logs/sessions/<session-id>/audit/**/feature-verdicts.json
+otto_logs/sessions/<session-id>/audit/**/screenshots/
+otto_logs/sessions/<session-id>/audit/**/videos/
 ```
 
-- `debug.log`
-- `tests-visible.log`
-- `tests-hidden.log` when the scenario runs hidden fixture tests
-- `run_result.json`
-- `verify.json`
-- `attempt.json`
+Web E2E:
 
-Mission Control and registry paths worth checking during failures:
+```text
+<artifacts>/<NN>-<scenario>/
+  screenshots and failure evidence
+<artifacts>/summary.json
+<artifacts>/coverage-model.json
+```
 
-- `otto_logs/cross-sessions/runs/live/<run_id>.json`
-- `otto_logs/cross-sessions/runs/gc/tombstones.jsonl`
-- `otto_logs/sessions/<run_id>/commands/requests.jsonl`
-- `otto_logs/sessions/<run_id>/commands/acks.jsonl`
-- `otto_logs/merge/commands/requests.jsonl`
-- `otto_logs/merge/commands/acks.jsonl`
-- `otto_logs/cross-sessions/history.jsonl`
+Live web-as-user:
 
-```bash
-asciinema play bench-results/as-user/<run-id>/<scenario>/recording.cast
-agg bench-results/as-user/<run-id>/<scenario>/recording.cast out.gif
+```text
+bench-results/web-as-user/<run-id>/<scenario>/
+  debug.log
+  final-state.json
+  run_result.json
+  verify.json
+  screenshots and browser/provider artifacts
+```
+
+Mission Control and registry paths worth checking:
+
+```text
+otto_logs/cross-sessions/runs/live/<run_id>.json
+otto_logs/cross-sessions/runs/gc/tombstones.jsonl
+otto_logs/cross-sessions/history.jsonl
+otto_logs/sessions/<run_id>/commands/requests.jsonl
+otto_logs/sessions/<run_id>/commands/acks.jsonl
+otto_logs/merge/commands/requests.jsonl
+otto_logs/merge/commands/acks.jsonl
 ```
 
 ## Failure Triage
 
-Result categories:
+Classify carefully:
 
-- `PASS`: verification succeeded
-- `FAIL`: real Otto bug or scenario/test bug
-- `INFRA`: transient auth, rate-limit, network, or provider issue; auto-retried once
+- `PASS`: verification succeeded.
+- `FAIL`: likely Otto bug, product bug, or scenario bug. Inspect artifacts.
+- `INFRA`: auth, rate limit, network, browser tool, provider outage, or setup
+  failure.
 
-Common INFRA signatures:
+Common infra signatures:
 
 - `Not logged in` or `Please run /login`
 - `rate limit` or `429`
-- `Command failed with exit code 1` plus near-zero cost and sub-2s duration
+- provider exits before a meaningful run starts
+- browser automation dependency missing
+- near-zero duration/cost with command-launch failure
 
 Common real failures:
 
-- `asciinema` missing or install failed before a recorded run starts
-- wrong interpreter or PATH, so Otto is not running from this repo's `.venv`
-- Mission Control or queue scenarios timing out before a live row reaches `running`
-- cancel request persisted but no ack arrived within `max(4s, 2 * heartbeat)`
-- resume scenario completed before the interruption signal actually landed
-- cross-run memory wrote a file but the prompt marker never appeared in `messages.jsonl`
+- wrong interpreter/PATH, so Otto is not running from this repo environment
+- web server is stale or serving an old static bundle
+- Mission Control row never reaches the expected queued/running/ready state
+- cancel request persisted but no ack arrived
+- resume/retry flow completes before interruption lands
+- CLI and web disagree about run, queue, merge, or proof state
+- provider emits token usage but no USD cost; do not interpret `cost_usd: 0.0`
+  as free execution when token usage is present
 
-Triage order: `recording.cast` for daily scenarios, then `debug.log`, then `verify.json`, then live-record / command-channel / history artifacts. To reduce INFRA frequency, increase `--scenario-delay` or run smaller batches.
-
-## Dependencies
-
-- `asciinema` is required for daily recordings
-- the harness checks `PATH` and `.venv/bin/asciinema`
-- if missing, it tries `uv pip install --python .venv/bin/python asciinema`, then `brew install asciinema`
+Triage order: session `summary.json`, narrative logs, audit logs, proof packet,
+screenshots/videos, harness `debug.log`, `verify.json`, `final-state.json`,
+live records, command-channel acks, then `history.jsonl`.
 
 ## Adding Scenarios
 
-Daily:
+Web E2E:
 
-- add `setup_*`, `run_*`, and `verify_*` in `scripts/otto_as_user.py`
+- add a `scenario_*` function in `scripts/e2e_web_mission_control.py`
+- register it in `scenarios()`
+- update `COVERAGE_MODEL` when the scenario owns new user-visible states/actions
+- use seeded repos and browser assertions that exercise the actual UI flow
+
+Live web-as-user:
+
+- add a `_run_w*` function in `scripts/web_as_user.py`
 - register the scenario in `SCENARIOS`
-- keep quick mode limited to the highest-signal set
-- prefer tiny repos and tiny intents
-- for TUI scenarios, perform the interaction inside the recorded PTY run so Mission Control is captured in `recording.cast`
-
-Nightly:
-
-- create `scripts/fixtures_nightly/<name>/` with `intent.md`, `otto.yaml`, app code, visible tests, hidden tests, and `restore.sh`
-- visible tests must pass on the initial fixture
-- hidden tests must fail on the initial fixture
-- add `setup_*`, `run_*`, and `verify_*` in `scripts/otto_as_user_nightly.py`
-- register the scenario in both `SCENARIOS` and `SCENARIO_SPECS`
-- keep `intent.md` in product language when certifier inference matters
-
-The weekly candidates `#3`, `#5`, `#6`, and `#7` remain deferred; nightly keeps the highest-signal seeded scenarios in the regular rotation.
+- keep `TIER_NIGHTLY`, `TIER_WEEKLY`, and `QUICK_SCENARIOS` intentional
+- use `RunFailures` soft assertions for long paid scenarios
+- mine artifacts after the run so one paid attempt finds multiple defects
