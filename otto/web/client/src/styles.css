@@ -9796,20 +9796,20 @@ mark.log-search-match.active {
 }
 
 /* ---------------- friendly error state (B19) ---------------- */
-/* R3-B54: vertically center the 404 card in the available shell space
-   (viewport minus topbar) so it doesn't read as orphaned at the top. */
+/* Keep route-level error states near the top of the working area. A previous
+   vertical-centering pass looked tidy in fixture screenshots, but on real
+   desktop viewports it created a blank-page failure before the user reached
+   the actionable "Run not found" copy. */
 .otto-app-shell-main:has(> .run-view-not-found),
 .otto-app-shell-main:has(> .run-view-error) {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: flex-start;
 }
 .run-view-error,
 .run-view-not-found {
   max-width: 520px;
-  /* R3-B54: drop the fixed-top margin; the parent main element now
-     centers via flex when these surfaces are direct children. */
-  margin: 0 auto;
+  margin: clamp(20px, 4vh, 48px) auto 0;
   padding: 24px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -10127,12 +10127,12 @@ button.otto-app-shell-project:focus-visible {
   box-sizing: border-box;
 }
 
-/* The not-found / generic-error states already have their own
-   max-width + auto margins; clear the legacy 48px top margin so
-   the AppShell's padding-block owns vertical spacing. */
+/* The not-found / generic-error states own a small top margin so they stay
+   visible near the top of the first screen instead of drifting into the
+   vertical center on tall desktop viewports. */
 .otto-app-shell .run-view-error,
 .otto-app-shell .run-view-not-found {
-  margin-top: 0;
+  margin-top: clamp(20px, 4vh, 48px);
 }
 
 /* SpecDiffPage hardcodes inline padding: 24 in its JSX. Inside the

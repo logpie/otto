@@ -313,3 +313,48 @@ def test_run_card_opens_side_drawer_without_route_navigation(
 
     page.get_by_test_id("run-list-detail-drawer-close").click()
     page.get_by_test_id("run-list-detail-drawer").wait_for(state="detached", timeout=10_000)
+
+
+def test_missing_run_deep_link_error_is_near_top(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """A stale run deep link should not strand the 404 card mid-page."""
+
+    page.set_viewport_size({"width": 1440, "height": 900})
+    project = _project()
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def missing_run(route: Any) -> None:
+        route.fulfill(
+            status=404,
+            content_type="application/json",
+            body=json.dumps({"detail": "session not found: missing-run"}),
+        )
+
+    page.route("**/api/projects", projects)
+    page.route("**/api/run-view/missing-run", missing_run)
+
+    page.goto(f"{mc_backend.url}/?view=run-view&session=missing-run", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="run-view-not-found"]', timeout=10_000)
+
+    topbar_box = page.get_by_test_id("otto-app-shell-topbar").bounding_box()
+    not_found_box = page.get_by_test_id("run-view-not-found").bounding_box()
+    assert topbar_box is not None
+    assert not_found_box is not None
+    assert not_found_box["y"] <= topbar_box["height"] + 96
+    assert page.get_by_text("Run not found").is_visible()
+    assert page.get_by_test_id("otto-app-shell-back-to-runs").is_visible()
