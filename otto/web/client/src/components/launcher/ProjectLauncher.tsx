@@ -139,7 +139,7 @@ export function ProjectLauncher({projectsState, refreshStatus, refreshPending, o
   }
 
   return (
-    <section className="launcher-page" aria-labelledby="projectLauncherHeading">
+    <section className="launcher-page" aria-labelledby="projectLauncherHeading" data-testid="project-launcher">
       <header className="launcher-hero">
         <BrandMark size={32} />
         <div className="launcher-hero-copy">

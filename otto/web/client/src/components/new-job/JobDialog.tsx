@@ -383,6 +383,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
         ref={dialogRef}
         className="job-dialog job-palette"
         role="dialog"
+        data-testid="job-dialog"
         aria-modal="true"
         aria-labelledby="jobDialogHeading"
         aria-describedby={status ? "jobDialogStatus" : undefined}

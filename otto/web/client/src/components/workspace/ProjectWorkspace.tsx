@@ -4,6 +4,7 @@ import {JobDialog, collectPriorRunOptions} from "../new-job/JobDialog";
 import {TaskQueueList} from "../tasks/TaskQueueList";
 import {ProjectOverview} from "../overview/Overview";
 import {RunViewPage} from "../run/RunViewPage";
+import {DiagnosticsSummary} from "../health/SystemHealth";
 import {defaultFilters} from "../../uiTypes";
 import type {BoardTask} from "../../uiTypes";
 import type {AutopilotDecision, AutopilotIncident, ProjectInfo, StateResponse} from "../../types";
@@ -14,6 +15,9 @@ interface Props {
 }
 
 export function ProjectWorkspace({project}: Props) {
+  const [workspaceView, setWorkspaceView] = useState<"tasks" | "diagnostics">(
+    () => readWorkspaceView(),
+  );
   const [data, setData] = useState<StateResponse | null>(null);
   const [stateError, setStateError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -70,6 +74,27 @@ export function ProjectWorkspace({project}: Props) {
     const onPop = () => setSelectedRunId(null);
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  useEffect(() => {
+    const onPop = () => setWorkspaceView(readWorkspaceView());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const changeWorkspaceView = useCallback((next: "tasks" | "diagnostics") => {
+    setWorkspaceView(next);
+    const url = new URL(window.location.href);
+    if (next === "diagnostics") {
+      url.searchParams.set("view", "diagnostics");
+    } else if (url.searchParams.get("view") === "diagnostics") {
+      url.searchParams.delete("view");
+    }
+    const target = `${url.pathname}${url.search}${url.hash}`;
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (target !== current) {
+      window.history.pushState({...window.history.state, workspaceView: next}, "", target);
+    }
   }, []);
 
   const startWatcher = useCallback(async () => {
@@ -193,22 +218,57 @@ export function ProjectWorkspace({project}: Props) {
 
       {data ? (
         <>
-          <TaskQueueList
-            data={data}
-            filters={defaultFilters}
-            selectedRunId={selectedRunId}
-            selectedQueuedTaskId={selectedQueuedTask?.id ?? null}
-            onSelect={openRun}
-            onSelectQueued={openQueuedTask}
-            onNewJob={() => setJobOpen(true)}
-            onStartWatcher={() => void startWatcher()}
-          />
-          <details className="tasks-supplementary" data-testid="tasks-supplementary" open={!hasWork}>
-            <summary><span>Project info & activity</span></summary>
-            <div className="tasks-supplementary-body">
+          <div className="project-workspace-tabs" role="group" aria-label="Project workspace views">
+            <button
+              type="button"
+              className={workspaceView === "tasks" ? "active" : ""}
+              aria-pressed={workspaceView === "tasks"}
+              data-testid="tasks-tab"
+              onClick={() => changeWorkspaceView("tasks")}
+            >
+              Tasks
+            </button>
+            <button
+              type="button"
+              className={workspaceView === "diagnostics" ? "active" : ""}
+              aria-pressed={workspaceView === "diagnostics"}
+              data-testid="diagnostics-tab"
+              onClick={() => changeWorkspaceView("diagnostics")}
+            >
+              Health
+            </button>
+          </div>
+          {workspaceView === "diagnostics" ? (
+            <section className="workspace-diagnostics" data-testid="diagnostics-view" aria-labelledby="workspaceDiagnosticsHeading">
+              <div className="panel-heading">
+                <div>
+                  <h2 id="workspaceDiagnosticsHeading">Health</h2>
+                  <p className="panel-subtitle">Project state, watcher health, recovery actions, and recent run history.</p>
+                </div>
+              </div>
               <ProjectOverview data={data} />
-            </div>
-          </details>
+              <DiagnosticsSummary data={data} onSelect={openRun} />
+            </section>
+          ) : (
+            <>
+              <TaskQueueList
+                data={data}
+                filters={defaultFilters}
+                selectedRunId={selectedRunId}
+                selectedQueuedTaskId={selectedQueuedTask?.id ?? null}
+                onSelect={openRun}
+                onSelectQueued={openQueuedTask}
+                onNewJob={() => setJobOpen(true)}
+                onStartWatcher={() => void startWatcher()}
+              />
+              <details className="tasks-supplementary" data-testid="tasks-supplementary" open={!hasWork}>
+                <summary><span>Project info & activity</span></summary>
+                <div className="tasks-supplementary-body">
+                  <ProjectOverview data={data} />
+                </div>
+              </details>
+            </>
+          )}
         </>
       ) : null}
 
@@ -334,3 +394,10 @@ function RunDetailOverlay({sessionId, onClose}: {sessionId: string; onClose: () 
 }
 
 export default ProjectWorkspace;
+
+function readWorkspaceView(): "tasks" | "diagnostics" {
+  if (typeof window === "undefined") return "tasks";
+  return new URLSearchParams(window.location.search).get("view") === "diagnostics"
+    ? "diagnostics"
+    : "tasks";
+}

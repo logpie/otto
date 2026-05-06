@@ -1439,6 +1439,41 @@ textarea {
   white-space: nowrap;
 }
 
+.project-workspace-tabs {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.project-workspace-tabs button {
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  min-height: 30px;
+  padding: 4px 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.project-workspace-tabs button.active,
+.project-workspace-tabs button:hover,
+.project-workspace-tabs button:focus-visible {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.workspace-diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .project-workspace-state-error,
 .project-workspace-loading {
   display: flex;
@@ -10021,6 +10056,37 @@ mark.log-search-match.active {
 .feature-drilldown-actions .feature-action-button:hover {
   background: var(--surface-alt);
 }
+.feature-resource-panel {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  background: var(--surface);
+}
+.feature-resource-panel h3 {
+  margin-top: 0;
+}
+.feature-resource-list {
+  display: grid;
+  gap: 8px;
+}
+.feature-resource-log {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-alt);
+}
+.feature-resource-log summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-weight: 600;
+}
+.feature-resource-log pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border-top: 1px solid var(--line);
+  white-space: pre-wrap;
+}
 .feature-drilldown .finding {
   display: flex;
   align-items: baseline;
@@ -10193,6 +10259,15 @@ mark.log-search-match.active {
   color: var(--text);
   text-decoration: none;
   white-space: nowrap;
+}
+
+.otto-app-shell-brand-button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
 }
 
 .otto-app-shell-brand-link:hover,
@@ -11040,6 +11115,14 @@ button.otto-app-shell-project:focus-visible {
   flex-direction: column;
   gap: 8px;
   margin: 0;
+  max-width: 720px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.spec-diff-empty-block .spec-diff-empty {
+  line-height: 1.5;
 }
 .spec-diff-empty-cta {
   margin: 0;
