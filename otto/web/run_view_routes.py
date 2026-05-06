@@ -381,6 +381,9 @@ def _session_logs_payload(session_dir: Path, *, group_id: str | None = None) -> 
             session_dir / "proof-packet.json",
         ])
         for pattern in (
+            "spec/**/*.log",
+            "spec/**/*.jsonl",
+            "spec/**/*.md",
             "build/**/*.log",
             "build/**/*.jsonl",
             "certify/**/*.log",

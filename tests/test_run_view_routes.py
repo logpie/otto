@@ -224,11 +224,18 @@ def test_run_view_logs_and_files_resolve_worktree_session(tmp_path: Path) -> Non
     session = project / ".worktrees" / "build-task" / "otto_logs" / "sessions" / sid
     _write_minimal_session(session, intent="worktree micro twitter", project_kind="webapp")
     (session / "spec-state.jsonl").write_text('{"kind":"group.started"}\n')
+    compile_agent = session / "spec" / "compile-agent"
+    compile_agent.mkdir(parents=True)
+    (compile_agent / "narrative.log").write_text("compile log\n")
+    (compile_agent / "messages.jsonl").write_text('{"message":"compile"}\n')
 
     client = _app_with_project(project)
     logs = client.get(f"/api/run-view/{sid}/logs")
     assert logs.status_code == 200
-    assert logs.json()["logs"][0]["path"] == "spec-state.jsonl"
+    log_paths = [item["path"] for item in logs.json()["logs"]]
+    assert log_paths[0] == "spec-state.jsonl"
+    assert "spec/compile-agent/narrative.log" in log_paths
+    assert "spec/compile-agent/messages.jsonl" in log_paths
 
     files = client.get(f"/api/run-view/{sid}/files")
     assert files.status_code == 200

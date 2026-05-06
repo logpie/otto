@@ -1618,3 +1618,73 @@ Decision:
 - Fix and retry from a fresh Mission Control process again. This run does not
   count as a product pass; it is evidence for the project-kind/walkthrough
   shape bug and the audit contract-runtime bug.
+
+## 2026-05-06 Fresh Acme Retry 5: Live Mission Control Run + Run-View Logs Fix
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-743f16`
+- Session: `2026-05-06-173132-2c6bc6`
+- Provider: Codex, submitted through Mission Control Web after commit
+  `168533c99`.
+
+Doorway / Web evidence:
+- Mission Control Web on port 9000 selected `acme-expense-portal`.
+- The Build from intent dialog provider was changed from inherited Claude to
+  Codex and visibly showed `codex · model provider default · effort=default ·
+  verification=fast`.
+- `/api/queue/build` returned task `add-a-manager-sla-aging-dashboard-743f16`;
+  `/api/watcher/start` returned success and the task row became running.
+- Cross-session payload:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/otto_logs/cross-sessions/runs/live/2026-05-06-173132-2c6bc6.json`
+  includes `argv=["build", ..., "--provider", "codex"]`.
+- Compile prompt:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16/otto_logs/sessions/2026-05-06-173132-2c6bc6/prompts/compile-spec-e609c916c80a.md`
+  correctly contains `project_kind=webapp`.
+- Patched Mission Control verification on port 9001 used the same live session
+  and selected project. Browser screenshot:
+  `/tmp/.playwright-cli/page-2026-05-06T17-41-21-917Z.png`.
+
+Bug found:
+- During compile, the Run drawer Logs tab claimed no logs existed even though
+  the active compile agent had written:
+  `spec/compile-agent/narrative.log` and
+  `spec/compile-agent/messages.jsonl`.
+- Root cause: `/api/run-view/{session_id}/logs` only globbed build, certify,
+  and audit phase logs. It omitted `spec/**/*.log`, `spec/**/*.jsonl`, and
+  `spec/**/*.md`, so active compile/spec-generation work was invisible in the
+  primary product surface.
+
+Generic fix:
+- `otto/web/run_view_routes.py` now includes spec-phase logs and markdown in
+  session-level Run View logs. This is phase-generic and is not tied to the
+  Acme project.
+
+Regression tests added:
+- `tests/test_run_view_routes.py::test_run_view_logs_and_files_resolve_worktree_session`
+  now covers worktree sessions with `spec/compile-agent/narrative.log` and
+  `spec/compile-agent/messages.jsonl`.
+
+Verification:
+- `.venv/bin/pytest tests/test_run_view_routes.py::test_run_view_logs_and_files_resolve_worktree_session -q`
+  -> `1 passed`.
+- `.venv/bin/pytest tests/test_run_view_routes.py -q` -> `16 passed`.
+- `uv run ruff check otto/web/run_view_routes.py tests/test_run_view_routes.py`
+  -> passed.
+- Patched `/api/run-view/2026-05-06-173132-2c6bc6/logs` on port 9001 returned
+  `empty=False`, including `spec/compile-agent/live.log` and
+  `spec/compile-agent/messages.jsonl`.
+- Browser drawer on port 9001 showed 3 build groups, 10 features, session Logs
+  with compile-agent logs, group logs for `sla-aging-data`, and group diff for
+  `sla-aging-data`.
+
+Current live-run state:
+- Compile produced `spec/spec.json` with 3 groups:
+  `sla-aging-data`, `sla-aging-dashboard-ui`, and
+  `behavior-regression-tests`.
+- At the last checkpoint, `sla-aging-data` was actively building through Codex
+  and the drawer showed its three features under `Building`.
+
+Decision:
+- Otto bug fixed. Continue the live run and externally verify the Acme app
+  result before counting this pressure test as a product pass.
