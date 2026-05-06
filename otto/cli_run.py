@@ -40,6 +40,7 @@ from otto.build import (
     BuildBudget,
     BuildResult,
     default_build_agent,
+    resolve_integration_base_branch,
     run_build,
 )
 from otto.config import (
@@ -311,6 +312,7 @@ async def _drive_full_pipeline(
     # exceed the documented "$30 total" ceiling because nobody owns
     # the shared accounting.
     shared_budget = BuildBudget()
+    base_branch = resolve_integration_base_branch(project_dir)
     console.print("  [bold]Build phase[/bold] — dispatching group agents")
     build_result = await run_build(
         spec,
@@ -319,6 +321,7 @@ async def _drive_full_pipeline(
         build_agent=default_build_agent,
         base_url=base_url,
         budget=shared_budget,
+        base_branch=base_branch,
     )
     console.print(
         f"  Build: {len(build_result.passing_ids)}/{len(build_result.group_results)} "
@@ -341,6 +344,7 @@ async def _drive_full_pipeline(
         build_agent=default_build_agent,
         budget=MergeBudget(),
         shared_budget=shared_budget,
+        base_branch=base_branch,
     )
     console.print(
         f"  Merge: {len(merge_result.landed_ids)} landed, "

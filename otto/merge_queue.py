@@ -48,6 +48,7 @@ from otto.build import (
     GroupResult,
     GroupStatus,
     detect_scope_violations,
+    resolve_integration_base_branch,
 )
 from otto.checks import Evidence, run_checks
 from otto.spec_compile import Group, Spec
@@ -309,7 +310,7 @@ async def run_merge_queue(
     *,
     project_dir: Path,
     session_dir: Path,
-    base_branch: str = "main",
+    base_branch: str | None = None,
     base_url: str | None = None,
     build_agent: BuildAgentCallable | None = None,
     config: dict[str, Any] | None = None,
@@ -340,6 +341,11 @@ async def run_merge_queue(
             units can proceed without re-merging prior work.
     """
     config = dict(config or {})
+    base_branch = (
+        base_branch
+        or build_result.base_branch
+        or resolve_integration_base_branch(project_dir)
+    )
     budget = budget or MergeBudget()
     branch_for_group = branch_for_group or (lambda s: f"i2p/{session_dir.name}/{s.id}")
     git = git_runner or _git

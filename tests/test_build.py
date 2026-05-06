@@ -34,6 +34,7 @@ from otto.spec_compile import (
     Feature,
     RepoTestCheck,
     Group,
+    PytestCheck,
     Spec,
     StateInvariant,
     StructureDecisions,
@@ -871,6 +872,80 @@ def test_build_agent_prompt_writeable_paths_only(tmp_path: Path) -> None:
     )
 
 
+def test_build_agent_prompt_allows_explicit_shared_entrypoint_edits(tmp_path: Path) -> None:
+    """Brownfield apps often need a small route/bootstrap edit.
+
+    If the compiler put an entry point in shared_scaffold, the prompt
+    should not contradict itself with blanket read-only language.
+    """
+    group = Group(
+        id="dashboard",
+        name="Dashboard",
+        owned_paths=["templates/dashboard.html"],
+        feature_ids=["pass SLA summary to dashboard template"],
+        checks=[],
+    )
+    spec = _spec([group])
+    spec.shared_scaffold = ["app.py"]
+    inp = BuildAgentInput(
+        spec=spec,
+        group=group,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="x",
+        attempt=1,
+    )
+
+    prompt = _build_agent_prompt(inp)
+
+    assert "**Shared scaffold (any slice may extend):**" in prompt
+    assert "`app.py`" in prompt
+    assert "If one is listed under **Yours** or **Shared scaffold**" in prompt
+    assert "may make the smallest necessary edit" in prompt
+    assert "DO NOT modify them" not in prompt
+
+
+def test_build_agent_prompt_steers_dep_owned_entrypoints_to_registration_points(
+    tmp_path: Path,
+) -> None:
+    """Dep-owned entry points remain merge hot spots.
+
+    The prompt should ask downstream slices to use a registration seam or
+    amendment instead of freely editing a transitive dependency entry point.
+    """
+    shell = Group(
+        id="shell",
+        name="Shell",
+        owned_paths=["app.py"],
+        feature_ids=[],
+        checks=[],
+    )
+    widget = Group(
+        id="widget",
+        name="Widget",
+        dependencies=["shell"],
+        owned_paths=["templates/widget.html"],
+        feature_ids=["register widget route"],
+        checks=[],
+    )
+    spec = _spec([shell, widget])
+    inp = BuildAgentInput(
+        spec=spec,
+        group=widget,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="x",
+        attempt=1,
+    )
+
+    prompt = _build_agent_prompt(inp)
+
+    assert "`app.py` (owned by `shell`)" in prompt
+    assert "appears only through **Dep-owned**" in prompt
+    assert "prefer the dependency's registration point" in prompt
+    assert "request an amendment via `.otto/amendment_request.json`" in prompt
+
+
 def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:
     s = Group(
         id="s1",
@@ -998,6 +1073,29 @@ def test_build_agent_prompt_surfaces_seeded_test_files(tmp_path: Path) -> None:
     prompt = _build_agent_prompt(inp)
     assert "tests/run_acceptance.py" in prompt
     assert "tests/conftest.py" in prompt
+
+
+def test_build_agent_prompt_uses_target_runtime_for_pytest_checks(tmp_path: Path) -> None:
+    s = Group(
+        id="sla",
+        name="SLA",
+        checks=[PytestCheck(selector="tests/test_sla_aging.py", timeout_s=120)],
+    )
+    spec = _spec([s])
+    inp = BuildAgentInput(
+        spec=spec,
+        group=s,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="x",
+        attempt=1,
+    )
+
+    prompt = _build_agent_prompt(inp)
+
+    assert "python -m pytest tests/test_sla_aging.py" in prompt
+    assert "global pytest executable" in prompt
+    assert "pytest selector `tests/test_sla_aging.py`" not in prompt
 
 
 def test_build_agent_prompt_omits_contract_section_when_no_contract(tmp_path: Path) -> None:

@@ -22,6 +22,7 @@ from otto.build import (
     BuildResult,
     GroupResult,
     GroupStatus,
+    run_build,
 )
 from otto.merge_queue import (
     MergeBudget,
@@ -59,6 +60,18 @@ def _init_git(repo: Path) -> None:
     (repo / ".gitkeep").write_text("", encoding="utf-8")
     subprocess.run(["git", "add", ".gitkeep", ".gitignore"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "init", "--no-verify"], cwd=repo, check=True)
+
+
+def _ensure_main(repo: Path) -> None:
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if current != "main":
+        subprocess.run(["git", "branch", "-m", current, "main"], cwd=repo, check=True)
 
 
 def _passing_check() -> RepoTestCheck:
@@ -202,6 +215,77 @@ def test_run_merge_queue_lands_single_slice_when_checks_pass(tmp_path: Path) -> 
     assert result.blocked_ids == []
     assert result.results[0].status == MergeStatus.LANDED
     assert result.results[0].landed_commit  # short hash present
+
+
+def test_build_and_merge_use_active_branch_in_linked_worktree(tmp_path: Path) -> None:
+    """Queue task worktrees must merge into their task branch, not `main`.
+
+    `main` often remains checked out in the parent project worktree. A hard
+    coded merge target of `main` therefore fails in the linked task worktree
+    with "already used by worktree".
+    """
+    parent = tmp_path / "parent"
+    task = tmp_path / "task"
+    parent.mkdir()
+    _init_git(parent)
+    _ensure_main(parent)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/task", str(task), "main"],
+        cwd=parent,
+        check=True,
+    )
+
+    session_dir = task / "_session"
+    session_dir.mkdir()
+
+    async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        (input_.worktree / "alpha.txt").write_text("alpha\n", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, cost_usd=0.0)
+
+    spec = _spec(
+        [
+            Group(
+                id="alpha",
+                name="Alpha",
+                owned_paths=["alpha.txt"],
+                feature_ids=["write alpha"],
+                checks=[_passing_check()],
+            )
+        ]
+    )
+
+    build_result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=task,
+            session_dir=session_dir,
+            build_agent=writing_agent,
+        )
+    )
+    assert build_result.all_passing
+    assert build_result.base_branch == "build/task"
+
+    merge_result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=task,
+            session_dir=session_dir,
+            build_agent=None,
+        )
+    )
+
+    assert merge_result.landed_ids == ["alpha"]
+    assert merge_result.blocked_ids == []
+    assert (task / "alpha.txt").read_text(encoding="utf-8") == "alpha\n"
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=task,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert current == "build/task"
 
 
 def test_run_merge_queue_uses_latest_passing_branch_for_superseded_group(tmp_path: Path) -> None:

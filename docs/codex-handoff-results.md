@@ -1431,3 +1431,109 @@ Decision:
 - Fix and retry from a fresh Mission Control process. This run does not count
   as a product pass; it is evidence for the linked-worktree runtime discovery
   bug and the cancel/retry recovery path.
+
+## 2026-05-06 Fresh Acme Retry 3: Prompt Truth + Active Worktree Merge Base
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-09936c`
+- Session: `2026-05-06-164439-20ca92`
+- Provider: Codex, submitted through Mission Control Web.
+- Intent: add a manager SLA aging dashboard widget to the existing Flask/SQLite
+  expense portal, grouped by assignee, while preserving submission, approval,
+  saved-filter, CSV, and PDF behavior.
+
+Mission Control and log evidence:
+- Queue payload captured by Web:
+  `/tmp/otto-acme-retry-20260506-1010/submit-result-2.json`
+  with `extra_args=["--provider","codex"]`.
+- Session artifacts:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-09936c/otto_logs/sessions/2026-05-06-164439-20ca92`
+- Compile produced 2 groups:
+  `sla-aging-query` and `dashboard-widget`.
+- `sla-aging-query` deterministic check passed using the target project venv:
+  `build/sla-aging-query/attempt-01/000-PytestCheck.log`
+  -> `/Users/yuxuan/otto-projects/acme-expense-portal/.venv/bin/pytest -q tests/test_sla_aging.py`, `2 passed`.
+- `dashboard-widget` checks passed:
+  `build/dashboard-widget/attempt-01/000-PytestCheck.log`
+  -> `4 passed`;
+  `build/dashboard-widget/attempt-01/001-RepoTestCheck.log`
+  -> full project `42 passed`.
+- Merge then blocked before integration:
+  `spec-state.jsonl` event `group.merge.started` had
+  `branch=i2p/2026-05-06-164439-20ca92/sla-aging-query base=main kind=group`;
+  the next group event blocked with
+  `checkout main failed: fatal: 'main' is already used by worktree at '/Users/yuxuan/otto-projects/acme-expense-portal'`.
+- Audit still ran and wrote browser/product evidence:
+  `audit/attempt-00/feature-verdicts.json`,
+  `audit/attempt-00/walkthrough/walkthrough.jsonl`,
+  screenshots `dashboard-home.png` and `dashboard-assignee-maya.png`.
+- Cross-session status after intentional stale-process stop:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/otto_logs/cross-sessions/runs/live/2026-05-06-164439-20ca92.json`
+  -> `status=failed`, `last_event=exit_code=-15`.
+
+External verifier:
+- Native project tests passed inside the generated worktree:
+  `audit/attempt-00/contract/test_command.log` -> `pytest`, `39 passed`.
+- Browser/API audit found product failure despite green tests:
+  `dashboard-widget` was `blocked`; the dashboard did not render or wire an SLA
+  aging widget, and the expected pending-by-assignee URL for Maya Chen returned
+  zero rows despite three pending assigned expenses.
+- The synthesized walkthrough incorrectly skipped first-party Flask evidence:
+  `audit/attempt-00/walkthrough/synthesized-webapp.log`
+  -> `shape=not-applicable`, `note=no Flask create_app and no static index.html`.
+  The audit judge compensated by launching the Flask app manually and saving
+  screenshots plus durable API artifacts.
+
+Bugs found and classification:
+- Build-agent check prompt mismatch: Otto executed `PytestCheck` with the
+  target runtime, but the prompt still told agents to run bare `pytest
+  selector`. Classification: Otto bug fixed.
+- Entry-point scope contradiction: the prompt listed entry points such as
+  `app.py` as shared scaffold while also saying all entry points were read-only,
+  pushing the agent into template-only SQL/workaround behavior instead of a
+  small honest route integration. Classification: Otto bug fixed.
+- Linked worktree merge base: i2p build/merge defaulted to `main`, but a queue
+  task linked worktree starts on its task branch while the parent project holds
+  `main`, so `git checkout main` fails and triggers irrelevant merge repair.
+  Classification: Otto bug fixed.
+- Audit walkthrough shape detection missed this Flask app. Classification:
+  design gap still open; the judge-level browser audit caught the failure, but
+  the default synthesized webapp walkthrough should learn this project shape.
+
+Generic fixes:
+- `PytestCheck` prompt now describes `python -m pytest <selector>` and tells the
+  agent to use the target project runtime instead of relying on global pytest.
+- Entry-point prompt guidance now treats entry points as high-contention files,
+  not blanket read-only files: if listed under Yours or Shared scaffold and the
+  slice requires it, the agent may make the smallest necessary edit; if only
+  Dep-owned, it should use a registration point or request an amendment.
+- Build, runner, CLI `otto run`, and merge queue now resolve one integration
+  base branch from the active branch in `project_dir`, falling back to `main`
+  only when branch resolution fails. `BuildResult.base_branch` carries that
+  decision into merge so linked queue worktrees merge into the task branch.
+
+Regression tests added:
+- `tests/test_build.py::test_build_agent_prompt_uses_target_runtime_for_pytest_checks`
+- `tests/test_build.py::test_build_agent_prompt_allows_explicit_shared_entrypoint_edits`
+- `tests/test_build.py::test_build_agent_prompt_steers_dep_owned_entrypoints_to_registration_points`
+- `tests/test_merge_queue.py::test_build_and_merge_use_active_branch_in_linked_worktree`
+
+Gates run:
+- `.venv/bin/python -m py_compile otto/build.py otto/merge_queue.py otto/runner.py otto/cli_run.py`
+  -> passed.
+- `.venv/bin/pytest tests/test_build.py::test_build_agent_prompt_uses_target_runtime_for_pytest_checks -q`
+  -> `1 passed`.
+- `.venv/bin/pytest tests/test_build.py::test_build_agent_prompt_uses_target_runtime_for_pytest_checks tests/test_build.py::test_build_agent_prompt_allows_explicit_shared_entrypoint_edits tests/test_build.py::test_build_agent_prompt_steers_dep_owned_entrypoints_to_registration_points tests/test_merge_queue.py::test_build_and_merge_use_active_branch_in_linked_worktree -q`
+  -> `4 passed`.
+- `.venv/bin/pytest tests/test_build.py -q` -> `50 passed`.
+- `.venv/bin/pytest tests/test_merge_queue.py tests/test_build.py -q`
+  -> `79 passed`.
+- `uv run ruff check otto/build.py otto/merge_queue.py otto/runner.py otto/cli_run.py tests/test_build.py tests/test_merge_queue.py`
+  -> passed.
+
+Decision:
+- Fix and retry from a fresh Mission Control process. This run does not count
+  as a product pass because it ran stale pre-fix code, blocked on the hard-coded
+  `main` merge base, and the browser audit found the produced dashboard
+  incomplete despite green native tests.

@@ -48,6 +48,36 @@ logger = logging.getLogger("otto.build")
 
 
 # ---------------------------------------------------------------------------
+# Git branch helpers
+# ---------------------------------------------------------------------------
+
+
+def resolve_integration_base_branch(project_dir: Path, fallback: str = "main") -> str:
+    """Return the branch that should receive this i2p run's slice merges.
+
+    Otto runs inside ordinary git worktrees and queue-managed linked
+    worktrees. In the latter case, the parent project may already have
+    `main` checked out, so a hard-coded `git checkout main` from the queue
+    worktree fails with "already used by worktree". The integration target
+    is the branch the operator/queue task started on.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return fallback
+    branch = (proc.stdout or "").strip()
+    if proc.returncode == 0 and branch and branch != "HEAD":
+        return branch
+    return fallback
+
+
+# ---------------------------------------------------------------------------
 # Status + budgets
 # ---------------------------------------------------------------------------
 
@@ -284,6 +314,7 @@ class BuildResult:
     component_results: list[ComponentResult] = field(default_factory=list)
     total_cost_usd: float = 0.0
     total_wall_s: float = 0.0
+    base_branch: str = ""
 
     @property
     def all_passing(self) -> bool:
@@ -1087,7 +1118,7 @@ async def run_build(
     config: dict[str, Any] | None = None,
     base_url: str | None = None,
     budget: BuildBudget | None = None,
-    base_branch: str = "main",
+    base_branch: str | None = None,
     branch_for_group: Callable[[Group], str] | None = None,
     worktree_for_group: Callable[[Group], Path] | None = None,
     on_state_change: Callable[[str, str, dict[str, Any]], None] | None = None,
@@ -1118,6 +1149,7 @@ async def run_build(
     follow-up; the readiness logic is structured to support it.
     """
     config = dict(config or {})
+    base_branch = base_branch or resolve_integration_base_branch(project_dir)
     budget = budget or BuildBudget()
     branch_for_group = branch_for_group or (
         lambda s: f"i2p/{session_dir.name}/{s.id}"
@@ -1485,6 +1517,7 @@ async def run_build(
         component_results=component_results,
         total_cost_usd=total_cost,
         total_wall_s=time.monotonic() - total_t0,
+        base_branch=base_branch,
     )
 
 
@@ -2172,27 +2205,26 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         "silently over-reaching."
     )
     lines.append("")
-    # V16b: even when the scope check would allow modifying a transitive
-    # dep's owned file (the "downstream slices extend foundations"
-    # exception), specific FILE PATTERNS are extension points where
-    # modification by sibling slices causes unrecoverable merge
-    # conflicts. Spell this out so the agent treats them as read-only.
+    # V16b: entry points are high-contention files, but the compiler may
+    # intentionally classify one as a slice-owned or shared-scaffold path
+    # for brownfield apps where the only honest implementation is a small
+    # route/bootstrap edit. Avoid the old blanket "never edit app.py" rule:
+    # it contradicted the Scope section and pushed agents into template-only
+    # workarounds that hid real route/data changes.
     lines.append(
-        "**App entry points are read-only across slices.** Even if a "
-        "transitive dep's `owned_paths` includes one of these — "
+        "**Entry-point files need extra care.** Files such as "
         "`app.py`, `app/__init__.py`, `wsgi.py`, `main.py`, `cli.py`, "
         "`models.py`, `db/__init__.py`, `routes.py`, `urls.py`, "
-        "`server.py`, `index.ts`, `index.js`, `cmd/main.go` — DO NOT "
-        "modify them. Multiple slices each editing the same entry-point "
-        "to register their own routes/blueprints/models will hit a "
-        "merge conflict that Otto's fix-loop cannot reliably resolve. "
-        "Instead: the foundation slice provides a registration point "
-        "(auto-discovery loop or explicit list); your slice creates a "
-        "NEW file in your own subdirectory (e.g. `routes/<your_slice>.py`, "
-        "`blueprints/<your_slice>.py`, `app/<your_feature>.py`) that "
-        "exports `bp`/`router`/`Model` per the convention. If foundation "
-        "didn't establish a registration point, request an amendment "
-        "rather than editing the entry point yourself."
+        "`server.py`, `index.ts`, `index.js`, `cmd/main.go` are often "
+        "merge hot spots. If one is listed under **Yours** or **Shared "
+        "scaffold** above and your slice's tasks/checks require it, you "
+        "may make the smallest necessary edit there. If an entry-point "
+        "file appears only through **Dep-owned**, prefer the dependency's "
+        "registration point (auto-discovery loop or explicit list) and add "
+        "new slice-local files such as `routes/<your_slice>.py`, "
+        "`blueprints/<your_slice>.py`, or `app/<your_feature>.py`. If no "
+        "registration point exists and the task cannot be implemented "
+        "honestly, request an amendment via `.otto/amendment_request.json`."
     )
     lines.append("")
     # V8 fix: build agents had unrestricted git/bash and one slice in
@@ -2380,7 +2412,11 @@ def _describe_check(check: CheckKind) -> str:
         cmd = " ".join(getattr(check, "command", ()) or ())
         return f"RepoTestCheck: `{cmd}` exits 0"
     if name == "PytestCheck":
-        return f"PytestCheck: pytest selector `{getattr(check, 'selector', '')}`"
+        selector = getattr(check, "selector", "")
+        return (
+            f"PytestCheck: `python -m pytest {selector}` exits 0 "
+            "(use the target project runtime; do not rely on a global pytest executable)"
+        )
     if name == "BrowserJourney":
         cmd = " ".join(getattr(check, "command", ()) or ())
         return f"BrowserJourney: `{cmd}` succeeds and produces evidence"
