@@ -18,6 +18,7 @@ from otto.spec_compile import (
     Spec,
     SpecValidationError,
     StructureDecisions,
+    _normalize_webapp_scaffold_scope,
     append_amendment,
     infer_feature_group_routes_from_owned_paths,
     load_spec,
@@ -758,6 +759,39 @@ def test_validate_spec_warns_for_unroutable_feature_group() -> None:
     result = validate_spec(spec)
 
     assert any("group_id 'missing' not in spec groups" in w for w in result.warnings)
+
+
+def test_compile_normalizes_missing_webapp_scaffold_scope() -> None:
+    spec = Spec(
+        intent="build a local kanban webapp",
+        project_kind="webapp",
+        groups=[
+            Group(
+                id="foundation_shell_state",
+                name="React app shell and shared state",
+                feature_ids=["scaffold the local only SPA"],
+                owned_paths=["README.md", "src/state/**", "src/styles/**"],
+            ),
+            Group(
+                id="board_crud_movement",
+                name="Board CRUD and movement",
+                dependencies=["foundation_shell_state"],
+                feature_ids=["create columns and cards"],
+                owned_paths=["src/features/board/**"],
+            ),
+        ],
+    )
+
+    warnings = _normalize_webapp_scaffold_scope(spec)
+
+    foundation_paths = spec.groups[0].owned_paths
+    assert "package.json" in foundation_paths
+    assert "vite.config.*" in foundation_paths
+    assert "playwright.config.*" in foundation_paths
+    assert "tsconfig*.json" in foundation_paths
+    assert "src/App.*" in foundation_paths
+    assert spec.groups[1].owned_paths == ["src/features/board/**"]
+    assert any("webapp scaffold scope normalized" in warning for warning in warnings)
 
 
 def test_infer_feature_group_routes_from_owned_paths(tmp_path: Path) -> None:

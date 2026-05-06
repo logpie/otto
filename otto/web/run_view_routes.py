@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
 from otto.mission_control.actions import (
     execute_abort_group,
@@ -142,13 +145,37 @@ def install_run_view_routes(
         return JSONResponse(_action_to_json(result), status_code=200 if result.ok else 409)
 
     @router.get("/{session_id}/proof-packet.html", include_in_schema=False)
-    def proof_packet_html(session_id: str) -> FileResponse:
+    def proof_packet_html(session_id: str) -> HTMLResponse:
         project = _resolve_project_dir()
         session_dir = resolve_session_dir(project, session_id)
         path = session_dir / "proof-packet.html"
         if not path.exists():
             raise HTTPException(status_code=404, detail="proof packet has not been produced")
-        return FileResponse(path, media_type="text/html")
+        try:
+            html = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"proof packet unreadable: {exc}") from exc
+        return HTMLResponse(
+            _rewrite_proof_asset_urls(html, session_id=session_id),
+            media_type="text/html",
+        )
+
+    @router.get("/{session_id}/evidence")
+    def get_evidence(session_id: str, path: str) -> FileResponse:
+        project = _resolve_project_dir()
+        session_dir = resolve_session_dir(project, session_id)
+        target = (session_dir / path).resolve(strict=False)
+        if not _is_allowed_evidence_target(target, session_dir):
+            raise HTTPException(status_code=400, detail="evidence path escapes session/worktree")
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="evidence not found")
+        return FileResponse(target)
+
+    @router.get("/{session_id}/diff")
+    def get_diff(session_id: str) -> PlainTextResponse:
+        project = _resolve_project_dir()
+        session_dir = resolve_session_dir(project, session_id)
+        return PlainTextResponse(_session_diff_text(session_dir), media_type="text/plain")
 
     @router.get("/{session_id}/logs")
     def get_logs(session_id: str) -> JSONResponse:
@@ -384,6 +411,122 @@ def _session_files_payload(session_dir: Path) -> dict[str, Any]:
         "files": files,
         "truncated": truncated,
     }
+
+
+_ASSET_ATTR_RE = re.compile(r'\b(?P<attr>src|href)="(?P<url>[^"]+)"')
+_URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+
+def _rewrite_proof_asset_urls(html: str, *, session_id: str) -> str:
+    """Route proof-packet relative artifact links back through RunView."""
+
+    def repl(match: re.Match[str]) -> str:
+        attr = match.group("attr")
+        url = match.group("url")
+        if (
+            not url
+            or url.startswith(("#", "/", "?"))
+            or _URL_SCHEME_RE.match(url)
+        ):
+            return match.group(0)
+        rewritten = (
+            f"/api/run-view/{quote(session_id, safe='')}/evidence"
+            f"?path={quote(url, safe='')}"
+        )
+        return f'{attr}="{rewritten}"'
+
+    return _ASSET_ATTR_RE.sub(repl, html)
+
+
+def _session_worktree_root(session_dir: Path) -> Path:
+    """Return the worktree root that owns a session directory."""
+
+    parts = session_dir.parts
+    try:
+        sessions_index = len(parts) - 1 - list(reversed(parts)).index("sessions")
+    except ValueError:
+        return session_dir
+    # Expected: <worktree>/otto_logs/sessions/<session_id>.
+    if sessions_index >= 1 and parts[sessions_index - 1] == "otto_logs":
+        return Path(*parts[: sessions_index - 1])
+    return session_dir
+
+
+def _is_allowed_evidence_target(target: Path, session_dir: Path) -> bool:
+    allowed_roots = [session_dir.resolve(strict=False)]
+    worktree_root = _session_worktree_root(session_dir).resolve(strict=False)
+    if worktree_root not in allowed_roots:
+        allowed_roots.append(worktree_root)
+    for root in allowed_roots:
+        try:
+            target.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _session_diff_text(session_dir: Path) -> str:
+    worktree = _session_worktree_root(session_dir)
+    if not (worktree / ".git").exists():
+        return "No git worktree is available for this session.\n"
+    base = _choose_diff_base(worktree)
+    if not base:
+        status = _git_text(["status", "--short"], worktree)
+        return status or "No diff base found.\n"
+    stat = _git_text(["diff", "--stat", f"{base}...HEAD"], worktree)
+    names = _git_text(["diff", "--name-status", f"{base}...HEAD"], worktree)
+    patch = _git_text(["diff", "--find-renames", f"{base}...HEAD"], worktree)
+    sections = [f"Base: {base}", ""]
+    if stat.strip():
+        sections.extend(["Summary:", stat.rstrip(), ""])
+    if names.strip():
+        sections.extend(["Files:", names.rstrip(), ""])
+    if patch.strip():
+        sections.extend(["Patch:", patch.rstrip(), ""])
+    if len(sections) == 2:
+        sections.append("No changes from base.\n")
+    return "\n".join(sections).rstrip() + "\n"
+
+
+def _choose_diff_base(worktree: Path) -> str | None:
+    for candidate in ("main", "master"):
+        if _git_ok(["rev-parse", "--verify", candidate], worktree):
+            return candidate
+    remote_head = _git_text(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], worktree).strip()
+    if remote_head:
+        return remote_head
+    return None
+
+
+def _git_ok(args: list[str], cwd: Path) -> bool:
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).returncode == 0
+    except OSError:
+        return False
+
+
+def _git_text(args: list[str], cwd: Path) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        return f"git {' '.join(args)} failed: {exc}\n"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return f"git {' '.join(args)} failed: {detail}\n"
+    return proc.stdout or ""
 
 
 def _tail_text(path: Path, limit: int) -> str:

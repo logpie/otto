@@ -7,6 +7,7 @@ Path-traversal rejection. 404 for missing sessions.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -181,6 +182,68 @@ def test_run_view_logs_and_files_resolve_worktree_session(tmp_path: Path) -> Non
     files = client.get(f"/api/run-view/{sid}/files")
     assert files.status_code == 200
     assert "proof-packet.json" in {item["path"] for item in files.json()["files"]}
+
+
+def test_proof_packet_rewrites_and_serves_worktree_artifact_links(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-worktree"
+    worktree = project / ".worktrees" / "build-task"
+    session = worktree / "otto_logs" / "sessions" / sid
+    _write_minimal_session(session, intent="worktree micro twitter", project_kind="webapp")
+    artifact = worktree / "otto_artifacts" / "browser" / "shot.png"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"fake-png")
+    (session / "proof-packet.html").write_text(
+        '<a href="../../../otto_artifacts/browser/shot.png">'
+        '<img src="../../../otto_artifacts/browser/shot.png" alt="shot"></a>',
+        encoding="utf-8",
+    )
+
+    client = _app_with_project(project)
+    html = client.get(f"/api/run-view/{sid}/proof-packet.html")
+    assert html.status_code == 200
+    assert f"/api/run-view/{sid}/evidence?path=..%2F..%2F..%2Fotto_artifacts%2Fbrowser%2Fshot.png" in html.text
+
+    image = client.get(
+        f"/api/run-view/{sid}/evidence",
+        params={"path": "../../../otto_artifacts/browser/shot.png"},
+    )
+    assert image.status_code == 200
+    assert image.content == b"fake-png"
+
+
+def test_run_view_diff_returns_worktree_diff_against_main(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.email", "test@otto.local"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Otto Tester"], cwd=project, check=True)
+    (project / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=project, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=project, check=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/task", ".worktrees/build-task", "main"],
+        cwd=project,
+        check=True,
+    )
+    worktree = project / ".worktrees" / "build-task"
+    (worktree / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-qm", "add app"], cwd=worktree, check=True)
+    sid = "2026-05-04-200000-worktree"
+    _write_minimal_session(
+        worktree / "otto_logs" / "sessions" / sid,
+        intent="worktree diff",
+        project_kind="webapp",
+    )
+
+    client = _app_with_project(project)
+    diff = client.get(f"/api/run-view/{sid}/diff")
+
+    assert diff.status_code == 200
+    assert "Base: main" in diff.text
+    assert "app.py" in diff.text
 
 
 def test_run_view_skips_symlinked_session_escape(tmp_path: Path) -> None:

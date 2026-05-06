@@ -20,12 +20,14 @@ import click
 
 from otto.config import (
     ConfigError,
+    PROVIDER_DEFAULT_MODEL_OVERRIDE,
     _normalize_intent,
     agent_effort,
     agent_provider,
     detect_project_kind,
     effective_agent_model,
     load_config,
+    normalize_provider,
     require_git,
     resolve_project_dir,
 )
@@ -362,6 +364,17 @@ def _record_cli_override(
         overrides[key] = value
 
 
+def _provider_changed(current: str | None, override: str | None) -> bool:
+    if not override:
+        return False
+    try:
+        next_provider = normalize_provider(override, default=None)
+        current_provider = normalize_provider(current, default=None) if current else None
+    except ValueError:
+        return False
+    return bool(next_provider and current_provider and next_provider != current_provider)
+
+
 def _record_phase_agent_cli_overrides(
     *,
     config: dict[str, Any],
@@ -372,6 +385,18 @@ def _record_phase_agent_cli_overrides(
         agent_config = config.setdefault("agents", {}).setdefault(agent_type, {})
         if not isinstance(agent_config, dict):
             continue
+        previous_provider = agent_provider(config, agent_type)
+        if (
+            overrides.get("provider")
+            and not overrides.get("model")
+            and _provider_changed(previous_provider, overrides.get("provider"))
+        ):
+            _record_cli_override(
+                config,
+                "model",
+                PROVIDER_DEFAULT_MODEL_OVERRIDE,
+                agent_type=agent_type,
+            )
         for key, value in overrides.items():
             if not value:
                 continue
@@ -472,6 +497,7 @@ def _apply_build_cli_overrides(
     if max_turns is not None:
         config["max_turns_per_call"] = max_turns
         sources["max_turns_per_call"] = "--max-turns"
+    previous_provider = agent_provider(config)
     if model:
         config["model"] = model
         sources["model"] = "--model"
@@ -480,6 +506,8 @@ def _apply_build_cli_overrides(
         config["provider"] = provider
         sources["provider"] = "--provider"
         _record_cli_override(config, "provider", provider)
+        if not model and _provider_changed(previous_provider, provider):
+            _record_cli_override(config, "model", PROVIDER_DEFAULT_MODEL_OVERRIDE)
     if effort:
         config["effort"] = effort
         sources["effort"] = "--effort"

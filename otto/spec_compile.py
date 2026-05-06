@@ -37,6 +37,7 @@ Key invariants:
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
 import hashlib
 import json
 import logging
@@ -95,6 +96,22 @@ DEFAULT_EVIDENCE_KINDS_PER_KIND: dict[str, tuple[str, ...]] = {
     "library": ("ImportCheck", "TypeCheck", "RepoTestCheck"),
     "cli": ("CLIProbe", "RepoTestCheck"),
 }
+
+_WEBAPP_SCAFFOLD_SCOPE_PATHS: tuple[str, ...] = (
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+    "index.html",
+    "vite.config.*",
+    "vitest.config.*",
+    "playwright.config.*",
+    "tsconfig*.json",
+    "src/main.*",
+    "src/App.*",
+    "src/vite-env.d.ts",
+)
 
 
 def default_evidence_kinds_for(project_kind: str) -> tuple[str, ...]:
@@ -2612,6 +2629,70 @@ def spec_from_dict(data: dict[str, Any]) -> Spec:
     return spec
 
 
+def _normalize_webapp_scaffold_scope(spec: Spec) -> list[str]:
+    """Ensure greenfield webapp scaffold files have an explicit writer.
+
+    Compile agents sometimes describe a foundational webapp slice that must
+    create package scripts, Vite/TS config, and browser-test config, while its
+    owned_paths only include `src/**` files. Build prompts treat Scope as a
+    hard rule, so that spec is internally contradictory before any code is
+    written. Normalize only the compile-agent path, not generic spec parsing,
+    so hand-written legacy specs continue to round-trip unchanged.
+    """
+    if spec.project_kind != "webapp" or not spec.groups:
+        return []
+
+    existing_patterns: list[str] = []
+    for group in spec.groups:
+        existing_patterns.extend(group.owned_paths or [])
+    existing_patterns.extend(spec.shared_scaffold or [])
+    existing_patterns.extend(spec.shared_paths or [])
+
+    missing = [
+        path for path in _WEBAPP_SCAFFOLD_SCOPE_PATHS
+        if not _scaffold_path_has_owner(path, existing_patterns)
+    ]
+    if not missing:
+        return []
+
+    target = _select_webapp_scaffold_group(spec.groups)
+    for path in missing:
+        if path not in target.owned_paths:
+            target.owned_paths.append(path)
+
+    return [
+        "webapp scaffold scope normalized: added missing root/app config "
+        f"paths to group {target.id!r}: {', '.join(missing)}"
+    ]
+
+
+def _scaffold_path_has_owner(path: str, patterns: list[str]) -> bool:
+    for pattern in patterns:
+        if pattern == path:
+            return True
+        if not any(ch in pattern for ch in "*?[]"):
+            continue
+        if fnmatch.fnmatch(path, pattern):
+            return True
+    return False
+
+
+def _select_webapp_scaffold_group(groups: list[Group]) -> Group:
+    def score(group: Group, index: int) -> tuple[int, int]:
+        text = f"{group.id} {group.name}".lower()
+        owned = " ".join(group.owned_paths or "").lower()
+        value = 0
+        if not group.dependencies:
+            value += 5
+        if any(marker in text for marker in ("foundation", "scaffold", "shell", "app")):
+            value += 4
+        if any(marker in owned for marker in ("index.html", "src/main", "src/app", "readme.md")):
+            value += 3
+        return value, -index
+
+    return max(enumerate(groups), key=lambda item: score(item[1], item[0]))[1]
+
+
 _SLUG_RE = re.compile(r"[^a-z0-9_-]+")
 
 
@@ -3656,6 +3737,9 @@ async def compile_spec(
         payload["project_kind"] = project_kind
 
     spec = spec_from_dict(payload)
+    normalization_warnings: list[str] = []
+    if not brownfield:
+        normalization_warnings = _normalize_webapp_scaffold_scope(spec)
 
     # A6.4: brownfield additive mode reconciles the agent's "what's new"
     # output with the prior base_spec, preserving mechanical / historical
@@ -3680,7 +3764,7 @@ async def compile_spec(
     # cross_group_checks" alerts that the validator emitted. Surface
     # them via the standard logger so they hit narrative.log AND
     # attach to the spec object so callers can render them.
-    all_warnings = [*routing_warnings, *result.warnings]
+    all_warnings = [*normalization_warnings, *routing_warnings, *result.warnings]
     for warning in all_warnings:
         logger.warning("spec validator: %s", warning)
     setattr(spec, "_validator_warnings", all_warnings)

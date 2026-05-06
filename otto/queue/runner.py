@@ -1310,6 +1310,11 @@ class Runner:
             "OTTO_INTERNAL_QUEUE_RUNNER": "1",
             "OTTO_QUEUE_TASK_ID": task.id,
             "OTTO_RUN_ID": attempt_run_id,
+            # I2P build/merge runs inside this linked worktree. The merge
+            # queue must integrate slices back onto the task branch, not the
+            # parent project's default branch, which may be checked out in a
+            # different worktree.
+            "OTTO_I2P_BASE_BRANCH": branch,
             # Anchor manifest writes to the MAIN project so the watcher (whose
             # cwd is the main project) and the child (whose cwd is the
             # worktree) resolve to the same path. See otto/manifest.py

@@ -1000,6 +1000,20 @@ def _setup_group_branch_with_deps(
     return True
 
 
+def _dependency_branch_setup_failure(
+    *,
+    unit_id: str,
+    primary_parent_ref: str,
+    additional_dep_refs: list[str],
+) -> str:
+    dep_refs = ", ".join([primary_parent_ref, *additional_dep_refs])
+    return (
+        "dependency branch setup failed: could not create an integrated "
+        f"branch for {unit_id} from required dependency refs {dep_refs}; "
+        "refusing to run against a partial dependency state"
+    )
+
+
 def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
     """Stage and commit the slice's work to its branch.
 
@@ -1255,9 +1269,33 @@ async def run_build(
                     additional_dep_refs=additional_dep_refs_c,
                 )
                 if not branch_real_c:
-                    branch_real_c = _setup_group_branch(
-                        comp_worktree, branch=comp_branch, parent_ref=primary_parent_ref_c,
+                    narrative = _dependency_branch_setup_failure(
+                        unit_id=next_component.id,
+                        primary_parent_ref=primary_parent_ref_c,
+                        additional_dep_refs=additional_dep_refs_c,
                     )
+                    logger.warning("component %s: %s", next_component.id, narrative)
+                    comp_result = ComponentResult(
+                        component_id=next_component.id,
+                        status=ComponentStatus.BLOCKED,
+                        attempts=0,
+                        branch=comp_branch,
+                        worktree=comp_worktree,
+                        failure_narrative=narrative,
+                    )
+                    total_cost += comp_result.cost_usd
+                    component_results.append(comp_result)
+                    blocked_ids.add(next_component.id)
+                    _emit_component_state(
+                        next_component.id,
+                        ComponentStatus.BLOCKED,
+                        {
+                            "branch": comp_branch,
+                            "branch_real": False,
+                            "narrative": narrative,
+                        },
+                    )
+                    continue
             else:
                 branch_real_c = _setup_group_branch(
                     comp_worktree, branch=comp_branch, parent_ref=primary_parent_ref_c,
@@ -1358,13 +1396,35 @@ async def run_build(
             # with an honest conflict, surfaced via V4.
             if not branch_real:
                 logger.warning(
-                    "slice %s: multi-dep branch setup failed (likely "
-                    "sibling-dep conflict); falling back to single-parent",
+                    "slice %s: multi-dep branch setup failed; blocking "
+                    "rather than running against a partial dependency state",
                     next_group.id,
                 )
-                branch_real = _setup_group_branch(
-                    group_worktree, branch=group_branch, parent_ref=primary_parent_ref,
+                narrative = _dependency_branch_setup_failure(
+                    unit_id=next_group.id,
+                    primary_parent_ref=primary_parent_ref,
+                    additional_dep_refs=additional_dep_refs,
                 )
+                slice_result = GroupResult(
+                    group_id=next_group.id,
+                    status=GroupStatus.BLOCKED,
+                    attempts=0,
+                    branch=group_branch,
+                    worktree=group_worktree,
+                    failure_narrative=narrative,
+                )
+                results.append(slice_result)
+                blocked_ids.add(next_group.id)
+                _emit_state(
+                    next_group.id,
+                    GroupStatus.BLOCKED,
+                    {
+                        "branch": group_branch,
+                        "branch_real": False,
+                        "narrative": narrative,
+                    },
+                )
+                continue
         else:
             branch_real = _setup_group_branch(
                 group_worktree, branch=group_branch, parent_ref=primary_parent_ref,

@@ -26,6 +26,7 @@ Event kinds (mirror the design doc):
   group.blocked           — group exhausted retries / merge repair budget
   audit.started           — final audit pass began
   audit.finished          — final audit pass produced verdict
+  run.started             — entire run started
   run.finished            — entire run reached a terminal state
 
 Why a separate file from checkpoint.json?
@@ -80,6 +81,7 @@ EVENT_KINDS: tuple[str, ...] = (
     "audit.started",
     "audit.finished",
     "audit.attempt.finished",  # Pattern A: per-attempt audit verdict in retry loop
+    "run.started",
     "run.finished",
     # v2.2 — amendments + scope events ----------------------------------
     "scope.warning",            # build agent attempted out-of-scope edit (informational)
@@ -125,6 +127,7 @@ EventKind = Literal[
     "audit.started",
     "audit.finished",
     "audit.attempt.finished",  # Pattern A — per-attempt audit verdict in retry loop
+    "run.started",
     "run.finished",
     "scope.warning",
     "amendment.requested",

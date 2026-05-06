@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +46,7 @@ def build_run_view(
     proof = _read_proof_packet(session_dir)
     spec = _read_spec(session_dir)
     state_events = _read_state_events(session_dir)
+    compile_active = _compile_logs_active(session_dir, spec, state_events, proof)
 
     run_id = session_dir.name
     intent = _str_or_empty(
@@ -64,25 +65,42 @@ def build_run_view(
     else:
         verdict_field = str(verdict)
 
-    status = _derive_status(verdict_field, state_events, live_state)
+    status = _derive_status(
+        verdict_field,
+        state_events,
+        live_state,
+        compile_active=compile_active,
+    )
 
     features = _build_features(spec, proof, live_state)
     groups = _build_groups(spec, proof, state_events, live_state)
     components = _build_components(spec, proof, state_events, live_state)
     guardrails = _build_guardrails(spec, proof)
-    stages = _build_stages(state_events, live_state, spec)
-    findings = _build_findings(proof)
-
-    cost_usd = float(
-        (proof.get("cost_usd") if proof else None)
-        or (live_state.get("cost_usd") if live_state else 0.0)
-        or 0.0
+    stages = _build_stages(
+        state_events,
+        live_state,
+        spec,
+        proof=proof,
+        compile_active=compile_active,
     )
-    wall_s = float(
-        (proof.get("wall_s") if proof else None)
-        or (live_state.get("wall_s") if live_state else None)
-        or (live_state.get("duration_s") if live_state else 0.0)
-        or 0.0
+    findings = _build_findings(proof)
+    aggregate_group_cost_usd = sum(
+        _float_or_zero(group.get("cost_usd")) for group in groups
+    )
+    aggregate_group_wall_s = sum(
+        _float_or_zero(group.get("wall_s")) for group in groups
+    )
+
+    cost_usd = _first_nonzero_float(
+        proof.get("cost_usd") if proof else None,
+        live_state.get("cost_usd") if live_state else None,
+        aggregate_group_cost_usd,
+    )
+    wall_s = _first_nonzero_float(
+        proof.get("wall_s") if proof else None,
+        live_state.get("wall_s") if live_state else None,
+        live_state.get("duration_s") if live_state else None,
+        aggregate_group_wall_s,
     )
 
     meta = {
@@ -160,6 +178,30 @@ def _read_state_events(session_dir: Path) -> list[dict[str, Any]]:
     except OSError:
         return []
     return events
+
+
+def _compile_logs_active(
+    session_dir: Path,
+    spec: dict[str, Any] | None,
+    state_events: list[dict[str, Any]],
+    proof: dict[str, Any] | None,
+) -> bool:
+    if spec or proof:
+        return False
+    if any(
+        _stage_event_target(str(event.get("event") or event.get("kind") or ""))[0] == "compile"
+        for event in state_events
+    ):
+        return False
+    compile_dir = session_dir / "spec" / "compile-agent"
+    for name in ("messages.jsonl", "narrative.log", "live.log"):
+        path = compile_dir / name
+        try:
+            if path.exists() and path.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +400,10 @@ def _group_to_view(
     payload: dict[str, Any],
     state_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    group_id = str(payload.get("id") or payload.get("slice_id") or "")
+    group_id = str(
+        payload.get("id") or payload.get("group_id") or payload.get("slice_id") or ""
+    )
+    metrics = _group_metrics_from_events(group_id, state_events)
     return {
         "id": group_id,
         "name": str(
@@ -376,8 +421,8 @@ def _group_to_view(
         "dependencies": [
             str(d) for d in (payload.get("dependencies") or payload.get("deps") or [])
         ],
-        "cost_usd": float(payload.get("cost_usd") or 0.0),
-        "wall_s": float(payload.get("wall_s") or 0.0),
+        "cost_usd": _first_float(payload.get("cost_usd"), metrics["cost_usd"]),
+        "wall_s": _first_float(payload.get("wall_s"), metrics["wall_s"]),
         "repair_attempts": int(payload.get("repair_attempts") or 0),
     }
 
@@ -430,6 +475,57 @@ def _group_status_from_events(
         }:
             status = "blocked"
     return status
+
+
+def _group_metrics_from_events(
+    group_id: str,
+    state_events: list[dict[str, Any]],
+) -> dict[str, float | None]:
+    metrics: dict[str, float | None] = {"cost_usd": None, "wall_s": None}
+    if not group_id:
+        return metrics
+    for event in state_events:
+        if str(event.get("group_id") or "") != group_id:
+            continue
+        extra = event.get("extra") if isinstance(event.get("extra"), dict) else {}
+        for key in metrics:
+            value = _float_or_none(extra.get(key))
+            if value is None:
+                value = _float_or_none(event.get(key))
+            if value is not None:
+                metrics[key] = value
+    return metrics
+
+
+def _first_float(*values: Any) -> float:
+    for value in values:
+        converted = _float_or_none(value)
+        if converted is not None:
+            return converted
+    return 0.0
+
+
+def _first_nonzero_float(*values: Any) -> float:
+    for value in values:
+        converted = _float_or_none(value)
+        if converted is None:
+            continue
+        if converted != 0.0:
+            return converted
+    return 0.0
+
+
+def _float_or_zero(value: Any) -> float:
+    return _float_or_none(value) or 0.0
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_components(
@@ -492,6 +588,9 @@ def _build_stages(
     state_events: list[dict[str, Any]],
     live_state: dict[str, Any] | None,
     spec: dict[str, Any] | None,
+    *,
+    proof: dict[str, Any] | None = None,
+    compile_active: bool = False,
 ) -> list[dict[str, Any]]:
     """Emit StageView list from state events.
 
@@ -531,6 +630,14 @@ def _build_stages(
             if stages["build"]["status"] == "pending":
                 stages["build"]["status"] = "active"
             continue
+        if kind == "audit.started" and str(event.get("detail") or "") != "run start":
+            ts = event.get("ts") or event.get("timestamp")
+            if stages["build"]["status"] == "active":
+                stages["build"]["status"] = "done"
+                stages["build"]["finished_at"] = stages["build"]["finished_at"] or ts
+            stages["audit"]["started_at"] = ts
+            stages["audit"]["status"] = "active"
+            continue
         stage_name, sub = _stage_event_target(kind)
         if stage_name is None or sub is None:
             continue
@@ -563,6 +670,8 @@ def _build_stages(
         first_ts = _first_event_ts(state_events)
         stages["compile"]["status"] = "done"
         stages["compile"]["finished_at"] = first_ts
+    elif compile_active and stages["compile"]["status"] == "pending":
+        stages["compile"]["status"] = "active"
 
     live_status = _normalize_live_status(live_state)
     if live_status in {"interrupted", "aborted", "failed"}:
@@ -576,13 +685,55 @@ def _build_stages(
                 stages["build"]["status"] = "failed"
                 stages["build"]["finished_at"] = str(live_state.get("finished_at") or "") if live_state else None
 
+    _reconcile_terminal_stages(stages, state_events, proof)
+
     return [stages[name] for name in canonical]
 
 
 # Stage names that emit bare "<stage>.<sub>" lifecycle events (no
 # "stage." prefix). Currently only `seed` — other stages still use
 # the "stage.<name>.<sub>" pattern for orchestrator-level lifecycle.
-_BARE_STAGE_EVENT_PREFIXES: tuple[str, ...] = ("seed",)
+_BARE_STAGE_EVENT_PREFIXES: tuple[str, ...] = ("seed", "audit")
+
+
+def _reconcile_terminal_stages(
+    stages: dict[str, dict[str, Any]],
+    state_events: list[dict[str, Any]],
+    proof: dict[str, Any] | None,
+) -> None:
+    """Normalize stage display once a proof packet/verdict exists.
+
+    I2P runs currently emit group-level build/merge events and bare audit
+    events, then write a proof packet without a dedicated render lifecycle
+    event. Without this reconciliation, terminal RunView responses can say
+    ``status=passed`` while Build/Audit remain visually active.
+    """
+    if not proof or str(proof.get("verdict") or "") not in {"passed", "partial", "blocked"}:
+        return
+
+    finished_ts = _last_event_ts(state_events)
+    audit_started_ts = _last_event_ts(
+        state_events,
+        lambda event: str(event.get("event") or event.get("kind") or "") == "audit.started",
+    )
+    last_group_ts = _last_event_ts(
+        state_events,
+        lambda event: str(event.get("event") or event.get("kind") or "").startswith("group."),
+    )
+
+    if stages["build"]["status"] in {"pending", "active"} and _has_group_events(state_events):
+        stages["build"]["status"] = "done"
+        stages["build"]["finished_at"] = stages["build"]["finished_at"] or audit_started_ts or last_group_ts or finished_ts
+        stages["build"]["started_at"] = stages["build"]["started_at"] or _first_group_event_ts(state_events)
+
+    if stages["audit"]["status"] == "active" and finished_ts:
+        stages["audit"]["status"] = "done"
+        stages["audit"]["finished_at"] = stages["audit"]["finished_at"] or finished_ts
+
+    if stages["render"]["status"] == "pending" and proof:
+        stages["render"]["status"] = "done"
+        stages["render"]["started_at"] = stages["render"]["started_at"] or finished_ts
+        stages["render"]["finished_at"] = stages["render"]["finished_at"] or finished_ts
 
 
 def _stage_event_target(kind: str) -> tuple[str | None, str | None]:
@@ -623,6 +774,28 @@ def _first_event_ts(state_events: list[dict[str, Any]]) -> str | None:
         ts = event.get("ts") or event.get("timestamp")
         if ts:
             return str(ts)
+    return None
+
+
+def _last_event_ts(
+    state_events: list[dict[str, Any]],
+    predicate: Callable[[dict[str, Any]], bool] | None = None,
+) -> str | None:
+    for event in reversed(state_events):
+        if predicate is not None and not predicate(event):
+            continue
+        ts = event.get("ts") or event.get("timestamp")
+        if ts:
+            return str(ts)
+    return None
+
+
+def _first_group_event_ts(state_events: list[dict[str, Any]]) -> str | None:
+    for event in state_events:
+        if str(event.get("event") or event.get("kind") or "").startswith("group."):
+            ts = event.get("ts") or event.get("timestamp")
+            if ts:
+                return str(ts)
     return None
 
 
@@ -705,6 +878,8 @@ def _derive_status(
     verdict: str | None,
     state_events: list[dict[str, Any]],
     live_state: dict[str, Any] | None,
+    *,
+    compile_active: bool = False,
 ) -> str:
     """Compute RunStatus from verdict + events."""
     if verdict == "passed":
@@ -714,7 +889,7 @@ def _derive_status(
     if verdict == "blocked":
         return "blocked"
     live_status = _normalize_live_status(live_state)
-    if live_status in {"interrupted", "aborted", "failed", "landed", "queued"}:
+    if live_status in {"interrupted", "aborted", "failed", "landed"}:
         return live_status
     # In-flight or pre-verdict — derive from latest stage event
     last_started = None
@@ -723,6 +898,9 @@ def _derive_status(
         kind = str(event.get("event") or event.get("kind") or "")
         if kind == "group.started":
             saw_group_started = True
+        if kind == "audit.started" and str(event.get("detail") or "") != "run start":
+            last_started = "audit"
+            continue
         stage_name, sub = _stage_event_target(kind)
         if stage_name is not None and sub == "started":
             last_started = stage_name
@@ -739,6 +917,8 @@ def _derive_status(
         }.get(last_started, "queued")
     if saw_group_started:
         return "building"
+    if compile_active:
+        return "compiling"
     if live_status:
         return live_status
     return "queued"

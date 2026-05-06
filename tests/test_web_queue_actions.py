@@ -77,6 +77,29 @@ def test_web_queue_build_spec_defaults_to_web_review_mode(tmp_path: Path) -> Non
     config = _client(repo).get("/api/state").json()["live"]["items"][0]["build_config"]
     assert config["planning"] == "spec_review"
 
+
+def test_web_queue_provider_override_does_not_reuse_other_provider_model(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "otto.yaml").write_text("provider: claude\nmodel: sonnet\n", encoding="utf-8")
+
+    response = _client(repo).post(
+        "/api/queue/build",
+        json={
+            "intent": "add saved searches",
+            "as": "saved-searches",
+            "extra_args": ["--provider", "codex"],
+        },
+    )
+
+    assert response.status_code == 200
+    config = _client(repo).get("/api/state").json()["live"]["items"][0]["build_config"]
+    assert config["provider"] == "codex"
+    assert config["model"] is None
+    assert config["agents"]["build"]["provider"] == "codex"
+    assert config["agents"]["build"]["model"] is None
+
+
 def test_web_queue_accepts_split_mode_and_phase_provider_args(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)

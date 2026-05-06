@@ -6,9 +6,9 @@ evidence, or token accounting.
 
 ## Repeated Mistakes To Avoid
 
-- Stay in the user-requested worktree. For the current I2P line, use
-  `/Users/yuxuan/work/cc-autonomous/.worktrees/codex-provider-i2p` unless the
-  user explicitly asks to inspect or merge another tree.
+- Stay in the user-requested worktree. If the target is ambiguous, inspect
+  `pwd`, `git branch --show-current`, `git status --short --branch`, and
+  `git worktree list` before acting. Do not assume a specific I2P worktree.
 - Do not assume the browser is running the latest code. After web client or
   backend changes, rebuild, restart the server, and verify the served bundle or
   API reflects the new commit. A stale server caused multiple false "fixed"
@@ -57,17 +57,19 @@ evidence, or token accounting.
   verifier completion; if verification fails, Otto should roll back or require
   `otto merge-verify <merge-id>` to turn that exact merge state green before
   showing the queue task as landed.
-- Claude SDK hook callbacks are fragile on Otto's one-shot string `query()`
-  path: stdin can close while long-running tool use still needs callbacks,
-  producing repeated `Stream closed` hook errors. For core safety policy, prefer
-  `can_use_tool` permission callbacks through `ClaudeSDKClient` interactive
-  mode, and verify with a real safe/deny SDK smoke before trusting a dogfood
-  rerun.
-- Prompt-only process lifecycle policy is not enough. Certifiers have attempted
-  `killall`, `pkill`, and malformed `kill` cleanup during proof repair. Otto
-  must enforce broad-process-kill blocking in provider permissions, and
-  dogfood verification should confirm Mission Control and the queue runner stay
-  alive afterward.
+- When Claude hook or permission callbacks matter, verify the
+  `ClaudeSDKClient` path is still active. Otto uses it so long-running tool use
+  keeps callbacks alive; regressions often show up as repeated `Stream closed`
+  hook errors.
+- Prompt-only process lifecycle policy is not enough. Provider permissions and
+  prompt policy should both block broad process-kill commands such as
+  `killall`, `pkill`, and malformed `kill`; dogfood verification should confirm
+  Mission Control and the queue runner stay alive afterward.
+- For local web dogfood, prefer explicit loopback URLs such as
+  `127.0.0.1:<free-port>` and app start commands that honor the chosen port.
+  Avoid assuming `localhost` or `python run.py` resolves to the intended app.
+- Treat zero-diff focused `improve` tasks as suspicious. Inspect the diff and
+  verify the requested delta, not just adjacent existing behavior.
 
 ## Web Build And Test Order
 

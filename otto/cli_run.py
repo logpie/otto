@@ -21,6 +21,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -44,8 +45,11 @@ from otto.build import (
 )
 from otto.config import (
     ConfigError,
+    PROVIDER_DEFAULT_MODEL_OVERRIDE,
     _normalize_intent,
+    agent_provider,
     load_config,
+    normalize_provider,
     require_git,
     resolve_project_dir,
 )
@@ -64,6 +68,7 @@ from otto.resume import (
     verify_spec_hash_matches,
 )
 from otto.runner import RunResult, run_pipeline
+from otto.queue.runtime import mark_queue_child_ready
 from otto.spec_compile import (
     PROJECT_KINDS,
     Spec,
@@ -177,6 +182,17 @@ def _record_cli_override(
     overrides[key] = value
 
 
+def _provider_changed(current: str | None, override: str | None) -> bool:
+    if not override:
+        return False
+    try:
+        next_provider = normalize_provider(override, default=None)
+        current_provider = normalize_provider(current, default=None) if current else None
+    except ValueError:
+        return False
+    return bool(next_provider and current_provider and next_provider != current_provider)
+
+
 def apply_i2p_cli_overrides(
     config: dict[str, Any],
     *,
@@ -202,12 +218,15 @@ def apply_i2p_cli_overrides(
         config["run_budget_seconds"] = budget
     if max_turns is not None:
         config["max_turns_per_call"] = max_turns
+    previous_provider = agent_provider(config)
     if model:
         config["model"] = model
         _record_cli_override(config, "model", model)
     if provider:
         config["provider"] = provider
         _record_cli_override(config, "provider", provider)
+        if not model and _provider_changed(previous_provider, provider):
+            _record_cli_override(config, "model", PROVIDER_DEFAULT_MODEL_OVERRIDE)
     if effort:
         config["effort"] = effort
         _record_cli_override(config, "effort", effort)
@@ -233,6 +252,18 @@ def apply_i2p_cli_overrides(
         agent_config = config.setdefault("agents", {}).setdefault(agent_type, {})
         if not isinstance(agent_config, dict):
             continue
+        previous_agent_provider = agent_provider(config, agent_type)
+        if (
+            overrides.get("provider")
+            and not overrides.get("model")
+            and _provider_changed(previous_agent_provider, overrides.get("provider"))
+        ):
+            _record_cli_override(
+                config,
+                "model",
+                PROVIDER_DEFAULT_MODEL_OVERRIDE,
+                agent_type=agent_type,
+            )
         for key, value in overrides.items():
             if not value:
                 continue
@@ -251,6 +282,42 @@ def _new_session_id(project_dir: Path) -> str:
         return injected
     from otto.runs.registry import allocate_run_id
     return allocate_run_id(project_dir)
+
+
+def _pipeline_base_branch(project_dir: Path, config: dict[str, Any]) -> str:
+    """Return the branch that greenfield I2P should integrate onto."""
+
+    env_branch = os.environ.get("OTTO_I2P_BASE_BRANCH", "").strip()
+    if env_branch:
+        return env_branch
+    try:
+        from otto.merge.git_ops import try_current_branch
+
+        current = try_current_branch(project_dir)
+    except Exception:  # noqa: BLE001 - fall back to config/default below.
+        current = None
+    if current:
+        return current
+    return str(config.get("default_branch") or "main")
+
+
+def _mark_queue_child_ready_best_effort(
+    project_dir: Path,
+    *,
+    session_id: str,
+    session_dir: Path,
+    phase: str,
+) -> None:
+    try:
+        mark_queue_child_ready(
+            project_dir,
+            run_id=session_id,
+            session_dir=session_dir,
+            phase=phase,
+            checkpoint_path=_paths.session_checkpoint(project_dir, session_id),
+        )
+    except Exception as exc:  # noqa: BLE001 - readiness is status bookkeeping.
+        logger.warning("queue child readiness publish failed: %s", exc)
 
 
 async def _run_compile_phase(
@@ -816,6 +883,12 @@ def orchestrate_run(
         console.print(
             f"  [bold]otto run --resume[/bold] — session {session_id}\n"
         )
+        _mark_queue_child_ready_best_effort(
+            project_dir,
+            session_id=session_id,
+            session_dir=session_dir,
+            phase="resume",
+        )
     elif from_spec is not None:
         try:
             spec = load_spec(from_spec)
@@ -829,6 +902,12 @@ def orchestrate_run(
         intent_text = spec.intent
         config: dict[str, Any] = {}
         compiled_inline = True  # caller already produced the spec
+        _mark_queue_child_ready_best_effort(
+            project_dir,
+            session_id=session_id,
+            session_dir=session_dir,
+            phase="build",
+        )
     else:
         intent_text = _resolve_intent_or_exit(intent, project_dir)
         spec = None
@@ -872,6 +951,12 @@ def orchestrate_run(
                     console.print(
                         f"  [bold]otto run[/bold] — session {session_id}\n"
                     )
+                    _mark_queue_child_ready_best_effort(
+                        project_dir,
+                        session_id=session_id,
+                        session_dir=session_dir,
+                        phase="compile",
+                    )
                     spec_path, spec = asyncio.run(
                         _run_compile_phase(
                             project_dir=project_dir,
@@ -902,6 +987,12 @@ def orchestrate_run(
                 session_id = _new_session_id(project_dir)
                 session_dir = _paths.session_dir(project_dir, session_id)
                 console.print(f"  [bold]otto run[/bold] — session {session_id}\n")
+                _mark_queue_child_ready_best_effort(
+                    project_dir,
+                    session_id=session_id,
+                    session_dir=session_dir,
+                    phase="compile",
+                )
                 spec_path, spec = asyncio.run(
                     _run_compile_phase(
                         project_dir=project_dir,
@@ -936,6 +1027,7 @@ def orchestrate_run(
                 audit_agent=default_audit_agent,
                 fix_agent=default_build_agent,
                 spec=spec,
+                base_branch=_pipeline_base_branch(project_dir, config),
                 on_phase=_default_phase_callback,
                 resume_plan=resume_plan,
                 review_gate=review_gate,
@@ -1076,7 +1168,50 @@ def _persist_session_summary(
             type(exc).__name__,
             exc,
         )
+    try:
+        from otto.manifest import current_head_sha, make_manifest, write_manifest
+
+        duration = float(run_result.wall_s)
+        started_at = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(max(0.0, time.time() - max(0.0, duration))),
+        )
+        checkpoint_path = _paths.session_checkpoint(project_dir, session_dir.name)
+        write_manifest(
+            make_manifest(
+                command=command,
+                argv=sys.argv[:],
+                run_id=session_dir.name,
+                branch=_current_branch(project_dir),
+                checkpoint_path=checkpoint_path if checkpoint_path.exists() else None,
+                proof_of_work_path=run_result.json_path,
+                cost_usd=float(run_result.cost_usd),
+                duration_s=duration,
+                started_at=started_at,
+                head_sha=current_head_sha(project_dir),
+                resolved_intent=intent_text,
+                exit_status="success" if passed else "failure",
+            ),
+            project_dir=project_dir,
+            fallback_dir=session_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 — manifest is status bookkeeping.
+        logger.warning(
+            "session manifest write failed for %s: %s: %s",
+            session_dir,
+            type(exc).__name__,
+            exc,
+        )
     _ = project_kind  # reserved for future summary fields
+
+
+def _current_branch(project_dir: Path) -> str | None:
+    try:
+        from otto.merge.git_ops import try_current_branch
+
+        return try_current_branch(project_dir)
+    except Exception:  # noqa: BLE001 - branch is manifest metadata only.
+        return None
 
 
 def _brownfield_compile_locked(

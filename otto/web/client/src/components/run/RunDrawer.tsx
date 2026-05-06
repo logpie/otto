@@ -32,7 +32,7 @@ interface Props {
 
 const TERMINAL_STATUSES = new Set(["passed", "partial", "blocked", "landed", "interrupted", "aborted", "failed"]);
 
-type ResourcePanel = "logs" | "files";
+type ResourcePanel = "logs" | "artifacts" | "diff";
 
 interface LogsPayload {
   logs: Array<{
@@ -52,6 +52,10 @@ interface FilesPayload {
     kind: string;
   }>;
   truncated: boolean;
+}
+
+interface DiffPayload {
+  text: string;
 }
 
 async function postSessionAction(
@@ -175,8 +179,11 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
   const onOpenLogs = useCallback(() => {
     setResourcePanel((current) => (current === "logs" ? null : "logs"));
   }, []);
-  const onOpenFiles = useCallback(() => {
-    setResourcePanel((current) => (current === "files" ? null : "files"));
+  const onOpenArtifacts = useCallback(() => {
+    setResourcePanel((current) => (current === "artifacts" ? null : "artifacts"));
+  }, []);
+  const onOpenDiff = useCallback(() => {
+    setResourcePanel((current) => (current === "diff" ? null : "diff"));
   }, []);
 
   return (
@@ -212,14 +219,22 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
         <button
           type="button"
           className="run-quick-action"
-          data-testid="run-quick-action-files"
-          onClick={onOpenFiles}
+          data-testid="run-quick-action-artifacts"
+          onClick={onOpenArtifacts}
         >
-          Files
+          Artifacts
+        </button>
+        <button
+          type="button"
+          className="run-quick-action"
+          data-testid="run-quick-action-diff"
+          onClick={onOpenDiff}
+        >
+          Diff
         </button>
       </div>
       {resourcePanel ? (
-        <RunResourcePanel sessionId={sessionId} kind={resourcePanel} />
+        <RunResourcePanel key={resourcePanel} sessionId={sessionId} kind={resourcePanel} />
       ) : null}
       {inFlight && (
         <div className="run-action-bar" data-testid="run-action-bar">
@@ -305,24 +320,29 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
 export default RunDrawer;
 
 function RunResourcePanel({sessionId, kind}: {sessionId: string; kind: ResourcePanel}) {
-  const [payload, setPayload] = useState<LogsPayload | FilesPayload | null>(null);
+  const [payload, setPayload] = useState<LogsPayload | FilesPayload | DiffPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setPayload(null);
     setError(null);
-    fetch(`/api/run-view/${encodeURIComponent(sessionId)}/${kind}`)
-      .then((resp) => {
+    const endpoint = kind === "artifacts" ? "files" : kind;
+    void (async () => {
+      try {
+        const resp = await fetch(`/api/run-view/${encodeURIComponent(sessionId)}/${endpoint}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
-        return resp.json() as Promise<LogsPayload | FilesPayload>;
-      })
-      .then((body) => {
+        let body: LogsPayload | FilesPayload | DiffPayload;
+        if (kind === "diff") {
+          body = {text: await resp.text()};
+        } else {
+          body = await resp.json() as LogsPayload | FilesPayload;
+        }
         if (!cancelled) setPayload(body);
-      })
-      .catch((err: Error) => {
-        if (!cancelled) setError(err.message || String(err));
-      });
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -330,14 +350,17 @@ function RunResourcePanel({sessionId, kind}: {sessionId: string; kind: ResourceP
 
   return (
     <section className="run-resource-panel" data-testid={`run-resource-panel-${kind}`}>
-      <h3>{kind === "logs" ? "Logs" : "Session files"}</h3>
+      <h3>{kind === "logs" ? "Logs" : kind === "diff" ? "Diff" : "Artifacts"}</h3>
       {error ? <p role="alert">Failed to load {kind}: {error}</p> : null}
       {!payload && !error ? <p>Loading {kind}...</p> : null}
       {payload && kind === "logs" ? (
         <LogsPanel payload={payload as LogsPayload} />
       ) : null}
-      {payload && kind === "files" ? (
+      {payload && kind === "artifacts" ? (
         <FilesPanel payload={payload as FilesPayload} />
+      ) : null}
+      {payload && kind === "diff" ? (
+        <DiffPanel payload={payload as DiffPayload} />
       ) : null}
     </section>
   );
@@ -364,7 +387,7 @@ function LogsPanel({payload}: {payload: LogsPayload}) {
 
 function FilesPanel({payload}: {payload: FilesPayload}) {
   if (payload.files.length === 0) {
-    return <p>No session files have been written yet.</p>;
+    return <p>No artifacts have been written yet.</p>;
   }
   return (
     <>
@@ -379,6 +402,14 @@ function FilesPanel({payload}: {payload: FilesPayload}) {
       {payload.truncated ? <p className="run-resource-note">Showing the first 300 files.</p> : null}
     </>
   );
+}
+
+function DiffPanel({payload}: {payload: DiffPayload}) {
+  const text = payload.text.trimEnd();
+  if (!text) {
+    return <p>No diff is available yet.</p>;
+  }
+  return <pre className="run-resource-diff">{text}</pre>;
 }
 
 function formatBytes(value: number): string {

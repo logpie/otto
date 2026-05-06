@@ -1084,6 +1084,61 @@ def test_run_build_dependent_slice_branches_off_dep_tip(tmp_path: Path) -> None:
     assert "i2p(b): build slice" in log
 
 
+def test_run_build_blocks_multi_dep_slice_when_dependency_branches_conflict(
+    tmp_path: Path,
+) -> None:
+    """A multi-dep slice must not silently fall back to one dependency.
+
+    If two required sibling branches conflict while building the slice's
+    integrated starting point, running the dependent agent on only one
+    dependency can produce a false pass for an incomplete product.
+    """
+    _init_git(tmp_path)
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if current != "main":
+        subprocess.run(["git", "branch", "-m", current, "main"], cwd=tmp_path, check=True)
+
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    calls: list[str] = []
+
+    async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        calls.append(input_.group.id)
+        if input_.group.id == "c":
+            raise AssertionError("dependent group ran without all dependency branches")
+        (input_.worktree / "shared.txt").write_text(
+            f"from {input_.group.id}\n", encoding="utf-8"
+        )
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    spec = _spec(
+        [
+            Group(id="a", name="A", dependencies=[], owned_paths=["shared.txt"],
+                  feature_ids=["write a"], checks=[_no_op_passing_check()]),
+            Group(id="b", name="B", dependencies=[], owned_paths=["shared.txt"],
+                  feature_ids=["write b"], checks=[_no_op_passing_check()]),
+            Group(id="c", name="C", dependencies=["a", "b"], owned_paths=["c.txt"],
+                  feature_ids=["write c"], checks=[_no_op_passing_check()]),
+        ]
+    )
+    spec.shared_scaffold = ["shared.txt"]
+
+    result = asyncio.run(
+        run_build(
+            spec, project_dir=tmp_path, session_dir=session_dir,
+            build_agent=writing_agent, base_branch="main",
+        )
+    )
+
+    assert calls == ["a", "b"]
+    c_result = next(r for r in result.group_results if r.group_id == "c")
+    assert c_result.status == GroupStatus.BLOCKED
+    assert "partial dependency state" in c_result.failure_narrative
+
+
 def test_run_build_falls_back_when_not_a_git_repo(tmp_path: Path) -> None:
     """Pattern D: if project_dir isn't a git repo, branch setup is
     skipped silently and the build completes in single-worktree mode.

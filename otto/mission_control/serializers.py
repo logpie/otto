@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.config import DEFAULTS
+from otto.config import PROVIDER_DEFAULT_MODEL_OVERRIDE
 from otto.config import agent_effort
 from otto.config import agent_provider
 from otto.config import effective_agent_model
@@ -17,6 +18,7 @@ from otto.config import get_max_turns_per_call
 from otto.config import get_run_budget
 from otto.config import get_spec_timeout
 from otto.config import load_config
+from otto.config import normalize_provider
 from otto.config import resolve_certifier_mode
 from otto.mission_control.actions import ActionResult, ActionState
 from otto.setup_gitignore import (
@@ -523,10 +525,15 @@ def run_config_from_argv(
     if command_family == "improve" and split_mode:
         primary_agent_name = "fix"
     build_agent = agents.get(primary_agent_name, {})
+    resolved_provider = _first_string(build_agent.get("provider"), provider_override, defaults.get("provider"))
+    model_fallback = None if (
+        not model_override
+        and _provider_changed(_first_string(defaults.get("provider")), resolved_provider)
+    ) else defaults.get("model")
     return {
         "command_family": command_family,
-        "provider": _first_string(build_agent.get("provider"), provider_override, defaults.get("provider")),
-        "model": _first_string(build_agent.get("model"), model_override, defaults.get("model")),
+        "provider": resolved_provider,
+        "model": _first_string(build_agent.get("model"), model_override, model_fallback),
         "reasoning_effort": _first_string(
             build_agent.get("reasoning_effort"),
             effort_override,
@@ -864,6 +871,10 @@ def _agents_with_overrides(
     try:
         config = load_config(config_path)
     except Exception:
+        fallback_model = None if provider and not model and _provider_changed(
+            _first_string(fallback.get("provider")),
+            provider,
+        ) else fallback.get("model")
         return {
             name: {
                 "provider": _first_string(
@@ -874,7 +885,7 @@ def _agents_with_overrides(
                 "model": _first_string(
                     agent_overrides.get(name, {}).get("model"),
                     model,
-                    fallback.get("model"),
+                    fallback_model,
                 ),
                 "reasoning_effort": _first_string(
                     agent_overrides.get(name, {}).get("effort"),
@@ -885,10 +896,18 @@ def _agents_with_overrides(
             for name in ("build", "certifier", "spec", "fix")
         }
     overrides = {key: value for key, value in {"provider": provider, "model": model, "effort": effort}.items() if value}
+    if provider and not model and _provider_changed(agent_provider(config), provider):
+        overrides["model"] = PROVIDER_DEFAULT_MODEL_OVERRIDE
     phase_overrides = {
         name: {key: value for key, value in values.items() if value}
         for name, values in agent_overrides.items()
     }
+    for name, values in agent_overrides.items():
+        if values.get("provider") and not values.get("model") and _provider_changed(
+            agent_provider(config, name),
+            values.get("provider"),
+        ):
+            phase_overrides.setdefault(name, {})["model"] = PROVIDER_DEFAULT_MODEL_OVERRIDE
     if overrides:
         config = dict(config)
         config["_cli_overrides"] = dict(overrides)
@@ -905,6 +924,17 @@ def _agents_with_overrides(
             }
         for name in ("build", "certifier", "spec", "fix")
     }
+
+
+def _provider_changed(current: str | None, override: str | None) -> bool:
+    if not override:
+        return False
+    try:
+        next_provider = normalize_provider(override, default=None)
+        current_provider = normalize_provider(current, default=None) if current else None
+    except ValueError:
+        return False
+    return bool(next_provider and current_provider and next_provider != current_provider)
 
 
 def _agent_overrides_from_sources(

@@ -11,8 +11,10 @@ build agents cannot drift on structure.
 ## What you produce
 
 A single JSON object describing the product as a set of vertical groups,
-each owned end-to-end by one build agent. Wrap the JSON in
-`<spec_json>...</spec_json>` so it can be parsed deterministically.
+each owned end-to-end by one build agent. Write the JSON to `{spec_path}`.
+If you cannot write the file for any reason, emit the JSON in
+`<spec_json>...</spec_json>` as a fallback so it can be parsed
+deterministically.
 
 ```json
 {
@@ -565,6 +567,16 @@ Example for a library:
 
 5. **`deps` is a DAG**. No cycles. Groups with no deps run first.
 
+   **Maximize safe parallelism.** Do not add a dependency merely because
+   two groups appear on the same page, toolbar, registry, or app shell.
+   If the foundation group creates a shared store, typed contracts, and
+   register-via-discovery extension point, sibling feature groups should
+   usually depend only on that foundation and then run concurrently.
+   Add a dependency only when group X truly needs group Y's completed
+   product behavior, data contract, generated file, or test helper.
+   Linear chains are a smell unless each later group genuinely consumes
+   the previous group's implementation.
+
    `deps` declares both DATA and UI dependencies. A group may modify
    a dep's owned files; modifying a peer's (a group not in its
    transitive deps) emits a scope warning (informational).
@@ -736,9 +748,10 @@ will fail downstream browser quality evaluators.
    files first — don't contradict what's already there.
 2. Decide `project_kind`. Default to `webapp` for product-shaped intents.
 3. Decompose into 2–6 vertical groups with explicit deps.
-4. Write the spec JSON to `{spec_path}` AND emit it inside
-   `<spec_json>...</spec_json>` in your final message. Do NOT add
-   markdown fences inside the tags.
+4. Write the spec JSON to `{spec_path}`. If the file write succeeds, do
+   NOT paste the JSON in your final message. Only if the write fails,
+   emit the JSON inside `<spec_json>...</spec_json>` with no markdown
+   fences inside the tags.
 
 After writing, your final message must include:
 

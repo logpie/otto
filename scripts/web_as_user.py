@@ -32,6 +32,7 @@ CLI::
     python scripts/web_as_user.py --tier nightly  # W11 + W1 + W7
     python scripts/web_as_user.py --tier weekly   # all W1..W13
     python scripts/web_as_user.py --dry-run --scenario W1
+    python scripts/web_as_user.py --scenario W1 --user-behavior mc-realistic --user-seed 42
     python scripts/web_as_user.py --bail-fast --scenario W11
     python scripts/web_as_user.py --keep-failed-only
 """
@@ -39,8 +40,10 @@ CLI::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import random
 import shutil
 import signal
 import subprocess
@@ -68,6 +71,7 @@ OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
 
 ScenarioStatus = Literal["PASS", "FAIL", "INFRA"]
 FailureClassification = Literal["INFRA", "FAIL"]
+UserBehaviorMode = Literal["off", "mc-realistic", "mc-stress"]
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +230,9 @@ class ScenarioContext:
     provider: str
     failures: RunFailures
     debug_log: Path
+    run_id: str = ""
+    user_behavior: UserBehaviorMode = "off"
+    user_seed: Optional[int] = None
     web_port: Optional[int] = None
     web_url: Optional[str] = None
 
@@ -422,6 +429,533 @@ def _safe_screenshot(page: Any, artifact_dir: Path, name: str) -> Optional[Path]
         return None
 
 
+def _mc_slug(raw: str) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in raw)
+    return "-".join(part for part in slug.split("-") if part)[:64] or "event"
+
+
+def _mc_user_seed(ctx: ScenarioContext) -> int:
+    if ctx.user_seed is not None:
+        return ctx.user_seed
+    source = f"{ctx.run_id}:{ctx.scenario.id}:{ctx.user_behavior}"
+    return int(hashlib.sha256(source.encode("utf-8")).hexdigest()[:16], 16)
+
+
+def _mc_phase_rng(ctx: ScenarioContext, phase: str) -> random.Random:
+    source = f"{_mc_user_seed(ctx)}:{ctx.scenario.id}:{phase}"
+    seed = int(hashlib.sha256(source.encode("utf-8")).hexdigest()[:16], 16)
+    return random.Random(seed)
+
+
+def _record_mc_user_action(
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    action: str,
+    **details: Any,
+) -> None:
+    if ctx.user_behavior == "off":
+        return
+    ctx.artifact_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "scenario": ctx.scenario.id,
+        "mode": ctx.user_behavior,
+        "seed": _mc_user_seed(ctx),
+        "phase": phase,
+        "action": action,
+        **details,
+    }
+    path = ctx.artifact_dir / "mc-user-behavior.jsonl"
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, default=str, sort_keys=True) + "\n")
+
+
+def _mc_selector_summary(page: Any, selectors: list[str]) -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
+    for selector in selectors:
+        try:
+            loc = page.locator(selector)
+            count = loc.count()
+            first = loc.first
+            visible = count > 0 and first.is_visible()
+            enabled = visible and first.is_enabled()
+            text = ""
+            if visible:
+                try:
+                    text = first.inner_text(timeout=500).strip()[:200]
+                except Exception:  # noqa: BLE001
+                    text = ""
+            summary[selector] = {
+                "count": count,
+                "visible": visible,
+                "enabled": enabled,
+                "text": text,
+            }
+        except Exception as exc:  # noqa: BLE001
+            summary[selector] = {"error": str(exc)}
+    return summary
+
+
+def _mc_observe_page(page: Any, selectors: list[str]) -> dict[str, Any]:
+    try:
+        document_text = page.locator("body").inner_text(timeout=1_000).strip()
+    except Exception:  # noqa: BLE001
+        document_text = ""
+    return {
+        "url": page.url,
+        "title": page.title() if hasattr(page, "title") else "",
+        "text_sample": document_text[:500],
+        "selectors": _mc_selector_summary(page, selectors),
+    }
+
+
+def _mc_check_expectation(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    action: str,
+    expectation: str,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+    any_visible: Optional[list[str]] = None,
+    all_visible: Optional[list[str]] = None,
+    text_any: Optional[list[str]] = None,
+    hard: bool = False,
+) -> bool:
+    """Record visible post-action state against the user's expectation."""
+    any_visible = any_visible or []
+    all_visible = all_visible or []
+    text_any = text_any or []
+    selectors = list(dict.fromkeys([*any_visible, *all_visible]))
+    observation = _mc_observe_page(page, selectors)
+    selector_summary = observation["selectors"]
+    any_ok = True
+    if any_visible:
+        any_ok = any(
+            bool(selector_summary.get(selector, {}).get("visible"))
+            for selector in any_visible
+        )
+    all_ok = all(
+        bool(selector_summary.get(selector, {}).get("visible"))
+        for selector in all_visible
+    )
+    text_ok = True
+    if text_any:
+        body = str(observation.get("text_sample", "")).lower()
+        text_ok = any(fragment.lower() in body for fragment in text_any)
+    matched = any_ok and all_ok and text_ok
+    verdict = "expected" if matched else ("blocked" if hard else "confusing UX")
+    screenshot = None
+    if not matched:
+        screenshot = _safe_screenshot(
+            page,
+            ctx.artifact_dir,
+            f"mc-expectation-{_mc_slug(phase)}-{_mc_slug(action)}",
+        )
+        msg = (
+            f"mc-user expectation mismatch after {action}: {expectation} "
+            f"(phase={phase}, url={observation.get('url')})"
+        )
+        if hard:
+            failures.fail(msg)
+        else:
+            failures.note(msg)
+        log_fn(f"  {msg}")
+    _record_mc_user_action(
+        ctx,
+        phase=phase,
+        action="expectation-check",
+        user_action=action,
+        expectation=expectation,
+        matched=matched,
+        verdict=verdict,
+        observation=observation,
+        screenshot=screenshot.name if screenshot else None,
+    )
+    return matched
+
+
+def _mc_click_first(
+    page: Any,
+    selectors: list[str],
+    *,
+    log_fn: Callable[[str], None],
+    timeout_ms: int = 3_000,
+) -> Optional[str]:
+    last_error: Optional[str] = None
+    for selector in selectors:
+        try:
+            loc = page.locator(selector).first
+            if loc.count() == 0:
+                continue
+            if not loc.is_visible():
+                continue
+            if not loc.is_enabled():
+                continue
+            loc.click(timeout=timeout_ms)
+            return selector
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+    if last_error:
+        log_fn(f"  mc-user click skipped after error: {last_error}")
+    return None
+
+
+def _mc_layout_snapshot(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    log_fn: Callable[[str], None],
+) -> None:
+    slug = _mc_slug(phase)
+    try:
+        metrics = page.evaluate(
+            """() => {
+              const visible = Array.from(document.querySelectorAll(
+                'button,a,input,textarea,select,[data-testid]'
+              )).map((el) => {
+                const r = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return {
+                  tag: el.tagName,
+                  testid: el.getAttribute('data-testid') || '',
+                  text: (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 80),
+                  x: Math.round(r.x),
+                  y: Math.round(r.y),
+                  w: Math.round(r.width),
+                  h: Math.round(r.height),
+                  visible: r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none',
+                };
+              }).filter((item) => item.visible).slice(0, 80);
+              return {
+                url: window.location.href,
+                viewport: {w: window.innerWidth, h: window.innerHeight},
+                activeTestId: document.activeElement?.getAttribute?.('data-testid') || '',
+                visibleInteractive: visible,
+              };
+            }"""
+        )
+        path = ctx.artifact_dir / f"mc-layout-{slug}.json"
+        path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+        screenshot = _safe_screenshot(page, ctx.artifact_dir, f"mc-layout-{slug}")
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="layout-snapshot",
+            expectation="Mission Control remains readable, with visible controls and no obvious layout collapse.",
+            url=metrics.get("url"),
+            artifact=path.name,
+            screenshot=screenshot.name if screenshot else None,
+        )
+        _mc_check_expectation(
+            page,
+            ctx,
+            phase=phase,
+            action="layout snapshot",
+            expectation="Mission Control shell or launcher/workspace remains visible after observing layout.",
+            any_visible=[
+                '[data-mc-shell="ready"]',
+                '[data-testid="launcher-subhead"]',
+                '[data-testid="project-workspace"]',
+                '[data-testid="task-board"]',
+            ],
+            log_fn=log_fn,
+            failures=ctx.failures,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_fn(f"  mc-user layout snapshot failed: {exc}")
+        _record_mc_user_action(ctx, phase=phase, action="layout-snapshot-failed", error=str(exc))
+
+
+def _mc_scroll_visible_panel(page: Any, ctx: ScenarioContext, *, phase: str) -> None:
+    try:
+        result = page.evaluate(
+            """() => {
+              const selectors = [
+                '[data-testid="logs-pane"]',
+                '[data-testid="diff-pane"]',
+                '[data-testid="proof-pane"]',
+                '[data-testid="run-drawer"]',
+                '[data-testid="run-list-detail-drawer"]',
+                'pre',
+                'main'
+              ];
+              const candidates = selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));
+              const target = candidates.find((el) => el.scrollHeight > el.clientHeight + 24);
+              if (target) {
+                target.scrollTop = Math.min(target.scrollTop + Math.floor(target.clientHeight * 0.65), target.scrollHeight);
+                return {target: target.getAttribute('data-testid') || target.tagName, scrollTop: target.scrollTop};
+              }
+              window.scrollBy({top: Math.floor(window.innerHeight * 0.5), left: 0, behavior: 'instant'});
+              return {target: 'window', scrollY: window.scrollY};
+            }"""
+        )
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="scroll",
+            expectation="Scrolling exposes more Mission Control content while preserving the current context.",
+            result=result,
+        )
+        _mc_check_expectation(
+            page,
+            ctx,
+            phase=phase,
+            action="scroll",
+            expectation="After scrolling, Mission Control content is still visible and usable.",
+            any_visible=[
+                '[data-mc-shell="ready"]',
+                '[data-testid="launcher-subhead"]',
+                '[data-testid="project-workspace"]',
+                '[data-testid="task-board"]',
+                '[data-testid="run-drawer"]',
+                '[data-testid="run-list-detail-drawer"]',
+            ],
+            log_fn=lambda _msg: None,
+            failures=ctx.failures,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _record_mc_user_action(ctx, phase=phase, action="scroll-failed", error=str(exc))
+
+
+def _mc_inspect_run_surface(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> None:
+    rng = _mc_phase_rng(ctx, f"{phase}:inspect")
+    opened = _mc_click_first(
+        page,
+        [
+            ".task-card-main",
+            ".history-activity",
+            '[data-testid^="history-row-activator-"]',
+            '[data-testid="run-list-detail-drawer"]',
+        ],
+        log_fn=log_fn,
+    )
+    if opened:
+        time.sleep(0.5)
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="open-run-detail",
+            expectation="Clicking a run/card opens a detail surface without losing Mission Control context.",
+            selector=opened,
+            url=page.url,
+        )
+        _mc_check_expectation(
+            page,
+            ctx,
+            phase=phase,
+            action="open run detail",
+            expectation="A run detail drawer, run drawer, or inspector controls are visible.",
+            any_visible=[
+                '[data-testid="run-list-detail-drawer"]',
+                '[data-testid="run-drawer"]',
+                '[data-testid="open-logs-button"]',
+                '[data-testid="open-proof-button"]',
+            ],
+            log_fn=log_fn,
+            failures=failures,
+        )
+
+    buttons = [
+        ("logs", ['[data-testid="open-logs-button"]', '[data-testid="run-quick-action-logs"]', '[data-testid="run-detail-open-logs-button"]']),
+        ("proof", ['[data-testid="open-proof-button"]', '[data-testid="run-quick-action-proof"]']),
+        ("diff", ['[data-testid="open-diff-button"]', '[data-testid="proof-open-diff-button"]']),
+        ("artifacts", ['[data-testid="open-artifacts-button"]', '[data-testid="proof-open-artifacts-button"]']),
+        ("history", ['[data-testid="open-history-button"]', '[data-testid="mission-history-button"]']),
+    ]
+    rng.shuffle(buttons)
+    limit = 1 if ctx.user_behavior == "mc-realistic" else 3
+    clicked_any = False
+    for name, selectors in buttons[:limit]:
+        clicked = _mc_click_first(page, selectors, log_fn=log_fn)
+        if not clicked:
+            continue
+        clicked_any = True
+        time.sleep(0.5)
+        _mc_scroll_visible_panel(page, ctx, phase=f"{phase}:{name}")
+        screenshot = _safe_screenshot(page, ctx.artifact_dir, f"mc-user-{_mc_slug(phase)}-{name}")
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action=f"inspect-{name}",
+            expectation=f"Opening {name} shows the requested Mission Control evidence without hiding the run context.",
+            selector=clicked,
+            url=page.url,
+            screenshot=screenshot.name if screenshot else None,
+        )
+        expected_selectors = {
+            "logs": ['[data-testid="logs-pane"]', "pre", '[data-testid="run-drawer"]', '[data-testid="run-list-detail-drawer"]'],
+            "proof": ['[data-testid="proof-pane"]', '[data-testid="run-drawer"]', '[data-testid="run-list-detail-drawer"]'],
+            "diff": ['[data-testid="diff-pane"]', '[data-testid="run-drawer"]', '[data-testid="run-list-detail-drawer"]'],
+            "artifacts": ['[data-testid="artifact-download"]', '[data-testid="artifact-image"]', '[data-testid="run-drawer"]', '[data-testid="run-list-detail-drawer"]'],
+            "history": ['[data-testid="history-pagination"]', '[data-testid^="history-row-activator-"]', '[data-testid="run-drawer"]', '[data-testid="run-list-detail-drawer"]'],
+        }
+        _mc_check_expectation(
+            page,
+            ctx,
+            phase=phase,
+            action=f"inspect {name}",
+            expectation=f"The {name} view gives visible feedback or keeps the run detail visible.",
+            any_visible=expected_selectors.get(name, []),
+            log_fn=log_fn,
+            failures=failures,
+        )
+    if opened and not clicked_any:
+        failures.note(f"mc-user {phase}: opened run detail but no logs/proof/diff/artifact controls were available")
+
+
+def _mc_browser_back_forward(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    log_fn: Callable[[str], None],
+) -> None:
+    before = page.url
+    back_url: Optional[str] = None
+    forward_url: Optional[str] = None
+    try:
+        page.go_back(wait_until="domcontentloaded", timeout=5_000)
+        time.sleep(0.5)
+        back_url = page.url
+        if ctx.web_url and not page.url.startswith(ctx.web_url.rstrip("/")):
+            page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=15_000)
+        else:
+            page.go_forward(wait_until="domcontentloaded", timeout=5_000)
+            time.sleep(0.5)
+            forward_url = page.url
+        _wait_for_mc_ready(page, timeout_ms=10_000)
+        screenshot = _safe_screenshot(page, ctx.artifact_dir, f"mc-user-{_mc_slug(phase)}-back-forward")
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="browser-back-forward",
+            expectation="Browser back/forward preserves a usable Mission Control shell and does not strand the user.",
+            before=before,
+            after_back=back_url,
+            after_forward=forward_url,
+            current=page.url,
+            screenshot=screenshot.name if screenshot else None,
+        )
+        _mc_check_expectation(
+            page,
+            ctx,
+            phase=phase,
+            action="browser back/forward",
+            expectation="Mission Control is still actionable after browser back/forward.",
+            any_visible=[
+                '[data-mc-shell="ready"]',
+                '[data-testid="launcher-subhead"]',
+                '[data-testid="project-workspace"]',
+                '[data-testid="task-board"]',
+            ],
+            log_fn=log_fn,
+            failures=ctx.failures,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_fn(f"  mc-user back/forward failed: {exc}")
+        if ctx.web_url:
+            try:
+                page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=15_000)
+                _wait_for_mc_ready(page, timeout_ms=10_000)
+            except Exception:  # noqa: BLE001
+                pass
+        _record_mc_user_action(ctx, phase=phase, action="browser-back-forward-failed", before=before, error=str(exc))
+
+
+def _mc_refresh(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    log_fn: Callable[[str], None],
+) -> None:
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=15_000)
+        _wait_for_mc_ready(page, timeout_ms=10_000)
+        screenshot = _safe_screenshot(page, ctx.artifact_dir, f"mc-user-{_mc_slug(phase)}-reload")
+        _record_mc_user_action(
+            ctx,
+            phase=phase,
+            action="reload",
+            expectation="Reload returns to the same usable Mission Control context with honest loading/recovery state.",
+            url=page.url,
+            screenshot=screenshot.name if screenshot else None,
+        )
+        _mc_check_expectation(
+            page,
+            ctx,
+            phase=phase,
+            action="reload",
+            expectation="Mission Control is still actionable after reload.",
+            any_visible=[
+                '[data-mc-shell="ready"]',
+                '[data-testid="launcher-subhead"]',
+                '[data-testid="project-workspace"]',
+                '[data-testid="task-board"]',
+            ],
+            log_fn=log_fn,
+            failures=ctx.failures,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_fn(f"  mc-user reload failed: {exc}")
+        _record_mc_user_action(ctx, phase=phase, action="reload-failed", error=str(exc))
+
+
+def _mc_user_probe(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> None:
+    if ctx.user_behavior == "off":
+        return
+
+    rng = _mc_phase_rng(ctx, phase)
+    _record_mc_user_action(ctx, phase=phase, action="probe-start", url=page.url)
+    actions = ["layout", "inspect-run", "scroll"]
+    if "running" in phase or "terminal" in phase:
+        actions.extend(["back-forward", "reload"])
+    if ctx.user_behavior == "mc-stress":
+        actions.extend(["inspect-run", "scroll", "back-forward", "reload"])
+    rng.shuffle(actions)
+    count = 1 if ctx.user_behavior == "mc-realistic" else min(3, len(actions))
+
+    for action in actions[:count]:
+        log_fn(f"  mc-user {phase}: {action}")
+        try:
+            if action == "layout":
+                _mc_layout_snapshot(page, ctx, phase=phase, log_fn=log_fn)
+            elif action == "inspect-run":
+                _mc_inspect_run_surface(page, ctx, phase=phase, log_fn=log_fn, failures=failures)
+            elif action == "scroll":
+                _mc_scroll_visible_panel(page, ctx, phase=phase)
+            elif action == "back-forward":
+                _mc_browser_back_forward(page, ctx, phase=phase, log_fn=log_fn)
+            elif action == "reload":
+                _mc_refresh(page, ctx, phase=phase, log_fn=log_fn)
+        except Exception as exc:  # noqa: BLE001
+            failures.note(f"mc-user {phase}/{action} raised: {exc}")
+            _record_mc_user_action(
+                ctx,
+                phase=phase,
+                action=f"{action}-raised",
+                error=str(exc),
+            )
+
+
 def _wait_for_mc_ready(page: Any, *, timeout_ms: int = 20_000) -> None:
     """Wait until the Mission Control SPA shell is ready for interaction.
 
@@ -506,6 +1040,8 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
 
     _log(f"web_url={ctx.web_url}")
     _log(f"project_dir={ctx.project_dir}")
+    if ctx.user_behavior != "off":
+        _log(f"mc_user_behavior={ctx.user_behavior} seed={_mc_user_seed(ctx)}")
 
     final_state: Optional[dict[str, Any]] = None
 
@@ -537,6 +1073,23 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"react never hydrated: {exc}")
+            if ctx.user_behavior != "off":
+                _mc_check_expectation(
+                    page,
+                    ctx,
+                    phase="shell-loaded",
+                    action="open Mission Control",
+                    expectation="Mission Control loads into an actionable launcher or project workspace.",
+                    any_visible=[
+                        '[data-mc-shell="ready"]',
+                        '[data-testid="launcher-subhead"]',
+                        '[data-testid="project-workspace"]',
+                        '[data-testid="task-board"]',
+                    ],
+                    log_fn=_log,
+                    failures=failures,
+                    hard=True,
+                )
 
             # ---------- Step 2: tasks UI present ----------
             # In our setup we ran with project_launcher=False, so the project
@@ -550,6 +1103,13 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 f"neither task-board nor launcher-subhead present (testid count: tb={has_task_board}, l={has_launcher})",
             )
             _safe_screenshot(page, artifact_dir, "02-shell")
+            _mc_user_probe(
+                page,
+                ctx,
+                phase="shell-loaded",
+                log_fn=_log,
+                failures=failures,
+            )
 
             # ---------- Step 3+5: open JobDialog ----------
             _log("Step 3: click new-job/start-first-build")
@@ -574,6 +1134,21 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"job dialog did not open: {exc}")
             _safe_screenshot(page, artifact_dir, "04-job-dialog")
+            if ctx.user_behavior != "off":
+                _mc_check_expectation(
+                    page,
+                    ctx,
+                    phase="job-dialog-open",
+                    action="click new job",
+                    expectation="The job dialog opens with an intent field and a submit button.",
+                    all_visible=[
+                        '[data-testid="job-dialog-intent"]',
+                        '[data-testid="job-dialog-submit-button"]',
+                    ],
+                    log_fn=_log,
+                    failures=failures,
+                    hard=True,
+                )
 
             # ---------- Step 6: submit intent ----------
             _log("Step 6: fill intent + submit")
@@ -607,6 +1182,23 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                     failures.fail(f"submit click failed: {exc}")
 
             _safe_screenshot(page, artifact_dir, "05-submitted")
+            if ctx.user_behavior != "off":
+                _mc_check_expectation(
+                    page,
+                    ctx,
+                    phase="job-submitted",
+                    action="submit build intent",
+                    expectation="After submitting, the dialog closes or Mission Control shows queue/workspace feedback.",
+                    any_visible=[
+                        '[data-testid="mission-start-watcher-button"]',
+                        '[data-testid="start-watcher-button"]',
+                        '[data-testid="project-workspace"]',
+                        '[data-testid="task-board"]',
+                    ],
+                    log_fn=_log,
+                    failures=failures,
+                    hard=True,
+                )
 
             # ---------- Step 7: start watcher (queue won't run otherwise) ----------
             _log("Step 7: start watcher")
@@ -631,6 +1223,28 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 except Exception as exc:  # noqa: BLE001
                     failures.fail(f"start watcher click failed: {exc}")
             _safe_screenshot(page, artifact_dir, "06-watcher-started")
+            if ctx.user_behavior != "off":
+                _mc_check_expectation(
+                    page,
+                    ctx,
+                    phase="watcher-started",
+                    action="start queue watcher",
+                    expectation="Mission Control remains on the queue/workspace view and gives visible run progress context.",
+                    any_visible=[
+                        '[data-testid="project-workspace"]',
+                        '[data-testid="task-board"]',
+                        ".task-card-main",
+                    ],
+                    log_fn=_log,
+                    failures=failures,
+                )
+            _mc_user_probe(
+                page,
+                ctx,
+                phase="running-start",
+                log_fn=_log,
+                failures=failures,
+            )
 
             # ---------- Step 8: wait for terminal state ----------
             _log("Step 8: poll /api/state for terminal status")
@@ -654,6 +1268,13 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                     _log(
                         f"poll#{poll_count}: live={live_statuses[:3]} history_outcomes={history_outcomes[:3]}"
                     )
+                    _mc_user_probe(
+                        page,
+                        ctx,
+                        phase=f"running-poll-{poll_count}",
+                        log_fn=_log,
+                        failures=failures,
+                    )
                 if history and any(o for o in history_outcomes):
                     terminal_outcome = next(
                         (o for o in history_outcomes if o), None
@@ -668,6 +1289,13 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             if terminal_outcome and terminal_outcome != "success":
                 failures.fail(f"build terminal_outcome={terminal_outcome!r} (expected success)")
             _safe_screenshot(page, artifact_dir, "07-build-terminal")
+            _mc_user_probe(
+                page,
+                ctx,
+                phase="terminal-state",
+                log_fn=_log,
+                failures=failures,
+            )
 
             # ---------- Step 9: refresh page + final state ----------
             try:
@@ -2401,6 +3029,7 @@ def _wait_for_terminal(
     log_fn: Callable[[str], None],
     domain_filter: Optional[set[str]] = None,
     queue_task_id: Optional[str] = None,
+    on_poll: Optional[Callable[[int], None]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Poll /api/state until a matching history row has a terminal_outcome.
 
@@ -2426,6 +3055,8 @@ def _wait_for_terminal(
                 f"  poll#{poll}: history={len(history)} live={len(live)} "
                 f"live_statuses={[it.get('status') for it in live[:3]]}"
             )
+            if on_poll:
+                on_poll(poll)
         time.sleep(5)
     return None, None
 
@@ -3419,6 +4050,8 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
 
     _log(f"web_url={ctx.web_url}")
     _log(f"project_dir={ctx.project_dir}")
+    if ctx.user_behavior != "off":
+        _log(f"mc_user_behavior={ctx.user_behavior} seed={_mc_user_seed(ctx)}")
 
     final_state: Optional[dict[str, Any]] = None
 
@@ -3460,6 +4093,23 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
                 _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"react never hydrated on mobile: {exc}")
+            if ctx.user_behavior != "off":
+                _mc_check_expectation(
+                    page,
+                    ctx,
+                    phase="mobile-shell-loaded",
+                    action="open Mission Control on mobile",
+                    expectation="Mission Control loads into an actionable mobile launcher or workspace.",
+                    any_visible=[
+                        '[data-mc-shell="ready"]',
+                        '[data-testid="launcher-subhead"]',
+                        '[data-testid="project-workspace"]',
+                        '[data-testid="task-board"]',
+                    ],
+                    log_fn=_log,
+                    failures=failures,
+                    hard=True,
+                )
 
             # Inspect viewport metrics for evidence
             try:
@@ -3486,6 +4136,13 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
                 f"shell not present on mobile: tb={has_task_board} l={has_launcher}",
             )
             _safe_screenshot(page, artifact_dir, "02-mobile-shell")
+            _mc_user_probe(
+                page,
+                ctx,
+                phase="mobile-shell-loaded",
+                log_fn=_log,
+                failures=failures,
+            )
 
             # ---------- Step 3: open JobDialog (touch tap) ----------
             _log("Step 3: tap new-job button")
@@ -3525,6 +4182,21 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"job dialog did not open on mobile: {exc}")
             _safe_screenshot(page, artifact_dir, "03-mobile-dialog")
+            if ctx.user_behavior != "off":
+                _mc_check_expectation(
+                    page,
+                    ctx,
+                    phase="mobile-job-dialog-open",
+                    action="tap new job",
+                    expectation="The mobile job dialog opens with an intent field and submit button.",
+                    all_visible=[
+                        '[data-testid="job-dialog-intent"]',
+                        '[data-testid="job-dialog-submit-button"]',
+                    ],
+                    log_fn=_log,
+                    failures=failures,
+                    hard=True,
+                )
 
             # ---------- Step 4: fill intent + submit ----------
             _log("Step 4: fill + submit on mobile")
@@ -3560,18 +4232,64 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
                     except Exception as exc2:  # noqa: BLE001
                         failures.fail(f"submit click also failed on mobile: {exc2}")
             _safe_screenshot(page, artifact_dir, "04-mobile-submitted")
+            if ctx.user_behavior != "off":
+                _mc_check_expectation(
+                    page,
+                    ctx,
+                    phase="mobile-job-submitted",
+                    action="submit mobile build intent",
+                    expectation="After mobile submit, Mission Control returns to visible queue/workspace feedback.",
+                    any_visible=[
+                        '[data-testid="mission-start-watcher-button"]',
+                        '[data-testid="start-watcher-button"]',
+                        '[data-testid="project-workspace"]',
+                        '[data-testid="task-board"]',
+                    ],
+                    log_fn=_log,
+                    failures=failures,
+                    hard=True,
+                )
 
             # ---------- Step 5: start watcher ----------
             _log("Step 5: start watcher")
             time.sleep(1.5)
             _click_start_watcher(page, failures=failures, label="W7")
             _safe_screenshot(page, artifact_dir, "05-mobile-watcher")
+            if ctx.user_behavior != "off":
+                _mc_check_expectation(
+                    page,
+                    ctx,
+                    phase="mobile-watcher-started",
+                    action="start queue watcher on mobile",
+                    expectation="Mobile Mission Control keeps the queue/workspace visible while work starts.",
+                    any_visible=[
+                        '[data-testid="project-workspace"]',
+                        '[data-testid="task-board"]',
+                        ".task-card-main",
+                    ],
+                    log_fn=_log,
+                    failures=failures,
+                )
+            _mc_user_probe(
+                page,
+                ctx,
+                phase="mobile-running-start",
+                log_fn=_log,
+                failures=failures,
+            )
 
             # ---------- Step 6: wait for terminal ----------
             _log(f"Step 6: wait ≤{W7_BUILD_TIMEOUT_S}s for terminal")
             outcome, run_id = _wait_for_terminal(
                 ctx.web_url, timeout_s=W7_BUILD_TIMEOUT_S, log_fn=_log,
                 domain_filter={"queue"},
+                on_poll=lambda poll: _mc_user_probe(
+                    page,
+                    ctx,
+                    phase=f"mobile-running-poll-{poll}",
+                    log_fn=_log,
+                    failures=failures,
+                ),
             )
             _log(f"  outcome={outcome} run_id={run_id}")
             failures.soft_assert(
@@ -3581,6 +4299,13 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
             if outcome and outcome != "success":
                 failures.fail(f"build outcome={outcome!r} (expected success)")
             _safe_screenshot(page, artifact_dir, "06-mobile-terminal")
+            _mc_user_probe(
+                page,
+                ctx,
+                phase="mobile-terminal-state",
+                log_fn=_log,
+                failures=failures,
+            )
 
             # ---------- Step 7: refresh + verify mobile layout still works ----------
             try:
@@ -5095,6 +5820,8 @@ def run_one_scenario(
     run_id: str,
     provider: str,
     dry_run: bool,
+    user_behavior: UserBehaviorMode,
+    user_seed: Optional[int],
 ) -> ScenarioOutcome:
     """Drive one W-scenario end-to-end.
 
@@ -5141,9 +5868,13 @@ def run_one_scenario(
             provider=provider,
             failures=failures,
             debug_log=debug_log,
+            run_id=run_id,
+            user_behavior=user_behavior,
+            user_seed=user_seed,
             web_port=getattr(backend, "port", None),
             web_url=getattr(backend, "url", None),
         )
+        _record_mc_user_action(ctx, phase="scenario-start", action="config")
         try:
             if backend is not None:
                 scenario.run_fn(ctx)
@@ -5272,6 +6003,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--provider", choices=["claude", "codex"], default="claude"
     )
     parser.add_argument(
+        "--user-behavior",
+        choices=["off", "mc-realistic", "mc-stress"],
+        default="off",
+        help=(
+            "optional seeded Mission Control user exploration: off, "
+            "mc-realistic, or mc-stress"
+        ),
+    )
+    parser.add_argument(
+        "--user-seed",
+        type=int,
+        help="seed for replaying --user-behavior choices",
+    )
+    parser.add_argument(
         "--scenario-delay",
         type=float,
         default=DEFAULT_SCENARIO_DELAY_S,
@@ -5304,6 +6049,8 @@ def main(argv: list[str]) -> int:
 
     if args.scenario_delay < 0:
         raise SystemExit("--scenario-delay must be >= 0")
+    if args.user_seed is not None and args.user_seed < 0:
+        raise SystemExit("--user-seed must be >= 0")
 
     if not args.dry_run:
         try:
@@ -5326,6 +6073,8 @@ def main(argv: list[str]) -> int:
                 run_id=run_id,
                 provider=args.provider,
                 dry_run=args.dry_run,
+                user_behavior=args.user_behavior,
+                user_seed=args.user_seed,
             )
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()

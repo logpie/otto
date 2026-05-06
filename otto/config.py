@@ -116,6 +116,7 @@ PROVIDER_AGENT_MODEL_DEFAULTS: dict[str, dict[str, str]] = {
         "spec": "haiku",
     },
 }
+PROVIDER_DEFAULT_MODEL_OVERRIDE = "__otto_provider_default_model__"
 _REPO_STATE_MARKERS: tuple[tuple[str, str], ...] = (
     ("MERGE_HEAD", "merge in progress"),
     ("rebase-merge", "rebase in progress"),
@@ -286,6 +287,8 @@ def agent_model(config: dict[str, Any], agent_type: str | None = None) -> str | 
     > global config.model > None.
     """
     cli_override = _cli_agent_override(config, "model", agent_type)
+    if cli_override == PROVIDER_DEFAULT_MODEL_OVERRIDE:
+        return None
     if cli_override:
         return str(cli_override)
     if agent_type:

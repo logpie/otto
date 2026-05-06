@@ -67,9 +67,13 @@ export function ProjectWorkspace({project}: Props) {
   }, []);
 
   useEffect(() => {
-    const onPop = () => setSelectedRunId(null);
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
+    const syncDrawerFromHistory = () => {
+      const runDrawer = window.history.state?.runDrawer;
+      setSelectedQueuedTask(null);
+      setSelectedRunId(typeof runDrawer === "string" && runDrawer ? runDrawer : null);
+    };
+    window.addEventListener("popstate", syncDrawerFromHistory);
+    return () => window.removeEventListener("popstate", syncDrawerFromHistory);
   }, []);
 
   const startWatcher = useCallback(async () => {

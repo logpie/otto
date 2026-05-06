@@ -9686,6 +9686,19 @@ mark.log-search-match.active {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.run-resource-diff {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .run-file-list {
   list-style: none;
   margin: 0;

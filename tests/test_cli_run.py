@@ -602,6 +602,70 @@ def test_i2p_cli_provider_override_beats_per_agent_config() -> None:
     assert agent_provider(config, "certifier") == "codex"
 
 
+def test_i2p_cli_provider_override_clears_cross_provider_model() -> None:
+    from otto.cli_run import apply_i2p_cli_overrides
+    from otto.config import effective_agent_model
+
+    config = {"provider": "claude", "model": "sonnet", "agents": {"build": {"provider": "claude"}}}
+
+    apply_i2p_cli_overrides(config, provider="codex")
+
+    assert effective_agent_model(config, "build") is None
+    assert effective_agent_model(config, "certifier") is None
+
+
+def test_persist_session_summary_writes_queue_manifest_for_i2p_build(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from otto.audit import AuditResult, AuditVerdict
+    from otto.cli_run import _persist_session_summary
+    from otto.runner import RunResult
+
+    _init_project(tmp_path)
+    session_id = "2026-05-06-120000-abcdef"
+    session_dir = tmp_path / "otto_logs" / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    proof_packet = session_dir / "proof-packet.json"
+    proof_packet.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OTTO_QUEUE_TASK_ID", "build-micro-twitter")
+    monkeypatch.setenv("OTTO_QUEUE_PROJECT_DIR", str(tmp_path))
+
+    run_result = RunResult(
+        spec=_fixture_spec("build micro twitter"),
+        audit_result=AuditResult(
+            verdict=AuditVerdict.PASSED,
+            narrative="passed",
+        ),
+        json_path=proof_packet,
+        wall_s=12.5,
+        cost_usd=0.25,
+    )
+
+    _persist_session_summary(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        intent_text="build micro twitter",
+        command="build",
+        project_kind="webapp",
+        run_result=run_result,
+    )
+
+    canonical = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
+    mirror_path = (
+        tmp_path / "otto_logs" / "queue" / "build-micro-twitter" / "manifest.json"
+    )
+    mirror = json.loads(mirror_path.read_text(encoding="utf-8"))
+
+    assert canonical["run_id"] == session_id
+    assert canonical["command"] == "build"
+    assert canonical["queue_task_id"] == "build-micro-twitter"
+    assert canonical["resolved_intent"] == "build micro twitter"
+    assert canonical["proof_of_work_path"] == str(proof_packet)
+    assert mirror["mirror_of"] == str((session_dir / "manifest.json").resolve())
+    assert mirror["run_id"] == session_id
+
+
 def test_improve_target_i2p_dispatches_to_orchestrate_improve(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -705,6 +769,64 @@ def test_run_with_intent_dispatches_to_compile_spec(tmp_path: Path, monkeypatch)
     # know the message points at the right session.
     assert "spec.json" in out
     assert env["OTTO_RUN_ID"] in out
+
+
+def test_pipeline_base_branch_prefers_queue_worktree_branch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _init_project(tmp_path)
+    from otto.cli_run import _pipeline_base_branch
+
+    monkeypatch.setenv("OTTO_I2P_BASE_BRANCH", "build/task-branch")
+
+    assert _pipeline_base_branch(tmp_path, {"default_branch": "main"}) == "build/task-branch"
+
+
+def test_pipeline_base_branch_falls_back_to_current_branch(tmp_path: Path) -> None:
+    _init_project(tmp_path)
+    subprocess.run(["git", "-C", str(tmp_path), "checkout", "-qb", "feature/current"], check=True)
+    from otto.cli_run import _pipeline_base_branch
+
+    assert _pipeline_base_branch(tmp_path, {"default_branch": "main"}) == "feature/current"
+
+
+def test_run_no_build_publishes_queue_child_ready_marker(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _init_project(tmp_path)
+
+    fake_spec = _fixture_spec("queue child ready")
+
+    async def fake_compile_spec(intent, *, project_dir, run_dir, config, project_kind, **kwargs):
+        from otto.spec_compile import persist_spec
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+        persist_spec(fake_spec, run_dir / "spec.json", allow_initial=True)
+        return fake_spec
+
+    monkeypatch.setattr("otto.cli_run.compile_spec", fake_compile_spec)
+
+    env = {
+        "OTTO_INTERNAL_QUEUE_RUNNER": "1",
+        "OTTO_QUEUE_TASK_ID": "task-ready",
+        "OTTO_QUEUE_PROJECT_DIR": str(tmp_path),
+        "OTTO_RUN_ID": "2026-05-06-120000-ready",
+    }
+    try:
+        code, out = _run(["run", "--no-build", "build from queue"], cwd=tmp_path, env=env)
+    finally:
+        from otto.queue.runtime import set_queue_runner_child
+
+        set_queue_runner_child(False)
+
+    assert code == 0, out
+    ready_path = tmp_path / "otto_logs" / "queue" / "task-ready" / "ready.json"
+    ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    assert ready["run_id"] == env["OTTO_RUN_ID"]
+    assert ready["task_id"] == "task-ready"
+    assert ready["phase"] == "compile"
 
 
 def test_run_respects_project_kind_flag(tmp_path: Path, monkeypatch) -> None:

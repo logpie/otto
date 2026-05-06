@@ -216,7 +216,7 @@ async def run_pipeline(
                 logger.warning("on_phase(%r) callback raised: %s", name, exc)
 
     try:
-        emit(session_dir, "audit.started", detail="run start")
+        emit(session_dir, "run.started", detail="run start")
     except Exception as exc:  # noqa: BLE001 — observability is best-effort
         logger.warning("emit run start failed: %s", exc)
 
@@ -866,6 +866,11 @@ def _feature_audits_to_verdicts(
     Mirrors the projection in ``otto/render.py:compose_proof_packet`` so
     the Layer 2 repair loop sees the same view as the proof packet.
     Features without an audit entry are omitted (no verdict to feed).
+
+    Audit agents sometimes return a group-level entry, using the Group id
+    or name as ``feature_id``/``name``. Layer 2 repairs Features, not
+    Groups, so route that entry to the most likely Feature in the group
+    instead of dropping a fixable failure on the floor.
     """
     if not spec.features:
         return []
@@ -875,19 +880,132 @@ def _feature_audits_to_verdicts(
             audits_by_key[fa.feature_id] = fa
         audits_by_key[fa.name] = fa
     out: list[dict[str, Any]] = []
+    seen_feature_ids: set[str] = set()
     for feature in spec.features:
         fa = audits_by_key.get(feature.id) or audits_by_key.get(feature.name)
         if fa is None:
             continue
-        out.append(
-            {
-                "feature_id": feature.id,
-                "verdict": fa.status,
-                "detail": fa.detail,
-                "evidence_refs": list(fa.evidence_refs),
-            }
-        )
+        out.append(_feature_verdict_payload(feature.id, fa))
+        seen_feature_ids.add(feature.id)
+
+    for fa in audit_result.feature_audits:
+        if fa.feature_id in seen_feature_ids or fa.name in seen_feature_ids:
+            continue
+        for feature_id in _feature_ids_for_group_audit(spec, fa):
+            if feature_id in seen_feature_ids:
+                continue
+            out.append(_feature_verdict_payload(feature_id, fa))
+            seen_feature_ids.add(feature_id)
     return out
+
+
+def _feature_verdict_payload(feature_id: str, feature_audit: Any) -> dict[str, Any]:
+    return {
+        "feature_id": feature_id,
+        "verdict": feature_audit.status,
+        "detail": feature_audit.detail,
+        "evidence_refs": list(feature_audit.evidence_refs),
+    }
+
+
+def _feature_ids_for_group_audit(spec: Spec, feature_audit: Any) -> list[str]:
+    key_values = {
+        str(feature_audit.feature_id or "").strip(),
+        str(feature_audit.name or "").strip(),
+    }
+    groups = [
+        group
+        for group in spec.groups
+        if group.id in key_values or group.name in key_values
+    ]
+    if not groups:
+        return []
+
+    group_feature_ids = set()
+    for group in groups:
+        group_feature_ids.update(group.feature_ids)
+        group_feature_ids.update(
+            feature.id for feature in spec.features if feature.group_id == group.id
+        )
+    candidates = [
+        feature for feature in spec.features if feature.id in group_feature_ids
+    ]
+    if not candidates:
+        return []
+
+    best = _best_matching_features_for_audit(candidates, feature_audit)
+    return [feature.id for feature in best or candidates]
+
+
+def _best_matching_features_for_audit(
+    features: list[Any], feature_audit: Any
+) -> list[Any]:
+    audit_tokens = _audit_match_tokens(str(feature_audit.detail or ""))
+    if not audit_tokens:
+        audit_tokens = _audit_match_tokens(
+            " ".join(
+                [
+                    str(feature_audit.name or ""),
+                    str(feature_audit.feature_id or ""),
+                ]
+            )
+        )
+    if not audit_tokens:
+        return []
+
+    scored: list[tuple[int, Any]] = []
+    for feature in features:
+        feature_tokens = _audit_match_tokens(
+            " ".join(
+                [
+                    feature.id,
+                    feature.name,
+                    feature.description,
+                    feature.acceptance_detail,
+                ]
+            )
+        )
+        score = len(audit_tokens & feature_tokens)
+        if score > 0:
+            scored.append((score, feature))
+    if not scored:
+        return []
+
+    best_score = max(score for score, _feature in scored)
+    return [feature for score, feature in scored if score == best_score]
+
+
+_AUDIT_MATCH_STOPWORDS = {
+    "a",
+    "all",
+    "and",
+    "app",
+    "are",
+    "as",
+    "be",
+    "but",
+    "by",
+    "for",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "part",
+    "the",
+    "to",
+    "with",
+    "work",
+    "works",
+}
+
+
+def _audit_match_tokens(value: str) -> set[str]:
+    import re
+
+    tokens = set(re.findall(r"[a-z0-9]+", value.casefold()))
+    return {token for token in tokens if len(token) > 2 and token not in _AUDIT_MATCH_STOPWORDS}
 
 
 def _make_layer2_fix_agent(

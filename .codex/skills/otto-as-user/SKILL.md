@@ -22,6 +22,90 @@ runners, proof inspection, and recovery/debug work.
 Do not treat this as a command cookbook. Treat it as a real-user simulation
 protocol.
 
+## True User Simulation
+
+When the scenario is Mission Control Web, behave like a real person using the
+product. The browser is the interface under test. What the user would see and
+do is what the agent should see and do.
+
+Focus true-user Web runs on **Mission Control itself**. Generated-app browsing
+is external product verification after Otto finishes; it must not replace the
+Mission Control journey. The primary user journey is launcher -> project
+workspace -> job dialog -> queue/watch progress -> run detail/logs/diff/proof
+-> review/land/retry.
+
+Do not use hidden shortcuts for user actions:
+
+- Do not enqueue, cancel, retry, merge, approve, or inspect work through direct
+  API calls when a visible UI path exists.
+- Do not seed fake UI state unless the scenario is explicitly a seeded
+  regression harness, not a true as-user run.
+- Do not bypass the project launcher for first-user or project-selection flows.
+- Do not use CLI submission unless the scenario is explicitly CLI/Web interop
+  or a power-user path.
+- Do not treat API/state checks as proof that the user experience worked. API
+  and disk checks are supporting evidence after the UI path is exercised.
+
+Exercise normal user behavior, including behavior during waits:
+
+- click through visible tabs, logs, diffs, proof, artifacts, and history while a
+  job is queued or running
+- use browser back/forward and verify the UI recovers honestly
+- reload during a long wait when a real user might wonder whether progress is
+  stale
+- scroll long logs and panels
+- open and close drawers, dialogs, and detail views
+- switch tabs or background the page for long-running work when relevant
+- use keyboard navigation and typing for realistic text entry and at least one
+  accessibility-oriented path when relevant
+- try plausible mistaken or exploratory clicks without breaking the scenario
+
+For every user action, write down the expected visible outcome before judging
+the page:
+
+- Action: what the user did, such as click New job, submit intent, open Logs,
+  browser Back, refresh, close a drawer, or switch projects.
+- User expectation: what a reasonable person expects to see next.
+- Observation: what Mission Control actually shows in the browser: URL,
+  visible controls, loading/error/success state, selected run, drawer/dialog
+  state, and any confusing or missing feedback.
+- Verdict: expected, surprising-but-acceptable, confusing UX, blocked, or
+  state contradiction.
+
+Do not treat a click as tested just because Playwright did not throw. The test
+must inspect the post-action page against the user's expectation. API, disk,
+and git checks can confirm durable truth, but they do not replace the visible
+expectation check.
+
+Use bounded randomness only for realistic Mission Control exploration:
+
+- keep golden scenarios deterministic unless user-behavior variance is
+  explicitly enabled
+- randomize within a fixed set of plausible Mission Control actions, not blind
+  page clicks
+- record the seed, phase, chosen action, user expectation, observation,
+  selector, URL, verdict, and screenshot/artifact path so the run can be
+  replayed
+- treat randomized UX findings as hard failures only when they block, mislead,
+  hide state, corrupt workflow state, or contradict API/disk/git truth
+- prefer seeded variants such as inspect logs first vs proof first, reload vs
+  browser back/forward during a wait, desktop vs mobile viewport, keyboard vs
+  pointer submission, and close/reopen drawer
+
+Inspect UI/UX as part of the run, not as a separate screenshot pass:
+
+- first-screen clarity: the next useful action is obvious within a few seconds
+- layout: no overlapping text, clipped buttons, unreadable logs, or cramped
+  controls at the tested viewport
+- interaction feedback: submits, loading states, disabled controls, errors, and
+  success states are visible and honest
+- navigation model: back/forward, project home, task cards, tabs, drawers, and
+  dialogs behave predictably
+- responsiveness: the same core workflow is usable on the target desktop and
+  mobile/tablet viewports when those are in scope
+- recovery: refresh/reconnect/restart states do not strand the user or imply
+  false success
+
 ## Core Rule
 
 For a real-user scenario, success means:
@@ -259,6 +343,7 @@ Useful commands:
 uv run --extra dev python scripts/e2e_web_mission_control.py --scenario all --artifacts /tmp/otto-web-e2e --viewport 1440x900
 uv run --extra dev python scripts/web_as_user.py --list
 OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --mode quick --provider codex
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --scenario W1 --provider codex --user-behavior mc-realistic --user-seed 42
 OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --tier nightly --provider codex --scenario-delay 10
 ```
 
@@ -293,6 +378,7 @@ Always capture:
 - surface used: Web, CLI, or mixed
 - exact command(s)
 - provider/model/effort if visible
+- Mission Control user-behavior mode, seed, and action log when enabled
 - session id and run id
 - wall time and cost when available
 - Otto verdict
@@ -319,6 +405,8 @@ otto_logs/cross-sessions/runs/live/<run_id>.json
 otto_logs/cross-sessions/history.jsonl
 otto_logs/sessions/<run_id>/commands/requests.jsonl
 otto_logs/sessions/<run_id>/commands/acks.jsonl
+bench-results/web-as-user/<run_id>/<scenario>/mc-user-behavior.jsonl
+bench-results/web-as-user/<run_id>/<scenario>/mc-layout-*.json
 ```
 
 ## Bug Hunting Rules
@@ -341,6 +429,7 @@ User goal:
 Project:
 Surface: Web / CLI / mixed
 Provider/model:
+MC user behavior:
 Session/run ids:
 Success measures:
 Steps performed:

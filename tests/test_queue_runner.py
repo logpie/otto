@@ -1247,6 +1247,7 @@ def test_runner_sets_queue_project_dir_env_on_spawn(tmp_path: Path, monkeypatch:
         runner._tick()
         # Verify both env vars are set
         assert captured_env.get("OTTO_QUEUE_TASK_ID") == "t1"
+        assert captured_env.get("OTTO_I2P_BASE_BRANCH") == "build/t1-test"
         assert captured_env.get("OTTO_QUEUE_PROJECT_DIR") == str(repo), \
             f"runner must set OTTO_QUEUE_PROJECT_DIR; got: {captured_env.get('OTTO_QUEUE_PROJECT_DIR')!r}"
         assert captured_env.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1"

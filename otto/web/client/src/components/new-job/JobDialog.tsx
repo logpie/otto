@@ -823,7 +823,8 @@ export function jobRunSummary({command, subcommand, project, provider, model, ef
 }): string {
   const defaults = project?.defaults;
   const providerLabel = provider || defaults?.provider || "default";
-  const modelLabel = model.trim() || defaults?.model || "default";
+  const defaultModel = provider && provider !== defaults?.provider ? null : defaults?.model;
+  const modelLabel = model.trim() || defaultModel || "provider default";
   const effortLabel = effort || defaults?.reasoning_effort || "default";
   const verificationLabel = describeVerificationPolicy(command, subcommand, certification, project);
   const roundLimit = effectiveRoundLimit(project, rounds);

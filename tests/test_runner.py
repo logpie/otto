@@ -120,6 +120,129 @@ def test_feature_audits_to_verdicts_prefers_feature_id() -> None:
     ]
 
 
+def test_feature_audits_to_verdicts_maps_group_id_to_best_matching_feature() -> None:
+    """A group-level audit miss must still route to a concrete Feature repair."""
+    from otto.audit import FeatureAudit
+
+    spec = Spec(
+        intent="micro twitter",
+        groups=[
+            Group(
+                id="foundation",
+                name="Vite app shell, shared styling, and README",
+                feature_ids=["shell", "readme_commands"],
+            )
+        ],
+        features=[
+            Feature(
+                id="shell",
+                name="Initialize a Vite React TypeScript SPA",
+                group_id="foundation",
+            ),
+            Feature(
+                id="readme_commands",
+                name="Document install, dev server, build, and test commands in README",
+                group_id="foundation",
+            ),
+        ],
+    )
+    audit = AuditResult(
+        verdict=AuditVerdict.PARTIAL,
+        narrative="x",
+        feature_audits=[
+            FeatureAudit(
+                feature_id="foundation",
+                name="Vite app shell, shared styling, and README",
+                status="partial",
+                detail="README omits the separate browser-test command.",
+            )
+        ],
+    )
+
+    assert _feature_audits_to_verdicts(spec, audit) == [
+        {
+            "feature_id": "readme_commands",
+            "verdict": "partial",
+            "detail": "README omits the separate browser-test command.",
+            "evidence_refs": [],
+        }
+    ]
+
+
+def test_layer2_repair_runs_for_group_level_feature_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: group-level audit ids used to bypass Layer 2 entirely."""
+    from otto.audit import FeatureAudit
+
+    spec = Spec(
+        intent="micro twitter",
+        groups=[
+            Group(
+                id="foundation",
+                name="Vite app shell, shared styling, and README",
+                feature_ids=["shell", "readme_commands"],
+            )
+        ],
+        features=[
+            Feature(
+                id="shell",
+                name="Initialize a Vite React TypeScript SPA",
+                group_id="foundation",
+            ),
+            Feature(
+                id="readme_commands",
+                name="Document install, dev server, build, and test commands in README",
+                group_id="foundation",
+            ),
+        ],
+    )
+    audit = AuditResult(
+        verdict=AuditVerdict.PARTIAL,
+        narrative="some group failed",
+        feature_audits=[
+            FeatureAudit(
+                feature_id="foundation",
+                name="Vite app shell, shared styling, and README",
+                status="partial",
+                detail="README omits the separate browser-test command.",
+            )
+        ],
+    )
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured = _wire_stubs(monkeypatch, audit=audit, order=order)
+
+    result = asyncio.run(
+        run_pipeline(
+            "x",
+            tmp_path,
+            session_dir,
+            project_kind="webapp",
+            brownfield=False,
+            base_url=None,
+            config={},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_stub_agent,
+            spec=spec,
+        )
+    )
+
+    assert "repair" in order.events
+    assert captured["repair_calls"] == 1
+    assert captured["repair_feature_verdicts"] == [
+        {
+            "feature_id": "readme_commands",
+            "verdict": "partial",
+            "detail": "README omits the separate browser-test command.",
+            "evidence_refs": [],
+        }
+    ]
+    assert result.repair_result is not None
+
+
 def _ok_build(spec: Spec, session_dir: Path) -> BuildResult:
     return BuildResult(
         spec_session_dir=session_dir,
