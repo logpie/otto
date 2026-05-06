@@ -18,6 +18,8 @@
 //   - Stage entries have `duration_s: null` until that stage finishes.
 //   - Per-Feature `verdict: null` means audit hasn't run for that Feature.
 
+import type { TokenUsage } from "../types";
+
 // ---------------------------------------------------------------------------
 // Top-level RunView
 // ---------------------------------------------------------------------------
@@ -50,6 +52,9 @@ export interface RunView {
   // Run-level cost + wall.
   cost_usd: number;
   wall_s: number;
+  token_usage?: TokenUsage;
+  phase_usage?: Record<string, PhaseUsage>;
+  agent_usage_top?: AgentUsageEntry[];
 
   // Run metadata: collapsed dl in drawer.
   meta: RunMeta;
@@ -138,8 +143,19 @@ export interface StageView {
   status: StageStatus;
   duration_s: number | null;   // null until stage finishes
   cost_usd: number | null;     // null until stage finishes
+  token_usage?: TokenUsage;
   started_at: string | null;   // ISO 8601, null if not yet started
   finished_at: string | null;  // ISO 8601, null if not yet finished
+}
+
+export interface PhaseUsage extends TokenUsage {
+  duration_s?: number;
+  cost_usd?: number;
+}
+
+export interface AgentUsageEntry extends PhaseUsage {
+  phase: string;
+  path: string;
 }
 
 export interface EvidenceRef {

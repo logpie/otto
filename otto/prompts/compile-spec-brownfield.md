@@ -18,6 +18,17 @@ this as your starting point — but you have full Read/Glob/Grep tool
 access and SHOULD dive deeper into any directory that looks load-bearing
 (routes, models, CLI entry points, tests, prompts, schemas).
 
+The deterministic repo index is available at:
+
+`{repo_index_path}`
+
+Summary: {repo_index_summary}
+
+Read this index first when deciding what files to inspect. It is a bounded
+map of manifests, tests, entrypoint candidates, source directories, and
+route/API candidates. It is not a source of behavioral truth; open the real
+files before declaring Features, Groups, checks, or owned paths.
+
 ```
 {project_preamble}
 ```

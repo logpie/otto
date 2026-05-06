@@ -3324,6 +3324,138 @@ def build_project_preamble(project_dir: Path) -> str:
     return "\n".join(parts) + "\n"
 
 
+def write_repo_index_packet(
+    project_dir: Path,
+    *,
+    project_kind: str,
+    output_path: Path,
+) -> dict[str, Any]:
+    """Write a deterministic brownfield repo index for compile agents.
+
+    The index is path metadata, not source content. It gives the compile
+    agent a map of likely load-bearing files while preserving full ability
+    to read the actual files as needed.
+    """
+    files = _project_file_list(project_dir)
+    manifests = [path for path in _BROWNFIELD_PREAMBLE_MANIFESTS if path in files]
+    readmes = [
+        path for path in files
+        if Path(path).name.lower() in {"readme.md", "readme.rst", "readme.txt"}
+    ]
+    tests = [
+        path for path in files
+        if path.startswith("tests/")
+        or "/tests/" in path
+        or Path(path).name.startswith(("test_", "spec_"))
+        or Path(path).name.endswith(("_test.py", ".spec.ts", ".test.ts", ".test.js"))
+    ]
+    config_files = [
+        path for path in files
+        if Path(path).name in {
+            "otto.yaml",
+            "pyproject.toml",
+            "package.json",
+            "tsconfig.json",
+            "vite.config.ts",
+            "vite.config.js",
+            "pytest.ini",
+            "tox.ini",
+            "Makefile",
+            "Dockerfile",
+        }
+        or Path(path).suffix in {".toml", ".yaml", ".yml"}
+    ]
+    entrypoints = [
+        path for path in files
+        if Path(path).name in {
+            "__main__.py",
+            "app.py",
+            "main.py",
+            "cli.py",
+            "server.py",
+            "manage.py",
+            "wsgi.py",
+            "asgi.py",
+            "index.js",
+            "index.ts",
+            "main.js",
+            "main.ts",
+            "main.go",
+        }
+        or (
+            project_kind in {"cli", "library"}
+            and len(Path(path).parts) == 1
+            and Path(path).suffix == ".py"
+            and not Path(path).name.startswith(("test_", "setup"))
+        )
+    ]
+    route_candidates = [
+        path for path in files
+        if re.search(r"(^|/)(routes|views|urls|api|controllers)(/|\.|$)", path)
+        or Path(path).name in {"routes.py", "views.py", "urls.py", "api.py"}
+    ]
+    source_dirs = _top_source_dirs(files)
+    packet = {
+        "schema_version": 1,
+        "kind": "repo_index_packet",
+        "project_dir": str(project_dir),
+        "project_kind": project_kind,
+        "file_count": len(files),
+        "files_sample": files[:300],
+        "truncated_files": max(0, len(files) - 300),
+        "readmes": readmes[:20],
+        "manifests": manifests[:20],
+        "config_files": config_files[:60],
+        "entrypoint_candidates": entrypoints[:60],
+        "source_dirs": source_dirs[:40],
+        "test_files": tests[:120],
+        "route_candidates": route_candidates[:120],
+        "notes": [
+            "This is a deterministic file index for brownfield compile.",
+            "Use it to choose what to read next; open source files directly for facts.",
+            "Do not infer behavior from filenames alone.",
+        ],
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(packet, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return packet
+
+
+def _project_file_list(project_dir: Path) -> list[str]:
+    tracked = _git_tracked_files(project_dir)
+    if tracked is None:
+        files = _glob_filtered_files(project_dir)
+    else:
+        files = sorted(
+            f for f in tracked
+            if not any(
+                p in _BROWNFIELD_PREAMBLE_IGNORE_PARTS
+                for p in Path(f).parts
+            )
+        )
+    return sorted(path for path in files if path and not path.startswith("../"))
+
+
+def _top_source_dirs(files: list[str]) -> list[str]:
+    counts: dict[str, int] = {}
+    for path in files:
+        parts = Path(path).parts
+        if not parts:
+            continue
+        top = "." if len(parts) == 1 else parts[0]
+        counts[top] = counts.get(top, 0) + 1
+    return [
+        name
+        for name, _count in sorted(
+            counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
+
 # ---------------------------------------------------------------------------
 # A6.5 — Out-of-scope intent guard (research §9.5b)
 # ---------------------------------------------------------------------------
@@ -3633,12 +3765,24 @@ async def compile_spec(
 
     if brownfield:
         prompt_template = COMPILE_PROMPT_BROWNFIELD
+        repo_index_path = run_dir / "repo-index.json"
+        repo_index = write_repo_index_packet(
+            project_dir,
+            project_kind=project_kind,
+            output_path=repo_index_path,
+        )
         prompt = render_prompt(
             prompt_template,
             intent=intent,
             spec_path=str(spec_path),
             project_context=f"project_kind={project_kind}",
             project_preamble=build_project_preamble(project_dir),
+            repo_index_path=str(repo_index_path),
+            repo_index_summary=(
+                f"{repo_index['file_count']} indexed files; "
+                f"{len(repo_index['entrypoint_candidates'])} entrypoint candidates; "
+                f"{len(repo_index['test_files'])} test files"
+            ),
             brownfield_mode_guidance=_brownfield_mode_guidance(brownfield_mode),
         )
     else:

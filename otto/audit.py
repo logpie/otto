@@ -1668,6 +1668,13 @@ def _write_audit_evidence_packet(agent_input: AuditAgentInput) -> None:
             "passed": agent_input.contract_test_passed,
             "detail": agent_input.contract_test_detail,
         },
+        "deterministic_first_order": [
+            "contract_test",
+            "cross_slice_evidence",
+            "walkthrough_artifacts",
+            "source_inspection",
+            "provider_transcript_excerpt_only_if_needed",
+        ],
         "build_summary": agent_input.build_summary,
         "merge_summary": agent_input.merge_summary,
         "cross_slice_evidence": [
@@ -1684,6 +1691,7 @@ def _write_audit_evidence_packet(agent_input: AuditAgentInput) -> None:
         "notes": [
             "Read this packet first, then inspect referenced artifacts as needed.",
             "Prefer deterministic contract/cross-slice results and browser artifacts over provider transcript text.",
+            "A failed deterministic contract is a blocker or partial cap unless direct evidence proves the oracle is invalid.",
             "Avoid bulk-reading messages.jsonl; if needed, inspect bounded relevant excerpts only.",
         ],
     }
@@ -1761,6 +1769,13 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
             "transcripts; if a raw transcript is genuinely needed, inspect only "
             "bounded relevant excerpts after the deterministic and browser "
             "evidence has been reviewed."
+        )
+        lines.append(
+            "Deterministic-first rule: evaluate contract_test, cross-slice "
+            "checks, and browser/walkthrough artifacts before source-reading "
+            "or judging product polish. A failed deterministic check is not "
+            "overridden by code inspection unless you can cite why that oracle "
+            "is invalid; in that case call out the oracle issue explicitly."
         )
         lines.append("")
     lines.append("## Spec Groups")

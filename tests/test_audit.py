@@ -560,9 +560,15 @@ def test_run_audit_writes_compact_evidence_packet_for_judge(tmp_path: Path) -> N
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
     assert packet["kind"] == "audit_evidence_packet"
     assert packet["full_spec_path"] == str(spec_path)
+    assert packet["deterministic_first_order"][:3] == [
+        "contract_test",
+        "cross_slice_evidence",
+        "walkthrough_artifacts",
+    ]
     assert "messages.jsonl" in " ".join(packet["notes"])
     assert str(packet_path) in captured["prompt"]
     assert "Do not bulk-read `messages.jsonl`" in captured["prompt"]
+    assert "Deterministic-first rule" in captured["prompt"]
     assert "Project contract test" in captured["prompt"]
 
 

@@ -15,6 +15,7 @@
 
 import { useState } from "react";
 import type { RunVerdict, RunView } from "../../types/run";
+import { formatTokenSpend, tokenBreakdownLine } from "../../utils/format";
 import { Pill, type PillTone } from "./Pill";
 
 interface Props {
@@ -108,6 +109,7 @@ export function VerdictHeader({ view }: Props) {
   // dateTime + title attributes for hover/inspection.
   const finishedAt = view.meta.finished_at;
   const finishedRelative = formatRelative(finishedAt);
+  const tokenSpend = formatTokenSpend(view.token_usage);
 
   return (
     <header className={`run-drawer-header ${tone}`} data-testid="verdict-header">
@@ -205,6 +207,14 @@ export function VerdictHeader({ view }: Props) {
             <span className="metric-num">{formatCost(view.cost_usd)}</span>
           </dd>
         </div>
+        {tokenSpend && (
+          <div className="metric">
+            <dt>Tokens</dt>
+            <dd className="tokens" title={tokenBreakdownLine(view.token_usage)}>
+              <span className="metric-num">{tokenSpend}</span>
+            </dd>
+          </div>
+        )}
       </dl>
     </header>
   );

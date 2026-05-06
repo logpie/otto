@@ -88,12 +88,18 @@ Minimum lifecycle truth checks:
    - The task row story/feature count must match the compiled spec or proof.
    - Groups and features must be visible when
      `spec/spec.json` contains `groups[*].feature_ids`.
+   - Phase token/time telemetry must be visible when provider usage exists:
+     header token spend, stage token spend, and top expensive agent calls from
+     `proof-packet.json` / RunView.
    - Logs and diffs actions must either open visible evidence or show a clear
      loading/error state. Silent clicks fail.
 4. Inspect logs before diagnosing:
    - `otto_logs/sessions/<id>/spec/spec.json`
+   - `otto_logs/sessions/<id>/spec/repo-index.json` for brownfield compile
    - `otto_logs/sessions/<id>/spec-state.jsonl`
    - `otto_logs/sessions/<id>/build/**/narrative.log`
+   - `otto_logs/sessions/<id>/build/**/context-packet.json`
+   - `otto_logs/sessions/<id>/audit/**/evidence-packet.json`
    - `otto_logs/sessions/<id>/proof-packet.json` when present
 
 If any of these fail, classify it as a Web/API truthfulness bug unless the logs
@@ -154,8 +160,14 @@ run/repair from CLI, then return to Web to review and land.
 
 4. Inspect evidence before judging.
    - Read `otto_logs/sessions/<id>/summary.json`.
+   - Read the compact packets first:
+     `spec/repo-index.json`, `build/**/context-packet.json`, and
+     `audit/**/evidence-packet.json` when present.
    - Read narrative logs, audit logs, proof packet JSON/HTML, screenshots, and
      videos when present.
+   - Inspect phase usage and hot calls from RunView or `proof-packet.json`.
+     A pressure run is incomplete if it cannot explain which phase or agent
+     call consumed the most wall time/tokens.
    - For Web/queue flows, inspect live records, history, command requests, and
      acks when behavior is unclear.
 
@@ -204,6 +216,8 @@ Use when applicable:
 - Recovery success: resume/retry/cancel behaves honestly.
 - Provider success: requested provider/model/effort propagated to child agents.
 - Cost/time success: budget, max-turns, and reported spend are credible.
+- Telemetry success: phase-level wall/token spend and top hot agent calls are
+  visible enough for a user to know where the run got expensive.
 - Accessibility success: controls have labels, focus behavior, and usable
   keyboard/mouse paths where relevant.
 
@@ -328,6 +342,7 @@ Always capture:
 - provider/model/effort if visible
 - session id and run id
 - wall time and cost when available
+- token spend, phase breakdown, and top expensive agent calls when available
 - Otto verdict
 - external verifier command/result
 - proof packet path
@@ -341,9 +356,12 @@ Primary artifact paths:
 ```text
 otto_logs/sessions/<session-id>/summary.json
 otto_logs/sessions/<session-id>/spec/spec.json
+otto_logs/sessions/<session-id>/spec/repo-index.json
 otto_logs/sessions/<session-id>/spec-state.jsonl
 otto_logs/sessions/<session-id>/proof-packet.html
 otto_logs/sessions/<session-id>/proof-packet.json
+otto_logs/sessions/<session-id>/build/**/context-packet.json
+otto_logs/sessions/<session-id>/audit/**/evidence-packet.json
 otto_logs/sessions/<session-id>/**/narrative.log
 otto_logs/sessions/<session-id>/audit/**/feature-verdicts.json
 otto_logs/sessions/<session-id>/audit/**/screenshots/
@@ -357,6 +375,14 @@ otto_logs/sessions/<run_id>/commands/acks.jsonl
 ## Bug Hunting Rules
 
 - Logs first, then diagnosis.
+- Compact packets first, raw transcripts last. Do not bulk-read
+  `messages.jsonl` when `summary.json`, `proof-packet.json`,
+  `context-packet.json`, or `evidence-packet.json` already answer the
+  question.
+- Deterministic-first audit: contract tests, cross-slice checks, and
+  browser/walkthrough artifacts beat source inspection and model narrative.
+  If a deterministic oracle is wrong, document why and fix the oracle
+  generically rather than ignoring it.
 - Reproduce or narrow before fixing when behavior is ambiguous.
 - Fix generic root causes only.
 - Add regression tests for code fixes.

@@ -21,6 +21,12 @@ import re
 from pathlib import Path
 from typing import Any
 
+from otto.token_usage import (
+    message_file_breakdown_from_messages,
+    phase_breakdown_from_messages,
+    total_token_usage_from_phases,
+)
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -76,12 +82,16 @@ def build_run_view(
     features = _build_features(spec, proof, live_state, state_events)
     components = _build_components(spec, proof, state_events, live_state)
     guardrails = _build_guardrails(spec, proof)
+    phase_usage = _build_phase_usage(session_dir, proof)
+    token_usage = _build_token_usage(proof, phase_usage)
+    agent_usage_top = _build_agent_usage_top(session_dir, proof)
     stages = _build_stages(
         state_events,
         live_state,
         spec,
         proof=proof,
         session_dir=session_dir,
+        phase_usage=phase_usage,
     )
     findings = _build_findings(proof)
 
@@ -121,6 +131,9 @@ def build_run_view(
         "stages": stages,
         "cost_usd": cost_usd,
         "wall_s": wall_s,
+        "token_usage": token_usage,
+        "phase_usage": phase_usage,
+        "agent_usage_top": agent_usage_top,
         "meta": meta,
         "findings": findings,
     }
@@ -172,6 +185,44 @@ def _read_state_events(session_dir: Path) -> list[dict[str, Any]]:
     except OSError:
         return []
     return events
+
+
+def _build_phase_usage(
+    session_dir: Path,
+    proof: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    raw = proof.get("phase_usage") if proof else None
+    if isinstance(raw, dict) and raw:
+        return {
+            str(phase): dict(data)
+            for phase, data in raw.items()
+            if isinstance(data, dict)
+        }
+    return phase_breakdown_from_messages(session_dir)
+
+
+def _build_token_usage(
+    proof: dict[str, Any] | None,
+    phase_usage: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    raw = proof.get("token_usage") if proof else None
+    if isinstance(raw, dict) and any(raw.values()):
+        return {
+            str(key): int(value)
+            for key, value in raw.items()
+            if isinstance(value, int | float) and value
+        }
+    return total_token_usage_from_phases(phase_usage)
+
+
+def _build_agent_usage_top(
+    session_dir: Path,
+    proof: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    raw = proof.get("agent_usage_top") if proof else None
+    if isinstance(raw, list) and raw:
+        return [dict(item) for item in raw if isinstance(item, dict)]
+    return message_file_breakdown_from_messages(session_dir)[:10]
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +819,7 @@ def _build_stages(
     *,
     proof: dict[str, Any] | None = None,
     session_dir: Path | None = None,
+    phase_usage: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Emit StageView list from state events.
 
@@ -787,6 +839,7 @@ def _build_stages(
             "status": "pending",
             "duration_s": None,
             "cost_usd": None,
+            "token_usage": {},
             "started_at": None,
             "finished_at": None,
         }
@@ -902,7 +955,58 @@ def _build_stages(
                 stages["build"]["status"] = "failed"
                 stages["build"]["finished_at"] = str(live_state.get("finished_at") or "") if live_state else None
 
+    _apply_phase_usage_to_stages(stages, phase_usage or {})
     return [stages[name] for name in canonical]
+
+
+def _apply_phase_usage_to_stages(
+    stages: dict[str, dict[str, Any]],
+    phase_usage: dict[str, dict[str, Any]],
+) -> None:
+    for stage_name, phase_names in {
+        "compile": ("compile", "spec"),
+        "build": ("build",),
+        "audit": ("audit", "certify"),
+        "render": ("render",),
+        "land": ("merge", "land"),
+    }.items():
+        data = _merge_phase_usage_entries(phase_usage, phase_names)
+        if not data or stage_name not in stages:
+            continue
+        token_usage = {
+            key: int(data.get(key, 0) or 0)
+            for key in (
+                "input_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+            )
+            if int(data.get(key, 0) or 0)
+        }
+        stages[stage_name]["token_usage"] = token_usage
+        if stages[stage_name].get("duration_s") is None and data.get("duration_s") is not None:
+            stages[stage_name]["duration_s"] = float(data["duration_s"])
+        if stages[stage_name].get("cost_usd") is None and data.get("cost_usd") is not None:
+            stages[stage_name]["cost_usd"] = float(data["cost_usd"])
+
+
+def _merge_phase_usage_entries(
+    phase_usage: dict[str, dict[str, Any]],
+    phase_names: tuple[str, ...],
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for name in phase_names:
+        data = phase_usage.get(name)
+        if not isinstance(data, dict):
+            continue
+        for key, value in data.items():
+            if not isinstance(value, int | float):
+                continue
+            merged[key] = float(merged.get(key, 0.0) or 0.0) + float(value)
+    return merged
 
 
 # Stage names that emit bare "<stage>.<sub>" lifecycle events (no

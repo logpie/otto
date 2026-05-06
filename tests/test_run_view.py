@@ -50,6 +50,26 @@ def test_build_run_view_happy_path_post_render(tmp_path: Path) -> None:
         "verdict": "passed",
         "wall_s": 215.0,
         "cost_usd": 1.42,
+        "token_usage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 80,
+            "output_tokens": 10,
+            "total_tokens": 110,
+        },
+        "phase_usage": {
+            "spec": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+            "audit": {"input_tokens": 90, "cached_input_tokens": 80, "output_tokens": 8, "total_tokens": 98},
+        },
+        "agent_usage_top": [
+            {
+                "phase": "audit",
+                "path": "audit/attempt-00/judge/messages.jsonl",
+                "input_tokens": 90,
+                "cached_input_tokens": 80,
+                "output_tokens": 8,
+                "total_tokens": 98,
+            }
+        ],
         "groups": [
             {
                 "id": "auth",
@@ -89,6 +109,10 @@ def test_build_run_view_happy_path_post_render(tmp_path: Path) -> None:
     assert view["status"] == "passed"
     assert view["cost_usd"] == 1.42
     assert view["wall_s"] == 215.0
+    assert view["token_usage"]["total_tokens"] == 110
+    assert view["agent_usage_top"][0]["path"] == "audit/attempt-00/judge/messages.jsonl"
+    assert next(s for s in view["stages"] if s["name"] == "compile")["token_usage"]["total_tokens"] == 12
+    assert next(s for s in view["stages"] if s["name"] == "audit")["token_usage"]["cached_input_tokens"] == 80
     assert len(view["features"]) == 1
     assert view["features"][0]["id"] == "login"
     assert view["features"][0]["verdict"] == "passed"
@@ -114,6 +138,40 @@ def test_build_run_view_legacy_session_no_artifacts(tmp_path: Path) -> None:
     assert view["components"] == []
     assert view["guardrails"] == []
     assert view["findings"] == []
+    assert view["token_usage"] == {}
+    assert view["agent_usage_top"] == []
+
+
+def test_build_run_view_recovers_usage_from_nested_messages(tmp_path: Path) -> None:
+    session = _setup_session(tmp_path, spec={"intent": "x", "project_kind": "webapp", "groups": []})
+    messages = session / "audit" / "attempt-00" / "judge" / "messages.jsonl"
+    messages.parent.mkdir(parents=True)
+    messages.write_text(
+        json.dumps({
+            "type": "phase_end",
+            "phase": "build",
+            "duration_s": 1.5,
+            "usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 75,
+                "output_tokens": 10,
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    view = build_run_view(session)
+
+    assert view["token_usage"] == {
+        "input_tokens": 100,
+        "cached_input_tokens": 75,
+        "output_tokens": 10,
+        "total_tokens": 110,
+    }
+    audit_stage = next(s for s in view["stages"] if s["name"] == "audit")
+    assert audit_stage["token_usage"]["cached_input_tokens"] == 75
+    assert audit_stage["duration_s"] == 1.5
+    assert view["agent_usage_top"][0]["phase"] == "audit"
 
 
 def test_build_run_view_initializing_compile_agent_is_compiling(tmp_path: Path) -> None:

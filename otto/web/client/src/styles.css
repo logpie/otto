@@ -9990,10 +9990,16 @@ mark.log-search-match.active {
   color: var(--muted);
 }
 .stage-timeline .stage-duration,
-.stage-timeline .stage-cost {
+.stage-timeline .stage-cost,
+.stage-timeline .stage-token {
   font-size: var(--text-xs, 12px);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+.stage-timeline .stage-token {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .stage-timeline .stage-arrow {
   color: var(--muted);
