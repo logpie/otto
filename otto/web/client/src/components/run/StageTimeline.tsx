@@ -1,7 +1,12 @@
 // StageTimeline — horizontal stage progression (research §6 pipeline stages).
 // Compile → [Spec review] → Build → Audit → Render → Land.
+//
+// Post-RUA round 1 (B6): replaced the old numbered <ol> with a horizontal
+// stepper. Each stage is a small block (status dot + name + duration +
+// optional cost) separated by → arrows. The container scrolls horizontally
+// on narrow viewports rather than wrapping.
 
-import type { StageView, StageStatus } from "../../types/run";
+import type { StageStatus, StageView } from "../../types/run";
 
 interface Props {
   stages: StageView[];
@@ -22,6 +27,21 @@ function statusClass(status: StageStatus): string {
   }
 }
 
+function statusGlyph(status: StageStatus): string {
+  switch (status) {
+    case "done":
+      return "●";
+    case "active":
+      return "◐";
+    case "failed":
+      return "✗";
+    case "skipped":
+      return "–";
+    default:
+      return "○";
+  }
+}
+
 function formatDuration(seconds: number | null): string {
   if (seconds === null) return "—";
   if (seconds < 60) return `${seconds.toFixed(0)}s`;
@@ -30,23 +50,45 @@ function formatDuration(seconds: number | null): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+// R3-B19: humanize raw stage tokens (e.g. "spec_review" → "Spec
+// review"). The CSS `text-transform: capitalize` rule only fires on
+// word boundaries, which leaves the underscore intact and renders
+// as "Spec_review". Strip the underscore in JS so the visible label
+// reads as ordinary prose.
+function humanizeStage(raw: string): string {
+  if (!raw) return raw;
+  const spaced = raw.replace(/_/g, " ").trim();
+  if (spaced.length === 0) return raw;
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
+}
+
 export function StageTimeline({ stages }: Props) {
   if (stages.length === 0) {
     return <p className="empty">No stage data.</p>;
   }
   return (
     <ol className="stage-timeline" data-testid="stage-timeline">
-      {stages.map((s) => (
+      {stages.map((s, i) => (
         <li
           key={s.name}
-          className={`stage ${statusClass(s.status)}`}
+          className={`stage stage-${statusClass(s.status)}`}
           data-testid={`stage-${s.name}`}
         >
-          <span className="stage-name">{s.name}</span>
-          <span className="stage-status">{s.status}</span>
-          <span className="stage-duration">{formatDuration(s.duration_s)}</span>
-          {s.cost_usd !== null && (
-            <span className="stage-cost">${s.cost_usd.toFixed(2)}</span>
+          <span className="stage-block">
+            <span className="stage-dot" aria-hidden>
+              {statusGlyph(s.status)}
+            </span>
+            <span className="stage-name">{humanizeStage(s.name)}</span>
+            <span className="stage-status">{s.status}</span>
+            <span className="stage-duration">{formatDuration(s.duration_s)}</span>
+            {s.cost_usd !== null && (
+              <span className="stage-cost">${s.cost_usd.toFixed(2)}</span>
+            )}
+          </span>
+          {i < stages.length - 1 && (
+            <span className="stage-arrow" aria-hidden>
+              →
+            </span>
           )}
         </li>
       ))}

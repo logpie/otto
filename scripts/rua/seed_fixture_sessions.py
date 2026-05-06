@@ -53,8 +53,8 @@ def _make_spec_passed() -> Spec:
         intent="A small markdown note-taking webapp with login, list, and edit views.",
         project_kind="webapp",
         groups=[
-            Group(id="auth", title="Authentication"),
-            Group(id="notes", title="Notes"),
+            Group(id="auth", name="Authentication"),
+            Group(id="notes", name="Notes"),
         ],
         features=[
             Feature(
@@ -91,9 +91,9 @@ def _make_spec_partial() -> Spec:
         intent="A real-time chat app with rooms, DMs, and presence indicators.",
         project_kind="webapp",
         groups=[
-            Group(id="rooms", title="Rooms"),
-            Group(id="dm", title="Direct messages"),
-            Group(id="presence", title="Presence"),
+            Group(id="rooms", name="Rooms"),
+            Group(id="dm", name="Direct messages"),
+            Group(id="presence", name="Presence"),
         ],
         features=[
             Feature(
@@ -131,9 +131,9 @@ def _make_spec_blocked() -> Spec:
         intent="A mini e-commerce store with product list, cart, and Stripe checkout.",
         project_kind="webapp",
         groups=[
-            Group(id="catalog", title="Catalog"),
-            Group(id="cart", title="Cart"),
-            Group(id="checkout", title="Checkout"),
+            Group(id="catalog", name="Catalog"),
+            Group(id="cart", name="Cart"),
+            Group(id="checkout", name="Checkout"),
         ],
         features=[
             Feature(
@@ -176,8 +176,8 @@ def _proof_passed(spec: Spec) -> dict:
         "groups": [
             {
                 "id": g.id,
-                "name": g.title,
-                "title": g.title,
+                "name": g.name,
+                "title": g.name,
                 "feature_ids": [f.id for f in spec.features if f.group_id == g.id],
                 "status": "passing",
                 "branch": f"{g.id}-branch",
@@ -230,8 +230,8 @@ def _proof_partial(spec: Spec) -> dict:
         "groups": [
             {
                 "id": g.id,
-                "name": g.title,
-                "title": g.title,
+                "name": g.name,
+                "title": g.name,
                 "feature_ids": [f.id for f in spec.features if f.group_id == g.id],
                 "status": "passing" if g.id == "rooms" else "warn",
                 "branch": f"{g.id}-branch",
@@ -298,8 +298,8 @@ def _proof_blocked(spec: Spec) -> dict:
         "groups": [
             {
                 "id": g.id,
-                "name": g.title,
-                "title": g.title,
+                "name": g.name,
+                "title": g.name,
                 "feature_ids": [f.id for f in spec.features if f.group_id == g.id],
                 "status": "passing" if g.id == "catalog" else ("warn" if g.id == "cart" else "blocked"),
                 "branch": f"{g.id}-branch",

@@ -1,9 +1,20 @@
 // SpecDiffPage — wireframe 4d.
 //
-// Compares two archived spec versions (`spec-v<N>.md`) for a session and
-// renders a line-level diff. Versions list is fetched from
-// `GET /api/specs/<session>/versions`; the diff payload from
-// `GET /api/specs/<session>/diff?from=<N>&to=<M>` (lands tick spec-diff).
+// Compares two spec snapshots for a session and renders a line-level
+// diff. Each side may be either an archived version `spec-v<N>.{md,json}`
+// or the live "current" working spec (`spec.json` + `spec.md`).
+//
+// Backend contract:
+//   GET /api/specs/<session>/versions       → {versions: number[]}
+//   GET /api/specs/<session>/diff?from=X&to=Y
+//      where X/Y is an int version OR the literal string "current"
+//
+// Defaults (B28): when at least one archived version exists, the page
+// loads with `From=last archived` and `To=current` — this gives the
+// most useful diff out of the box (what changed since the last save?).
+// When zero archived versions exist (B15), the dropdowns still render
+// but only "current" is selectable; the empty-state explanation is
+// shown above the diff pane.
 //
 // We deliberately avoid heavyweight diff libraries: `diff` is not in the
 // dependency tree, and the spec markdown is small (hundreds of lines at
@@ -11,9 +22,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+type VersionId = number | "current";
+
 interface DiffPayload {
-  from_version: number;
-  to_version: number;
+  from_version: VersionId;
+  to_version: VersionId;
   from_md: string;
   to_md: string;
   from_json: unknown;
@@ -31,6 +44,16 @@ interface DiffLine {
   op: DiffOp;
   text: string;
 }
+
+// R2-B26: a "fold" entry replaces a run of consecutive context lines when
+// the user toggles "Show only changes". Rendered as a single
+// `… N unchanged lines …` placeholder.
+interface DiffFold {
+  op: "fold";
+  count: number;
+}
+
+type DiffEntry = DiffLine | DiffFold;
 
 interface Props {
   sessionId: string;
@@ -93,14 +116,60 @@ function classFor(op: DiffOp): string {
   return "";
 }
 
+function labelFor(v: VersionId): string {
+  return v === "current" ? "current" : `v${v}`;
+}
+
+function parseVersionId(raw: string): VersionId {
+  if (raw === "current") return "current";
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : "current";
+}
+
+function encodeVersionParam(v: VersionId): string {
+  return v === "current" ? "current" : String(v);
+}
+
+// R2-B26: collapse consecutive context lines into a single fold entry.
+// We use the same threshold for "minimum run worth folding" as common
+// patch tools (3 lines). Smaller runs are kept inline because the fold
+// placeholder would be longer than the context itself.
+function collapseContext(lines: DiffLine[], minRun = 3): DiffEntry[] {
+  const out: DiffEntry[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i] as DiffLine;
+    if (line.op !== "context") {
+      out.push(line);
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < lines.length && (lines[j] as DiffLine).op === "context") {
+      j++;
+    }
+    const run = j - i;
+    if (run >= minRun) {
+      out.push({ op: "fold", count: run });
+    } else {
+      for (let k = i; k < j; k++) out.push(lines[k] as DiffLine);
+    }
+    i = j;
+  }
+  return out;
+}
+
 export function SpecDiffPage({ sessionId }: Props) {
   const [versions, setVersions] = useState<number[] | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
-  const [from, setFrom] = useState<number | null>(null);
-  const [to, setTo] = useState<number | null>(null);
+  const [from, setFrom] = useState<VersionId | null>(null);
+  const [to, setTo] = useState<VersionId | null>(null);
   const [diff, setDiff] = useState<DiffPayload | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+  // R2-B26: collapse-context toggle. Default false → preserves the
+  // existing behavior (full diff with all context lines visible).
+  const [onlyChanges, setOnlyChanges] = useState<boolean>(false);
 
   // Fetch the available versions on mount.
   useEffect(() => {
@@ -114,13 +183,17 @@ export function SpecDiffPage({ sessionId }: Props) {
         if (cancelled) return;
         const list = [...(payload.versions || [])].sort((x, y) => x - y);
         setVersions(list);
-        // Default: compare second-to-last vs last (the most recent edit).
-        if (list.length >= 2) {
-          setFrom(list[list.length - 2] as number);
-          setTo(list[list.length - 1] as number);
-        } else if (list.length === 1) {
-          setFrom(list[0] as number);
-          setTo(list[0] as number);
+        // Default selection (B28): most-recently-archived → current. This
+        // shows "what changed since the last save" out of the box.
+        if (list.length >= 1) {
+          setFrom(list[list.length - 1] as number);
+          setTo("current");
+        } else {
+          // No archived versions yet (B15). Both sides default to
+          // "current" — the no-op message (B29) will surface
+          // immediately, telling the user there's nothing to diff yet.
+          setFrom("current");
+          setTo("current");
         }
       })
       .catch((err: Error) => {
@@ -132,15 +205,23 @@ export function SpecDiffPage({ sessionId }: Props) {
     };
   }, [sessionId]);
 
-  // Re-fetch the diff payload whenever from/to change.
+  // Re-fetch the diff payload whenever from/to change. Skip the fetch
+  // entirely when the two sides are the same — there's no diff to
+  // render and the no-op message (B29) handles the empty state.
   useEffect(() => {
     if (from === null || to === null) return;
+    if (from === to) {
+      setDiff(null);
+      setDiffError(null);
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setDiffError(null);
     const url =
       `/api/specs/${encodeURIComponent(sessionId)}/diff` +
-      `?from=${from}&to=${to}`;
+      `?from=${encodeVersionParam(from)}&to=${encodeVersionParam(to)}`;
     fetch(url)
       .then(async (resp) => {
         if (!resp.ok) {
@@ -175,11 +256,35 @@ export function SpecDiffPage({ sessionId }: Props) {
     return diffLines(diff.from_md, diff.to_md);
   }, [diff]);
 
+  // R2-B26: when "Show only changes" is active, collapse runs of
+  // unchanged context lines into single fold placeholders.
+  const entries = useMemo<DiffEntry[]>(() => {
+    if (!onlyChanges) return lines;
+    return collapseContext(lines);
+  }, [lines, onlyChanges]);
+
+  // R2-B27: swap the From and To selections — trivial UX shortcut so
+  // users don't have to manipulate two dropdowns to reverse a comparison.
+  const handleSwap = () => {
+    if (from === null || to === null) return;
+    setFrom(to);
+    setTo(from);
+  };
+
+  const isNoop = from !== null && to !== null && from === to;
+  // Options always include "current" so the user can compare any
+  // archived version against the live working spec (B28). The list is
+  // ordered "current" first, then v1..vN ascending.
+  const dropdownOptions = useMemo<VersionId[]>(() => {
+    const archived = (versions ?? []).slice().sort((a, b) => a - b);
+    return ["current", ...archived];
+  }, [versions]);
+
   if (versionsError) {
     return (
-      <main className="spec-diff-page" style={{ padding: 24 }}>
+      <main className="spec-diff-page">
         <h1>Spec diff</h1>
-        <p role="alert" style={{ color: "#fca5a5" }}>
+        <p className="spec-diff-error" role="alert">
           Failed to load versions: {versionsError}
         </p>
       </main>
@@ -188,95 +293,178 @@ export function SpecDiffPage({ sessionId }: Props) {
 
   if (versions === null) {
     return (
-      <main className="spec-diff-page" style={{ padding: 24 }}>
+      <main className="spec-diff-page">
         <p>Loading spec versions…</p>
       </main>
     );
   }
 
-  if (versions.length === 0) {
-    return (
-      <main className="spec-diff-page" style={{ padding: 24 }}>
-        <h1>Spec diff</h1>
-        <p>
-          No archived spec versions for session{" "}
-          <code>{sessionId}</code>. A version is created each time the
-          spec is edited through the spec-review flow.
-        </p>
-      </main>
-    );
-  }
+  const hasArchived = versions.length > 0;
 
   return (
-    <main className="spec-diff-page" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
-      <header style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-        <h1 style={{ margin: 0 }}>
-          Spec diff{" "}
+    // R2-B29 (option a): the page now uses the app's light-theme tokens
+    // for cross-screen consistency. The `.diff-pane` keeps its own
+    // background/foreground via CSS so the diff itself reads as an
+    // intentional embedded code block, not a different app.
+    <main className="spec-diff-page">
+      <header className="spec-diff-header">
+        <h1 className="spec-diff-title">
+          Spec diff
           {from !== null && to !== null ? (
-            <span style={{ color: "#94a3b8", fontWeight: 400 }}>
-              · v{from} → v{to}
-            </span>
+            <>
+              {" "}
+              {/* R2-B28: render the version labels with identical
+                  styling on both sides (same color + weight, no italic).
+                  Previously the inline span was a single muted block
+                  which made `v1 → current` read asymmetrically. */}
+              <span className="spec-diff-title-versions">
+                ·{" "}
+                <span className="spec-diff-version-label">
+                  {labelFor(from)}
+                </span>{" "}
+                →{" "}
+                <span className="spec-diff-version-label">
+                  {labelFor(to)}
+                </span>
+              </span>
+            </>
           ) : null}
         </h1>
-        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ color: "#94a3b8" }}>From</span>
-          <select
-            value={from ?? ""}
-            onChange={(e) => setFrom(Number(e.target.value))}
-            aria-label="Compare from version"
+        <div className="spec-diff-controls">
+          <label className="spec-diff-label">
+            <span>From</span>
+            <select
+              value={from === null ? "" : encodeVersionParam(from)}
+              onChange={(e) => setFrom(parseVersionId(e.target.value))}
+              aria-label="Compare from version"
+              data-testid="spec-diff-from"
+            >
+              {dropdownOptions.map((v) => (
+                <option key={String(v)} value={encodeVersionParam(v)}>
+                  {labelFor(v)}
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* R2-B27: swap From and To. Disabled when either side is
+              unset (shouldn't happen post-load, but defensive). */}
+          <button
+            type="button"
+            className="spec-diff-swap"
+            data-testid="spec-diff-swap"
+            aria-label="Swap From and To versions"
+            title="Swap versions"
+            onClick={handleSwap}
+            disabled={from === null || to === null}
           >
-            {versions.map((v) => (
-              <option key={v} value={v}>
-                v{v}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ color: "#94a3b8" }}>To</span>
-          <select
-            value={to ?? ""}
-            onChange={(e) => setTo(Number(e.target.value))}
-            aria-label="Compare to version"
+            ⇄
+          </button>
+          <label className="spec-diff-label">
+            <span>To</span>
+            <select
+              value={to === null ? "" : encodeVersionParam(to)}
+              onChange={(e) => setTo(parseVersionId(e.target.value))}
+              aria-label="Compare to version"
+              data-testid="spec-diff-to"
+            >
+              {dropdownOptions.map((v) => (
+                <option key={String(v)} value={encodeVersionParam(v)}>
+                  {labelFor(v)}
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* R2-B26: show-only-changes toggle. Default unchecked →
+              preserves prior behavior (full diff with all context).
+              R3-B45: re-styled as a clearly-toggle button — outlined
+              when inactive, filled-blue when active. `aria-pressed`
+              is already set so screen readers + assistive tech read
+              the toggle state correctly.
+              R3-B47: when disabled (no diff to filter), surface a
+              title tooltip explaining why. */}
+          <button
+            type="button"
+            className="spec-diff-fold-toggle"
+            data-testid="spec-diff-fold-toggle"
+            aria-pressed={onlyChanges}
+            onClick={() => setOnlyChanges((v) => !v)}
+            disabled={!diff || isNoop}
+            title={!diff || isNoop ? "No diff to filter" : undefined}
           >
-            {versions.map((v) => (
-              <option key={v} value={v}>
-                v{v}
-              </option>
-            ))}
-          </select>
-        </label>
+            {onlyChanges ? "Show full diff" : "Show only changes"}
+          </button>
+        </div>
       </header>
 
-      {diffError ? (
-        <p role="alert" style={{ color: "#fca5a5" }}>
+      {/* R3-B44: collapse the previously-stacked empty-state messages
+          into a single block when there are no archived versions. The
+          `!hasArchived` case used to render BOTH the spec-diff-empty
+          paragraph AND the diff-noop-message (since from === to ===
+          "current"), which read as two separate empties. We now show
+          one unified message and an Edit-spec CTA (R3-B46). */}
+      {!hasArchived ? (
+        <div className="spec-diff-empty-block" data-testid="spec-diff-empty">
+          <p className="spec-diff-empty">
+            No archived spec versions for this session yet. Spec versions
+            are created each time the spec is edited and saved through
+            the spec-review flow.
+          </p>
+          <p className="spec-diff-empty-cta">
+            <a
+              className="spec-diff-empty-cta-link"
+              data-testid="spec-diff-edit-spec-cta"
+              href={`?view=spec-review&spec=${encodeURIComponent(sessionId)}`}
+            >
+              Edit spec to create a version
+            </a>
+          </p>
+        </div>
+      ) : isNoop ? (
+        <p
+          className="diff-noop-message"
+          data-testid="diff-noop-message"
+        >
+          Pick two different versions to see a diff.
+        </p>
+      ) : null}
+
+      {diffError && !isNoop ? (
+        <p className="spec-diff-error" role="alert">
           Failed to load diff: {diffError}
         </p>
       ) : null}
 
-      {loading && !diff ? <p>Loading diff…</p> : null}
+      {loading && !diff && !isNoop ? <p>Loading diff…</p> : null}
 
-      {diff ? (
+      {diff && !isNoop ? (
         <pre
-          className="diff-pane"
-          aria-label={`Spec diff v${diff.from_version} to v${diff.to_version}`}
-          style={{ flex: 1, margin: 0 }}
+          className="diff-pane spec-diff-pane"
+          aria-label={`Spec diff ${labelFor(diff.from_version)} to ${labelFor(diff.to_version)}`}
         >
-          {lines.length === 0 ? (
-            <span style={{ color: "#94a3b8" }}>
-              (no textual differences between v{diff.from_version} and v
-              {diff.to_version})
+          {entries.length === 0 ? (
+            <span className="spec-diff-pane-empty">
+              (no textual differences between {labelFor(diff.from_version)} and{" "}
+              {labelFor(diff.to_version)})
             </span>
           ) : (
-            lines.map((line, idx) => (
-              <span
-                key={idx}
-                className={classFor(line.op)}
-                style={{ display: "block" }}
-              >
-                {prefixFor(line.op)} {line.text}
-              </span>
-            ))
+            entries.map((entry, idx) => {
+              if (entry.op === "fold") {
+                return (
+                  <span
+                    key={`fold-${idx}`}
+                    className="diff-fold"
+                    data-testid="diff-fold"
+                  >
+                    {`… ${entry.count} unchanged line${entry.count === 1 ? "" : "s"} …`}
+                  </span>
+                );
+              }
+              return (
+                <span key={idx} className={`diff-line ${classFor(entry.op)}`}>
+                  {prefixFor(entry.op)} {entry.text}
+                </span>
+              );
+            })
           )}
         </pre>
       ) : null}

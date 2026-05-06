@@ -152,9 +152,14 @@ export function AddFeatureModal({
           </button>
         </header>
 
-        <label>
-          <span>Name</span>
+        {/* B13: plain block-level <label> elements above each input
+            instead of floating labels — labels were getting visually
+            clipped by the previous CSS. The label text now sits above
+            its control with explicit margin. */}
+        <div className="add-feature-field">
+          <label htmlFor="add-feature-name">Name</label>
           <input
+            id="add-feature-name"
             ref={nameInputRef}
             type="text"
             data-testid="add-feature-name"
@@ -163,11 +168,12 @@ export function AddFeatureModal({
             placeholder="e.g. Markdown rendering"
             required
           />
-        </label>
+        </div>
 
-        <label>
-          <span>Feature id</span>
+        <div className="add-feature-field">
+          <label htmlFor="add-feature-id">Feature id</label>
           <input
+            id="add-feature-id"
             type="text"
             data-testid="add-feature-id"
             value={featureIdOverride || computedFeatureId}
@@ -183,11 +189,12 @@ export function AddFeatureModal({
               Id "{computedFeatureId}" is already in use.
             </span>
           )}
-        </label>
+        </div>
 
-        <label>
-          <span>Group</span>
+        <div className="add-feature-field">
+          <label htmlFor="add-feature-group">Group</label>
           <select
+            id="add-feature-group"
             data-testid="add-feature-group"
             value={groupId}
             onChange={(e) => setGroupId(e.target.value)}
@@ -199,41 +206,47 @@ export function AddFeatureModal({
               </option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label>
-          <span>Description</span>
+        <div className="add-feature-field">
+          <label htmlFor="add-feature-description">Description</label>
           <textarea
+            id="add-feature-description"
             data-testid="add-feature-description"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             rows={3}
             placeholder="What does this feature do?"
           />
-        </label>
+        </div>
 
-        <label>
-          <span>Evidence kinds (comma-separated)</span>
+        <div className="add-feature-field">
+          <label htmlFor="add-feature-evidence">
+            Evidence kinds (comma-separated)
+          </label>
           <input
+            id="add-feature-evidence"
             type="text"
             data-testid="add-feature-evidence"
             value={evidenceKinds}
             onChange={(e) => setEvidenceKinds(e.target.value)}
             placeholder="e.g. BrowserJourney, RepoTestCheck"
           />
-        </label>
+        </div>
 
-        <label>
-          <span>Acceptance</span>
+        <div className="add-feature-field">
+          <label htmlFor="add-feature-acceptance">Acceptance</label>
           <textarea
+            id="add-feature-acceptance"
             data-testid="add-feature-acceptance"
             value={acceptance}
             onChange={(e) => setAcceptance(e.target.value)}
             rows={2}
             placeholder="Concrete pass/fail criterion (optional)"
           />
-        </label>
+        </div>
 
+        {/* B14: right-aligned action group; Cancel before Add to spec. */}
         <footer className="add-feature-modal-actions">
           <button
             type="button"
@@ -244,6 +257,7 @@ export function AddFeatureModal({
           </button>
           <button
             type="submit"
+            className="primary"
             data-testid="add-feature-submit"
             disabled={!canSubmit}
           >
