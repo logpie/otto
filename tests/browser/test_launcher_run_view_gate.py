@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from typing import Any
 
 import pytest
@@ -755,6 +756,129 @@ def test_group_actions_open_filtered_logs_and_diff(
     page.wait_for_selector("text=Scope: group foundation", timeout=10_000)
     assert page.get_by_text("Scope: group foundation").is_visible()
     assert page.get_by_text("src/App.tsx").is_visible()
+
+
+def test_run_drawer_group_diff_click_uses_real_run_view_diff_route(
+    mc_backend: Any,
+    page: Any,
+) -> None:
+    """Group Diff must exercise the real run-view diff route, including untracked files."""
+
+    project_dir = mc_backend.project_dir
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/foundation", ".worktrees/build-foundation", "main"],
+        cwd=project_dir,
+        check=True,
+    )
+    worktree = project_dir / ".worktrees" / "build-foundation"
+    sid = "2026-05-06-120000-real-diff"
+    session = worktree / "otto_logs" / "sessions" / sid
+    (session / "spec").mkdir(parents=True)
+    (session / "spec" / "spec.json").write_text(
+        json.dumps(
+            {
+                "intent": "build a micro twitter",
+                "project_kind": "webapp",
+                "groups": [
+                    {
+                        "id": "foundation",
+                        "name": "Foundation",
+                        "owned_paths": ["src/App.tsx"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app_file = worktree / "src" / "App.tsx"
+    app_file.parent.mkdir(parents=True)
+    app_file.write_text("export default function App() { return <main>Microfeed</main>; }\n", encoding="utf-8")
+
+    project = _project(str(project_dir))
+    item = _live_item(run_id=sid)
+    item["project_dir"] = str(project_dir)
+    item["cwd"] = str(worktree)
+    item["worktree"] = ".worktrees/build-foundation"
+    item["branch"] = "build/foundation"
+    run_view = _run_view(sid)
+    run_view.update(
+        {
+            "status": "running",
+            "verdict": "partial",
+            "intent": "build a micro twitter",
+            "groups": [
+                {
+                    "id": "foundation",
+                    "name": "Foundation",
+                    "status": "in_progress",
+                    "stories_passed": 0,
+                    "stories_total": 1,
+                    "feature_ids": ["feed"],
+                    "branch": "build/foundation",
+                    "owned_paths": ["src/App.tsx"],
+                    "dependencies": [],
+                    "cost_usd": 0,
+                    "wall_s": 0,
+                    "repair_attempts": 0,
+                }
+            ],
+            "features": [
+                {
+                    "feature_id": "feed",
+                    "name": "Timeline feed",
+                    "group_id": "foundation",
+                    "verdict": "pending",
+                    "stories_passed": 0,
+                    "stories_total": 1,
+                    "stories": [],
+                    "findings": [],
+                    "repair_attempts": 0,
+                }
+            ],
+        }
+    )
+
+    def projects(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "launcher_enabled": True,
+                    "projects_root": "/tmp/managed",
+                    "current": project,
+                    "projects": [project],
+                }
+            ),
+        )
+
+    def state(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_state(project, live_items=[item], watcher_running=True)),
+        )
+
+    def run_detail(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(run_view))
+
+    page.route(f"**/api/run-view/{sid}", run_detail)
+    page.route("**/api/projects", projects)
+    page.route("**/api/state", state)
+
+    page.goto(mc_backend.url, wait_until="networkidle")
+    page.get_by_test_id("task-card-build-a-micro-twitter").click()
+    page.wait_for_selector('[data-testid="run-drawer"]', timeout=10_000)
+    page.get_by_test_id("group-list").locator("summary").click()
+    page.get_by_test_id("group-diff-foundation").click()
+
+    page.wait_for_selector('[data-testid="run-resource-panel-diff"]', timeout=10_000)
+    page.wait_for_selector("text=Untracked files:", timeout=10_000)
+    assert page.get_by_text("Diff for Foundation").is_visible()
+    assert page.get_by_text("src/App.tsx").is_visible()
+    assert page.get_by_text("+export default function App()").is_visible()
+    assert page.get_by_text("No diff is available yet").count() == 0
+    assert page.get_by_text("No changes from base").count() == 0
 
 
 def test_new_run_queues_from_web_and_starts_runner(

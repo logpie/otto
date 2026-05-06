@@ -11,7 +11,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -145,6 +147,110 @@ def test_web_as_user_scenario_registry_completeness() -> None:
         assert sid in web_as_user.SCENARIOS, f"TIER_NIGHTLY references unknown scenario {sid!r}"
     for sid in web_as_user.TIER_WEEKLY:
         assert sid in web_as_user.SCENARIOS, f"TIER_WEEKLY references unknown scenario {sid!r}"
+
+
+def test_web_as_user_evidence_selectors_cover_current_run_drawer() -> None:
+    """True-web evidence checks must target the current RunDrawer controls/panels."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    assert '[data-testid="run-quick-action-logs"]' in web_as_user.MC_EVIDENCE_BUTTON_SELECTORS["logs"]
+    assert '[data-testid="run-quick-action-diff"]' in web_as_user.MC_EVIDENCE_BUTTON_SELECTORS["diff"]
+    assert '[data-testid="run-quick-action-artifacts"]' in web_as_user.MC_EVIDENCE_BUTTON_SELECTORS["artifacts"]
+    assert '[data-testid="run-resource-panel-logs"]' in web_as_user.MC_EVIDENCE_PANEL_SELECTORS["logs"]
+    assert '[data-testid="run-resource-panel-diff"]' in web_as_user.MC_EVIDENCE_PANEL_SELECTORS["diff"]
+    assert '[data-testid="run-resource-panel-artifacts"]' in web_as_user.MC_EVIDENCE_PANEL_SELECTORS["artifacts"]
+    assert '[data-testid="run-drawer"]' not in web_as_user.MC_EVIDENCE_PANEL_SELECTORS["diff"]
+    assert '[data-testid="run-list-detail-drawer"]' not in web_as_user.MC_EVIDENCE_PANEL_SELECTORS["logs"]
+
+
+def test_web_as_user_honors_scenario_returned_failure(monkeypatch, tmp_path: Path) -> None:
+    """A scenario returning FAIL/INFRA must not be wrapped as PASS."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    class DummyBackend:
+        port = 12345
+        url = "http://127.0.0.1:12345"
+
+        def stop(self) -> None:
+            return None
+
+    @contextmanager
+    def fake_project() -> Iterator[Path]:
+        project = tmp_path / "project"
+        project.mkdir()
+        yield project
+
+    def returned_failure(ctx: object) -> object:
+        return web_as_user.ScenarioRunResult(
+            outcome="FAIL",
+            note="scenario-specific failure",
+            duration_s=0.0,
+            failures=[],
+        )
+
+    monkeypatch.setattr(web_as_user, "DEFAULT_ARTIFACT_ROOT", tmp_path / "artifacts")
+    monkeypatch.setattr(web_as_user, "_throwaway_project", fake_project)
+    monkeypatch.setattr(web_as_user, "_start_otto_web_in_process", lambda _project, _artifact: DummyBackend())
+    monkeypatch.setattr(web_as_user, "artifact_mine_pass", lambda _project, _failures: None)
+
+    scenario = web_as_user.Scenario(
+        id="WX",
+        description="returned failure regression",
+        tier="nightly",
+        estimated_cost=0.0,
+        estimated_seconds=0,
+        needs_product_verification=False,
+        target_recordings=[],
+        run_fn=returned_failure,
+    )
+
+    outcome = web_as_user.run_one_scenario(
+        scenario,
+        run_id="test-run",
+        provider="claude",
+        dry_run=False,
+        user_behavior="off",
+        user_seed=None,
+    )
+
+    assert outcome.outcome == "FAIL"
+    assert outcome.note == "scenario-specific failure"
+
+
+def test_web_as_user_summary_treats_infra_as_nonzero(tmp_path: Path) -> None:
+    """INFRA is not a green test run unless the caller handles it explicitly."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    exit_code = web_as_user.print_summary(
+        "test-run",
+        [
+            web_as_user.ScenarioOutcome(
+                scenario_id="WX",
+                description="infra regression",
+                outcome="INFRA",
+                note="rate limited",
+                artifact_dir=tmp_path,
+                wall_duration_s=0.0,
+            )
+        ],
+    )
+
+    assert exit_code == 1
 
 
 def test_web_as_user_semantic_audit_flags_obvious_false_confidence() -> None:

@@ -74,6 +74,49 @@ ScenarioStatus = Literal["PASS", "FAIL", "INFRA"]
 FailureClassification = Literal["INFRA", "FAIL"]
 UserBehaviorMode = Literal["off", "mc-realistic", "mc-stress"]
 
+MC_EVIDENCE_BUTTON_SELECTORS: dict[str, list[str]] = {
+    "logs": [
+        '[data-testid="run-quick-action-logs"]',
+        '[data-testid="open-logs-button"]',
+        '[data-testid="run-detail-open-logs-button"]',
+    ],
+    "diff": [
+        '[data-testid="run-quick-action-diff"]',
+        '[data-testid="open-diff-button"]',
+        '[data-testid="proof-open-diff-button"]',
+    ],
+    "artifacts": [
+        '[data-testid="run-quick-action-artifacts"]',
+        '[data-testid="open-artifacts-button"]',
+        '[data-testid="proof-open-artifacts-button"]',
+    ],
+    "proof": [
+        '[data-testid="run-quick-action-proof"]',
+        '[data-testid="open-proof-button"]',
+    ],
+}
+
+MC_EVIDENCE_PANEL_SELECTORS: dict[str, list[str]] = {
+    "logs": [
+        '[data-testid="run-resource-panel-logs"]',
+        '[data-testid="run-log-pane"]',
+        '[data-testid="logs-pane"]',
+    ],
+    "diff": [
+        '[data-testid="run-resource-panel-diff"]',
+        '[data-testid="diff-pane"]',
+    ],
+    "artifacts": [
+        '[data-testid="run-resource-panel-artifacts"]',
+        '[data-testid^="artifact-list-item-"]',
+        '[data-testid="artifact-download"]',
+        '[data-testid="artifact-image"]',
+    ],
+    "proof": [
+        '[data-testid="proof-pane"]',
+    ],
+}
+
 
 # ---------------------------------------------------------------------------
 # Tier mappings (Phase 5C)
@@ -236,6 +279,7 @@ class ScenarioContext:
     user_seed: Optional[int] = None
     web_port: Optional[int] = None
     web_url: Optional[str] = None
+    backend: Any = None
 
 
 @dataclass
@@ -664,6 +708,78 @@ def _mc_click_first(
     return None
 
 
+def _mc_visible_selector(page: Any, selectors: list[str]) -> Optional[str]:
+    for selector in selectors:
+        try:
+            loc = page.locator(selector).first
+            if loc.count() > 0 and loc.is_visible():
+                return selector
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _mc_wait_for_visible_selector(
+    page: Any,
+    selectors: list[str],
+    *,
+    timeout_s: float = 6.0,
+) -> Optional[str]:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        visible = _mc_visible_selector(page, selectors)
+        if visible:
+            return visible
+        time.sleep(0.2)
+    return _mc_visible_selector(page, selectors)
+
+
+def _mc_assert_evidence_panel(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    kind: str,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+    hard: bool = True,
+    clicked_selector: Optional[str] = None,
+) -> bool:
+    """Require the specific evidence surface requested by a real user action."""
+    if kind == "proof" and clicked_selector == '[data-testid="run-quick-action-proof"]':
+        try:
+            pages = getattr(page.context, "pages", [])
+            if len(pages) > 1:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        failures.fail("proof quick action did not open a proof packet page")
+        return False
+    selectors = MC_EVIDENCE_PANEL_SELECTORS.get(kind, [])
+    if not selectors:
+        return True
+    _mc_wait_for_visible_selector(page, selectors, timeout_s=6.0)
+    matched = _mc_check_expectation(
+        page,
+        ctx,
+        phase=phase,
+        action=f"inspect {kind}",
+        expectation=f"Opening {kind} shows the {kind}-specific evidence panel, not just the existing drawer.",
+        any_visible=selectors,
+        log_fn=log_fn,
+        failures=failures,
+        hard=hard,
+    )
+    if kind == "diff":
+        deadline = time.monotonic() + 8.0
+        while "Loading diff..." in _mc_visible_text(page) and time.monotonic() < deadline:
+            time.sleep(0.4)
+        if "Loading diff..." in _mc_visible_text(page):
+            failures.fail("diff evidence panel stayed on Loading diff... instead of resolving")
+            matched = False
+    return matched
+
+
 def _mc_layout_snapshot(
     page: Any,
     ctx: ScenarioContext,
@@ -736,6 +852,10 @@ def _mc_scroll_visible_panel(page: Any, ctx: ScenarioContext, *, phase: str) -> 
         result = page.evaluate(
             """() => {
               const selectors = [
+                '[data-testid="run-resource-panel-logs"]',
+                '[data-testid="run-resource-panel-diff"]',
+                '[data-testid="run-resource-panel-artifacts"]',
+                '[data-testid="run-log-pane"]',
                 '[data-testid="logs-pane"]',
                 '[data-testid="diff-pane"]',
                 '[data-testid="proof-pane"]',
@@ -820,8 +940,10 @@ def _mc_inspect_run_surface(
             any_visible=[
                 '[data-testid="run-list-detail-drawer"]',
                 '[data-testid="run-drawer"]',
-                '[data-testid="open-logs-button"]',
-                '[data-testid="open-proof-button"]',
+                *MC_EVIDENCE_BUTTON_SELECTORS["logs"],
+                *MC_EVIDENCE_BUTTON_SELECTORS["diff"],
+                *MC_EVIDENCE_BUTTON_SELECTORS["artifacts"],
+                *MC_EVIDENCE_BUTTON_SELECTORS["proof"],
             ],
             log_fn=log_fn,
             failures=failures,
@@ -829,14 +951,14 @@ def _mc_inspect_run_surface(
         _mc_inspect_group_evidence(page, ctx, phase=phase, log_fn=log_fn, failures=failures)
 
     buttons = [
-        ("logs", ['[data-testid="open-logs-button"]', '[data-testid="run-quick-action-logs"]', '[data-testid="run-detail-open-logs-button"]']),
-        ("proof", ['[data-testid="open-proof-button"]', '[data-testid="run-quick-action-proof"]']),
-        ("diff", ['[data-testid="open-diff-button"]', '[data-testid="proof-open-diff-button"]']),
-        ("artifacts", ['[data-testid="open-artifacts-button"]', '[data-testid="proof-open-artifacts-button"]']),
+        ("logs", MC_EVIDENCE_BUTTON_SELECTORS["logs"]),
+        ("proof", MC_EVIDENCE_BUTTON_SELECTORS["proof"]),
+        ("diff", MC_EVIDENCE_BUTTON_SELECTORS["diff"]),
+        ("artifacts", MC_EVIDENCE_BUTTON_SELECTORS["artifacts"]),
         ("history", ['[data-testid="open-history-button"]', '[data-testid="mission-history-button"]']),
     ]
     rng.shuffle(buttons)
-    limit = 1 if ctx.user_behavior == "mc-realistic" else 3
+    limit = len(buttons)
     clicked_any = False
     for name, selectors in buttons[:limit]:
         clicked = _mc_click_first(page, selectors, log_fn=log_fn)
@@ -855,25 +977,35 @@ def _mc_inspect_run_surface(
             url=page.url,
             screenshot=screenshot.name if screenshot else None,
         )
-        expected_selectors = {
-            "logs": ['[data-testid="logs-pane"]', "pre", '[data-testid="run-drawer"]', '[data-testid="run-list-detail-drawer"]'],
-            "proof": ['[data-testid="proof-pane"]', '[data-testid="run-drawer"]', '[data-testid="run-list-detail-drawer"]'],
-            "diff": ['[data-testid="diff-pane"]', '[data-testid="run-drawer"]', '[data-testid="run-list-detail-drawer"]'],
-            "artifacts": ['[data-testid="artifact-download"]', '[data-testid="artifact-image"]', '[data-testid="run-drawer"]', '[data-testid="run-list-detail-drawer"]'],
-            "history": ['[data-testid="history-pagination"]', '[data-testid^="history-row-activator-"]', '[data-testid="run-drawer"]', '[data-testid="run-list-detail-drawer"]'],
-        }
-        _mc_check_expectation(
-            page,
-            ctx,
-            phase=phase,
-            action=f"inspect {name}",
-            expectation=f"The {name} view gives visible feedback or keeps the run detail visible.",
-            any_visible=expected_selectors.get(name, []),
-            log_fn=log_fn,
-            failures=failures,
-        )
+        if name in MC_EVIDENCE_PANEL_SELECTORS:
+            _mc_assert_evidence_panel(
+                page,
+                ctx,
+                phase=phase,
+                kind=name,
+                log_fn=log_fn,
+                failures=failures,
+                hard=True,
+                clicked_selector=clicked,
+            )
+        else:
+            _mc_check_expectation(
+                page,
+                ctx,
+                phase=phase,
+                action=f"inspect {name}",
+                expectation=f"The {name} view gives visible feedback or keeps the run detail visible.",
+                any_visible=[
+                    '[data-testid="history-pagination"]',
+                    '[data-testid^="history-row-activator-"]',
+                    '[data-testid="run-drawer"]',
+                    '[data-testid="run-list-detail-drawer"]',
+                ],
+                log_fn=log_fn,
+                failures=failures,
+            )
     if opened and not clicked_any:
-        failures.note(f"mc-user {phase}: opened run detail but no logs/proof/diff/artifact controls were available")
+        failures.fail(f"mc-user {phase}: opened run detail but no logs/proof/diff/artifact controls were available")
 
 
 def _mc_inspect_group_evidence(
@@ -1446,26 +1578,35 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                     except Exception as exc:  # noqa: BLE001
                         failures.note(f"task-card click failed: {exc}")
                     time.sleep(1)
-                # Walk tabs
-                for tab_name, testid in [
-                    ("Logs", "open-logs-button"),
-                    ("Diff", "open-diff-button"),
-                    ("Proof", "open-proof-button"),
-                    ("Artifacts", "open-artifacts-button"),
+                # Walk evidence controls. A successful build must expose real
+                # evidence surfaces; screenshots alone are not a user oracle.
+                for tab_name, kind in [
+                    ("Logs", "logs"),
+                    ("Diff", "diff"),
+                    ("Proof", "proof"),
+                    ("Artifacts", "artifacts"),
                 ]:
-                    btn = page.locator(f'[data-testid="{testid}"]')
-                    if btn.count() == 0:
-                        failures.note(f"tab button {tab_name} ({testid}) not present")
+                    clicked = _mc_click_first(
+                        page,
+                        MC_EVIDENCE_BUTTON_SELECTORS[kind],
+                        log_fn=_log,
+                        timeout_ms=5_000,
+                    )
+                    if not clicked:
+                        failures.fail(f"evidence control {tab_name} missing or disabled after terminal state")
                         continue
-                    try:
-                        if not btn.is_enabled():
-                            failures.note(f"tab button {tab_name} disabled — skipped")
-                            continue
-                        btn.click(timeout=5_000)
-                        time.sleep(1)
-                        _safe_screenshot(page, artifact_dir, f"09-tab-{tab_name.lower()}")
-                    except Exception as exc:  # noqa: BLE001
-                        failures.fail(f"tab {tab_name} interaction failed: {exc}")
+                    time.sleep(1)
+                    _safe_screenshot(page, artifact_dir, f"09-tab-{tab_name.lower()}")
+                    _mc_assert_evidence_panel(
+                        page,
+                        ctx,
+                        phase=f"final-inspector-{kind}",
+                        kind=kind,
+                        log_fn=_log,
+                        failures=failures,
+                        hard=True,
+                        clicked_selector=clicked,
+                    )
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"walking inspector tabs raised: {exc}")
 
@@ -2875,34 +3016,13 @@ def _run_w13(ctx: ScenarioContext) -> ScenarioRunResult:
             # ---------- Step 3: kill the backend mid-run ----------
             _log("Step 3: kill in-process backend (simulate outage)")
             outage_at = time.monotonic()
-            # The harness wired the backend handle via start_backend() and
-            # passed only url/port through ctx. We need to find the backend
-            # to call stop(). We use the parent harness's known location:
-            # run_one_scenario keeps `backend` in its local — we can't reach
-            # it. Instead, we'll spawn a NEW backend on a different port
-            # AFTER closing the current one via http (no API for shutdown).
-            #
-            # Simpler approach: bind a sigterm to the current process group?
-            # That'd kill ourselves. Instead: import and use the same
-            # start_backend; orchestrate teardown via a side-channel.
-            #
-            # PRACTICAL: since start_backend runs uvicorn in a daemon thread,
-            # we can't shut it down without the handle. We simulate "outage"
-            # by closing the browser's current context's TCP keepalive and
-            # opening a fresh page after starting backend_b on a new port.
-            # For W13's purposes, what matters is that the SECOND otto-web
-            # instance (a restart) sees the still-in-flight run.
-            #
-            # NOTE TO ORCHESTRATOR: real outage simulation requires
-            # plumbing the backend handle into ctx. This is logged as
-            # W13-INFRA-1.
-            failures.note(
-                "harness plumbing limitation: ScenarioContext does not expose the "
-                "backend handle, so a true SIGTERM-style stop cannot be issued from "
-                "within the scenario — we instead spin up a SECOND backend against "
-                "the same project_dir and verify the run survives a fresh page load. "
-                "Tracked as W13-INFRA-1."
-            )
+            if ctx.backend is None or not hasattr(ctx.backend, "stop"):
+                failures.fail("W13 cannot simulate outage because ScenarioContext.backend is missing")
+            else:
+                try:
+                    ctx.backend.stop()
+                except Exception as exc:  # noqa: BLE001
+                    failures.fail(f"failed to stop in-process backend for outage simulation: {exc}")
             time.sleep(2)  # let the running build accrue some progress
 
             _log("Step 3b: start backend_b on a new port against same project")
@@ -2950,28 +3070,28 @@ def _run_w13(ctx: ScenarioContext) -> ScenarioRunResult:
                     if cards.count() > 0:
                         cards.first.click(timeout=5_000)
                         time.sleep(1)
-                    for label, testid in [
-                        ("logs", "open-logs-button"),
-                        ("diff", "open-diff-button"),
-                        ("proof", "open-proof-button"),
-                    ]:
-                        btn = page.locator(f'[data-testid="{testid}"]')
-                        if btn.count() == 0:
-                            failures.note(f"drawer {label} button missing post-restart")
+                    for label in ["logs", "diff", "proof"]:
+                        clicked = _mc_click_first(
+                            page,
+                            MC_EVIDENCE_BUTTON_SELECTORS[label],
+                            log_fn=_log,
+                            timeout_ms=5_000,
+                        )
+                        if not clicked:
+                            failures.fail(f"drawer {label} button missing or disabled post-restart")
                             continue
-                        try:
-                            if not btn.is_enabled():
-                                failures.note(f"drawer {label} disabled post-restart")
-                                continue
-                            btn.click(timeout=5_000)
-                            time.sleep(1)
-                            _safe_screenshot(
-                                page, artifact_dir, f"05-drawer-{label}"
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            failures.fail(
-                                f"drawer {label} click failed post-restart: {exc}"
-                            )
+                        time.sleep(1)
+                        _safe_screenshot(page, artifact_dir, f"05-drawer-{label}")
+                        _mc_assert_evidence_panel(
+                            page,
+                            ctx,
+                            phase=f"post-restart-{label}",
+                            kind=label,
+                            log_fn=_log,
+                            failures=failures,
+                            hard=True,
+                            clicked_selector=clicked,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     failures.fail(f"walking drawers post-restart failed: {exc}")
 
@@ -2994,6 +3114,8 @@ def _run_w13(ctx: ScenarioContext) -> ScenarioRunResult:
                     final_outcome is not None,
                     f"run {running_run_id!r} never reached terminal post-restart in {W13_BUILD_TIMEOUT_S}s",
                 )
+                if final_outcome and final_outcome != "success":
+                    failures.fail(f"run {running_run_id!r} terminal_outcome={final_outcome!r} post-restart (expected success)")
 
             # ---------- Step 8: actions not lost (event log preserved) ----------
             url_for_events = (
@@ -6004,12 +6126,20 @@ def run_one_scenario(
             user_seed=user_seed,
             web_port=getattr(backend, "port", None),
             web_url=getattr(backend, "url", None),
+            backend=backend,
         )
         _record_mc_user_action(ctx, phase="scenario-start", action="config")
+        result: Optional[ScenarioRunResult] = None
+        note = "scenario did not run"
         try:
             if backend is not None:
-                scenario.run_fn(ctx)
-            note = "scenario phases completed"
+                result = scenario.run_fn(ctx)
+                note = result.note or "scenario phases completed"
+                for failure in result.failures:
+                    if failure not in failures.failures:
+                        failures.fail(failure)
+            else:
+                note = "backend unavailable; scenario not run"
         except NotImplementedError as exc:
             note = f"stub: {exc}"
             failures.fail(f"NotImplementedError: {exc}")
@@ -6029,13 +6159,18 @@ def run_one_scenario(
                 except Exception as exc:  # noqa: BLE001
                     failures.note(f"backend.stop raised: {exc}")
 
-    if failures.failures:
-        classification = classify_failure(failures)
+    explicit_outcome = result.outcome if result is not None else None
+    if failures.failures or (explicit_outcome is not None and explicit_outcome != "PASS"):
+        classification = (
+            explicit_outcome
+            if explicit_outcome in ("FAIL", "INFRA")
+            else classify_failure(failures)
+        )
         return ScenarioOutcome(
             scenario_id=scenario.id,
             description=scenario.description,
             outcome=classification,
-            note=failures.summary(),
+            note=failures.summary() if failures.failures else note,
             artifact_dir=artifact_dir,
             wall_duration_s=time.monotonic() - started,
             failures=list(failures.failures),
@@ -6075,6 +6210,7 @@ def print_summary(run_id: str, outcomes: list[ScenarioOutcome]) -> int:
             f"{int(outcome.wall_duration_s):>4}s     {outcome.note}"
         )
     failed = [o for o in outcomes if o.outcome == "FAIL"]
+    not_passed = [o for o in outcomes if o.outcome != "PASS"]
     print()
     print(
         f"Totals: {len(outcomes)} scenarios, "
@@ -6082,7 +6218,7 @@ def print_summary(run_id: str, outcomes: list[ScenarioOutcome]) -> int:
         f"{len(failed)} FAIL, "
         f"{sum(1 for o in outcomes if o.outcome == 'INFRA')} INFRA"
     )
-    return 1 if failed else 0
+    return 1 if not_passed else 0
 
 
 # ---------------------------------------------------------------------------
@@ -6136,10 +6272,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--user-behavior",
         choices=["off", "mc-realistic", "mc-stress"],
-        default="off",
+        default="mc-realistic",
         help=(
-            "optional seeded Mission Control user exploration: off, "
-            "mc-realistic, or mc-stress"
+            "seeded Mission Control user exploration: mc-realistic, "
+            "mc-stress, or off"
         ),
     )
     parser.add_argument(
@@ -6224,7 +6360,7 @@ def main(argv: list[str]) -> int:
             passed=outcome.outcome == "PASS",
         )
         print(f"[{scenario.id}] {outcome.outcome}: {outcome.note}", flush=True)
-        if args.bail_fast and outcome.outcome == "FAIL":
+        if args.bail_fast and outcome.outcome != "PASS":
             break
         if index < len(scenarios) - 1 and args.scenario_delay > 0:
             print(
