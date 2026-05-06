@@ -177,6 +177,43 @@ def test_scope_violations_allows_shared_scaffold() -> None:
     assert violations == []
 
 
+def test_scope_violations_warns_on_existing_unowned_file(tmp_path: Path) -> None:
+    """Existing config files must be declared own/shared/dependency scope."""
+    spec = _spec(
+        [
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app.py"], feature_ids=[], checks=[]),
+        ]
+    )
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+
+    violations = detect_scope_violations(
+        spec.groups[0],
+        spec,
+        ["pyproject.toml"],
+        project_root=tmp_path,
+    )
+
+    assert violations == ["pyproject.toml"]
+
+
+def test_scope_violations_allows_new_unowned_file(tmp_path: Path) -> None:
+    """New supporting files remain allowed as implicit shared scaffold."""
+    spec = _spec(
+        [
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app.py"], feature_ids=[], checks=[]),
+        ]
+    )
+
+    violations = detect_scope_violations(
+        spec.groups[0],
+        spec,
+        ["README.md"],
+        project_root=tmp_path,
+    )
+
+    assert violations == []
+
+
 def test_scope_violations_allows_shared_scaffold_extension(tmp_path: Path) -> None:
     """Microfeed bench learning: foundational files like models.py must be
     extendable by multiple slices. shared_scaffold declares this; the rule

@@ -66,6 +66,39 @@ Minimum doorway smoke:
 Doorway smoke proves the entrance works. It does not prove Otto can build or
 repair a real product; continue with a real scenario for that.
 
+## Mission Control Lifecycle Truth Smoke
+
+When testing Mission Control as a real user, run at least one live lifecycle
+smoke after the doorway smoke. The point is to verify that Web can drive Otto,
+not merely display routes.
+
+Minimum lifecycle truth checks:
+
+1. Queue a real build from Web with the intended provider. Inspect the submitted
+   request and the queued task row.
+   - The provider/model summary must not combine one provider with another
+     provider's default model. Example failure: `codex · model sonnet`.
+   - Build jobs must not expose or submit legacy controls whose flags are
+     ignored by i2p, such as `--split`, `--agentic`, or build `--rounds`.
+2. Start the queue runner from Web when that is the visible user path.
+   - The UI must show that work has actually started within a few seconds.
+   - If `otto_logs/sessions/<id>/spec/compile-agent/` contains live logs, the
+     run must not still look merely "queued".
+3. Open the run drawer/detail while the job is active.
+   - The task row story/feature count must match the compiled spec or proof.
+   - Groups and features must be visible when
+     `spec/spec.json` contains `groups[*].feature_ids`.
+   - Logs and diffs actions must either open visible evidence or show a clear
+     loading/error state. Silent clicks fail.
+4. Inspect logs before diagnosing:
+   - `otto_logs/sessions/<id>/spec/spec.json`
+   - `otto_logs/sessions/<id>/spec-state.jsonl`
+   - `otto_logs/sessions/<id>/build/**/narrative.log`
+   - `otto_logs/sessions/<id>/proof-packet.json` when present
+
+If any of these fail, classify it as a Web/API truthfulness bug unless the logs
+prove Otto itself never started.
+
 If the work under test changed Mission Control UI, also run the
 `otto-frontend-rua` product-level gate. Do not accept a component-level check
 that only proves elements exist or routes click.

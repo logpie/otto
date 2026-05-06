@@ -76,6 +76,15 @@ Minimum product-level checks:
 - Project context must be explicit after selection. A list of unknown historical
   runs without the selected project identity is a failure even if `/api/run-view`
   succeeds.
+- Web must be honest about the live Otto workflow. A run with compile/build logs
+  must not remain visually "queued"; task-row feature counts must match the
+  compiled spec/proof; group and feature rows must remain visible in blocked
+  states; logs/diff clicks must visibly open evidence or a clear error/loading
+  state; and queue dialogs must not expose controls whose submitted flags are
+  ignored by the current i2p path.
+- Provider/model routing must be self-consistent. A provider override cannot
+  inherit another provider's default model label, and the queued row/API payload
+  must match the user's selected provider.
 - Inspect the browser console and network panel during this gate. A normal
   launcher load must not issue `/api/run-view` before a project is selected,
   and must not show first-load 4xx/5xx for expected UI requests.
@@ -115,7 +124,10 @@ it correctly?" Everything below is in service of that.
   from real Otto bugs: `versions.length < 2` hid v1 forever (B27);
   history sidebar didn't refetch after save (B26); approve silently
   flipped state (B30); 404 page showed `HTTP 404 Not Found + Retry`
-  with no recovery (B19).
+  with no recovery (B19); Codex provider override displayed a Claude
+  model default; active compile logs still appeared as queued; build
+  dialogs exposed legacy flags that i2p ignored; task rows showed `0`
+  stories while the compiled spec contained real feature IDs.
 - **Don't lose user work** — destructive actions (Cancel with unsaved
   edits B31, navigate-away with dirty form, double-click submit) must
   confirm or auto-save.

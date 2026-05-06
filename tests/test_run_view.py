@@ -116,6 +116,30 @@ def test_build_run_view_legacy_session_no_artifacts(tmp_path: Path) -> None:
     assert view["findings"] == []
 
 
+def test_build_run_view_initializing_compile_agent_is_compiling(tmp_path: Path) -> None:
+    """Active compile-agent logs should not be reported as merely queued."""
+
+    session = _setup_session(tmp_path)
+    compile_dir = session / "spec" / "compile-agent"
+    compile_dir.mkdir(parents=True)
+    (compile_dir / "narrative.log").write_text("[+0:00] COMPILE starting\n", encoding="utf-8")
+
+    view = build_run_view(
+        session,
+        live_state={
+            "status": "initializing",
+            "started_at": "2026-05-04T20:00:00Z",
+            "duration_s": 42,
+        },
+    )
+
+    assert view["status"] == "compiling"
+    assert view["wall_s"] == 42.0
+    compile_stage = next(stage for stage in view["stages"] if stage["name"] == "compile")
+    assert compile_stage["status"] == "active"
+    assert compile_stage["started_at"] == "2026-05-04T20:00:00Z"
+
+
 def test_build_run_view_legacy_slices_key_maps_to_groups(tmp_path: Path) -> None:
     """Pre-A0.3 specs that use 'slices' key still produce groups in RunView."""
     spec = {

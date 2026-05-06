@@ -64,13 +64,18 @@ def build_run_view(
     else:
         verdict_field = str(verdict)
 
-    status = _derive_status(verdict_field, state_events, live_state)
+    status = _derive_status(
+        verdict_field,
+        state_events,
+        live_state,
+        session_dir=session_dir,
+    )
 
     groups = _build_groups(spec, proof, state_events, live_state)
     features = _build_features(spec, proof, live_state, state_events)
     components = _build_components(spec, proof, state_events, live_state)
     guardrails = _build_guardrails(spec, proof)
-    stages = _build_stages(state_events, live_state, spec)
+    stages = _build_stages(state_events, live_state, spec, session_dir=session_dir)
     findings = _build_findings(proof)
 
     cost_usd = float(
@@ -656,6 +661,8 @@ def _build_stages(
     state_events: list[dict[str, Any]],
     live_state: dict[str, Any] | None,
     spec: dict[str, Any] | None,
+    *,
+    session_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Emit StageView list from state events.
 
@@ -727,6 +734,16 @@ def _build_stages(
         first_ts = _first_event_ts(state_events)
         stages["compile"]["status"] = "done"
         stages["compile"]["finished_at"] = first_ts
+    elif (
+        stages["compile"]["status"] == "pending"
+        and _normalize_live_status(live_state) == "queued"
+        and session_dir is not None
+        and _has_compile_activity(session_dir)
+    ):
+        stages["compile"]["status"] = "active"
+        stages["compile"]["started_at"] = (
+            str(live_state.get("started_at") or "") if live_state else None
+        )
 
     live_status = _normalize_live_status(live_state)
     if live_status in {"interrupted", "aborted", "failed"}:
@@ -869,6 +886,8 @@ def _derive_status(
     verdict: str | None,
     state_events: list[dict[str, Any]],
     live_state: dict[str, Any] | None,
+    *,
+    session_dir: Path | None = None,
 ) -> str:
     """Compute RunStatus from verdict + events."""
     if verdict == "passed":
@@ -903,9 +922,24 @@ def _derive_status(
         }.get(last_started, "queued")
     if saw_group_started:
         return "building"
+    if (
+        live_status == "queued"
+        and not state_events
+        and session_dir is not None
+        and _has_compile_activity(session_dir)
+    ):
+        return "compiling"
     if live_status:
         return live_status
     return "queued"
+
+
+def _has_compile_activity(session_dir: Path) -> bool:
+    compile_dir = session_dir / "spec" / "compile-agent"
+    return any(
+        (compile_dir / name).exists()
+        for name in ("narrative.log", "messages.jsonl", "live.log")
+    )
 
 
 def _normalize_live_status(live_state: dict[str, Any] | None) -> str | None:

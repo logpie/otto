@@ -1058,6 +1058,9 @@ def test_new_run_queues_from_web_and_starts_runner(
 
     assert len(queue_posts) == 1
     assert queue_posts[0]["intent"].startswith("build a webapp")
+    assert "--split" not in queue_posts[0]["extra_args"]
+    assert "--agentic" not in queue_posts[0]["extra_args"]
+    assert "--rounds" not in queue_posts[0]["extra_args"]
     assert watcher_starts["count"] == 1
     assert page.get_by_test_id("run-list-queue-banner").is_visible()
 

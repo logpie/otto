@@ -22,8 +22,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+import pytest
 
-from otto.checks import run_check, run_checks
+from otto.checks import _pytest_base_command, run_check, run_checks
 from otto.spec_compile import (
     ApiProbe,
     BrowserJourney,
@@ -210,6 +211,53 @@ def test_pytest_check_imports_top_level_module_without_conftest(tmp_path: Path) 
     evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
     assert evidence.passed is True, evidence.raw
     assert evidence.raw["exit_code"] == 0
+
+
+def test_pytest_check_uses_project_venv_pytest_before_uv(tmp_path: Path) -> None:
+    venv_pytest = tmp_path / ".venv" / "bin" / "pytest"
+    venv_pytest.parent.mkdir(parents=True)
+    venv_pytest.write_text(
+        "#!/bin/sh\nprintf 'project-venv-pytest %s\\n' \"$*\"\nexit 0\n",
+        encoding="utf-8",
+    )
+    venv_pytest.chmod(0o755)
+
+    check = PytestCheck(selector="tests/test_app.py", timeout_s=30)
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+
+    assert evidence.passed is True, evidence.raw
+    assert evidence.raw["command"][0] == str(venv_pytest)
+    assert "project-venv-pytest" in evidence.raw["stdout"]
+
+
+def test_pytest_command_prefers_path_pytest_over_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_pytest = fake_bin / "pytest"
+    fake_pytest.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_pytest.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin))
+
+    assert _pytest_base_command(tmp_path, tmp_path) == [str(fake_pytest)]
+
+
+def test_pytest_command_skips_current_otto_venv_on_user_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    otto_bin = tmp_path / "otto-venv" / "bin"
+    user_bin = tmp_path / "user-bin"
+    otto_bin.mkdir(parents=True)
+    user_bin.mkdir()
+    (otto_bin / "pytest").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (user_bin / "pytest").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (otto_bin / "pytest").chmod(0o755)
+    (user_bin / "pytest").chmod(0o755)
+    monkeypatch.setattr("otto.checks.sys.executable", str(otto_bin / "python"))
+    monkeypatch.setenv("VIRTUAL_ENV", str(otto_bin.parent))
+    monkeypatch.setenv("PATH", f"{otto_bin}{os.pathsep}{user_bin}")
+
+    assert _pytest_base_command(tmp_path, tmp_path) == [str(user_bin / "pytest")]
 
 
 def test_repo_test_check_passes_pythonpath_to_subprocess(tmp_path: Path) -> None:

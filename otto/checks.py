@@ -265,11 +265,7 @@ def _run_pytest(
         selector_parts = [s for s in selector.split() if s]
         if not selector_parts:
             selector_parts = [selector]
-    # Prefer `uv run pytest` if uv exists; fall back to interpreter.
-    if _which("uv"):
-        cmd = ["uv", "run", "pytest", "-q", *selector_parts]
-    else:
-        cmd = [sys.executable, "-m", "pytest", "-q", *selector_parts]
+    cmd = [*_pytest_base_command(cwd, project_dir), "-q", *selector_parts]
     # Project-root layouts (e.g. flat `app.py` + `tests/test_x.py`) need the
     # project_dir on PYTHONPATH or `from app import …` fails at collect time.
     # `pytest` itself only auto-adds rootdir if a conftest.py is present;
@@ -295,6 +291,44 @@ def _run_pytest(
             "stderr": completed.stderr or "",
         },
     )
+
+
+def _pytest_base_command(cwd: Path, project_dir: Path) -> list[str]:
+    """Return the least-surprising pytest executable for a target project.
+
+    ``uv run pytest`` is a useful fallback for projects that manage dependencies
+    through uv, but it is the wrong default for brownfield repos that have a
+    requirements.txt and no PEP 621 dependencies: uv creates a clean temporary
+    environment and pytest fails to import installed app dependencies. Prefer
+    the target project's venv or the user's PATH first, matching what a real
+    developer and Otto's build agent would run from that checkout.
+    """
+    for root in (cwd, project_dir):
+        for relative in (".venv/bin/pytest", ".venv/Scripts/pytest.exe"):
+            candidate = root / relative
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return [str(candidate)]
+    pytest_bin = _which_user_path("pytest")
+    if pytest_bin:
+        return [pytest_bin]
+    if _which("uv"):
+        return ["uv", "run", "pytest"]
+    return [sys.executable, "-m", "pytest"]
+
+
+def _which_user_path(name: str) -> str | None:
+    """Locate a user PATH binary without preferring Otto's own venv."""
+    skip = {str(Path(sys.executable).parent)}
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env:
+        skip.add(str(Path(virtual_env) / "bin"))
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry or entry in skip:
+            continue
+        candidate = Path(entry) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 
 def _run_browser_journey(

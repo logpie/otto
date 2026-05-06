@@ -313,10 +313,26 @@ def effective_agent_model(config: dict[str, Any], agent_type: str | None = None)
     ``None = provider default``. Agent execution should use this helper so
     provider defaults do not silently drift under Otto.
     """
-    explicit = agent_model(config, agent_type)
-    if explicit:
-        return explicit
-    return provider_default_model(agent_provider(config, agent_type), agent_type)
+    cli_override = _cli_agent_override(config, "model", agent_type)
+    if cli_override:
+        return str(cli_override)
+    if agent_type:
+        per_agent = (config.get("agents", {}) or {}).get(agent_type, {}) or {}
+        if per_agent.get("model"):
+            return str(per_agent["model"])
+    provider = agent_provider(config, agent_type)
+    global_model = config.get("model")
+    if global_model and provider == _configured_global_provider(config):
+        return str(global_model)
+    return provider_default_model(provider, agent_type)
+
+
+def _configured_global_provider(config: dict[str, Any]) -> str:
+    return normalize_provider(
+        config.get("provider"),
+        default=DEFAULTS["provider"],
+        key="provider",
+    ) or DEFAULTS["provider"]
 
 
 def agent_effort(config: dict[str, Any], agent_type: str | None = None) -> str | None:

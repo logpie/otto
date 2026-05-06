@@ -1229,3 +1229,93 @@ Fast-gate addendum:
   `do not invent` / `never invent` anti-derivation wording. This was fixed in
   the prompt, preserving the existing test because the guidance matters for
   brownfield correctness.
+
+## 2026-05-06 Mission Control Live Product Audit Addendum
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Session: `2026-05-06-151701-0fa37f`
+- Task: add a manager SLA dashboard widget to an existing Flask/SQLite expense
+  portal while preserving submission, approval, saved-filter, CSV, and PDF
+  behavior.
+- Web artifacts: `/tmp/otto-live-audit-20260506/`
+- Proof packet:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-dashboard-widget-to-763c11/otto_logs/sessions/2026-05-06-151701-0fa37f/proof-packet.json`
+
+Live bugs found and fixed generically:
+- Mission Control displayed `codex · model sonnet` when the project default was
+  Claude but the user selected Codex. Root cause: provider overrides inherited a
+  global model from another provider in both config/model resolution and
+  Mission Control serialization. Fix: provider-safe model resolution now only
+  inherits a global model when the effective provider still matches the global
+  provider.
+- Web build queue payloads exposed/submitted legacy `--split`, `--agentic`, and
+  build `--rounds` controls that the current i2p path ignores. Fix: the job
+  dialog hides those controls for build, and the queue payload only sends i2p
+  phase/provider controls that are actually honored.
+- Active i2p sessions looked merely queued while compile-agent logs already
+  existed. Fix: RunView now treats compile-agent log presence as active
+  compile state before spec-state events arrive.
+- Task-board story counts showed `0` while the compiled i2p spec already had
+  grouped feature IDs. Fix: landing status derives in-flight feature counts
+  from `spec/spec.json` or proof-packet features when terminal queue summaries
+  do not have `stories_*` yet.
+- Pytest slice checks used `uv run pytest`, which created a clean env without
+  brownfield requirements and falsely blocked the Acme run even though native
+  `pytest` passed. Fix: `PytestCheck` now prefers the target project venv or
+  user PATH pytest, skipping Otto's own venv, and uses `uv run pytest` only as a
+  fallback.
+- The Acme worktree also contained a pre-existing `pyproject.toml` edit outside
+  the group's declared owned paths. Root cause: build-time scope detection only
+  warned on peer-owned paths, while pre-existing unowned files were treated as
+  invisible shared scaffold. Fix: existing unowned edits now produce scope
+  warnings unless the spec declares them as own/shared/dependency scope; newly
+  created support files remain allowed.
+
+External verifier:
+- In the Acme worktree, native verifier passed:
+  `pytest tests/test_manager_sla_widget.py tests/test_saved_filters.py::test_dashboard_filter_by_assignee`
+  -> `5 passed`.
+- Reproduced the fixed checker path outside Otto:
+  `PytestCheck` now runs `/opt/homebrew/bin/pytest -q ...` for the Acme selectors
+  and both checks pass.
+
+Regression tests added or updated:
+- `tests/test_config.py::TestProviderHelpers::test_effective_agent_model_does_not_cross_provider_override`
+- `tests/test_config.py::TestProviderHelpers::test_effective_agent_model_preserves_explicit_model_override`
+- `tests/test_config.py::TestProviderHelpers::test_effective_agent_model_does_not_inherit_global_model_for_phase_provider`
+- `tests/test_web_queue_actions.py::test_web_queue_provider_override_does_not_inherit_other_provider_model`
+- `tests/test_web_queue_actions.py::test_landing_item_derives_active_i2p_feature_count_from_compiled_spec`
+- `tests/test_run_view.py::test_build_run_view_initializing_compile_agent_is_compiling`
+- `tests/test_checks.py::test_pytest_check_uses_project_venv_pytest_before_uv`
+- `tests/test_checks.py::test_pytest_command_prefers_path_pytest_over_uv`
+- `tests/test_checks.py::test_pytest_command_skips_current_otto_venv_on_user_path`
+- `tests/test_build.py::test_scope_violations_warns_on_existing_unowned_file`
+- `tests/test_build.py::test_scope_violations_allows_new_unowned_file`
+- Browser checks for provider/default-model summary and Web queue payloads.
+
+Skill updates:
+- `.codex/skills/otto-as-user/SKILL.md` and
+  `.claude/skills/otto-as-user/SKILL.md` now require a live Mission Control
+  lifecycle truth smoke.
+- `.codex/skills/otto-frontend-rua/SKILL.md` and
+  `.claude/skills/otto-frontend-rua/SKILL.md` now include provider/model,
+  compile-state, feature-count, log/diff action, and ignored-control checks as
+  product-level RUA requirements.
+
+Gates run:
+- `uv run ruff check otto/checks.py otto/config.py otto/mission_control/serializers.py otto/mission_control/run_view.py otto/mission_control/service.py tests/test_checks.py tests/test_config.py tests/test_web_queue_actions.py tests/test_run_view.py`
+  -> passed.
+- `uv run pytest -q tests/test_checks.py tests/test_config.py::TestProviderHelpers tests/test_web_queue_actions.py tests/test_run_view.py`
+  -> `102 passed`.
+- `npm run web:typecheck` -> passed.
+- `npm run web:build` -> passed and regenerated `otto/web/static`.
+- `uv run python scripts/test_tiers.py web` -> `208 passed`.
+- Browser iteration with fresh bundle:
+  `OTTO_BROWSER_SKIP_BUILD=1 uv run pytest -q tests/browser/test_first_run_clarity.py::test_job_dialog_provider_override_uses_provider_default_model tests/browser/test_launcher_run_view_gate.py::test_new_run_queues_from_web_and_starts_runner -m browser -p playwright`
+  -> `2 passed`.
+
+Decision:
+- Generic Otto bugs fixed. The Acme run's terminal blocked verdict is now
+  classified as an Otto verifier-environment bug fixed in this pass; the target
+  product selectors pass externally.

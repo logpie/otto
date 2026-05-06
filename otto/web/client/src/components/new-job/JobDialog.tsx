@@ -564,15 +564,6 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
             onToggle={(event) => setAdvancedOpen((event.target as HTMLDetailsElement).open)}
           >
             <summary>Advanced options</summary>
-            {command !== "certify" && (
-              <label>Execution mode
-                <select data-testid="job-execution-mode-select" value={executionMode} onChange={(event) => setExecutionMode(event.target.value as ExecutionMode)}>
-                  <option value="split">Reliable split mode</option>
-                  <option value="agentic">Agentic single session</option>
-                </select>
-                <span className="field-hint">{executionModeHelp(executionMode, command)}</span>
-              </label>
-            )}
             {command === "build" && (
               <label>Planning
                 <select data-testid="job-planning-select" value={planning} onChange={(event) => setPlanning(event.target.value as PlanningMode)}>
@@ -603,22 +594,24 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
                 <input value={after} type="text" placeholder="optional dependencies" onChange={(event) => setAfter(event.target.value)} />
               </label>
             </div>
-            <label>Max rounds
-              <input
-                data-testid="job-rounds-input"
-                value={rounds}
-                type="number"
-                min={1}
-                max={50}
-                placeholder={project?.defaults?.max_certify_rounds ? `inherit: ${project.defaults.max_certify_rounds}` : "inherit"}
-                onChange={(event) => setRounds(event.target.value)}
-              />
-              <span className={`field-hint ${improveOneRoundWarning ? "field-warning" : ""}`} data-testid="job-rounds-help">
-                {improveOneRoundWarning
-                  ? "One split improve round only evaluates existing work. Use 2+ rounds to let Otto fix/improve and re-check."
-                  : "Maximum certify/evaluate rounds for this queued job."}
-              </span>
-            </label>
+            {command === "improve" && (
+              <label>Max improve rounds
+                <input
+                  data-testid="job-rounds-input"
+                  value={rounds}
+                  type="number"
+                  min={1}
+                  max={50}
+                  placeholder={project?.defaults?.max_certify_rounds ? `inherit: ${project.defaults.max_certify_rounds}` : "inherit"}
+                  onChange={(event) => setRounds(event.target.value)}
+                />
+                <span className={`field-hint ${improveOneRoundWarning ? "field-warning" : ""}`} data-testid="job-rounds-help">
+                  {improveOneRoundWarning
+                    ? "One improve round only evaluates existing work. Use 2+ rounds to let Otto fix/improve and re-check."
+                    : "Maximum improve/evaluate rounds for this queued job."}
+                </span>
+              </label>
+            )}
             <div className="field-grid">
               <label>Default provider
                 <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
@@ -641,20 +634,11 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
               <input value={model} type="text" placeholder={modelDefaultPlaceholder(project)} onChange={(event) => setModel(event.target.value)} />
             </label>
             <details className="job-agent-routing">
-              <summary>{executionMode === "agentic" && command !== "certify" ? "Agent session" : "Per-phase overrides"}</summary>
-              {executionMode === "split" && (
-                <p className="field-hint job-routing-hint">
-                  Leave these inherited unless a phase should use a different provider, model, or reasoning effort.
-                </p>
-              )}
-            {command !== "certify" && executionMode === "agentic" && (
-              <div className="static-field">
-                <span>Routing model</span>
-                <strong>Single session</strong>
-                <p className="field-hint">Use Provider, Model, and Reasoning above for the main agent. Split-only phase overrides are hidden because agentic mode does not run separate build/certify/fix calls.</p>
-              </div>
-            )}
-            {command === "build" && executionMode === "split" && (
+              <summary>Agent routing</summary>
+              <p className="field-hint job-routing-hint">
+                Leave these inherited unless a phase should use a different provider, model, or reasoning effort.
+              </p>
+            {command === "build" && (
               <PhaseRoutingFields
                 label="Build"
                 testKey="build"
@@ -666,7 +650,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
                 onEffort={setBuildEffort}
               />
             )}
-            {(command === "certify" || executionMode === "split") && (
+            {(command === "certify" || command === "build" || command === "improve") && (
               <PhaseRoutingFields
                 label={command === "improve" ? "Certifier / evaluator" : "Certifier"}
                 testKey="certifier"
@@ -678,9 +662,9 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
                 onEffort={setCertifierEffort}
               />
             )}
-            {command !== "certify" && executionMode === "split" && (
+            {command !== "certify" && (
               <PhaseRoutingFields
-                label={command === "improve" ? "Improver / fixer" : "Fix"}
+                label={command === "improve" ? "Fix / improve" : "Fix"}
                 testKey="fix"
                 provider={fixProvider}
                 model={fixModel}
@@ -824,12 +808,28 @@ export function jobRunSummary({command, subcommand, project, provider, model, ef
 }): string {
   const defaults = project?.defaults;
   const providerLabel = provider || defaults?.provider || "default";
-  const modelLabel = model.trim() || defaults?.model || "default";
+  const modelLabel = effectiveModelLabel({project, provider, model});
   const effortLabel = effort || defaults?.reasoning_effort || "default";
   const verificationLabel = describeVerificationPolicy(command, subcommand, certification, project);
   const roundLimit = effectiveRoundLimit(project, rounds);
-  const roundLabel = roundLimit ? ` · rounds ${roundLimit}` : "";
+  const roundLabel = command === "improve" && roundLimit ? ` · rounds ${roundLimit}` : "";
   return `${providerLabel} · model ${modelLabel} · effort=${effortLabel} · verification=${verificationLabel}${roundLabel}`;
+}
+
+export function effectiveModelLabel({project, provider, model}: {
+  project: StateResponse["project"] | undefined;
+  provider: string;
+  model: string;
+}): string {
+  const explicitModel = model.trim();
+  if (explicitModel) return explicitModel;
+  const defaults = project?.defaults;
+  const requestedProvider = provider.trim();
+  const defaultProvider = defaults?.provider || "";
+  if (!requestedProvider || requestedProvider === defaultProvider) {
+    return defaults?.model || "provider default";
+  }
+  return "provider default";
 }
 
 export function effectiveRoundLimit(project: StateResponse["project"] | undefined, rounds: string): number | null {

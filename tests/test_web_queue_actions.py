@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from otto.queue.schema import load_queue
+from otto import paths
+from otto.queue.schema import load_queue, write_state as write_queue_state
 
 from tests._web_mc_helpers import _append_queue_task, _client, _init_repo, _write_empty_queue_state
 
@@ -50,6 +52,73 @@ def test_web_queue_build_enqueues_without_click_context(tmp_path: Path) -> None:
 
     matching = client.get("/api/state?type=queue&query=saved").json()
     assert matching["live"]["items"][0]["queue_task_id"] == "saved-searches"
+
+
+def test_web_queue_provider_override_does_not_inherit_other_provider_model(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "otto.yaml").write_text("provider: claude\nmodel: sonnet\n", encoding="utf-8")
+    _append_queue_task(
+        repo,
+        "codex-default-model",
+        command_argv=["build", "add reports", "--provider", "codex"],
+        resolved_intent="add reports",
+    )
+    _write_empty_queue_state(repo)
+
+    row = _client(repo).get("/api/state").json()["live"]["items"][0]
+
+    assert row["provider"] == "codex"
+    assert row["model"] is None
+    assert row["build_config"]["model"] is None
+    assert row["build_config"]["agents"]["build"]["provider"] == "codex"
+    assert row["build_config"]["agents"]["build"]["model"] is None
+
+
+def test_landing_item_derives_active_i2p_feature_count_from_compiled_spec(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    task = _append_queue_task(
+        repo,
+        "active-i2p",
+        command_argv=["build", "add dashboard"],
+        resolved_intent="add dashboard",
+        worktree=".worktrees/active-i2p",
+    )
+    session_dir = repo / task.worktree / "otto_logs" / "sessions" / "run-123"
+    (session_dir / "spec").mkdir(parents=True)
+    (session_dir / "spec" / "spec.json").write_text(
+        json.dumps(
+            {
+                "intent": "add dashboard",
+                "groups": [
+                    {"id": "ui", "feature_ids": ["chart", "filter"]},
+                    {"id": "export", "feature_ids": ["csv"]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths.queue_ready_path(repo, task.id).parent.mkdir(parents=True, exist_ok=True)
+    paths.queue_ready_path(repo, task.id).write_text(
+        json.dumps({"run_id": "run-123", "session_dir": str(session_dir)}),
+        encoding="utf-8",
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {"active-i2p": {"status": "running", "attempt_run_id": "run-123"}},
+        },
+    )
+
+    item = _client(repo).get("/api/state").json()["landing"]["items"][0]
+
+    assert item["run_id"] == "run-123"
+    assert item["stories_passed"] == 0
+    assert item["stories_tested"] == 3
+
 
 def test_web_queue_build_spec_defaults_to_web_review_mode(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -295,7 +364,7 @@ def test_web_state_exposes_queue_task_build_config(tmp_path: Path) -> None:
         assert config["certifier_mode"] == "thorough"
         assert config["skip_product_qa"] is False
         assert config["run_budget_seconds"] == 900
-        assert config["max_certify_rounds"] == 6
+        assert config["max_certify_rounds"] is None
         assert config["max_turns_per_call"] == 80
         assert config["strict_mode"] is True
         assert config["split_mode"] is True

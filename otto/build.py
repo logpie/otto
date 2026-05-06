@@ -459,8 +459,8 @@ def detect_scope_violations(
       slice's transitive deps. (Downstream slices extend foundations
       they depend on. Peers cannot trample each other.)
     - A path is allowed if it was newly created (file did not exist before).
-    - Otherwise: violation if it matches a peer slice's `owned_paths`
-      (a slice not in this slice's transitive deps).
+    - Otherwise: warning if it is an existing unowned path or if it matches a
+      peer slice's `owned_paths` (a slice not in this slice's transitive deps).
 
     Newness is approximated: if `project_root` is provided, a path is
     "newly created" iff it does not currently exist on disk. In tests,
@@ -506,8 +506,11 @@ def detect_scope_violations(
             # downstream slices extend foundations they depend on.
             continue
         if not _matches_any(path, peer_globs):
-            # Not under any slice's ownership — implicitly shared
-            # (agents may add new top-level files like README.md).
+            # Newly created unowned paths are implicitly shared scaffold. Edits
+            # to existing unowned files are still scope-relevant because the
+            # compiler failed to declare them as own/shared/dependency scope.
+            if project_root is not None and (project_root / path).exists():
+                violations.append(path)
             continue
         # Peer-slice ownership. Check if it's newly created.
         if project_root is not None:
@@ -605,10 +608,9 @@ def _matches_any(path: str, globs: list[str]) -> bool:
                 # zero (so a/**/b matches a/b)
                 for depth in range(0, 6):
                     middle = "/".join(["*"] * depth) if depth else ""
-                    if middle:
-                        candidate = f"{left}/{middle}/{right}".replace("//", "/")
-                    else:
-                        candidate = f"{left}/{right}".replace("//", "/")
+                    candidate = "/".join(
+                        part for part in (left, middle, right) if part
+                    )
                     if fnmatch(path, candidate):
                         return True
     return False
