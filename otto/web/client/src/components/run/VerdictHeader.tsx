@@ -84,8 +84,14 @@ function formatRelative(iso: string | null): string | null {
 
 export function VerdictHeader({ view }: Props) {
   const tone = verdictTone(view.verdict);
-  const passedFeatures = view.features.filter((f) => f.verdict === "passed").length;
+  const hasFeatureAudit = view.features.some((f) => f.verdict !== null);
+  const passedFeatures = hasFeatureAudit
+    ? view.features.filter((f) => f.verdict === "passed").length
+    : view.features.filter((f) => f.build_status === "passing" || f.build_status === "landed").length;
   const totalFeatures = view.features.length;
+  const completedGroups = view.groups.filter((g) => g.status === "passing" || g.status === "landed").length;
+  const totalGroups = view.groups.length;
+  const activeGroup = view.groups.find((g) => g.status === "in_progress") ?? null;
   const criticalCount = view.findings.filter((f) => f.severity === "critical").length;
   const label = view.verdict ?? view.status;
   const [intentExpanded, setIntentExpanded] = useState(false);
@@ -145,7 +151,31 @@ export function VerdictHeader({ view }: Props) {
           </time>
         </div>
       )}
+      {!view.verdict && totalGroups > 0 && (
+        <div className="run-drawer-active-line" data-testid="run-drawer-active-line">
+          {activeGroup ? (
+            <>
+              Building group: <strong>{activeGroup.name}</strong>
+              {activeGroup.dependencies.length > 0
+                ? ` · after ${activeGroup.dependencies.join(", ")}`
+                : ""}
+            </>
+          ) : (
+            <>Dispatching groups in dependency order.</>
+          )}
+        </div>
+      )}
       <dl className="metrics" data-testid="metrics">
+        {totalGroups > 0 && (
+          <div className="metric">
+            <dt>Groups</dt>
+            <dd className="groups">
+              <span className="metric-num">{completedGroups}</span>
+              <span className="metric-sep" aria-hidden>/</span>
+              <span className="metric-num">{totalGroups}</span>
+            </dd>
+          </div>
+        )}
         <div className="metric">
           <dt>Features</dt>
           <dd className="features">

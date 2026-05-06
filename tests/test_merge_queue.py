@@ -1029,6 +1029,97 @@ def test_merge_handles_dirty_worktree_from_prior_check(tmp_path: Path) -> None:
     )
 
 
+def test_merge_uses_base_worktree_when_slice_branch_is_linked_worktree(
+    tmp_path: Path,
+) -> None:
+    """Linked slice worktrees cannot check out main while main is checked out.
+
+    The integration merge must happen in the project/base worktree, while the
+    slice worktree stays on the slice branch for possible repair.
+    """
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    branch = "i2p/_session/linked_slice"
+    slice_worktree = tmp_path / ".worktrees" / "linked_slice"
+    slice_worktree.parent.mkdir()
+    subprocess.run(
+        ["git", "worktree", "add", "-qb", branch, str(slice_worktree), "main"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (slice_worktree / "feature.txt").write_text("feature", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "feature.txt"],
+        cwd=slice_worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "feature", "--no-verify"],
+        cwd=slice_worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    main_branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert main_branch == "main"
+
+    spec = _spec(
+        [
+            Group(
+                id="linked_slice",
+                name="linked",
+                dependencies=[],
+                owned_paths=["feature.txt"],
+                feature_ids=["add feature"],
+                checks=[_passing_check()],
+            ),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="linked_slice",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=branch,
+                worktree=slice_worktree,
+            ),
+        ],
+    )
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            branch_for_group=lambda _s: branch,
+        )
+    )
+
+    assert result.landed_ids == ["linked_slice"], result.results[0]
+    assert (tmp_path / "feature.txt").read_text(encoding="utf-8") == "feature"
+    slice_branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=slice_worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert slice_branch == branch
+
+
 def test_run_merge_queue_resume_skip_seeds_landed_ids(tmp_path: Path) -> None:
     """Resume must not re-merge units already landed by the prior attempt.
 

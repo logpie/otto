@@ -72,6 +72,8 @@ export interface FeatureView {
   acceptance_detail: string;
   evidence_kinds: string[];
   group_id: string;
+  group_name: string;
+  build_status: GroupStatus;
 
   // Verdict — null pre-Audit, populated post-Render.
   verdict: FeatureVerdict | null;

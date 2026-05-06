@@ -55,6 +55,7 @@ from otto.merge_queue import (
     MergeQueueResult,
     run_merge_queue,
 )
+from otto.queue.runtime import mark_queue_child_ready
 from otto.resume import (
     ResumeError,
     ResumePlan,
@@ -920,6 +921,14 @@ def orchestrate_run(
         except SpecValidationError as exc:
             error_console.print(f"[error]Spec compile failed:[/error]\n{exc}")
             sys.exit(1)
+
+    mark_queue_child_ready(
+        project_dir,
+        run_id=session_id,
+        phase="i2p",
+        session_dir=session_dir,
+        checkpoint_path=session_dir / "checkpoint.json",
+    )
 
     # Drive seed → build → merge → audit → repair → render via runner.
     try:

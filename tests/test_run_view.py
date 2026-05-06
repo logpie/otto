@@ -338,6 +338,123 @@ def test_build_run_view_group_started_drives_group_and_build_status(tmp_path: Pa
     assert next(s for s in view["stages"] if s["name"] == "build")["status"] == "active"
 
 
+def test_in_flight_features_inherit_group_build_state(tmp_path: Path) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [
+            {"id": "shell", "name": "App shell", "feature_ids": ["route", "nav"]},
+            {"id": "posts", "name": "Posts", "feature_ids": ["create post"]},
+        ],
+    }
+    state = [
+        {
+            "kind": "group.started",
+            "group_id": "shell",
+            "ts": "2026-05-04T20:00:02Z",
+            "extra": {"branch": "i2p/session-1/shell"},
+        },
+        {
+            "kind": "group.merge.eligible",
+            "group_id": "shell",
+            "ts": "2026-05-04T20:01:02Z",
+            "extra": {"wall_s": 60, "cost_usd": 0.2},
+        },
+        {
+            "kind": "group.started",
+            "group_id": "posts",
+            "ts": "2026-05-04T20:01:03Z",
+            "extra": {"branch": "i2p/session-1/posts"},
+        },
+    ]
+    session = _setup_session(tmp_path, spec=spec, state_events=state)
+
+    view = build_run_view(session)
+
+    features = {feature["id"]: feature for feature in view["features"]}
+    assert features["route"]["build_status"] == "passing"
+    assert features["route"]["group_name"] == "App shell"
+    assert features["create post"]["build_status"] == "in_progress"
+    groups = {group["id"]: group for group in view["groups"]}
+    assert groups["shell"]["branch"] == "i2p/session-1/shell"
+    assert groups["shell"]["wall_s"] == 60.0
+    assert groups["shell"]["cost_usd"] == 0.2
+    assert groups["posts"]["branch"] == "i2p/session-1/posts"
+
+
+def test_proof_group_id_maps_to_group_view_and_blocked_event_wins(
+    tmp_path: Path,
+) -> None:
+    proof = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "verdict": "blocked",
+        "groups": [
+            {
+                "group_id": "foundation",
+                "name": "Foundation",
+                "status": "passing",
+                "landed": False,
+                "branch": "i2p/session-1/foundation",
+                "failure_narrative": "checkout main failed",
+            }
+        ],
+    }
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [
+            {
+                "id": "foundation",
+                "name": "Foundation",
+                "feature_ids": ["scaffold", "routing"],
+                "dependencies": ["seed"],
+            }
+        ],
+    }
+    state = [
+        {
+            "kind": "group.blocked",
+            "group_id": "foundation",
+            "detail": "checkout main failed",
+            "ts": "2026-05-04T20:01:02Z",
+        }
+    ]
+    session = _setup_session(tmp_path, proof=proof, spec=spec, state_events=state)
+
+    view = build_run_view(session)
+
+    assert view["groups"][0]["id"] == "foundation"
+    assert view["groups"][0]["status"] == "blocked"
+    assert view["groups"][0]["branch"] == "i2p/session-1/foundation"
+    assert view["groups"][0]["feature_ids"] == ["scaffold", "routing"]
+    assert view["groups"][0]["dependencies"] == ["seed"]
+
+
+def test_build_run_view_initializing_live_state_does_not_hide_started_group(
+    tmp_path: Path,
+) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [{"id": "g1", "name": "G1", "feature_ids": ["f1"]}],
+    }
+    state = [{"kind": "group.started", "group_id": "g1", "ts": "2026-05-04T20:00:02Z"}]
+    session = _setup_session(tmp_path, spec=spec, state_events=state)
+    view = build_run_view(
+        session,
+        live_state={
+            "status": "initializing",
+            "started_at": "2026-05-04T20:00:00Z",
+            "duration_s": 90,
+        },
+    )
+    assert view["status"] == "building"
+    assert view["wall_s"] == 90.0
+    assert view["groups"][0]["status"] == "in_progress"
+    assert next(s for s in view["stages"] if s["name"] == "build")["status"] == "active"
+
+
 def test_build_run_view_interrupted_queue_state_is_terminal(tmp_path: Path) -> None:
     spec = {
         "intent": "test",

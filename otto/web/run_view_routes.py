@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -155,6 +157,32 @@ def install_run_view_routes(
         project = _resolve_project_dir()
         session_dir = resolve_session_dir(project, session_id)
         return JSONResponse(_session_logs_payload(session_dir))
+
+    @router.get("/{session_id}/groups/{group_id}/logs")
+    def get_group_logs(session_id: str, group_id: str) -> JSONResponse:
+        project = _resolve_project_dir()
+        session_dir = resolve_session_dir(project, session_id)
+        safe_group_id = _safe_group_id(group_id)
+        return JSONResponse(
+            _session_logs_payload(session_dir, group_id=safe_group_id)
+        )
+
+    @router.get("/{session_id}/groups/{group_id}/diff")
+    def get_group_diff(session_id: str, group_id: str) -> JSONResponse:
+        project = _resolve_project_dir()
+        session_dir = resolve_session_dir(project, session_id)
+        safe_group_id = _safe_group_id(group_id)
+        view = build_run_view(
+            session_dir,
+            live_state=queue_state_for_session(project, session_id),
+        )
+        group = next(
+            (g for g in view.get("groups", []) if g.get("id") == safe_group_id),
+            None,
+        )
+        if group is None:
+            raise HTTPException(status_code=404, detail="group not found")
+        return JSONResponse(_group_diff_payload(session_dir, group))
 
     @router.get("/{session_id}/files")
     def get_files(session_id: str) -> JSONResponse:
@@ -322,24 +350,45 @@ def _session_finished_at(
 _LOG_NAME_LIMIT = 64
 _LOG_TEXT_LIMIT = 32_000
 _FILE_LIST_LIMIT = 300
+_DIFF_TEXT_LIMIT = 120_000
+_SAFE_GROUP_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
-def _session_logs_payload(session_dir: Path) -> dict[str, Any]:
+def _safe_group_id(group_id: str) -> str:
+    normalized = str(group_id or "").strip()
+    if not normalized or not _SAFE_GROUP_RE.fullmatch(normalized):
+        raise HTTPException(status_code=404, detail="group not found")
+    return normalized
+
+
+def _session_logs_payload(session_dir: Path, *, group_id: str | None = None) -> dict[str, Any]:
     candidates = [
         session_dir / "spec-state.jsonl",
         session_dir / "state.jsonl",
-        session_dir / "summary.json",
-        session_dir / "proof-packet.json",
     ]
-    for pattern in (
-        "build/**/*.log",
-        "build/**/*.jsonl",
-        "certify/**/*.log",
-        "certify/**/*.jsonl",
-        "audit/**/*.log",
-        "audit/**/*.jsonl",
-    ):
-        candidates.extend(sorted(session_dir.glob(pattern)))
+    if group_id:
+        for pattern in (
+            f"build/{group_id}/**/*.log",
+            f"build/{group_id}/**/*.jsonl",
+            f"build/{group_id}/**/*.md",
+            f"audit/{group_id}/**/*.log",
+            f"audit/{group_id}/**/*.jsonl",
+        ):
+            candidates.extend(sorted(session_dir.glob(pattern)))
+    else:
+        candidates.extend([
+            session_dir / "summary.json",
+            session_dir / "proof-packet.json",
+        ])
+        for pattern in (
+            "build/**/*.log",
+            "build/**/*.jsonl",
+            "certify/**/*.log",
+            "certify/**/*.jsonl",
+            "audit/**/*.log",
+            "audit/**/*.jsonl",
+        ):
+            candidates.extend(sorted(session_dir.glob(pattern)))
 
     seen: set[Path] = set()
     logs: list[dict[str, Any]] = []
@@ -359,7 +408,66 @@ def _session_logs_payload(session_dir: Path) -> dict[str, Any]:
                 "truncated": stat.st_size > _LOG_TEXT_LIMIT,
             }
         )
-    return {"session_id": session_dir.name, "logs": logs, "empty": not logs}
+    payload: dict[str, Any] = {
+        "session_id": session_dir.name,
+        "logs": logs,
+        "empty": not logs,
+    }
+    if group_id:
+        payload["group_id"] = group_id
+    return payload
+
+
+def _group_diff_payload(session_dir: Path, group: dict[str, Any]) -> dict[str, Any]:
+    group_id = str(group.get("id") or "")
+    branch = str(group.get("branch") or "").strip()
+    candidate_refs = [branch] if branch else []
+    fallback_ref = f"i2p/{session_dir.name}/{group_id}" if group_id else ""
+    if fallback_ref and fallback_ref not in candidate_refs:
+        candidate_refs.append(fallback_ref)
+    worktree = session_dir.parents[2]
+    last_error = ""
+    for ref in candidate_refs:
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "show",
+                    "--format=fuller",
+                    "--stat",
+                    "--patch",
+                    "--find-renames",
+                    ref,
+                ],
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            last_error = str(exc)
+            continue
+        if result.returncode == 0:
+            text = result.stdout
+            truncated = len(text) > _DIFF_TEXT_LIMIT
+            return {
+                "session_id": session_dir.name,
+                "group_id": group_id,
+                "branch": ref,
+                "diff": text[:_DIFF_TEXT_LIMIT],
+                "truncated": truncated,
+                "error": None,
+            }
+        last_error = (result.stderr or result.stdout or "").strip()
+    return {
+        "session_id": session_dir.name,
+        "group_id": group_id,
+        "branch": branch,
+        "diff": "",
+        "truncated": False,
+        "error": last_error or "No branch/commit found for this group.",
+    }
 
 
 def _session_files_payload(session_dir: Path) -> dict[str, Any]:

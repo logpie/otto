@@ -1,5 +1,6 @@
-// GroupList — secondary surface of the RunDrawer (research §3: Group is
-// dispatch unit, surfaced one click below the FeatureList primary view).
+// GroupList — live dispatch surface of the RunDrawer. Groups are the unit
+// Otto actually builds and merges; features inherit group state until audit
+// produces per-feature verdicts.
 //
 // A7: while a run is in flight, each Group row carries an Abort button.
 // Aborting writes a `group.aborted_by_user` event to the session journal;
@@ -9,7 +10,7 @@
 //
 // Post-RUA round 1 (B1, B2, B7): rows lay out via flex/gap (no baked
 // whitespace), status renders through the scoped <Pill>, and per-Group
-// wall + cost + [diff]/[logs] stubs are surfaced.
+// wall + cost + diff/log actions are surfaced.
 
 import type { GroupStatus, GroupView } from "../../types/run";
 import { Pill, type PillTone } from "./Pill";
@@ -17,6 +18,8 @@ import { Pill, type PillTone } from "./Pill";
 interface Props {
   groups: GroupView[];
   onAbort?: (groupId: string) => void;
+  onOpenDiff?: (groupId: string) => void;
+  onOpenLogs?: (groupId: string) => void;
   pendingAbortId?: string | null;
 }
 
@@ -54,7 +57,7 @@ function formatCost(usd: number): string {
   return `$${usd.toFixed(2)}`;
 }
 
-export function GroupList({ groups, onAbort, pendingAbortId }: Props) {
+export function GroupList({ groups, onAbort, onOpenDiff, onOpenLogs, pendingAbortId }: Props) {
   if (groups.length === 0) {
     return <p className="empty">No groups dispatched.</p>;
   }
@@ -63,12 +66,15 @@ export function GroupList({ groups, onAbort, pendingAbortId }: Props) {
     // "▶ N groups" disclosure has the same visual weight as the
     // surrounding "Features" / "Stages" headings. The native <details>
     // marker is replaced by a custom chevron rendered via CSS.
-    <details className="group-list" data-testid="group-list">
+    <details className="group-list" data-testid="group-list" open>
       <summary className="group-list-summary">
         <span className="group-list-summary-caret" aria-hidden>
           ▸
         </span>
         <span className="group-list-summary-label">
+          Build groups
+        </span>
+        <span className="group-list-summary-count">
           {groups.length} group{groups.length === 1 ? "" : "s"}
         </span>
       </summary>
@@ -90,6 +96,11 @@ export function GroupList({ groups, onAbort, pendingAbortId }: Props) {
               <span className="feature-count">
                 {g.feature_ids.length} feature{g.feature_ids.length === 1 ? "" : "s"}
               </span>
+              {g.dependencies.length > 0 && (
+                <span className="group-deps" title={`Runs after ${g.dependencies.join(", ")}`}>
+                  after {g.dependencies.join(", ")}
+                </span>
+              )}
               <span className="group-wall" title="Group wall time">
                 wall {formatDuration(g.wall_s)}
               </span>
@@ -112,11 +123,9 @@ export function GroupList({ groups, onAbort, pendingAbortId }: Props) {
                   data-testid={`group-diff-${g.id}`}
                   onClick={(e) => {
                     e.preventDefault();
-                    // TODO: wire to /api/run-view/<sid>/groups/<gid>/diff
-                    // eslint-disable-next-line no-console
-                    console.log("[GroupList] diff stub", g.id);
+                    onOpenDiff?.(g.id);
                   }}
-                  title="View diff for this group (stub)"
+                  title="View diff for this group"
                 >
                   diff
                 </button>
@@ -126,11 +135,9 @@ export function GroupList({ groups, onAbort, pendingAbortId }: Props) {
                   data-testid={`group-logs-${g.id}`}
                   onClick={(e) => {
                     e.preventDefault();
-                    // TODO: wire to /api/run-view/<sid>/groups/<gid>/logs
-                    // eslint-disable-next-line no-console
-                    console.log("[GroupList] logs stub", g.id);
+                    onOpenLogs?.(g.id);
                   }}
-                  title="View logs for this group (stub)"
+                  title="View logs for this group"
                 >
                   logs
                 </button>

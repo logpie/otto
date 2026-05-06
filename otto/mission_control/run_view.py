@@ -66,8 +66,8 @@ def build_run_view(
 
     status = _derive_status(verdict_field, state_events, live_state)
 
-    features = _build_features(spec, proof, live_state)
     groups = _build_groups(spec, proof, state_events, live_state)
+    features = _build_features(spec, proof, live_state, state_events)
     components = _build_components(spec, proof, state_events, live_state)
     guardrails = _build_guardrails(spec, proof)
     stages = _build_stages(state_events, live_state, spec)
@@ -171,6 +171,7 @@ def _build_features(
     spec: dict[str, Any] | None,
     proof: dict[str, Any] | None,
     live_state: dict[str, Any] | None,
+    state_events: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Emit FeatureView list for the RunView.
 
@@ -183,21 +184,40 @@ def _build_features(
     omits them (A4 RUA report bug).
     """
     spec_evidence_by_id = _spec_evidence_kinds_by_id(spec)
+    group_status_by_id = _group_statuses_for_features(spec, proof, state_events)
+    group_name_by_id = _group_names_for_features(spec, proof)
     # Prefer proof-packet's features[] (post-Render shape from A3 wiring),
     # but fall back per-feature to spec evidence_kinds when proof's is empty.
     if proof and isinstance(proof.get("features"), list) and proof["features"]:
         return [
-            _feature_to_view(f, spec_evidence_by_id) for f in proof["features"]
+            _feature_to_view(
+                f,
+                spec_evidence_by_id,
+                group_status_by_id=group_status_by_id,
+                group_name_by_id=group_name_by_id,
+            )
+            for f in proof["features"]
         ]
     if not spec:
         return []
     raw_features = spec.get("features") or []
     if isinstance(raw_features, list) and raw_features:
-        return [_feature_to_view(f, spec_evidence_by_id) for f in raw_features]
-    return _features_from_groups(spec)
+        return [
+            _feature_to_view(
+                f,
+                spec_evidence_by_id,
+                group_status_by_id=group_status_by_id,
+                group_name_by_id=group_name_by_id,
+            )
+            for f in raw_features
+        ]
+    return _features_from_groups(spec, state_events)
 
 
-def _features_from_groups(spec: dict[str, Any]) -> list[dict[str, Any]]:
+def _features_from_groups(
+    spec: dict[str, Any],
+    state_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Derive user-facing features from Group.feature_ids when needed.
 
     Some early i2p compiler outputs left top-level ``features`` empty while
@@ -215,9 +235,10 @@ def _features_from_groups(spec: dict[str, Any]) -> list[dict[str, Any]]:
     for group in raw_groups:
         if not isinstance(group, dict):
             continue
-        group_id = str(group.get("id") or group.get("slice_id") or "")
+        group_id = _group_id(group)
         group_name = str(group.get("name") or group.get("title") or group_id)
         evidence_kinds = _evidence_kinds_from_checks(group.get("checks"))
+        build_status = _group_status(group, group_id, state_events)
         for raw_feature_id in group.get("feature_ids") or []:
             feature_id = str(raw_feature_id).strip()
             if not feature_id or feature_id in seen:
@@ -231,6 +252,8 @@ def _features_from_groups(spec: dict[str, Any]) -> list[dict[str, Any]]:
                     "acceptance_detail": "",
                     "evidence_kinds": list(evidence_kinds),
                     "group_id": group_id,
+                    "group_name": group_name,
+                    "build_status": build_status,
                     "verdict": None,
                     "evidence_completeness": "full",
                     "coverage_confidence": "high",
@@ -302,19 +325,34 @@ def _spec_evidence_kinds_by_id(
 def _feature_to_view(
     payload: dict[str, Any],
     spec_evidence_by_id: dict[str, list[str]] | None = None,
+    *,
+    group_status_by_id: dict[str, str] | None = None,
+    group_name_by_id: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Map proof/spec feature dict to FeatureView shape."""
     feature_id = str(payload.get("feature_id") or payload.get("id") or "")
     payload_kinds = [str(k) for k in (payload.get("evidence_kinds") or [])]
     if not payload_kinds and spec_evidence_by_id:
         payload_kinds = list(spec_evidence_by_id.get(feature_id, []))
+    group_id = str(payload.get("group_id") or "")
+    build_status = str(
+        payload.get("build_status")
+        or (group_status_by_id or {}).get(group_id)
+        or "pending"
+    )
     return {
         "id": feature_id,
         "name": str(payload.get("name") or ""),
         "description": str(payload.get("description") or ""),
         "acceptance_detail": str(payload.get("acceptance_detail") or ""),
         "evidence_kinds": payload_kinds,
-        "group_id": str(payload.get("group_id") or ""),
+        "group_id": group_id,
+        "group_name": str(
+            payload.get("group_name")
+            or (group_name_by_id or {}).get(group_id)
+            or ""
+        ),
+        "build_status": build_status,
         "verdict": payload.get("verdict"),
         "evidence_completeness": str(
             payload.get("evidence_completeness") or "full"
@@ -343,22 +381,68 @@ def _build_groups(
     live_state: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     """Emit GroupView list."""
-    raw_groups = (
-        (proof.get("groups") if proof else None)
-        or (spec.get("groups") if spec else None)
+    proof_groups = proof.get("groups") if proof else None
+    spec_groups = (
+        (spec.get("groups") if spec else None)
         or (spec.get("slices") if spec else None)  # legacy
         or []
     )
+    raw_groups = proof_groups or spec_groups or []
     if not isinstance(raw_groups, list):
         return []
+    if isinstance(proof_groups, list) and isinstance(spec_groups, list):
+        raw_groups = _merge_proof_groups_with_spec(raw_groups, spec_groups)
     return [_group_to_view(g, state_events) for g in raw_groups]
+
+
+def _merge_proof_groups_with_spec(
+    proof_groups: list[Any],
+    spec_groups: list[Any],
+) -> list[dict[str, Any]]:
+    """Overlay proof outcomes onto spec group metadata.
+
+    Proof packets intentionally focus on runtime outcome fields and older
+    packets omit spec-only metadata such as ``feature_ids`` and dependencies.
+    The run drawer needs both: proof status plus the original product plan.
+    """
+    spec_by_id = {
+        _group_id(group): group
+        for group in spec_groups
+        if isinstance(group, dict) and _group_id(group)
+    }
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for proof_group in proof_groups:
+        if not isinstance(proof_group, dict):
+            continue
+        group_id = _group_id(proof_group)
+        spec_group = spec_by_id.get(group_id, {})
+        merged = dict(spec_group)
+        merged.update(proof_group)
+        if not merged.get("feature_ids") and spec_group.get("feature_ids"):
+            merged["feature_ids"] = spec_group["feature_ids"]
+        if not merged.get("dependencies") and spec_group.get("dependencies"):
+            merged["dependencies"] = spec_group["dependencies"]
+        if not merged.get("deps") and spec_group.get("deps"):
+            merged["deps"] = spec_group["deps"]
+        out.append(merged)
+        if group_id:
+            seen.add(group_id)
+    for spec_group in spec_groups:
+        if not isinstance(spec_group, dict):
+            continue
+        group_id = _group_id(spec_group)
+        if group_id and group_id not in seen:
+            out.append(dict(spec_group))
+    return out
 
 
 def _group_to_view(
     payload: dict[str, Any],
     state_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    group_id = str(payload.get("id") or payload.get("slice_id") or "")
+    group_id = _group_id(payload)
+    event_summary = _group_event_summary(group_id, state_events)
     return {
         "id": group_id,
         "name": str(
@@ -369,17 +453,95 @@ def _group_to_view(
             str(fid) for fid in (payload.get("feature_ids") or [])
         ],
         "status": _group_status(payload, group_id, state_events),
-        "branch": str(payload.get("branch") or ""),
+        "branch": str(payload.get("branch") or event_summary.get("branch") or ""),
         "owned_paths": [
             str(p) for p in (payload.get("owned_paths") or [])
         ],
         "dependencies": [
             str(d) for d in (payload.get("dependencies") or payload.get("deps") or [])
         ],
-        "cost_usd": float(payload.get("cost_usd") or 0.0),
-        "wall_s": float(payload.get("wall_s") or 0.0),
+        "cost_usd": float(payload.get("cost_usd") or event_summary.get("cost_usd") or 0.0),
+        "wall_s": float(payload.get("wall_s") or event_summary.get("wall_s") or 0.0),
         "repair_attempts": int(payload.get("repair_attempts") or 0),
     }
+
+
+def _group_names_for_features(
+    spec: dict[str, Any] | None,
+    proof: dict[str, Any] | None,
+) -> dict[str, str]:
+    raw_groups = (
+        (proof.get("groups") if proof else None)
+        or (spec.get("groups") if spec else None)
+        or (spec.get("slices") if spec else None)
+        or []
+    )
+    if not isinstance(raw_groups, list):
+        return {}
+    out: dict[str, str] = {}
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            continue
+        group_id = _group_id(group)
+        if group_id:
+            out[group_id] = str(group.get("name") or group.get("title") or group_id)
+    return out
+
+
+def _group_statuses_for_features(
+    spec: dict[str, Any] | None,
+    proof: dict[str, Any] | None,
+    state_events: list[dict[str, Any]],
+) -> dict[str, str]:
+    raw_groups = (
+        (proof.get("groups") if proof else None)
+        or (spec.get("groups") if spec else None)
+        or (spec.get("slices") if spec else None)
+        or []
+    )
+    if not isinstance(raw_groups, list):
+        return {}
+    out: dict[str, str] = {}
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            continue
+        group_id = _group_id(group)
+        if group_id:
+            out[group_id] = _group_status(group, group_id, state_events)
+    return out
+
+
+def _group_id(payload: dict[str, Any]) -> str:
+    return str(
+        payload.get("id")
+        or payload.get("group_id")
+        or payload.get("slice_id")
+        or ""
+    )
+
+
+def _group_event_summary(
+    group_id: str,
+    state_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    if not group_id:
+        return summary
+    for event in state_events:
+        if str(event.get("group_id") or "") != group_id:
+            continue
+        kind = str(event.get("event") or event.get("kind") or "")
+        extra = event.get("extra") if isinstance(event.get("extra"), dict) else {}
+        if kind == "group.started":
+            branch = extra.get("branch")
+            if branch:
+                summary["branch"] = str(branch)
+        if kind in {"group.merge.eligible", "group.check.finished", "group.blocked"}:
+            if extra.get("wall_s") is not None:
+                summary["wall_s"] = extra.get("wall_s")
+            if extra.get("cost_usd") is not None:
+                summary["cost_usd"] = extra.get("cost_usd")
+    return summary
 
 
 def _group_status(
@@ -391,9 +553,11 @@ def _group_status(
     landed = bool(payload.get("landed"))
     if landed:
         return "landed"
+    event_status = _group_status_from_events(group_id, state_events)
+    if event_status in {"blocked", "landed", "failed_scope"}:
+        return event_status
     if status in ("passing", "blocked", "in_progress", "failed_scope"):
         return status
-    event_status = _group_status_from_events(group_id, state_events)
     if event_status:
         return event_status
     if status == "pending":
@@ -714,7 +878,7 @@ def _derive_status(
     if verdict == "blocked":
         return "blocked"
     live_status = _normalize_live_status(live_state)
-    if live_status in {"interrupted", "aborted", "failed", "landed", "queued"}:
+    if live_status in {"interrupted", "aborted", "failed", "landed"}:
         return live_status
     # In-flight or pre-verdict — derive from latest stage event
     last_started = None

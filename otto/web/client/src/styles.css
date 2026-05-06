@@ -9553,6 +9553,15 @@ mark.log-search-match.active {
   font-weight: 600;
   color: var(--text);
 }
+.run-drawer-active-line {
+  font-size: var(--text-sm, 14px);
+  color: var(--muted);
+  margin-top: -2px;
+}
+.run-drawer-active-line strong {
+  color: var(--text);
+  font-weight: 600;
+}
 /* R3-B18: KPI grid sits in its own visual block — separate it from the
    intent line with a top border so the eye reads it as a metric row,
    not a continuation of the intent. */
@@ -9686,6 +9695,18 @@ mark.log-search-match.active {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.run-diff-text {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+}
 .run-file-list {
   list-style: none;
   margin: 0;
@@ -9796,6 +9817,7 @@ mark.log-search-match.active {
   color: var(--text);
 }
 .group-row .feature-count,
+.group-row .group-deps,
 .group-row .group-wall,
 .group-row .group-cost {
   font-size: var(--text-xs, 12px);
@@ -10877,6 +10899,10 @@ button.otto-app-shell-project:focus-visible {
 }
 .group-list-summary-label {
   color: var(--text);
+}
+.group-list-summary-count {
+  color: var(--muted);
+  font-size: var(--text-sm, 14px);
 }
 
 /* === RUA round-3 cluster 3 fixes — spec review + spec diff polish ===

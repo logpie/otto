@@ -16,7 +16,7 @@
 //   - R3-B33: red `[N critical]` badge next to the verdict pill when a
 //     feature has ≥1 critical finding.
 
-import type { FeatureView, FeatureVerdict, FindingView } from "../../types/run";
+import type { FeatureView, FeatureVerdict, FindingView, GroupStatus } from "../../types/run";
 import { Pill, type PillTone } from "./Pill";
 
 interface Props {
@@ -32,48 +32,55 @@ interface Props {
 // are warning states — keep ✓ for passed, ✗ for blocked. R2-B12: glyph
 // color is tone-matched via .feature-row.<tone> selectors (green for
 // passed, amber for partial+missing, red for blocked).
-function verdictGlyph(verdict: FeatureVerdict | null): string {
-  if (verdict === null) return "○";
-  if (verdict === "passed") return "✓";
-  if (verdict === "partial") return "⚠";
-  if (verdict === "missing") return "⚠";
-  return "✗"; // blocked / failed
+interface FeatureVisualState {
+  glyph: string;
+  tone: "ok" | "warn" | "fail" | "pending" | "info";
+  pillTone: PillTone;
+  label: string;
+  bucket: VerdictBucket;
 }
 
-function verdictTone(verdict: FeatureVerdict | null): "ok" | "warn" | "fail" | "pending" {
-  if (verdict === null) return "pending";
-  if (verdict === "passed") return "ok";
-  if (verdict === "partial") return "warn";
-  if (verdict === "missing") return "warn";
-  return "fail";
+function buildStatusLabel(status: GroupStatus): string {
+  if (status === "passing" || status === "landed") return "built";
+  if (status === "in_progress") return "building";
+  if (status === "blocked" || status === "failed_scope") return "blocked";
+  return "waiting";
 }
 
-function verdictPillTone(verdict: FeatureVerdict | null): PillTone {
-  if (verdict === null) return "muted";
-  if (verdict === "passed") return "ok";
-  if (verdict === "partial") return "warn";
-  if (verdict === "missing") return "warn";
-  return "error";
+function visualState(verdict: FeatureVerdict | null, buildStatus: GroupStatus): FeatureVisualState {
+  if (verdict === "passed") {
+    return { glyph: "✓", tone: "ok", pillTone: "ok", label: "passed", bucket: "passing" };
+  }
+  if (verdict === "partial" || verdict === "missing") {
+    return { glyph: "⚠", tone: "warn", pillTone: "warn", label: verdict, bucket: "partial" };
+  }
+  if (verdict === "blocked" || verdict === "failed") {
+    return { glyph: "✗", tone: "fail", pillTone: "error", label: verdict, bucket: "blocked" };
+  }
+  if (buildStatus === "passing" || buildStatus === "landed") {
+    return { glyph: "✓", tone: "ok", pillTone: "ok", label: buildStatusLabel(buildStatus), bucket: "passing" };
+  }
+  if (buildStatus === "in_progress") {
+    return { glyph: "●", tone: "info", pillTone: "info", label: buildStatusLabel(buildStatus), bucket: "building" };
+  }
+  if (buildStatus === "blocked" || buildStatus === "failed_scope") {
+    return { glyph: "✗", tone: "fail", pillTone: "error", label: buildStatusLabel(buildStatus), bucket: "blocked" };
+  }
+  return { glyph: "○", tone: "pending", pillTone: "muted", label: buildStatusLabel(buildStatus), bucket: "pending" };
 }
 
 // R3-B24: classify each feature into one of four buckets so we can emit
 // section subheads when more than one bucket has members. We surface
 // "Passing", "Partial", "Blocked", "Pending" (covers null + missing).
-type VerdictBucket = "passing" | "partial" | "blocked" | "pending";
+type VerdictBucket = "passing" | "building" | "partial" | "blocked" | "pending";
 
-function bucketFor(verdict: FeatureVerdict | null): VerdictBucket {
-  if (verdict === "passed") return "passing";
-  if (verdict === "partial") return "partial";
-  if (verdict === "blocked" || verdict === "failed") return "blocked";
-  return "pending";
-}
-
-const BUCKET_ORDER: VerdictBucket[] = ["blocked", "partial", "passing", "pending"];
+const BUCKET_ORDER: VerdictBucket[] = ["blocked", "partial", "building", "passing", "pending"];
 const BUCKET_LABEL: Record<VerdictBucket, string> = {
   passing: "Passing",
+  building: "Building",
   partial: "Partial",
   blocked: "Blocked",
-  pending: "Pending",
+  pending: "Waiting",
 };
 
 function truncate(text: string, max: number): string {
@@ -100,7 +107,7 @@ export function FeatureList({ features, findings = [], onSelect }: Props) {
   // each bucket. Only emit subheads when more than one bucket is present.
   const buckets = new Map<VerdictBucket, FeatureView[]>();
   for (const f of features) {
-    const b = bucketFor(f.verdict);
+    const b = visualState(f.verdict, f.build_status).bucket;
     const list = buckets.get(b) ?? [];
     list.push(f);
     buckets.set(b, list);
@@ -114,20 +121,21 @@ export function FeatureList({ features, findings = [], onSelect }: Props) {
     const isBlocked = f.verdict === "blocked" || f.verdict === "failed";
     const inlineCritical =
       isBlocked && criticalCount > 0 ? truncate(criticals[0]!.text, 80) : null;
+    const state = visualState(f.verdict, f.build_status);
     return (
       <li
         key={f.id}
-        className={`feature-row ${verdictTone(f.verdict)}`}
+        className={`feature-row ${state.tone}`}
         data-testid={`feature-${f.id}`}
         onClick={() => onSelect?.(f.id)}
       >
         <span className="feature-row-main">
           <span className="verdict-glyph" aria-hidden>
-            {verdictGlyph(f.verdict)}
+            {state.glyph}
           </span>
           <span className="feature-name">{f.name}</span>
-          <Pill tone={verdictPillTone(f.verdict)} className="feature-verdict-pill">
-            {f.verdict ?? "pending"}
+          <Pill tone={state.pillTone} className="feature-verdict-pill">
+            {state.label}
           </Pill>
           {/* R3-B33: critical-finding count badge (red bg) sits next to
               the verdict pill so it reads as severity, not metadata. */}
