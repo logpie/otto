@@ -17,6 +17,7 @@ to refresh the RunView shape.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +76,13 @@ def build_run_view(
     features = _build_features(spec, proof, live_state, state_events)
     components = _build_components(spec, proof, state_events, live_state)
     guardrails = _build_guardrails(spec, proof)
-    stages = _build_stages(state_events, live_state, spec, session_dir=session_dir)
+    stages = _build_stages(
+        state_events,
+        live_state,
+        spec,
+        proof=proof,
+        session_dir=session_dir,
+    )
     findings = _build_findings(proof)
 
     cost_usd = float(
@@ -216,12 +223,13 @@ def _build_features(
             )
             for f in raw_features
         ]
-    return _features_from_groups(spec, state_events)
+    return _features_from_groups(spec, state_events, proof)
 
 
 def _features_from_groups(
     spec: dict[str, Any],
     state_events: list[dict[str, Any]],
+    proof: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Derive user-facing features from Group.feature_ids when needed.
 
@@ -243,6 +251,8 @@ def _features_from_groups(
         group_id = _group_id(group)
         group_name = str(group.get("name") or group.get("title") or group_id)
         evidence_kinds = _evidence_kinds_from_checks(group.get("checks"))
+        proof_group = _proof_group_by_id(proof).get(group_id)
+        evidence_refs = _group_evidence_refs(group_id, state_events, proof_group)
         build_status = _group_status(group, group_id, state_events)
         for raw_feature_id in group.get("feature_ids") or []:
             feature_id = str(raw_feature_id).strip()
@@ -264,7 +274,7 @@ def _features_from_groups(
                     "coverage_confidence": "high",
                     "multi_actor_required": False,
                     "audit_pre_merge": False,
-                    "evidence_refs": [],
+                    "evidence_refs": list(evidence_refs),
                 }
             )
     return out
@@ -285,24 +295,118 @@ def _evidence_kinds_from_checks(raw_checks: Any) -> list[str]:
         if not isinstance(check, dict):
             continue
         raw = str(check.get("kind") or check.get("type") or check.get("check_type") or "")
-        key = raw.replace("-", "_").replace(" ", "_").lower()
-        kind = {
-            "browser_journey": "BrowserJourney",
-            "browser": "BrowserJourney",
-            "api_probe": "ApiProbe",
-            "api": "ApiProbe",
-            "state_invariant": "StateInvariant",
-            "state": "StateInvariant",
-            "repo_test": "RepoTestCheck",
-            "repo_test_check": "RepoTestCheck",
-            "test": "RepoTestCheck",
-            "cli_probe": "CLIProbe",
-            "import_check": "ImportCheck",
-            "type_check": "TypeCheck",
-        }.get(key)
+        kind = _normalize_evidence_kind(raw)
         if kind and kind not in mapped:
             mapped.append(kind)
     return mapped
+
+
+def _normalize_evidence_kind(raw: Any) -> str | None:
+    key = re.sub(r"(?<!^)(?=[A-Z])", "_", str(raw or ""))
+    key = key.replace("-", "_").replace(" ", "_").lower()
+    return {
+        "browser_journey": "BrowserJourney",
+        "browser": "BrowserJourney",
+        "api_probe": "ApiProbe",
+        "api": "ApiProbe",
+        "state_invariant": "StateInvariant",
+        "state": "StateInvariant",
+        "repo_test": "RepoTestCheck",
+        "repo_test_check": "RepoTestCheck",
+        "pytest": "RepoTestCheck",
+        "pytest_check": "RepoTestCheck",
+        "py_test": "RepoTestCheck",
+        "test": "RepoTestCheck",
+        "cli_probe": "CLIProbe",
+        "import_check": "ImportCheck",
+        "type_check": "TypeCheck",
+    }.get(key)
+
+
+def _proof_group_by_id(proof: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    raw_groups = proof.get("groups") if proof else []
+    if not isinstance(raw_groups, list):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            continue
+        group_id = _group_id(group)
+        if group_id:
+            out[group_id] = group
+    return out
+
+
+def _group_evidence_refs(
+    group_id: str,
+    state_events: list[dict[str, Any]],
+    proof_group: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    if not group_id:
+        return []
+    refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    if proof_group:
+        raw_evidence = proof_group.get("check_evidence") or []
+        if isinstance(raw_evidence, list):
+            for entry in raw_evidence:
+                if not isinstance(entry, dict):
+                    continue
+                kind = _normalize_evidence_kind(entry.get("kind")) or "RepoTestCheck"
+                raw = entry.get("raw") if isinstance(entry.get("raw"), dict) else {}
+                path = str(raw.get("selector") or entry.get("selector") or "")
+                if not path:
+                    artifacts = entry.get("artifacts")
+                    if isinstance(artifacts, list) and artifacts:
+                        path = str(artifacts[0])
+                summary = str(entry.get("detail") or "")
+                _append_evidence_ref(refs, seen, kind=kind, path=path, summary=summary)
+    for event in state_events:
+        if str(event.get("group_id") or "") != group_id:
+            continue
+        kind = str(event.get("event") or event.get("kind") or "")
+        if kind != "group.check.finished":
+            continue
+        extra = event.get("extra") if isinstance(event.get("extra"), dict) else {}
+        details = extra.get("details") if isinstance(extra.get("details"), list) else []
+        if not details:
+            details = [event.get("detail") or "group check finished"]
+        for raw_detail in details:
+            detail = str(raw_detail or "")
+            selector = _selector_from_check_detail(detail)
+            _append_evidence_ref(
+                refs,
+                seen,
+                kind="RepoTestCheck",
+                path=selector,
+                summary=detail,
+            )
+    return refs
+
+
+def _selector_from_check_detail(detail: str) -> str:
+    match = re.search(r"selector=(['\"])(?P<selector>.+?)\1", detail)
+    if match:
+        return match.group("selector")
+    match = re.search(r"path=(['\"])(?P<path>.+?)\1", detail)
+    if match:
+        return match.group("path")
+    return ""
+
+
+def _append_evidence_ref(
+    refs: list[dict[str, str]],
+    seen: set[tuple[str, str, str]],
+    *,
+    kind: str,
+    path: str,
+    summary: str,
+) -> None:
+    item = (kind, path, summary)
+    if item in seen:
+        return
+    seen.add(item)
+    refs.append({"kind": kind, "path": path, "summary": summary})
 
 
 def _spec_evidence_kinds_by_id(
@@ -662,6 +766,7 @@ def _build_stages(
     live_state: dict[str, Any] | None,
     spec: dict[str, Any] | None,
     *,
+    proof: dict[str, Any] | None = None,
     session_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Emit StageView list from state events.
@@ -690,6 +795,8 @@ def _build_stages(
 
     for event in state_events:
         kind = str(event.get("event") or event.get("kind") or "")
+        if _is_legacy_run_start_audit_event(event):
+            continue
         if kind == "group.started":
             ts = event.get("ts") or event.get("timestamp")
             stages["build"]["started_at"] = stages["build"]["started_at"] or ts
@@ -745,6 +852,44 @@ def _build_stages(
             str(live_state.get("started_at") or "") if live_state else None
         )
 
+    if (
+        stages["spec_review"]["status"] == "pending"
+        and _spec_review_completed(session_dir, state_events)
+    ):
+        _mark_stage_done(
+            stages["spec_review"],
+            _last_event_ts(state_events) or _first_event_ts(state_events),
+        )
+
+    terminal_verdict = _terminal_verdict(proof, state_events)
+    terminal_ts = _terminal_ts(state_events)
+    if terminal_verdict in {"passed", "partial", "blocked"}:
+        if _has_group_events(state_events):
+            _mark_stage_done(
+                stages["build"],
+                _last_event_ts(
+                    state_events,
+                    kinds={
+                        "group.check.finished",
+                        "group.merge.eligible",
+                        "group.merge.started",
+                        "group.merge.landed",
+                    },
+                )
+                or terminal_ts,
+            )
+        if stages["audit"]["status"] in {"pending", "active"} and (
+            proof is not None or _has_event_kind(state_events, "audit.finished")
+        ):
+            _mark_stage_done(stages["audit"], terminal_ts)
+        if proof is not None:
+            _mark_stage_done(stages["render"], terminal_ts)
+        if _has_landed_groups(proof, state_events):
+            _mark_stage_done(
+                stages["land"],
+                _last_event_ts(state_events, kinds={"group.merge.landed"}) or terminal_ts,
+            )
+
     live_status = _normalize_live_status(live_state)
     if live_status in {"interrupted", "aborted", "failed"}:
         for name in ("build", "audit", "render", "land"):
@@ -761,9 +906,9 @@ def _build_stages(
 
 
 # Stage names that emit bare "<stage>.<sub>" lifecycle events (no
-# "stage." prefix). Currently only `seed` — other stages still use
-# the "stage.<name>.<sub>" pattern for orchestrator-level lifecycle.
-_BARE_STAGE_EVENT_PREFIXES: tuple[str, ...] = ("seed",)
+# "stage." prefix). New i2p journals use bare seed/audit events; older
+# stage.<name>.<sub> events are still accepted by _stage_event_target().
+_BARE_STAGE_EVENT_PREFIXES: tuple[str, ...] = ("seed", "audit")
 
 
 def _stage_event_target(kind: str) -> tuple[str | None, str | None]:
@@ -783,6 +928,12 @@ def _stage_event_target(kind: str) -> tuple[str | None, str | None]:
             sub = kind[len(prefix) + 1 :]
             return prefix, sub
     return None, None
+
+
+def _is_legacy_run_start_audit_event(event: dict[str, Any]) -> bool:
+    kind = str(event.get("event") or event.get("kind") or "")
+    detail = str(event.get("detail") or "").strip().lower()
+    return kind == "audit.started" and detail == "run start"
 
 
 def _event_succeeded(event: dict[str, Any]) -> bool:
@@ -807,11 +958,98 @@ def _first_event_ts(state_events: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _last_event_ts(
+    state_events: list[dict[str, Any]],
+    *,
+    kinds: set[str] | None = None,
+) -> str | None:
+    for event in reversed(state_events):
+        kind = str(event.get("event") or event.get("kind") or "")
+        if kinds is not None and kind not in kinds:
+            continue
+        ts = event.get("ts") or event.get("timestamp")
+        if ts:
+            return str(ts)
+    return None
+
+
 def _has_group_events(state_events: list[dict[str, Any]]) -> bool:
     return any(
         str(event.get("event") or event.get("kind") or "").startswith("group.")
         for event in state_events
     )
+
+
+def _has_event_kind(state_events: list[dict[str, Any]], kind: str) -> bool:
+    return any(
+        str(event.get("event") or event.get("kind") or "") == kind
+        for event in state_events
+    )
+
+
+def _spec_review_completed(
+    session_dir: Path | None,
+    state_events: list[dict[str, Any]],
+) -> bool:
+    if any(
+        str(event.get("event") or event.get("kind") or "")
+        in {"spec.approved", "spec.review_approved"}
+        for event in state_events
+    ):
+        return True
+    if session_dir is None:
+        return False
+    path = session_dir / "spec" / "lifecycle.json"
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    lifecycle = str(payload.get("lifecycle") or "").strip().lower()
+    return lifecycle in {"approved", "editing_in_flight"}
+
+
+def _terminal_verdict(
+    proof: dict[str, Any] | None,
+    state_events: list[dict[str, Any]],
+) -> str:
+    if proof and proof.get("verdict") not in (None, ""):
+        return str(proof.get("verdict")).strip().lower()
+    for event in reversed(state_events):
+        kind = str(event.get("event") or event.get("kind") or "")
+        if kind != "run.finished":
+            continue
+        extra = event.get("extra") if isinstance(event.get("extra"), dict) else {}
+        verdict = extra.get("verdict") or event.get("verdict")
+        if verdict:
+            return str(verdict).strip().lower()
+    return ""
+
+
+def _terminal_ts(state_events: list[dict[str, Any]]) -> str | None:
+    return _last_event_ts(state_events, kinds={"run.finished", "audit.finished"})
+
+
+def _has_landed_groups(
+    proof: dict[str, Any] | None,
+    state_events: list[dict[str, Any]],
+) -> bool:
+    proof_groups = proof.get("groups") if proof else None
+    if isinstance(proof_groups, list) and proof_groups:
+        group_dicts = [group for group in proof_groups if isinstance(group, dict)]
+        return bool(group_dicts) and all(
+            bool(group.get("landed")) for group in group_dicts
+        )
+    return _has_event_kind(state_events, "group.merge.landed")
+
+
+def _mark_stage_done(stage: dict[str, Any], ts: str | None) -> None:
+    if stage["status"] == "failed":
+        return
+    stage["status"] = "done"
+    if ts and not stage.get("finished_at"):
+        stage["finished_at"] = ts
 
 
 # Severity vocabulary normalization (research §4 severity ladder).
@@ -904,6 +1142,8 @@ def _derive_status(
     saw_group_started = False
     for event in state_events:
         kind = str(event.get("event") or event.get("kind") or "")
+        if _is_legacy_run_start_audit_event(event):
+            continue
         if kind == "group.started":
             saw_group_started = True
         stage_name, sub = _stage_event_target(kind)

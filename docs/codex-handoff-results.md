@@ -1908,3 +1908,89 @@ Decision:
 - Do not count this as another pressure-test pass. It was a repair/audit round
   against the same Acme evidence, and it found real product-flow gaps in the
   Mission Control surface after the backend queue false-failure was repaired.
+
+## 2026-05-06 Mission Control Product Audit: Run Truthfulness Repair
+
+Context:
+- Follow-up product-level browser/API audit on restarted Mission Control
+  `http://127.0.0.1:9000/`, selected project
+  `/Users/yuxuan/otto-projects/acme-expense-portal`.
+- Real session inspected:
+  `2026-05-06-173132-2c6bc6` in
+  `/Users/yuxuan/otto-projects/acme-expense-portal/.worktrees/add-a-manager-sla-aging-dashboard-743f16/otto_logs/sessions/`.
+- Browser evidence:
+  `bench-results/as-user/2026-05-06-ui-round/round3-acme-run-detail-fixed-stages-1280x800.png`,
+  `bench-results/as-user/2026-05-06-ui-round/round3-acme-feature-evidence-1280x800.png`,
+  `bench-results/as-user/2026-05-06-ui-round/round3-acme-spec-features-1280x800.png`.
+
+Bug found: passed i2p run showed a stale/in-flight stage timeline
+- Evidence: the Acme run header reported `passed`, `Groups 3/3`, `Features
+  10/10`, and `Wall 22:31`, while the stage timeline still showed spec review
+  pending, build active, audit/render/land pending.
+- Logs-first evidence: `spec-state.jsonl` contained group checks, merge landed
+  events, `audit.finished`, and `run.finished verdict=passed`; the proof packet
+  also reported `verdict=passed` with all groups landed.
+- Root cause: `RunView` only treated bare `seed.*` lifecycle events as stage
+  events. Bare `audit.*` events were ignored, completed group/merge/proof
+  evidence did not reconcile later stages, and the runner had been using
+  `audit.started detail="run start"` as a fake run-start event.
+- Generic fix: future journals emit `run.started`; `RunView` skips the legacy
+  fake audit-start event, recognizes bare audit lifecycle events, and
+  reconciles terminal passed/partial/blocked runs from proof, group merge
+  evidence, lifecycle state, and `run.finished`.
+
+Bug found: synthesized group features showed no evidence
+- Evidence: opening feature `Derive pending expenses submitted more than 7
+  days ago` showed `No evidence kinds declared` and `No evidence collected yet`
+  even though the group had a real pytest check and passed evidence.
+- Root cause: group-only i2p specs synthesize feature rows from
+  `Group.feature_ids`, but `RunView` did not map `pytest` / `PytestCheck` to the
+  canonical `RepoTestCheck` evidence kind and dropped group check evidence refs.
+- Generic fix: synthesized feature rows now inherit declared group check kinds
+  and evidence refs from proof-packet `check_evidence` plus
+  `group.check.finished` journal details.
+
+Bug found: spec review hid concrete group feature scope
+- Evidence: `GET /api/specs/2026-05-06-173132-2c6bc6/markdown` rendered only
+  three group headings before the fix, despite the compiled spec containing ten
+  concrete `groups[*].feature_ids`.
+- Root cause: `render_spec_md` only rendered top-level `Spec.features`; legacy
+  group-only i2p specs had `features=[]`.
+- Generic fix: markdown rendering now synthesizes readable feature headings
+  from group feature ids when top-level features are absent. Parsing also
+  derives `Group.feature_ids` from parsed feature comments so edited markdown
+  stays internally coherent.
+
+Live verification after fix:
+- `curl /api/run-view/2026-05-06-173132-2c6bc6` -> `status=passed`,
+  `verdict=passed`, and all stages `compile`, `spec_review`, `build`, `seed`,
+  `audit`, `render`, `land` are `done`.
+- First synthesized feature now reports `evidence_kinds=["RepoTestCheck"]` and
+  evidence ref `tests/test_sla_aging_data.py`.
+- `curl /api/specs/2026-05-06-173132-2c6bc6/markdown` -> rendered all ten group
+  feature headings.
+- Browser snapshot confirmed the run detail, feature drilldown, and spec review
+  surfaces show groups/features/stages/evidence truthfully.
+
+Regression tests added:
+- `tests/test_run_view.py::test_passed_i2p_run_marks_terminal_stages_done`
+- `tests/test_run_view.py::test_group_feature_ids_inherit_pytest_evidence_refs`
+- `tests/test_a1a_dataclasses.py::test_render_spec_md_group_feature_ids_when_features_empty`
+- `tests/test_a1a_dataclasses.py::test_parse_spec_md_features_with_metadata_comments`
+
+Verification:
+- `.venv/bin/pytest tests/test_run_view.py tests/test_a1a_dataclasses.py::test_render_spec_md_group_feature_ids_when_features_empty tests/test_a1a_dataclasses.py::test_parse_spec_md_features_with_metadata_comments tests/test_a1a_dataclasses.py::test_round_trip_render_parse_full tests/test_spec_state.py::test_append_and_iter_roundtrips_every_event_kind -q`
+  -> `26 passed`.
+- `uv run ruff check otto/mission_control/run_view.py otto/runner.py otto/spec_state.py otto/spec_compile.py tests/test_run_view.py tests/test_a1a_dataclasses.py`
+  -> passed.
+- `uv run python scripts/test_tiers.py smoke` -> `252 passed, 1800 deselected`.
+- `uv run python scripts/test_tiers.py web` -> `210 passed`.
+- `git diff --check` -> passed.
+- Direct serializer check against the real Acme session -> all stages done and
+  pytest evidence visible.
+- Restarted Mission Control on port 9000 and rechecked the live API/browser.
+
+Decision:
+- Classify as `Otto UI/API truthfulness bugs fixed`.
+- This remains an audit/repair round against the Acme pressure-test evidence,
+  not a new pressure-test tier.

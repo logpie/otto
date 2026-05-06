@@ -977,9 +977,10 @@ def render_spec_md(spec: Spec) -> str:
     # Features (grouped by Group)
     if spec.features or spec.groups:
         parts.append("\n## Features\n")
+        render_features = _features_for_spec_markdown(spec)
         # Group features by group_id, preserving spec.groups order
         features_by_group: dict[str, list[Feature]] = {}
-        for f in spec.features:
+        for f in render_features:
             features_by_group.setdefault(f.group_id, []).append(f)
         # Render in spec.groups order
         for group in spec.groups:
@@ -1025,6 +1026,39 @@ def render_spec_md(spec: Spec) -> str:
             parts.append(f"- ⊘ {g.text}{scope_note}\n")
 
     return "".join(parts)
+
+
+def _features_for_spec_markdown(spec: Spec) -> list[Feature]:
+    """Return features to show in the human spec-review surface.
+
+    Early i2p compiler outputs sometimes left top-level ``features`` empty
+    while preserving concrete user work in ``Group.feature_ids``. Rendering
+    only group headings made the spec-review UI look empty even though the
+    build plan had real feature work. For those legacy/group-only specs,
+    synthesize read-friendly Feature objects from the group feature ids so
+    operators can review the actual scope.
+    """
+    if spec.features:
+        return list(spec.features)
+    if not spec.groups:
+        return []
+    out: list[Feature] = []
+    seen: set[str] = set()
+    for group in spec.groups:
+        for raw_feature_id in group.feature_ids:
+            name = str(raw_feature_id).strip()
+            if not name:
+                continue
+            feature_id = _markdown_feature_id_from_group_id(name, seen)
+            out.append(Feature(id=feature_id, name=name, group_id=group.id))
+    return out
+
+
+def _markdown_feature_id_from_group_id(raw_feature_id: str, seen: set[str]) -> str:
+    slug = _SLUG_RE.sub("-", raw_feature_id.lower()).strip("-_") or "feature"
+    slug = _dedupe_slug(slug, seen)
+    seen.add(slug)
+    return slug
 
 
 def parse_spec_md(
@@ -1227,6 +1261,14 @@ def parse_spec_md(
 
     _flush_feature()
     _flush_group()
+
+    feature_ids_by_group: dict[str, list[str]] = {}
+    for feature in features_out:
+        if feature.group_id:
+            feature_ids_by_group.setdefault(feature.group_id, []).append(feature.id)
+    for group in groups_out:
+        if group.id in feature_ids_by_group:
+            group.feature_ids = list(feature_ids_by_group[group.id])
 
     # Guardrails section
     guardrails_out: list[Guardrail] = []

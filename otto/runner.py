@@ -219,7 +219,7 @@ async def run_pipeline(
                 logger.warning("on_phase(%r) callback raised: %s", name, exc)
 
     try:
-        emit(session_dir, "audit.started", detail="run start")
+        emit(session_dir, "run.started", detail="run start")
     except Exception as exc:  # noqa: BLE001 — observability is best-effort
         logger.warning("emit run start failed: %s", exc)
 

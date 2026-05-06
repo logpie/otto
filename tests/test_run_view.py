@@ -344,6 +344,64 @@ def test_build_run_view_derives_features_from_group_feature_ids(tmp_path: Path) 
     assert view["features"][0]["evidence_kinds"] == ["StateInvariant"]
 
 
+def test_group_feature_ids_inherit_pytest_evidence_refs(tmp_path: Path) -> None:
+    spec = {
+        "intent": "build a micro twitter",
+        "project_kind": "webapp",
+        "features": [],
+        "groups": [
+            {
+                "id": "timeline",
+                "name": "Timeline",
+                "feature_ids": ["post short messages"],
+                "checks": [{"kind": "pytest", "selector": "tests/test_timeline.py"}],
+            }
+        ],
+    }
+    proof = {
+        "intent": "build a micro twitter",
+        "project_kind": "webapp",
+        "verdict": "passed",
+        "features": [],
+        "groups": [
+            {
+                "group_id": "timeline",
+                "name": "Timeline",
+                "landed": True,
+                "check_evidence": [
+                    {
+                        "kind": "PytestCheck",
+                        "detail": "selector='tests/test_timeline.py' exit=0",
+                        "raw": {"selector": "tests/test_timeline.py"},
+                    }
+                ],
+            }
+        ],
+    }
+    state = [
+        {
+            "kind": "group.check.finished",
+            "group_id": "timeline",
+            "detail": "pass",
+            "extra": {"details": ["selector='tests/test_timeline.py' exit=0"]},
+            "ts": "2026-05-04T20:00:02Z",
+        }
+    ]
+    session = _setup_session(tmp_path, proof=proof, spec=spec, state_events=state)
+
+    view = build_run_view(session)
+
+    feature = view["features"][0]
+    assert feature["evidence_kinds"] == ["RepoTestCheck"]
+    assert feature["evidence_refs"] == [
+        {
+            "kind": "RepoTestCheck",
+            "path": "tests/test_timeline.py",
+            "summary": "selector='tests/test_timeline.py' exit=0",
+        }
+    ]
+
+
 def test_build_run_view_group_started_drives_group_and_build_status(tmp_path: Path) -> None:
     spec = {
         "intent": "test",
@@ -503,3 +561,80 @@ def test_build_run_view_interrupted_queue_state_is_terminal(tmp_path: Path) -> N
     assert view["meta"]["started_at"] == "2026-05-04T20:00:00Z"
     assert view["meta"]["finished_at"] == "2026-05-04T20:05:00Z"
     assert next(s for s in view["stages"] if s["name"] == "build")["status"] == "failed"
+
+
+def test_passed_i2p_run_marks_terminal_stages_done(tmp_path: Path) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "features": [],
+        "groups": [
+            {
+                "id": "g1",
+                "name": "G1",
+                "feature_ids": ["f1"],
+                "checks": [{"kind": "pytest"}],
+            }
+        ],
+    }
+    proof = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "verdict": "passed",
+        "features": [],
+        "groups": [{"group_id": "g1", "landed": True, "status": "landed"}],
+    }
+    state = [
+        {"kind": "audit.started", "detail": "run start", "ts": "2026-05-04T20:00:00Z"},
+        {"kind": "seed.started", "ts": "2026-05-04T20:00:01Z"},
+        {
+            "kind": "seed.finished",
+            "ts": "2026-05-04T20:00:02Z",
+            "extra": {"succeeded": True},
+        },
+        {"kind": "group.started", "group_id": "g1", "ts": "2026-05-04T20:00:03Z"},
+        {
+            "kind": "group.check.finished",
+            "group_id": "g1",
+            "detail": "pass",
+            "extra": {"details": ["selector='tests/test_g1.py' exit=0"]},
+            "ts": "2026-05-04T20:00:04Z",
+        },
+        {
+            "kind": "group.merge.eligible",
+            "group_id": "g1",
+            "ts": "2026-05-04T20:00:05Z",
+        },
+        {
+            "kind": "group.merge.landed",
+            "group_id": "g1",
+            "detail": "abc123",
+            "ts": "2026-05-04T20:00:06Z",
+        },
+        {"kind": "audit.started", "ts": "2026-05-04T20:00:07Z"},
+        {
+            "kind": "audit.finished",
+            "ts": "2026-05-04T20:00:08Z",
+            "extra": {"verdict": "passed"},
+        },
+        {
+            "kind": "run.finished",
+            "detail": "verdict=passed",
+            "ts": "2026-05-04T20:00:08Z",
+            "extra": {"verdict": "passed"},
+        },
+    ]
+    session = _setup_session(tmp_path, proof=proof, spec=spec, state_events=state)
+    lifecycle = session / "spec" / "lifecycle.json"
+    lifecycle.write_text('{"lifecycle": "approved"}\n')
+
+    view = build_run_view(session)
+
+    stages = {stage["name"]: stage for stage in view["stages"]}
+    assert stages["compile"]["status"] == "done"
+    assert stages["spec_review"]["status"] == "done"
+    assert stages["build"]["status"] == "done"
+    assert stages["seed"]["status"] == "done"
+    assert stages["audit"]["status"] == "done"
+    assert stages["render"]["status"] == "done"
+    assert stages["land"]["status"] == "done"
