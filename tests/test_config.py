@@ -567,6 +567,29 @@ class TestDetectProjectKind:
 
         assert detect_project_kind(tmp_bare_git_repo) == "webapp"
 
+    def test_detects_requirements_flask_package_app_as_webapp(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\ntestpaths = ['tests']\n",
+            encoding="utf-8",
+        )
+        (tmp_bare_git_repo / "requirements.txt").write_text(
+            "Flask>=3.1,<4\npytest>=9,<10\n",
+            encoding="utf-8",
+        )
+        (tmp_bare_git_repo / "expense_portal" / "templates").mkdir(parents=True)
+        (tmp_bare_git_repo / "expense_portal" / "static").mkdir()
+
+        assert detect_project_kind(tmp_bare_git_repo) == "webapp"
+
+    def test_template_package_without_manifest_deps_is_webapp(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\ntestpaths = ['tests']\n",
+            encoding="utf-8",
+        )
+        (tmp_bare_git_repo / "portal" / "templates").mkdir(parents=True)
+
+        assert detect_project_kind(tmp_bare_git_repo) == "webapp"
+
     def test_detects_node_webapp(self, tmp_bare_git_repo):
         pkg = {
             "scripts": {"dev": "vite --host 0.0.0.0"},

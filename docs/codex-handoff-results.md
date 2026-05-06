@@ -1537,3 +1537,84 @@ Decision:
   as a product pass because it ran stale pre-fix code, blocked on the hard-coded
   `main` merge base, and the browser audit found the produced dashboard
   incomplete despite green native tests.
+
+## 2026-05-06 Fresh Acme Retry 4: Project-Kind + Walkthrough Shape Fix
+
+Live project:
+- `/Users/yuxuan/otto-projects/acme-expense-portal`
+- Task id: `add-a-manager-sla-aging-dashboard-8bb288`
+- Session: `2026-05-06-172058-0a57ca`
+- Provider: Codex, submitted through Mission Control Web from a freshly
+  restarted server after commit `1f39410d1`.
+
+Doorway / Web evidence:
+- Mission Control server restarted from this worktree on port 9000.
+- Browser artifacts: `/tmp/otto-mc-doorway-20260506-1018/`.
+- Project selected through Mission Control Web; job dialog provider changed
+  from inherited Claude to Codex, and the visible summary updated to
+  `codex · model provider default · effort=default · verification=fast`.
+- Web submission created task `add-a-manager-sla-aging-dashboard-8bb288`;
+  queue row showed it as running within seconds.
+- Cross-session payload:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/otto_logs/cross-sessions/runs/live/2026-05-06-172058-0a57ca.json`
+  includes `argv=["build", ..., "--provider", "codex"]`.
+
+Bug found:
+- The compile prompt for a real Flask/SQLite app still said
+  `project_kind=library`.
+- Direct reproduction before the fix:
+  `detect_project_kind(/Users/yuxuan/otto-projects/acme-expense-portal)`
+  returned `library` even though the project has `requirements.txt` with
+  Flask and package-level `expense_portal/templates` / `expense_portal/static`.
+- This is the same root cause behind the previous audit walkthrough message:
+  `shape=not-applicable`, `note=no Flask create_app and no static index.html`.
+  The default synthesized walkthrough only tried `from app import create_app`;
+  it did not discover packaged factories such as `expense_portal:create_app`.
+- A broader audit test sweep exposed one more runtime gap: the audit-level
+  `otto.yaml` `test_command` path used the sanitized subprocess env but did
+  not resolve bare `python`, so macOS environments without `python` on PATH
+  failed the contract gate even though deterministic checks had been fixed.
+
+Classification:
+- Otto bugs fixed. The run was intentionally stopped at 99 seconds because it
+  had already compiled from stale `project_kind=library` context.
+
+Generic fixes:
+- `detect_project_kind` now reads `requirements*.txt` in addition to Python
+  package metadata, treats package-level `templates/` or `static/` as a webapp
+  signal, and classifies Flask/Django/FastAPI package apps correctly.
+- The synthesized webapp walkthrough now tries root modules plus top-level
+  Python packages for `create_app`, including package factories such as
+  `expense_portal:create_app` and `expense_portal.app:create_app`.
+- Audit contract tests now use the same subprocess executable resolver as
+  deterministic checks, so bare `python` / `pytest` in `otto.yaml` run through
+  the target project runtime or user PATH rather than failing at launch.
+
+External verifier:
+- Direct detection after the fix:
+  `detect_project_kind(/Users/yuxuan/otto-projects/acme-expense-portal)`
+  -> `webapp`.
+- The queued linked worktree for `add-a-manager-sla-aging-dashboard-8bb288`
+  also detects as `webapp`.
+
+Regression tests added or expanded:
+- `tests/test_config.py::TestDetectProjectKind::test_detects_requirements_flask_package_app_as_webapp`
+- `tests/test_config.py::TestDetectProjectKind::test_template_package_without_manifest_deps_is_webapp`
+- `tests/test_audit.py::test_synthesized_walkthrough_finds_package_create_app`
+- Existing audit contract tests now cover the executable resolver path because
+  the full `tests/test_audit.py` sweep includes bare `python` `test_command`
+  cases.
+
+Gates run:
+- `.venv/bin/python -m py_compile otto/config.py otto/audit.py` -> passed.
+- `.venv/bin/pytest tests/test_config.py::TestDetectProjectKind::test_detects_requirements_flask_package_app_as_webapp tests/test_config.py::TestDetectProjectKind::test_template_package_without_manifest_deps_is_webapp tests/test_audit.py::test_synthesized_walkthrough_finds_package_create_app -q`
+  -> `3 passed`.
+- `.venv/bin/pytest tests/test_config.py::TestDetectProjectKind tests/test_audit.py -q`
+  -> `54 passed`.
+- `uv run ruff check otto/config.py otto/audit.py tests/test_config.py tests/test_audit.py`
+  -> passed.
+
+Decision:
+- Fix and retry from a fresh Mission Control process again. This run does not
+  count as a product pass; it is evidence for the project-kind/walkthrough
+  shape bug and the audit contract-runtime bug.

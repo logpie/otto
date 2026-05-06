@@ -1300,7 +1300,8 @@ def detect_project_kind(project_dir: Path) -> str:
     pyproject = project_dir / "pyproject.toml"
     setup_py = project_dir / "setup.py"
     setup_cfg = project_dir / "setup.cfg"
-    if pyproject.exists() or setup_py.exists() or setup_cfg.exists():
+    requirement_files = tuple(project_dir.glob("requirements*.txt"))
+    if pyproject.exists() or setup_py.exists() or setup_cfg.exists() or requirement_files:
         py_text = ""
         if pyproject.exists():
             try:
@@ -1314,7 +1315,13 @@ def detect_project_kind(project_dir: Path) -> str:
                     setup_text += "\n" + path.read_text(encoding="utf-8").casefold()
                 except OSError:
                     pass
-        combined = f"{py_text}\n{setup_text}"
+        requirements_text = ""
+        for path in requirement_files:
+            try:
+                requirements_text += "\n" + path.read_text(encoding="utf-8").casefold()
+            except OSError:
+                pass
+        combined = f"{py_text}\n{setup_text}\n{requirements_text}"
         if (
             "[project.scripts]" in combined
             or "console_scripts" in combined
@@ -1343,7 +1350,9 @@ def detect_project_kind(project_dir: Path) -> str:
         if any(marker in combined for marker in ("flask", "django")):
             return "webapp" if has_template_or_static else "api"
         if "fastapi" in combined:
-            return "api"
+            return "webapp" if has_template_or_static else "api"
+        if has_template_or_static:
+            return "webapp"
         return "library"
 
     pkg_json = project_dir / "package.json"

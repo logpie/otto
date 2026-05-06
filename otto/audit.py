@@ -547,31 +547,56 @@ def _synthesized_webapp_walkthrough(
         # way, missing infrastructure is "walkthrough not applicable",
         # not "audit failure".
         boot_script = (
-            "import json, sys, traceback, os\n"
+            "import importlib, json, sys, traceback, os\n"
             "from pathlib import Path\n"
             "ROOT = Path(os.getcwd())\n"
             "result = {}\n"
-            "# Attempt 1: Flask/FastAPI-style create_app.\n"
-            "try:\n"
-            "    from app import create_app  # type: ignore[import-not-found]\n"
-            "    app = create_app({'TESTING': True})\n"
-            "    client = app.test_client()\n"
-            "    r = client.get('/')\n"
-            "    body = r.get_data(as_text=True) or ''\n"
-            "    result = {'shape': 'flask-create_app', 'status': r.status_code,\n"
-            "              'body_len': len(body), 'body_preview': body[:500]}\n"
-            "    with open('__audit_home_body__.html', 'w') as f:\n"
-            "        f.write(body)\n"
-            "    print(json.dumps(result))\n"
-            "    sys.exit(0)\n"
-            "except (ImportError, ModuleNotFoundError):\n"
-            "    pass  # not Flask-shaped\n"
-            "except Exception as exc:\n"
-            "    # create_app exists but boot failed → real audit signal.\n"
-            "    result = {'shape': 'flask-create_app', 'error': f'{type(exc).__name__}: {exc}',\n"
-            "              'traceback': traceback.format_exc()}\n"
-            "    print(json.dumps(result))\n"
-            "    sys.exit(2)\n"
+            "# Attempt 1: Flask/FastAPI-style create_app. Try root modules and\n"
+            "# top-level packages because brownfield Flask apps commonly expose\n"
+            "# create_app from package __init__.py rather than app.py.\n"
+            "candidates = ['app', 'main', 'wsgi', 'asgi']\n"
+            "for child in sorted(ROOT.iterdir()):\n"
+            "    if not child.is_dir() or child.name.startswith(('.', '_')):\n"
+            "        continue\n"
+            "    if (child / '__init__.py').is_file():\n"
+            "        candidates.append(child.name)\n"
+            "        candidates.append(f'{child.name}.app')\n"
+            "seen = set()\n"
+            "for module_name in candidates:\n"
+            "    if module_name in seen:\n"
+            "        continue\n"
+            "    seen.add(module_name)\n"
+            "    try:\n"
+            "        module = importlib.import_module(module_name)\n"
+            "    except (ImportError, ModuleNotFoundError):\n"
+            "        continue\n"
+            "    create_app = getattr(module, 'create_app', None)\n"
+            "    if not callable(create_app):\n"
+            "        continue\n"
+            "    try:\n"
+            "        try:\n"
+            "            app = create_app({'TESTING': True})\n"
+            "        except TypeError:\n"
+            "            app = create_app()\n"
+            "        if not hasattr(app, 'test_client'):\n"
+            "            raise TypeError(f'{module_name}.create_app returned object without test_client')\n"
+            "        client = app.test_client()\n"
+            "        r = client.get('/')\n"
+            "        body = r.get_data(as_text=True) or ''\n"
+            "        result = {'shape': 'flask-create_app', 'module': module_name,\n"
+            "                  'status': r.status_code, 'body_len': len(body),\n"
+            "                  'body_preview': body[:500]}\n"
+            "        with open('__audit_home_body__.html', 'w') as f:\n"
+            "            f.write(body)\n"
+            "        print(json.dumps(result))\n"
+            "        sys.exit(0)\n"
+            "    except Exception as exc:\n"
+            "        # create_app exists but boot failed -> real audit signal.\n"
+            "        result = {'shape': 'flask-create_app', 'module': module_name,\n"
+            "                  'error': f'{type(exc).__name__}: {exc}',\n"
+            "                  'traceback': traceback.format_exc()}\n"
+            "        print(json.dumps(result))\n"
+            "        sys.exit(2)\n"
             "# Attempt 2: static-site or CLI shape — look for produced output.\n"
             "for candidate in ('output/index.html', 'dist/index.html', 'build/index.html', 'site/index.html', 'index.html'):\n"
             "    p = ROOT / candidate\n"
@@ -1426,8 +1451,8 @@ def _run_project_contract_test(
     if not test_command:
         return None, "no test_command configured in otto.yaml"
 
-    # Use the same PATH+venv augmentation as checks.py.
-    from otto.checks import _subprocess_env
+    # Use the same PATH+venv augmentation and executable resolution as checks.py.
+    from otto.checks import _resolve_subprocess_command, _subprocess_env
 
     try:
         argv = shlex.split(test_command)
@@ -1444,9 +1469,13 @@ def _run_project_contract_test(
         argv = fallback_argv
         command_for_output = shlex.join(argv)
         fallback_note = f"; fallback from {test_command!r}"
+    resolved_argv = _resolve_subprocess_command(argv, project_dir, [project_dir])
+    if resolved_argv != argv:
+        command_for_output = shlex.join(resolved_argv)
+        fallback_note = f"{fallback_note}; resolved from {test_command!r}"
     try:
         completed = _sp.run(
-            argv,
+            resolved_argv,
             cwd=project_dir,
             env=env,
             capture_output=True,

@@ -1312,6 +1312,63 @@ def test_default_walkthrough_no_browser_journey_webapp_synthesizes(tmp_path: Pat
     assert "Hello synthesized walkthrough" in log_text or '"status": 200' in log_text
 
 
+def test_synthesized_walkthrough_finds_package_create_app(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Brownfield Flask apps often expose create_app from a package."""
+    from otto.spec_compile import PytestCheck
+
+    spec = Spec(
+        intent="x",
+        project_kind="webapp",
+        features=[Feature(id="home", name="Package Flask home")],
+        groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])],
+    )
+    (tmp_path / "flask.py").write_text(
+        "class _Response:\n"
+        "    status_code = 200\n"
+        "    def __init__(self, body): self._body = body\n"
+        "    def get_data(self, as_text=False):\n"
+        "        return self._body if as_text else self._body.encode()\n"
+        "class Flask:\n"
+        "    def __init__(self, name): self.routes = {}\n"
+        "    def get(self, path):\n"
+        "        def decorator(fn):\n"
+        "            self.routes[path] = fn\n"
+        "            return fn\n"
+        "        return decorator\n"
+        "    def test_client(self):\n"
+        "        app = self\n"
+        "        class Client:\n"
+        "            def get(self, path): return _Response(app.routes[path]())\n"
+        "        return Client()\n",
+        encoding="utf-8",
+    )
+    package_dir = tmp_path / "expense_portal"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text(
+        "from flask import Flask\n"
+        "def create_app(config=None):\n"
+        "    app = Flask(__name__)\n"
+        "    @app.get('/')\n"
+        "    def home(): return '<h1>Package Flask home</h1>'\n"
+        "    return app\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("otto.audit._capture_playwright_page", _fake_playwright_capture)
+
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(tmp_path, tmp_path / "log", 60)
+
+    assert result.succeeded is True
+    log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
+    assert '"module": "expense_portal"' in log_text
+    assert "Package Flask home" in log_text
+    artifact_names = {path.name for path in result.artifacts}
+    assert "screenshot-home.png" in artifact_names
+
+
 def test_default_walkthrough_picks_cross_slice_journey_first(tmp_path: Path) -> None:
     """When both cross-slice and slice-level BrowserJourney exist, the
     cross-slice one wins (it's the integrated test)."""
