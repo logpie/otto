@@ -959,6 +959,33 @@ def _mc_click_run_action_from_ui(
     return False
 
 
+def _mc_click_land_ready_from_ui(
+    page: Any,
+    *,
+    failures: RunFailures,
+    log_fn: Callable[[str], None],
+) -> bool:
+    """Drive the current task-board landing path through visible controls."""
+    try:
+        button = page.locator('[data-testid="mission-land-ready-button"]').first
+        if button.count() == 0 or not button.is_visible():
+            failures.note("land-ready button is not visible")
+            return False
+        if not button.is_enabled():
+            failures.note("land-ready button is visible but disabled")
+            return False
+        label = _mc_action_button_text(button)
+        log_fn(f"  clicking land-ready button: {label!r}")
+        button.click(timeout=5_000)
+        _mc_confirm_dialog_if_present(page, failures=failures, log_fn=log_fn)
+        time.sleep(1.0)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        failures.note(f"land-ready click failed: {exc}")
+        log_fn(f"  land-ready click failed: {exc}")
+        return False
+
+
 def _mc_layout_snapshot(
     page: Any,
     ctx: ScenarioContext,
@@ -3836,6 +3863,7 @@ def _enqueue_via_dialog_full(
     intent: str,
     command: str,
     subcommand: Optional[str],
+    provider: Optional[str],
     failures: RunFailures,
     label: str,
     artifact_dir: Path,
@@ -3865,6 +3893,16 @@ def _enqueue_via_dialog_full(
             time.sleep(0.5)
         if command == "improve" and subcommand:
             if not _set_improve_subcommand(page, subcommand, failures=failures):
+                return False
+        if provider:
+            provider_select = page.locator('[data-testid="job-provider-select"]').first
+            if provider_select.count() == 0:
+                failures.note(f"enqueue {label}: provider selector not present")
+                return False
+            try:
+                provider_select.select_option(value=provider, timeout=5_000)
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"enqueue {label}: could not select provider {provider!r} — {exc}")
                 return False
         page.locator('[data-testid="job-dialog-intent"]').fill(intent, timeout=5_000)
         _maybe_confirm_dirty_target(page, failures=failures)
@@ -3981,6 +4019,7 @@ def _run_w3(ctx: ScenarioContext) -> ScenarioRunResult:
                 intent=W3_BUILD_INTENT,
                 command="build",
                 subcommand=None,
+                provider=ctx.provider,
                 failures=failures,
                 label="prior-build",
                 artifact_dir=artifact_dir,
@@ -4022,6 +4061,7 @@ def _run_w3(ctx: ScenarioContext) -> ScenarioRunResult:
                 intent=W3_IMPROVE_FOCUS,
                 command="improve",
                 subcommand="bugs",
+                provider=ctx.provider,
                 failures=failures,
                 label="improve",
                 artifact_dir=artifact_dir,
@@ -4280,6 +4320,7 @@ def _run_w4(ctx: ScenarioContext) -> ScenarioRunResult:
                 intent=W4_INTENT,
                 command="build",
                 subcommand=None,
+                provider=ctx.provider,
                 failures=failures,
                 label="w4-build",
                 artifact_dir=artifact_dir,
@@ -4320,26 +4361,29 @@ def _run_w4(ctx: ScenarioContext) -> ScenarioRunResult:
             # ---------- Step 5: merge from UI ----------
             _log("Step 5: merge through visible UI")
             if build_run_id:
-                # Verify legal_actions includes merge
-                _, detail_body = _api_get(
-                    ctx.web_url, f"/api/runs/{build_run_id}",
-                )
-                detail = detail_body if isinstance(detail_body, dict) else {}
-                legal_keys = [a.get("key") for a in (detail.get("legal_actions") or [])]
-                _log(f"  legal_actions keys={legal_keys}")
+                state = _state(ctx.web_url)
+                landing = state.get("landing") if isinstance(state, dict) else {}
+                ready_items = [
+                    item for item in (landing.get("items") or [])
+                    if isinstance(item, dict) and item.get("landing_state") == "ready"
+                ] if isinstance(landing, dict) else []
+                _log(f"  landing ready items={len(ready_items)}")
                 failures.soft_assert(
-                    "m" in legal_keys or "merge" in legal_keys,
-                    f"merge action not in legal_actions: {legal_keys}",
+                    any(item.get("run_id") == build_run_id for item in ready_items),
+                    f"run {build_run_id} was not listed as ready to land",
                 )
-
-                merge_clicked = _mc_click_run_action_from_ui(
-                    page,
-                    build_run_id,
-                    "merge",
-                    failures=failures,
-                    log_fn=_log,
+                merge_clicked = _mc_click_land_ready_from_ui(
+                    page, failures=failures, log_fn=_log
                 )
-                failures.soft_assert(merge_clicked, f"could not merge run {build_run_id} through visible UI")
+                if not merge_clicked:
+                    merge_clicked = _mc_click_run_action_from_ui(
+                        page,
+                        build_run_id,
+                        "merge",
+                        failures=failures,
+                        log_fn=_log,
+                    )
+                failures.soft_assert(merge_clicked, f"could not land run {build_run_id} through visible UI")
 
             # ---------- Step 6: wait merge history row ----------
             _log("Step 6: poll for merge history row")
@@ -4492,6 +4536,7 @@ def _run_w5(ctx: ScenarioContext) -> ScenarioRunResult:
                 intent=W5_INTENT,
                 command="build",
                 subcommand=None,
+                provider=ctx.provider,
                 failures=failures,
                 label="w5-build",
                 artifact_dir=artifact_dir,
@@ -4539,25 +4584,27 @@ def _run_w5(ctx: ScenarioContext) -> ScenarioRunResult:
             except Exception as exc:  # noqa: BLE001
                 failures.note(f"git status failed: {exc}")
 
-            # ---------- Step 4: attempt merge in UI — expect visible blocked reason ----------
-            _log("Step 4: attempt merge through visible UI — expect blocked")
-            merge_attempted = False
+            # ---------- Step 4: refresh UI — expect visible blocked reason ----------
+            _log("Step 4: refresh Mission Control — expect landing blocked")
             merge_body = ""
-            if build_run_id:
-                merge_attempted = _mc_click_run_action_from_ui(
-                    page,
-                    build_run_id,
-                    "merge",
-                    failures=failures,
-                    log_fn=_log,
-                )
-                time.sleep(1)
-                merge_body = _mc_visible_text(page)
-                (artifact_dir / "merge-blocked-visible-text.txt").write_text(merge_body, encoding="utf-8")
-
+            try:
+                refresh = page.locator('[data-testid="project-workspace-refresh"]').first
+                if refresh.count() > 0 and refresh.is_enabled():
+                    refresh.click(timeout=5_000)
+                    time.sleep(1.0)
+                else:
+                    page.reload(wait_until="domcontentloaded", timeout=15_000)
+                    _wait_for_mc_ready(page)
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"W5 refresh after dirtying project failed: {exc}")
+            state = _state(ctx.web_url)
+            landing = state.get("landing") if isinstance(state, dict) else {}
+            blocked = bool(landing.get("merge_blocked")) if isinstance(landing, dict) else False
+            merge_body = _mc_visible_text(page)
+            (artifact_dir / "merge-blocked-visible-text.txt").write_text(merge_body, encoding="utf-8")
             failures.soft_assert(
-                merge_attempted,
-                "could not attempt merge through visible UI",
+                blocked or page.locator('[data-testid="merge-blocked-banner"]').count() > 0,
+                "Mission Control did not show landing as blocked after project became dirty",
             )
             # Reason should mention dirty / blocked / repository / merge-ready
             body_lower = merge_body.lower()
@@ -4718,6 +4765,7 @@ def _run_w6(ctx: ScenarioContext) -> ScenarioRunResult:
                 intent=W6_INTENT,
                 command="build",
                 subcommand=None,
+                provider=ctx.provider,
                 failures=failures,
                 label="w6-build-fail",
                 artifact_dir=artifact_dir,
