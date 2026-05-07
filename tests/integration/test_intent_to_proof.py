@@ -4,8 +4,8 @@ Drives `otto build` against a tmp project with a tiny but non-trivial
 intent ("hello world plus a counter button") and asserts the canonical
 i2p artifacts land on disk.
 
-This is a real-cost test: it spawns real Codex provider sessions via
-`uv run otto build --provider codex ...`. It is gated behind
+This is a real-cost test: it spawns real Codex App Server provider sessions via
+`uv run otto build ...` using Otto's default provider. It is gated behind
 `OTTO_ALLOW_REAL_COST=1` so CI/local default runs never burn money.
 Run it via the `i2p-e2e` tier:
 
@@ -130,8 +130,8 @@ def _resolve_session_dir(project_dir: Path) -> Path:
     return target_path
 
 
-def test_intent_to_proof_real_codex(tmp_path: Path) -> None:
-    """Drive a real `otto build --provider codex` and assert artifacts."""
+def test_intent_to_proof_real_default_provider(tmp_path: Path) -> None:
+    """Drive a real default-provider `otto build` and assert artifacts."""
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
     _init_tmp_project(project_dir)
@@ -149,8 +149,6 @@ def test_intent_to_proof_real_codex(tmp_path: Path) -> None:
         "otto.cli",
         "build",
         _FIXTURE_INTENT,
-        "--provider",
-        "codex",
         "--budget",
         str(_BUDGET_SECONDS),
     ]

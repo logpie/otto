@@ -163,6 +163,7 @@ async def test_codex_query_normalizes_json_events(tmp_path, monkeypatch):
     assert "--dangerously-bypass-approvals-and-sandbox" in args
     assert "-C" in args
     assert str(tmp_path) in args
+    assert seen["kwargs"]["env"] is None
     assert seen["kwargs"]["limit"] == CODEX_STDIO_LIMIT_BYTES
     assert CODEX_STDIO_LIMIT_BYTES >= 16 * 1024 * 1024
 
@@ -247,6 +248,7 @@ async def test_codex_app_server_query_normalizes_thread_turn_events(tmp_path, mo
     assert written[2]["params"]["sandbox"] == "danger-full-access"
     assert written[3]["params"]["effort"] == "low"
     assert written[3]["params"]["input"][0]["text"] == "Run tests"
+    assert seen["kwargs"]["env"] is None
 
 
 @pytest.mark.asyncio
@@ -561,8 +563,22 @@ def test_make_agent_options_env_prefers_target_project_src(tmp_path, monkeypatch
 def test_make_agent_options_sets_default_max_turns(tmp_path):
     options = make_agent_options(tmp_path, {})
 
+    assert options.provider == "codex-app-server"
     assert options.max_turns == 200
     assert options.max_subagent_dispatches == 160
+
+
+@pytest.mark.asyncio
+async def test_query_defaults_to_codex_app_server(monkeypatch):
+    async def fake_query(*, prompt, options=None, state=None):
+        assert prompt == "test"
+        yield ResultMessage(total_cost_usd=0.0, session_id="app-server-default")
+
+    monkeypatch.setattr("otto.agent._query_codex_app_server", fake_query)
+
+    messages = [message async for message in query(prompt="test", options=AgentOptions())]
+
+    assert [message.session_id for message in messages] == ["app-server-default"]
 
 
 @pytest.mark.asyncio
@@ -583,7 +599,7 @@ async def test_run_agent_query_streams_markers_without_retaining_full_tool_blob(
 
     text, _cost, _result = await run_agent_query(
         "test",
-        AgentOptions(),
+        AgentOptions(provider="claude"),
         capture_tool_output=True,
     )
 
@@ -631,7 +647,7 @@ async def test_run_agent_query_dedupes_marker_block_when_final_assistant_repeats
 
     text, _cost, _result = await run_agent_query(
         "test",
-        AgentOptions(),
+        AgentOptions(provider="claude"),
         capture_tool_output=False,
     )
 
@@ -687,7 +703,7 @@ async def test_run_agent_query_strips_duplicate_certify_round_recap(monkeypatch)
 
     text, _cost, _result = await run_agent_query(
         "test",
-        AgentOptions(),
+        AgentOptions(provider="claude"),
         capture_tool_output=True,
     )
 
@@ -710,7 +726,7 @@ async def test_run_agent_query_limits_subagent_dispatches(monkeypatch):
     with pytest.raises(AgentCallError, match="max_subagent dispatch cap reached"):
         await run_agent_query(
             "test",
-            AgentOptions(max_subagent_dispatches=2),
+            AgentOptions(provider="claude", max_subagent_dispatches=2),
         )
 
 

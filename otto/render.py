@@ -189,6 +189,7 @@ def compose_proof_packet(
     build_by_group: dict[str, GroupResult] = {
         r.group_id: r for r in build_result.group_results
     }
+    product_passed = audit_result.verdict == AuditVerdict.PASSED
 
     group_packets: list[GroupPacket] = []
     for s in spec.groups:
@@ -207,6 +208,11 @@ def compose_proof_packet(
         landed = bool(mres and mres.status == MergeStatus.LANDED)
         if landed:
             group_status = "landed"
+        elif product_passed:
+            # Layer 2 repairs can fix the integrated product after an earlier
+            # group build/merge blocker. The final proof should describe the
+            # residual state, not stale pre-repair blockers.
+            group_status = "passing"
         elif bres and bres.status == GroupStatus.PASSING:
             group_status = "passing"  # passed build but did not land
         elif bres:
@@ -215,7 +221,9 @@ def compose_proof_packet(
             group_status = "pending"
 
         failure = ""
-        if mres and mres.status == MergeStatus.BLOCKED:
+        if product_passed:
+            failure = ""
+        elif mres and mres.status == MergeStatus.BLOCKED:
             failure = mres.failure_narrative
         elif bres and bres.status in (GroupStatus.BLOCKED, GroupStatus.FAILED_SCOPE):
             failure = bres.failure_narrative
@@ -320,7 +328,11 @@ def compose_proof_packet(
         groups=group_packets,
         audit_narrative=audit_result.narrative,
         walkthrough_artifacts=[_path_to_str(p) for p in audit_result.walkthrough_artifacts],
-        blocked_group_ids=list(merge_result.blocked_ids) + list(build_result.blocked_ids),
+        blocked_group_ids=(
+            []
+            if product_passed
+            else list(merge_result.blocked_ids) + list(build_result.blocked_ids)
+        ),
         landed_group_ids=list(merge_result.landed_ids),
         amendments=amendments_render,
         quality_score=audit_result.quality_score,

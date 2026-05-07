@@ -495,6 +495,13 @@ async def run_merge_queue(
                 detail=result.failure_narrative,
             )
 
+    _checkout_base_branch_after_merge(
+        project_dir=project_dir,
+        session_dir=session_dir,
+        base_branch=base_branch,
+        git=git,
+    )
+
     return MergeQueueResult(
         landed_ids=landed_ids,
         blocked_ids=blocked_ids,
@@ -503,6 +510,34 @@ async def run_merge_queue(
         total_cost_usd=total_cost,
         total_wall_s=time.monotonic() - total_t0,
     )
+
+
+def _checkout_base_branch_after_merge(
+    *,
+    project_dir: Path,
+    session_dir: Path,
+    base_branch: str,
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+) -> None:
+    """Leave the project on the integrated branch for audit/Layer 2 repair.
+
+    The build phase checks out per-group branches. If no group is eligible to
+    merge, or the last attempted group blocks, the merge queue used to return
+    with the worktree still on that group branch. The following audit then
+    judged a slice branch instead of the integrated product.
+    """
+    current = git(["rev-parse", "--abbrev-ref", "HEAD"], project_dir)
+    if current.returncode == 0 and current.stdout.strip() == base_branch:
+        return
+    checkout = git(["checkout", base_branch], project_dir)
+    if checkout.returncode != 0:
+        detail = checkout.stderr.strip()[:500] or checkout.stdout.strip()[:500]
+        logger.warning("could not return to integration branch %s: %s", base_branch, detail)
+        emit(
+            session_dir,
+            "merge.checkout_failed",
+            detail=f"checkout {base_branch} failed: {detail}",
+        )
 
 
 async def _process_candidate(
@@ -1023,6 +1058,7 @@ def _merge_group_branch(
     # V18: preserve user-owned project config files alongside Otto runtime paths.
     git(["clean", "-fdx",
          "-e", ".otto/", "-e", "_otto_*", "-e", "_session/", "-e", "otto_logs/",
+         "-e", ".venv/", "-e", "venv/", "-e", ".env/",
          "-e", "otto.yaml", "-e", "intent.md"], worktree)
 
     # 2. Checkout base_branch.

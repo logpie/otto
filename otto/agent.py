@@ -893,14 +893,14 @@ async def run_agent_with_timeout(
 
 
 def _provider_name(options: AgentOptions | None) -> str:
-    from otto.config import normalize_provider
+    from otto.config import CODEX_APP_SERVER_PROVIDER, normalize_provider
 
     raw_provider = getattr(options, "provider", None)
     try:
-        provider = normalize_provider(raw_provider, default="claude")
+        provider = normalize_provider(raw_provider, default=CODEX_APP_SERVER_PROVIDER)
     except ValueError as exc:
         raise ValueError(f"Unsupported agent provider: {str(raw_provider).strip().lower()}") from exc
-    return provider or "claude"
+    return provider or CODEX_APP_SERVER_PROVIDER
 
 
 def _safe_read(path: Path, max_chars: int = 40_000) -> str | None:
@@ -2079,7 +2079,7 @@ async def _query_codex_app_server(
     state: dict[str, Any] | None = None,
 ):
     opts = options or AgentOptions()
-    env = dict(opts.env or {})
+    env = dict(opts.env) if opts.env is not None else None
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -2383,7 +2383,7 @@ async def _query_codex(
     state: dict[str, Any] | None = None,
 ):
     opts = options or AgentOptions()
-    env = dict(opts.env or {})
+    env = dict(opts.env) if opts.env is not None else None
 
     try:
         process = await asyncio.create_subprocess_exec(

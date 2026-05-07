@@ -519,7 +519,7 @@ def register_run_command(main: click.Group) -> None:
     @click.option(
         "--provider",
         default=None,
-        help="Override provider for every agent: claude | codex | codex-app-server | openai-agents.",
+        help="Override provider for every agent: codex-app-server | codex | claude.",
     )
     @click.option(
         "--effort",
@@ -610,7 +610,7 @@ def register_run_command(main: click.Group) -> None:
 
         Examples:
             otto run "a bookmark manager"
-            otto run --provider codex --budget 3600 "a bookmark manager"
+            otto run --budget 3600 "a bookmark manager"
             otto run --project-kind cli "a small linter"
             otto run --no-build "review-only mode"
             otto run --from-spec otto_logs/sessions/x/spec/spec.json

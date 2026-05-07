@@ -5,23 +5,23 @@ observations from the `fix/codex-provider-i2p` worktree.
 
 ## Current Integration Shape
 
-Otto's default Codex provider still invokes Codex through the Codex CLI:
+Otto's default provider is now Codex App Server:
 
 ```text
-codex exec --json ...
+codex app-server --listen stdio://
 ```
 
-That adapter reads Codex JSONL events from `codex exec --json` and normalizes
-them into Otto's internal
+That adapter uses Codex's structured thread/turn protocol with local
+ChatGPT/Codex subscription auth and normalizes app-server events into Otto's
+internal
 `AssistantMessage`, `ToolUseBlock`, `ToolResultBlock`, and `ResultMessage`
 stream.
 
-Otto also has an opt-in `openai-agents` provider for the OpenAI Agents SDK. That
-path uses the SDK's local sandbox agent for filesystem/shell/patch work, streams
-SDK run items through the same Otto message/log surface, records OpenAI token
-usage, and preserves SDK structured final output in `ResultMessage.structured_output`
-and `messages.jsonl`. It is a separate provider so the stable Codex CLI path
-remains available while the SDK path is pressure-tested.
+The older `codex` provider remains available as a fallback. It invokes
+`codex exec --json` and normalizes Codex JSONL into the same internal message
+types. The API-key based `openai-agents` experiment remains in code for explicit
+local experiments, but it is not a normal Mission Control or CLI path and is not
+used by default.
 
 ## Root Causes
 
@@ -142,7 +142,7 @@ Same static todo intent with `--no-qa --budget 600`:
 
 ### Full Codex Build + QA Loop
 
-Command shape:
+Historical command shape for the older `codex exec` adapter:
 
 ```text
 otto build <todo intent> --standard --provider codex --budget 1200

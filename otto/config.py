@@ -33,7 +33,7 @@ DEFAULTS: dict[str, Any] = {
     "test_command":           None,
 
     # Global agent defaults (fallback for every agent)
-    "provider":               "claude",
+    "provider":               "codex-app-server",
     "model":                  None,      # None = provider default
     "effort":                 None,      # low | medium | high | max
 
@@ -1460,7 +1460,7 @@ default_branch: {default_branch}      # detected
 test_command: {test_command}          # detected; set explicitly if wrong
 
 # ─── Global agent defaults (applied to every agent) ──────────────────
-provider: {provider}                  # claude | codex | codex-app-server | openai-agents
+provider: {provider}                  # codex-app-server | codex | claude
 # model: null                         # override provider model (e.g. sonnet, haiku, gpt-5)
 # effort: null                        # low | medium | high | max (provider-specific)
 

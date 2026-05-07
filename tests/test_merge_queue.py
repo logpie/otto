@@ -228,6 +228,57 @@ def test_run_merge_queue_lands_single_slice_when_checks_pass(tmp_path: Path) -> 
     assert result.results[0].landed_commit  # short hash present
 
 
+def test_run_merge_queue_returns_to_base_when_no_groups_are_eligible(tmp_path: Path) -> None:
+    """Audit must run on the integrated branch, not a leftover group branch."""
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    branch = "i2p/x/s1"
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "slice.txt").write_text("slice-only work\n", encoding="utf-8")
+    subprocess.run(["git", "add", "slice.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "slice work", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    spec = _spec(
+        [
+            Group(
+                id="s1", name="hello", dependencies=[], owned_paths=[], feature_ids=[],
+                checks=[_passing_check()],
+            ),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="s1", status=GroupStatus.BLOCKED, attempts=2,
+                branch=branch, worktree=tmp_path,
+            ),
+        ],
+        base_branch="main",
+    )
+
+    result = asyncio.run(
+        run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
+    )
+
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert current == "main"
+    assert result.landed_ids == []
+    assert result.blocked_ids == []
+
+
 def test_build_and_merge_use_active_branch_in_linked_worktree(tmp_path: Path) -> None:
     """Queue task worktrees must merge into their task branch, not `main`.
 
@@ -653,6 +704,49 @@ def test_run_merge_queue_real_merge_when_slice_branch_exists(tmp_path: Path) -> 
     assert len(head_parents) == 2, f"expected merge commit (2 parents), got {head_parents}"
     # Group's file is now on main.
     assert (tmp_path / "slice-work.txt").exists()
+
+
+def test_run_merge_queue_preserves_project_virtualenv_during_clean(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("local runtime\n", encoding="utf-8")
+    branch = "i2p/_session/s1"
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "slice-work.txt").write_text("from slice", encoding="utf-8")
+    subprocess.run(["git", "add", "slice-work.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(s1): build slice", "--no-verify"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+    spec = _spec(
+        [
+            Group(id="s1", name="x", dependencies=[], owned_paths=["slice-work.txt"],
+                  feature_ids=["write slice-work"], checks=[_passing_check()]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1,
+                        branch=branch, worktree=tmp_path),
+        ],
+        base_branch="main",
+    )
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec, build_result, project_dir=tmp_path, session_dir=session_dir,
+            branch_for_group=lambda s: branch,
+        )
+    )
+
+    assert result.landed_ids == ["s1"]
+    assert venv_python.read_text(encoding="utf-8") == "local runtime\n"
 
 
 def test_run_merge_queue_real_merge_redundant_when_branch_empty(tmp_path: Path) -> None:

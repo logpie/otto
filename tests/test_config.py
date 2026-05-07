@@ -272,8 +272,8 @@ class TestLoadConfig:
 
 
 class TestProviderHelpers:
-    def test_agent_provider_defaults_to_claude(self):
-        assert agent_provider({}) == "claude"
+    def test_agent_provider_defaults_to_codex_app_server(self):
+        assert agent_provider({}) == "codex-app-server"
 
     def test_effective_agent_model_does_not_cross_provider_override(self):
         config = {

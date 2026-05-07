@@ -177,20 +177,18 @@ Phase-specific overrides:
 
 Provider choices today:
 
-- `codex`: stable Codex CLI subprocess integration. Otto runs `codex exec
-  --json`, normalizes JSONL into Otto's message/log format, and preserves Codex
-  local configuration unless Otto overrides model or reasoning effort.
-- `codex-app-server`: experimental Codex App Server integration. Otto starts
+- `codex-app-server`: default Codex integration. Otto starts
   `codex app-server` over stdio, uses its structured thread/turn protocol,
   preserves local ChatGPT/Codex subscription auth, captures app-server token
   usage/diff events, routes approval requests through Otto's provider safety
   checks, and passes structured output schemas to `turn/start`.
+- `codex`: fallback Codex CLI subprocess integration. Otto runs `codex exec
+  --json`, normalizes JSONL into Otto's message/log format, and preserves Codex
+  local configuration unless Otto overrides model or reasoning effort.
 - `claude`: Claude SDK integration where configured.
-- `openai-agents`: experimental OpenAI Agents SDK integration. Otto keeps the
-  same durable outer orchestrator, but runs the inner worker through the SDK's
-  local sandbox agent, streams SDK run items into the existing messages.jsonl
-  shape, records token usage, and stores structured final output when the SDK
-  returns typed output.
+The API-key based `openai-agents` experiment remains available in code for
+explicit local experiments, but it is not a normal Mission Control or CLI path
+and is not the default subscription-backed provider.
 
 The outer orchestrator is durable Otto state; provider sessions are disposable
 inner workers.

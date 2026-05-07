@@ -237,6 +237,53 @@ def test_compose_proof_packet_blocked_slice_carries_narrative(tmp_path: Path) ->
     assert packet.verdict == "partial"
 
 
+def test_compose_proof_packet_clears_stale_blockers_after_repair_pass(
+    tmp_path: Path,
+) -> None:
+    """Final proof reports residual blockers, not pre-repair failures."""
+    spec = _two_slice_spec(tmp_path)
+    build_result = BuildResult(
+        spec_session_dir=tmp_path,
+        group_results=[
+            GroupResult(
+                group_id="shell",
+                status=GroupStatus.BLOCKED,
+                attempts=2,
+                branch="i2p/x/shell",
+                worktree=tmp_path,
+                failure_narrative="pre-repair check failed",
+            ),
+            GroupResult(
+                group_id="counter",
+                status=GroupStatus.BLOCKED,
+                attempts=2,
+                branch="i2p/x/counter",
+                worktree=tmp_path,
+                failure_narrative="pre-repair check failed",
+            ),
+        ],
+    )
+    merge_result = MergeQueueResult()
+    audit_result = _audit_passed()
+
+    packet = compose_proof_packet(
+        spec,
+        build_result,
+        merge_result,
+        audit_result,
+        wall_s=10.0,
+        cost_usd=0.0,
+    )
+
+    assert packet.verdict == "passed"
+    assert packet.blocked_group_ids == []
+    assert {group.group_id: group.status for group in packet.groups} == {
+        "shell": "passing",
+        "counter": "passing",
+    }
+    assert all(not group.failure_narrative for group in packet.groups)
+
+
 # ---------------------------------------------------------------------------
 # render_json
 # ---------------------------------------------------------------------------

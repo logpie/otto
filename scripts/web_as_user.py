@@ -26,7 +26,7 @@ CLI::
 
     python scripts/web_as_user.py --list
     python scripts/web_as_user.py --mode quick
-    python scripts/web_as_user.py --mode full --provider claude
+    python scripts/web_as_user.py --mode full --provider codex-app-server
     python scripts/web_as_user.py --scenario W11
     python scripts/web_as_user.py --scenario W1,W7,W11 --scenario-delay 10
     python scripts/web_as_user.py --tier nightly  # W11 + W1 + W7
@@ -7390,7 +7390,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="nightly = W11+W1+W7; weekly = all 14",
     )
     parser.add_argument(
-        "--provider", choices=["claude", "codex"], default="claude"
+        "--provider",
+        choices=["codex-app-server", "codex", "claude"],
+        default="codex-app-server",
     )
     parser.add_argument(
         "--user-behavior",
