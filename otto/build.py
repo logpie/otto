@@ -37,12 +37,13 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Callable, Protocol
 
 from otto.checks import Evidence, run_checks
 from otto.setup_gitignore import (
     is_common_build_artifact_path,
+    is_otto_owned_path,
     non_product_paths_from_porcelain,
 )
 from otto.spec_compile import CheckKind, Component, Feature, Group, Spec
@@ -535,7 +536,7 @@ def detect_scope_violations(
         path = str(raw or "").strip()
         if not path:
             continue
-        if is_common_build_artifact_path(path):
+        if is_otto_owned_path(path) or is_common_build_artifact_path(path):
             continue
         if _matches_any(path, own_globs):
             continue
@@ -1147,6 +1148,7 @@ async def run_build(
     worktree_for_group: Callable[[Group], Path] | None = None,
     on_state_change: Callable[[str, str, dict[str, Any]], None] | None = None,
     skip_components: Iterable[str] | None = None,
+    resume_agent_sessions: Mapping[str, str] | None = None,
 ) -> BuildResult:
     """Execute the build loop for an approved Spec.
 
@@ -1179,6 +1181,7 @@ async def run_build(
         lambda s: f"i2p/{session_dir.name}/{s.id}"
     )
     worktree_for_group = worktree_for_group or (lambda _s: project_dir)
+    resume_agent_sessions = dict(resume_agent_sessions or {})
 
     completed_ids: set[str] = set()
     blocked_ids: set[str] = set()
@@ -1359,6 +1362,7 @@ async def run_build(
                 config=config,
                 base_url=base_url,
                 budget=budget,
+                initial_agent_session_id=resume_agent_sessions.get(next_component.id, ""),
             )
             if branch_real_c and comp_result.status == ComponentStatus.PASSING:
                 committed_c = _commit_group_work(
@@ -1495,6 +1499,7 @@ async def run_build(
             config=config,
             base_url=base_url,
             budget=budget,
+            initial_agent_session_id=resume_agent_sessions.get(next_group.id, ""),
         )
 
         # Pattern D: commit the slice's work to its branch so merge_queue
@@ -1641,6 +1646,7 @@ async def _run_slice(
     config: dict[str, Any],
     base_url: str | None,
     budget: BuildBudget,
+    initial_agent_session_id: str = "",
 ) -> GroupResult:
     """Run one slice through tasks→checks→fix retries.
 
@@ -1665,7 +1671,7 @@ async def _run_slice(
     # while the agent makes incremental progress).
     prior_diff_hash: str = ""
     current_diff_hash: str = ""
-    agent_session_id = ""
+    agent_session_id = str(initial_agent_session_id or "")
 
     while attempt < budget.per_group_retries_hard_cap:
         attempt += 1
@@ -2080,6 +2086,7 @@ async def _run_component(
     config: dict[str, Any],
     base_url: str | None,
     budget: BuildBudget,
+    initial_agent_session_id: str = "",
 ) -> ComponentResult:
     """Run one Component through tasks→checks→fix retries (research §2.6).
 
@@ -2099,6 +2106,7 @@ async def _run_component(
         config=config,
         base_url=base_url,
         budget=budget,
+        initial_agent_session_id=initial_agent_session_id,
     )
     if slice_result.status == GroupStatus.PASSING:
         comp_status = ComponentStatus.PASSING

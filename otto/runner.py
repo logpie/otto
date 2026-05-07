@@ -373,6 +373,15 @@ async def run_pipeline(
         skip_components: set[str] = (
             set(resume_plan.landed_components) if resume_plan is not None else set()
         )
+        resume_agent_sessions: dict[str, str] = (
+            dict(resume_plan.agent_session_ids) if resume_plan is not None else {}
+        )
+        if resume_plan is not None and resume_plan.prior_invalidated_group_ids:
+            # Outer product truth wins over inner-agent memory. If a unit was
+            # invalidated by a spec edit, do not resume a thread that was
+            # primed with the old contract.
+            for invalidated_id in resume_plan.prior_invalidated_group_ids:
+                resume_agent_sessions.pop(invalidated_id, None)
         # A6: open the mid-build edit window. Spec-review's POST /edit
         # accepts edits while lifecycle == "editing_in_flight"; after
         # build (and any re-dispatch) returns we revert to "approved"
@@ -390,6 +399,7 @@ async def run_pipeline(
                 budget=shared_budget,
                 base_branch=base_branch,
                 skip_components=skip_components,
+                resume_agent_sessions=resume_agent_sessions,
             )
             # A6: if mid-build spec edits invalidated any Groups, re-dispatch
             # the affected Groups against the (now persisted) post-edit Spec.
@@ -415,6 +425,7 @@ async def run_pipeline(
                     shared_budget=shared_budget,
                     base_branch=base_branch,
                     skip_components=skip_components,
+                    resume_agent_sessions=resume_agent_sessions,
                 )
                 result.spec = spec
         finally:
@@ -451,6 +462,7 @@ async def run_pipeline(
             shared_budget=shared_budget,
             base_branch=base_branch,
             skip_components=skip_components,
+            resume_agent_sessions=resume_agent_sessions,
         )
         result.build_result = build_result
     result.merge_result = merge_result
@@ -700,6 +712,7 @@ async def _redispatch_invalidated_groups(
     shared_budget: BuildBudget,
     base_branch: str,
     skip_components: set[str],
+    resume_agent_sessions: dict[str, str] | None = None,
 ) -> tuple[Spec, BuildResult]:
     """Re-load the post-edit spec, re-build invalidated Groups,
     and merge the new GroupResult entries into the prior BuildResult.
@@ -746,6 +759,7 @@ async def _redispatch_invalidated_groups(
             budget=shared_budget,
             base_branch=base_branch,
             skip_components=second_skip,
+            resume_agent_sessions=resume_agent_sessions,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the runner here
         logger.warning(
@@ -793,6 +807,7 @@ async def _rebuild_dependency_setup_blocked_units(
     shared_budget: BuildBudget,
     base_branch: str,
     skip_components: set[str],
+    resume_agent_sessions: dict[str, str] | None = None,
 ) -> tuple[BuildResult, MergeQueueResult]:
     """Give downstream units one pass after dependency merge repair.
 
@@ -827,6 +842,7 @@ async def _rebuild_dependency_setup_blocked_units(
             budget=shared_budget,
             base_branch=base_branch,
             skip_components=second_skip,
+            resume_agent_sessions=resume_agent_sessions,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(

@@ -2203,3 +2203,101 @@ Verification:
   -> passed.
 - `npm run web:typecheck` -> passed.
 - `npm run web:build` -> passed; static Mission Control bundle regenerated.
+
+## 2026-05-07 — Codex App Server Backbone Hardening + Secure-Session E2E
+
+Context:
+- Continued the App Server migration after the default-provider switch. The
+  focus here was making `codex-app-server` reliable as Otto's normal i2p
+  backbone, not just a provider spike.
+- Validated direct `otto run --from-spec` with `--provider codex-app-server`
+  against a committed `otto.yaml` that still named `claude`, so the run
+  exercised CLI override semantics rather than relying on project defaults.
+
+Generic fixes:
+- `otto run --from-spec` now loads the project config and applies provider,
+  budget, max-turns, model, effort, and per-agent CLI overrides. Before this,
+  the from-spec path used an empty config dict and could silently ignore the
+  requested runtime/provider knobs.
+- Build-phase outer resume now restores inner agent continuity from durable
+  provider logs. `plan_resume()` derives the latest provider session/thread id
+  per group from prior `messages.jsonl` result rows, and runner/build pass that
+  id back through `AgentOptions.resume`. Prior spec-edit invalidations still
+  clear stale group continuity.
+- Mission Control run-view data now exposes compact provider state: provider
+  name, status/activity, token usage, app-server diff changed-file counts, and
+  provider error summaries. A new events endpoint returns sequence-aware
+  provider metadata without prompt text.
+- Run-view diffs now include persisted App Server `codex-app-server-diff.patch`
+  files even when the target project is not a normal git worktree.
+- Contract-test execution now retries bare `pytest ...` commands under Otto's
+  own Python runtime when the first failure is a pytest import/environment
+  mismatch. This fixes the common `/opt/homebrew/bin/pytest` vs project venv
+  mismatch without weakening the oracle.
+- Scope-warning logic now ignores Otto runtime paths such as `otto_logs/`,
+  preventing evidence artifacts from being reported as product-scope changes.
+
+Regression coverage added:
+- `tests/test_agent.py::test_codex_app_server_uses_thread_resume_when_requested`
+- `tests/test_resume.py::test_plan_resume_derives_agent_session_ids_from_build_logs`
+- `tests/test_build.py::test_run_build_uses_resume_agent_session_from_prior_run`
+- `tests/test_runner.py` resume plumbing assertions for build and repair paths
+- `tests/test_run_view.py::test_build_run_view_projects_provider_events_without_prompt_text`
+- `tests/test_run_view_routes.py::test_run_view_diff_includes_persisted_app_server_patch`
+- `tests/test_run_view_routes.py::test_run_view_events_returns_sequence_provider_metadata`
+- `tests/test_audit.py::test_contract_test_pytest_retries_otto_runtime_on_import_env_failure`
+- `tests/test_build.py::test_run_build_ignores_otto_runtime_paths_in_scope_warnings`
+- `tests/test_cli_run.py::test_run_from_spec_applies_runtime_overrides`
+
+E2E run: secure FastAPI session repair
+- Project:
+  `/tmp/otto-appserver-secure-w4uvom/n1_secure_sessions`.
+- Shape: persistence-backed FastAPI app with visible and hidden pytest suites,
+  seeded SQLite data, login cookies, task APIs, label APIs, and an existing
+  multi-user leak.
+- Why harder than prior CLI smoke: this is an API/persistence security repair
+  with hidden tests, session integrity, query-count performance expectations,
+  merge/audit/proof, and an external verifier.
+- Command:
+  `/Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2/.venv/bin/python -m otto.cli run --from-spec otto_logs/sessions/appserver-secure/spec/spec.json --provider codex-app-server --budget 1500 --max-turns 80 --project-kind api --verbose`
+- Session: `appserver-secure`.
+- Provider/model: `codex-app-server`; model/effort inherited from project and
+  CLI defaults.
+- App Server thread ids:
+  build `019e04d6-7e09-7910-98a8-b06c71c16dd6`, audit
+  `019e04d9-689c-7d02-89ee-ac9c62ac80ae`.
+- Wall: build `190s`, merge `<1s`, audit `197s`; terminal CLI summary reported
+  build/audit/proof completed successfully.
+- Cost: `$0.00` reported by the local App Server subscription path.
+- Final Otto verdict: `passed`.
+- Proof packet:
+  `/tmp/otto-appserver-secure-w4uvom/n1_secure_sessions/otto_logs/sessions/appserver-secure/proof-packet.html`
+  and `proof-packet.json`.
+- External verifier:
+  `PYTHONDONTWRITEBYTECODE=1 /Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2/.venv/bin/python -m pytest tests/visible tests/hidden -q`
+  -> `6 passed in 0.04s`.
+- Audit walkthrough:
+  `otto_logs/sessions/appserver-secure/audit/attempt-00/walkthrough/walkthrough.jsonl`
+  includes raw forged cookie rejection, tampered signed-cookie rejection, Bob
+  login scoping, filtered task scoping, label scoping, and the visible+hidden
+  pytest command.
+- Product result: App Server repaired the app by issuing HMAC-signed `user_id`
+  cookies, requiring signed cookies on protected routes, scoping task/label
+  queries by authenticated user, and adding a tamper regression test.
+- Bugs found: the first run exposed bare-pytest environment mismatch, runtime
+  scope-warning noise, and from-spec CLI override loss. All were fixed
+  generically with regression coverage before this passing rerun.
+- Decision: `passed; app-server path is viable as Otto's default backbone for
+  this class of i2p run`.
+
+Inner-agent continuity status:
+- Before this wave, Otto had in-process retry continuity for build/fix attempts,
+  but a process crash plus outer `--resume` did not recover provider thread
+  ids from disk.
+- This wave adds build-phase crash/resume continuity by deriving provider
+  thread ids from durable logs and feeding them back through
+  `AgentOptions.resume`.
+- Remaining gap: audit and Layer 2 repair are still outer-journal resumable but
+  do not yet persist and restore their own provider thread ids across process
+  crashes. That should be the next crash-recovery slice if we want full
+  phase-wide inner-agent continuity.

@@ -1507,6 +1507,7 @@ def _run_project_contract_test(
     import shlex
     import shutil
     import subprocess as _sp
+    import sys
 
     try:
         from otto.config import load_config
@@ -1527,6 +1528,7 @@ def _run_project_contract_test(
     if not argv:
         return None, "test_command parsed to empty argv"
 
+    original_argv = list(argv)
     env = _subprocess_env(extra_pythonpath=[project_dir])
     command_for_output = test_command
     fallback_note = ""
@@ -1540,19 +1542,41 @@ def _run_project_contract_test(
         command_for_output = shlex.join(resolved_argv)
         fallback_note = f"{fallback_note}; resolved from {test_command!r}"
     try:
-        completed = _sp.run(
+        completed = _run_contract_subprocess(
             resolved_argv,
-            cwd=project_dir,
+            project_dir=project_dir,
             env=env,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
         )
     except _sp.TimeoutExpired:
         return False, f"test_command timed out: {command_for_output}"
     except Exception as exc:  # noqa: BLE001 — surface any subprocess failure
         return False, f"test_command launch failed: {type(exc).__name__}: {exc}"
+
+    retry_note = ""
+    if (
+        completed.returncode != 0
+        and _is_pytest_command(original_argv)
+        and _looks_like_pytest_import_environment_failure(completed)
+        and resolved_argv[:3] != [sys.executable, "-m", "pytest"]
+    ):
+        retry_argv = [sys.executable, "-m", "pytest", *original_argv[1:]]
+        try:
+            retry_completed = _run_contract_subprocess(
+                retry_argv,
+                project_dir=project_dir,
+                env=env,
+            )
+        except _sp.TimeoutExpired:
+            retry_completed = None
+        except Exception:
+            retry_completed = None
+        if retry_completed is not None and retry_completed.returncode == 0:
+            completed = retry_completed
+            command_for_output = shlex.join(retry_argv)
+            retry_note = (
+                f"; retried with Otto runtime after pytest import failure "
+                f"from {shlex.join(resolved_argv)!r}"
+            )
 
     output = (
         f"$ {command_for_output}\nexit_code={completed.returncode}\n\n"
@@ -1567,10 +1591,42 @@ def _run_project_contract_test(
 
     detail = (
         f"test_command={command_for_output!r} exit={completed.returncode}"
-        f"{fallback_note}; "
+        f"{fallback_note}{retry_note}; "
         + ((completed.stdout or "")[-400:].strip() or "(no stdout)")
     )
     return completed.returncode == 0, detail
+
+
+def _run_contract_subprocess(
+    argv: list[str],
+    *,
+    project_dir: Path,
+    env: dict[str, str],
+):
+    import subprocess as _sp
+
+    return _sp.run(
+        argv,
+        cwd=project_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+
+def _is_pytest_command(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    return Path(str(argv[0])).name.lower() in {"pytest", "pytest.exe"}
+
+
+def _looks_like_pytest_import_environment_failure(completed: Any) -> bool:
+    text = f"{getattr(completed, 'stdout', '') or ''}\n{getattr(completed, 'stderr', '') or ''}"
+    if "ImportError while loading conftest" not in text:
+        return False
+    return "ModuleNotFoundError" in text or "ImportError" in text
 
 
 def _fallback_contract_test_argv(

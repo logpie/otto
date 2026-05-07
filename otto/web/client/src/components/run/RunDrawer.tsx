@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ConfirmDialog, type ConfirmState } from "../ConfirmDialog";
 import type { GroupView, RunView } from "../../types/run";
+import { formatTokenSpend } from "../../utils/format";
 import { FeatureList } from "./FeatureList";
 import { GroupList } from "./GroupList";
 import { Guardrails } from "./Guardrails";
@@ -378,7 +379,10 @@ function CurrentWorkSummary({
   const activeGroups = view.groups.filter((group) => group.status === "in_progress");
   const displayGroups = activeGroups.length > 0 ? activeGroups : nextPendingGroups(view.groups);
   const activeStage = view.stages.find((stage) => stage.status === "active");
-  if (displayGroups.length === 0 && !activeStage) return null;
+  const provider = view.provider ?? null;
+  if (displayGroups.length === 0 && !activeStage && !provider) return null;
+  const providerTokens = provider ? formatTokenSpend(provider.token_usage) : "";
+  const changedFiles = provider?.diff_summary?.changed_files ?? [];
   return (
     <section className="current-work-panel" data-testid="current-work-panel" aria-label="Current work">
       <div className="current-work-heading">
@@ -389,6 +393,21 @@ function CurrentWorkSummary({
           </span>
         ) : null}
       </div>
+      {provider ? (
+        <div className="current-work-provider" data-testid="current-work-provider">
+          <span>
+            {provider.provider}
+            {provider.current_activity ? ` · ${provider.current_activity}` : ""}
+            {provider.status ? ` · ${provider.status}` : ""}
+          </span>
+          <span>
+            {providerTokens || "tokens pending"}
+            {changedFiles.length > 0
+              ? ` · ${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"} changed`
+              : ""}
+          </span>
+        </div>
+      ) : null}
       {displayGroups.map((group) => {
         const features = view.features.filter((feature) => feature.group_id === group.id);
         return (

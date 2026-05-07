@@ -317,6 +317,48 @@ async def test_run_agent_with_timeout_persists_codex_app_server_events_and_diff(
 
 
 @pytest.mark.asyncio
+async def test_codex_app_server_uses_thread_resume_when_requested(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-prior","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-2","status":"inProgress","items":[]}}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-prior","turnId":"turn-2","item":{"type":"agentMessage","id":"msg-1","text":"Resumed."}}}\n',
+        '{"method":"turn/completed","params":{"threadId":"thread-prior","turn":{"id":"turn-2","status":"completed","items":[],"error":null,"startedAt":1,"completedAt":2,"durationMs":1000}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="Continue",
+        options=AgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            resume="thread-prior",
+        ),
+    ):
+        messages.append(message)
+
+    assert isinstance(messages[-1], ResultMessage)
+    assert messages[-1].session_id == "thread-prior"
+    written = [
+        json.loads(line)
+        for line in process.stdin.buffer.decode("utf-8").splitlines()
+    ]
+    assert [line["method"] for line in written[:4]] == [
+        "initialize",
+        "initialized",
+        "thread/resume",
+        "turn/start",
+    ]
+    assert written[2]["params"]["threadId"] == "thread-prior"
+    assert written[3]["params"]["threadId"] == "thread-prior"
+
+
+@pytest.mark.asyncio
 async def test_codex_app_server_passes_output_schema_and_structured_result(tmp_path, monkeypatch):
     process = _FakeProcess([
         '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',

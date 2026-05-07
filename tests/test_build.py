@@ -563,6 +563,47 @@ def test_run_build_reuses_agent_session_between_retries(tmp_path: Path) -> None:
     assert seen_sessions == ["", "provider-session-1"]
 
 
+def test_run_build_uses_resume_agent_session_from_prior_run(tmp_path: Path) -> None:
+    """A resumed outer run should seed the first attempt with the prior thread."""
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    seen_sessions: list[str] = []
+
+    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        seen_sessions.append(input_.agent_session_id)
+        return BuildAgentOutput(
+            succeeded=True,
+            detail="ok",
+            session_id="provider-session-next",
+        )
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="x",
+                dependencies=[],
+                owned_paths=[],
+                feature_ids=[],
+                checks=[],
+            ),
+        ]
+    )
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+            resume_agent_sessions={"s1": "provider-session-prior"},
+        )
+    )
+
+    assert result.all_passing
+    assert seen_sessions == ["provider-session-prior"]
+
+
 def test_default_build_agent_passes_resume_session_to_provider(tmp_path: Path, monkeypatch) -> None:
     """A9: default_build_agent must set AgentOptions.resume from BuildAgentInput."""
     from otto.agent import AgentOptions
@@ -765,6 +806,43 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
     assert by_id["s1"].status == GroupStatus.PASSING
     assert by_id["s2"].status == GroupStatus.PASSING
     assert "app/main.py" in by_id["s2"].scope_warnings
+
+
+def test_run_build_ignores_otto_runtime_paths_in_scope_warnings(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "otto_logs" / "sessions" / "scope-run"
+    session_dir.mkdir(parents=True)
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="feature",
+                dependencies=[],
+                owned_paths=["app.py"],
+                feature_ids=[],
+                checks=[_no_op_passing_check()],
+            ),
+        ]
+    )
+
+    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        (input_.worktree / "app.py").write_text("print('ok')\n", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True)
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+        )
+    )
+
+    s1_result = next(r for r in result.group_results if r.group_id == "s1")
+    assert s1_result.scope_warnings == []
+    journal = (session_dir / "spec-state.jsonl").read_text(encoding="utf-8")
+    assert '"kind": "scope.warning"' not in journal
 
 
 def test_run_build_warns_on_dep_owned_extension(tmp_path: Path) -> None:

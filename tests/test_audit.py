@@ -1223,6 +1223,49 @@ def test_contract_test_tox_falls_back_to_uvx_when_tox_missing(
     assert args_path.read_text(encoding="utf-8").strip() == "--with tox-uv tox -e py"
 
 
+def test_contract_test_pytest_retries_otto_runtime_on_import_env_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import sys
+
+    user_bin = tmp_path / "user-bin"
+    otto_bin = tmp_path / "otto-bin"
+    user_bin.mkdir()
+    otto_bin.mkdir()
+    user_pytest = user_bin / "pytest"
+    user_pytest.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"ImportError while loading conftest '/tmp/project/tests/conftest.py'.\" >&2\n"
+        "printf '%s\\n' \"E   ModuleNotFoundError: No module named 'fastapi'\" >&2\n"
+        "exit 4\n",
+        encoding="utf-8",
+    )
+    user_pytest.chmod(0o755)
+    otto_python = otto_bin / "python"
+    otto_python.write_text(
+        "#!/bin/sh\n"
+        "test \"$1\" = '-m' && test \"$2\" = 'pytest' || exit 99\n"
+        "printf 'runtime pytest passed\\n'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    otto_python.chmod(0o755)
+
+    monkeypatch.setenv("PATH", str(user_bin))
+    monkeypatch.setattr(sys, "executable", str(otto_python))
+    _seed_otto_yaml(tmp_path, "pytest tests/visible -q")
+
+    passed, detail = _run_project_contract_test(
+        tmp_path,
+        log_dir=tmp_path / "contract",
+    )
+
+    assert passed is True
+    assert f"{otto_python} -m pytest tests/visible -q" in detail
+    assert "retried with Otto runtime after pytest import failure" in detail
+    assert "runtime pytest passed" in detail
+
+
 def test_contract_test_tox_fallback_not_used_when_tox_exists() -> None:
     def fake_which(cmd: str, path: str | None = None) -> str | None:
         if cmd == "tox":

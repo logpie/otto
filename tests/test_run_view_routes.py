@@ -282,6 +282,64 @@ def test_run_view_group_logs_filter_to_group_build_artifacts(tmp_path: Path) -> 
     assert "building foundation" in logs.json()["logs"][0]["text"]
 
 
+def test_run_view_events_returns_sequence_provider_metadata(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-events"
+    session = project / "otto_logs" / "sessions" / sid
+    _write_minimal_session(session, intent="events", project_kind="webapp")
+    messages = session / "build" / "foundation" / "attempt-01" / "messages.jsonl"
+    messages.parent.mkdir(parents=True)
+    messages.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user", "blocks": [{"text": "prompt text"}]}),
+                json.dumps(
+                    {
+                        "type": "provider_event",
+                        "provider": "codex-app-server",
+                        "event": "turn_started",
+                        "method": "turn/started",
+                        "session_id": "thread-1",
+                        "turn_id": "turn-1",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "provider_event",
+                        "provider": "codex-app-server",
+                        "event": "token_usage_updated",
+                        "usage": {"total_tokens": 42},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "session_id": "thread-1",
+                        "structured_output_error": "bad schema",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    client = _app_with_project(project)
+    first = client.get(f"/api/run-view/{sid}/events", params={"after": -1})
+    assert first.status_code == 200
+    body = first.json()
+    assert [event["seq"] for event in body["events"]] == [0, 1, 2]
+    assert [event["event"] for event in body["events"]] == [
+        "turn_started",
+        "token_usage_updated",
+        "structured_output_error",
+    ]
+    assert "prompt text" not in json.dumps(body)
+
+    second = client.get(f"/api/run-view/{sid}/events", params={"after": 0})
+    assert [event["seq"] for event in second.json()["events"]] == [1, 2]
+
+
 def test_proof_packet_rewrites_and_serves_worktree_artifact_links(tmp_path: Path) -> None:
     project = tmp_path / "proj"
     sid = "2026-05-04-200000-worktree"
@@ -393,6 +451,31 @@ def test_run_view_diff_includes_live_untracked_group_files(tmp_path: Path) -> No
     assert "src/App.tsx" in diff.text
     assert "+export default function App()" in diff.text
     assert "outside.txt" not in diff.text
+
+
+def test_run_view_diff_includes_persisted_app_server_patch(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-provider-diff"
+    session = project / "otto_logs" / "sessions" / sid
+    _write_minimal_session(session, intent="provider diff", project_kind="webapp")
+    patch = session / "build" / "foundation" / "attempt-01" / "codex-app-server-diff.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text(
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@\n"
+        "+print('provider patch')\n",
+        encoding="utf-8",
+    )
+
+    client = _app_with_project(project)
+    diff = client.get(f"/api/run-view/{sid}/diff", params={"group_id": "foundation"})
+
+    assert diff.status_code == 200
+    assert "No git worktree is available" in diff.text
+    assert "Provider live diff patch:" in diff.text
+    assert "+print('provider patch')" in diff.text
 
 
 def test_group_logs_and_diff_are_real_endpoints(tmp_path: Path) -> None:

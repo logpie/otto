@@ -95,6 +95,7 @@ def build_run_view(
     phase_usage = _build_phase_usage(session_dir, proof)
     token_usage = _build_token_usage(proof, phase_usage)
     agent_usage_top = _build_agent_usage_top(session_dir, proof)
+    provider = _build_provider_view(session_dir)
     stages = _build_stages(
         state_events,
         live_state,
@@ -154,6 +155,7 @@ def build_run_view(
         "token_usage": token_usage,
         "phase_usage": phase_usage,
         "agent_usage_top": agent_usage_top,
+        "provider": provider,
         "meta": meta,
         "findings": findings,
     }
@@ -205,6 +207,101 @@ def _read_state_events(session_dir: Path) -> list[dict[str, Any]]:
     except OSError:
         return []
     return events
+
+
+def _build_provider_view(session_dir: Path) -> dict[str, Any] | None:
+    """Project provider-side app-server events into a compact UI view.
+
+    The raw ``messages.jsonl`` transcripts can be large and include prompt
+    content, so this reader only extracts metadata rows that Otto wrote
+    itself: ``provider_event`` status/usage/diff updates plus result-level
+    structured-output parse errors.
+    """
+    latest_event: dict[str, Any] | None = None
+    latest_usage: dict[str, Any] | None = None
+    latest_diff: dict[str, Any] | None = None
+    structured_error = ""
+    provider = ""
+    event_count = 0
+
+    for messages in sorted(session_dir.rglob("messages.jsonl")):
+        try:
+            with messages.open("r", encoding="utf-8", errors="replace") as fh:
+                for raw in fh:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        record = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    if record.get("type") == "provider_event":
+                        event_count += 1
+                        latest_event = record
+                        provider = str(record.get("provider") or provider)
+                        usage = record.get("usage")
+                        if isinstance(usage, dict) and usage:
+                            latest_usage = usage
+                        data = record.get("data")
+                        if record.get("event") == "diff_updated" and isinstance(data, dict):
+                            latest_diff = data
+                    elif record.get("type") == "result":
+                        error = str(record.get("structured_output_error") or "").strip()
+                        if error:
+                            structured_error = error
+                        usage = record.get("usage")
+                        if isinstance(usage, dict) and usage:
+                            latest_usage = usage
+        except OSError:
+            continue
+
+    if latest_event is None and not structured_error:
+        return None
+
+    event_name = str((latest_event or {}).get("event") or "")
+    method = str((latest_event or {}).get("method") or "")
+    status = str((latest_event or {}).get("status") or "")
+    session_id = str((latest_event or {}).get("session_id") or "")
+    turn_id = str((latest_event or {}).get("turn_id") or "")
+    activity = _provider_activity(event_name, method, status)
+    return {
+        "provider": provider or "unknown",
+        "status": status,
+        "current_activity": activity,
+        "event": event_name,
+        "method": method,
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "last_event_at": str((latest_event or {}).get("ts") or ""),
+        "last_event_elapsed_s": _float_or_none((latest_event or {}).get("elapsed_s")),
+        "event_count": event_count,
+        "token_usage": latest_usage or {},
+        "diff_summary": latest_diff or {},
+        "structured_output_error": structured_error,
+    }
+
+
+def _provider_activity(event: str, method: str, status: str) -> str:
+    if event == "token_usage_updated":
+        return "Updating token usage"
+    if event == "diff_updated":
+        return "Updating diff"
+    if event == "turn_started":
+        return "Running turn"
+    if event == "turn_completed":
+        return "Turn completed"
+    if event == "turn_acknowledged":
+        return "Turn queued"
+    if event == "thread_status_changed":
+        if status == "idle":
+            return "Idle"
+        if status:
+            return status.replace("_", " ").title()
+    if method:
+        return method.replace("/", " ")
+    return event.replace("_", " ").title() if event else "Provider activity"
 
 
 def _compile_logs_active(

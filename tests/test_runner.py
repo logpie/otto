@@ -1609,6 +1609,7 @@ def test_resume_plan_skips_landed_components_and_short_circuits_audit(
         audit_finished=True,
         audit_verdict="passed",
         prior_cost_usd=2.50,
+        agent_session_ids={"g": "provider-thread-g"},
     )
 
     result = asyncio.run(
@@ -1630,6 +1631,7 @@ def test_resume_plan_skips_landed_components_and_short_circuits_audit(
     build_kwargs = captured["build_kwargs"]
     assert "skip_components" in build_kwargs
     assert "g" in set(build_kwargs["skip_components"])
+    assert build_kwargs["resume_agent_sessions"] == {"g": "provider-thread-g"}
     merge_kwargs = captured["merge_kwargs"]
     assert "skip_components" in merge_kwargs
     assert "g" in set(merge_kwargs["skip_components"])

@@ -904,7 +904,31 @@ def orchestrate_run(
         session_dir = spec_path.parent.parent  # spec/ → session/
         console.print(f"  [bold]otto run[/bold] — driving from {spec_path}")
         intent_text = spec.intent
-        config: dict[str, Any] = {}
+        config_path = project_dir / "otto.yaml"
+        try:
+            config = load_config(config_path)
+        except ConfigError as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
+        apply_i2p_cli_overrides(
+            config,
+            budget=budget,
+            max_turns=max_turns,
+            model=model,
+            provider=provider,
+            effort=effort,
+            build_provider=build_provider,
+            build_model=build_model,
+            build_effort=build_effort,
+            certifier_provider=certifier_provider,
+            certifier_model=certifier_model,
+            certifier_effort=certifier_effort,
+            fix_provider=fix_provider,
+            fix_model=fix_model,
+            fix_effort=fix_effort,
+            verbose=verbose,
+            debug_unredacted=debug_unredacted,
+        )
         compiled_inline = True  # caller already produced the spec
         _mark_queue_child_ready_best_effort(
             project_dir,

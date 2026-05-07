@@ -151,6 +151,35 @@ def test_plan_resume_reads_prior_cost_from_summary(tmp_path: Path) -> None:
     assert plan.prior_wall_s == pytest.approx(120.0)
 
 
+def test_plan_resume_derives_agent_session_ids_from_build_logs(tmp_path: Path) -> None:
+    """Provider threads are recoverable from existing attempt messages."""
+    session_dir, _ = _seed_session(tmp_path)
+    g_attempt = session_dir / "build" / "g-a" / "attempt-01"
+    g_attempt.mkdir(parents=True)
+    (g_attempt / "messages.jsonl").write_text(
+        "\n".join([
+            json.dumps({"type": "provider_event", "event": "turn_started"}),
+            json.dumps({"type": "result", "session_id": "thread-g-a-old"}),
+            json.dumps({"type": "result", "session_id": "thread-g-a-new"}),
+        ])
+        + "\n",
+        encoding="utf-8",
+    )
+    c_attempt = session_dir / "build" / "c-x" / "attempt-01"
+    c_attempt.mkdir(parents=True)
+    (c_attempt / "messages.jsonl").write_text(
+        json.dumps({"type": "result", "session_id": "thread-c-x"}) + "\n",
+        encoding="utf-8",
+    )
+
+    plan = plan_resume(session_dir)
+
+    assert plan.agent_session_ids == {
+        "g-a": "thread-g-a-new",
+        "c-x": "thread-c-x",
+    }
+
+
 def test_plan_resume_missing_session_raises(tmp_path: Path) -> None:
     with pytest.raises(ResumeError, match="does not exist"):
         plan_resume(tmp_path / "nope")

@@ -204,6 +204,66 @@ def test_build_run_view_recovers_usage_from_nested_messages(tmp_path: Path) -> N
     assert view["agent_usage_top"][0]["phase"] == "audit"
 
 
+def test_build_run_view_projects_provider_events_without_prompt_text(tmp_path: Path) -> None:
+    session = _setup_session(tmp_path, spec={"intent": "x", "project_kind": "webapp", "groups": []})
+    messages = session / "build" / "foundation" / "attempt-01" / "messages.jsonl"
+    messages.parent.mkdir(parents=True)
+    messages.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "provider_event",
+                        "provider": "codex-app-server",
+                        "event": "turn_started",
+                        "method": "turn/started",
+                        "session_id": "thread-1",
+                        "turn_id": "turn-1",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "provider_event",
+                        "provider": "codex-app-server",
+                        "event": "diff_updated",
+                        "method": "turn/diff/updated",
+                        "session_id": "thread-1",
+                        "data": {"changed_files": ["app.py"], "files_changed": 1},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "provider_event",
+                        "provider": "codex-app-server",
+                        "event": "token_usage_updated",
+                        "method": "thread/tokenUsage/updated",
+                        "session_id": "thread-1",
+                        "usage": {"input_tokens": 20, "output_tokens": 3, "total_tokens": 23},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "session_id": "thread-1",
+                        "structured_output_error": "missing field",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    view = build_run_view(session)
+
+    assert view["provider"]["provider"] == "codex-app-server"
+    assert view["provider"]["session_id"] == "thread-1"
+    assert view["provider"]["event"] == "token_usage_updated"
+    assert view["provider"]["token_usage"]["total_tokens"] == 23
+    assert view["provider"]["diff_summary"]["changed_files"] == ["app.py"]
+    assert view["provider"]["structured_output_error"] == "missing field"
+
+
 def test_build_run_view_initializing_compile_agent_is_compiling(tmp_path: Path) -> None:
     """Active compile-agent logs should not be reported as merely queued."""
 
