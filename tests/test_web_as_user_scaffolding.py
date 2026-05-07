@@ -176,6 +176,115 @@ def test_web_as_user_dry_run_accepts_group_concurrency() -> None:
     )
 
 
+def test_web_as_user_cleanup_keeps_videos_but_prunes_trace_bundles(tmp_path: Path) -> None:
+    """True-web videos are evidence; trace/HAR bundles are optional debug bloat."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    artifact_dir = tmp_path / "artifacts"
+    nested = artifact_dir / "test-results" / "case"
+    nested.mkdir(parents=True)
+    video = nested / "video.webm"
+    trace = nested / "trace.zip"
+    har = nested / "network.har"
+    screenshot = nested / "screen.png"
+    video.write_bytes(b"video")
+    trace.write_bytes(b"trace")
+    har.write_bytes(b"har")
+    screenshot.write_bytes(b"png")
+
+    report = web_as_user.cleanup_heavy_browser_artifacts(artifact_dir)
+
+    assert video.exists()
+    assert screenshot.exists()
+    assert not trace.exists()
+    assert not har.exists()
+    deleted = {entry["path"] for entry in report["deleted"]}
+    assert "test-results/case/trace.zip" in deleted
+    assert "test-results/case/network.har" in deleted
+
+
+def test_web_as_user_writes_bounded_meta_debug_packet(tmp_path: Path) -> None:
+    """A stalled monitor gets root-cause evidence without dumping messages.jsonl."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    artifact_dir = tmp_path / "artifacts"
+    session = project / ".worktrees" / "task-a" / "otto_logs" / "sessions" / "run-1"
+    (session / "audit" / "attempt-00").mkdir(parents=True)
+    (session / "summary.json").write_text('{"verdict":"blocked"}', encoding="utf-8")
+    (session / "audit" / "attempt-00" / "evidence-packet.json").write_text(
+        json.dumps(
+            {
+                "merge_summary": {
+                    "blocked_ids": ["foundation"],
+                    "per_group": [
+                        {
+                            "group_id": "foundation",
+                            "narrative": "merge wall budget exhausted after 1230s",
+                        }
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session / "spec-state.jsonl").write_text(
+        '{"kind":"group.blocked","detail":"merge wall budget exhausted after 1230s"}\n',
+        encoding="utf-8",
+    )
+    (session / "messages.jsonl").write_text("do not read this raw transcript\n", encoding="utf-8")
+    ctx = web_as_user.ScenarioContext(
+        scenario=web_as_user.SCENARIOS["W1"],
+        project_dir=project,
+        artifact_dir=artifact_dir,
+        provider="codex",
+        failures=web_as_user.RunFailures(),
+        debug_log=artifact_dir / "debug.log",
+        run_id="test-run",
+    )
+
+    packet_path = web_as_user._write_meta_debug_packet(
+        ctx,
+        reason="visible-progress-stall",
+        state={
+            "live": {
+                "items": [
+                    {
+                        "status": "running",
+                        "run_id": "run-1",
+                        "queue_task_id": "task-a",
+                        "last_event": "merge",
+                    }
+                ]
+            },
+            "history": {"items": []},
+            "landing": {"items": []},
+        },
+        submitted_task_id="task-a",
+        submitted_run_id="run-1",
+        poll_count=42,
+        progress_signature="same",
+        terminal_outcome=None,
+    )
+
+    assert packet_path is not None
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert packet["reason"] == "visible-progress-stall"
+    assert packet["audit_evidence"]["merge_summary"]["blocked_ids"] == ["foundation"]
+    assert any("merge wall budget exhausted" in hint for hint in packet["hints"])
+    assert "messages.jsonl" not in json.dumps(packet.get("recent_spec_events", []))
+
+
 def test_configure_throwaway_project_aligns_timeout_and_queue_guard(tmp_path: Path) -> None:
     """Long true-web runs must not be preempted by Otto's queue hard-kill guard."""
     sys.path.insert(0, str(SCRIPTS_DIR))

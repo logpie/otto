@@ -73,6 +73,8 @@ DEFAULT_SCENARIO_DELAY_S = 5.0
 INFRA_RETRY_DELAY_S = 30.0
 INFRA_RETRY_ATTEMPTS = 2
 OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
+HEAVY_BROWSER_ARTIFACT_SUFFIXES = {".har"}
+HEAVY_BROWSER_TRACE_NAMES = {"trace.zip", "traces.zip"}
 
 ScenarioStatus = Literal["PASS", "FAIL", "INFRA"]
 FailureClassification = Literal["INFRA", "FAIL"]
@@ -3397,6 +3399,17 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                     >= W1_VISIBLE_PROGRESS_IDLE_TIMEOUT_S
                 ):
                     stalled = True
+                    _write_meta_debug_packet(
+                        ctx,
+                        reason="visible-progress-stall",
+                        state=last_state,
+                        submitted_task_id=submitted_task_id,
+                        submitted_run_id=submitted_run_id,
+                        poll_count=poll_count,
+                        progress_signature=last_progress_signature,
+                        terminal_outcome=terminal_outcome,
+                        log_fn=_log,
+                    )
                     failures.fail(
                         "submitted build showed no Mission Control-visible progress change "
                         f"for {W1_VISIBLE_PROGRESS_IDLE_TIMEOUT_S}s; true-web stopped "
@@ -3411,6 +3424,17 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                     f"build did not reach terminal in {build_timeout_s}s",
                 )
             if terminal_outcome and terminal_outcome != "success":
+                _write_meta_debug_packet(
+                    ctx,
+                    reason="terminal-failure",
+                    state=last_state,
+                    submitted_task_id=submitted_task_id,
+                    submitted_run_id=submitted_run_id,
+                    poll_count=poll_count,
+                    progress_signature=last_progress_signature,
+                    terminal_outcome=terminal_outcome,
+                    log_fn=_log,
+                )
                 failures.fail(f"build terminal_outcome={terminal_outcome!r} (expected success)")
             _safe_screenshot(page, artifact_dir, "07-build-terminal")
             _mc_user_probe(
@@ -4178,6 +4202,210 @@ def _submitted_task_progress_signature(
         payload["token_usage"] = row.get("token_usage") or {}
         return json.dumps(payload, sort_keys=True, default=str)
     return None
+
+
+def _row_meta_summary(row: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "_source",
+        "domain",
+        "status",
+        "display_status",
+        "terminal_outcome",
+        "run_id",
+        "queue_task_id",
+        "task_id",
+        "intent",
+        "updated_at",
+        "heartbeat_at",
+        "finished_at",
+        "elapsed_s",
+        "duration_s",
+        "progress",
+        "last_event",
+        "stories_passed",
+        "stories_tested",
+        "changed_file_count",
+        "cost_usd",
+    )
+    return {key: row.get(key) for key in keys if row.get(key) not in (None, "", [])}
+
+
+def _state_meta_summary(
+    state: Optional[dict[str, Any]],
+    *,
+    submitted_task_id: str | None,
+    submitted_run_id: str | None,
+) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {"available": False}
+    rows = _state_task_rows(state)
+    matched = [
+        _row_meta_summary(row)
+        for row in rows
+        if _submitted_row_matches(
+            row,
+            submitted_task_id=submitted_task_id,
+            submitted_run_id=submitted_run_id,
+        )
+    ]
+    return {
+        "available": True,
+        "watcher": state.get("watcher"),
+        "runtime": state.get("runtime"),
+        "counts": {
+            source: len((state.get(source) or {}).get("items") or [])
+            for source in ("live", "history", "landing")
+        },
+        "submitted_rows": matched[:8],
+        "visible_rows_sample": [_row_meta_summary(row) for row in rows[:8]],
+    }
+
+
+def _read_json_dict(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _tail_jsonl(path: Path, *, max_lines: int = 40, max_bytes: int = 128_000) -> list[dict[str, Any]]:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            raw = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    lines = raw.splitlines()[-max_lines:]
+    events: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            payload = {"raw": line[:1000]}
+        if isinstance(payload, dict):
+            events.append(payload)
+    return events
+
+
+def _meta_debug_hints(packet: dict[str, Any]) -> list[str]:
+    text = json.dumps(packet, default=str).lower()
+    hints: list[str] = []
+    if "merge wall budget exhausted" in text:
+        hints.append("merge wall budget exhausted before a slice landed; inspect merge repair attempts and whether the agent was fixing the integrated state")
+    if "package.json" in text and ("enoent" in text or "absent" in text or "missing" in text):
+        hints.append("integrated project root is missing package.json; likely no app scaffold slice landed before audit")
+    if "eperm" in text and ("5173" in text or "listen" in text or "bind" in text):
+        hints.append("provider sandbox could not bind a local dev server; rely on Otto check-runner artifacts and avoid repeated browser-launch probing")
+    if "strict mode violation" in text:
+        hints.append("browser journey is failing on ambiguous accessible locators; repair should scope locators or UI names to user-visible containers")
+    if "horizontal overflow" in text:
+        hints.append("browser journey found responsive layout overflow; inspect saved screenshot/error context and widest DOM elements")
+    if not hints:
+        hints.append("inspect submitted_rows, recent spec events, and named check logs before waiting further")
+    return hints
+
+
+def _compact_meta_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 6:
+        return "<max-depth>"
+    if isinstance(value, str):
+        return value if len(value) <= 2000 else value[:2000] + "...<truncated>"
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_meta_value(item, depth=depth + 1)
+            for key, item in list(value.items())[:80]
+        }
+    if isinstance(value, list):
+        return [_compact_meta_value(item, depth=depth + 1) for item in value[:20]]
+    return value
+
+
+def _write_meta_debug_packet(
+    ctx: ScenarioContext,
+    *,
+    reason: str,
+    state: Optional[dict[str, Any]],
+    submitted_task_id: str | None,
+    submitted_run_id: str | None,
+    poll_count: int,
+    progress_signature: str | None,
+    terminal_outcome: str | None,
+    log_fn: Callable[[str], None] | None = None,
+) -> Path | None:
+    """Write bounded diagnosis for the monitor; never bulk-read transcripts."""
+    session_dir = _find_session_dir_for_run(
+        ctx,
+        submitted_run_id,
+        queue_task_id=submitted_task_id,
+    )
+    packet: dict[str, Any] = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "scenario": ctx.scenario.id,
+        "reason": reason,
+        "poll_count": poll_count,
+        "submitted_task_id": submitted_task_id,
+        "submitted_run_id": submitted_run_id,
+        "terminal_outcome": terminal_outcome,
+        "progress_signature": progress_signature,
+        "state": _state_meta_summary(
+            state,
+            submitted_task_id=submitted_task_id,
+            submitted_run_id=submitted_run_id,
+        ),
+        "session_dir": str(session_dir) if session_dir else None,
+        "project_processes": _project_processes(ctx.project_dir)[:20],
+        "notes": [
+            "bounded meta-debug packet for the monitoring session",
+            "raw messages.jsonl transcripts are intentionally not read here",
+        ],
+    }
+    if session_dir is not None:
+        summary = _read_json_dict(session_dir / "summary.json")
+        if summary is not None:
+            packet["summary"] = _compact_meta_value(summary)
+        evidence = _read_json_dict(session_dir / "audit" / "attempt-00" / "evidence-packet.json")
+        if evidence is not None:
+            packet["audit_evidence"] = _compact_meta_value({
+                key: evidence.get(key)
+                for key in (
+                    "build_summary",
+                    "merge_summary",
+                    "contract_test",
+                    "cross_slice_evidence",
+                    "verdict",
+                    "summary",
+                )
+                if key in evidence
+            })
+        recent_events = _tail_jsonl(session_dir / "spec-state.jsonl", max_lines=50)
+        if recent_events:
+            packet["recent_spec_events"] = _compact_meta_value(recent_events)
+    group_report = _read_json_dict(ctx.artifact_dir / "group-concurrency.json")
+    if group_report is not None:
+        packet["group_concurrency"] = group_report
+    packet["hints"] = _meta_debug_hints(packet)
+
+    path = ctx.artifact_dir / f"meta-debug-{_mc_slug(reason)}.json"
+    try:
+        ctx.artifact_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(packet, indent=2, default=str), encoding="utf-8")
+    except OSError as exc:
+        if log_fn is not None:
+            log_fn(f"meta-debug packet write failed: {exc}")
+        return None
+    _record_mc_user_action(
+        ctx,
+        phase="meta-debug",
+        action=reason,
+        packet=path.name,
+        hints=packet["hints"],
+    )
+    if log_fn is not None:
+        log_fn(f"meta-debug packet: {path.name}")
+    return path
 
 
 def _wait_for_submitted_task(
@@ -8351,6 +8579,7 @@ def run_one_scenario(
     intent_override: Optional[str] = None,
     build_timeout_s: Optional[int] = None,
     group_concurrent: Optional[int] = None,
+    keep_heavy_artifacts: bool = False,
 ) -> ScenarioOutcome:
     """Drive one W-scenario end-to-end.
 
@@ -8460,6 +8689,8 @@ def run_one_scenario(
                     failures.note(f"backend.stop raised: {exc}")
 
     explicit_outcome = result.outcome if result is not None else None
+    cleanup_heavy_browser_artifacts(artifact_dir, keep=keep_heavy_artifacts)
+
     if failures.failures or (explicit_outcome is not None and explicit_outcome != "PASS"):
         classification = (
             explicit_outcome
@@ -8492,6 +8723,48 @@ def maybe_prune_artifacts(
         return
     if artifact_dir.exists():
         shutil.rmtree(artifact_dir, ignore_errors=True)
+
+
+def _is_heavy_browser_artifact(path: Path) -> bool:
+    name = path.name.lower()
+    if name in HEAVY_BROWSER_TRACE_NAMES or name.endswith("-trace.zip"):
+        return True
+    return path.suffix.lower() in HEAVY_BROWSER_ARTIFACT_SUFFIXES
+
+
+def cleanup_heavy_browser_artifacts(artifact_dir: Path, *, keep: bool = False) -> dict[str, Any]:
+    """Prune bulky trace/HAR files after evidence JSON/screenshots/video are saved."""
+    report: dict[str, Any] = {
+        "kept": bool(keep),
+        "deleted": [],
+        "bytes_deleted": 0,
+    }
+    if keep or not artifact_dir.exists():
+        return report
+    for path in sorted(artifact_dir.rglob("*")):
+        if not path.is_file() or not _is_heavy_browser_artifact(path):
+            continue
+        try:
+            size = path.stat().st_size
+            path.unlink()
+        except OSError as exc:
+            report.setdefault("errors", []).append({"path": str(path), "error": str(exc)})
+            continue
+        report["bytes_deleted"] += size
+        report["deleted"].append(
+            {
+                "path": str(path.relative_to(artifact_dir)),
+                "bytes": size,
+            }
+        )
+    try:
+        (artifact_dir / "artifact-cleanup.json").write_text(
+            json.dumps(report, indent=2, default=str),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return report
 
 
 def utc_run_id() -> str:
@@ -8630,6 +8903,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="only keep artifacts for FAIL/INFRA scenarios",
     )
     parser.add_argument(
+        "--keep-heavy-browser-artifacts",
+        action="store_true",
+        help="keep Playwright trace/HAR bundles instead of pruning them after the run",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="skip Playwright + LLM; verify harness wiring only",
@@ -8679,6 +8957,7 @@ def main(argv: list[str]) -> int:
                 intent_override=args.intent,
                 build_timeout_s=args.build_timeout_s,
                 group_concurrent=args.group_concurrent,
+                keep_heavy_artifacts=args.keep_heavy_browser_artifacts,
             )
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
