@@ -37,6 +37,10 @@ otto improve bugs "look for auth and data isolation bugs" --provider codex
 otto certify "users can save, restore, rename, and delete saved searches" --provider codex
 ```
 
+Provider choices are `codex`, `claude`, and experimental `openai-agents`. The
+`codex` provider uses the Codex CLI; `openai-agents` uses the OpenAI Agents SDK
+local sandbox backend.
+
 Run the web Mission Control portal:
 
 ```bash
@@ -172,6 +176,11 @@ otto run "add billing exports" \
   --certifier-effort high \
   --budget 5400 \
   --max-turns 200
+
+otto run "add CSV import previews" \
+  --provider openai-agents \
+  --model gpt-5.4 \
+  --budget 3600
 ```
 
 ## Queue And Worktrees

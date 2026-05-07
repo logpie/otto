@@ -175,8 +175,18 @@ Phase-specific overrides:
 --fix-provider / --fix-model / --fix-effort
 ```
 
-The Codex integration is CLI-subprocess based and normalizes provider JSONL
-into Otto's message/log format. Claude remains supported where configured.
+Provider choices today:
+
+- `codex`: stable Codex CLI subprocess integration. Otto runs `codex exec
+  --json`, normalizes JSONL into Otto's message/log format, and preserves Codex
+  local configuration unless Otto overrides model or reasoning effort.
+- `claude`: Claude SDK integration where configured.
+- `openai-agents`: experimental OpenAI Agents SDK integration. Otto keeps the
+  same durable outer orchestrator, but runs the inner worker through the SDK's
+  local sandbox agent, streams SDK run items into the existing messages.jsonl
+  shape, records token usage, and stores structured final output when the SDK
+  returns typed output.
+
 The outer orchestrator is durable Otto state; provider sessions are disposable
 inner workers.
 

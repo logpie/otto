@@ -100,7 +100,15 @@ DEFAULTS: dict[str, Any] = {
 # callers. Prefer DEFAULTS in new code.
 DEFAULT_CONFIG: dict[str, Any] = DEFAULTS
 
-SUPPORTED_PROVIDERS = {"claude", "codex"}
+OPENAI_AGENTS_PROVIDER = "openai-agents"
+PROVIDER_ALIASES = {
+    "agents": OPENAI_AGENTS_PROVIDER,
+    "agents-sdk": OPENAI_AGENTS_PROVIDER,
+    "openai_agents": OPENAI_AGENTS_PROVIDER,
+    "openai-agents-sdk": OPENAI_AGENTS_PROVIDER,
+    "openai_agents_sdk": OPENAI_AGENTS_PROVIDER,
+}
+SUPPORTED_PROVIDERS = {"claude", "codex", OPENAI_AGENTS_PROVIDER}
 PUBLIC_CERTIFIER_MODES = ("fast", "standard", "thorough")
 INTERNAL_CERTIFIER_MODES = ("hillclimb", "target")
 SUPPORTED_CERTIFIER_MODES = PUBLIC_CERTIFIER_MODES + INTERNAL_CERTIFIER_MODES
@@ -232,6 +240,7 @@ def normalize_provider(
     if value is None or value == "":
         return default
     provider = str(value).strip().lower()
+    provider = PROVIDER_ALIASES.get(provider, provider)
     if provider not in SUPPORTED_PROVIDERS:
         choices = ", ".join(sorted(SUPPORTED_PROVIDERS))
         raise ValueError(f"Invalid {key}: {value!r}. Expected one of: {choices}")
@@ -1445,7 +1454,7 @@ default_branch: {default_branch}      # detected
 test_command: {test_command}          # detected; set explicitly if wrong
 
 # ─── Global agent defaults (applied to every agent) ──────────────────
-provider: {provider}                  # claude | codex
+provider: {provider}                  # claude | codex | openai-agents
 # model: null                         # override provider model (e.g. sonnet, haiku, gpt-5)
 # effort: null                        # low | medium | high | max (provider-specific)
 

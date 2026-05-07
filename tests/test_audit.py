@@ -17,6 +17,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from otto.audit import (
     AuditAgentInput,

@@ -17,6 +17,7 @@ from typing import Any, Callable
 from otto.observability import iso_timestamp, write_crash_artifact
 from otto.token_usage import TOKEN_USAGE_KEYS
 _SDK_IMPORT_ERROR_MESSAGE = ""
+_OPENAI_AGENTS_IMPORT_ERROR_MESSAGE = ""
 
 CODEX_STDIO_LIMIT_BYTES = 16 * 1024 * 1024
 DEFAULT_DISALLOWED_BASH_TOOLS = (
@@ -63,6 +64,38 @@ try:
     from claude_agent_sdk.types import ThinkingBlock as _SDKThinkingBlock
 except (ImportError, AttributeError):
     _SDKThinkingBlock = None
+
+try:
+    from agents import Agent as _OpenAIAgent
+    from agents import AgentOutputSchema as _OpenAIAgentOutputSchema
+    from agents import ModelSettings as _OpenAIModelSettings
+    from agents import RunConfig as _OpenAIRunConfig
+    from agents import Runner as _OpenAIRunner
+    from agents.sandbox import Manifest as _OpenAIManifest
+    from agents.sandbox import SandboxAgent as _OpenAISandboxAgent
+    from agents.sandbox import SandboxRunConfig as _OpenAISandboxRunConfig
+    from agents.sandbox.capabilities import Compaction as _OpenAICompactionCapability
+    from agents.sandbox.capabilities import Filesystem as _OpenAIFilesystemCapability
+    from agents.sandbox.capabilities import Shell as _OpenAIShellCapability
+    from agents.sandbox.capabilities.tools import ExecCommandTool as _OpenAIExecCommandTool
+    from agents.sandbox.sandboxes import UnixLocalSandboxClient as _OpenAIUnixLocalSandboxClient
+except ImportError:
+    import sys
+
+    _OPENAI_AGENTS_IMPORT_ERROR_MESSAGE = str(sys.exc_info()[1] or "")
+    _OpenAIAgent = None
+    _OpenAIAgentOutputSchema = None
+    _OpenAIModelSettings = None
+    _OpenAIRunConfig = None
+    _OpenAIRunner = None
+    _OpenAIManifest = None
+    _OpenAISandboxAgent = None
+    _OpenAISandboxRunConfig = None
+    _OpenAICompactionCapability = None
+    _OpenAIFilesystemCapability = None
+    _OpenAIShellCapability = None
+    _OpenAIExecCommandTool = None
+    _OpenAIUnixLocalSandboxClient = None
 
 
 @dataclass
@@ -858,10 +891,14 @@ async def run_agent_with_timeout(
 
 
 def _provider_name(options: AgentOptions | None) -> str:
-    provider = (getattr(options, "provider", None) or "claude").strip().lower()
-    if provider not in {"claude", "codex"}:
-        raise ValueError(f"Unsupported agent provider: {provider}")
-    return provider
+    from otto.config import normalize_provider
+
+    raw_provider = getattr(options, "provider", None)
+    try:
+        provider = normalize_provider(raw_provider, default="claude")
+    except ValueError as exc:
+        raise ValueError(f"Unsupported agent provider: {str(raw_provider).strip().lower()}") from exc
+    return provider or "claude"
 
 
 def _safe_read(path: Path, max_chars: int = 40_000) -> str | None:
@@ -929,6 +966,503 @@ def _codex_tool_compat_prelude(prompt: str) -> str:
         "use Codex's `spawn_agent` tool.\n"
         "- After spawning subagents, use the Codex wait tool to collect every "
         "subagent result before reporting."
+    )
+
+
+def _openai_agents_instructions(options: AgentOptions) -> str | None:
+    parts: list[str] = []
+    if isinstance(options.system_prompt, str) and options.system_prompt.strip():
+        parts.append(options.system_prompt.strip())
+    compat = _codex_compat_prelude(options)
+    if compat:
+        parts.append(compat)
+    parts.append(
+        "Otto provider compatibility:\n"
+        "- Use the provided filesystem, shell, and patch tools to work inside "
+        "the current project directory.\n"
+        "- Prefer apply_patch for text edits and shell commands for verification.\n"
+        "- Do not use process-wide kill commands; stop only processes you started "
+        "through the active tool session."
+    )
+    return "\n\n".join(part for part in parts if part).strip() or None
+
+
+def _openai_agents_model_settings(options: AgentOptions) -> Any:
+    if _OpenAIModelSettings is None:
+        return None
+    kwargs: dict[str, Any] = {
+        "include_usage": True,
+        "parallel_tool_calls": True,
+        "truncation": "auto",
+    }
+    effort = _openai_agents_reasoning_effort(options.effort)
+    if effort:
+        kwargs["reasoning"] = {"effort": effort}
+    return _OpenAIModelSettings(**kwargs)
+
+
+def _openai_agents_reasoning_effort(effort: str | None) -> str | None:
+    value = str(effort or "").strip().lower()
+    if not value:
+        return None
+    if value == "max":
+        return "high"
+    if value in {"low", "medium", "high"}:
+        return value
+    return None
+
+
+def _openai_agents_output_type(output_format: Any) -> Any:
+    if output_format is None:
+        return None
+    if isinstance(output_format, type):
+        return output_format
+    if not isinstance(output_format, dict):
+        return None
+
+    schema = output_format.get("schema")
+    if not isinstance(schema, dict):
+        json_schema = output_format.get("json_schema")
+        if isinstance(json_schema, dict):
+            schema = json_schema.get("schema")
+    if not isinstance(schema, dict):
+        return None
+    if str(schema.get("type") or "").lower() != "object":
+        return None
+
+    try:
+        from pydantic import create_model
+    except Exception:
+        return None
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return None
+    required = {
+        str(item)
+        for item in (schema.get("required") or [])
+        if isinstance(item, str)
+    }
+    fields: dict[str, tuple[Any, Any]] = {}
+    for name, spec in properties.items():
+        if not isinstance(name, str) or not name.isidentifier():
+            continue
+        field_type = _json_schema_python_type(spec if isinstance(spec, dict) else {})
+        fields[name] = (field_type, ... if name in required else None)
+    if not fields:
+        return None
+    model_name = str(
+        output_format.get("name")
+        or (output_format.get("json_schema") or {}).get("name")
+        or schema.get("title")
+        or "OttoStructuredOutput"
+    )
+    model_name = re.sub(r"\W+", "_", model_name).strip("_") or "OttoStructuredOutput"
+    model = create_model(model_name, **fields)
+    if _OpenAIAgentOutputSchema is None:
+        return model
+    return _OpenAIAgentOutputSchema(
+        model,
+        strict_json_schema=bool(output_format.get("strict", True)),
+    )
+
+
+def _json_schema_python_type(spec: dict[str, Any]) -> Any:
+    typ = str(spec.get("type") or "").lower()
+    if isinstance(spec.get("enum"), list):
+        return str
+    if typ == "string":
+        return str
+    if typ == "integer":
+        return int
+    if typ == "number":
+        return float
+    if typ == "boolean":
+        return bool
+    if typ == "array":
+        return list[Any]
+    if typ == "object":
+        return dict[str, Any]
+    return Any
+
+
+def _openai_agents_trace_enabled() -> bool:
+    return str(os.environ.get("OTTO_OPENAI_AGENTS_TRACING", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _openai_agents_trace_sensitive() -> bool:
+    return str(os.environ.get("OTTO_OPENAI_AGENTS_TRACE_SENSITIVE", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _openai_agents_run_config(options: AgentOptions) -> Any:
+    if _OpenAIRunConfig is None:
+        return None
+    metadata = {
+        "otto_provider": "openai-agents",
+        "cwd": options.cwd or "",
+    }
+    if options.model:
+        metadata["model"] = options.model
+    kwargs: dict[str, Any] = {
+        "model": options.model,
+        "model_settings": _openai_agents_model_settings(options),
+        "workflow_name": "otto.agent",
+        "trace_metadata": metadata,
+        "tracing_disabled": not _openai_agents_trace_enabled(),
+        "trace_include_sensitive_data": _openai_agents_trace_sensitive(),
+    }
+    sandbox_config = _openai_agents_sandbox_config(options)
+    if sandbox_config is not None:
+        kwargs["sandbox"] = sandbox_config
+    return _OpenAIRunConfig(**kwargs)
+
+
+def _openai_agents_manifest(options: AgentOptions) -> Any:
+    if _OpenAIManifest is None:
+        return None
+    root = str(Path(options.cwd or os.getcwd()).resolve())
+    env = {
+        str(key): str(value)
+        for key, value in (options.env or {}).items()
+        if key is not None and value is not None
+    }
+    kwargs: dict[str, Any] = {"root": root}
+    if env:
+        kwargs["environment"] = {"value": env}
+    return _OpenAIManifest(**kwargs)
+
+
+def _openai_agents_sandbox_config(options: AgentOptions) -> Any:
+    if (
+        _OpenAISandboxRunConfig is None
+        or _OpenAIUnixLocalSandboxClient is None
+        or _OpenAIManifest is None
+    ):
+        return None
+    return _OpenAISandboxRunConfig(
+        client=_OpenAIUnixLocalSandboxClient(),
+        manifest=_openai_agents_manifest(options),
+    )
+
+
+def _openai_agents_capabilities() -> list[Any] | None:
+    if (
+        _OpenAIFilesystemCapability is None
+        or _OpenAIShellCapability is None
+        or _OpenAICompactionCapability is None
+    ):
+        return None
+
+    capabilities: list[Any] = [_OpenAIFilesystemCapability(), _OpenAIShellCapability()]
+    if _OpenAIExecCommandTool is not None:
+        capabilities[1] = _OpenAIShellCapability(configure_tools=_configure_openai_shell_tools)
+    capabilities.append(_OpenAICompactionCapability())
+    return capabilities
+
+
+def _configure_openai_shell_tools(toolset: Any) -> None:
+    original = getattr(toolset, "exec_command", None)
+    if original is None or _OpenAIExecCommandTool is None:
+        return
+
+    class OttoSafeExecCommandTool(_OpenAIExecCommandTool):  # type: ignore[misc, valid-type]
+        async def run(self, args: Any) -> str:  # noqa: ANN401 - SDK-owned args model
+            command = str(getattr(args, "cmd", "") or "")
+            reason = _unsafe_bash_command_reason(command)
+            if reason:
+                return reason
+            return await super().run(args)
+
+    session = getattr(original, "session", None)
+    if session is None:
+        return
+    toolset.exec_command = OttoSafeExecCommandTool(
+        session=session,
+        user=getattr(original, "user", None),
+    )
+
+
+def _openai_agents_agent(options: AgentOptions) -> Any:
+    output_type = _openai_agents_output_type(options.output_format)
+    agent_kwargs: dict[str, Any] = {
+        "name": "otto-openai-agents",
+        "instructions": _openai_agents_instructions(options),
+        "model": options.model,
+        "model_settings": _openai_agents_model_settings(options),
+        "output_type": output_type,
+    }
+    if _OpenAISandboxAgent is not None and _openai_agents_sandbox_config(options) is not None:
+        agent_kwargs["default_manifest"] = _openai_agents_manifest(options)
+        capabilities = _openai_agents_capabilities()
+        if capabilities is not None:
+            agent_kwargs["capabilities"] = capabilities
+        return _OpenAISandboxAgent(**agent_kwargs)
+    if _OpenAIAgent is None:
+        return None
+    return _OpenAIAgent(**agent_kwargs)
+
+
+def _openai_agents_text_from_message_raw(raw_item: Any) -> str:
+    content = _raw_value(raw_item, "content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        text = _raw_value(item, "text")
+        if text is None:
+            text = _raw_value(item, "content")
+        if text is not None:
+            parts.append(str(text))
+    return "".join(parts)
+
+
+def _openai_agents_tool_name(raw_item: Any, item: Any) -> str:
+    name = _raw_value(item, "tool_name") or _raw_value(raw_item, "name")
+    typ = str(_raw_value(raw_item, "type") or "").lower()
+    if not name:
+        if typ in {"shell_call", "local_shell_call"}:
+            return "Bash"
+        if typ == "apply_patch_call":
+            return "Edit"
+    if str(name) in {"exec_command", "shell", "local_shell"}:
+        return "Bash"
+    if str(name) == "apply_patch":
+        return "Edit"
+    return str(name or "")
+
+
+def _openai_agents_tool_input(raw_item: Any) -> dict[str, Any]:
+    for attr in ("input", "arguments", "args"):
+        value = _raw_value(raw_item, attr)
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    command = _raw_value(raw_item, "command") or _raw_value(raw_item, "cmd")
+    if command is not None:
+        return {"command": str(command), "cmd": str(command)}
+    action = _raw_value(raw_item, "action")
+    if isinstance(action, dict):
+        return dict(action)
+    return {}
+
+
+def _openai_agents_tool_output_text(output: Any) -> str:
+    if isinstance(output, str):
+        return output
+    if output is None:
+        return ""
+    if hasattr(output, "model_dump"):
+        try:
+            output = output.model_dump()
+        except Exception:
+            pass
+    if isinstance(output, dict):
+        for key in ("output", "text", "content", "stdout"):
+            value = output.get(key)
+            if isinstance(value, str):
+                return value
+        return json.dumps(_json_safe(output), ensure_ascii=False)
+    return str(output)
+
+
+def _openai_agents_reasoning_text(raw_item: Any) -> str:
+    for attr in ("summary", "content", "text"):
+        value = _raw_value(raw_item, attr)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                text = _raw_value(item, "text") or _raw_value(item, "content")
+                if text:
+                    parts.append(str(text))
+            if parts:
+                return "\n".join(parts)
+    return ""
+
+
+def _openai_agents_normalize_item(item: Any, session_id: str) -> Any | None:
+    item_type = str(_raw_value(item, "type") or "")
+    raw_item = _raw_value(item, "raw_item") or {}
+    if item_type == "message_output_item":
+        text = _openai_agents_text_from_message_raw(raw_item)
+        if text:
+            return AssistantMessage(content=[TextBlock(text=text)], session_id=session_id)
+        return None
+    if item_type == "tool_call_item":
+        tool_name = _openai_agents_tool_name(raw_item, item)
+        tool_input = _openai_agents_tool_input(raw_item)
+        if tool_name == "Bash" and "command" not in tool_input and "cmd" in tool_input:
+            tool_input["command"] = tool_input["cmd"]
+        return AssistantMessage(
+            content=[
+                ToolUseBlock(
+                    name=tool_name,
+                    input=tool_input,
+                    id=str(_raw_value(item, "call_id") or _raw_value(raw_item, "call_id") or _raw_value(raw_item, "id") or "") or None,
+                )
+            ],
+            session_id=session_id,
+        )
+    if item_type == "tool_call_output_item":
+        output = _openai_agents_tool_output_text(_raw_value(item, "output"))
+        return AssistantMessage(
+            content=[
+                ToolResultBlock(
+                    content=output,
+                    tool_use_id=str(_raw_value(item, "call_id") or _raw_value(raw_item, "call_id") or _raw_value(raw_item, "id") or "") or None,
+                )
+            ],
+            session_id=session_id,
+        )
+    if item_type == "reasoning_item":
+        thinking = _openai_agents_reasoning_text(raw_item)
+        if thinking:
+            return AssistantMessage(content=[ThinkingBlock(thinking=thinking)], session_id=session_id)
+    return None
+
+
+def _raw_value(obj: Any, key: str) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if hasattr(value, "model_dump"):
+        try:
+            return _json_safe(value.model_dump())
+        except Exception:
+            pass
+    if hasattr(value, "__dict__"):
+        return _json_safe(vars(value))
+    return str(value)
+
+
+def _openai_agents_usage_dict(result: Any) -> dict[str, Any] | None:
+    totals: dict[str, int] = {
+        "requests": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 0,
+    }
+    seen = False
+    for response in list(getattr(result, "raw_responses", []) or []):
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            continue
+        seen = True
+        totals["requests"] += int(getattr(usage, "requests", 0) or 0)
+        totals["input_tokens"] += int(getattr(usage, "input_tokens", 0) or 0)
+        totals["output_tokens"] += int(getattr(usage, "output_tokens", 0) or 0)
+        totals["total_tokens"] += int(getattr(usage, "total_tokens", 0) or 0)
+        input_details = getattr(usage, "input_tokens_details", None)
+        totals["cached_input_tokens"] += int(getattr(input_details, "cached_tokens", 0) or 0)
+        output_details = getattr(usage, "output_tokens_details", None)
+        totals["reasoning_tokens"] += int(getattr(output_details, "reasoning_tokens", 0) or 0)
+    if not seen:
+        return None
+    if not totals["total_tokens"]:
+        totals["total_tokens"] = (
+            totals["input_tokens"]
+            + totals["output_tokens"]
+            + totals["reasoning_tokens"]
+        )
+    return {key: value for key, value in totals.items() if value}
+
+
+def _structured_output_to_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    safe = _json_safe(value)
+    if isinstance(safe, str):
+        return safe
+    return json.dumps(safe, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+async def _query_openai_agents(
+    *,
+    prompt: str,
+    options: AgentOptions | None = None,
+    state: dict[str, Any] | None = None,
+):
+    if _OpenAIRunner is None:
+        detail = _OPENAI_AGENTS_IMPORT_ERROR_MESSAGE or "unknown import error"
+        raise RuntimeError(
+            "openai-agents provider requested but the Agents SDK is not importable: "
+            f"{detail}; run `uv pip install -e .[openai]`"
+        )
+    opts = options or AgentOptions()
+    agent = _openai_agents_agent(opts)
+    if agent is None:
+        raise RuntimeError("openai-agents provider requested but no SDK Agent class is available")
+
+    run_config = _openai_agents_run_config(opts)
+    stream = _OpenAIRunner.run_streamed(
+        agent,
+        prompt,
+        max_turns=opts.max_turns,
+        run_config=run_config,
+        previous_response_id=opts.resume or None,
+    )
+    if hasattr(stream, "ensure_sandbox_cleanup_on_completion"):
+        stream.ensure_sandbox_cleanup_on_completion()
+
+    async for event in stream.stream_events():
+        if str(_raw_value(event, "type") or "") != "run_item_stream_event":
+            continue
+        item = _raw_value(event, "item")
+        if item is None:
+            continue
+        session_id = str(getattr(stream, "last_response_id", None) or "")
+        if state is not None and session_id:
+            state["session_id"] = session_id
+        normalized = _openai_agents_normalize_item(item, session_id)
+        if normalized is not None:
+            yield normalized
+
+    session_id = str(getattr(stream, "last_response_id", None) or "")
+    if state is not None and session_id:
+        state["session_id"] = session_id
+    usage = _openai_agents_usage_dict(stream)
+    structured = None
+    final_output = getattr(stream, "final_output", None)
+    if final_output is not None and not isinstance(final_output, str):
+        structured = _json_safe(final_output)
+    yield ResultMessage(
+        subtype="success",
+        is_error=False,
+        session_id=session_id,
+        result=_structured_output_to_text(final_output) if final_output is not None else None,
+        total_cost_usd=None,
+        usage=usage,
+        structured_output=structured,
     )
 
 
@@ -1425,6 +1959,10 @@ async def query(
     provider = _provider_name(options)
     if provider == "codex":
         async for message in _query_codex(prompt=prompt, options=options, state=state):
+            yield message
+        return
+    if provider == "openai-agents":
+        async for message in _query_openai_agents(prompt=prompt, options=options, state=state):
             yield message
         return
 

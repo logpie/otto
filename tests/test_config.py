@@ -238,6 +238,16 @@ class TestLoadConfig:
         cfg = load_config(config_path)
         assert cfg["provider"] == "codex"
 
+    def test_normalizes_openai_agents_provider_aliases(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({
+            "provider": "openai_agents",
+            "agents": {"build": {"provider": "agents-sdk"}},
+        }))
+        cfg = load_config(config_path)
+        assert cfg["provider"] == "openai-agents"
+        assert agent_provider(cfg, "build") == "openai-agents"
+
     def test_rejects_invalid_provider(self, tmp_bare_git_repo):
         config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({"provider": "not-a-provider"}))

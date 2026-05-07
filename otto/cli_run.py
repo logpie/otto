@@ -519,7 +519,7 @@ def register_run_command(main: click.Group) -> None:
     @click.option(
         "--provider",
         default=None,
-        help="Override provider for every agent: claude | codex.",
+        help="Override provider for every agent: claude | codex | openai-agents.",
     )
     @click.option(
         "--effort",

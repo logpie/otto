@@ -5,16 +5,23 @@ observations from the `fix/codex-provider-i2p` worktree.
 
 ## Current Integration Shape
 
-Otto still invokes Codex through the Codex CLI:
+Otto's default Codex provider still invokes Codex through the Codex CLI:
 
 ```text
 codex exec --json ...
 ```
 
-It does not use an OpenAI Agents SDK integration. The adapter reads Codex JSONL
-events from `codex exec --json` and normalizes them into Otto's internal
+That adapter reads Codex JSONL events from `codex exec --json` and normalizes
+them into Otto's internal
 `AssistantMessage`, `ToolUseBlock`, `ToolResultBlock`, and `ResultMessage`
 stream.
+
+Otto also has an opt-in `openai-agents` provider for the OpenAI Agents SDK. That
+path uses the SDK's local sandbox agent for filesystem/shell/patch work, streams
+SDK run items through the same Otto message/log surface, records OpenAI token
+usage, and preserves SDK structured final output in `ResultMessage.structured_output`
+and `messages.jsonl`. It is a separate provider so the stable Codex CLI path
+remains available while the SDK path is pressure-tested.
 
 ## Root Causes
 

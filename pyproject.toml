@@ -22,8 +22,12 @@ dependencies = [
 claude = [
     "claude-agent-sdk>=0.1.0",
 ]
+openai = [
+    "openai-agents>=0.16,<0.17",
+]
 dev = [
     "claude-agent-sdk>=0.1.0",
+    "openai-agents>=0.16,<0.17",
     "pytest>=9.0",
     "pytest-asyncio>=1.0",
     "httpx>=0.24",

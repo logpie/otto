@@ -3,6 +3,7 @@
 import asyncio
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -620,9 +621,201 @@ def test_cleanup_orphan_processes_skips_reused_process_group(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_openai_agents_query_streams_tools_usage_and_structured_output(tmp_path, monkeypatch):
+    import otto.agent as agent_mod
+
+    calls: dict[str, object] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            calls["agent_kwargs"] = kwargs
+
+    class FakeRunConfig:
+        def __init__(self, **kwargs):
+            calls["run_config_kwargs"] = kwargs
+            self.kwargs = kwargs
+
+    class FakeModelSettings:
+        def __init__(self, **kwargs):
+            calls["model_settings_kwargs"] = kwargs
+            self.kwargs = kwargs
+
+    class FakeManifest:
+        def __init__(self, **kwargs):
+            calls["manifest_kwargs"] = kwargs
+
+    class FakeSandboxRunConfig:
+        def __init__(self, **kwargs):
+            calls["sandbox_kwargs"] = kwargs
+
+    class FakeUnixLocalSandboxClient:
+        pass
+
+    class FakeStream:
+        final_output = {"verdict": "PASS", "stories": 2}
+        raw_responses = [
+            SimpleNamespace(
+                response_id="resp-123",
+                usage=SimpleNamespace(
+                    requests=1,
+                    input_tokens=11,
+                    input_tokens_details=SimpleNamespace(cached_tokens=3),
+                    output_tokens=5,
+                    output_tokens_details=SimpleNamespace(reasoning_tokens=2),
+                    total_tokens=18,
+                ),
+            )
+        ]
+
+        @property
+        def last_response_id(self):
+            return "resp-123"
+
+        def ensure_sandbox_cleanup_on_completion(self):
+            calls["cleanup_registered"] = True
+
+        async def stream_events(self):
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                item=SimpleNamespace(
+                    type="message_output_item",
+                    raw_item=SimpleNamespace(
+                        content=[SimpleNamespace(text="Planning\n")]
+                    ),
+                ),
+            )
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                item=SimpleNamespace(
+                    type="tool_call_item",
+                    raw_item=SimpleNamespace(
+                        type="shell_call",
+                        call_id="call-1",
+                        name="exec_command",
+                        arguments='{"cmd": "pytest -q"}',
+                    ),
+                ),
+            )
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                item=SimpleNamespace(
+                    type="tool_call_output_item",
+                    output={"output": "2 passed\n"},
+                    raw_item=SimpleNamespace(call_id="call-1"),
+                ),
+            )
+
+    class FakeRunner:
+        @staticmethod
+        def run_streamed(agent, input, **kwargs):
+            calls["runner_agent"] = agent
+            calls["runner_input"] = input
+            calls["runner_kwargs"] = kwargs
+            return FakeStream()
+
+    monkeypatch.setattr(agent_mod, "_OpenAIRunner", FakeRunner)
+    monkeypatch.setattr(agent_mod, "_OpenAISandboxAgent", FakeAgent)
+    monkeypatch.setattr(agent_mod, "_OpenAIAgent", FakeAgent)
+    monkeypatch.setattr(agent_mod, "_OpenAIRunConfig", FakeRunConfig)
+    monkeypatch.setattr(agent_mod, "_OpenAIModelSettings", FakeModelSettings)
+    monkeypatch.setattr(agent_mod, "_OpenAIManifest", FakeManifest)
+    monkeypatch.setattr(agent_mod, "_OpenAISandboxRunConfig", FakeSandboxRunConfig)
+    monkeypatch.setattr(agent_mod, "_OpenAIUnixLocalSandboxClient", FakeUnixLocalSandboxClient)
+    monkeypatch.setattr(agent_mod, "_OpenAIFilesystemCapability", None)
+    monkeypatch.setattr(agent_mod, "_OpenAIShellCapability", None)
+    monkeypatch.setattr(agent_mod, "_OpenAICompactionCapability", None)
+
+    state: dict[str, object] = {}
+    text, cost, result = await run_agent_query(
+        "Build the app",
+        AgentOptions(
+            provider="openai-agents",
+            cwd=str(tmp_path),
+            max_turns=12,
+            effort="low",
+            setting_sources=["project"],
+            env={"OTTO_TEST_FLAG": "1"},
+        ),
+        capture_tool_output=True,
+        state=state,
+    )
+
+    assert "Planning" in text
+    assert "2 passed" in text
+    assert cost == 0.0
+    assert isinstance(result, ResultMessage)
+    assert result.session_id == "resp-123"
+    assert result.structured_output == {"verdict": "PASS", "stories": 2}
+    assert result.usage == {
+        "requests": 1,
+        "input_tokens": 11,
+        "cached_input_tokens": 3,
+        "output_tokens": 5,
+        "reasoning_tokens": 2,
+        "total_tokens": 18,
+    }
+    assert state["session_id"] == "resp-123"
+    assert calls["runner_input"] == "Build the app"
+    assert calls["runner_kwargs"]["max_turns"] == 12
+    assert calls["runner_kwargs"]["previous_response_id"] is None
+    assert calls["cleanup_registered"] is True
+    assert calls["run_config_kwargs"]["tracing_disabled"] is True
+    assert calls["model_settings_kwargs"]["include_usage"] is True
+    assert calls["model_settings_kwargs"]["parallel_tool_calls"] is True
+    assert calls["model_settings_kwargs"]["reasoning"] == {"effort": "low"}
+    assert calls["manifest_kwargs"]["root"] == str(tmp_path.resolve())
+    assert calls["manifest_kwargs"]["environment"] == {"value": {"OTTO_TEST_FLAG": "1"}}
+
+
+@pytest.mark.asyncio
+async def test_openai_agents_missing_sdk_surfaces_install_hint(monkeypatch):
+    import otto.agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "_OpenAIRunner", None)
+    monkeypatch.setattr(agent_mod, "_OPENAI_AGENTS_IMPORT_ERROR_MESSAGE", "missing agents")
+
+    with pytest.raises(RuntimeError, match="openai"):
+        async for _message in query(
+            prompt="test",
+            options=AgentOptions(provider="openai-agents"),
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_openai_agents_shell_tool_blocks_process_kill_commands(monkeypatch):
+    import otto.agent as agent_mod
+
+    class FakeExecCommandTool:
+        def __init__(self, *, session, user=None):
+            self.session = session
+            self.user = user
+
+        async def run(self, args):
+            return f"ran {args.cmd}"
+
+    monkeypatch.setattr(agent_mod, "_OpenAIExecCommandTool", FakeExecCommandTool)
+    toolset = SimpleNamespace(
+        exec_command=FakeExecCommandTool(session=object(), user="otto")
+    )
+
+    agent_mod._configure_openai_shell_tools(toolset)
+
+    blocked = await toolset.exec_command.run(SimpleNamespace(cmd="killall node"))
+    allowed = await toolset.exec_command.run(SimpleNamespace(cmd="echo ok"))
+
+    assert blocked.startswith("Otto blocked a broad killall command")
+    assert allowed == "ran echo ok"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("provider", "backend_attr"),
-    [("claude", "_query_claude"), ("codex", "_query_codex")],
+    [
+        ("claude", "_query_claude"),
+        ("codex", "_query_codex"),
+        ("openai-agents", "_query_openai_agents"),
+    ],
 )
 async def test_run_agent_with_timeout_supports_debug_unredacted_for_all_providers(
     tmp_path,
