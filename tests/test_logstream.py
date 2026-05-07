@@ -18,6 +18,7 @@ import pytest
 
 from otto.agent import (
     AssistantMessage,
+    ProviderEventMessage,
     ResultMessage,
     TextBlock,
     ThinkingBlock,
@@ -81,6 +82,28 @@ class TestJsonlWriter:
         assert rec["cost_usd"] == 0.42
         assert rec["usage"] == {"input_tokens": 100, "output_tokens": 50}
         assert rec["session_id"] == "sess-1"
+
+    def test_provider_event_records_usage_and_data(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        w = JsonlMessageWriter(path)
+        w.write(ProviderEventMessage(
+            event="diff_updated",
+            provider="codex-app-server",
+            session_id="thread-1",
+            method="turn/diff/updated",
+            turn_id="turn-1",
+            usage={"input_tokens": 10, "output_tokens": 2},
+            data={"changed_files": ["app.py"], "diff_sha256": "abc"},
+        ))
+        w.close()
+
+        rec = json.loads(path.read_text().strip())
+        assert rec["type"] == "provider_event"
+        assert rec["event"] == "diff_updated"
+        assert rec["provider"] == "codex-app-server"
+        assert rec["session_id"] == "thread-1"
+        assert rec["usage"] == {"input_tokens": 10, "output_tokens": 2}
+        assert rec["data"]["changed_files"] == ["app.py"]
 
     def test_result_message_redacts_secret_text(self, tmp_path):
         path = tmp_path / "messages.jsonl"

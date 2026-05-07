@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -154,6 +155,22 @@ class ResultMessage:
     total_cost_usd: float | None = None
     usage: dict[str, Any] | None = None
     structured_output: Any = None
+    structured_output_error: str = ""
+
+
+@dataclass
+class ProviderEventMessage:
+    """Durable provider-side state that is not assistant prose or tool IO."""
+
+    event: str
+    provider: str
+    session_id: str = ""
+    method: str = ""
+    turn_id: str = ""
+    item_id: str = ""
+    status: str = ""
+    usage: dict[str, Any] | None = None
+    data: dict[str, Any] | None = None
 
 
 @dataclass
@@ -614,6 +631,7 @@ async def run_agent_with_timeout(
         "child_session_ids": [],
         "total_cost_usd": None,
         "provider_stderr": "",
+        "log_dir": str(log_dir),
     }
 
     def _append_narrative(line: str) -> None:
@@ -660,6 +678,31 @@ async def run_agent_with_timeout(
         crash_path = write_crash_artifact(session_dir, payload)
         _append_narrative(f"crash details: {crash_path}")
         return str(crash_path)
+
+    def _attach_structured_result(
+        breakdown_data: dict[str, Any],
+        result_msg: ResultMessage | None,
+    ) -> None:
+        if result_msg is None:
+            return
+        structured_output = getattr(result_msg, "structured_output", None)
+        if structured_output is not None:
+            breakdown_data["structured_output"] = structured_output
+        structured_error = getattr(result_msg, "structured_output_error", "") or ""
+        if structured_error:
+            breakdown_data["structured_output_error"] = structured_error
+
+    def _persist_provider_artifacts(breakdown_data: dict[str, Any]) -> None:
+        diff_text = agent_state.get("codex_app_server_diff")
+        if not isinstance(diff_text, str) or not diff_text.strip():
+            return
+        try:
+            diff_path = log_dir / "codex-app-server-diff.patch"
+            diff_path.write_text(diff_text, encoding="utf-8")
+        except OSError:
+            return
+        breakdown_data["provider_diff_path"] = str(diff_path)
+        breakdown_data["provider_diff_summary"] = _codex_app_server_diff_summary(diff_text)
 
     heartbeat_task: asyncio.Task[None] | None = None
     heartbeat_error: BaseException | None = None
@@ -732,6 +775,8 @@ async def run_agent_with_timeout(
             breakdown_data["recovered_tool_errors"] = int(
                 finalize_stats.get("recovered_tool_errors", 0)
             )
+            _attach_structured_result(breakdown_data, result_msg)
+            _persist_provider_artifacts(breakdown_data)
             err = AgentCallError(
                 str(reason),
                 session_id=session_id,
@@ -820,6 +865,8 @@ async def run_agent_with_timeout(
         breakdown_data["recovered_tool_errors"] = int(
             finalize_stats.get("recovered_tool_errors", 0)
         )
+        _attach_structured_result(breakdown_data, result_msg)
+        _persist_provider_artifacts(breakdown_data)
         return text, cost, session_id, breakdown_data
     except AgentCallError as err:
         _cleanup_agent_processes(project_dir, agent_state)
@@ -1855,7 +1902,30 @@ def _codex_app_server_output_schema(output_format: Any) -> dict[str, Any] | None
         schema = output_format
     if not isinstance(schema, dict):
         return None
-    return dict(schema)
+    return _codex_app_server_strict_schema(schema)
+
+
+def _codex_app_server_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return an app-server-compatible JSON schema copy.
+
+    Codex app-server forwards ``outputSchema`` into OpenAI structured output,
+    which rejects object schemas that omit ``additionalProperties: false``.
+    Otto's public `AgentOptions.output_format` remains provider-neutral; this
+    adapter projects it into the stricter app-server dialect at the boundary.
+    """
+    projected = dict(schema)
+    properties = projected.get("properties")
+    if isinstance(properties, dict):
+        projected["properties"] = {
+            key: _codex_app_server_strict_schema(value)
+            if isinstance(value, dict) else value
+            for key, value in properties.items()
+        }
+        projected["additionalProperties"] = False
+    items = projected.get("items")
+    if isinstance(items, dict):
+        projected["items"] = _codex_app_server_strict_schema(items)
+    return projected
 
 
 def _codex_app_server_usage_dict(token_usage: Any) -> dict[str, Any] | None:
@@ -1888,13 +1958,118 @@ def _codex_app_server_usage_dict(token_usage: Any) -> dict[str, Any] | None:
     return {key: value for key, value in usage.items() if value}
 
 
-def _codex_app_server_structured_output(text: str, options: AgentOptions) -> Any:
-    if _codex_app_server_output_schema(options.output_format) is None:
-        return None
+def _json_schema_type_matches(value: Any, expected_type: str) -> bool:
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    return True
+
+
+def _validate_json_schema_subset(
+    value: Any,
+    schema: dict[str, Any],
+    *,
+    path: str = "$",
+) -> list[str]:
+    """Validate the JSON-schema subset Otto passes to app-server.
+
+    This is intentionally small: it covers the schema features Otto emits
+    for structured spec/audit results and provider regressions, while leaving
+    full JSON Schema semantics to upstream providers and stage validators.
+    """
+    errors: list[str] = []
+    raw_type = schema.get("type")
+    expected_types = (
+        [str(item) for item in raw_type]
+        if isinstance(raw_type, list)
+        else [str(raw_type)] if isinstance(raw_type, str) else []
+    )
+    if expected_types and not any(_json_schema_type_matches(value, kind) for kind in expected_types):
+        errors.append(f"{path}: expected {'/'.join(expected_types)}, got {type(value).__name__}")
+        return errors
+
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        errors.append(f"{path}: expected one of {enum!r}, got {value!r}")
+
+    if isinstance(value, dict):
+        required = schema.get("required")
+        if isinstance(required, list):
+            for key in required:
+                if isinstance(key, str) and key not in value:
+                    errors.append(f"{path}.{key}: missing required field")
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for key, child_schema in properties.items():
+                if key in value and isinstance(child_schema, dict):
+                    errors.extend(
+                        _validate_json_schema_subset(
+                            value[key],
+                            child_schema,
+                            path=f"{path}.{key}",
+                        )
+                    )
+    elif isinstance(value, list):
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                errors.extend(
+                    _validate_json_schema_subset(
+                        item,
+                        item_schema,
+                        path=f"{path}[{index}]",
+                    )
+                )
+    return errors
+
+
+def _codex_app_server_structured_output_result(
+    text: str,
+    options: AgentOptions,
+) -> tuple[Any, str]:
+    schema = _codex_app_server_output_schema(options.output_format)
+    if schema is None:
+        return None, ""
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return None
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return None, f"structured output was not valid JSON: {exc}"
+    errors = _validate_json_schema_subset(parsed, schema)
+    if errors:
+        return parsed, "structured output failed schema validation: " + "; ".join(errors[:5])
+    return parsed, ""
+
+
+def _codex_app_server_structured_output(text: str, options: AgentOptions) -> Any:
+    parsed, _error = _codex_app_server_structured_output_result(text, options)
+    return parsed
+
+
+def _codex_app_server_diff_summary(diff_text: str) -> dict[str, Any]:
+    changed_files: list[str] = []
+    for line in diff_text.splitlines():
+        if not line.startswith("diff --git "):
+            continue
+        parts = line.split()
+        if len(parts) >= 4:
+            path = parts[3]
+            changed_files.append(path[2:] if path.startswith("b/") else path)
+    return {
+        "diff_sha256": hashlib.sha256(diff_text.encode("utf-8")).hexdigest(),
+        "diff_bytes": len(diff_text.encode("utf-8")),
+        "changed_files": changed_files,
+    }
 
 
 def _codex_app_server_collab_result_text(item: dict[str, Any], child_id: str | None = None) -> str:
@@ -2118,6 +2293,29 @@ async def _query_codex_app_server(
     emitted_collab_tool_ids: set[str] = set()
     child_tool_use_by_thread_id: dict[str, str] = {}
 
+    def provider_event(
+        event_name: str,
+        *,
+        method: str = "",
+        params: dict[str, Any] | None = None,
+        usage: dict[str, Any] | None = None,
+        status: str = "",
+        data: dict[str, Any] | None = None,
+    ) -> ProviderEventMessage:
+        event_params = params or {}
+        fallback_session_id = state.get("session_id", "") if state is not None else ""
+        return ProviderEventMessage(
+            event=event_name,
+            provider="codex-app-server",
+            session_id=str(event_params.get("threadId") or fallback_session_id),
+            method=method,
+            turn_id=str(event_params.get("turnId") or ""),
+            item_id=str(event_params.get("itemId") or ""),
+            status=status,
+            usage=usage,
+            data=data,
+        )
+
     async def send(payload: dict[str, Any]) -> None:
         stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
         await stdin.drain()
@@ -2252,22 +2450,47 @@ async def _query_codex_app_server(
 
             if event.get("id") == turn_id and not event.get("error"):
                 turn_seen = True
+                yield provider_event(
+                    "turn_acknowledged",
+                    method="turn/start",
+                    params={"threadId": thread_id},
+                    data={"request_id": turn_id},
+                )
                 continue
 
             if method == "turn/started":
                 turn_seen = True
+                yield provider_event(
+                    "turn_started",
+                    method=method,
+                    params=params,
+                    status="started",
+                )
                 continue
 
             if method == "thread/tokenUsage/updated":
                 usage = _codex_app_server_usage_dict(params.get("tokenUsage"))
                 if usage:
                     last_usage = usage
+                    yield provider_event(
+                        "token_usage_updated",
+                        method=method,
+                        params=params,
+                        usage=usage,
+                    )
                 continue
 
             if method == "turn/diff/updated":
                 last_diff = str(params.get("diff") or "")
                 if state is not None and last_diff:
                     state["codex_app_server_diff"] = last_diff
+                if last_diff:
+                    yield provider_event(
+                        "diff_updated",
+                        method=method,
+                        params=params,
+                        data=_codex_app_server_diff_summary(last_diff),
+                    )
                 continue
 
             if method == "item/agentMessage/delta":
@@ -2312,8 +2535,15 @@ async def _query_codex_app_server(
             if method == "thread/status/changed":
                 status = params.get("status")
                 status_type = str((status or {}).get("type") or "") if isinstance(status, dict) else ""
+                if status_type:
+                    yield provider_event(
+                        "thread_status_changed",
+                        method=method,
+                        params=params,
+                        status=status_type,
+                    )
                 if status_type == "idle" and turn_seen and (last_text or last_usage):
-                    structured_output = _codex_app_server_structured_output(last_text, opts)
+                    structured_output, structured_error = _codex_app_server_structured_output_result(last_text, opts)
                     yield ResultMessage(
                         subtype="success",
                         is_error=False,
@@ -2322,6 +2552,7 @@ async def _query_codex_app_server(
                         total_cost_usd=0.0,
                         usage=last_usage,
                         structured_output=structured_output,
+                        structured_output_error=structured_error,
                     )
                     saw_result = True
                     break
@@ -2339,7 +2570,13 @@ async def _query_codex_app_server(
                 status = str((turn or {}).get("status") or "") if isinstance(turn, dict) else ""
                 error = (turn or {}).get("error") if isinstance(turn, dict) else None
                 is_error = status == "failed"
-                structured_output = _codex_app_server_structured_output(last_text, opts)
+                yield provider_event(
+                    "turn_completed",
+                    method=method,
+                    params=params,
+                    status=status or ("failed" if is_error else "completed"),
+                )
+                structured_output, structured_error = _codex_app_server_structured_output_result(last_text, opts)
                 yield ResultMessage(
                     subtype="error" if is_error else "success",
                     is_error=is_error,
@@ -2352,6 +2589,7 @@ async def _query_codex_app_server(
                     total_cost_usd=0.0,
                     usage=last_usage,
                     structured_output=structured_output,
+                    structured_output_error=structured_error,
                 )
                 saw_result = True
                 break
@@ -2792,5 +3030,16 @@ async def run_agent_query(
                             )
                     if on_tool:
                         on_tool(block)
+
+    if state is not None:
+        legacy_ids = state.get("child_session_ids", []) or []
+        app_server_ids = state.get("codex_child_session_ids", []) or []
+        merged = {
+            str(sid)
+            for sid in [*legacy_ids, *app_server_ids]
+            if str(sid or "").strip()
+        }
+        if merged:
+            state["child_session_ids"] = sorted(merged)
 
     return transcript.finalize_text(), cost, result_msg

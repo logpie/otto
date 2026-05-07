@@ -717,6 +717,69 @@ def test_default_audit_agent_uses_judge_timeout_from_input(tmp_path: Path, monke
     assert captured["timeout"] == 23
 
 
+def test_default_audit_agent_prefers_structured_output(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import default_audit_agent
+
+    options = SimpleNamespace(cwd="", permission_mode="")
+
+    def fake_make_agent_options(*_args, **_kwargs):
+        return options
+
+    async def fake_run_agent_with_timeout(_prompt, seen_options, **_kwargs):
+        assert seen_options is options
+        assert options.output_format["json_schema"]["name"] == "otto_audit_result"
+        return (
+            "this is deliberately not JSON",
+            0.0,
+            "session-1",
+            {
+                "structured_output": {
+                    "verdict": "passed",
+                    "narrative": "structured ok",
+                    "group_verdicts": [
+                        {"group_id": "g1", "passed": True, "detail": "ok"}
+                    ],
+                    "feature_audits": [
+                        {
+                            "feature_id": "f1",
+                            "name": "Feature 1",
+                            "status": "passed",
+                            "detail": "ok",
+                            "evidence_refs": ["walkthrough.jsonl#L1"],
+                        }
+                    ],
+                    "quality_score": 4,
+                    "quality_findings": ["usable"],
+                }
+            },
+        )
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_agent_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+
+    result = asyncio.run(
+        default_audit_agent(
+            AuditAgentInput(
+                spec=_spec(["f1"]),
+                project_dir=tmp_path,
+                integrated_worktree=tmp_path,
+                build_summary={},
+                merge_summary={},
+                cross_slice_evidence=[],
+                walkthrough_artifacts=[],
+                config={"agents": {}},
+                judge_timeout_s=23,
+            )
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert result.narrative == "structured ok"
+    assert result.group_verdicts[0].group_id == "g1"
+    assert result.feature_audits[0].feature_id == "f1"
+    assert result.quality_score == 4
+
+
 def test_default_audit_agent_sets_search_guard_env(tmp_path: Path, monkeypatch) -> None:
     from otto.audit import default_audit_agent
 

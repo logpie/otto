@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from otto.agent import (
     AssistantMessage,
     CODEX_STDIO_LIMIT_BYTES,
     ClaudeAgentOptions,
+    ProviderEventMessage,
     ResultMessage,
     TextBlock,
     ToolResultBlock,
@@ -205,22 +207,32 @@ async def test_codex_app_server_query_normalizes_thread_turn_events(tmp_path, mo
     ):
         messages.append(message)
 
-    assert [type(m) for m in messages] == [
+    provider_events = [m for m in messages if isinstance(m, ProviderEventMessage)]
+    flow_messages = [m for m in messages if not isinstance(m, ProviderEventMessage)]
+    assert [type(m) for m in flow_messages] == [
         AssistantMessage,
         AssistantMessage,
         AssistantMessage,
         ResultMessage,
     ]
-    assert isinstance(messages[0].content[0], ToolUseBlock)
-    assert messages[0].content[0].name == "Bash"
-    assert messages[0].content[0].input["command"] == "pytest -q"
-    assert isinstance(messages[1].content[0], ToolResultBlock)
-    assert messages[1].content[0].content == "1 passed\n"
-    assert isinstance(messages[2].content[0], TextBlock)
-    assert messages[2].content[0].text == "Done."
-    assert isinstance(messages[3], ResultMessage)
-    assert messages[3].session_id == "thread-app"
-    assert messages[3].usage == {
+    assert [event.event for event in provider_events] == [
+        "turn_acknowledged",
+        "diff_updated",
+        "token_usage_updated",
+        "thread_status_changed",
+    ]
+    assert provider_events[1].data["changed_files"] == ["app.py"]
+    assert provider_events[2].usage["total_tokens"] == 15
+    assert isinstance(flow_messages[0].content[0], ToolUseBlock)
+    assert flow_messages[0].content[0].name == "Bash"
+    assert flow_messages[0].content[0].input["command"] == "pytest -q"
+    assert isinstance(flow_messages[1].content[0], ToolResultBlock)
+    assert flow_messages[1].content[0].content == "1 passed\n"
+    assert isinstance(flow_messages[2].content[0], TextBlock)
+    assert flow_messages[2].content[0].text == "Done."
+    assert isinstance(flow_messages[3], ResultMessage)
+    assert flow_messages[3].session_id == "thread-app"
+    assert flow_messages[3].usage == {
         "input_tokens": 10,
         "cached_input_tokens": 2,
         "output_tokens": 4,
@@ -249,6 +261,59 @@ async def test_codex_app_server_query_normalizes_thread_turn_events(tmp_path, mo
     assert written[3]["params"]["effort"] == "low"
     assert written[3]["params"]["input"][0]["text"] == "Run tests"
     assert seen["kwargs"]["env"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_with_timeout_persists_codex_app_server_events_and_diff(tmp_path, monkeypatch):
+    process = _LongLivedFakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"turn/diff/updated","params":{"threadId":"thread-app","turnId":"turn-1","diff":"diff --git a/app.py b/app.py\\n+print(1)\\n"}}\n',
+        '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-app","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":10,"outputTokens":4,"totalTokens":14},"total":{"inputTokens":10,"outputTokens":4,"totalTokens":14}}}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Done."}}}\n',
+        '{"method":"thread/status/changed","params":{"threadId":"thread-app","status":{"type":"idle"}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    log_dir = tmp_path / "logs"
+    text, _cost, session_id, breakdown = await run_agent_with_timeout(
+        "Run tests",
+        AgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            permission_mode="bypassPermissions",
+        ),
+        log_dir=log_dir,
+        phase_name="SPEC_COMPILE",
+        phase_label="compile",
+        timeout=30,
+        project_dir=tmp_path,
+    )
+
+    assert text == "Done."
+    assert session_id == "thread-app"
+    diff_path = Path(breakdown["provider_diff_path"])
+    assert diff_path.exists()
+    assert diff_path.read_text(encoding="utf-8").startswith("diff --git a/app.py")
+    assert breakdown["provider_diff_summary"]["changed_files"] == ["app.py"]
+    records = [
+        json.loads(line)
+        for line in (log_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    provider_events = [record for record in records if record.get("type") == "provider_event"]
+    assert [record["event"] for record in provider_events] == [
+        "turn_acknowledged",
+        "diff_updated",
+        "token_usage_updated",
+        "thread_status_changed",
+    ]
+    assert provider_events[1]["data"]["changed_files"] == ["app.py"]
+    assert provider_events[2]["usage"]["total_tokens"] == 14
 
 
 @pytest.mark.asyncio
@@ -293,6 +358,47 @@ async def test_codex_app_server_passes_output_schema_and_structured_result(tmp_p
         for line in process.stdin.buffer.decode("utf-8").splitlines()
     ]
     assert written[3]["params"]["outputSchema"]["required"] == ["verdict"]
+    assert written[3]["params"]["outputSchema"]["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_reports_structured_schema_errors(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"{\\"stories\\": 1}"}}}\n',
+        '{"method":"turn/completed","params":{"threadId":"thread-app","turn":{"id":"turn-1","status":"completed","items":[],"error":null,"startedAt":1,"completedAt":2,"durationMs":1000}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="Return a verdict",
+        options=ClaudeAgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            output_format={
+                "json_schema": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {"verdict": {"type": "string"}},
+                        "required": ["verdict"],
+                    }
+                }
+            },
+        ),
+    ):
+        messages.append(message)
+
+    result = messages[-1]
+    assert isinstance(result, ResultMessage)
+    assert result.structured_output == {"stories": 1}
+    assert "missing required field" in result.structured_output_error
 
 
 @pytest.mark.asyncio

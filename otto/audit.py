@@ -2279,20 +2279,7 @@ def _compose_verdict(
     return verdict, narrative
 
 
-def _parse_audit_output(text: str) -> AuditAgentOutput:
-    """Parse the audit agent's JSON-fenced response."""
-    import json as _json
-    import re as _re
-
-    match = _re.search(r"```json\s*(\{.*?\})\s*```", text, flags=_re.DOTALL)
-    raw = match.group(1) if match else text.strip()
-    try:
-        data = _json.loads(raw)
-    except _json.JSONDecodeError:
-        return AuditAgentOutput(
-            verdict=AuditVerdict.BLOCKED,
-            narrative=f"audit agent returned non-JSON output: {text[:200]}",
-        )
+def _audit_output_from_dict(data: dict[str, Any]) -> AuditAgentOutput:
     verdict_str = str(data.get("verdict") or "blocked").lower()
     verdict = (
         AuditVerdict.PASSED if verdict_str == "passed"
@@ -2365,6 +2352,96 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
         quality_score=quality_score,
         quality_findings=quality_findings,
     )
+
+
+def _parse_audit_output(text: str) -> AuditAgentOutput:
+    """Parse the audit agent's JSON-fenced response."""
+    import json as _json
+    import re as _re
+
+    match = _re.search(r"```json\s*(\{.*?\})\s*```", text, flags=_re.DOTALL)
+    raw = match.group(1) if match else text.strip()
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.BLOCKED,
+            narrative=f"audit agent returned non-JSON output: {text[:200]}",
+        )
+    if not isinstance(data, dict):
+        return AuditAgentOutput(
+            verdict=AuditVerdict.BLOCKED,
+            narrative="audit agent returned JSON that was not an object",
+        )
+    return _audit_output_from_dict(data)
+
+
+def _audit_output_format() -> dict[str, Any]:
+    schema = {
+        "type": "object",
+        "required": [
+            "verdict",
+            "narrative",
+            "group_verdicts",
+            "feature_audits",
+            "quality_score",
+            "quality_findings",
+        ],
+        "properties": {
+            "verdict": {"type": "string", "enum": ["passed", "partial", "blocked"]},
+            "narrative": {"type": "string"},
+            "group_verdicts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["group_id", "passed", "detail"],
+                    "properties": {
+                        "group_id": {"type": "string"},
+                        "passed": {"type": "boolean"},
+                        "detail": {"type": "string"},
+                    },
+                },
+            },
+            "feature_audits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["feature_id", "name", "status", "detail", "evidence_refs"],
+                    "properties": {
+                        "feature_id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "status": {"type": "string", "enum": ["passed", "partial", "blocked"]},
+                        "detail": {"type": "string"},
+                        "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+            "quality_score": {"type": "integer"},
+            "quality_findings": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    return {
+        "type": "json_schema",
+        "name": "otto_audit_result",
+        "strict": False,
+        "json_schema": {"name": "otto_audit_result", "schema": schema},
+    }
+
+
+def _assign_output_format(options: Any, output_format: dict[str, Any]) -> None:
+    try:
+        setattr(options, "output_format", output_format)
+    except Exception:
+        logger.debug("agent options object does not support output_format assignment")
+
+
+def _structured_audit_output_from_breakdown(
+    breakdown: dict[str, Any],
+) -> AuditAgentOutput | None:
+    structured = breakdown.get("structured_output") if isinstance(breakdown, dict) else None
+    if not isinstance(structured, dict):
+        return None
+    return _audit_output_from_dict(structured)
 
 
 def _recover_audit_output_from_artifacts(
@@ -2589,6 +2666,7 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
     options = make_agent_options(
         agent_input.project_dir, config, agent_type="certifier"
     )
+    _assign_output_format(options, _audit_output_format())
     options.cwd = str(agent_input.integrated_worktree)
     options.env = _audit_search_env(getattr(options, "env", None), log_dir)
     options.permission_mode = "bypassPermissions"  # audit reads, doesn't edit
@@ -2613,7 +2691,14 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
             timeout=agent_input.judge_timeout_s,
             project_dir=agent_input.project_dir,
         )
-        parsed = _parse_audit_output(text)
+        parsed = _structured_audit_output_from_breakdown(_breakdown)
+        if parsed is None:
+            if _breakdown.get("structured_output_error"):
+                logger.warning(
+                    "audit agent structured output unusable; falling back to text: %s",
+                    _breakdown["structured_output_error"],
+                )
+            parsed = _parse_audit_output(text)
         parsed.cost_usd = cost or 0.0
         parsed.wall_s = time.monotonic() - t0
         return parsed
