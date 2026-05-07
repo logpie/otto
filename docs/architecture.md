@@ -180,6 +180,11 @@ Provider choices today:
 - `codex`: stable Codex CLI subprocess integration. Otto runs `codex exec
   --json`, normalizes JSONL into Otto's message/log format, and preserves Codex
   local configuration unless Otto overrides model or reasoning effort.
+- `codex-app-server`: experimental Codex App Server integration. Otto starts
+  `codex app-server` over stdio, uses its structured thread/turn protocol,
+  preserves local ChatGPT/Codex subscription auth, captures app-server token
+  usage/diff events, routes approval requests through Otto's provider safety
+  checks, and passes structured output schemas to `turn/start`.
 - `claude`: Claude SDK integration where configured.
 - `openai-agents`: experimental OpenAI Agents SDK integration. Otto keeps the
   same durable outer orchestrator, but runs the inner worker through the SDK's

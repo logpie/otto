@@ -1,6 +1,7 @@
 """Tests for provider-aware agent execution."""
 
 import asyncio
+import json
 
 import os
 from types import SimpleNamespace
@@ -64,6 +65,21 @@ class _FakeProcess:
 
     def kill(self) -> None:
         pass
+
+
+class _LongLivedFakeProcess(_FakeProcess):
+    def __init__(self, lines: list[str], return_code: int = 0):
+        super().__init__(lines, return_code)
+        self.terminated = False
+
+    async def wait(self) -> int:
+        if not self.terminated:
+            raise AssertionError("long-lived app-server must be terminated after a completed turn")
+        self.returncode = self._return_code
+        return self._return_code
+
+    def terminate(self) -> None:
+        self.terminated = True
 
 
 class _SlowWaitProcess:
@@ -149,6 +165,161 @@ async def test_codex_query_normalizes_json_events(tmp_path, monkeypatch):
     assert str(tmp_path) in args
     assert seen["kwargs"]["limit"] == CODEX_STDIO_LIMIT_BYTES
     assert CODEX_STDIO_LIMIT_BYTES >= 16 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_query_normalizes_thread_turn_events(tmp_path, monkeypatch):
+    seen: dict[str, object] = {}
+    process = _LongLivedFakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"item/started","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"pytest -q","cwd":"/tmp/project","status":"inProgress","aggregatedOutput":null,"exitCode":null,"durationMs":null,"commandActions":[],"source":"exec","processId":null}}}\n',
+        '{"method":"item/commandExecution/outputDelta","params":{"threadId":"thread-app","turnId":"turn-1","itemId":"cmd-1","delta":"1 passed\\n"}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"pytest -q","cwd":"/tmp/project","status":"completed","aggregatedOutput":null,"exitCode":0,"durationMs":12,"commandActions":[],"source":"exec","processId":null}}}\n',
+        '{"method":"turn/diff/updated","params":{"threadId":"thread-app","turnId":"turn-1","diff":"diff --git a/app.py b/app.py"}}\n',
+        '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-app","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":10,"cachedInputTokens":2,"outputTokens":4,"reasoningOutputTokens":1,"totalTokens":15},"total":{"inputTokens":10,"cachedInputTokens":2,"outputTokens":4,"reasoningOutputTokens":1,"totalTokens":15},"modelContextWindow":128000}}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Done."}}}\n',
+        '{"method":"thread/status/changed","params":{"threadId":"thread-app","status":{"type":"idle"}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    state: dict[str, object] = {}
+    messages = []
+    async for message in query(
+        prompt="Run tests",
+        options=ClaudeAgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            permission_mode="bypassPermissions",
+            effort="low",
+        ),
+        state=state,
+    ):
+        messages.append(message)
+
+    assert [type(m) for m in messages] == [
+        AssistantMessage,
+        AssistantMessage,
+        AssistantMessage,
+        ResultMessage,
+    ]
+    assert isinstance(messages[0].content[0], ToolUseBlock)
+    assert messages[0].content[0].name == "Bash"
+    assert messages[0].content[0].input["command"] == "pytest -q"
+    assert isinstance(messages[1].content[0], ToolResultBlock)
+    assert messages[1].content[0].content == "1 passed\n"
+    assert isinstance(messages[2].content[0], TextBlock)
+    assert messages[2].content[0].text == "Done."
+    assert isinstance(messages[3], ResultMessage)
+    assert messages[3].session_id == "thread-app"
+    assert messages[3].usage == {
+        "input_tokens": 10,
+        "cached_input_tokens": 2,
+        "output_tokens": 4,
+        "reasoning_tokens": 1,
+        "total_tokens": 15,
+    }
+    assert state["session_id"] == "thread-app"
+    assert state["codex_app_server_thread_id"] == "thread-app"
+    assert state["codex_app_server_diff"] == "diff --git a/app.py b/app.py"
+
+    args = seen["args"]
+    assert args[:4] == ("codex", "app-server", "--listen", "stdio://")
+    assert seen["kwargs"]["limit"] == CODEX_STDIO_LIMIT_BYTES
+    written = [
+        json.loads(line)
+        for line in process.stdin.buffer.decode("utf-8").splitlines()
+    ]
+    assert [line["method"] for line in written[:4]] == [
+        "initialize",
+        "initialized",
+        "thread/start",
+        "turn/start",
+    ]
+    assert written[2]["params"]["approvalPolicy"] == "never"
+    assert written[2]["params"]["sandbox"] == "danger-full-access"
+    assert written[3]["params"]["effort"] == "low"
+    assert written[3]["params"]["input"][0]["text"] == "Run tests"
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_passes_output_schema_and_structured_result(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"{\\"verdict\\": \\"PASS\\", \\"stories\\": 1}"}}}\n',
+        '{"method":"turn/completed","params":{"threadId":"thread-app","turn":{"id":"turn-1","status":"completed","items":[],"error":null,"startedAt":1,"completedAt":2,"durationMs":1000}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="Return a verdict",
+        options=ClaudeAgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            output_format={
+                "json_schema": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {"verdict": {"type": "string"}},
+                        "required": ["verdict"],
+                    }
+                }
+            },
+        ),
+    ):
+        messages.append(message)
+
+    result = messages[-1]
+    assert isinstance(result, ResultMessage)
+    assert result.structured_output == {"verdict": "PASS", "stories": 1}
+    written = [
+        json.loads(line)
+        for line in process.stdin.buffer.decode("utf-8").splitlines()
+    ]
+    assert written[3]["params"]["outputSchema"]["required"] == ["verdict"]
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_declines_unsafe_command_approval(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"method":"item/commandExecution/requestApproval","id":99,"params":{"threadId":"thread-app","turnId":"turn-1","itemId":"cmd-1","command":"killall node"}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"turn/completed","params":{"threadId":"thread-app","turn":{"id":"turn-1","status":"completed","items":[],"error":null,"startedAt":1,"completedAt":2,"durationMs":1000}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    async for _message in query(
+        prompt="Try command",
+        options=ClaudeAgentOptions(provider="codex-app-server", cwd=str(tmp_path)),
+    ):
+        pass
+
+    written = [
+        json.loads(line)
+        for line in process.stdin.buffer.decode("utf-8").splitlines()
+    ]
+    approval_response = next(line for line in written if line.get("id") == 99)
+    assert approval_response["result"] == {"decision": "decline"}
 
 
 @pytest.mark.asyncio
@@ -841,6 +1012,7 @@ async def test_openai_agents_shell_tool_blocks_process_kill_commands(monkeypatch
     [
         ("claude", "_query_claude"),
         ("codex", "_query_codex"),
+        ("codex-app-server", "_query_codex_app_server"),
         ("openai-agents", "_query_openai_agents"),
     ],
 )

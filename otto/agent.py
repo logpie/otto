@@ -1777,6 +1777,605 @@ def _codex_collab_result_text(item: dict[str, Any], child_id: str | None = None)
     return "\n\n".join(messages)
 
 
+def _codex_app_server_command(_options: AgentOptions) -> list[str]:
+    return ["codex", "app-server", "--listen", "stdio://"]
+
+
+def _codex_app_server_approval_policy(options: AgentOptions) -> str:
+    if options.permission_mode == "bypassPermissions":
+        return "never"
+    return "on-failure"
+
+
+def _codex_app_server_sandbox_mode(options: AgentOptions) -> str:
+    if options.permission_mode == "bypassPermissions":
+        return "danger-full-access"
+    return "workspace-write"
+
+
+def _codex_app_server_sandbox_policy(options: AgentOptions) -> dict[str, Any]:
+    if options.permission_mode == "bypassPermissions":
+        return {"type": "dangerFullAccess"}
+    return {
+        "type": "workspaceWrite",
+        "writableRoots": [str(Path(options.cwd or os.getcwd()).resolve())],
+        "networkAccess": True,
+        "excludeTmpdirEnvVar": False,
+        "excludeSlashTmp": False,
+    }
+
+
+def _codex_app_server_thread_params(options: AgentOptions) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "cwd": str(Path(options.cwd or os.getcwd()).resolve()),
+        "approvalPolicy": _codex_app_server_approval_policy(options),
+        "sandbox": _codex_app_server_sandbox_mode(options),
+        "serviceName": "otto",
+    }
+    if options.model:
+        params["model"] = options.model
+    if isinstance(options.system_prompt, str) and options.system_prompt.strip():
+        params["baseInstructions"] = options.system_prompt.strip()
+    return params
+
+
+def _codex_app_server_turn_params(
+    *,
+    thread_id: str,
+    prompt: str,
+    options: AgentOptions,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": prompt, "text_elements": []}],
+        "cwd": str(Path(options.cwd or os.getcwd()).resolve()),
+        "approvalPolicy": _codex_app_server_approval_policy(options),
+        "sandboxPolicy": _codex_app_server_sandbox_policy(options),
+    }
+    if options.model:
+        params["model"] = options.model
+    effort = _codex_reasoning_effort(options.effort)
+    if effort:
+        params["effort"] = effort
+    output_schema = _codex_app_server_output_schema(options.output_format)
+    if output_schema is not None:
+        params["outputSchema"] = output_schema
+    return params
+
+
+def _codex_app_server_output_schema(output_format: Any) -> dict[str, Any] | None:
+    if not isinstance(output_format, dict):
+        return None
+    schema = output_format.get("schema")
+    if not isinstance(schema, dict):
+        json_schema = output_format.get("json_schema")
+        if isinstance(json_schema, dict):
+            schema = json_schema.get("schema")
+    if not isinstance(schema, dict) and isinstance(output_format.get("type"), str):
+        schema = output_format
+    if not isinstance(schema, dict):
+        return None
+    return dict(schema)
+
+
+def _codex_app_server_usage_dict(token_usage: Any) -> dict[str, Any] | None:
+    if not isinstance(token_usage, dict):
+        return None
+    breakdown = token_usage.get("last")
+    if not isinstance(breakdown, dict):
+        breakdown = token_usage.get("total")
+    if not isinstance(breakdown, dict):
+        breakdown = token_usage
+    usage = {
+        "input_tokens": int(breakdown.get("inputTokens") or breakdown.get("input_tokens") or 0),
+        "cached_input_tokens": int(
+            breakdown.get("cachedInputTokens") or breakdown.get("cached_input_tokens") or 0
+        ),
+        "output_tokens": int(breakdown.get("outputTokens") or breakdown.get("output_tokens") or 0),
+        "reasoning_tokens": int(
+            breakdown.get("reasoningOutputTokens")
+            or breakdown.get("reasoning_tokens")
+            or 0
+        ),
+        "total_tokens": int(breakdown.get("totalTokens") or breakdown.get("total_tokens") or 0),
+    }
+    if not usage["total_tokens"]:
+        usage["total_tokens"] = (
+            usage["input_tokens"]
+            + usage["output_tokens"]
+            + usage["reasoning_tokens"]
+        )
+    return {key: value for key, value in usage.items() if value}
+
+
+def _codex_app_server_structured_output(text: str, options: AgentOptions) -> Any:
+    if _codex_app_server_output_schema(options.output_format) is None:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _codex_app_server_collab_result_text(item: dict[str, Any], child_id: str | None = None) -> str:
+    states = item.get("agentsStates")
+    if not isinstance(states, dict):
+        states = item.get("agents_states")
+    if not isinstance(states, dict):
+        return ""
+    if child_id:
+        child_state = states.get(child_id)
+        if isinstance(child_state, dict):
+            return str(child_state.get("message", "") or "")
+        return ""
+    messages: list[str] = []
+    for child_state in states.values():
+        if isinstance(child_state, dict):
+            message = str(child_state.get("message", "") or "")
+            if message:
+                messages.append(message)
+    return "\n\n".join(messages)
+
+
+def _codex_app_server_normalize_item(
+    item: dict[str, Any],
+    *,
+    method: str,
+    thread_id: str,
+    command_outputs: dict[str, str],
+    agent_message_buffers: dict[str, str],
+    emitted_agent_items: set[str],
+    emitted_collab_tool_ids: set[str],
+    child_tool_use_by_thread_id: dict[str, str],
+    state: dict[str, Any] | None,
+) -> AssistantMessage | None:
+    item_type = str(item.get("type") or "")
+    item_id = str(item.get("id") or "") or None
+
+    if item_type == "agentMessage":
+        text = str(item.get("text") or "")
+        if not text and item_id:
+            text = agent_message_buffers.get(item_id, "")
+        if text:
+            if item_id:
+                emitted_agent_items.add(item_id)
+            return AssistantMessage(content=[TextBlock(text=text)], session_id=thread_id)
+        return None
+
+    if item_type == "plan":
+        text = str(item.get("text") or "")
+        if text:
+            return AssistantMessage(content=[TextBlock(text=f"[plan] {text}")], session_id=thread_id)
+        return None
+
+    if item_type == "reasoning":
+        parts = [
+            str(part)
+            for part in [*(item.get("summary") or []), *(item.get("content") or [])]
+            if part
+        ]
+        if parts:
+            return AssistantMessage(
+                content=[ThinkingBlock(thinking="\n".join(parts))],
+                session_id=thread_id,
+            )
+        return None
+
+    if item_type == "commandExecution":
+        command = str(item.get("command") or "")
+        if method == "item/started":
+            return AssistantMessage(
+                content=[ToolUseBlock(name="Bash", input={"command": command}, id=item_id)],
+                session_id=thread_id,
+            )
+        output = item.get("aggregatedOutput")
+        if output is None and item_id:
+            output = command_outputs.get(item_id, "")
+        return AssistantMessage(
+            content=[ToolResultBlock(content=str(output or ""), tool_use_id=item_id)],
+            session_id=thread_id,
+        )
+
+    if item_type == "fileChange":
+        changes = item.get("changes") or []
+        if method == "item/started":
+            return AssistantMessage(
+                content=[ToolUseBlock(name="Edit", input={"changes": changes}, id=item_id)],
+                session_id=thread_id,
+            )
+        return AssistantMessage(
+            content=[
+                ToolResultBlock(
+                    content=json.dumps(
+                        {
+                            "status": item.get("status"),
+                            "changes": changes,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_use_id=item_id,
+                )
+            ],
+            session_id=thread_id,
+        )
+
+    if item_type == "collabAgentToolCall":
+        tool = str(item.get("tool") or "")
+        receiver_thread_ids = [
+            str(child_id)
+            for child_id in (item.get("receiverThreadIds") or item.get("receiver_thread_ids") or [])
+            if child_id
+        ]
+        if state is not None and receiver_thread_ids:
+            existing_children = set(state.get("codex_child_session_ids", []) or [])
+            existing_children.update(receiver_thread_ids)
+            state["codex_child_session_ids"] = sorted(existing_children)
+        if tool == "spawnAgent" and method in {"item/started", "item/completed"}:
+            if item_id and method == "item/completed":
+                for child_id in receiver_thread_ids:
+                    child_tool_use_by_thread_id[child_id] = item_id
+            if item_id and item_id in emitted_collab_tool_ids:
+                return None
+            if item_id:
+                emitted_collab_tool_ids.add(item_id)
+            return AssistantMessage(
+                content=[
+                    ToolUseBlock(
+                        name="Agent",
+                        input={
+                            "subagent_type": "codex-app-server",
+                            "prompt": str(item.get("prompt") or ""),
+                        },
+                        id=item_id,
+                    )
+                ],
+                session_id=thread_id,
+            )
+        if tool == "wait" and method == "item/completed":
+            parts: list[ToolResultBlock] = []
+            for child_id in receiver_thread_ids:
+                content = _codex_app_server_collab_result_text(item, child_id)
+                if content:
+                    parts.append(
+                        ToolResultBlock(
+                            content=content,
+                            tool_use_id=child_tool_use_by_thread_id.get(child_id) or item_id,
+                        )
+                    )
+            if parts:
+                return AssistantMessage(content=parts, session_id=thread_id)
+    return None
+
+
+def _codex_app_server_approval_result(
+    method: str,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    if method == "item/commandExecution/requestApproval":
+        reason = _unsafe_bash_command_reason(str(params.get("command") or ""))
+        return {"decision": "decline" if reason else "accept"}
+    if method == "execCommandApproval":
+        command = str(params.get("command") or params.get("cmd") or "")
+        reason = _unsafe_bash_command_reason(command)
+        return {"decision": "denied" if reason else "approved"}
+    if method == "item/fileChange/requestApproval":
+        return {"decision": "accept"}
+    if method == "applyPatchApproval":
+        return {"decision": "approved"}
+    if method == "item/permissions/requestApproval":
+        permissions = params.get("permissions")
+        return {
+            "permissions": permissions if isinstance(permissions, dict) else {},
+            "scope": "turn",
+            "strictAutoReview": False,
+        }
+    return None
+
+
+async def _query_codex_app_server(
+    *,
+    prompt: str,
+    options: AgentOptions | None = None,
+    state: dict[str, Any] | None = None,
+):
+    opts = options or AgentOptions()
+    env = dict(opts.env or {})
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *_codex_app_server_command(opts),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=opts.cwd or None,
+            env=env,
+            limit=CODEX_STDIO_LIMIT_BYTES,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "codex CLI not found in PATH; install it from https://developers.openai.com/codex/cli"
+        ) from exc
+
+    if state is not None:
+        pid = getattr(process, "pid", None)
+        if isinstance(pid, int):
+            _remember_agent_process(state, pid)
+
+    stdout = process.stdout
+    stdin = process.stdin
+    assert stdout is not None
+    assert stdin is not None
+
+    request_id = 0
+    raw_lines: list[str] = []
+    last_text = ""
+    last_usage: dict[str, Any] | None = None
+    last_diff = ""
+    command_outputs: dict[str, str] = {}
+    agent_message_buffers: dict[str, str] = {}
+    emitted_agent_items: set[str] = set()
+    emitted_collab_tool_ids: set[str] = set()
+    child_tool_use_by_thread_id: dict[str, str] = {}
+
+    async def send(payload: dict[str, Any]) -> None:
+        stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        await stdin.drain()
+
+    async def send_request(method: str, params: Any) -> int:
+        nonlocal request_id
+        current = request_id
+        request_id += 1
+        await send({"method": method, "id": current, "params": params})
+        return current
+
+    async def send_result(current_id: Any, result: Any) -> None:
+        await send({"id": current_id, "result": result})
+
+    async def send_error(current_id: Any, message: str) -> None:
+        await send({"id": current_id, "error": {"code": -32603, "message": message}})
+
+    async def read_event() -> dict[str, Any] | None:
+        while True:
+            raw_line = await stdout.readline()
+            if not raw_line:
+                return None
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            raw_lines.append(line)
+            if state is not None:
+                state["provider_stderr"] = "\n".join(raw_lines[-50:])
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+    async def handle_server_request(event: dict[str, Any]) -> bool:
+        if "id" not in event or not isinstance(event.get("method"), str):
+            return False
+        method = str(event.get("method") or "")
+        params = event.get("params")
+        result = _codex_app_server_approval_result(
+            method,
+            params if isinstance(params, dict) else {},
+        )
+        if result is None:
+            await send_error(event.get("id"), f"Otto codex-app-server provider does not support {method}")
+        else:
+            await send_result(event.get("id"), result)
+        return True
+
+    async def read_response(expected_id: int) -> dict[str, Any] | None:
+        while True:
+            event = await read_event()
+            if event is None:
+                return None
+            if await handle_server_request(event):
+                continue
+            if event.get("id") == expected_id:
+                return event
+
+    try:
+        init_id = await send_request(
+            "initialize",
+            {"clientInfo": {"name": "otto", "title": "Otto", "version": "0.0.0"}},
+        )
+        init_response = await read_response(init_id)
+        if init_response is None or init_response.get("error"):
+            error = init_response.get("error") if isinstance(init_response, dict) else None
+            message = (error or {}).get("message") if isinstance(error, dict) else None
+            yield ResultMessage(subtype="error", is_error=True, result=message or "codex app-server initialize failed")
+            return
+        await send({"method": "initialized", "params": {}})
+
+        if opts.resume:
+            thread_params = {
+                **_codex_app_server_thread_params(opts),
+                "threadId": opts.resume,
+            }
+            thread_request_id = await send_request("thread/resume", thread_params)
+        else:
+            thread_request_id = await send_request(
+                "thread/start",
+                _codex_app_server_thread_params(opts),
+            )
+        thread_response = await read_response(thread_request_id)
+        if thread_response is None or thread_response.get("error"):
+            error = thread_response.get("error") if isinstance(thread_response, dict) else None
+            message = (error or {}).get("message") if isinstance(error, dict) else None
+            yield ResultMessage(subtype="error", is_error=True, result=message or "codex app-server thread start failed")
+            return
+        result = thread_response.get("result") if isinstance(thread_response, dict) else {}
+        thread = (result or {}).get("thread") if isinstance(result, dict) else {}
+        thread_id = str((thread or {}).get("id") or opts.resume or "")
+        if not thread_id:
+            yield ResultMessage(subtype="error", is_error=True, result="codex app-server did not return a thread id")
+            return
+        if state is not None:
+            state["session_id"] = thread_id
+            state["codex_app_server_thread_id"] = thread_id
+
+        final_prompt = _codex_prompt(prompt, opts)
+        turn_id = await send_request(
+            "turn/start",
+            _codex_app_server_turn_params(
+                thread_id=thread_id,
+                prompt=final_prompt,
+                options=opts,
+            ),
+        )
+        saw_result = False
+        turn_seen = False
+        while True:
+            event = await read_event()
+            if event is None:
+                break
+            if await handle_server_request(event):
+                continue
+            if event.get("id") == turn_id and event.get("error"):
+                error = event.get("error")
+                message = (error or {}).get("message") if isinstance(error, dict) else None
+                yield ResultMessage(
+                    subtype="error",
+                    is_error=True,
+                    session_id=thread_id,
+                    result=message or "codex app-server turn start failed",
+                    usage=last_usage,
+                )
+                saw_result = True
+                break
+
+            method = str(event.get("method") or "")
+            params = event.get("params") if isinstance(event.get("params"), dict) else {}
+            event_thread_id = str(params.get("threadId") or thread_id)
+
+            if event.get("id") == turn_id and not event.get("error"):
+                turn_seen = True
+                continue
+
+            if method == "turn/started":
+                turn_seen = True
+                continue
+
+            if method == "thread/tokenUsage/updated":
+                usage = _codex_app_server_usage_dict(params.get("tokenUsage"))
+                if usage:
+                    last_usage = usage
+                continue
+
+            if method == "turn/diff/updated":
+                last_diff = str(params.get("diff") or "")
+                if state is not None and last_diff:
+                    state["codex_app_server_diff"] = last_diff
+                continue
+
+            if method == "item/agentMessage/delta":
+                item_id = str(params.get("itemId") or "")
+                if item_id:
+                    agent_message_buffers[item_id] = (
+                        agent_message_buffers.get(item_id, "")
+                        + str(params.get("delta") or "")
+                    )
+                continue
+
+            if method in {"item/commandExecution/outputDelta", "command/exec/outputDelta"}:
+                item_id = str(params.get("itemId") or "")
+                if item_id:
+                    command_outputs[item_id] = (
+                        command_outputs.get(item_id, "")
+                        + str(params.get("delta") or "")
+                    )
+                continue
+
+            if method in {"item/started", "item/completed"}:
+                item = params.get("item")
+                if isinstance(item, dict):
+                    message = _codex_app_server_normalize_item(
+                        item,
+                        method=method,
+                        thread_id=event_thread_id,
+                        command_outputs=command_outputs,
+                        agent_message_buffers=agent_message_buffers,
+                        emitted_agent_items=emitted_agent_items,
+                        emitted_collab_tool_ids=emitted_collab_tool_ids,
+                        child_tool_use_by_thread_id=child_tool_use_by_thread_id,
+                        state=state,
+                    )
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock) and block.text:
+                                last_text = block.text
+                        yield message
+                continue
+
+            if method == "thread/status/changed":
+                status = params.get("status")
+                status_type = str((status or {}).get("type") or "") if isinstance(status, dict) else ""
+                if status_type == "idle" and turn_seen and (last_text or last_usage):
+                    structured_output = _codex_app_server_structured_output(last_text, opts)
+                    yield ResultMessage(
+                        subtype="success",
+                        is_error=False,
+                        session_id=event_thread_id,
+                        result=last_text or None,
+                        total_cost_usd=0.0,
+                        usage=last_usage,
+                        structured_output=structured_output,
+                    )
+                    saw_result = True
+                    break
+                continue
+
+            if method == "turn/completed":
+                for item_id, text in agent_message_buffers.items():
+                    if item_id not in emitted_agent_items and text:
+                        last_text = text
+                        yield AssistantMessage(
+                            content=[TextBlock(text=text)],
+                            session_id=event_thread_id,
+                        )
+                turn = params.get("turn")
+                status = str((turn or {}).get("status") or "") if isinstance(turn, dict) else ""
+                error = (turn or {}).get("error") if isinstance(turn, dict) else None
+                is_error = status == "failed"
+                structured_output = _codex_app_server_structured_output(last_text, opts)
+                yield ResultMessage(
+                    subtype="error" if is_error else "success",
+                    is_error=is_error,
+                    session_id=event_thread_id,
+                    result=(
+                        str((error or {}).get("message") or "codex app-server turn failed")
+                        if is_error and isinstance(error, dict)
+                        else last_text or None
+                    ),
+                    total_cost_usd=0.0,
+                    usage=last_usage,
+                    structured_output=structured_output,
+                )
+                saw_result = True
+                break
+
+        if saw_result:
+            return
+
+        return_code = await process.wait()
+        if not saw_result or return_code != 0:
+            error_text = "\n".join(raw_lines[-20:]) or f"codex app-server exited with code {return_code}"
+            if state is not None:
+                state["provider_stderr"] = error_text
+            yield ResultMessage(
+                subtype="error",
+                is_error=True,
+                session_id=state.get("session_id", "") if state else "",
+                result=error_text,
+                total_cost_usd=0.0,
+                usage=last_usage,
+            )
+    finally:
+        await _terminate_provider_process(process)
+
+
 async def _query_codex(
     *,
     prompt: str,
@@ -2006,6 +2605,10 @@ async def query(
     provider = _provider_name(options)
     if provider == "codex":
         async for message in _query_codex(prompt=prompt, options=options, state=state):
+            yield message
+        return
+    if provider == "codex-app-server":
+        async for message in _query_codex_app_server(prompt=prompt, options=options, state=state):
             yield message
         return
     if provider == "openai-agents":

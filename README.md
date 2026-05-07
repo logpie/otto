@@ -37,9 +37,11 @@ otto improve bugs "look for auth and data isolation bugs" --provider codex
 otto certify "users can save, restore, rename, and delete saved searches" --provider codex
 ```
 
-Provider choices are `codex`, `claude`, and experimental `openai-agents`. The
-`codex` provider uses the Codex CLI; `openai-agents` uses the OpenAI Agents SDK
-local sandbox backend.
+Provider choices are `codex`, `codex-app-server`, `claude`, and experimental
+`openai-agents`. The `codex` provider uses `codex exec --json`;
+`codex-app-server` uses Codex App Server's thread/turn protocol with the same
+local Codex subscription auth; `openai-agents` uses the OpenAI Agents SDK local
+sandbox backend and requires API-scoped OpenAI credentials.
 
 Run the web Mission Control portal:
 

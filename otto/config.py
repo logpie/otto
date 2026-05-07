@@ -101,14 +101,20 @@ DEFAULTS: dict[str, Any] = {
 DEFAULT_CONFIG: dict[str, Any] = DEFAULTS
 
 OPENAI_AGENTS_PROVIDER = "openai-agents"
+CODEX_APP_SERVER_PROVIDER = "codex-app-server"
 PROVIDER_ALIASES = {
     "agents": OPENAI_AGENTS_PROVIDER,
     "agents-sdk": OPENAI_AGENTS_PROVIDER,
     "openai_agents": OPENAI_AGENTS_PROVIDER,
     "openai-agents-sdk": OPENAI_AGENTS_PROVIDER,
     "openai_agents_sdk": OPENAI_AGENTS_PROVIDER,
+    "app-server": CODEX_APP_SERVER_PROVIDER,
+    "codex_app_server": CODEX_APP_SERVER_PROVIDER,
+    "codex-appserver": CODEX_APP_SERVER_PROVIDER,
+    "codex_sdk": CODEX_APP_SERVER_PROVIDER,
+    "codex-sdk": CODEX_APP_SERVER_PROVIDER,
 }
-SUPPORTED_PROVIDERS = {"claude", "codex", OPENAI_AGENTS_PROVIDER}
+SUPPORTED_PROVIDERS = {"claude", "codex", CODEX_APP_SERVER_PROVIDER, OPENAI_AGENTS_PROVIDER}
 PUBLIC_CERTIFIER_MODES = ("fast", "standard", "thorough")
 INTERNAL_CERTIFIER_MODES = ("hillclimb", "target")
 SUPPORTED_CERTIFIER_MODES = PUBLIC_CERTIFIER_MODES + INTERNAL_CERTIFIER_MODES
@@ -1454,7 +1460,7 @@ default_branch: {default_branch}      # detected
 test_command: {test_command}          # detected; set explicitly if wrong
 
 # ─── Global agent defaults (applied to every agent) ──────────────────
-provider: {provider}                  # claude | codex | openai-agents
+provider: {provider}                  # claude | codex | codex-app-server | openai-agents
 # model: null                         # override provider model (e.g. sonnet, haiku, gpt-5)
 # effort: null                        # low | medium | high | max (provider-specific)
 

@@ -498,6 +498,7 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
               <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
                 <option value="">{providerDefaultLabel(project)}</option>
                 <option value="codex">Codex</option>
+                <option value="codex-app-server">Codex App Server</option>
                 <option value="openai-agents">OpenAI Agents SDK</option>
                 <option value="claude">Claude</option>
               </select>
@@ -828,6 +829,7 @@ export function PhaseRoutingFields({label, testKey, provider, model, effort, onP
           <select data-testid={`job-${testKey}-provider-select`} value={provider} onChange={(event) => onProvider(event.target.value)}>
             <option value="">Inherit</option>
             <option value="codex">Codex</option>
+            <option value="codex-app-server">Codex App Server</option>
             <option value="openai-agents">OpenAI Agents SDK</option>
             <option value="claude">Claude</option>
           </select>
@@ -988,6 +990,7 @@ export function providerDefaultLabel(project: StateResponse["project"] | undefin
 }
 
 function providerDisplayName(provider: string): string {
+  if (provider === "codex-app-server") return "Codex App Server";
   if (provider === "openai-agents") return "OpenAI Agents SDK";
   return titleCase(provider);
 }
