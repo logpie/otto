@@ -490,6 +490,7 @@ def _wire_stubs(
     order: _Order,
     seed_result: SeedResult | None = None,
     build: BuildResult | None = None,
+    merge: MergeQueueResult | None = None,
 ) -> dict[str, Any]:
     """Patch the runner's phase callables to record + return canned results.
 
@@ -516,7 +517,7 @@ def _wire_stubs(
         captured["merge_calls"] += 1
         captured["merge_kwargs"] = kwargs
         order.add("merge")
-        return MergeQueueResult(landed_ids=["g"])
+        return merge or MergeQueueResult(landed_ids=["g"])
 
     async def _audit(spec, **kwargs):
         captured["audit_calls"] += 1
@@ -951,6 +952,37 @@ def test_repair_called_on_non_pass_with_fix_agent(
     fvs = captured["repair_feature_verdicts"]
     assert any(v["feature_id"] == "f1" for v in fvs)
     assert result.repair_result is not None
+
+
+def test_layer2_repair_skipped_when_merge_has_blocked_groups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Layer 2 cannot fix blocked slice branches from the integrated root."""
+    spec = _spec(with_features=True)
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured = _wire_stubs(
+        monkeypatch,
+        audit=_partial_audit_with_failing_feature(spec),
+        order=order,
+        merge=MergeQueueResult(landed_ids=[], blocked_ids=["g"]),
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None, config={},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_stub_agent,
+            spec=spec,
+        )
+    )
+
+    assert "repair" not in order.events
+    assert captured["repair_calls"] == 0
+    assert result.repair_result is None
 
 
 def test_layer2_repair_reaudits_and_updates_final_verdict(

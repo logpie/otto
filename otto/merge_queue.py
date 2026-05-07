@@ -30,6 +30,7 @@ old `otto build` / `otto certify` paths during Phase A coexistence.
 from __future__ import annotations
 
 import logging
+import math
 import subprocess
 import time
 from collections.abc import Iterable
@@ -850,6 +851,20 @@ async def _process_candidate(
             if on_slice_branch and shared_merge_and_repair_worktree:
                 git(["checkout", candidate.base_branch], candidate.worktree)
             continue
+        remaining_wall_s = budget.per_slice_wall_s - (time.monotonic() - t0)
+        if remaining_wall_s <= 0:
+            wall = time.monotonic() - t0
+            return MergeResult(
+                group_id=group_obj.id,
+                status=MergeStatus.BLOCKED,
+                cross_slice_evidence=cross_evidence,
+                group_recheck_evidence=group_evidence,
+                failure_narrative=f"merge wall budget exhausted after {wall:.0f}s",
+                repair_attempts=repair_attempts,
+                cost_usd=cost_total,
+                wall_s=wall,
+            )
+        agent_input.timeout_s = max(1, math.ceil(remaining_wall_s))
         try:
             agent_output = await build_agent(agent_input)
             cost_total += agent_output.cost_usd

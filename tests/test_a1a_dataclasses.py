@@ -1152,7 +1152,7 @@ def test_group_for_feature_returns_none_for_orphan() -> None:
     assert group_for_feature(spec, "unknown-feature") is None
 
 
-def test_features_to_repair_caps_at_default() -> None:
+def test_features_to_repair_coalesces_same_group_before_default_cap() -> None:
     from otto.audit_loop import features_to_repair
 
     spec = Spec(
@@ -1166,17 +1166,11 @@ def test_features_to_repair_caps_at_default() -> None:
         {"feature_id": f"f{i}", "verdict": "failed", "detail": "x"}
         for i in range(10)
     ]
-    # default max_repair_attempts_per_run is 6
     candidates = features_to_repair(spec, verdicts)
-    assert len(candidates) == 6
-    assert [c.feature_id for c in candidates] == [
-        "f0",
-        "f1",
-        "f2",
-        "f3",
-        "f4",
-        "f5",
-    ]
+    assert len(candidates) == 1
+    assert candidates[0].feature_id == "f0"
+    assert candidates[0].related_feature_ids == [f"f{i}" for i in range(10)]
+    assert "Multiple actionable audit failures share group `g1`" in candidates[0].detail
 
 
 def test_features_to_repair_respects_explicit_cap() -> None:
@@ -1184,9 +1178,9 @@ def test_features_to_repair_respects_explicit_cap() -> None:
 
     spec = Spec(
         intent="webapp",
-        groups=[Group(id="g1", name="G1")],
+        groups=[Group(id=f"g{i}", name=f"G{i}") for i in range(5)],
         features=[
-            Feature(id=f"f{i}", name=f"F{i}", group_id="g1") for i in range(5)
+            Feature(id=f"f{i}", name=f"F{i}", group_id=f"g{i}") for i in range(5)
         ],
     )
     verdicts = [
@@ -2250,6 +2244,34 @@ def test_render_spec_md_multiple_groups_preserves_spec_order() -> None:
     assert z_pos < a_pos  # spec.groups order preserved, not alphabetical
 
 
+def test_render_spec_md_surfaces_planned_checks() -> None:
+    from otto.spec_compile import BrowserJourney, RepoTestCheck, render_spec_md
+
+    s = Spec(
+        intent="x",
+        groups=[
+            Group(
+                id="g",
+                name="G",
+                checks=[RepoTestCheck(command=("npm", "test"), timeout_s=120)],
+            )
+        ],
+        cross_group_checks=[
+            BrowserJourney(
+                command=("python3", "tests/run_browser_journey.py"),
+                evidence_globs=("otto_artifacts/browser/*.png",),
+                timeout_s=600,
+            )
+        ],
+    )
+    md = render_spec_md(s)
+    assert "## Planned checks" in md
+    assert "<!-- planned-checks-group: g -->" in md
+    assert '"kind": "repo_test"' in md
+    assert "<!-- planned-checks: cross_group_checks -->" in md
+    assert '"kind": "browser_journey"' in md
+
+
 # ---------------------------------------------------------------------------
 # A5: parse_spec_md + round-trip property test (research §2.1)
 # ---------------------------------------------------------------------------
@@ -2436,6 +2458,46 @@ def test_round_trip_preserves_mechanical_fields_via_base() -> None:
     # Mechanical fields survive
     assert parsed.groups[0].owned_paths == ["routes/g1.py", "templates/g1.html"]
     assert parsed.groups[0].dependencies == ["foundation"]
+
+
+def test_parse_spec_md_updates_planned_checks_from_markdown() -> None:
+    from otto.spec_compile import BrowserJourney, RepoTestCheck, parse_spec_md, render_spec_md
+
+    original = Spec(
+        intent="x",
+        groups=[
+            Group(
+                id="g",
+                name="G",
+                checks=[RepoTestCheck(command=("npm", "test"), timeout_s=120)],
+            )
+        ],
+        cross_group_checks=[
+            BrowserJourney(
+                command=("python3", "tests/old_browser.py"),
+                evidence_globs=("old/*.png",),
+                timeout_s=600,
+            )
+        ],
+    )
+    md = render_spec_md(original)
+    edited = md.replace('"timeout_s": 120', '"timeout_s": 90').replace(
+        '"tests/old_browser.py"', '"tests/new_browser.py"'
+    )
+
+    parsed, warnings = parse_spec_md(edited, base=original)
+
+    assert warnings == []
+    assert parsed.groups[0].checks == [
+        RepoTestCheck(command=("npm", "test"), timeout_s=90)
+    ]
+    assert parsed.cross_group_checks == [
+        BrowserJourney(
+            command=("python3", "tests/new_browser.py"),
+            evidence_globs=("old/*.png",),
+            timeout_s=600,
+        )
+    ]
 
 
 def test_parse_spec_md_orphan_features_under_ungrouped() -> None:

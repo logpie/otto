@@ -39,6 +39,9 @@ export interface SpecMdView {
 
   // ISO-8601 wall-clock timestamp the spec was last written.
   updated_at: string;
+
+  // Non-fatal validator warnings for generated checks, groups, and coverage.
+  validator_warnings?: string[];
 }
 
 export interface SpecEditRequest {

@@ -466,14 +466,18 @@ async def repair_failing_features(
         if re_audit is None or result.halted_reason == "audit_passes_cap_exhausted":
             return result
 
+        successful_attempts = [attempt for attempt in pass_attempts if attempt.succeeded]
+        if not successful_attempts:
+            return result
+
         attempted_ids = _unique_feature_ids(
             feature_id
-            for attempt in pass_attempts
+            for attempt in successful_attempts
             for feature_id in related_ids_by_attempt.get(attempt.feature_id, [attempt.feature_id])
         )
         succeeded_before_reaudit = {
             feature_id: bool(attempt.succeeded)
-            for attempt in pass_attempts
+            for attempt in successful_attempts
             for feature_id in related_ids_by_attempt.get(attempt.feature_id, [attempt.feature_id])
         }
         emit("audit.re_audit.started", {"feature_ids": attempted_ids})

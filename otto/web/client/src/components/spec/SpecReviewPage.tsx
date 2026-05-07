@@ -587,6 +587,20 @@ export function SpecReviewPage({ specId, onApproved }: Props) {
         </div>
       )}
 
+      {(data.validator_warnings || []).length > 0 && (
+        <div
+          className="spec-review-warnings"
+          data-testid="spec-review-validator-warnings"
+        >
+          <h3>Validator warnings</h3>
+          <ul>
+            {(data.validator_warnings || []).map((w, i) => (
+              <li key={`${i}-${w}`}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* B12: Markdown <-> Form view toggle (placeholder form view). */}
       {!editing && (
         <div

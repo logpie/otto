@@ -497,6 +497,7 @@ async def run_pipeline(
         audit_result.verdict != AuditVerdict.PASSED
         and fix_agent is not None
         and repair_spec.features
+        and not _merge_result_blocks_layer2_repair(merge_result)
     ):
         # Keep downstream proof/render Feature-aware for compact specs, but
         # do not rewrite the persisted spec just to repair a legacy shape.
@@ -1188,6 +1189,11 @@ def _repair_verdicts_for_audit(
         *verdicts,
         *_quality_findings_to_feature_verdicts(spec, audit_result.quality_findings),
     ]
+
+
+def _merge_result_blocks_layer2_repair(merge_result: MergeQueueResult | None) -> bool:
+    """Layer 2 repairs the integrated tree, not blocked slice branches."""
+    return bool(merge_result is not None and merge_result.blocked_ids)
 
 
 def _quality_findings_to_feature_verdicts(

@@ -83,6 +83,7 @@ def test_get_markdown_returns_view(
     assert body["lifecycle"] == "draft"
     assert "Markdown rendering" in body["markdown"]
     assert "<!-- feature: md-render" in body["markdown"]
+    assert isinstance(body["validator_warnings"], list)
 
 
 def test_get_markdown_resolves_queue_worktree_session(tmp_path: Path) -> None:

@@ -618,9 +618,11 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
     )
 
     seen_configs: list[dict] = []
+    seen_timeouts: list[int | None] = []
 
     async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
         seen_configs.append(dict(input_.config))
+        seen_timeouts.append(input_.timeout_s)
         # Repair by creating the missing marker.
         (input_.worktree / "marker.txt").write_text("ok", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.05)
@@ -630,6 +632,7 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
             spec, build_result, project_dir=tmp_path, session_dir=session_dir,
             build_agent=repair_agent,
             config={"provider": "codex", "_cli_overrides": {"provider": "codex"}},
+            budget=MergeBudget(per_slice_repair_retries=1, per_slice_wall_s=17),
         )
     )
     assert result.landed_ids == ["s1"]
@@ -638,6 +641,9 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
     assert seen_configs == [
         {"provider": "codex", "_cli_overrides": {"provider": "codex"}}
     ]
+    assert len(seen_timeouts) == 1
+    assert seen_timeouts[0] is not None
+    assert 1 <= seen_timeouts[0] <= 17
 
 
 def test_run_merge_queue_blocks_when_repair_retries_exhausted(tmp_path: Path) -> None:

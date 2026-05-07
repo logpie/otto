@@ -475,6 +475,28 @@ def test_fix_agent_exception_recorded_as_failed_attempt() -> None:
     assert "agent timed out" in a.detail
 
 
+def test_failed_repair_attempt_does_not_trigger_re_audit() -> None:
+    spec = _spec("f1")
+    fix_agent, _ = _make_fix_agent(succeed=False)
+    re_audit, re_audit_calls = _make_re_audit({"f1": "passed"})
+
+    result = asyncio.run(
+        repair_failing_features(
+            spec=spec,
+            feature_verdicts=[_verdict("f1", "partial")],
+            fix_agent=fix_agent,
+            re_audit=re_audit,
+            max_attempts_per_run=10,
+            max_audit_passes=10,
+        )
+    )
+
+    assert len(result.attempts) == 1
+    assert result.attempts[0].succeeded is False
+    assert re_audit_calls == []
+    assert result.audit_passes_run == 1
+
+
 def test_re_audit_exception_halts_loop_with_reason() -> None:
     spec = _spec("f1")
     fix_agent, _ = _make_fix_agent()

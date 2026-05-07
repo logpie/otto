@@ -39,6 +39,7 @@ from otto.spec_compile import (
     parse_spec_md,
     render_spec_md,
     spec_to_dict,
+    validate_spec,
 )
 from otto.spec_state import emit as emit_state_event, is_run_paused_by_user
 from otto.web.session_resolver import (
@@ -497,6 +498,7 @@ def _build_view(
         "intent_hash": spec.intent_hash,
         "lifecycle": lifecycle,
         "updated_at": updated_at,
+        "validator_warnings": list(validate_spec(spec).warnings),
     }
 
 

@@ -969,6 +969,10 @@ def render_spec_md(spec: Spec) -> str:
 
         - ⊘ <guardrail.text>
 
+        ## Planned checks
+
+        Editable JSON for Group.checks and Spec.cross_group_checks.
+
     Multi-line intent: first line is the H1 title; remaining lines fall
     under it as body prose. Empty fields (description, acceptance_detail)
     are omitted from the rendered output.
@@ -1042,7 +1046,27 @@ def render_spec_md(spec: Spec) -> str:
             )
             parts.append(f"- ⊘ {g.text}{scope_note}\n")
 
+    # Planned checks
+    if spec.groups or spec.cross_group_checks:
+        parts.append("\n## Planned checks\n")
+        parts.append("\n### Group checks\n")
+        for group in spec.groups:
+            parts.append(f"\n#### {group.name or group.id}\n")
+            parts.append(f"<!-- planned-checks-group: {group.id} -->\n")
+            parts.append("```json\n")
+            parts.append(_checks_to_markdown_json(group.checks))
+            parts.append("\n```\n")
+        parts.append("\n### Integration checks\n")
+        parts.append("<!-- planned-checks: cross_group_checks -->\n")
+        parts.append("```json\n")
+        parts.append(_checks_to_markdown_json(spec.cross_group_checks))
+        parts.append("\n```\n")
+
     return "".join(parts)
+
+
+def _checks_to_markdown_json(checks: list[CheckKind] | tuple[CheckKind, ...]) -> str:
+    return json.dumps([_check_to_dict(check) for check in checks], indent=2)
 
 
 def _features_for_spec_markdown(spec: Spec) -> list[Feature]:
@@ -1086,7 +1110,9 @@ def parse_spec_md(
 
     Recovers a Spec from its Markdown rendering. Mechanical fields not
     present in the Markdown surface (owned_paths, dependencies, ...)
-    are preserved from `base` when supplied.
+    are preserved from `base` when supplied. Planned check sections are
+    surfaced as JSON and parsed back into Group.checks and
+    Spec.cross_group_checks.
 
     Args:
         md_text: full Markdown source as produced by render_spec_md.
@@ -1124,6 +1150,7 @@ def parse_spec_md(
     project_kind = "webapp"
     features_section: list[str] = []
     guardrails_section: list[str] = []
+    planned_checks_section: list[str] = []
 
     section = "intent"
     h1_seen = False
@@ -1141,6 +1168,8 @@ def parse_spec_md(
                 section = "features"
             elif heading == "guardrails":
                 section = "guardrails"
+            elif heading == "planned checks":
+                section = "planned_checks"
             else:
                 section = "other"
             continue
@@ -1155,6 +1184,8 @@ def parse_spec_md(
             features_section.append(line)
         elif section == "guardrails":
             guardrails_section.append(line)
+        elif section == "planned_checks":
+            planned_checks_section.append(line)
 
     intent = "\n".join(line for line in intent_lines if line is not None).strip()
     if not project_kind:
@@ -1177,6 +1208,9 @@ def parse_spec_md(
         r"<!--\s*feature:\s*([\w-]+)(?:\s*\|\s*evidence:\s*([^>-][^>]*?))?\s*-->"
     )
     acceptance_re = re.compile(r"^\*\*Acceptance:\*\*\s*(.*)$")
+    parsed_group_checks, parsed_cross_checks = _parse_planned_checks_section(
+        planned_checks_section, warnings
+    )
 
     def _flush_feature() -> None:
         nonlocal current_feature_id, current_feature_name
@@ -1224,6 +1258,13 @@ def parse_spec_md(
         if any(g.id == current_group_id for g in groups_out):
             return
         base_grp = base_groups_by_id.get(current_group_id)
+        checks = (
+            list(parsed_group_checks[current_group_id])
+            if current_group_id in parsed_group_checks
+            else list(base_grp.checks)
+            if base_grp
+            else []
+        )
         groups_out.append(
             Group(
                 id=current_group_id,
@@ -1231,7 +1272,7 @@ def parse_spec_md(
                 feature_ids=list(base_grp.feature_ids) if base_grp else [],
                 dependencies=list(base_grp.dependencies) if base_grp else [],
                 owned_paths=list(base_grp.owned_paths) if base_grp else [],
-                checks=list(base_grp.checks) if base_grp else [],
+                checks=checks,
             )
         )
 
@@ -1322,7 +1363,11 @@ def parse_spec_md(
         # Preserve mechanical fields not encoded in markdown
         spec_kwargs["intent_hash"] = base.intent_hash
         spec_kwargs["structure"] = base.structure
-        spec_kwargs["cross_group_checks"] = list(base.cross_group_checks)
+        spec_kwargs["cross_group_checks"] = (
+            list(parsed_cross_checks)
+            if parsed_cross_checks is not None
+            else list(base.cross_group_checks)
+        )
         spec_kwargs["shared_scaffold"] = list(base.shared_scaffold)
         spec_kwargs["non_goals"] = list(base.non_goals)
         spec_kwargs["done_means"] = list(base.done_means)
@@ -1330,8 +1375,101 @@ def parse_spec_md(
         spec_kwargs["components"] = list(base.components)
         spec_kwargs["shared_paths"] = list(base.shared_paths)
         spec_kwargs["audit_fixtures"] = list(base.audit_fixtures)
+    elif parsed_cross_checks is not None:
+        spec_kwargs["cross_group_checks"] = list(parsed_cross_checks)
 
     return Spec(**spec_kwargs), warnings
+
+
+def _parse_planned_checks_section(
+    lines: list[str],
+    warnings: list[str],
+) -> tuple[dict[str, list[CheckKind]], list[CheckKind] | None]:
+    group_checks: dict[str, list[CheckKind]] = {}
+    cross_group_checks: list[CheckKind] | None = None
+    current_target: tuple[str, str] | None = None
+    collecting = False
+    json_lines: list[str] = []
+    group_comment_re = re.compile(r"<!--\s*planned-checks-group:\s*([\w-]+)\s*-->")
+    cross_comment_re = re.compile(
+        r"<!--\s*planned-checks:\s*cross_group_checks\s*-->"
+    )
+
+    def _flush() -> None:
+        nonlocal cross_group_checks, json_lines, collecting
+        if current_target is None:
+            json_lines = []
+            collecting = False
+            return
+        raw_json = "\n".join(json_lines).strip() or "[]"
+        target_kind, target_id = current_target
+        checks = _parse_checks_json(raw_json, target=f"planned checks {target_id}", warnings=warnings)
+        if checks is None:
+            json_lines = []
+            collecting = False
+            return
+        if target_kind == "group":
+            group_checks[target_id] = checks
+        else:
+            cross_group_checks = checks
+        json_lines = []
+        collecting = False
+
+    for raw in lines:
+        line = raw.rstrip()
+        m_group = group_comment_re.search(line)
+        if m_group:
+            if collecting:
+                _flush()
+            current_target = ("group", m_group.group(1))
+            continue
+        if cross_comment_re.search(line):
+            if collecting:
+                _flush()
+            current_target = ("cross", "cross_group_checks")
+            continue
+        if line.strip().startswith("```"):
+            if collecting:
+                _flush()
+            elif current_target is not None:
+                collecting = True
+                json_lines = []
+            continue
+        if collecting:
+            json_lines.append(line)
+    if collecting:
+        _flush()
+    return group_checks, cross_group_checks
+
+
+def _parse_checks_json(
+    raw_json: str,
+    *,
+    target: str,
+    warnings: list[str],
+) -> list[CheckKind] | None:
+    try:
+        payload = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        warnings.append(f"{target}: invalid check JSON ({exc.msg})")
+        return None
+    if not isinstance(payload, list):
+        warnings.append(f"{target}: expected a JSON list of checks")
+        return None
+    collector = WarningCollector()
+    checks: list[CheckKind] = []
+    for index, entry in enumerate(payload):
+        check = _check_from_dict(
+            entry,
+            collector=collector,
+            path=f"{target}[{index}]",
+        )
+        if check is not None:
+            checks.append(check)
+    warnings.extend(
+        f"{warning.path}: {warning.message}" for warning in collector.warnings
+    )
+    return checks
 
 
 _FEATURE_PROOF_TEMPLATE = Path(__file__).parent / "web" / "templates" / "feature-proof.html.j2"
