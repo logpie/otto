@@ -83,7 +83,11 @@ from otto.runs.registry import (
     write_record,
 )
 from otto.runs.schema import TERMINAL_STATUSES
-from otto.setup_gitignore import is_otto_owned_path
+from otto.setup_gitignore import (
+    git_porcelain_path,
+    is_common_build_artifact_path,
+    is_otto_owned_path,
+)
 
 logger = logging.getLogger("otto.queue.runner")
 
@@ -114,11 +118,18 @@ def _task_success_can_commit_generated_lockfiles(manifest: dict[str, Any]) -> bo
     return command in {"build", "improve"}
 
 
+def _summary_indicates_product_success(summary: dict[str, Any]) -> bool:
+    if summary.get("passed") is True:
+        return True
+    verdict = str(summary.get("verdict") or "").strip().lower()
+    if verdict:
+        return verdict == "passed"
+    status = str(summary.get("status") or "").strip().lower()
+    return status in {"success", "done", "passed"}
+
+
 def _porcelain_status_path(line: str) -> str:
-    raw = line[3:] if len(line) > 3 else line
-    if " -> " in raw:
-        raw = raw.rsplit(" -> ", 1)[-1]
-    return raw.strip().strip('"')
+    return git_porcelain_path(line)
 
 
 def _auto_commit_generated_lockfiles(worktree: Path) -> bool:
@@ -209,11 +220,17 @@ def _dirty_successful_worktree_reason(worktree: Path) -> str | None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         return f"could not verify successful task worktree cleanliness: {detail or 'git status failed'}"
-    lines = [
-        line
-        for line in (result.stdout or "").splitlines()
-        if line.strip() and not is_otto_owned_path(_porcelain_path(line))
-    ]
+    lines = []
+    for line in (result.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        path = _porcelain_path(line)
+        status = line[:2]
+        if is_otto_owned_path(path):
+            continue
+        if status == "??" and is_common_build_artifact_path(path):
+            continue
+        lines.append(line)
     if not lines:
         return None
     preview = ", ".join(line[3:] if len(line) > 3 else line for line in lines[:6])
@@ -226,11 +243,7 @@ def _dirty_successful_worktree_reason(worktree: Path) -> str | None:
 
 
 def _porcelain_path(line: str) -> str:
-    path = line[3:] if len(line) > 3 else line
-    path = path.strip()
-    if " -> " in path:
-        path = path.split(" -> ", 1)[1].strip()
-    return path.strip('"')
+    return git_porcelain_path(line)
 
 
 @dataclass
@@ -1650,6 +1663,7 @@ class Runner:
                 git={
                     "branch": task.branch,
                     "worktree": str(wt_path.resolve(strict=False)) if task.worktree else None,
+                    "head_sha": str(ts.get("head_sha") or "").strip() or None,
                 },
                 source=source,
                 identity=identity,
@@ -1689,7 +1703,12 @@ class Runner:
                 "argv": list(task.command_argv),
                 "resumable": bool(task.resumable),
             },
-            git={"branch": task.branch, "worktree": task.worktree, "target_branch": None, "head_sha": None},
+            git={
+                "branch": task.branch,
+                "worktree": task.worktree,
+                "target_branch": None,
+                "head_sha": str(ts.get("head_sha") or "").strip() or None,
+            },
             intent={
                 "summary": task.resolved_intent or task.id,
                 "intent_path": self._queue_intent_path(task, ts),
@@ -1943,6 +1962,9 @@ class Runner:
                 ts["manifest_path"] = str(manifest_p)
                 ts["cost_usd"] = manifest.get("cost_usd")
                 ts["duration_s"] = manifest.get("duration_s")
+                head_sha = str(manifest.get("head_sha") or "").strip()
+                if head_sha:
+                    ts["head_sha"] = head_sha
                 self._record_summary_usage(ts, manifest)
                 manifest_exit_status = str(manifest.get("exit_status") or "success")
                 if exit_code not in (None, 0):
@@ -1981,6 +2003,9 @@ class Runner:
         ts["manifest_path"] = str(manifest_p)
         ts["cost_usd"] = manifest.get("cost_usd")
         ts["duration_s"] = manifest.get("duration_s")
+        head_sha = str(manifest.get("head_sha") or "").strip()
+        if head_sha:
+            ts["head_sha"] = head_sha
         self._record_summary_usage(ts, manifest)
         manifest_exit_status = str(manifest.get("exit_status") or "success")
 
@@ -2069,11 +2094,7 @@ class Runner:
         command_argv = list(task.command_argv) if task is not None else []
         command = str(summary.get("command") or (command_argv[0] if command_argv else "") or "")
         run_id = str(summary.get("run_id") or ts.get("child_run_id") or ts.get("attempt_run_id") or "")
-        passed = (
-            summary.get("passed") is True
-            or str(summary.get("verdict") or "").lower() == "passed"
-            or str(summary.get("status") or "").lower() in {"completed", "success", "done"}
-        )
+        passed = _summary_indicates_product_success(summary)
         if not run_id:
             return None
         proof_path = session_dir / "proof-packet.json"
@@ -2208,6 +2229,7 @@ class Runner:
                     "timing": {"heartbeat_interval_s": self.config.heartbeat_interval_s},
                     "artifacts": self._queue_run_artifacts(task, ts),
                     "metrics": self._queue_metrics(ts),
+                    "git": {"head_sha": str(ts.get("head_sha") or "").strip() or None},
                     "last_event": str(ts.get("failure_reason") or status),
                 },
             )

@@ -10,7 +10,7 @@ import {BulkLandingConfirmList} from "../review/ConfirmDetails";
 import {defaultFilters} from "../../uiTypes";
 import type {BoardTask} from "../../uiTypes";
 import type {ActionResult, AutopilotDecision, AutopilotIncident, ProjectInfo, StateResponse, VerificationPolicy} from "../../types";
-import {canMerge, errorMessage, landingBulkConfirmation, refreshIntervalMs} from "../../utils/missionControl";
+import {canMerge, errorMessage, landingBulkConfirmation, realRunId, refreshIntervalMs} from "../../utils/missionControl";
 
 interface Props {
   project?: ProjectInfo | null;
@@ -69,6 +69,10 @@ export function ProjectWorkspace({project}: Props) {
     setSelectedRunId(runId);
   }, []);
 
+  const closeQueuedTask = useCallback(() => {
+    setSelectedQueuedTask(null);
+  }, []);
+
   const closeRun = useCallback(() => {
     if (window.history.state?.runDrawer) {
       window.history.back();
@@ -122,12 +126,22 @@ export function ProjectWorkspace({project}: Props) {
   }, [refresh]);
 
   const openQueuedTask = useCallback((task: BoardTask) => {
+    setSelectedRunId(null);
     setSelectedQueuedTask(task);
     setBanner({
       kind: "info",
-      message: `${task.title} is queued but has no Otto session yet. Start the queue runner to create the run detail.`,
+      message: `${task.title} does not have an Otto session detail yet. The drawer will switch to run details once the session is created.`,
     });
   }, []);
+
+  useEffect(() => {
+    if (!selectedQueuedTask || selectedRunId || !data) return;
+    const runId = realRunIdForQueuedTask(data, selectedQueuedTask.id);
+    if (!runId) return;
+    setSelectedQueuedTask(null);
+    window.history.pushState({...window.history.state, runDrawer: runId}, "", window.location.href);
+    setSelectedRunId(runId);
+  }, [data, selectedQueuedTask, selectedRunId]);
 
   const approveRecovery = useCallback(async (decisionId: string) => {
     setRecoveryPending(decisionId);
@@ -218,7 +232,7 @@ export function ProjectWorkspace({project}: Props) {
       className="project-workspace"
       data-testid="project-workspace"
       data-mc-shell={data || stateError ? "ready" : "loading"}
-      data-drawer-open={selectedRunId ? "true" : "false"}
+      data-drawer-open={selectedRunId || selectedQueuedTask ? "true" : "false"}
     >
       <header className="project-workspace-head">
         <div className="project-workspace-title">
@@ -361,6 +375,15 @@ export function ProjectWorkspace({project}: Props) {
         <RunDetailOverlay sessionId={selectedRunId} onClose={closeRun} />
       ) : null}
 
+      {selectedQueuedTask && !selectedRunId ? (
+        <QueuedTaskOverlay
+          task={selectedQueuedTask}
+          watcherRunning={Boolean(data?.watcher.alive)}
+          onStartWatcher={() => void startWatcher()}
+          onClose={closeQueuedTask}
+        />
+      ) : null}
+
       {confirm ? (
         <ConfirmDialog
           confirm={confirm}
@@ -473,6 +496,103 @@ function RunDetailOverlay({sessionId, onClose}: {sessionId: string; onClose: () 
   );
 }
 
+function QueuedTaskOverlay({
+  task,
+  watcherRunning,
+  onStartWatcher,
+  onClose,
+}: {
+  task: BoardTask;
+  watcherRunning: boolean;
+  onStartWatcher: () => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const waitingForRunner = !watcherRunning && !task.active;
+  const title = waitingForRunner ? "Waiting for queue runner" : "Waiting for Otto session";
+  const body = waitingForRunner
+    ? "This task is queued, but the queue runner is stopped. Start the queue runner to create the run detail."
+    : "The queue runner is starting this task. Run details will appear here when Otto records the session.";
+
+  return (
+    <>
+      <div
+        className="run-list-drawer-backdrop"
+        data-testid="run-list-drawer-backdrop"
+        onClick={onClose}
+      />
+      <aside
+        className="run-list-detail-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Task ${task.title}`}
+        data-testid="run-list-detail-drawer"
+      >
+        <button
+          type="button"
+          className="run-list-detail-drawer-close"
+          data-testid="run-list-detail-drawer-close"
+          aria-label="Close task details"
+          onClick={onClose}
+        >
+          ×
+        </button>
+        <div className="run-view-error run-view-queued" data-testid="run-detail-panel">
+          <section data-testid="run-detail-queued" data-queued-task-id={task.id}>
+            <h2>{title}</h2>
+            <p>{body}</p>
+            <dl className="queued-task-facts">
+              <div>
+                <dt>Task</dt>
+                <dd title={task.title}>{task.title}</dd>
+              </div>
+              <div>
+                <dt>Status</dt>
+                <dd>{task.status}</dd>
+              </div>
+              {task.branch ? (
+                <div>
+                  <dt>Branch</dt>
+                  <dd title={task.branch}>{task.branch}</dd>
+                </div>
+              ) : null}
+              {task.reason ? (
+                <div>
+                  <dt>Current signal</dt>
+                  <dd>{task.reason}</dd>
+                </div>
+              ) : null}
+              {task.summary ? (
+                <div>
+                  <dt>Intent</dt>
+                  <dd>{task.summary}</dd>
+                </div>
+              ) : null}
+            </dl>
+            {waitingForRunner ? (
+              <button
+                type="button"
+                className="primary-action"
+                data-testid="run-detail-queued-start-watcher"
+                onClick={onStartWatcher}
+              >
+                Start queue runner
+              </button>
+            ) : null}
+          </section>
+        </div>
+      </aside>
+    </>
+  );
+}
+
 export default ProjectWorkspace;
 
 function readWorkspaceView(): "tasks" | "diagnostics" {
@@ -480,4 +600,12 @@ function readWorkspaceView(): "tasks" | "diagnostics" {
   return new URLSearchParams(window.location.search).get("view") === "diagnostics"
     ? "diagnostics"
     : "tasks";
+}
+
+function realRunIdForQueuedTask(data: StateResponse, taskId: string): string | null {
+  const live = data.live.items.find((item) => item.queue_task_id === taskId);
+  const liveRunId = realRunId(live?.run_id);
+  if (liveRunId) return liveRunId;
+  const landing = data.landing.items.find((item) => item.task_id === taskId);
+  return realRunId(landing?.run_id);
 }

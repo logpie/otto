@@ -6,11 +6,10 @@ card whose watcher hadn't picked it up yet had a dead button — the
 user could see it but couldn't open Details, leaving them with no way
 to inspect the queued intent or know what to do next.
 
-The fix in ``otto/web/client/src/App.tsx`` adds an ``onSelectQueued``
-prop to ``TaskCard`` and a ``selectedQueuedTask`` state in App. The
-``RunDetailPanel`` renders a "Waiting for queue runner" placeholder with
-status, branch, intent, and a Start queue runner CTA when the queued-task
-selection is set.
+The fix adds an ``onSelectQueued`` path to the task board and a
+``selectedQueuedTask`` drawer state in the project workspace. The drawer
+renders a "Waiting for queue runner" placeholder with status, branch, intent,
+and a Start queue runner CTA when the queued-task selection is set.
 
 The real-backend regression in this file covers a later bug: queue-compat
 runs were serialized as active, so the SPA showed a stopped-watcher queued
@@ -241,8 +240,8 @@ def test_clicking_queued_card_opens_waiting_placeholder(
 def test_task_board_points_to_global_queue_runner_when_stopped(
     mc_backend: Any, page: Any, disable_animations: Any
 ) -> None:
-    """When the queue runner is stopped, the task board explains the wait
-    while the top bar remains the single start control."""
+    """When the queue runner is stopped, the task board explains the wait and
+    exposes an obvious start control."""
 
     # Stopped watcher
     item = _queued_landing_item(task_id="needs-watcher")
@@ -253,9 +252,7 @@ def test_task_board_points_to_global_queue_runner_when_stopped(
     banner.wait_for(state="visible", timeout=5_000)
     text = banner.text_content() or ""
     assert "not running yet" in text
-    assert "top-right queue runner" in text
-    assert page.locator("[data-testid='task-board-start-queue-runner']").count() == 0
-    assert page.get_by_test_id("start-watcher-button").is_enabled()
+    assert page.get_by_test_id("task-board-start-queue-runner").is_enabled()
 
 
 def _seed_real_queued_task(project_dir: Path, *, task_id: str) -> None:
@@ -288,7 +285,6 @@ def test_real_backend_queued_task_with_stopped_watcher_is_waiting_not_running(
 
     page.goto(mc_backend.url, wait_until="networkidle")
     page.wait_for_selector('[data-mc-shell="ready"]', timeout=10_000)
-    page.wait_for_function("window.__OTTO_MC_READY === true", timeout=10_000)
     disable_animations(page)
 
     state_response = page.request.get(f"{mc_backend.url}/api/state")
@@ -308,23 +304,19 @@ def test_real_backend_queued_task_with_stopped_watcher_is_waiting_not_running(
     assert "Waiting" in row_text
     assert "queued for" in row_text
     assert page.get_by_test_id("queue-start-banner").is_visible()
-    assert page.locator("[data-testid='task-board-start-queue-runner']").count() == 0
-    assert page.get_by_test_id("start-watcher-button").is_enabled()
-
-    active_filter = page.locator(".toolbar input[type=checkbox]").first
-    active_filter.check()
-    row.wait_for(state="hidden", timeout=5_000)
-    active_filter.uncheck()
-    row.wait_for(state="visible", timeout=5_000)
+    assert page.get_by_test_id("task-board-start-queue-runner").is_enabled()
 
     row.click()
     detail = page.get_by_test_id("run-detail-panel")
     detail.wait_for(state="visible", timeout=5_000)
-    assert page.get_by_test_id("run-detail-loading").is_visible()
-    page.get_by_text("Queue runner stopped").wait_for(state="visible", timeout=5_000)
+    placeholder = page.get_by_test_id("run-detail-queued")
+    placeholder.wait_for(state="visible", timeout=5_000)
     detail_text = detail.text_content() or ""
-    assert "Queue runner stopped" in detail_text
-    assert "top-right queue runner" in detail_text
+    assert "Run not found" not in detail_text
+    assert "Waiting for queue runner" in detail_text
+    assert task_id in detail_text
+    assert page.get_by_test_id("run-detail-queued-start-watcher").is_enabled()
+    assert page.get_by_test_id("run-detail-loading").count() == 0
     assert page.get_by_test_id("verification-plan-panel").count() == 0
     pending_badges = page.locator(".review-check.check-pending > span")
     for index in range(pending_badges.count()):

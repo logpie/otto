@@ -833,12 +833,21 @@ class MissionControlService:
                 merge_info=merge_info,
                 certification_only=certification_only,
             )
+            verified_head_sha = _optional_from_mapping(raw_state, "head_sha")
+            branch_head_sha, branch_head_error = _branch_head_sha(self.project_dir, branch)
+            stale_reason = _landing_stale_reason(
+                queue_status=queue_status,
+                verified_head_sha=verified_head_sha,
+                branch_head_sha=branch_head_sha,
+                branch_head_error=branch_head_error,
+            )
             classification = _classify_landing_task(
                 queue_status=queue_status,
                 branch=branch,
                 diff=diff,
                 merge_info=merge_info,
                 certification_only=certification_only,
+                stale_reason=stale_reason,
             )
             counts[classification.count_key] += 1
             if classification.counts_for_collision:
@@ -865,6 +874,9 @@ class MissionControlService:
                 "merge_id": merge_info.get("merge_id") if merge_info else None,
                 "merge_status": merge_info.get("status") if merge_info else None,
                 "merge_run_status": merge_info.get("merge_run_status") if merge_info else None,
+                "verified_head_sha": verified_head_sha,
+                "branch_head_sha": branch_head_sha,
+                "stale_reason": stale_reason,
                 "started_at": _optional_from_mapping(raw_state, "started_at"),
                 "finished_at": _optional_from_mapping(raw_state, "finished_at"),
                 "updated_at": _optional_from_mapping(raw_state, "updated_at"),
@@ -877,7 +889,7 @@ class MissionControlService:
             }
             item["changed_file_count"] = len(diff["files"])
             item["changed_files"] = diff["files"][:8]
-            item["diff_error"] = diff["error"]
+            item["diff_error"] = stale_reason or diff["error"]
             items.append(item)
 
         _annotate_superseded_landing_items(items, counts)
@@ -4879,11 +4891,14 @@ def _classify_landing_task(
     diff: dict[str, Any],
     merge_info: dict[str, Any] | None,
     certification_only: bool,
+    stale_reason: str | None = None,
 ) -> LandingClassification:
     if merge_info is not None:
         return LandingClassification(state="merged", label="Landed", count_key="merged")
     if queue_status == "done" and certification_only:
         return LandingClassification(state="reviewed", label="Certified", count_key="reviewed")
+    if queue_status == "done" and stale_reason:
+        return LandingClassification(state="blocked", label="Stale certification", count_key="blocked")
     if queue_status == "done" and branch and diff.get("error") is None:
         return LandingClassification(
             state="ready",
@@ -4893,6 +4908,46 @@ def _classify_landing_task(
         )
     label = "Review blocked" if queue_status == "done" and diff.get("error") else _blocked_landing_label(queue_status, branch)
     return LandingClassification(state="blocked", label=label, count_key="blocked")
+
+
+def _branch_head_sha(project_dir: Path, branch: str) -> tuple[str | None, str | None]:
+    branch = str(branch or "").strip()
+    if not branch:
+        return None, None
+    return _resolve_sha(project_dir, branch)
+
+
+def _landing_stale_reason(
+    *,
+    queue_status: str,
+    verified_head_sha: str | None,
+    branch_head_sha: str | None,
+    branch_head_error: str | None,
+) -> str | None:
+    if queue_status != "done" or not verified_head_sha:
+        return None
+    if branch_head_error:
+        return f"Certified branch head cannot be resolved: {branch_head_error}"
+    if not branch_head_sha:
+        return "Certified branch head cannot be resolved."
+    if _sha_matches(verified_head_sha, branch_head_sha):
+        return None
+    return (
+        "Branch moved after certification; rerun the task or certification before landing "
+        f"(certified {verified_head_sha[:12]}, current {branch_head_sha[:12]})."
+    )
+
+
+def _sha_matches(left: str, right: str) -> bool:
+    left = left.strip()
+    right = right.strip()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return min(len(left), len(right)) >= 7 and (
+        left.startswith(right) or right.startswith(left)
+    )
 
 
 def _task_intent(argv: Any) -> str | None:

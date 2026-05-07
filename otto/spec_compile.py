@@ -1988,6 +1988,50 @@ def _normalize_feature_group_ids(
             group.feature_ids.append(feature.id)
 
 
+def _synthesize_features_from_group_feature_ids(
+    groups: list[Group],
+    *,
+    project_kind: str,
+    collector: WarningCollector,
+) -> list[Feature]:
+    """Backfill first-class Features from legacy group-only feature strings."""
+    if not groups:
+        return []
+    out: list[Feature] = []
+    seen: set[str] = set()
+    evidence_kinds = list(default_evidence_kinds_for(project_kind))
+    for group_index, group in enumerate(groups):
+        canonical_ids: list[str] = []
+        for feature_index, raw_feature_id in enumerate(group.feature_ids):
+            name = str(raw_feature_id).strip()
+            if not name:
+                continue
+            feature_id = _markdown_feature_id_from_group_id(name, seen)
+            canonical_ids.append(feature_id)
+            out.append(
+                Feature(
+                    id=feature_id,
+                    name=name,
+                    description=name,
+                    acceptance_detail=name,
+                    evidence_kinds=list(evidence_kinds),
+                    group_id=group.id,
+                )
+            )
+            if feature_id != name:
+                collector.add(
+                    code="spec.coerce.features_from_group_feature_ids",
+                    path=f"groups[{group_index}].feature_ids[{feature_index}]",
+                    message=(
+                        "group-only feature text was converted into a "
+                        f"first-class Feature {feature_id!r}"
+                    ),
+                    coerced_to=feature_id,
+                )
+        group.feature_ids = canonical_ids
+    return out
+
+
 _FEATURE_ROUTE_MAX_FILE_BYTES = 1_000_000
 _IDENTIFIER_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
@@ -3924,6 +3968,17 @@ async def compile_spec(
 
     spec = spec_from_dict(payload)
     normalization_warnings: list[str] = []
+    feature_shape_warnings: list[str] = []
+    if not spec.features and spec.groups:
+        feature_collector = WarningCollector()
+        spec.features = _synthesize_features_from_group_feature_ids(
+            spec.groups,
+            project_kind=spec.project_kind,
+            collector=feature_collector,
+        )
+        feature_shape_warnings = [
+            warning.message for warning in feature_collector.warnings
+        ]
     if not brownfield:
         normalization_warnings = _normalize_webapp_scaffold_scope(spec)
 
@@ -3950,7 +4005,12 @@ async def compile_spec(
     # cross_group_checks" alerts that the validator emitted. Surface
     # them via the standard logger so they hit narrative.log AND
     # attach to the spec object so callers can render them.
-    all_warnings = [*normalization_warnings, *routing_warnings, *result.warnings]
+    all_warnings = [
+        *feature_shape_warnings,
+        *normalization_warnings,
+        *routing_warnings,
+        *result.warnings,
+    ]
     for warning in all_warnings:
         logger.warning("spec validator: %s", warning)
     setattr(spec, "_validator_warnings", all_warnings)

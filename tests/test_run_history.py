@@ -175,6 +175,36 @@ def test_i2p_history_rows_count_canonical_groups(tmp_path: Path) -> None:
     assert row["i2p_slice_count"] == 2
 
 
+def test_i2p_history_rows_include_queue_worktree_sessions(tmp_path: Path) -> None:
+    worktree = tmp_path / ".worktrees" / "build-task"
+    session_dir = worktree / "otto_logs" / "sessions" / "i2p-worktree-run"
+    (session_dir / "spec").mkdir(parents=True)
+    (session_dir / "spec" / "spec.json").write_text(
+        json.dumps({"intent": "build micro twitter", "schema_version": 2}),
+        encoding="utf-8",
+    )
+    (session_dir / "proof-packet.json").write_text(
+        json.dumps(
+            {
+                "intent": "build micro twitter",
+                "verdict": "passed",
+                "head_sha": "abc123",
+                "groups": [{"group_id": "feed"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows = load_project_history_rows(tmp_path)
+    row = next(row for row in rows if row["run_id"] == "i2p-worktree-run")
+
+    assert row["domain"] == "i2p"
+    assert row["status"] == "done"
+    assert row["head_sha"] == "abc123"
+    assert row["worktree"].endswith(".worktrees/build-task")
+    assert row["session_dir"] == str(session_dir.resolve(strict=False))
+
+
 def test_terminal_history_writers_emit_v2_snapshots_for_all_domains(tmp_path: Path) -> None:
     build_session = paths.ensure_session_scaffold(tmp_path, "build-run", phase="build")
     (build_session / "build" / "narrative.log").write_text("", encoding="utf-8")

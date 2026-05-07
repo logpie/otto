@@ -9173,6 +9173,38 @@ mark.log-search-match.active {
   margin: 0;
 }
 
+.run-list-detail-drawer .run-view-queued {
+  display: block;
+}
+
+.queued-task-facts {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.queued-task-facts div {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.32fr) 1fr;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line, #e2e8f0);
+}
+
+.queued-task-facts dt {
+  color: var(--muted, #64748b);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.queued-task-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text, #0f172a);
+}
+
 .run-list-detail-drawer-close {
   align-self: flex-end;
   margin: 0 0 12px;
@@ -9668,6 +9700,15 @@ mark.log-search-match.active {
 .run-drawer-active-line strong {
   color: var(--text);
   font-weight: 600;
+}
+.run-drawer-control-conflict {
+  border: 1px solid var(--danger-border, #f0a6a6);
+  background: var(--danger-bg, #fff5f5);
+  color: var(--danger-text, #8a1f1f);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: var(--text-sm, 14px);
+  line-height: 1.35;
 }
 /* R3-B18: KPI grid sits in its own visual block — separate it from the
    intent line with a top border so the eye reads it as a metric row,

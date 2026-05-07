@@ -27,6 +27,7 @@ import type { TokenUsage } from "../types";
 export interface RunView {
   run_id: string;
   status: RunStatus;
+  control_plane?: ControlPlaneView;
   intent: string;
   project_kind: ProjectKind;
 
@@ -168,6 +169,14 @@ export interface PhaseUsage extends TokenUsage {
 export interface AgentUsageEntry extends PhaseUsage {
   phase: string;
   path: string;
+}
+
+export interface ControlPlaneView {
+  status: RunStatus | string | null;
+  raw_status: string | null;
+  failure_reason: string | null;
+  conflict: boolean;
+  conflict_reason: string | null;
 }
 
 export interface EvidenceRef {

@@ -60,7 +60,7 @@ from otto.build import (
 )
 from otto.checks import Evidence, run_checks
 from otto.merge_queue import MergeQueueResult
-from otto.spec_compile import Spec
+from otto.spec_compile import Feature, Spec
 from otto.spec_state import emit
 
 logger = logging.getLogger("otto.audit")
@@ -178,7 +178,7 @@ class AuditBudget:
 
     audit_retries: int = 2
     walk_timeout_s: int = 600  # walkthrough subprocess wall budget
-    judge_timeout_s: int = 300  # LLM judge wall budget
+    judge_timeout_s: int = 600  # LLM judge wall budget
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +422,31 @@ def _spec_with_group_fallback_features(
     if not features:
         return spec
     return dataclasses.replace(spec, features=features)
+
+
+def _spec_with_declared_feature_fallbacks(spec: Spec) -> Spec:
+    """Return an audit-ready Spec when compact specs omit ``features[]``.
+
+    Some compile agents emit concrete user-facing work only as
+    ``groups[*].feature_ids``. The build planner can work with that compact
+    shape, but the audit judge needs an explicit Feature list so it can return
+    one verdict per capability without rediscovering the schema by hand.
+    """
+    if spec.features:
+        return spec
+    declared_feature_ids = {
+        str(feature_id or "").strip()
+        for group in spec.groups
+        for feature_id in (group.feature_ids or [])
+        if str(feature_id or "").strip()
+    }
+    if not declared_feature_ids:
+        return spec
+    return _spec_with_group_fallback_features(
+        spec,
+        Feature,
+        observed_feature_ids=declared_feature_ids,
+    )
 
 
 def _next_audit_attempt_index(session_dir: Path) -> int:
@@ -941,6 +966,9 @@ async def run_audit(
         cross-slice evidence + walkthrough artifacts.
     """
     config = dict(config or {})
+    project_dir = project_dir.resolve()
+    session_dir = session_dir.resolve()
+    spec = _spec_with_declared_feature_fallbacks(spec)
     budget = budget or AuditBudget()
     walk = walkthrough or no_op_walkthrough
     scoped_feature_ids = tuple(str(fid) for fid in (feature_scope_ids or ()) if str(fid))
@@ -1777,6 +1805,21 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
             "overridden by code inspection unless you can cite why that oracle "
             "is invalid; in that case call out the oracle issue explicitly."
         )
+        if agent_input.judge_timeout_s:
+            timeout_s = int(agent_input.judge_timeout_s)
+            reserve_s = max(
+                5,
+                min(180, max(15, int(timeout_s * 0.2)), max(5, timeout_s // 2)),
+            )
+            lines.append(
+                f"Time budget: this audit call has a hard "
+                f"{timeout_s}s timeout. Reserve the final "
+                f"{reserve_s}s to write the required fenced JSON verdict. "
+                "Do not keep exploring after you have enough deterministic, "
+                "browser, and source evidence to judge the product. If evidence "
+                "is incomplete near the deadline, return `partial` with the "
+                "specific missing evidence instead of timing out."
+            )
         lines.append("")
     lines.append("## Spec Groups")
     for s in spec.groups:
@@ -1844,6 +1887,15 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "contract below. Per-Feature evidence is derived from these "
         "tagged actions; untagged or weakly-tagged walkthroughs cause "
         "the audit pass to be rejected."
+    )
+    lines.append(
+        "If the evidence packet or walkthrough artifacts already include a "
+        "real browser journey, start by translating those observed actions "
+        "into tagged `walkthrough.jsonl` entries. Run only a small focused "
+        "manual browser walk for gaps. One concrete user action may tag "
+        "multiple Features when it genuinely evidences them; do not perform "
+        "an exhaustive one-action-per-Feature tour after executable browser "
+        "evidence has already covered the intent."
     )
     lines.append("")
     lines.append(_load_feature_tagging_contract().rstrip())
@@ -2267,6 +2319,201 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
     )
 
 
+def _recover_audit_output_from_artifacts(
+    agent_input: AuditAgentInput,
+    failure_detail: str,
+) -> AuditAgentOutput | None:
+    """Recover a judge result when the agent wrote structured artifacts first.
+
+    Real browser audits can finish the expensive work, write
+    ``feature-verdicts.json`` and ``walkthrough.jsonl``, then miss the final
+    chat-response deadline. Treating that as a total BLOCKED result throws away
+    better evidence than the timeout wrapper itself has. This fallback is
+    intentionally narrow: it only recovers when a structured artifact covers
+    every declared Feature.
+    """
+    attempt_dirs: list[Path] = []
+    if agent_input.log_dir is not None:
+        attempt_dirs.append(agent_input.log_dir.parent)
+    if agent_input.walkthrough_jsonl_path is not None:
+        attempt_dirs.append(agent_input.walkthrough_jsonl_path.parent.parent)
+
+    seen: set[Path] = set()
+    for attempt_dir in attempt_dirs:
+        if attempt_dir in seen:
+            continue
+        seen.add(attempt_dir)
+        for result_path in (
+            attempt_dir / "audit-result.json",
+            attempt_dir / "judge" / "audit-result.json",
+        ):
+            recovered = _recover_audit_output_from_result_json(
+                result_path,
+                failure_detail,
+            )
+            if recovered is not None:
+                return recovered
+        recovered = _recover_audit_output_from_feature_verdicts(
+            attempt_dir / "feature-verdicts.json",
+            agent_input.spec,
+            failure_detail,
+        )
+        if recovered is not None:
+            return recovered
+    return None
+
+
+def _recover_audit_output_from_result_json(
+    result_path: Path,
+    failure_detail: str,
+) -> AuditAgentOutput | None:
+    if not result_path.exists():
+        return None
+    try:
+        parsed = _parse_audit_output(result_path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    parsed.narrative = (
+        (parsed.narrative or "audit result recovered from audit-result.json")
+        + f"\n\n[recovered after agent failure] {failure_detail}"
+    ).strip()
+    return parsed
+
+
+def _recover_audit_output_from_feature_verdicts(
+    verdict_path: Path,
+    spec: Spec,
+    failure_detail: str,
+) -> AuditAgentOutput | None:
+    if not verdict_path.exists():
+        return None
+    try:
+        data = json.loads(verdict_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    raw_verdicts = data.get("verdicts") if isinstance(data, dict) else None
+    if not isinstance(raw_verdicts, list):
+        return None
+
+    feature_audits: list[FeatureAudit] = []
+    for entry in raw_verdicts:
+        if not isinstance(entry, dict):
+            continue
+        feature_id = str(entry.get("feature_id") or "").strip()
+        if not feature_id:
+            continue
+        name = str(entry.get("name") or feature_id).strip()
+        status_raw = str(entry.get("status") or entry.get("verdict") or "").strip().lower()
+        status: Literal["passed", "partial", "blocked"]
+        if status_raw == "passed":
+            status = "passed"
+        elif status_raw == "partial":
+            status = "partial"
+        else:
+            status = "blocked"
+        evidence_raw = entry.get("evidence_refs") or []
+        evidence_refs = (
+            [str(ref) for ref in evidence_raw if ref]
+            if isinstance(evidence_raw, list) else []
+        )
+        detail = str(entry.get("detail") or "")
+        if status == "passed" and not evidence_refs:
+            status = "partial"
+            detail = (
+                detail
+                + " Fallback recovery found no evidence_refs for this passed Feature."
+            ).strip()
+        feature_audits.append(
+            FeatureAudit(
+                feature_id=feature_id,
+                name=name,
+                status=status,
+                detail=detail,
+                evidence_refs=evidence_refs,
+            )
+        )
+
+    expected_ids = [feature.id for feature in spec.features if feature.id]
+    by_feature_id = {audit.feature_id: audit for audit in feature_audits}
+    missing_ids = [feature_id for feature_id in expected_ids if feature_id not in by_feature_id]
+    if expected_ids and missing_ids:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.BLOCKED,
+            narrative=(
+                f"{failure_detail}; feature-verdicts.json was incomplete "
+                f"({len(missing_ids)} missing Feature verdict(s): "
+                f"{', '.join(missing_ids[:10])})"
+            ),
+            feature_audits=list(feature_audits),
+        )
+    if expected_ids:
+        feature_audits = [by_feature_id[feature_id] for feature_id in expected_ids]
+
+    if not feature_audits:
+        return None
+
+    blocked = [audit for audit in feature_audits if audit.status == "blocked"]
+    partial = [audit for audit in feature_audits if audit.status == "partial"]
+    if len(blocked) * 2 > len(feature_audits):
+        verdict = AuditVerdict.BLOCKED
+    elif blocked or partial:
+        verdict = AuditVerdict.PARTIAL
+    else:
+        verdict = AuditVerdict.PASSED
+
+    audits_by_id = {audit.feature_id: audit for audit in feature_audits}
+    feature_group_by_id = {feature.id: feature.group_id for feature in spec.features}
+    group_verdicts: list[GroupVerdict] = []
+    for group in spec.groups:
+        group_feature_ids = [
+            feature_id for feature_id, group_id in feature_group_by_id.items()
+            if group_id == group.id
+        ]
+        if not group_feature_ids:
+            group_feature_ids = [
+                str(feature_id) for feature_id in (group.feature_ids or [])
+                if str(feature_id)
+            ]
+        group_audits = [
+            audits_by_id[feature_id]
+            for feature_id in group_feature_ids
+            if feature_id in audits_by_id
+        ]
+        if not group_audits:
+            continue
+        failing = [audit for audit in group_audits if audit.status != "passed"]
+        group_verdicts.append(
+            GroupVerdict(
+                group_id=group.id,
+                passed=not failing,
+                detail=(
+                    "all recovered Feature verdicts passed"
+                    if not failing
+                    else "recovered Feature verdicts not passed: "
+                    + ", ".join(f"{audit.feature_id}={audit.status}" for audit in failing)
+                ),
+            )
+        )
+
+    narrative = (
+        f"{failure_detail}; recovered {len(feature_audits)} complete "
+        f"Feature verdict(s) from {verdict_path}. The audit agent completed "
+        "the structured evidence artifacts but did not return the final chat "
+        "JSON before the timeout."
+    )
+    return AuditAgentOutput(
+        verdict=verdict,
+        narrative=narrative,
+        group_verdicts=group_verdicts,
+        feature_audits=feature_audits,
+        quality_score=3 if verdict == AuditVerdict.PASSED else 0,
+        quality_findings=[
+            "Fallback recovered from feature-verdicts.json after the audit agent timed out.",
+            "No separate final quality score was emitted; inspect the cited screenshots and feature evidence for product polish.",
+        ],
+    )
+
+
 async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
     """Default LLM-driven audit agent.
 
@@ -2322,9 +2569,15 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
         parsed.wall_s = time.monotonic() - t0
         return parsed
     except AgentCallError as exc:
+        failure_detail = f"audit agent crashed: {exc}"
+        recovered = _recover_audit_output_from_artifacts(agent_input, failure_detail)
+        if recovered is not None:
+            recovered.cost_usd = exc.total_cost_usd or 0.0
+            recovered.wall_s = time.monotonic() - t0
+            return recovered
         return AuditAgentOutput(
             verdict=AuditVerdict.BLOCKED,
-            narrative=f"audit agent crashed: {exc}",
+            narrative=failure_detail,
             wall_s=time.monotonic() - t0,
         )
 

@@ -85,7 +85,7 @@ def test_get_run_returns_run_view(project_with_session: tuple[Path, str]) -> Non
     assert "guardrails" in body
 
 
-def test_get_run_includes_project_queue_concurrency(tmp_path: Path) -> None:
+def test_get_run_does_not_show_queue_concurrency_as_group_concurrency(tmp_path: Path) -> None:
     project = tmp_path / "proj"
     sid = "2026-05-04-200000-abc123"
     _write_minimal_session(
@@ -98,7 +98,7 @@ def test_get_run_includes_project_queue_concurrency(tmp_path: Path) -> None:
 
     body = _app_with_project(project).get(f"/api/run-view/{sid}").json()
 
-    assert body["dispatch"]["max_concurrent"] == 4
+    assert body["dispatch"]["max_concurrent"] == 1
 
 
 def test_list_runs_includes_queue_worktree_sessions(tmp_path: Path) -> None:
@@ -181,6 +181,9 @@ def test_get_run_merges_queue_state_for_worktree_session(tmp_path: Path) -> None
     # Proof packets still win terminal verdicts, but queue metrics must merge.
     assert body["status"] == "passed"
     assert body["wall_s"] == 200.0
+    assert body["control_plane"]["status"] == "interrupted"
+    assert body["control_plane"]["conflict"] is True
+    assert "Proof says the product passed" in body["control_plane"]["conflict_reason"]
 
 
 def test_get_run_derives_active_queue_duration(tmp_path: Path) -> None:

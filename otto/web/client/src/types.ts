@@ -351,6 +351,9 @@ export interface LandingItem {
   merge_id: string | null;
   merge_status: string | null;
   merge_run_status: string | null;
+  verified_head_sha?: string | null;
+  branch_head_sha?: string | null;
+  stale_reason?: string | null;
   started_at: string | null;
   finished_at: string | null;
   updated_at: string | null;

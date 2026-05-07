@@ -748,6 +748,57 @@ def test_parse_feature_ids_backfill_names_and_group_feature_ids() -> None:
     assert "spec.coerce.group_feature_ids" in codes
 
 
+def test_compile_normalization_synthesizes_features_from_group_only_feature_text() -> None:
+    from otto.spec_compile import (
+        _synthesize_features_from_group_feature_ids,
+        parse_spec,
+        spec_to_dict,
+    )
+    from otto.spec_warnings import WarningCollector
+
+    spec, _warnings = parse_spec({
+        "intent": "micro twitter",
+        "project_kind": "webapp",
+        "structure": {"payload": {}},
+        "groups": [
+            {
+                "id": "timeline",
+                "name": "Timeline",
+                "feature_ids": [
+                    "create posts for the current identity",
+                    "render a newest-first timeline",
+                ],
+                "dependencies": [],
+                "owned_paths": ["src/features/timeline/**"],
+                "checks": [],
+            }
+        ],
+        "features": [],
+    })
+    collector = WarningCollector()
+    spec.features = _synthesize_features_from_group_feature_ids(
+        spec.groups,
+        project_kind=spec.project_kind,
+        collector=collector,
+    )
+
+    assert [feature.id for feature in spec.features] == [
+        "create-posts-for-the-current-identity",
+        "render-a-newest-first-timeline",
+    ]
+    assert [feature.name for feature in spec.features] == [
+        "create posts for the current identity",
+        "render a newest-first timeline",
+    ]
+    assert [feature.group_id for feature in spec.features] == ["timeline", "timeline"]
+    assert spec.groups[0].feature_ids == [
+        "create-posts-for-the-current-identity",
+        "render-a-newest-first-timeline",
+    ]
+    assert spec_to_dict(spec)["features"][0]["group_id"] == "timeline"
+    assert "spec.coerce.features_from_group_feature_ids" in {w.code for w in collector.warnings}
+
+
 def test_validate_spec_warns_for_unroutable_feature_group() -> None:
     """Layer 2 cannot repair Features without a real owning Group."""
     spec = Spec(

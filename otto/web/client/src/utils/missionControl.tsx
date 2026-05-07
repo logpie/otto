@@ -418,7 +418,7 @@ export function taskBoardColumns(data: StateResponse | null, filters: Filters = 
   for (const item of data.landing.items) {
     if (item.superseded) continue;
     const live = liveByTask.get(item.task_id);
-    const runId = item.run_id || live?.run_id || null;
+    const runId = realRunId(live?.run_id) || realRunId(item.run_id);
     const card = boardTaskFromLanding(item, runId, !data.landing.merge_blocked, live);
     cardsByKey.set(item.task_id, card);
   }
@@ -512,7 +512,7 @@ export function boardTaskFromLive(item: LiveRunItem): BoardTask {
   const reason = item.overlay?.reason || lastEvent || liveWaitingReason(item) || item.elapsed_display || item.display_status;
   return {
     id: item.queue_task_id || item.run_id,
-    runId: item.run_id,
+    runId: realRunId(item.run_id),
     title: item.queue_task_id || item.display_id || item.run_id,
     summary: item.command || lastEvent || item.run_id,
     stage,
@@ -534,6 +534,12 @@ export function boardTaskFromLive(item: LiveRunItem): BoardTask {
     timestampDisplay: taskTimestampLine(item.active ? "Started" : "Updated", item.started_at || item.updated_at || item.heartbeat_at),
     timestampTitle: item.started_at || item.updated_at || item.heartbeat_at || null,
   };
+}
+
+export function realRunId(runId: string | null | undefined): string | null {
+  const value = String(runId || "").trim();
+  if (!value || value.startsWith("queue-compat:")) return null;
+  return value;
 }
 
 export function boardTaskFromHistory(item: HistoryItem): BoardTask {

@@ -143,7 +143,7 @@ def test_build_run_view_legacy_session_no_artifacts(tmp_path: Path) -> None:
     assert view["agent_usage_top"] == []
 
 
-def test_build_run_view_explains_group_dispatch_concurrency(tmp_path: Path) -> None:
+def test_build_run_view_explains_sequential_group_dispatch(tmp_path: Path) -> None:
     session = _setup_session(
         tmp_path,
         spec={
@@ -164,12 +164,12 @@ def test_build_run_view_explains_group_dispatch_concurrency(tmp_path: Path) -> N
 
     view = build_run_view(session, runtime_defaults={"queue_concurrent": 3})
 
-    assert view["dispatch"]["max_concurrent"] == 3
+    assert view["dispatch"]["max_concurrent"] == 1
     assert view["dispatch"]["running_group_ids"] == ["feed"]
     assert view["dispatch"]["ready_group_ids"] == ["search"]
     assert view["dispatch"]["waiting_group_ids"] == ["admin"]
-    assert view["dispatch"]["parallelizable_group_ids"] == ["feed", "search"]
-    assert "running 1/3" in view["dispatch"]["summary"]
+    assert view["dispatch"]["parallelizable_group_ids"] == ["feed"]
+    assert "running 1/1" in view["dispatch"]["summary"]
 
 
 def test_build_run_view_recovers_usage_from_nested_messages(tmp_path: Path) -> None:

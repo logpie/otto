@@ -51,6 +51,7 @@ from otto.build import (
     resolve_integration_base_branch,
 )
 from otto.checks import Evidence, run_checks
+from otto.setup_gitignore import otto_owned_paths_from_porcelain
 from otto.spec_compile import Group, Spec
 from otto.spec_state import aborted_group_ids, emit
 
@@ -951,6 +952,23 @@ class CommitOutcome:
     detail: str = ""
 
 
+def _unstage_otto_owned_paths(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+) -> subprocess.CompletedProcess[str]:
+    """Remove Otto runtime/evidence files from the index after `git add -A`."""
+    status = git(["status", "--porcelain"], worktree)
+    if status.returncode != 0:
+        return status
+    for runtime_path in otto_owned_paths_from_porcelain(status.stdout or ""):
+        git(["reset", "HEAD", "--", runtime_path], worktree)
+        git(
+            ["rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", runtime_path],
+            worktree,
+        )
+    return git(["status", "--porcelain"], worktree)
+
+
 def _branch_exists(
     git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
     worktree: Path,
@@ -1098,7 +1116,14 @@ def _commit_integration(
             detail=f"git add -A failed: {add_proc.stderr.strip()[:200]}",
         )
 
-    status = git(["status", "--porcelain"], worktree)
+    status = _unstage_otto_owned_paths(git, worktree)
+    if status.returncode != 0:
+        return CommitOutcome(
+            status=MergeStatus.BLOCKED,
+            head_before=head_before,
+            head_after=head_before,
+            detail=f"git status failed: {status.stderr.strip()[:200]}",
+        )
     if not status.stdout.strip():
         # No changes to commit — slice didn't contribute new code.
         return CommitOutcome(

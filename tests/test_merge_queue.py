@@ -27,6 +27,7 @@ from otto.build import (
 from otto.merge_queue import (
     MergeBudget,
     MergeStatus,
+    _commit_integration,
     eligible_candidates,
     passing_group_ids,
     run_merge_queue,
@@ -72,6 +73,16 @@ def _ensure_main(repo: Path) -> None:
     ).stdout.strip()
     if current != "main":
         subprocess.run(["git", "branch", "-m", current, "main"], cwd=repo, check=True)
+
+
+def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _passing_check() -> RepoTestCheck:
@@ -682,6 +693,30 @@ def test_run_merge_queue_real_merge_redundant_when_branch_empty(tmp_path: Path) 
     assert "s1" in result.landed_ids
     assert "s1" in result.redundant_ids
     assert result.results[0].status == MergeStatus.REDUNDANT
+
+
+def test_commit_integration_excludes_otto_runtime_evidence_from_product_commit(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('real change')\n", encoding="utf-8")
+    artifact_dir = tmp_path / "otto_artifacts" / "browser"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "shot.png").write_bytes(b"png")
+    (tmp_path / "__audit_home_body__.html").write_text("<main>audit</main>", encoding="utf-8")
+
+    outcome = _commit_integration(_git, tmp_path, group_id="s1", branch="i2p/s1")
+
+    assert outcome.status == MergeStatus.LANDED
+    committed_paths = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    assert "src/app.py" in committed_paths
+    assert not any(path.startswith("otto_artifacts/") for path in committed_paths)
+    assert "__audit_home_body__.html" not in committed_paths
 
 
 def test_run_merge_queue_real_merge_blocks_on_conflict(tmp_path: Path) -> None:

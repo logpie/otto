@@ -154,6 +154,12 @@ export function VerdictHeader({ view }: Props) {
           </time>
         </div>
       )}
+      {view.control_plane?.conflict && (
+        <div className="run-drawer-control-conflict" data-testid="run-control-plane-conflict">
+          {view.control_plane.conflict_reason ||
+            "Proof and queue control-plane status disagree."}
+        </div>
+      )}
       {!view.verdict && totalGroups > 0 && (
         <div className="run-drawer-active-line" data-testid="run-drawer-active-line">
           {dispatch && dispatch.running_group_ids.length > 0 ? (

@@ -572,6 +572,84 @@ def test_run_audit_writes_compact_evidence_packet_for_judge(tmp_path: Path) -> N
     assert "Project contract test" in captured["prompt"]
 
 
+def test_run_audit_expands_group_feature_ids_for_audit_prompt(tmp_path: Path) -> None:
+    spec = Spec(
+        intent="build a tiny feed",
+        project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        groups=[
+            Group(
+                id="timeline",
+                name="Timeline",
+                dependencies=[],
+                owned_paths=[],
+                feature_ids=["create posts", "newest-first ordering"],
+                checks=[],
+            )
+        ],
+        features=[],
+        cross_group_checks=[],
+    )
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    captured: dict[str, Any] = {}
+
+    async def passing_agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        captured["feature_ids"] = [feature.id for feature in input_.spec.features]
+        captured["prompt"] = _audit_prompt(input_)
+        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="ok")
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["timeline"], tmp_path),
+            merge_result=_merge_result(["timeline"]),
+            audit_agent=passing_agent,
+            budget=AuditBudget(audit_retries=0),
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert captured["feature_ids"] == ["create posts", "newest-first ordering"]
+    assert "## Spec Features" in captured["prompt"]
+    assert "- create posts: create posts (group timeline)" in captured["prompt"]
+
+
+def test_run_audit_resolves_relative_session_paths_for_judge(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    project_dir = Path("project")
+    project_dir.mkdir()
+    session_dir = Path("relative-session")
+    captured: dict[str, Any] = {}
+
+    async def passing_agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        captured["project_dir"] = input_.project_dir
+        captured["log_dir"] = input_.log_dir
+        captured["walkthrough_jsonl_path"] = input_.walkthrough_jsonl_path
+        captured["evidence_packet_path"] = input_.evidence_packet_path
+        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="ok")
+
+    result = asyncio.run(
+        run_audit(
+            _spec(["s1"]),
+            project_dir=project_dir,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], project_dir),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=passing_agent,
+            budget=AuditBudget(audit_retries=0),
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert captured["project_dir"].is_absolute()
+    assert captured["log_dir"].is_absolute()
+    assert captured["walkthrough_jsonl_path"].is_absolute()
+    assert captured["evidence_packet_path"].is_absolute()
+
+
 def test_run_audit_passes_judge_timeout_to_agent_input(tmp_path: Path) -> None:
     spec = _spec(["s1"])
     session_dir = tmp_path / "sess"
@@ -636,6 +714,183 @@ def test_default_audit_agent_uses_judge_timeout_from_input(tmp_path: Path, monke
 
     assert result.verdict == AuditVerdict.PASSED
     assert captured["timeout"] == 23
+
+
+def test_default_audit_agent_recovers_complete_feature_verdicts_on_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from otto.agent import AgentCallError
+    from otto.audit import default_audit_agent
+
+    spec = Spec(
+        intent="build a feed",
+        project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        groups=[
+            Group(
+                id="ui",
+                name="UI",
+                dependencies=[],
+                owned_paths=[],
+                feature_ids=["username", "timeline"],
+                checks=[],
+            )
+        ],
+        features=[
+            Feature(id="username", name="Persist username", group_id="ui"),
+            Feature(id="timeline", name="Newest-first timeline", group_id="ui"),
+        ],
+        cross_group_checks=[],
+    )
+    attempt_dir = tmp_path / "audit" / "attempt-00"
+    (attempt_dir / "judge").mkdir(parents=True)
+    (attempt_dir / "walkthrough").mkdir()
+    (attempt_dir / "feature-verdicts.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "verdicts": [
+                {
+                    "feature_id": "username",
+                    "verdict": "passed",
+                    "detail": "username persisted",
+                    "evidence_refs": ["walkthrough/walkthrough.jsonl#L2"],
+                },
+                {
+                    "feature_id": "timeline",
+                    "verdict": "passed",
+                    "detail": "timeline sorted newest first",
+                    "evidence_refs": ["walkthrough/walkthrough.jsonl#L3"],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    def fake_make_agent_options(*_args, **_kwargs):
+        return SimpleNamespace(cwd="", permission_mode="")
+
+    async def fake_run_agent_with_timeout(*_args, **_kwargs):
+        raise AgentCallError("Agent timed out after 600s", total_cost_usd=1.25)
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_agent_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+
+    result = asyncio.run(
+        default_audit_agent(
+            AuditAgentInput(
+                spec=spec,
+                project_dir=tmp_path,
+                integrated_worktree=tmp_path,
+                build_summary={},
+                merge_summary={},
+                cross_slice_evidence=[],
+                walkthrough_artifacts=[],
+                log_dir=attempt_dir / "judge",
+                walkthrough_jsonl_path=attempt_dir / "walkthrough" / "walkthrough.jsonl",
+                config={"agents": {}},
+                judge_timeout_s=600,
+            )
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert result.cost_usd == 1.25
+    assert [audit.feature_id for audit in result.feature_audits] == ["username", "timeline"]
+    assert result.group_verdicts[0].group_id == "ui"
+    assert result.group_verdicts[0].passed is True
+    assert result.quality_score == 3
+    assert "recovered 2 complete Feature verdict" in result.narrative
+
+
+def test_default_audit_agent_does_not_pass_incomplete_recovered_verdicts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from otto.agent import AgentCallError
+    from otto.audit import default_audit_agent
+
+    spec = Spec(
+        intent="build a feed",
+        project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        groups=[Group(id="ui", name="UI", feature_ids=["username", "timeline"])],
+        features=[
+            Feature(id="username", name="Persist username", group_id="ui"),
+            Feature(id="timeline", name="Newest-first timeline", group_id="ui"),
+        ],
+    )
+    attempt_dir = tmp_path / "audit" / "attempt-00"
+    (attempt_dir / "judge").mkdir(parents=True)
+    (attempt_dir / "walkthrough").mkdir()
+    (attempt_dir / "feature-verdicts.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "verdicts": [
+                {
+                    "feature_id": "username",
+                    "verdict": "passed",
+                    "detail": "username persisted",
+                    "evidence_refs": ["walkthrough/walkthrough.jsonl#L2"],
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    def fake_make_agent_options(*_args, **_kwargs):
+        return SimpleNamespace(cwd="", permission_mode="")
+
+    async def fake_run_agent_with_timeout(*_args, **_kwargs):
+        raise AgentCallError("Agent timed out after 600s")
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_agent_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+
+    result = asyncio.run(
+        default_audit_agent(
+            AuditAgentInput(
+                spec=spec,
+                project_dir=tmp_path,
+                integrated_worktree=tmp_path,
+                build_summary={},
+                merge_summary={},
+                cross_slice_evidence=[],
+                walkthrough_artifacts=[],
+                log_dir=attempt_dir / "judge",
+                walkthrough_jsonl_path=attempt_dir / "walkthrough" / "walkthrough.jsonl",
+                config={"agents": {}},
+                judge_timeout_s=600,
+            )
+        )
+    )
+
+    assert result.verdict == AuditVerdict.BLOCKED
+    assert "feature-verdicts.json was incomplete" in result.narrative
+    assert "timeline" in result.narrative
+
+
+def test_audit_prompt_includes_timeout_stop_rule(tmp_path: Path) -> None:
+    prompt = _audit_prompt(
+        AuditAgentInput(
+            spec=_spec(["s1"]),
+            project_dir=tmp_path,
+            integrated_worktree=tmp_path,
+            build_summary={},
+            merge_summary={},
+            cross_slice_evidence=[],
+            walkthrough_artifacts=[],
+            judge_timeout_s=300,
+            evidence_packet_path=tmp_path / "evidence-packet.json",
+        )
+    )
+
+    assert "hard 300s timeout" in prompt
+    assert "required fenced JSON verdict" in prompt
+    assert "return `partial` with the specific missing evidence instead of timing out" in prompt
+    assert "translating those observed actions into tagged `walkthrough.jsonl` entries" in prompt
+
+
+def test_audit_default_judge_timeout_allows_real_web_audit() -> None:
+    assert AuditBudget().judge_timeout_s == 600
 
 
 # ---------------------------------------------------------------------------

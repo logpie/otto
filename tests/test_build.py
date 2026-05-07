@@ -1447,6 +1447,28 @@ def test_commit_group_work_excludes_otto_build_logs_from_product_commit(
     assert "?? _otto_build_logs/" in status
 
 
+def test_commit_group_work_excludes_otto_runtime_evidence_from_product_commit(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('real change')\n", encoding="utf-8")
+    artifact_dir = tmp_path / "otto_artifacts" / "browser"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "shot.png").write_bytes(b"png")
+    (tmp_path / "__audit_home_body__.html").write_text("<main>audit</main>", encoding="utf-8")
+
+    assert _commit_group_work(tmp_path, group_id="g", branch="layer2/g")
+
+    committed_paths = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    assert "src/app.py" in committed_paths
+    assert not any(path.startswith("otto_artifacts/") for path in committed_paths)
+    assert "__audit_home_body__.html" not in committed_paths
+
+
 def test_run_build_marks_blocked_on_commit_failure(tmp_path: Path) -> None:
     """B2/B4: if _commit_group_work fails (e.g., git not configured),
     the slice is marked BLOCKED rather than PASSING. branch_by_group is

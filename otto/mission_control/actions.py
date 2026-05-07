@@ -31,13 +31,18 @@ from otto.runs.registry import (
 )
 from otto.runs.schema import RunRecord, is_terminal_status
 from otto.verification import (
-    VerificationPolicy,
     normalize_verification_policy,
     verification_policy_cli_value,
     verification_policy_label,
 )
 
 _COMMAND_COUNTER = itertools.count(1)
+
+LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE = (
+    "Legacy queue landing is unavailable because the old `otto merge` command "
+    "has been removed. Use the current Otto build path for group landing, or "
+    "run merge verification for an existing merge record."
+)
 
 
 @dataclass(slots=True)
@@ -149,16 +154,14 @@ def execute_merge_all(
     verification_policy: str | None = "smart",
     post_result: Callable[[ActionResult], None] | None = None,
 ) -> ActionResult:
+    del post_result
     try:
-        policy = normalize_verification_policy(verification_policy, default="smart")
+        normalize_verification_policy(verification_policy, default="smart")
     except ValueError as exc:
         return _error_result("Landing failed", str(exc))
-    return _launch_process(
-        _otto_cli_argv(*_merge_argv(policy, all_done=True, transactional=True)),
-        cwd=Path(project_dir),
-        description=f"merge all ({policy} verification)",
-        post_result=post_result,
-        settle_timeout_s=2.0,
+    return _warning_result(
+        "Landing unavailable",
+        LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE,
     )
 
 
@@ -184,18 +187,28 @@ def execute_merge_recover(
     *,
     post_result: Callable[[ActionResult], None] | None = None,
 ) -> ActionResult:
+    del post_result
     project_dir = Path(project_dir)
     if git_ops.merge_in_progress(project_dir):
         abort = git_ops.merge_abort(project_dir)
         if not abort.ok:
             detail = (abort.stderr or abort.stdout or "git merge --abort failed").strip()
             return _error_result("Recover landing failed", detail)
-    return _launch_process(
-        _otto_cli_argv("merge", "--verify", "risk-based", "--all"),
-        cwd=project_dir,
-        description="recover landing (risk-based verification)",
-        post_result=post_result,
-        settle_timeout_s=2.0,
+        return ActionResult(
+            ok=False,
+            message=(
+                "in-progress merge aborted. "
+                f"{LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE}"
+            ),
+            severity="warning",
+            modal_title="Landing unavailable",
+            modal_message=LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE,
+            refresh=True,
+            clear_banner=True,
+        )
+    return _warning_result(
+        "Landing unavailable",
+        LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE,
     )
 
 
@@ -620,6 +633,7 @@ def _execute_merge_selected(
     verification_policy: str | None,
     post_result: Callable[[ActionResult], None] | None,
 ) -> ActionResult:
+    del project_dir, post_result
     task_ids = [task_id for task_id in (selected_queue_task_ids or []) if task_id]
     if not task_ids:
         task_id = _queue_task_id(record)
@@ -628,15 +642,12 @@ def _execute_merge_selected(
     if not task_ids:
         return _error_result("Merge failed", "queue task id missing")
     try:
-        policy = normalize_verification_policy(verification_policy, default="smart")
+        normalize_verification_policy(verification_policy, default="smart")
     except ValueError as exc:
         return _error_result("Merge failed", str(exc))
-    return _launch_process(
-        _otto_cli_argv(*_merge_argv(policy, ids=task_ids, transactional=False)),
-        cwd=project_dir,
-        description=f"merge {' '.join(task_ids)} ({verification_policy_label(policy)} verification)",
-        post_result=post_result,
-        settle_timeout_s=2.0,
+    return _warning_result(
+        "Landing unavailable",
+        LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE,
     )
 
 
@@ -645,24 +656,6 @@ def _payload_verification_policy(payload: dict[str, Any] | None) -> str | None:
         return None
     value = payload.get("verification_policy")
     return str(value) if value is not None else None
-
-
-def _merge_argv(
-    policy: VerificationPolicy,
-    *,
-    ids: list[str] | None = None,
-    all_done: bool = False,
-    transactional: bool = False,
-) -> list[str]:
-    argv = ["merge", "--fast"]
-    if transactional:
-        argv.append("--transactional")
-    argv.extend(["--verify", verification_policy_cli_value(policy)])
-    if all_done:
-        argv.append("--all")
-    else:
-        argv.extend(ids or [])
-    return argv
 
 
 def _execute_open_editor(

@@ -81,6 +81,11 @@ def build_run_view(
         compile_active=compile_active,
         session_dir=session_dir,
     )
+    control_plane = _build_control_plane_status(
+        live_state,
+        product_status=status,
+        verdict=verdict_field,
+    )
 
     groups = _build_groups(spec, proof, state_events, live_state)
     dispatch = _build_dispatch(groups, live_state, runtime_defaults)
@@ -134,6 +139,7 @@ def build_run_view(
     return {
         "run_id": run_id,
         "status": status,
+        "control_plane": control_plane,
         "intent": intent,
         "project_kind": project_kind,
         "verdict": verdict_field,
@@ -270,8 +276,12 @@ def _build_dispatch(
             ready.append(gid)
         else:
             waiting.append(gid)
-    parallelizable = [*running, *ready]
     max_concurrent = _dispatch_max_concurrent(live_state, runtime_defaults)
+    if max_concurrent is None:
+        parallelizable = [*running, *ready]
+    else:
+        open_slots = max(0, max_concurrent - len(running))
+        parallelizable = [*running, *ready[:open_slots]]
     return {
         "max_concurrent": max_concurrent,
         "running_group_ids": running,
@@ -294,20 +304,20 @@ def _dispatch_max_concurrent(
     live_state: dict[str, Any] | None,
     runtime_defaults: dict[str, Any] | None,
 ) -> int | None:
+    # Group dispatch is sequential today. Queue concurrency controls how
+    # many top-level runs the watcher can execute, not how many Groups
+    # inside this run can build at once. Keep this explicit so RunView
+    # does not imply group-level parallelism before the build scheduler
+    # actually supports it.
     candidates = [
-        (live_state or {}).get("queue_concurrent"),
-        (live_state or {}).get("concurrent"),
-        (runtime_defaults or {}).get("queue_concurrent"),
-        (runtime_defaults or {}).get("concurrent"),
+        (live_state or {}).get("group_concurrent"),
+        (runtime_defaults or {}).get("group_concurrent"),
     ]
-    queue_defaults = (runtime_defaults or {}).get("queue")
-    if isinstance(queue_defaults, dict):
-        candidates.append(queue_defaults.get("concurrent"))
     for value in candidates:
         parsed = _positive_int_or_none(value)
         if parsed is not None:
             return parsed
-    return None
+    return 1
 
 
 def _positive_int_or_none(value: Any) -> int | None:
@@ -1556,6 +1566,42 @@ def _normalize_live_status(live_state: dict[str, Any] | None) -> str | None:
     }:
         return raw
     return None
+
+
+def _build_control_plane_status(
+    live_state: dict[str, Any] | None,
+    *,
+    product_status: str,
+    verdict: str | None,
+) -> dict[str, Any]:
+    raw_status = str(live_state.get("status") or "").strip() if live_state else ""
+    normalized = _normalize_live_status(live_state)
+    failure_reason = ""
+    if live_state:
+        failure_reason = str(
+            live_state.get("failure_reason")
+            or live_state.get("last_event")
+            or live_state.get("reason")
+            or ""
+        ).strip()
+    product_terminal_success = verdict == "passed" or product_status in {"passed", "landed"}
+    control_terminal_failure = normalized in {"interrupted", "aborted", "failed"}
+    conflict = bool(product_terminal_success and control_terminal_failure)
+    conflict_reason = ""
+    if conflict:
+        conflict_reason = (
+            "Proof says the product passed, but the queue control plane ended "
+            f"as {normalized}."
+        )
+        if failure_reason:
+            conflict_reason += f" Queue reason: {failure_reason}"
+    return {
+        "status": normalized,
+        "raw_status": raw_status or None,
+        "failure_reason": failure_reason or None,
+        "conflict": conflict,
+        "conflict_reason": conflict_reason or None,
+    }
 
 
 def _started_at(

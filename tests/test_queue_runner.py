@@ -481,6 +481,75 @@ def test_finalize_success_manifest_ignores_otto_runtime_artifacts(tmp_path: Path
     assert ts["failure_reason"] is None
 
 
+def test_finalize_success_manifest_ignores_otto_browser_evidence_artifacts(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    (repo / ".worktrees").mkdir()
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/t1", ".worktrees/t1", "main"],
+        cwd=repo,
+        check=True,
+    )
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    evidence_dir = repo / ".worktrees" / "t1" / "otto_artifacts" / "browser"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / "home-1200.png").write_bytes(b"png")
+    _write_queue_manifest(repo, "t1", exit_status="success")
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume"), otto_bin="/bin/true")
+    ts = {
+        "status": "running",
+        "started_at": "2026-04-19T00:00:00Z",
+        "child": {"pid": 123456, "pgid": 123456},
+    }
+
+    runner._finalize_task_from_manifest(ts, "t1", exit_code=0)
+
+    assert ts["status"] == "done"
+    assert ts["failure_reason"] is None
+
+
+def test_finalize_success_manifest_does_not_ignore_tracked_build_artifact_changes(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path)
+    (repo / ".worktrees").mkdir()
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/t1", ".worktrees/t1", "main"],
+        cwd=repo,
+        check=True,
+    )
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    worktree = repo / ".worktrees" / "t1"
+    (worktree / "dist").mkdir()
+    (worktree / "dist" / "app.js").write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "dist/app.js"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "track dist output"], cwd=worktree, check=True)
+    (worktree / "dist" / "app.js").write_text("new\n", encoding="utf-8")
+    _write_queue_manifest(repo, "t1", exit_status="success")
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume"), otto_bin="/bin/true")
+    ts = {
+        "status": "running",
+        "started_at": "2026-04-19T00:00:00Z",
+        "child": {"pid": 123456, "pgid": 123456},
+    }
+
+    runner._finalize_task_from_manifest(ts, "t1", exit_code=0)
+
+    assert ts["status"] == "failed"
+    assert "dist/app.js" in ts["failure_reason"]
+
+
 def test_finalize_missing_queue_manifest_uses_i2p_session_summary(tmp_path: Path) -> None:
     """i2p writes summary/proof artifacts even when the queue manifest is absent.
 
@@ -549,6 +618,7 @@ def test_finalize_missing_queue_manifest_uses_i2p_session_summary(tmp_path: Path
     assert ts["failure_reason"] is None
     assert ts["manifest_path"] == str(queue_manifest)
     assert ts["cost_usd"] == 0.25
+    assert ts["head_sha"] == "abc123"
     assert ts["stories_passed"] == 3
     assert ts["stories_tested"] == 3
     assert queue_manifest.exists()
@@ -564,6 +634,54 @@ def test_finalize_missing_queue_manifest_uses_i2p_session_summary(tmp_path: Path
     runner._finalize_task_from_manifest(ts, "t1", exit_code=0)
     assert ts["status"] == "done"
     assert ts["failure_reason"] is None
+
+
+@pytest.mark.parametrize("verdict", ["partial", "blocked"])
+def test_finalize_missing_queue_manifest_does_not_treat_completed_summary_as_success(
+    tmp_path: Path,
+    verdict: str,
+) -> None:
+    repo = init_repo(tmp_path)
+    (repo / ".worktrees").mkdir()
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/t1", ".worktrees/t1", "main"],
+        cwd=repo,
+        check=True,
+    )
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "add dashboard", "--provider", "codex"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+        resolved_intent="add dashboard",
+    ))
+    run_id = "2026-05-06-173132-2c6bc6"
+    session_dir = repo / ".worktrees" / "t1" / "otto_logs" / "sessions" / run_id
+    session_dir.mkdir(parents=True)
+    (session_dir / "summary.json").write_text(json.dumps({
+        "command": "build",
+        "run_id": run_id,
+        "branch": "build/t1",
+        "intent": "add dashboard",
+        "passed": False,
+        "status": "completed",
+        "verdict": verdict,
+    }), encoding="utf-8")
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume"), otto_bin="/bin/true")
+    ts = {
+        "status": "failed",
+        "failure_reason": "exited 0 but no manifest at otto_logs/queue/t1/manifest.json",
+        "started_at": "2026-05-06T17:31:32Z",
+        "child": {"pid": 123456, "pgid": 123456},
+        "attempt_run_id": run_id,
+        "child_run_id": run_id,
+        "session_dir": str(session_dir),
+    }
+
+    runner._finalize_task_from_manifest(ts, "t1", exit_code=0)
+
+    assert ts["status"] == "failed"
+    assert ts["failure_reason"] == "manifest exit_status=failure"
 
 
 def test_finalize_build_success_auto_commits_generated_lockfile(tmp_path: Path) -> None:

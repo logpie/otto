@@ -21,8 +21,11 @@ from otto.queue.schema import load_queue, load_state
 from otto.runs.registry import make_run_record, writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
-from otto.verification import verification_policy_cli_value
-from otto.mission_control.actions import ActionExecutingAdapter, make_action
+from otto.mission_control.actions import (
+    LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE,
+    ActionExecutingAdapter,
+    make_action,
+)
 from otto.mission_control.adapters.common import (
     artifact_ref_for_path,
     durable_session_dir_for_record,
@@ -257,29 +260,24 @@ class QueueMissionControlAdapter(ActionExecutingAdapter):
             make_action(
                 "m",
                 "merge selected",
-                enabled=bool(task_id) and record.status == "done",
+                enabled=False,
                 reason=(
                     "queue task id missing"
                     if not task_id
-                    else "only done queue rows can be merged"
-                    if record.status != "done"
-                    else None
+                    else LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE
                 ),
                 preview=(
                     "cannot target queue merge"
                     if not task_id
-                    else f"would shell `otto merge --fast --verify {verification_policy_cli_value('smart')} {task_id}`"
+                    else LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE
                 ),
             ),
             make_action(
                 "M",
                 "merge all",
-                enabled=True,
-                reason=None,
-                preview=(
-                    "would shell `otto merge --fast --transactional "
-                    f"--verify {verification_policy_cli_value('smart')} --all`"
-                ),
+                enabled=False,
+                reason=LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE,
+                preview=LEGACY_QUEUE_LANDING_UNAVAILABLE_MESSAGE,
             ),
             make_action(
                 "o",

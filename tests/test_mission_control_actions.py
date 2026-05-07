@@ -497,7 +497,7 @@ def test_cleanup_terminal_atomic_run_calls_cleanup_cli(tmp_path: Path, monkeypat
     assert _FakePopen.calls[-1]["argv"][-2:] == ["cleanup", "atomic-run"]
 
 
-def test_merge_selected_and_all_shell_out(tmp_path: Path, monkeypatch) -> None:
+def test_legacy_merge_selected_and_all_do_not_shell_out(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     _FakePopen.calls.clear()
     record = _record(
@@ -510,27 +510,21 @@ def test_merge_selected_and_all_shell_out(tmp_path: Path, monkeypatch) -> None:
         queue_task_id="task-1",
     )
 
-    execute_action(record, "m", tmp_path, selected_queue_task_ids=["task-1", "task-2"])
-    execute_merge_all(tmp_path)
+    selected = execute_action(
+        record,
+        "m",
+        tmp_path,
+        selected_queue_task_ids=["task-1", "task-2"],
+    )
+    all_done = execute_merge_all(tmp_path)
 
-    assert _FakePopen.calls[0]["argv"][-6:] == [
-        "merge",
-        "--fast",
-        "--verify",
-        "risk-based",
-        "task-1",
-        "task-2",
-    ]
-    assert _FakePopen.calls[1]["argv"][-6:] == [
-        "merge",
-        "--fast",
-        "--transactional",
-        "--verify",
-        "risk-based",
-        "--all",
-    ]
-    assert _FakePopen.calls[0]["start_new_session"] is True
-    assert _FakePopen.calls[1]["start_new_session"] is True
+    assert selected.ok is False
+    assert all_done.ok is False
+    assert selected.severity == "warning"
+    assert all_done.severity == "warning"
+    assert "old `otto merge` command has been removed" in (selected.message or "")
+    assert "old `otto merge` command has been removed" in (all_done.message or "")
+    assert _FakePopen.calls == []
 
 
 def test_merge_all_accepts_verification_policy(tmp_path: Path, monkeypatch) -> None:
@@ -539,15 +533,10 @@ def test_merge_all_accepts_verification_policy(tmp_path: Path, monkeypatch) -> N
 
     result = execute_merge_all(tmp_path, verification_policy="full")
 
-    assert result.ok is True
-    assert _FakePopen.calls[-1]["argv"][-6:] == [
-        "merge",
-        "--fast",
-        "--transactional",
-        "--verify",
-        "full",
-        "--all",
-    ]
+    assert result.ok is False
+    assert result.severity == "warning"
+    assert "old `otto merge` command has been removed" in (result.message or "")
+    assert _FakePopen.calls == []
 
 
 def test_merge_abort_requires_in_progress_merge(tmp_path: Path, monkeypatch) -> None:
@@ -576,7 +565,7 @@ def test_merge_abort_aborts_git_merge(tmp_path: Path, monkeypatch) -> None:
     assert calls == [str(tmp_path)]
 
 
-def test_merge_recover_aborts_then_launches_agentic_merge(tmp_path: Path, monkeypatch) -> None:
+def test_merge_recover_aborts_but_does_not_launch_removed_merge_command(tmp_path: Path, monkeypatch) -> None:
     abort_calls: list[str] = []
     monkeypatch.setattr("otto.mission_control.actions.subprocess.Popen", _FakePopen)
     monkeypatch.setattr(mission_control_actions.git_ops, "merge_in_progress", lambda project_dir: True)
@@ -589,10 +578,12 @@ def test_merge_recover_aborts_then_launches_agentic_merge(tmp_path: Path, monkey
 
     result = execute_merge_recover(tmp_path)
 
-    assert result.ok is True
+    assert result.ok is False
+    assert result.severity == "warning"
+    assert result.clear_banner is True
     assert abort_calls == [str(tmp_path)]
-    assert _FakePopen.calls[-1]["argv"][-4:] == ["merge", "--verify", "risk-based", "--all"]
-    assert _FakePopen.calls[-1]["cwd"] == str(tmp_path)
+    assert "old `otto merge` command has been removed" in (result.message or "")
+    assert _FakePopen.calls == []
 
 
 def test_merge_verify_shells_out_for_existing_merge(tmp_path: Path, monkeypatch) -> None:

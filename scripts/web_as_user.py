@@ -185,7 +185,8 @@ def artifact_mine_pass(project_dir: Path, failures: RunFailures) -> None:
       - check `git worktree list` for orphan worktrees
       - assert no `.otto-queue-state.json` lookalike files leaked into
         project root from agent prompts
-      - assert `.gitignore` (if present) excludes `otto_logs/`
+      - assert `.gitignore` (if present) excludes `otto_logs/` and
+        `otto_artifacts/`
     """
     from otto import paths
 
@@ -229,7 +230,47 @@ def artifact_mine_pass(project_dir: Path, failures: RunFailures) -> None:
                 f"live run {record.run_id!r} has no session dir at {sess}"
             )
 
-    # Orchestrator extends with worktree + gitignore + leakage checks.
+    _artifact_mine_gitignore_pass(project_dir, failures)
+
+
+def _artifact_mine_gitignore_pass(project_dir: Path, failures: RunFailures) -> None:
+    """Verify Otto runtime evidence cannot dirty real project source state."""
+    if not (project_dir / ".git").exists():
+        return
+    gitignore = project_dir / ".gitignore"
+    if not gitignore.exists():
+        runtime_dirs = [project_dir / "otto_logs", project_dir / "otto_artifacts"]
+        if any(path.exists() for path in runtime_dirs):
+            failures.fail(
+                "project created Otto runtime artifacts but has no gitignore for "
+                "otto_logs/ and otto_artifacts/"
+            )
+        return
+    try:
+        lines = gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        failures.fail(f"project gitignore could not be read: {exc}")
+        return
+    missing = [
+        pattern for pattern in ("otto_logs/", "otto_artifacts/")
+        if not _gitignore_has_dir_pattern(lines, pattern)
+    ]
+    if missing:
+        failures.fail(
+            "project gitignore is missing Otto runtime ignores: " + ", ".join(missing)
+        )
+
+
+def _gitignore_has_dir_pattern(lines: list[str], pattern: str) -> bool:
+    bare = pattern.rstrip("/")
+    accepted = {bare, f"{bare}/", f"{bare}/*"}
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        if line in accepted:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -330,9 +371,10 @@ W13_INTENT = (
 )
 
 # How long the harness will wait for the LLM build to reach a terminal state
-# before bailing. Per scenario plan: W1 ~8 min, W11 ~25 min. Add a margin so
-# slow-but-completing runs aren't forced into FAIL.
-W1_BUILD_TIMEOUT_S = 12 * 60
+# before bailing. W1 is now used for true Mission Control Web pressure tests
+# with real multi-group products; keep the default aligned with Otto's queue
+# task budget rather than the old tiny-kanban estimate.
+W1_BUILD_TIMEOUT_S = 60 * 60
 W11_BUILD_TIMEOUT_S = 25 * 60
 W2_BUILD_TIMEOUT_S = 20 * 60   # 3 sequential builds, generous bound
 W12A_BUILD_TIMEOUT_S = 10 * 60
@@ -1330,9 +1372,11 @@ def _mc_browser_back_forward(
             ],
             log_fn=log_fn,
             failures=ctx.failures,
+            hard=True,
         )
     except Exception as exc:  # noqa: BLE001
         log_fn(f"  mc-user back/forward failed: {exc}")
+        ctx.failures.fail(f"mc-user browser back/forward failed: {exc}")
         if ctx.web_url:
             try:
                 page.goto(ctx.web_url, wait_until="domcontentloaded", timeout=15_000)
@@ -1375,9 +1419,11 @@ def _mc_refresh(
             ],
             log_fn=log_fn,
             failures=ctx.failures,
+            hard=True,
         )
     except Exception as exc:  # noqa: BLE001
         log_fn(f"  mc-user reload failed: {exc}")
+        ctx.failures.fail(f"mc-user reload failed: {exc}")
         _record_mc_user_action(ctx, phase=phase, action="reload-failed", error=str(exc))
 
 
@@ -1620,6 +1666,73 @@ def _mc_project_roundtrip(
         failures=failures,
         hard=True,
     )
+
+
+def _mc_select_project_from_launcher_if_needed(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> bool:
+    """Select the scenario project through the visible launcher when shown."""
+    if page.locator('[data-testid="project-workspace"], [data-testid="task-board"]').count() > 0:
+        return True
+    launcher = page.locator('[data-testid="launcher-subhead"]').first
+    if launcher.count() == 0 or not launcher.is_visible():
+        failures.fail("Mission Control showed neither a project workspace nor the project launcher")
+        return False
+
+    project_name = ctx.project_dir.name
+    search = page.locator('[data-testid="launcher-project-search"]').first
+    if search.count() > 0 and search.is_visible() and search.is_enabled():
+        try:
+            search.fill(project_name, timeout=3_000)
+            time.sleep(0.3)
+        except Exception as exc:  # noqa: BLE001
+            failures.fail(f"launcher search for project {project_name!r} failed: {exc}")
+            return False
+
+    row = page.locator(".project-row").filter(has_text=project_name).first
+    if row.count() == 0:
+        failures.fail(f"launcher did not list scenario project {project_name!r}")
+        return False
+    if not row.is_visible() or not row.is_enabled():
+        failures.fail(f"launcher project row for {project_name!r} was not clickable")
+        return False
+    try:
+        row.click(timeout=5_000)
+        page.wait_for_selector('[data-testid="project-workspace"]', timeout=15_000)
+        _wait_for_mc_ready(page, timeout_ms=15_000)
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"selecting launcher project {project_name!r} failed: {exc}")
+        return False
+
+    _record_mc_user_action(
+        ctx,
+        phase="project-select",
+        action="open-project-from-launcher",
+        expectation="A real Mission Control user starts from the launcher and opens the target project before queuing work.",
+        project_name=project_name,
+        url=page.url,
+    )
+    _mc_check_expectation(
+        page,
+        ctx,
+        phase="project-select",
+        action="select project from launcher",
+        expectation="Selecting the project opens the actionable workspace.",
+        any_visible=[
+            '[data-testid="project-workspace"]',
+            '[data-testid="task-board"]',
+            '[data-testid="mission-new-job-button"]',
+            '[data-testid="new-job-button"]',
+        ],
+        log_fn=log_fn,
+        failures=failures,
+        hard=True,
+    )
+    return True
 
 
 def _mc_background_return(
@@ -1925,6 +2038,35 @@ def _api_get(base_url: str, path: str, *, timeout: float = 10.0) -> tuple[int, A
         return 0, {"error": str(exc)}
 
 
+def _api_post(
+    base_url: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout: float = 10.0,
+) -> tuple[int, Any]:
+    """Tiny stdlib HTTP POST to avoid an extra dep."""
+    import urllib.request
+
+    url = base_url.rstrip("/") + path
+    data = json.dumps(payload or {}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            try:
+                return resp.status, json.loads(body)
+            except json.JSONDecodeError:
+                return resp.status, body
+    except Exception as exc:  # noqa: BLE001
+        return 0, {"error": str(exc)}
+
+
 def _web_watcher_running(base_url: Optional[str]) -> bool:
     if not base_url:
         return False
@@ -1940,7 +2082,12 @@ def _web_watcher_running(base_url: Optional[str]) -> bool:
     )
 
 
-def _start_otto_web_in_process(project_dir: Path, artifact_dir: Path) -> Any:
+def _start_otto_web_in_process(
+    project_dir: Path,
+    artifact_dir: Path,
+    *,
+    project_launcher: bool = False,
+) -> Any:
     """Bring up otto's FastAPI in a thread on a free port; return the handle."""
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
@@ -1948,9 +2095,9 @@ def _start_otto_web_in_process(project_dir: Path, artifact_dir: Path) -> Any:
 
     ensure_bundle_built()
     start_backend = _import_start_backend()
-    projects_root = artifact_dir / "managed-projects"
+    projects_root = project_dir.parent if project_launcher else artifact_dir / "managed-projects"
     projects_root.mkdir(parents=True, exist_ok=True)
-    return start_backend(project_dir, projects_root=projects_root, project_launcher=False)
+    return start_backend(project_dir, projects_root=projects_root, project_launcher=project_launcher)
 
 
 def _provider_extra_args(provider: str) -> list[str]:
@@ -1992,6 +2139,10 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
         _log(f"mc_user_behavior={ctx.user_behavior} seed={_mc_user_seed(ctx)}")
 
     final_state: Optional[dict[str, Any]] = None
+    build_intent = _scenario_intent(ctx, W1_INTENT)
+    submitted_task: dict[str, Any] | None = None
+    submitted_task_id: Optional[str] = None
+    submitted_run_id: Optional[str] = None
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -2021,6 +2172,12 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"react never hydrated: {exc}")
+            _mc_select_project_from_launcher_if_needed(
+                page,
+                ctx,
+                log_fn=_log,
+                failures=failures,
+            )
             if ctx.user_behavior != "off":
                 _mc_check_expectation(
                     page,
@@ -2103,7 +2260,7 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             intent_field = page.locator('[data-testid="job-dialog-intent"]')
             if intent_field.count() > 0:
                 try:
-                    intent_field.fill(_scenario_intent(ctx, W1_INTENT), timeout=5_000)
+                    intent_field.fill(build_intent, timeout=5_000)
                 except Exception as exc:  # noqa: BLE001
                     failures.fail(f"intent fill failed: {exc}")
             # Set provider in advanced options (optional — server picks default if blank)
@@ -2119,6 +2276,7 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                     failures.note(f"could not set provider in dialog: {exc}")
 
             submit = page.locator('[data-testid="job-dialog-submit-button"]')
+            before_submit_keys = _state_task_keys(_state(ctx.web_url))
             if not failures.soft_assert(
                 submit.count() > 0, "submit button missing in JobDialog"
             ):
@@ -2129,7 +2287,31 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 except Exception as exc:  # noqa: BLE001
                     failures.fail(f"submit click failed: {exc}")
 
+            try:
+                page.wait_for_selector(
+                    '[data-testid="job-dialog-intent"]', state="detached", timeout=15_000
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.note(f"job dialog did not close after submit within 15s: {exc}")
+            submitted_task = _wait_for_submitted_task(
+                ctx.web_url,
+                before_keys=before_submit_keys,
+                timeout_s=20,
+                expected_intent=build_intent,
+                log_fn=_log,
+            )
+            submitted_to_queue = submitted_task is not None
+            if submitted_task is not None:
+                submitted_task_id = str(
+                    submitted_task.get("queue_task_id") or submitted_task.get("task_id") or ""
+                ).strip() or None
+                submitted_run_id = str(submitted_task.get("run_id") or "").strip() or None
             _safe_screenshot(page, artifact_dir, "05-submitted")
+            if not submitted_to_queue:
+                failures.fail(
+                    "submit did not create a new queued/running task matching the entered intent within 20s; "
+                    "not starting watcher or waiting for a terminal build"
+                )
             if ctx.user_behavior != "off":
                 _mc_check_expectation(
                     page,
@@ -2150,8 +2332,11 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
 
             # ---------- Step 7: start watcher (queue won't run otherwise) ----------
             _log("Step 7: start watcher")
-            time.sleep(1.5)  # let dialog close + state refresh
-            _click_start_watcher(page, failures=failures, label="W1", base_url=ctx.web_url)
+            if submitted_to_queue:
+                time.sleep(1.5)  # let dialog close + state refresh
+                _click_start_watcher(page, failures=failures, label="W1", base_url=ctx.web_url)
+            else:
+                _log("skipping watcher start because no queued task exists")
             _safe_screenshot(page, artifact_dir, "06-watcher-started")
             if ctx.user_behavior != "off":
                 _mc_check_expectation(
@@ -2182,7 +2367,9 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             deadline = time.monotonic() + build_timeout_s
             terminal_outcome: Optional[str] = None
             poll_count = 0
-            while time.monotonic() < deadline:
+            if not submitted_to_queue:
+                _log("skipping terminal poll because submit produced no queue row")
+            while submitted_to_queue and time.monotonic() < deadline:
                 poll_count += 1
                 status, body = _api_get(ctx.web_url, "/api/state")
                 if status != 200 or not isinstance(body, dict):
@@ -2206,10 +2393,19 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                         log_fn=_log,
                         failures=failures,
                     )
-                if history and any(o for o in history_outcomes):
-                    terminal_outcome = next(
-                        (o for o in history_outcomes if o), None
-                    )
+                for item in history:
+                    if submitted_task_id and item.get("queue_task_id") != submitted_task_id:
+                        continue
+                    if submitted_run_id and item.get("run_id") != submitted_run_id:
+                        continue
+                    if not submitted_task_id and not submitted_run_id:
+                        continue
+                    outcome = item.get("terminal_outcome")
+                    if outcome:
+                        terminal_outcome = outcome
+                        submitted_run_id = str(item.get("run_id") or submitted_run_id or "").strip() or submitted_run_id
+                        break
+                if terminal_outcome:
                     break
                 time.sleep(5)
             _log(f"terminal_outcome={terminal_outcome}")
@@ -2241,14 +2437,18 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 if terminal_outcome is None:
                     failures.note("skipping final evidence controls because the build never reached terminal")
                     raise StopIteration
-                # Click first task card if present
-                task_cards = page.locator(".task-card-main").first
-                if task_cards.count() > 0 and task_cards.is_enabled():
-                    try:
-                        task_cards.click(timeout=5_000)
-                    except Exception as exc:  # noqa: BLE001
-                        failures.note(f"task-card click failed: {exc}")
-                    time.sleep(1)
+                if submitted_run_id:
+                    _mc_open_run_by_id(page, submitted_run_id, failures=failures, log_fn=_log)
+                elif submitted_task_id:
+                    task_card = page.locator(f'[data-queue-task-id="{submitted_task_id}"] .task-card-main').first
+                    if task_card.count() > 0 and task_card.is_enabled():
+                        try:
+                            task_card.click(timeout=5_000)
+                        except Exception as exc:  # noqa: BLE001
+                            failures.fail(f"task-card click failed for submitted task {submitted_task_id}: {exc}")
+                        time.sleep(1)
+                    else:
+                        failures.fail(f"could not find visible task card for submitted task {submitted_task_id}")
                 # Walk evidence controls. A successful build must expose real
                 # evidence surfaces; screenshots alone are not a user oracle.
                 for tab_name, kind in [
@@ -2764,7 +2964,10 @@ def _click_start_watcher(
     if _web_watcher_running(base_url):
         return
     btn = page.locator(
-        '[data-testid="mission-start-watcher-button"], [data-testid="start-watcher-button"]'
+        '[data-testid="mission-start-watcher-button"], '
+        '[data-testid="start-watcher-button"], '
+        '[data-testid="task-board-start-queue-runner"], '
+        '[data-testid="run-detail-queued-start-watcher"]'
     ).first
     if btn.count() == 0:
         if _web_watcher_running(base_url):
@@ -2790,6 +2993,135 @@ def _click_start_watcher(
 def _state(base_url: str) -> Optional[dict[str, Any]]:
     _, body = _api_get(base_url, "/api/state")
     return body if isinstance(body, dict) else None
+
+
+def _queued_work_count(state: Optional[dict[str, Any]]) -> int:
+    if not isinstance(state, dict):
+        return 0
+    watcher_counts = (state.get("watcher") or {}).get("counts") or {}
+    queued_from_counts = sum(
+        int(watcher_counts.get(key) or 0)
+        for key in ("queued", "starting", "initializing", "running")
+    )
+    runtime = state.get("runtime") or {}
+    backlog = (runtime.get("command_backlog") or {}).get("pending") or 0
+    live_count = len(_live_items(state))
+    landing_count = len((state.get("landing") or {}).get("items") or [])
+    return max(
+        queued_from_counts,
+        int(runtime.get("queue_tasks") or 0),
+        int(runtime.get("state_tasks") or 0),
+        int(backlog or 0),
+        live_count,
+        landing_count,
+    )
+
+
+def _state_task_rows(state: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(state, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for source, items in (
+        ("live", (state.get("live") or {}).get("items") or []),
+        ("history", (state.get("history") or {}).get("items") or []),
+        ("landing", (state.get("landing") or {}).get("items") or []),
+    ):
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            row["_source"] = source
+            if source == "landing":
+                row.setdefault("queue_task_id", row.get("task_id"))
+            rows.append(row)
+    return rows
+
+
+def _task_row_keys(row: dict[str, Any]) -> set[str]:
+    return {
+        str(value).strip()
+        for value in (
+            row.get("queue_task_id"),
+            row.get("task_id"),
+            row.get("run_id"),
+        )
+        if str(value or "").strip()
+    }
+
+
+def _state_task_keys(state: Optional[dict[str, Any]]) -> set[str]:
+    keys: set[str] = set()
+    for row in _state_task_rows(state):
+        keys.update(_task_row_keys(row))
+    return keys
+
+
+def _wait_for_submitted_task(
+    base_url: str,
+    *,
+    before_keys: set[str],
+    timeout_s: float,
+    expected_task_id: str | None = None,
+    expected_intent: str | None = None,
+    log_fn: Callable[[str], None] | None = None,
+) -> dict[str, Any] | None:
+    intent_needle = " ".join(str(expected_intent or "").lower().split())[:120]
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        state = _state(base_url)
+        for row in _state_task_rows(state):
+            keys = _task_row_keys(row)
+            if expected_task_id and expected_task_id not in keys:
+                continue
+            if not expected_task_id and not keys.difference(before_keys):
+                continue
+            if intent_needle:
+                haystack = " ".join(
+                    str(value or "")
+                    for value in (
+                        row.get("summary"),
+                        row.get("intent"),
+                        row.get("display_name"),
+                        row.get("row_label"),
+                    )
+                )
+                haystack = " ".join(haystack.lower().split())
+                if intent_needle not in haystack:
+                    continue
+            if log_fn is not None:
+                label = row.get("queue_task_id") or row.get("task_id") or row.get("run_id")
+                log_fn(f"submitted task visible after submit: {label} source={row.get('_source')}")
+            return row
+        time.sleep(0.5)
+    if log_fn is not None:
+        if expected_task_id:
+            log_fn(f"submitted task {expected_task_id!r} not visible within {timeout_s:.0f}s")
+        else:
+            log_fn(f"no new task row became visible within {timeout_s:.0f}s")
+    return None
+
+
+def _wait_for_job_queued(
+    base_url: str,
+    *,
+    timeout_s: float,
+    log_fn: Callable[[str], None] | None = None,
+) -> bool:
+    deadline = time.monotonic() + timeout_s
+    last_count = 0
+    while time.monotonic() < deadline:
+        state = _state(base_url)
+        last_count = _queued_work_count(state)
+        if last_count > 0:
+            if log_fn is not None:
+                log_fn(f"queued work visible after submit: count={last_count}")
+            return True
+        time.sleep(0.5)
+    if log_fn is not None:
+        log_fn(f"queued work not visible within {timeout_s:.0f}s (last_count={last_count})")
+    return False
 
 
 def _live_items(state: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3931,6 +4263,7 @@ def _wait_for_terminal(
     log_fn: Callable[[str], None],
     domain_filter: Optional[set[str]] = None,
     queue_task_id: Optional[str] = None,
+    run_id: Optional[str] = None,
     on_poll: Optional[Callable[[int], None]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Poll /api/state until a matching history row has a terminal_outcome.
@@ -3947,6 +4280,8 @@ def _wait_for_terminal(
             if domain_filter and it.get("domain") not in domain_filter:
                 continue
             if queue_task_id and it.get("queue_task_id") != queue_task_id:
+                continue
+            if run_id and it.get("run_id") != run_id:
                 continue
             outcome = it.get("terminal_outcome")
             if outcome:
@@ -5003,6 +5338,12 @@ def _run_w7(ctx: ScenarioContext) -> ScenarioRunResult:
                 _wait_for_mc_ready(page)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"react never hydrated on mobile: {exc}")
+            _mc_select_project_from_launcher_if_needed(
+                page,
+                ctx,
+                log_fn=_log,
+                failures=failures,
+            )
             if ctx.user_behavior != "off":
                 _mc_check_expectation(
                     page,
@@ -6691,6 +7032,140 @@ def _throwaway_project() -> Iterator[Path]:
             shutil.rmtree(project, ignore_errors=True)
 
 
+def _project_processes(project_dir: Path) -> list[dict[str, Any]]:
+    """Return processes whose command line still references this scenario project."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid,ppid,pgid,command"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    needle = str(project_dir)
+    current_pid = os.getpid()
+    rows: list[dict[str, Any]] = []
+    for raw in (proc.stdout or "").splitlines()[1:]:
+        parts = raw.strip().split(None, 3)
+        if len(parts) != 4:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+            pgid = int(parts[2])
+        except ValueError:
+            continue
+        command = parts[3]
+        if pid == current_pid or needle not in command:
+            continue
+        rows.append({"pid": pid, "ppid": ppid, "pgid": pgid, "command": command})
+    return rows
+
+
+def _terminate_project_processes(project_dir: Path, *, grace_s: float = 3.0) -> dict[str, Any]:
+    """Best-effort cleanup for watcher/provider children before temp deletion."""
+    report: dict[str, Any] = {"matched": []}
+    children = _project_processes(project_dir)
+    report["matched"] = children
+    if not children:
+        return report
+
+    pgids = sorted({int(child["pgid"]) for child in children if int(child["pgid"]) > 0})
+    report["signalled_pgids"] = pgids
+    for pgid in pgids:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            report.setdefault("term_errors", []).append({"pgid": pgid, "error": str(exc)})
+
+    deadline = time.monotonic() + max(0.0, grace_s)
+    live = _project_processes(project_dir)
+    while live and time.monotonic() < deadline:
+        time.sleep(0.1)
+        live = _project_processes(project_dir)
+    report["after_sigterm"] = live
+    if not live:
+        return report
+
+    live_pgids = sorted({int(child["pgid"]) for child in live if int(child["pgid"]) > 0})
+    report["killed_pgids"] = live_pgids
+    for pgid in live_pgids:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            report.setdefault("kill_errors", []).append({"pgid": pgid, "error": str(exc)})
+    time.sleep(0.2)
+    report["after_sigkill"] = _project_processes(project_dir)
+    return report
+
+
+def _preserve_failed_project_snapshot(project_dir: Path, artifact_dir: Path) -> dict[str, Any]:
+    """Copy useful failure evidence before deleting the throwaway project."""
+    snapshot = artifact_dir / "project-snapshot"
+    report: dict[str, Any] = {"snapshot": str(snapshot), "copied": False}
+    if not project_dir.exists():
+        report["error"] = "project_dir missing"
+        return report
+    if snapshot.exists():
+        shutil.rmtree(snapshot, ignore_errors=True)
+
+    def _ignore(_dir: str, names: list[str]) -> set[str]:
+        ignored = {
+            ".git",
+            "node_modules",
+            "dist",
+            "build",
+            "coverage",
+            "test-results",
+            ".pytest_cache",
+            "__pycache__",
+        }
+        return {name for name in names if name in ignored}
+
+    try:
+        shutil.copytree(project_dir, snapshot, ignore=_ignore)
+        report["copied"] = True
+    except Exception as exc:  # noqa: BLE001
+        report["error"] = str(exc)
+    return report
+
+
+def _teardown_scenario_runtime(
+    *,
+    project_dir: Path,
+    artifact_dir: Path,
+    web_url: str | None,
+    keep_snapshot: bool,
+) -> None:
+    """Stop live Otto work before backend/tempdir teardown."""
+    report: dict[str, Any] = {}
+    if keep_snapshot:
+        report["snapshot"] = _preserve_failed_project_snapshot(project_dir, artifact_dir)
+    if web_url:
+        status, body = _api_post(web_url, "/api/watcher/stop", {}, timeout=10.0)
+        report["watcher_stop_api"] = {"status": status, "body": body}
+    try:
+        from otto.mission_control.service import terminate_watcher_blocking
+
+        report["terminate_watcher_blocking"] = terminate_watcher_blocking(
+            project_dir,
+            grace=5.0,
+            reason="web-as-user teardown",
+        )
+    except Exception as exc:  # noqa: BLE001
+        report["terminate_watcher_blocking_error"] = str(exc)
+    report["project_process_cleanup"] = _terminate_project_processes(project_dir)
+    try:
+        (artifact_dir / "teardown.json").write_text(
+            json.dumps(report, indent=2, default=str),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def classify_failure(failures: RunFailures) -> FailureClassification:
     """Classify whether a run's failures are INFRA or genuine FAIL."""
     text = "\n".join(failures.failures).lower()
@@ -6746,7 +7221,11 @@ def run_one_scenario(
         # Start the in-process FastAPI backend for the duration of the scenario.
         backend = None
         try:
-            backend = _start_otto_web_in_process(project_dir, artifact_dir)
+            backend = _start_otto_web_in_process(
+                project_dir,
+                artifact_dir,
+                project_launcher=scenario.id in {"W1", "W7"},
+            )
         except Exception as exc:  # noqa: BLE001
             failures.fail(f"failed to start in-process otto web backend: {exc}")
 
@@ -6790,6 +7269,12 @@ def run_one_scenario(
                 artifact_mine_pass(project_dir, failures)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"artifact_mine_pass crashed: {exc}")
+            _teardown_scenario_runtime(
+                project_dir=project_dir,
+                artifact_dir=artifact_dir,
+                web_url=getattr(backend, "url", None),
+                keep_snapshot=bool(failures.failures),
+            )
             # Stop the in-process backend.
             if backend is not None:
                 try:

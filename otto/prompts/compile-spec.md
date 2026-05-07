@@ -49,9 +49,9 @@ deterministically.
       "id": "shell",
       "name": "App shell with header and routing",
       "feature_ids": [
-        "scaffold the SPA",
-        "render the navbar with Home / About links",
-        "add /, /about routes"
+        "scaffold-spa",
+        "navbar-home-about",
+        "home-about-routes"
       ],
       "dependencies": [],
       "owned_paths": ["src/App.*", "src/index.*", "src/components/Navbar.*"],
@@ -63,6 +63,44 @@ deterministically.
           "timeout_s": 600
         }
       ]
+    }
+  ],
+  "features": [
+    {
+      "id": "scaffold-spa",
+      "name": "Scaffold the SPA",
+      "description": "The app boots as a browser-rendered single page app.",
+      "acceptance_detail": "Opening `/` renders the app shell without console errors.",
+      "evidence_kinds": ["BrowserJourney", "RepoTestCheck"],
+      "group_id": "shell",
+      "evidence_completeness": "full",
+      "coverage_confidence": "high",
+      "multi_actor_required": false,
+      "audit_pre_merge": false
+    },
+    {
+      "id": "navbar-home-about",
+      "name": "Home and About navigation",
+      "description": "The navbar exposes Home and About links.",
+      "acceptance_detail": "A browser journey can click both links and see distinct content.",
+      "evidence_kinds": ["BrowserJourney"],
+      "group_id": "shell",
+      "evidence_completeness": "full",
+      "coverage_confidence": "high",
+      "multi_actor_required": false,
+      "audit_pre_merge": false
+    },
+    {
+      "id": "home-about-routes",
+      "name": "Home and About routes",
+      "description": "The app renders distinct Home and About views.",
+      "acceptance_detail": "The route content changes when navigating between `/` and `/about`.",
+      "evidence_kinds": ["BrowserJourney"],
+      "group_id": "shell",
+      "evidence_completeness": "full",
+      "coverage_confidence": "high",
+      "multi_actor_required": false,
+      "audit_pre_merge": false
     }
   ],
   "shared_scaffold": ["package.json", "vite.config.*"],
@@ -757,7 +795,11 @@ will fail downstream browser quality evaluators.
    files first — don't contradict what's already there.
 2. Decide `project_kind`. Default to `webapp` for product-shaped intents.
 3. Decompose into 2–6 vertical groups with explicit deps.
-4. Write the spec JSON to `{spec_path}`. If the file write succeeds, do
+4. Declare every user-facing capability as a first-class `features[]`
+   entry. `groups[*].feature_ids` must contain stable feature ids from
+   `features[].id`, not prose descriptions. Do not leave `features` empty
+   for a real build.
+5. Write the spec JSON to `{spec_path}`. If the file write succeeds, do
    NOT paste the JSON in your final message. Only if the write fails,
    emit the JSON inside `<spec_json>...</spec_json>` with no markdown
    fences inside the tags.

@@ -41,6 +41,7 @@ from collections.abc import Iterable
 from typing import Any, Callable, Protocol
 
 from otto.checks import Evidence, run_checks
+from otto.setup_gitignore import otto_owned_paths_from_porcelain
 from otto.spec_compile import CheckKind, Component, Feature, Group, Spec
 from otto.spec_state import emit, is_group_aborted_by_user
 
@@ -1081,13 +1082,13 @@ def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
     )
     if add.returncode != 0:
         return False
-    for runtime_path in (
-        "_session",
-        "otto_logs",
-        "_otto_build_logs",
-        ".otto",
-        ".playwright-cli",
-    ):
+    status_after_add = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    if status_after_add.returncode != 0:
+        return False
+    for runtime_path in otto_owned_paths_from_porcelain(status_after_add.stdout or ""):
         subprocess.run(
             ["git", "reset", "HEAD", "--", runtime_path],
             cwd=worktree, capture_output=True, text=True, check=False,

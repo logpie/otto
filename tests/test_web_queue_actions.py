@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from otto import paths
 from otto.queue.schema import load_queue, write_state as write_queue_state
 
-from tests._web_mc_helpers import _append_queue_task, _client, _init_repo, _write_empty_queue_state
+from tests._web_mc_helpers import (
+    _append_queue_task,
+    _client,
+    _create_branch_file,
+    _init_repo,
+    _write_empty_queue_state,
+)
 
 
 def test_web_queue_build_enqueues_without_click_context(tmp_path: Path) -> None:
@@ -135,6 +142,59 @@ def test_landing_item_derives_active_i2p_feature_count_from_compiled_spec(tmp_pa
     assert item["run_id"] == "run-123"
     assert item["stories_passed"] == 0
     assert item["stories_tested"] == 3
+
+
+def test_landing_blocks_when_branch_moves_after_certification(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _create_branch_file(repo, "build/stale", filename="feature.txt", content="v1\n")
+    certified_sha = subprocess.check_output(
+        ["git", "rev-parse", "build/stale"],
+        cwd=repo,
+        text=True,
+    ).strip()
+    subprocess.run(["git", "checkout", "-q", "build/stale"], cwd=repo, check=True)
+    (repo / "feature.txt").write_text("v2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "move branch after certify"], cwd=repo, check=True)
+    moved_sha = subprocess.check_output(
+        ["git", "rev-parse", "build/stale"],
+        cwd=repo,
+        text=True,
+    ).strip()
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+
+    _append_queue_task(
+        repo,
+        "stale",
+        command_argv=["build", "add feed"],
+        resolved_intent="add feed",
+        branch="build/stale",
+        worktree=".worktrees/stale",
+    )
+    write_queue_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "stale": {
+                    "status": "done",
+                    "attempt_run_id": "run-stale",
+                    "head_sha": certified_sha,
+                }
+            },
+        },
+    )
+
+    item = _client(repo).get("/api/state").json()["landing"]["items"][0]
+
+    assert item["landing_state"] == "blocked"
+    assert item["label"] == "Stale certification"
+    assert item["verified_head_sha"] == certified_sha
+    assert item["branch_head_sha"] == moved_sha
+    assert "Branch moved after certification" in item["stale_reason"]
+    assert "Branch moved after certification" in item["diff_error"]
 
 
 def test_web_queue_build_spec_defaults_to_web_review_mode(tmp_path: Path) -> None:

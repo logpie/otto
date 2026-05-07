@@ -206,9 +206,42 @@ def load_project_history_rows(project_dir: Path, *, limit_hint: int | None = Non
     # project — observed in P1-P9). The fix is generic: scan the well-
     # known sessions root and synthesize HistoryRow-shaped dicts for
     # every session that has spec.json or proof-packet.json.
-    rows.extend(_load_i2p_session_history_rows(project_dir))
+    known_run_ids = {history_run_id(row) for row in rows}
+    rows.extend(
+        row
+        for row in _load_i2p_session_history_rows(project_dir)
+        if history_run_id(row) not in known_run_ids
+    )
     rows.sort(key=lambda r: str(r.get("timestamp") or r.get("finished_at") or ""))
     return rows
+
+
+def _iter_i2p_session_dirs(project_dir: Path) -> list[tuple[Path, Path | None]]:
+    project_root = project_dir.resolve(strict=False)
+    roots: list[tuple[Path, Path | None]] = [
+        (paths.sessions_root(project_root), None)
+    ]
+    worktrees_root = project_root / ".worktrees"
+    if worktrees_root.exists() and worktrees_root.is_dir():
+        for child in sorted(worktrees_root.iterdir(), key=lambda path: path.name):
+            if child.is_dir():
+                roots.append((paths.sessions_root(child), child))
+
+    by_id: dict[str, tuple[Path, Path | None]] = {}
+    for root, worktree in roots:
+        resolved_root = root.resolve(strict=False)
+        if not _is_relative_to(resolved_root, project_root):
+            continue
+        if not resolved_root.exists() or not resolved_root.is_dir():
+            continue
+        for entry in sorted(resolved_root.iterdir(), key=lambda path: path.name):
+            if not entry.is_dir():
+                continue
+            resolved_entry = entry.resolve(strict=False)
+            if not _is_relative_to(resolved_entry, resolved_root):
+                continue
+            by_id.setdefault(entry.name, (resolved_entry, worktree))
+    return list(by_id.values())
 
 
 def _load_i2p_session_history_rows(project_dir: Path) -> list[dict[str, Any]]:
@@ -222,13 +255,8 @@ def _load_i2p_session_history_rows(project_dir: Path) -> list[dict[str, Any]]:
     so the dashboard's filtering (Outcome=Success/Failed) works without
     the user needing to know which run is i2p.
     """
-    sessions_root = paths.sessions_root(project_dir)
-    if not sessions_root.exists():
-        return []
     out: list[dict[str, Any]] = []
-    for entry in sorted(sessions_root.iterdir()):
-        if not entry.is_dir():
-            continue
+    for entry, worktree in _iter_i2p_session_dirs(project_dir):
         spec_path = entry / "spec" / "spec.json"
         if not spec_path.exists():
             continue  # not an i2p session
@@ -290,8 +318,8 @@ def _load_i2p_session_history_rows(project_dir: Path) -> list[dict[str, Any]]:
             "timestamp": finished_iso,
             "branch": None,
             "target_branch": None,
-            "head_sha": None,
-            "worktree": str(project_dir),
+            "head_sha": _string_or_none(proof.get("head_sha")),
+            "worktree": str(worktree.resolve(strict=False) if worktree else project_dir),
             "resumable": False,
             "session_dir": str(entry),
             "manifest_path": None,
@@ -319,6 +347,14 @@ def _load_i2p_session_history_rows(project_dir: Path) -> list[dict[str, Any]]:
             "i2p_slice_count": len(groups),
         })
     return out
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _normalize_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:

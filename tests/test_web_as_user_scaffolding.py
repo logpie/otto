@@ -220,7 +220,7 @@ def test_web_as_user_honors_scenario_returned_failure(monkeypatch, tmp_path: Pat
 
     monkeypatch.setattr(web_as_user, "DEFAULT_ARTIFACT_ROOT", tmp_path / "artifacts")
     monkeypatch.setattr(web_as_user, "_throwaway_project", fake_project)
-    monkeypatch.setattr(web_as_user, "_start_otto_web_in_process", lambda _project, _artifact: DummyBackend())
+    monkeypatch.setattr(web_as_user, "_start_otto_web_in_process", lambda _project, _artifact, **_kwargs: DummyBackend())
     monkeypatch.setattr(web_as_user, "artifact_mine_pass", lambda _project, _failures: None)
 
     scenario = web_as_user.Scenario(
@@ -288,6 +288,45 @@ def test_artifact_mine_does_not_require_manifest_for_running_queue_task(tmp_path
         '{"tasks": {"build-micro-twitter": {"status": "running"}}}',
         encoding="utf-8",
     )
+    failures = web_as_user.RunFailures()
+
+    web_as_user.artifact_mine_pass(project, failures)
+
+    assert failures.failures == []
+
+
+def test_artifact_mine_flags_missing_otto_artifacts_gitignore_after_evidence(tmp_path: Path) -> None:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=project, check=True)
+    (project / "otto_artifacts").mkdir()
+    failures = web_as_user.RunFailures()
+
+    web_as_user.artifact_mine_pass(project, failures)
+
+    assert any("otto_artifacts" in failure for failure in failures.failures)
+
+
+def test_artifact_mine_accepts_runtime_gitignore_patterns(tmp_path: Path) -> None:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=project, check=True)
+    (project / ".gitignore").write_text("otto_logs/\notto_artifacts/\n", encoding="utf-8")
+    (project / "otto_artifacts").mkdir()
     failures = web_as_user.RunFailures()
 
     web_as_user.artifact_mine_pass(project, failures)
