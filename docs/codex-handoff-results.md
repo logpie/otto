@@ -1994,3 +1994,67 @@ Decision:
 - Classify as `Otto UI/API truthfulness bugs fixed`.
 - This remains an audit/repair round against the Acme pressure-test evidence,
   not a new pressure-test tier.
+
+## 2026-05-07 — Codex App Server Spike Follow-Up: Audit Token Blow-Up And Generated Artifacts
+
+Context:
+- Compared `codex-app-server` against `codex` on the same ledgerlite CLI intent
+  under `/tmp/otto-appserver-validation`.
+- App Server run: `2026-05-07-163432-dad295`, verdict `passed`, wall `271s`,
+  `244,007` tokens.
+- Codex exec run: `2026-05-07-164129-440b30`, verdict `partial`, wall `658s`,
+  `2,813,417` tokens.
+
+Bug found: audit agent accidentally searched Otto runtime transcripts
+- Evidence: Codex exec audit attempt 1 contained one `rg -n ... -S .` result
+  with `676,387` chars. The search matched `otto_logs/`,
+  `_otto_build_logs/`, prior `messages.jsonl`, prompts, and narrative logs.
+- Impact: audit attempt 1 used `651,182` tokens for a small CLI app; the whole
+  audit phase used `1,083,043` tokens across two attempts.
+- Root cause: the prompt warned against bulk-reading `messages.jsonl`, but the
+  harness did not prevent broad content search from indirectly ingesting the
+  same transcripts.
+- Generic fix: `default_audit_agent` now installs an audit-only
+  `RIPGREP_CONFIG_PATH` that excludes Otto runtime logs, provider transcripts,
+  generated caches, `.git`, and dependency directories from normal `rg`
+  searches. The audit prompt now names this guard and clarifies that transcripts
+  are diagnostic fallback evidence, not product behavior.
+- Verification: rerunning the exact dangerous `rg -n ... -S .` query against
+  the failed ledgerlite project with the new config reduced output from about
+  `1.5MB` to `2.7KB` and produced zero `messages.jsonl` / `otto_logs` /
+  `_otto_build_logs` hits.
+
+Bug found: generated Python artifacts leaked into i2p branch commits
+- Evidence: both providers produced scope warnings for `__pycache__/*.pyc`; the
+  Codex exec run then failed dependency branch setup because sibling branches
+  conflicted on tracked binary `ledgerlite/__pycache__/cli.cpython-314.pyc`.
+- Root cause: build/merge commit staging defensively unstaged Otto-owned paths,
+  but did not defensively unstage common generated artifacts when `.gitignore`
+  was incomplete or bypassed.
+- Generic fix: build and merge commit paths now unstage both Otto runtime files
+  and common generated artifacts from `git add -A`; scope violation reporting
+  ignores generated build/test artifacts.
+
+Regression tests added:
+- `tests/test_audit.py::test_default_audit_agent_sets_search_guard_env`
+- `tests/test_build.py::test_scope_violations_ignore_common_generated_artifacts`
+- `tests/test_build.py::test_commit_group_work_excludes_common_generated_artifacts`
+- `tests/test_merge_queue.py::test_commit_integration_excludes_common_generated_artifacts`
+
+Verification:
+- `uv run pytest -q tests/test_audit.py::test_default_audit_agent_sets_search_guard_env tests/test_audit.py::test_default_audit_agent_uses_judge_timeout_from_input`
+  -> `2 passed`.
+- `uv run pytest -q tests/test_build.py::test_scope_violations_ignore_common_generated_artifacts tests/test_build.py::test_commit_group_work_excludes_common_generated_artifacts tests/test_build.py::test_commit_group_work_excludes_otto_build_logs_from_product_commit`
+  -> `3 passed`.
+- `uv run pytest -q tests/test_merge_queue.py::test_commit_integration_excludes_common_generated_artifacts tests/test_merge_queue.py::test_commit_integration_excludes_otto_runtime_evidence_from_product_commit`
+  -> `2 passed`.
+- `uv run pytest -q tests/test_audit.py tests/test_build.py tests/test_merge_queue.py --maxfail=3`
+  -> `145 passed`.
+- `uv run ruff check otto/audit.py otto/build.py otto/merge_queue.py otto/setup_gitignore.py tests/test_audit.py tests/test_build.py tests/test_merge_queue.py`
+  -> passed.
+
+Decision:
+- Classify as `Otto bug fixed`.
+- App Server remains a successful provider spike, but the provider comparison
+  should be rerun after this generic artifact/search hardening because the
+  previous Codex exec baseline was confounded by the fixed Otto bugs.

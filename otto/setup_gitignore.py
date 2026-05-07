@@ -191,6 +191,22 @@ def otto_owned_paths_from_porcelain(output: str) -> list[str]:
     return paths
 
 
+def non_product_paths_from_porcelain(output: str) -> list[str]:
+    """Return generated/runtime paths that must not be committed as product code."""
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        path = git_porcelain_path(line)
+        if not path or path in seen:
+            continue
+        if is_otto_owned_path(path) or is_common_build_artifact_path(path):
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
 def is_common_build_artifact_path(path: str) -> bool:
     """Return True for generated test/build/runtime artifacts Otto ignores.
 

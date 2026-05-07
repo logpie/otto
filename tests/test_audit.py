@@ -717,6 +717,53 @@ def test_default_audit_agent_uses_judge_timeout_from_input(tmp_path: Path, monke
     assert captured["timeout"] == 23
 
 
+def test_default_audit_agent_sets_search_guard_env(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import default_audit_agent
+
+    captured: dict[str, Any] = {}
+
+    def fake_make_agent_options(*_args, **_kwargs):
+        return SimpleNamespace(cwd="", permission_mode="", env={"PATH": "/bin"})
+
+    async def fake_run_agent_with_timeout(_prompt, options, **_kwargs):
+        captured["env"] = options.env
+        return (
+            '```json\n{"verdict":"passed","narrative":"ok","quality_score":3}\n```',
+            0.0,
+            "session-1",
+            {},
+        )
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_agent_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+
+    result = asyncio.run(
+        default_audit_agent(
+            AuditAgentInput(
+                spec=_spec(["s1"]),
+                project_dir=tmp_path,
+                integrated_worktree=tmp_path,
+                build_summary={},
+                merge_summary={},
+                cross_slice_evidence=[],
+                walkthrough_artifacts=[],
+                log_dir=tmp_path / "audit" / "attempt-00" / "judge",
+                config={"agents": {}},
+            )
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    env = captured["env"]
+    assert env["PATH"] == "/bin"
+    config_path = Path(env["RIPGREP_CONFIG_PATH"])
+    assert config_path.exists()
+    config_text = config_path.read_text(encoding="utf-8")
+    assert "--glob=!**/otto_logs/**" in config_text
+    assert "--glob=!**/_otto_build_logs/**" in config_text
+    assert "--glob=!**/messages.jsonl" in config_text
+
+
 def test_default_audit_agent_recovers_complete_feature_verdicts_on_timeout(
     tmp_path: Path, monkeypatch
 ) -> None:

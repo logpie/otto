@@ -41,7 +41,10 @@ from collections.abc import Iterable
 from typing import Any, Callable, Protocol
 
 from otto.checks import Evidence, run_checks
-from otto.setup_gitignore import otto_owned_paths_from_porcelain
+from otto.setup_gitignore import (
+    is_common_build_artifact_path,
+    non_product_paths_from_porcelain,
+)
 from otto.spec_compile import CheckKind, Component, Feature, Group, Spec
 from otto.spec_state import emit, is_group_aborted_by_user
 
@@ -531,6 +534,8 @@ def detect_scope_violations(
     for raw in modified_paths:
         path = str(raw or "").strip()
         if not path:
+            continue
+        if is_common_build_artifact_path(path):
             continue
         if _matches_any(path, own_globs):
             continue
@@ -1065,7 +1070,8 @@ def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
         return False
     # V14 fix: stage all user changes via plain `git add -A` (so the
     # project's .gitignore works normally), then DEFENSIVELY unstage
-    # Otto's runtime artifact paths. Two steps because:
+    # Otto runtime artifacts and common generated test/build artifacts.
+    # Two steps because:
     #   - explicit pathspec exclusions on `git add` make git complain
     #     with rc=1 when the excluded path is also gitignored
     #     ("paths are ignored by one of your .gitignore files"), even
@@ -1088,13 +1094,13 @@ def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
     )
     if status_after_add.returncode != 0:
         return False
-    for runtime_path in otto_owned_paths_from_porcelain(status_after_add.stdout or ""):
+    for non_product_path in non_product_paths_from_porcelain(status_after_add.stdout or ""):
         subprocess.run(
-            ["git", "reset", "HEAD", "--", runtime_path],
+            ["git", "reset", "HEAD", "--", non_product_path],
             cwd=worktree, capture_output=True, text=True, check=False,
         )
         subprocess.run(
-            ["git", "rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", runtime_path],
+            ["git", "rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", non_product_path],
             cwd=worktree, capture_output=True, text=True, check=False,
         )
     status = subprocess.run(

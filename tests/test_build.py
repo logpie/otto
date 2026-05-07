@@ -199,6 +199,27 @@ def test_scope_violations_warns_on_existing_unowned_file(tmp_path: Path) -> None
     assert violations == ["pyproject.toml"]
 
 
+def test_scope_violations_ignore_common_generated_artifacts(tmp_path: Path) -> None:
+    """Generated caches are not product write-scope evidence."""
+    spec = _spec(
+        [
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app.py"], feature_ids=[], checks=[]),
+        ]
+    )
+    cache_dir = tmp_path / "pkg" / "__pycache__"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "app.cpython-314.pyc").write_bytes(b"cache")
+
+    violations = detect_scope_violations(
+        spec.groups[0],
+        spec,
+        ["pkg/__pycache__/app.cpython-314.pyc", "tests/__pycache__/test_app.pyc"],
+        project_root=tmp_path,
+    )
+
+    assert violations == []
+
+
 def test_scope_violations_allows_new_unowned_file(tmp_path: Path) -> None:
     """New supporting files remain allowed as implicit shared scaffold."""
     spec = _spec(
@@ -1467,6 +1488,30 @@ def test_commit_group_work_excludes_otto_runtime_evidence_from_product_commit(
     assert "src/app.py" in committed_paths
     assert not any(path.startswith("otto_artifacts/") for path in committed_paths)
     assert "__audit_home_body__.html" not in committed_paths
+
+
+def test_commit_group_work_excludes_common_generated_artifacts(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('real change')\n", encoding="utf-8")
+    cache_dir = tmp_path / "src" / "__pycache__"
+    cache_dir.mkdir()
+    (cache_dir / "app.cpython-314.pyc").write_bytes(b"cache")
+    pytest_cache = tmp_path / ".pytest_cache"
+    pytest_cache.mkdir()
+    (pytest_cache / "README.md").write_text("cache\n", encoding="utf-8")
+
+    assert _commit_group_work(tmp_path, group_id="g", branch="layer2/g")
+
+    committed_paths = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    assert "src/app.py" in committed_paths
+    assert not any("__pycache__" in path for path in committed_paths)
+    assert not any(path.startswith(".pytest_cache/") for path in committed_paths)
 
 
 def test_run_build_marks_blocked_on_commit_failure(tmp_path: Path) -> None:

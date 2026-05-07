@@ -719,6 +719,32 @@ def test_commit_integration_excludes_otto_runtime_evidence_from_product_commit(
     assert "__audit_home_body__.html" not in committed_paths
 
 
+def test_commit_integration_excludes_common_generated_artifacts(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('real change')\n", encoding="utf-8")
+    cache_dir = tmp_path / "src" / "__pycache__"
+    cache_dir.mkdir()
+    (cache_dir / "app.cpython-314.pyc").write_bytes(b"cache")
+    pytest_cache = tmp_path / ".pytest_cache"
+    pytest_cache.mkdir()
+    (pytest_cache / "README.md").write_text("cache\n", encoding="utf-8")
+
+    outcome = _commit_integration(_git, tmp_path, group_id="s1", branch="i2p/s1")
+
+    assert outcome.status == MergeStatus.LANDED
+    committed_paths = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    assert "src/app.py" in committed_paths
+    assert not any("__pycache__" in path for path in committed_paths)
+    assert not any(path.startswith(".pytest_cache/") for path in committed_paths)
+
+
 def test_run_merge_queue_real_merge_blocks_on_conflict(tmp_path: Path) -> None:
     """Pattern D: a slice branch that conflicts with main on merge
     BLOCKS without an agent (real merge errors are surfaced, not hidden).
