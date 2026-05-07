@@ -71,6 +71,7 @@ try:
     from agents import ModelSettings as _OpenAIModelSettings
     from agents import RunConfig as _OpenAIRunConfig
     from agents import Runner as _OpenAIRunner
+    from agents import set_default_openai_key as _OpenAISetDefaultOpenAIKey
     from agents.sandbox import Manifest as _OpenAIManifest
     from agents.sandbox import SandboxAgent as _OpenAISandboxAgent
     from agents.sandbox import SandboxRunConfig as _OpenAISandboxRunConfig
@@ -88,6 +89,7 @@ except ImportError:
     _OpenAIModelSettings = None
     _OpenAIRunConfig = None
     _OpenAIRunner = None
+    _OpenAISetDefaultOpenAIKey = None
     _OpenAIManifest = None
     _OpenAISandboxAgent = None
     _OpenAISandboxRunConfig = None
@@ -1212,6 +1214,48 @@ def _openai_agents_agent(options: AgentOptions) -> Any:
     return _OpenAIAgent(**agent_kwargs)
 
 
+def _openai_agents_auth_error() -> str | None:
+    if os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_ADMIN_KEY"):
+        return None
+    stored_api_key, has_subscription_tokens = _codex_auth_credentials()
+    if stored_api_key:
+        if _OpenAISetDefaultOpenAIKey is not None:
+            _OpenAISetDefaultOpenAIKey(stored_api_key, use_for_tracing=False)
+            return None
+        os.environ["OPENAI_API_KEY"] = stored_api_key
+        return None
+    if has_subscription_tokens:
+        return (
+            "Codex subscription login was found in ~/.codex/auth.json, but the "
+            "OpenAI Agents SDK uses API credentials for Responses API model calls. "
+            "The subscription OAuth token is not an API key and lacks scopes such "
+            "as api.responses.write. Use provider=codex for subscription-backed "
+            "Codex CLI runs, or export an API-scoped OPENAI_API_KEY before using "
+            "provider=openai-agents."
+        )
+    return (
+        "OPENAI_API_KEY is not set. Export an API-scoped OPENAI_API_KEY before "
+        "using provider=openai-agents, or use provider=codex for Codex CLI "
+        "subscription-backed runs."
+    )
+
+
+def _codex_auth_credentials() -> tuple[str | None, bool]:
+    auth_path = Path.home() / ".codex" / "auth.json"
+    try:
+        data = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, False
+    raw_key = data.get("OPENAI_API_KEY")
+    api_key = str(raw_key).strip() if isinstance(raw_key, str) else ""
+    tokens = data.get("tokens")
+    has_subscription_tokens = isinstance(tokens, dict) and any(
+        bool(tokens.get(key))
+        for key in ("access_token", "id_token", "refresh_token")
+    )
+    return api_key or None, has_subscription_tokens
+
+
 def _openai_agents_text_from_message_raw(raw_item: Any) -> str:
     content = _raw_value(raw_item, "content")
     if isinstance(content, str):
@@ -1418,6 +1462,9 @@ async def _query_openai_agents(
             "openai-agents provider requested but the Agents SDK is not importable: "
             f"{detail}; run `uv pip install -e .[openai]`"
         )
+    auth_error = _openai_agents_auth_error()
+    if auth_error:
+        raise RuntimeError(auth_error)
     opts = options or AgentOptions()
     agent = _openai_agents_agent(opts)
     if agent is None:

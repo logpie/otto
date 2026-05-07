@@ -625,6 +625,7 @@ async def test_openai_agents_query_streams_tools_usage_and_structured_output(tmp
     import otto.agent as agent_mod
 
     calls: dict[str, object] = {}
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -775,6 +776,32 @@ async def test_openai_agents_missing_sdk_surfaces_install_hint(monkeypatch):
     monkeypatch.setattr(agent_mod, "_OPENAI_AGENTS_IMPORT_ERROR_MESSAGE", "missing agents")
 
     with pytest.raises(RuntimeError, match="openai"):
+        async for _message in query(
+            prompt="test",
+            options=AgentOptions(provider="openai-agents"),
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_openai_agents_subscription_auth_gets_clear_hint(tmp_path, monkeypatch):
+    import otto.agent as agent_mod
+
+    auth_dir = tmp_path / ".codex"
+    auth_dir.mkdir()
+    (auth_dir / "auth.json").write_text(
+        (
+            '{"OPENAI_API_KEY": null, '
+            '"tokens": {"access_token": "oauth-token", "refresh_token": "refresh"}}'
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_ADMIN_KEY", raising=False)
+    monkeypatch.setattr(agent_mod.Path, "home", lambda: tmp_path)
+
+    with pytest.raises(RuntimeError, match="Codex subscription login"):
         async for _message in query(
             prompt="test",
             options=AgentOptions(provider="openai-agents"),
