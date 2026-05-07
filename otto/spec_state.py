@@ -71,6 +71,8 @@ JOURNAL_FILENAME = "spec-state.jsonl"
 # are plain strings and tests can read them literally.
 EVENT_KINDS: tuple[str, ...] = (
     "group.started",
+    "group.execution.started",
+    "group.execution.finished",
     "group.check.started",
     "group.check.finished",
     "group.attempt.failed",
@@ -118,6 +120,8 @@ EVENT_KINDS: tuple[str, ...] = (
 
 EventKind = Literal[
     "group.started",
+    "group.execution.started",
+    "group.execution.finished",
     "group.check.started",
     "group.check.finished",
     "group.attempt.failed",

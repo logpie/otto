@@ -1475,6 +1475,7 @@ def _make_layer2_fix_agent(
             last_failure_narrative=failing.detail,
             log_dir=None,
             feature_id=failing.feature_id,
+            related_feature_ids=tuple(failing.related_feature_ids or [failing.feature_id]),
             agent_session_id=session_by_feature.get(failing.feature_id, ""),
             config=dict(config or {}),
         )

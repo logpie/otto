@@ -59,6 +59,7 @@ def test_layer2_passes_feature_id_to_build_agent(tmp_path: Path) -> None:
 
     async def recording_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
         captured["feature_id"] = agent_input.feature_id
+        captured["related_feature_ids"] = agent_input.related_feature_ids
         captured["group_id"] = agent_input.group.id
         captured["last_failure_narrative"] = agent_input.last_failure_narrative
         captured["worktree"] = agent_input.worktree
@@ -83,6 +84,7 @@ def test_layer2_passes_feature_id_to_build_agent(tmp_path: Path) -> None:
     attempt = asyncio.run(bridge(failing, group))
 
     assert captured["feature_id"] == "feat-a"
+    assert captured["related_feature_ids"] == ("feat-a",)
     assert captured["group_id"] == "g1"
     assert captured["last_failure_narrative"] == "login button does nothing"
     assert captured["project_dir"] == tmp_path
@@ -198,6 +200,30 @@ def test_layer2_prompt_narrowing_includes_feature_id(tmp_path: Path) -> None:
     assert "feat-a" in rendered
     assert "Feature A" in rendered
     assert "login button does nothing" in rendered
+
+
+def test_layer2_prompt_cluster_repair_does_not_claim_siblings_passed(tmp_path: Path) -> None:
+    """Cluster repair should tell the agent to fix related failures together."""
+    from otto.build import _build_agent_prompt
+
+    spec = _spec_with_two_features()
+    agent_input = BuildAgentInput(
+        spec=spec,
+        group=spec.groups[0],
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="",
+        attempt=1,
+        last_failure_narrative="Both the form and filter controls are missing.",
+        feature_id="feat-a",
+        related_feature_ids=("feat-a", "feat-b"),
+    )
+    rendered = _build_agent_prompt(agent_input)
+    assert "FIX THE FAILING FEATURE CLUSTER" in rendered
+    assert "feat-a" in rendered
+    assert "feat-b" in rendered
+    assert "already passed audit" not in rendered
+    assert "do not treat failing sibling features as off-limits" in rendered
 
 
 def test_layer2_prompt_no_narrowing_when_feature_id_empty(tmp_path: Path) -> None:

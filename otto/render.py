@@ -111,6 +111,7 @@ class ProofPacket:
     walkthrough_artifacts: list[str]  # absolute paths
     blocked_group_ids: list[str]
     landed_group_ids: list[str]
+    redundant_group_ids: list[str] = field(default_factory=list)
     # v2.2 + phase 4: amendment chain rendered for human review
     amendments: list[dict[str, Any]] = field(default_factory=list)
     # Audit-final-quality: human-facing quality score 1-5 (0 = not assessed)
@@ -207,6 +208,8 @@ def compose_proof_packet(
         landed = bool(mres and mres.status == MergeStatus.LANDED)
         if landed:
             group_status = "landed"
+        elif mres and mres.status == MergeStatus.REDUNDANT:
+            group_status = "redundant"
         elif bres and bres.status == GroupStatus.PASSING:
             group_status = "passing"  # passed build but did not land
         elif bres:
@@ -217,6 +220,11 @@ def compose_proof_packet(
         failure = ""
         if mres and mres.status == MergeStatus.BLOCKED:
             failure = mres.failure_narrative
+        elif mres and mres.status == MergeStatus.REDUNDANT:
+            failure = (
+                mres.failure_narrative
+                or "No product diff landed; dependency was satisfied by already-integrated work."
+            )
         elif bres and bres.status in (GroupStatus.BLOCKED, GroupStatus.FAILED_SCOPE):
             failure = bres.failure_narrative
 
@@ -321,7 +329,12 @@ def compose_proof_packet(
         audit_narrative=audit_result.narrative,
         walkthrough_artifacts=[_path_to_str(p) for p in audit_result.walkthrough_artifacts],
         blocked_group_ids=list(merge_result.blocked_ids) + list(build_result.blocked_ids),
-        landed_group_ids=list(merge_result.landed_ids),
+        landed_group_ids=[
+            group_id
+            for group_id in merge_result.landed_ids
+            if group_id not in set(merge_result.redundant_ids)
+        ],
+        redundant_group_ids=list(merge_result.redundant_ids),
         amendments=amendments_render,
         quality_score=audit_result.quality_score,
         quality_findings=list(audit_result.quality_findings),
@@ -357,6 +370,7 @@ def _packet_to_dict(packet: ProofPacket) -> dict[str, Any]:
         "walkthrough_artifacts": packet.walkthrough_artifacts,
         "blocked_group_ids": packet.blocked_group_ids,
         "landed_group_ids": packet.landed_group_ids,
+        "redundant_group_ids": packet.redundant_group_ids,
         "amendments": packet.amendments,
         "quality_score": packet.quality_score,
         "quality_findings": packet.quality_findings,
@@ -434,6 +448,7 @@ def proof_packet_from_dict(payload: dict[str, Any]) -> ProofPacket:
         walkthrough_artifacts=_string_list(payload.get("walkthrough_artifacts")),
         blocked_group_ids=_string_list(payload.get("blocked_group_ids") or payload.get("blocked_slice_ids")),
         landed_group_ids=_string_list(payload.get("landed_group_ids") or payload.get("landed_slice_ids")),
+        redundant_group_ids=_string_list(payload.get("redundant_group_ids")),
         amendments=_dict_list(payload.get("amendments")),
         quality_score=_int_value(payload.get("quality_score")),
         quality_findings=_string_list(payload.get("quality_findings")),
@@ -631,6 +646,10 @@ def render_html(packet: ProofPacket, *, session_dir: Path | None = None) -> str:
 
 
 def _render_header(packet: ProofPacket) -> str:
+    redundant_suffix = (
+        f" / {len(packet.redundant_group_ids)} redundant"
+        if packet.redundant_group_ids else ""
+    )
     return f"""<h1>{escape(packet.intent)}</h1>
 <p>
   <span class="verdict {escape(packet.verdict)}">{escape(packet.verdict.upper())}</span>
@@ -639,7 +658,7 @@ def _render_header(packet: ProofPacket) -> str:
   <span class="kpi"><span class="label">cost</span> <span class="value">${packet.cost_usd:.2f}</span></span>
   {_render_token_kpi(packet)}
   <span class="kpi"><span class="label">groups</span>
-    <span class="value">{len(packet.landed_group_ids)} landed / {len(packet.groups)} total</span>
+    <span class="value">{len(packet.landed_group_ids)} landed{redundant_suffix} / {len(packet.groups)} total</span>
   </span>
 </p>"""
 
@@ -757,9 +776,10 @@ def _render_group(s: GroupPacket, *, session_dir: Path | None) -> str:
         f'<span class="muted">landed @ {escape(s.landed_commit)}</span>'
         if s.landed_commit else ""
     )
+    status_note = " · no product diff landed" if s.status == "redundant" else ""
     parts.append(
         f'<header><h3>{escape(s.group_id)} — {escape(s.name)}</h3>'
-        f'<span class="meta">{escape(s.status)}{" · " + landed_tag if landed_tag else ""}</span></header>'
+        f'<span class="meta">{escape(s.status)}{status_note}{" · " + landed_tag if landed_tag else ""}</span></header>'
     )
     if s.branch:
         parts.append(f'<div class="muted">branch: <code>{escape(s.branch)}</code></div>')
@@ -876,11 +896,17 @@ def _render_limitations(packet: ProofPacket) -> str:
 
 def _render_merge_state(packet: ProofPacket) -> str:
     parts = ["<h2>Merge state</h2><ul>"]
+    redundant_ids = set(packet.redundant_group_ids)
     for s in packet.groups:
         if s.landed:
             parts.append(
                 f"<li>✅ <code>{escape(s.group_id)}</code> landed @ "
                 f"<code>{escape(s.landed_commit)}</code></li>"
+            )
+        elif s.group_id in redundant_ids or s.status == "redundant":
+            parts.append(
+                f"<li>⚠️ <code>{escape(s.group_id)}</code> redundant "
+                f'<span class="muted">— no product diff landed; dependency satisfied</span></li>'
             )
         else:
             parts.append(

@@ -10,6 +10,7 @@ from otto.setup_gitignore import (
     OTTO_HEADER,
     OTTO_PATTERNS,
     ensure_gitignore,
+    generated_artifact_paths_from_porcelain,
 )
 
 
@@ -41,6 +42,27 @@ def test_ensure_gitignore_adds_common_build_artifacts(tmp_path: Path):
     assert "*.sqlite" in text
     assert "*.sqlite3" in text
     assert "instance/" in text
+    assert "test-results/" in text
+    assert "playwright-report/" in text
+    assert "coverage/" in text
+
+
+def test_generated_artifact_paths_from_porcelain_includes_playwright_outputs() -> None:
+    paths = generated_artifact_paths_from_porcelain(
+        "\n".join(
+            [
+                " M test-results/browser/.last-run.json",
+                "UU test-results/playwright-report/index.html",
+                "?? otto_artifacts/browser/final.png",
+                " M src/App.tsx",
+            ]
+        )
+    )
+    assert paths == [
+        "test-results/browser/.last-run.json",
+        "test-results/playwright-report/index.html",
+        "otto_artifacts/browser/final.png",
+    ]
 
 
 def test_ensure_gitignore_adds_queue_runtime_journals(tmp_path: Path):

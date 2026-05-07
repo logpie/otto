@@ -81,8 +81,8 @@ def run_check(
 
     Args:
         check: The typed CheckKind from a Spec.
-        project_dir: Project root (git worktree top). Used for path resolution
-            and PATH augmentation.
+        project_dir: Project root (git worktree top). Used for PATH
+            augmentation and as fallback context.
         cwd: Working directory for subprocess checks. Defaults to project_dir.
         base_url: Base URL for ApiProbe and StateInvariant checks that probe
             a running app (e.g., "http://localhost:5173"). Required for
@@ -380,7 +380,10 @@ def _run_browser_journey(
         list(check.command), cwd=cwd, timeout_s=check.timeout_s,
         extra_pythonpath=[project_dir, cwd],
     )
-    output = _format_subprocess_output(check.command, completed)
+    resolved_command = (
+        list(completed.args) if isinstance(completed.args, (list, tuple)) else list(check.command)
+    )
+    output = _format_subprocess_output(resolved_command, completed)
     if bootstrap is not None:
         output = (
             _format_subprocess_output(bootstrap.args, bootstrap).rstrip()
@@ -397,6 +400,7 @@ def _run_browser_journey(
     passed = completed.returncode == 0
     raw = {
         "command": list(check.command),
+        "resolved_command": resolved_command,
         "exit_code": completed.returncode,
         "stdout": completed.stdout or "",
         "stderr": completed.stderr or "",
@@ -532,11 +536,11 @@ def _run_state_invariant(
         "project_dir": project_dir,
         "cwd": cwd,
         "Path": Path,
-        "exists": lambda p: (project_dir / p).exists() if not Path(p).is_absolute() else Path(p).exists(),
-        "is_file": lambda p: (project_dir / p).is_file() if not Path(p).is_absolute() else Path(p).is_file(),
-        "is_dir": lambda p: (project_dir / p).is_dir() if not Path(p).is_absolute() else Path(p).is_dir(),
-        "glob_count": lambda pattern: len(list(project_dir.glob(pattern))),
-        "read_text": lambda p: ((project_dir / p).read_text(encoding="utf-8") if not Path(p).is_absolute() else Path(p).read_text(encoding="utf-8")),
+        "exists": lambda p: (cwd / p).exists() if not Path(p).is_absolute() else Path(p).exists(),
+        "is_file": lambda p: (cwd / p).is_file() if not Path(p).is_absolute() else Path(p).is_file(),
+        "is_dir": lambda p: (cwd / p).is_dir() if not Path(p).is_absolute() else Path(p).is_dir(),
+        "glob_count": lambda pattern: len(list(cwd.glob(pattern))),
+        "read_text": lambda p: ((cwd / p).read_text(encoding="utf-8") if not Path(p).is_absolute() else Path(p).read_text(encoding="utf-8")),
     }
     if base_url:
         namespace["http_get"] = lambda path: _safe_http_get(base_url, path, timeout=check.timeout_s)
@@ -839,7 +843,8 @@ def _run_command(
 
     Raises subprocess.TimeoutExpired on timeout (caller catches in run_check).
     """
-    resolved_command = _resolve_subprocess_command(command, cwd, extra_pythonpath)
+    expanded_command = _expand_command_globs(command, cwd)
+    resolved_command = _resolve_subprocess_command(expanded_command, cwd, extra_pythonpath)
     return subprocess.run(
         resolved_command,
         cwd=cwd,
@@ -849,6 +854,48 @@ def _run_command(
         timeout=timeout_s,
         check=False,
     )
+
+
+def _expand_command_globs(command: list[str], cwd: Path) -> list[str]:
+    """Expand path globs in structured subprocess commands.
+
+    Checks run without a shell, but agents naturally test commands in a
+    shell. Expanding path-like glob arguments here keeps Otto's authoritative
+    check gate aligned with what `npm run test -- src/**/*.test.tsx` means in
+    a terminal while still avoiding shell execution.
+    """
+    if not command:
+        return command
+    expanded: list[str] = [command[0]]
+    for arg in command[1:]:
+        matches = _expand_command_glob_arg(arg, cwd)
+        expanded.extend(matches if matches else [arg])
+    return expanded
+
+
+def _expand_command_glob_arg(arg: str, cwd: Path) -> list[str]:
+    if not _looks_like_path_glob(arg):
+        return []
+    pattern = arg if Path(arg).is_absolute() else str(cwd / arg)
+    matches = sorted(glob.glob(pattern, recursive=True))
+    if not matches:
+        return []
+    if Path(arg).is_absolute():
+        return matches
+    return [
+        os.path.relpath(match, cwd)
+        for match in matches
+    ]
+
+
+def _looks_like_path_glob(arg: str) -> bool:
+    if not any(ch in arg for ch in "*?["):
+        return False
+    if arg.startswith("-") or "=" in arg:
+        return False
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", arg):
+        return False
+    return True
 
 
 def _run_node_bootstrap_if_needed(

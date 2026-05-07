@@ -28,6 +28,7 @@ export interface ProjectDefaults {
   queue_worktree_dir: string | null;
   queue_on_watcher_restart: string | null;
   queue_merge_certifier_mode: string | null;
+  group_concurrent: number | null;
   autopilot?: AutopilotPolicy;
   config_file_exists: boolean;
   config_error: string | null;

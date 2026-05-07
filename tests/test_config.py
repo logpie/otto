@@ -106,6 +106,45 @@ class TestLoadConfig:
         assert "intent.md" in q["bookkeeping_files"]
         assert "otto.yaml" in q["bookkeeping_files"]
 
+    def test_build_section_defaults_present(self, tmp_bare_git_repo):
+        cfg = load_config(tmp_bare_git_repo / "otto.yaml")
+        assert cfg["build"]["group_concurrent"] == 3
+
+    def test_build_partial_override_preserves_other_defaults(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"build": {"group_concurrent": 2}}))
+        cfg = load_config(config_path)
+        assert cfg["build"]["group_concurrent"] == 2
+
+    def test_build_section_unknown_keys_are_rejected(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"build": {"future_key": "x"}}))
+        with pytest.raises(ConfigError, match="Unknown build config key: build.future_key"):
+            load_config(config_path)
+
+    @pytest.mark.parametrize("bad_group_concurrent", [0, -1, "many", True])
+    def test_warns_and_falls_back_for_invalid_build_group_concurrent(
+        self, tmp_bare_git_repo, caplog, bad_group_concurrent
+    ):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"build": {"group_concurrent": bad_group_concurrent}}))
+
+        with caplog.at_level("WARNING", logger="otto.config"):
+            cfg = load_config(config_path)
+
+        assert cfg["build"]["group_concurrent"] == DEFAULT_CONFIG["build"]["group_concurrent"]
+        assert "Invalid build.group_concurrent" in caplog.text
+
+    def test_warns_when_build_section_is_not_a_dict(self, tmp_bare_git_repo, caplog):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"build": "not-a-dict"}))
+
+        with caplog.at_level("WARNING", logger="otto.config"):
+            cfg = load_config(config_path)
+
+        assert cfg["build"] == DEFAULT_CONFIG["build"]
+        assert "Invalid build config" in caplog.text
+
     def test_queue_partial_override_preserves_other_defaults(self, tmp_bare_git_repo):
         """Deep-merge: user setting `queue.concurrent: 5` must not drop
         other queue defaults like `worktree_dir`."""

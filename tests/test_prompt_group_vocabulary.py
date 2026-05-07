@@ -91,6 +91,13 @@ def test_compile_spec_json_example_uses_groups_key() -> None:
     assert '"slices":' not in text
 
 
+def test_compile_spec_warns_against_monolithic_shared_store_contention() -> None:
+    text = (PROMPTS_DIR / "compile-spec.md").read_text()
+    assert "Shared stores/data contracts need the same treatment" in text
+    assert "all need to add methods to one store file" in text
+    assert "mark the contested file shared" in text
+
+
 def test_prompt_files_referenced_by_module_render_clean() -> None:
     """Every prompt must still render via otto.prompts.render_prompt.
 

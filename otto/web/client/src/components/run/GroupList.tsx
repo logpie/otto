@@ -6,7 +6,7 @@
 // Aborting writes a `group.aborted_by_user` event to the session journal;
 // the build loop honors it on the next retry boundary and the merge queue
 // skips the group as BLOCKED. Already-terminal groups (landed/blocked/
-// failed_scope) hide the Abort button — there is nothing to abort.
+// redundant/failed_scope) hide the Abort button — there is nothing to abort.
 //
 // Post-RUA round 1 (B1, B2, B7): rows lay out via flex/gap (no baked
 // whitespace), status renders through the scoped <Pill>, and per-Group
@@ -26,6 +26,7 @@ interface Props {
 
 const TERMINAL_GROUP_STATUSES = new Set([
   "landed",
+  "redundant",
   "blocked",
   "failed_scope",
 ]);
@@ -35,6 +36,8 @@ function statusTone(status: GroupStatus): PillTone {
     case "landed":
     case "passing":
       return "ok";
+    case "redundant":
+      return "warn";
     case "in_progress":
       return "info";
     case "blocked":

@@ -242,6 +242,7 @@ export type GroupStatus =
   | "passing"
   | "blocked"
   | "landed"
+  | "redundant"
   | "failed_scope";
 
 export type ComponentStatus =

@@ -172,6 +172,34 @@ def test_build_run_view_explains_sequential_group_dispatch(tmp_path: Path) -> No
     assert "running 1/1" in view["dispatch"]["summary"]
 
 
+def test_build_run_view_uses_group_concurrency_when_configured(tmp_path: Path) -> None:
+    session = _setup_session(
+        tmp_path,
+        spec={
+            "intent": "x",
+            "project_kind": "webapp",
+            "groups": [
+                {"id": "foundation", "name": "Foundation", "feature_ids": ["f1"]},
+                {"id": "feed", "name": "Feed", "dependencies": ["foundation"]},
+                {"id": "search", "name": "Search", "dependencies": ["foundation"]},
+                {"id": "admin", "name": "Admin", "dependencies": ["feed"]},
+            ],
+        },
+        state_events=[
+            {"event": "group.check.finished", "group_id": "foundation"},
+            {"event": "group.started", "group_id": "feed"},
+        ],
+    )
+
+    view = build_run_view(session, runtime_defaults={"group_concurrent": 2, "queue_concurrent": 5})
+
+    assert view["dispatch"]["max_concurrent"] == 2
+    assert view["dispatch"]["running_group_ids"] == ["feed"]
+    assert view["dispatch"]["ready_group_ids"] == ["search"]
+    assert view["dispatch"]["parallelizable_group_ids"] == ["feed", "search"]
+    assert "running 1/2" in view["dispatch"]["summary"]
+
+
 def test_build_run_view_recovers_usage_from_nested_messages(tmp_path: Path) -> None:
     session = _setup_session(tmp_path, spec={"intent": "x", "project_kind": "webapp", "groups": []})
     messages = session / "audit" / "attempt-00" / "judge" / "messages.jsonl"
@@ -264,6 +292,36 @@ def test_build_run_view_proof_groups_accept_group_id_key(tmp_path: Path) -> None
     assert view["groups"][0]["id"] == "timeline"
     assert view["groups"][0]["name"] == "Timeline"
     assert view["groups"][0]["status"] == "landed"
+
+
+def test_build_run_view_surfaces_redundant_group_status(tmp_path: Path) -> None:
+    """A no-diff group is dependency-satisfied, but not product-landed."""
+    proof = {
+        "verdict": "passed",
+        "landed_group_ids": ["timeline"],
+        "redundant_group_ids": ["actions"],
+        "groups": [
+            {
+                "group_id": "timeline",
+                "name": "Timeline",
+                "status": "landed",
+                "landed": True,
+            },
+            {
+                "group_id": "actions",
+                "name": "Actions",
+                "status": "redundant",
+                "landed": False,
+            },
+        ],
+    }
+    session = _setup_session(tmp_path, proof=proof)
+
+    view = build_run_view(session)
+    groups = {group["id"]: group for group in view["groups"]}
+
+    assert groups["timeline"]["status"] == "landed"
+    assert groups["actions"]["status"] == "redundant"
 
 
 def test_build_run_view_in_flight_status_from_state_events(tmp_path: Path) -> None:

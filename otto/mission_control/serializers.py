@@ -573,6 +573,9 @@ def run_config_from_argv(
             "on_watcher_restart": _first_string(defaults.get("queue_on_watcher_restart")),
             "merge_certifier_mode": _first_string(defaults.get("queue_merge_certifier_mode")),
         },
+        "build": {
+            "group_concurrent": _first_int(defaults.get("group_concurrent")),
+        },
         "agents": agents,
         "config_file_exists": bool(defaults.get("config_file_exists")),
         "config_error": _first_string(defaults.get("config_error")),
@@ -832,6 +835,7 @@ def _project_defaults(project_dir: Path) -> dict[str, Any]:
     try:
         config = load_config(config_path)
         queue = config.get("queue") if isinstance(config.get("queue"), dict) else {}
+        build = config.get("build") if isinstance(config.get("build"), dict) else {}
         return {
             "provider": agent_provider(config),
             "model": effective_agent_model(config),
@@ -852,12 +856,14 @@ def _project_defaults(project_dir: Path) -> dict[str, Any]:
             "queue_worktree_dir": _first_string(queue.get("worktree_dir")),
             "queue_on_watcher_restart": _first_string(queue.get("on_watcher_restart")),
             "queue_merge_certifier_mode": _first_string(queue.get("merge_certifier_mode")),
+            "group_concurrent": _first_int(build.get("group_concurrent")),
             "autopilot": dict(config.get("autopilot") or {}),
             "config_file_exists": config_exists,
             "config_error": None,
         }
     except Exception as exc:
         queue_defaults = DEFAULTS["queue"] if isinstance(DEFAULTS.get("queue"), dict) else {}
+        build_defaults = DEFAULTS["build"] if isinstance(DEFAULTS.get("build"), dict) else {}
         return {
             "provider": DEFAULTS["provider"],
             "model": DEFAULTS["model"],
@@ -878,6 +884,7 @@ def _project_defaults(project_dir: Path) -> dict[str, Any]:
             "queue_worktree_dir": queue_defaults.get("worktree_dir"),
             "queue_on_watcher_restart": queue_defaults.get("on_watcher_restart"),
             "queue_merge_certifier_mode": queue_defaults.get("merge_certifier_mode"),
+            "group_concurrent": build_defaults.get("group_concurrent"),
             "autopilot": dict(DEFAULTS.get("autopilot") or {}),
             "config_file_exists": config_exists,
             "config_error": str(exc),

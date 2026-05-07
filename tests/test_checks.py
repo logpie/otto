@@ -76,6 +76,31 @@ def test_repo_test_happy_path(tmp_path: Path) -> None:
     assert evidence.duration_s >= 0
 
 
+def test_repo_test_expands_path_globs_without_shell(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "src" / "features" / "search"
+    feature_dir.mkdir(parents=True)
+    (feature_dir / "FeedSearch.test.tsx").write_text("// one\n", encoding="utf-8")
+    (feature_dir / "Search.test.tsx").write_text("// two\n", encoding="utf-8")
+
+    code = (
+        "import sys; "
+        "expected=['src/features/search/FeedSearch.test.tsx',"
+        "'src/features/search/Search.test.tsx']; "
+        "print('\\n'.join(sys.argv[1:])); "
+        "raise SystemExit(0 if sys.argv[1:]==expected else 9)"
+    )
+    check = RepoTestCheck(
+        command=("python", "-c", code, "src/features/search/*.test.tsx"),
+        timeout_s=10,
+    )
+
+    evidence = run_check(check, project_dir=tmp_path)
+
+    assert evidence.passed is True
+    assert "src/features/search/FeedSearch.test.tsx" in evidence.raw["stdout"]
+    assert "src/features/search/*.test.tsx" not in evidence.raw["resolved_command"]
+
+
 def test_repo_test_nonzero_exit_fails(tmp_path: Path) -> None:
     check = RepoTestCheck(command=("python", "-c", "import sys; sys.exit(7)"), timeout_s=10)
     evidence = run_check(check, project_dir=tmp_path)
@@ -390,6 +415,7 @@ def test_browser_journey_subprocess_and_globs_collect_artifacts(tmp_path: Path) 
     # Sorted by filename
     assert evidence.artifacts[0].name == "step-1.png"
     assert evidence.artifacts[1].name == "step-2.png"
+    assert evidence.raw["resolved_command"][0].endswith(("python", "python3"))
 
 
 def test_browser_journey_subprocess_failure_keeps_partial_artifacts(tmp_path: Path) -> None:
@@ -545,6 +571,28 @@ def test_state_invariant_filesystem_helpers(tmp_path: Path) -> None:
         expression="exists('app/main.py') and not is_dir('microfeed')",
     )
     evidence = run_check(check, project_dir=tmp_path)
+    assert evidence.passed is True
+
+
+def test_state_invariant_filesystem_helpers_resolve_from_cwd(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    worktree = tmp_path / "linked-worktree"
+    project_root.mkdir()
+    worktree.mkdir()
+    (project_root / "package.json").write_text('{"name":"stale-root"}', encoding="utf-8")
+    (worktree / "src").mkdir()
+    (worktree / "src" / "app.jsx").write_text("export default null\n", encoding="utf-8")
+
+    check = StateInvariant(
+        description="linked worktree app shell",
+        expression=(
+            "exists('src/app.jsx') and is_file('src/app.jsx') "
+            "and glob_count('src/*.jsx') == 1 "
+            "and 'export default' in read_text('src/app.jsx')"
+        ),
+    )
+
+    evidence = run_check(check, project_dir=project_root, cwd=worktree)
     assert evidence.passed is True
 
 

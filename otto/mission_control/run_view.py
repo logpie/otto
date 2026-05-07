@@ -244,7 +244,7 @@ def _build_dispatch(
     completed = {
         gid
         for gid, status in status_by_id.items()
-        if status in {"passing", "landed"}
+        if status in {"passing", "landed", "redundant"}
     }
     running = [
         gid
@@ -304,11 +304,8 @@ def _dispatch_max_concurrent(
     live_state: dict[str, Any] | None,
     runtime_defaults: dict[str, Any] | None,
 ) -> int | None:
-    # Group dispatch is sequential today. Queue concurrency controls how
-    # many top-level runs the watcher can execute, not how many Groups
-    # inside this run can build at once. Keep this explicit so RunView
-    # does not imply group-level parallelism before the build scheduler
-    # actually supports it.
+    # Queue concurrency controls top-level runs. Group concurrency is a
+    # separate build-level knob used inside one i2p run.
     candidates = [
         (live_state or {}).get("group_concurrent"),
         (runtime_defaults or {}).get("group_concurrent"),
@@ -874,9 +871,9 @@ def _group_status(
     if landed:
         return "landed"
     event_status = _group_status_from_events(group_id, state_events)
-    if event_status in {"blocked", "landed", "failed_scope"}:
+    if event_status in {"blocked", "landed", "failed_scope", "redundant"}:
         return event_status
-    if status in ("passing", "blocked", "in_progress", "failed_scope"):
+    if status in ("passing", "blocked", "in_progress", "failed_scope", "redundant"):
         return status
     if event_status:
         return event_status
@@ -902,6 +899,8 @@ def _group_status_from_events(
             status = "passing"
         elif kind in {"group.merge.landed", "group.landed"}:
             status = "landed"
+        elif kind == "group.merge.redundant":
+            status = "redundant"
         elif kind in {"group.scope.failed"}:
             status = "failed_scope"
         elif kind in {

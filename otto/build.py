@@ -31,7 +31,10 @@ to `otto.agent.run_agent_with_timeout`; tests pass a mock instead.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -41,7 +44,7 @@ from collections.abc import Iterable
 from typing import Any, Callable, Protocol
 
 from otto.checks import Evidence, run_checks
-from otto.setup_gitignore import otto_owned_paths_from_porcelain
+from otto.setup_gitignore import generated_artifact_paths_from_porcelain
 from otto.spec_compile import CheckKind, Component, Feature, Group, Spec
 from otto.spec_state import emit, is_group_aborted_by_user
 
@@ -388,11 +391,13 @@ class BuildAgentInput:
     last_failure_narrative: str = ""  # empty on first attempt
     log_dir: Path | None = None  # if set, agent writes narrative there
     feature_id: str = ""  # Layer 2 narrowing: fix only this feature in the slice
+    related_feature_ids: tuple[str, ...] = ()  # Layer 2 cluster repair scope
     agent_session_id: str = ""  # resume same provider conversation across attempts
     config: dict[str, Any] = field(default_factory=dict)
     context_packet_path: Path | None = None
     full_spec_path: Path | None = None
     merge_repair: bool = False  # true when merge_queue asks this slice to integrate
+    timeout_s: int | None = None  # wall timeout for this provider attempt
 
 
 @dataclass
@@ -532,6 +537,8 @@ def detect_scope_violations(
         path = str(raw or "").strip()
         if not path:
             continue
+        if _is_amendment_request_path(path):
+            continue
         if _matches_any(path, own_globs):
             continue
         if _matches_any(path, shared_globs):
@@ -554,6 +561,13 @@ def detect_scope_violations(
                 continue
         violations.append(path)
     return violations
+
+
+def _is_amendment_request_path(path: str) -> bool:
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized == ".otto/amendment_request.json"
 
 
 def detect_dependency_scope_extensions(
@@ -974,13 +988,20 @@ def _setup_group_branch(worktree: Path, *, branch: str, parent_ref: str) -> bool
     return co_slice.returncode == 0
 
 
+@dataclass(frozen=True)
+class _DependencyBranchSetup:
+    ok: bool
+    conflict_context: str = ""
+
+
 def _setup_group_branch_with_deps(
     worktree: Path,
     *,
     branch: str,
     primary_parent_ref: str,
     additional_dep_refs: list[str],
-) -> bool:
+    allow_conflict_context: bool = False,
+) -> _DependencyBranchSetup:
     """V12 fix: set up a slice branch with multiple deps.
 
     Pattern D's original `_setup_group_branch(parent_ref=last_dep)` only
@@ -997,17 +1018,16 @@ def _setup_group_branch_with_deps(
       2. For each `additional_dep_refs`: skip if already an ancestor
          of HEAD (its commits are reachable transitively); otherwise
          `git merge --no-edit` it in.
-      3. On any merge conflict during step 2: abort the merge cleanly
-         and return False (caller should fall back to single-parent
-         setup via `_setup_group_branch`, or surface a build-time
-         error if even that fails).
+      3. On any merge conflict during step 2: either abort and return
+         False, or, when `allow_conflict_context=True`, leave conflict
+         markers in place and return setup context for the build agent.
 
     The slice's branch ends up containing the union of all deps'
     contributions — exactly the integrated state the slice's build
     agent needs to write code against.
     """
     if not _setup_group_branch(worktree, branch=branch, parent_ref=primary_parent_ref):
-        return False
+        return _DependencyBranchSetup(ok=False)
     for dep_ref in additional_dep_refs:
         if not dep_ref or dep_ref == primary_parent_ref:
             continue
@@ -1023,6 +1043,36 @@ def _setup_group_branch_with_deps(
             cwd=worktree, capture_output=True, text=True, check=False,
         )
         if merge.returncode != 0:
+            if allow_conflict_context:
+                unmerged = subprocess.run(
+                    ["git", "diff", "--name-only", "--diff-filter=U"],
+                    cwd=worktree,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                unmerged_paths = [
+                    line.strip()
+                    for line in (unmerged.stdout or "").splitlines()
+                    if line.strip()
+                ]
+                detail = (
+                    "Dependency integration conflict before this group started: "
+                    f"Otto merged `{dep_ref}` into `{branch}` and left the "
+                    "conflict markers in this worktree for the group agent to "
+                    "resolve. Preserve both dependency behaviors, resolve all "
+                    "unmerged paths, then run the declared checks. "
+                    f"Unmerged paths: {', '.join(unmerged_paths) if unmerged_paths else '(none reported)'}. "
+                    f"Git said: {((merge.stdout or '') + (merge.stderr or '')).strip()[:500]}"
+                )
+                logger.warning(
+                    "slice %s: dep-merge of %s conflicted; leaving conflict context "
+                    "for the build agent: %s",
+                    branch,
+                    dep_ref,
+                    ", ".join(unmerged_paths) if unmerged_paths else "(none reported)",
+                )
+                return _DependencyBranchSetup(ok=True, conflict_context=detail)
             subprocess.run(
                 ["git", "merge", "--abort"],
                 cwd=worktree, capture_output=True, text=True, check=False,
@@ -1033,8 +1083,8 @@ def _setup_group_branch_with_deps(
                 (merge.stdout or "").strip()[:300],
                 (merge.stderr or "").strip()[:300],
             )
-            return False
-    return True
+            return _DependencyBranchSetup(ok=False)
+    return _DependencyBranchSetup(ok=True)
 
 
 def _dependency_branch_setup_failure(
@@ -1088,7 +1138,7 @@ def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
     )
     if status_after_add.returncode != 0:
         return False
-    for runtime_path in otto_owned_paths_from_porcelain(status_after_add.stdout or ""):
+    for runtime_path in generated_artifact_paths_from_porcelain(status_after_add.stdout or ""):
         subprocess.run(
             ["git", "reset", "HEAD", "--", runtime_path],
             cwd=worktree, capture_output=True, text=True, check=False,
@@ -1120,6 +1170,75 @@ def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
         cwd=worktree, capture_output=True, text=True, check=False,
     )
     return commit.returncode == 0
+
+
+def _configured_group_concurrent(config: dict[str, Any] | None) -> int:
+    """Return build.group_concurrent, defaulting to 1 for direct test calls.
+
+    `load_config()` supplies the production default. A bare `run_build(...)`
+    call remains sequential so existing unit fixtures and non-git harnesses
+    keep their historical behavior unless they opt in.
+    """
+    build = (config or {}).get("build")
+    if not isinstance(build, dict):
+        return 1
+    raw = build.get("group_concurrent")
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return parsed if parsed >= 1 else 1
+
+
+def _safe_worktree_segment(value: str) -> str:
+    segment = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip()).strip(".-")
+    return segment or "group"
+
+
+def _default_group_worktree(session_dir: Path, group_id: str) -> Path:
+    return session_dir / "worktrees" / _safe_worktree_segment(group_id)
+
+
+def _ensure_linked_group_worktree(
+    *,
+    project_dir: Path,
+    worktree: Path,
+    start_ref: str,
+) -> bool:
+    """Create a linked git worktree for one concurrent Group if needed."""
+    if _is_git_repo(worktree):
+        return True
+    try:
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    add = subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree), start_ref],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if add.returncode == 0:
+        return True
+    logger.warning(
+        "failed to create linked group worktree %s from %s: rc=%d stdout=%r stderr=%r",
+        worktree,
+        start_ref,
+        add.returncode,
+        (add.stdout or "").strip()[:300],
+        (add.stderr or "").strip()[:300],
+    )
+    return False
+
+
+@dataclass(frozen=True)
+class _PreparedGroupDispatch:
+    group: Group
+    branch: str
+    worktree: Path
+    branch_real: bool
+    setup_narrative: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1155,16 +1274,13 @@ async def run_build(
         budget: Bounds; defaults to BuildBudget().
         branch_for_group: Branch naming. Default: ``i2p/<spec_session>/<group_id>``.
         worktree_for_group: Worktree resolution. Default: project_dir
-            (single-worktree mode for v1; future: separate worktrees per slice).
+            in sequential mode, and per-session linked worktrees when
+            `build.group_concurrent > 1`.
         on_state_change: Optional hook called as (group_id, status, extra).
             Receives every status transition for testability and progress UI.
 
     Returns:
         BuildResult with per-slice outcomes.
-
-    The build loop itself is sequential dispatch in v1 — slices that are
-    ready run one at a time, in dep-topological order. Concurrency is a
-    follow-up; the readiness logic is structured to support it.
     """
     config = dict(config or {})
     base_branch = base_branch or resolve_integration_base_branch(project_dir)
@@ -1172,7 +1288,33 @@ async def run_build(
     branch_for_group = branch_for_group or (
         lambda s: f"i2p/{session_dir.name}/{s.id}"
     )
-    worktree_for_group = worktree_for_group or (lambda _s: project_dir)
+    group_concurrent = _configured_group_concurrent(config)
+    if group_concurrent > 1 and budget.total_cost_usd != float("inf"):
+        logger.warning(
+            "build.group_concurrent=%d requested with a finite total cost budget; "
+            "serializing groups so concurrent agents cannot overspend the cap",
+            group_concurrent,
+        )
+        group_concurrent = 1
+    default_worktree_for_group = worktree_for_group is None
+    linked_group_worktrees = (
+        default_worktree_for_group
+        and group_concurrent > 1
+        and _is_git_repo(project_dir)
+    )
+    if default_worktree_for_group:
+        if linked_group_worktrees:
+            def _session_worktree_for_group(s: Group) -> Path:
+                return _default_group_worktree(session_dir, s.id)
+
+            worktree_for_group = _session_worktree_for_group
+        else:
+            def _project_worktree_for_group(_s: Group) -> Path:
+                return project_dir
+
+            worktree_for_group = _project_worktree_for_group
+            group_concurrent = 1
+    assert worktree_for_group is not None
 
     completed_ids: set[str] = set()
     blocked_ids: set[str] = set()
@@ -1275,6 +1417,158 @@ async def run_build(
     # slices can branch off them and see their work.
     branch_by_group: dict[str, str] = {}
 
+    def _dependency_refs(dependencies: Iterable[str]) -> tuple[str, list[str]]:
+        dep_ids = list(dependencies or [])
+        if dep_ids:
+            primary_parent_ref = branch_by_group.get(dep_ids[-1], base_branch)
+            additional_dep_refs = [
+                branch_by_group[d]
+                for d in dep_ids[:-1]
+                if d in branch_by_group
+            ]
+            return primary_parent_ref, additional_dep_refs
+        return base_branch, []
+
+    def _select_group_batch(ready_groups_now: list[Group]) -> list[Group]:
+        if group_concurrent <= 1:
+            return ready_groups_now[:1]
+        batch: list[Group] = []
+        seen_worktrees: set[Path] = set()
+        for group in ready_groups_now:
+            candidate = Path(worktree_for_group(group)).resolve()
+            if candidate in seen_worktrees:
+                continue
+            seen_worktrees.add(candidate)
+            batch.append(group)
+            if len(batch) >= group_concurrent:
+                break
+        return batch or ready_groups_now[:1]
+
+    def _record_group_result(
+        slice_result: GroupResult,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        nonlocal total_cost
+        total_cost += slice_result.cost_usd
+        results.append(slice_result)
+        if slice_result.status == GroupStatus.PASSING:
+            completed_ids.add(slice_result.group_id)
+        else:
+            blocked_ids.add(slice_result.group_id)
+        payload = {
+            "attempts": slice_result.attempts,
+            "wall_s": slice_result.wall_s,
+            "cost_usd": slice_result.cost_usd,
+            "narrative": slice_result.failure_narrative,
+            "group_concurrent": group_concurrent,
+        }
+        payload.update(extra or {})
+        _emit_state(
+            slice_result.group_id,
+            slice_result.status,
+            payload,
+        )
+
+    def _prepare_group_dispatch(next_group: Group) -> _PreparedGroupDispatch | None:
+        group_branch = branch_for_group(next_group)
+        group_worktree = Path(worktree_for_group(next_group))
+        primary_parent_ref, additional_dep_refs = _dependency_refs(next_group.dependencies)
+
+        if linked_group_worktrees and not _ensure_linked_group_worktree(
+            project_dir=project_dir,
+            worktree=group_worktree,
+            start_ref=primary_parent_ref,
+        ):
+            narrative = (
+                "failed to create isolated group worktree for concurrent build; "
+                "refusing to run this group in the shared checkout"
+            )
+            slice_result = GroupResult(
+                group_id=next_group.id,
+                status=GroupStatus.BLOCKED,
+                attempts=0,
+                branch=group_branch,
+                worktree=group_worktree,
+                failure_narrative=narrative,
+            )
+            _record_group_result(
+                slice_result,
+                {"branch": group_branch, "branch_real": False},
+            )
+            return None
+
+        # Pattern D: choose the parent ref based on deps. A slice with
+        # no deps branches off `base_branch`. A slice with deps branches
+        # off the LAST dep's tip — so it sees that dep's work AND
+        # (transitively) all earlier deps via that dep's own branch
+        # ancestry. V12 fix: when the slice has multiple deps that may
+        # be siblings (DAG topology, not linear chain), the last-dep
+        # primary parent doesn't include sibling deps. Merge the rest
+        # in via `_setup_group_branch_with_deps` so the slice branch
+        # contains the integrated state of ALL its deps.
+        if additional_dep_refs:
+            dep_setup = _setup_group_branch_with_deps(
+                group_worktree, branch=group_branch,
+                primary_parent_ref=primary_parent_ref,
+                additional_dep_refs=additional_dep_refs,
+                allow_conflict_context=True,
+            )
+            branch_real = dep_setup.ok
+            # Fall back to single-parent setup if the dep-merge produced a
+            # conflict — preserves the build run instead of failing the
+            # slice purely from V12. The slice will then fail at merge time
+            # with an honest conflict, surfaced via V4.
+            if not branch_real:
+                logger.warning(
+                    "slice %s: multi-dep branch setup failed; blocking "
+                    "rather than running against a partial dependency state",
+                    next_group.id,
+                )
+                narrative = _dependency_branch_setup_failure(
+                    unit_id=next_group.id,
+                    primary_parent_ref=primary_parent_ref,
+                    additional_dep_refs=additional_dep_refs,
+                )
+                slice_result = GroupResult(
+                    group_id=next_group.id,
+                    status=GroupStatus.BLOCKED,
+                    attempts=0,
+                    branch=group_branch,
+                    worktree=group_worktree,
+                    failure_narrative=narrative,
+                )
+                _record_group_result(
+                    slice_result,
+                    {"branch": group_branch, "branch_real": False},
+                )
+                return None
+        else:
+            branch_real = _setup_group_branch(
+                group_worktree, branch=group_branch, parent_ref=primary_parent_ref,
+            )
+        if not branch_real:
+            logger.info(
+                "slice %s: per-slice branch setup skipped (not a git repo or "
+                "base branch missing); using single-worktree mode",
+                next_group.id,
+            )
+        _emit_state(
+            next_group.id,
+            GroupStatus.IN_PROGRESS,
+            {
+                "branch": group_branch,
+                "branch_real": branch_real,
+                "group_concurrent": group_concurrent,
+            },
+        )
+        return _PreparedGroupDispatch(
+            group=next_group,
+            branch=group_branch,
+            worktree=group_worktree,
+            branch_real=branch_real,
+            setup_narrative=dep_setup.conflict_context if additional_dep_refs else "",
+        )
+
     while True:
         ready = ready_groups(spec, completed_ids, skipped_ids=blocked_ids)
         ready_comps = ready_components(spec, completed_ids, skipped_ids=blocked_ids)
@@ -1288,24 +1582,47 @@ async def run_build(
             next_component = ready_comps[0]
             comp_branch = branch_for_group(_component_as_slice(next_component))
             comp_worktree = worktree_for_group(_component_as_slice(next_component))
-            primary_parent_ref_c: str
-            additional_dep_refs_c: list[str] = []
-            comp_deps = list(next_component.dependencies or [])
-            if comp_deps:
-                primary_parent_ref_c = branch_by_group.get(comp_deps[-1], base_branch)
-                additional_dep_refs_c = [
-                    branch_by_group[d]
-                    for d in comp_deps[:-1]
-                    if d in branch_by_group
-                ]
-            else:
-                primary_parent_ref_c = base_branch
+            primary_parent_ref_c, additional_dep_refs_c = _dependency_refs(
+                next_component.dependencies
+            )
+            if linked_group_worktrees and not _ensure_linked_group_worktree(
+                project_dir=project_dir,
+                worktree=comp_worktree,
+                start_ref=primary_parent_ref_c,
+            ):
+                narrative = (
+                    "failed to create isolated component worktree for concurrent build; "
+                    "refusing to run this component in the shared checkout"
+                )
+                comp_result = ComponentResult(
+                    component_id=next_component.id,
+                    status=ComponentStatus.BLOCKED,
+                    attempts=0,
+                    branch=comp_branch,
+                    worktree=comp_worktree,
+                    failure_narrative=narrative,
+                )
+                total_cost += comp_result.cost_usd
+                component_results.append(comp_result)
+                blocked_ids.add(next_component.id)
+                _emit_component_state(
+                    next_component.id,
+                    ComponentStatus.BLOCKED,
+                    {
+                        "branch": comp_branch,
+                        "branch_real": False,
+                        "narrative": narrative,
+                    },
+                )
+                continue
             if additional_dep_refs_c:
-                branch_real_c = _setup_group_branch_with_deps(
+                dep_setup_c = _setup_group_branch_with_deps(
                     comp_worktree, branch=comp_branch,
                     primary_parent_ref=primary_parent_ref_c,
                     additional_dep_refs=additional_dep_refs_c,
+                    allow_conflict_context=True,
                 )
+                branch_real_c = dep_setup_c.ok
                 if not branch_real_c:
                     narrative = _dependency_branch_setup_failure(
                         unit_id=next_component.id,
@@ -1353,6 +1670,9 @@ async def run_build(
                 config=config,
                 base_url=base_url,
                 budget=budget,
+                initial_failure_narrative=(
+                    dep_setup_c.conflict_context if additional_dep_refs_c else ""
+                ),
             )
             if branch_real_c and comp_result.status == ComponentStatus.PASSING:
                 committed_c = _commit_group_work(
@@ -1391,149 +1711,99 @@ async def run_build(
                 },
             )
             continue
-        # Sequential v1: pick the first ready slice. Stable ordering = spec order.
-        next_group = ready[0]
-        group_branch = branch_for_group(next_group)
-        group_worktree = worktree_for_group(next_group)
-
-        # Pattern D: choose the parent ref based on deps. A slice with
-        # no deps branches off `base_branch`. A slice with deps branches
-        # off the LAST dep's tip — so it sees that dep's work AND
-        # (transitively) all earlier deps via that dep's own branch
-        # ancestry. V12 fix: when the slice has multiple deps that may
-        # be siblings (DAG topology, not linear chain), the last-dep
-        # primary parent doesn't include sibling deps. Merge the rest
-        # in via `_setup_group_branch_with_deps` so the slice branch
-        # contains the integrated state of ALL its deps.
-        primary_parent_ref: str
-        additional_dep_refs: list[str] = []
-        if next_group.dependencies:
-            primary_parent_ref = branch_by_group.get(next_group.dependencies[-1], base_branch)
-            additional_dep_refs = [
-                branch_by_group[d]
-                for d in next_group.dependencies[:-1]
-                if d in branch_by_group
-            ]
-        else:
-            primary_parent_ref = base_branch
-
-        # Create a real per-slice branch so the slice's edits
-        # accumulate on its own branch — no taint from peer slices,
-        # real merges downstream. Falls back gracefully if the worktree
-        # isn't a git repo (tests, certain bench fixtures); the build
-        # still works, just without branch isolation.
-        if additional_dep_refs:
-            branch_real = _setup_group_branch_with_deps(
-                group_worktree, branch=group_branch,
-                primary_parent_ref=primary_parent_ref,
-                additional_dep_refs=additional_dep_refs,
+        # Stable order = spec order, but dispatch all ready Groups up to the
+        # configured cap when each selected unit has an isolated worktree.
+        prepared = [
+            dispatch
+            for group in _select_group_batch(ready)
+            if (dispatch := _prepare_group_dispatch(group)) is not None
+        ]
+        if not prepared:
+            continue
+        async def _run_prepared_group(
+            dispatch: _PreparedGroupDispatch,
+        ) -> GroupResult:
+            emit(
+                session_dir,
+                "group.execution.started",
+                group_id=dispatch.group.id,
+                branch=dispatch.branch,
+                group_concurrent=group_concurrent,
             )
-            # Fall back to single-parent setup if the dep-merge produced a
-            # conflict — preserves the build run instead of failing the
-            # slice purely from V12. The slice will then fail at merge time
-            # with an honest conflict, surfaced via V4.
-            if not branch_real:
-                logger.warning(
-                    "slice %s: multi-dep branch setup failed; blocking "
-                    "rather than running against a partial dependency state",
-                    next_group.id,
+            try:
+                return await _run_slice(
+                    spec=spec,
+                    group_obj=dispatch.group,
+                    project_dir=project_dir,
+                    worktree=dispatch.worktree,
+                    branch=dispatch.branch,
+                    session_dir=session_dir,
+                    build_agent=build_agent,
+                    config=config,
+                    base_url=base_url,
+                    budget=budget,
+                    initial_failure_narrative=dispatch.setup_narrative,
                 )
-                narrative = _dependency_branch_setup_failure(
-                    unit_id=next_group.id,
-                    primary_parent_ref=primary_parent_ref,
-                    additional_dep_refs=additional_dep_refs,
+            finally:
+                emit(
+                    session_dir,
+                    "group.execution.finished",
+                    group_id=dispatch.group.id,
+                    branch=dispatch.branch,
+                    group_concurrent=group_concurrent,
                 )
+
+        run_tasks = [
+            _run_prepared_group(dispatch)
+            for dispatch in prepared
+        ]
+        batch_results = await asyncio.gather(*run_tasks, return_exceptions=True)
+
+        for dispatch, raw_result in zip(prepared, batch_results):
+            if isinstance(raw_result, Exception):
                 slice_result = GroupResult(
-                    group_id=next_group.id,
+                    group_id=dispatch.group.id,
                     status=GroupStatus.BLOCKED,
                     attempts=0,
-                    branch=group_branch,
-                    worktree=group_worktree,
-                    failure_narrative=narrative,
-                )
-                results.append(slice_result)
-                blocked_ids.add(next_group.id)
-                _emit_state(
-                    next_group.id,
-                    GroupStatus.BLOCKED,
-                    {
-                        "branch": group_branch,
-                        "branch_real": False,
-                        "narrative": narrative,
-                    },
-                )
-                continue
-        else:
-            branch_real = _setup_group_branch(
-                group_worktree, branch=group_branch, parent_ref=primary_parent_ref,
-            )
-        if not branch_real:
-            logger.info(
-                "slice %s: per-slice branch setup skipped (not a git repo or "
-                "base branch missing); using single-worktree mode",
-                next_group.id,
-            )
-        _emit_state(
-            next_group.id, GroupStatus.IN_PROGRESS,
-            {"branch": group_branch, "branch_real": branch_real},
-        )
-
-        slice_result = await _run_slice(
-            spec=spec,
-            group_obj=next_group,
-            project_dir=project_dir,
-            worktree=group_worktree,
-            branch=group_branch,
-            session_dir=session_dir,
-            build_agent=build_agent,
-            config=config,
-            base_url=base_url,
-            budget=budget,
-        )
-
-        # Pattern D: commit the slice's work to its branch so merge_queue
-        # can do a real `git merge`. Only run when branch setup succeeded.
-        # B2/B4 fix: if the commit fails, the slice branch may be empty
-        # or dirty — downstream slices MUST NOT branch off it. Mark
-        # the slice BLOCKED, do NOT add to branch_by_group, and emit
-        # a blocked event so resume reconstructs reality.
-        if branch_real and slice_result.status == GroupStatus.PASSING:
-            committed = _commit_group_work(
-                group_worktree, group_id=next_group.id, branch=group_branch,
-            )
-            if committed:
-                branch_by_group[next_group.id] = group_branch
-            else:
-                logger.warning(
-                    "slice %s: failed to commit work to branch %s — marking BLOCKED",
-                    next_group.id, group_branch,
-                )
-                import dataclasses as _dc
-                slice_result = _dc.replace(
-                    slice_result,
-                    status=GroupStatus.BLOCKED,
+                    branch=dispatch.branch,
+                    worktree=dispatch.worktree,
                     failure_narrative=(
-                        slice_result.failure_narrative
-                        or f"failed to commit work to slice branch {group_branch}"
+                        f"build crashed: {type(raw_result).__name__}: {raw_result}"
                     ),
                 )
+            else:
+                slice_result = raw_result
 
-        total_cost += slice_result.cost_usd
-        results.append(slice_result)
-        if slice_result.status == GroupStatus.PASSING:
-            completed_ids.add(next_group.id)
-        else:
-            blocked_ids.add(next_group.id)
-        _emit_state(
-            next_group.id,
-            slice_result.status,
-            {
-                "attempts": slice_result.attempts,
-                "wall_s": slice_result.wall_s,
-                "cost_usd": slice_result.cost_usd,
-                "narrative": slice_result.failure_narrative,
-            },
-        )
+            # Pattern D: commit the slice's work to its branch so merge_queue
+            # can do a real `git merge`. Only run when branch setup succeeded.
+            # B2/B4 fix: if the commit fails, the slice branch may be empty
+            # or dirty — downstream slices MUST NOT branch off it. Mark
+            # the slice BLOCKED, do NOT add to branch_by_group, and emit
+            # a blocked event so resume reconstructs reality.
+            if dispatch.branch_real and slice_result.status == GroupStatus.PASSING:
+                committed = _commit_group_work(
+                    dispatch.worktree,
+                    group_id=dispatch.group.id,
+                    branch=dispatch.branch,
+                )
+                if committed:
+                    branch_by_group[dispatch.group.id] = dispatch.branch
+                else:
+                    logger.warning(
+                        "slice %s: failed to commit work to branch %s — marking BLOCKED",
+                        dispatch.group.id, dispatch.branch,
+                    )
+                    import dataclasses as _dc
+                    slice_result = _dc.replace(
+                        slice_result,
+                        status=GroupStatus.BLOCKED,
+                        failure_narrative=(
+                            slice_result.failure_narrative
+                            or f"failed to commit work to slice branch {dispatch.branch}"
+                        ),
+                    )
+
+            _record_group_result(slice_result)
 
     # Mark slices that never ran (because a dep was blocked) as PENDING+blocked.
     pending_unreachable = [
@@ -1635,13 +1905,14 @@ async def _run_slice(
     config: dict[str, Any],
     base_url: str | None,
     budget: BuildBudget,
+    initial_failure_narrative: str = "",
 ) -> GroupResult:
     """Run one slice through tasks→checks→fix retries.
 
     Returns GroupResult with PASSING / BLOCKED / FAILED_SCOPE.
     """
     slice_t0 = time.monotonic()
-    last_failure = ""
+    last_failure = initial_failure_narrative
     last_evidence: list[Evidence] = []
     accumulated_scope_warnings: list[str] = []
     cost_total = 0.0
@@ -1818,6 +2089,7 @@ async def _run_slice(
             config=config,
             context_packet_path=prompt_dir / "context-packet.json",
             full_spec_path=full_spec_path if full_spec_path.exists() else None,
+            timeout_s=max(1, int(math.ceil(budget.per_group_wall_s - elapsed))),
         )
 
         # v2 phase 4 (observability): archive the compact context packet
@@ -2008,9 +2280,13 @@ async def _run_slice(
             )
 
         # Otherwise: prepare narrative for next attempt's prompt-level reset.
-        failed_summaries = [ev.detail for ev in last_evidence if not ev.passed]
-        last_failure = (
-            f"checks failed on attempt {attempt}: " + "; ".join(failed_summaries[:5])
+        # The repair agent needs the check-runner's authoritative evidence,
+        # not just a one-line exit code. Without this, provider-side browser
+        # environment errors can distract it from the actual product failure.
+        last_failure = _failed_check_repair_narrative(
+            attempt,
+            evidence_pairs,
+            raw_log_dir / f"attempt-{attempt:02d}",
         )
         # Snapshot the agent's work-so-far for the no-progress bound.
         current_diff_hash = _hash_worktree_diff(worktree)
@@ -2074,6 +2350,7 @@ async def _run_component(
     config: dict[str, Any],
     base_url: str | None,
     budget: BuildBudget,
+    initial_failure_narrative: str = "",
 ) -> ComponentResult:
     """Run one Component through tasks→checks→fix retries (research §2.6).
 
@@ -2093,6 +2370,7 @@ async def _run_component(
         config=config,
         base_url=base_url,
         budget=budget,
+        initial_failure_narrative=initial_failure_narrative,
     )
     if slice_result.status == GroupStatus.PASSING:
         comp_status = ComponentStatus.PASSING
@@ -2171,6 +2449,7 @@ def _write_build_context_packet(
         "worktree": str(agent_input.worktree),
         "branch": agent_input.branch,
         "attempt": agent_input.attempt,
+        "repair_feature_ids": list(agent_input.related_feature_ids),
         "full_spec_path": str(agent_input.full_spec_path or ""),
         "group": group,
         "features_for_group": features,
@@ -2239,6 +2518,11 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
             "tasks and already-integrated product behavior both survive."
         )
         lines.append(
+            "- If this worktree has conflict markers or unmerged paths, resolve "
+            "them directly in the files. Otto will stage and commit the repair; "
+            "do not run git mutation commands yourself."
+        )
+        lines.append(
             "- If the conflict is an incompatible product decision, make the "
             "smallest safe integration and call out the remaining decision in "
             "your final response instead of silently erasing behavior."
@@ -2250,35 +2534,56 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         lines.append("")
 
     # === LAYER 2 NARROWING (when feature_id is set) ===
-    # If this dispatch targets a single failing Feature within the Group,
-    # surface a sharp "fix only this" preamble so the agent doesn't
-    # re-touch passing siblings. The narrowing supplements (does not
-    # replace) the Group's normal task/scope/checks framing — the agent
-    # still needs the Group-level rules below to know its write-scope.
-    if agent_input.feature_id:
-        narrowed: Feature | None = next(
-            (f for f in spec.features if f.id == agent_input.feature_id),
-            None,
+    # A repair can target one failing Feature or a cluster of failing
+    # Features in the same Group. The cluster case matters when audit
+    # finds a shared root cause such as an unimplemented section: telling
+    # the agent "other sibling features passed" is false and causes
+    # slow one-feature-at-a-time repairs.
+    repair_feature_ids = tuple(
+        feature_id for feature_id in (
+            agent_input.related_feature_ids
+            or ((agent_input.feature_id,) if agent_input.feature_id else ())
         )
-        if narrowed is not None:
-            lines.append("## FIX ONLY THE FAILING FEATURE")
-            lines.append("")
+        if feature_id
+    )
+    if repair_feature_ids:
+        narrowed_features: list[Feature] = [
+            feature for feature in spec.features
+            if feature.id in set(repair_feature_ids)
+        ]
+        if narrowed_features:
+            cluster_repair = len(repair_feature_ids) > 1
             lines.append(
-                f"This is a Layer 2 repair dispatch for feature "
-                f"`{narrowed.name}` (id=`{narrowed.id}`) inside group "
-                f"`{s.id}`. Other features in this group already passed "
-                f"audit — DO NOT modify them or their behaviour. Touch "
-                f"only the code paths required to make this one feature "
-                f"pass its acceptance criteria."
+                "## FIX THE FAILING FEATURE CLUSTER"
+                if cluster_repair
+                else "## FIX ONLY THE FAILING FEATURE"
             )
-            if narrowed.description:
-                lines.append("")
-                lines.append(f"**Feature description**: {narrowed.description}")
-            if narrowed.acceptance_detail:
-                lines.append("")
+            lines.append("")
+            if cluster_repair:
                 lines.append(
-                    f"**Acceptance detail**: {narrowed.acceptance_detail}"
+                    f"This is a Layer 2 repair dispatch for {len(repair_feature_ids)} "
+                    f"currently failing features inside group `{s.id}`. Repair the "
+                    "shared group behavior coherently in one pass. Preserve unrelated "
+                    "or already-working behavior, but do not treat failing sibling "
+                    "features as off-limits."
                 )
+            else:
+                narrowed = narrowed_features[0]
+                lines.append(
+                    f"This is a Layer 2 repair dispatch for feature "
+                    f"`{narrowed.name}` (id=`{narrowed.id}`) inside group "
+                    f"`{s.id}`. Touch only the code paths required to make this "
+                    "feature pass its acceptance criteria while preserving unrelated "
+                    "behavior."
+                )
+            lines.append("")
+            lines.append("**Repair feature scope:**")
+            for feature in narrowed_features:
+                lines.append(f"- `{feature.id}` — {feature.name}")
+                if feature.description:
+                    lines.append(f"  Description: {feature.description}")
+                if feature.acceptance_detail:
+                    lines.append(f"  Acceptance detail: {feature.acceptance_detail}")
             if agent_input.last_failure_narrative:
                 lines.append("")
                 lines.append("**Previous audit detail (why it failed)**:")
@@ -2293,20 +2598,21 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
                 "and edge/error cases named in the audit detail or original "
                 "intent. If you touch parsing, normalization, validation, or "
                 "error handling, include an invalid/error input that exercises "
-                "the same changed path, not only a generic invalid value. Run "
-                "the targeted test or explain why it could not be run."
+                "the same changed path, not only a generic invalid value. When "
+                "the audit or intent says invalid input should be preserved, "
+                "assert the result is exactly equal to the original input, "
+                "including punctuation/separators. Run the targeted test or "
+                "explain why it could not be run."
             )
             lines.append(
                 "Do NOT change expected test values to match your current "
                 "implementation when that would contradict the user intent or "
-                "audit detail. If the contract says an invalid string is "
-                "`unchanged`, that means exactly equal to the original input, "
-                "including punctuation/separators. Existing repo test files are "
-                "in scope for focused regression tests unless the repository "
-                "itself forbids editing tests; docstring examples are not a "
-                "substitute unless the native test command runs doctests."
+                "audit detail. Existing repo test files are in scope for focused "
+                "regression tests unless the repository itself forbids editing "
+                "tests; docstring examples are not a substitute unless the native "
+                "test command runs doctests."
             )
-            lines.append("")
+    lines.append("")
 
     # === SLICE FRAMING (primary, slice-narrow) ===
     total = len(spec.groups)
@@ -2336,6 +2642,21 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
             f"done_means below — those belong to slices {pos+1}..{total}.**"
         )
     lines.append("")
+
+    if (
+        agent_input.attempt == 1
+        and agent_input.last_failure_narrative
+        and not agent_input.merge_repair
+        and not agent_input.feature_id
+    ):
+        lines.append("## Setup context before your first attempt")
+        lines.append(agent_input.last_failure_narrative)
+        lines.append(
+            "Resolve this setup/integration state inside the worktree before "
+            "implementing or validating your slice tasks. Do not run git "
+            "mutation commands; Otto will stage and commit your resolved files."
+        )
+        lines.append("")
 
     # === TASKS (primary, the slice's job) ===
     lines.append("## What you must do (slice tasks — THIS is your job)")
@@ -2426,6 +2747,106 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         "create the file yourself within your scope OR request an "
         "amendment via `.otto/amendment_request.json` to widen your "
         "scope. Do NOT pull in another slice's branch via git merge."
+    )
+    lines.append("")
+    lines.append("**Test discovery must stay inside the product project.**")
+    lines.append(
+        "If you create or edit test runner config/scripts (Playwright, "
+        "Vitest, Jest, Pytest, etc.), restrict discovery to product test "
+        "paths and exclude Otto/runtime/generated directories: "
+        "`otto_logs/**`, `.worktrees/**`, `_otto_build_logs/**`, "
+        "`.otto/**`, `otto_artifacts/**`, `node_modules/**`, `dist/**`, "
+        "`test-results/**`. Never let project tests recurse into Otto "
+        "session or worktree artifacts."
+    )
+    lines.append(
+        "When exploring source, run searches from your slice worktree and keep "
+        "them scoped to product files. Do not search or dump parent Otto session "
+        "directories, `otto_logs/**`, `_otto_build_logs/**`, or `messages.jsonl` "
+        "transcripts. If you need prior failure context, use the prompt's failure "
+        "narrative, the compact context packet, the full spec, and specific check "
+        "logs named by Otto instead of grepping broad runtime logs."
+    )
+    lines.append("")
+    lines.append("**BrowserJourney checks must stay behavioral.**")
+    lines.append(
+        "If a check is `browser_journey`, its command must launch and drive "
+        "a real browser against the product. If browser launch is unavailable "
+        "or blocked, fail the check honestly and report that blocker. Do NOT "
+        "replace the browser journey with source scanning, built-asset token "
+        "checks, mocked DOM checks, synthetic screenshots, or a "
+        "`browser unavailable` success fallback."
+    )
+    lines.append(
+        "Keep browser-environment diagnosis bounded. After a browser check "
+        "fails with a clear environment-level blocker such as blocked local "
+        "ports, macOS Mach/TCC permission errors, missing browser executables, "
+        "or missing uncached browser dependencies, stop after at most two "
+        "targeted fixes/probes and report the blocker. Do NOT keep probing "
+        "system apps or automation backends with `open -a`, AppleScript/"
+        "`osascript`, SafariDriver, random remote-debugging ports, or repeated "
+        "Chrome/Firefox launch variants. Otto's deterministic check runner "
+        "will rerun the declared browser journey after your slice returns."
+    )
+    lines.append(
+        "If a browser journey launches the app and then fails on product "
+        "behavior, treat that as a real user-facing bug. Before changing CSS, "
+        "locators, or tests, inspect the Playwright error context, screenshot, "
+        "trace path, and any saved artifacts. For responsive/layout failures, "
+        "use DOM measurements when possible (for example document "
+        "scrollWidth/clientWidth and the widest overflowing elements) so the "
+        "fix targets the offending element instead of guessing. If local "
+        "browser launch is blocked on retry, make the source fix from the "
+        "existing artifacts and report the exact browser blocker; do not claim "
+        "the browser journey passed until a real browser run verifies it."
+    )
+    lines.append(
+        "Write BrowserJourney Playwright locators like a durable user test. "
+        "Scope short/common controls and text to named forms, regions, "
+        "landmarks, lists, tables, or cards before interacting or asserting. "
+        "Use exact accessible names for short labels and buttons such as "
+        "`Status`, `Comment`, `List`, `Done`, `Import`, and `Export`; avoid "
+        "global `page.getByText(...)` for strings that can also appear in JSON "
+        "previews, logs, hidden templates, repeated cards, or select options. "
+        "Prefer stable unique anchors (`data-testid`, named regions/forms, "
+        "table rows, cards, or explicit live-status labels) for assertions "
+        "that mention common domain words. Headings and table/card contents "
+        "must use `exact: true` or be scoped to the specific row/card when "
+        "their text can be a substring of an empty state, helper text, or "
+        "button label (for example `Transactions` versus `No transactions "
+        "yet`, or a row title versus `Edit <title>` / `Delete <title>`). "
+        "Status assertions must target the intended feedback/live region, not "
+        "a global `getByRole('status')` that can match empty-state regions. "
+        "After reload, import/export, route changes, or view switches, re-query "
+        "the control from its visible container instead of reusing a locator "
+        "that may have unmounted. A BrowserJourney test should fail on product "
+        "behavior, not on avoidable strict-mode ambiguity."
+    )
+    lines.append("")
+    lines.append("**Project commands must be self-contained and bounded.**")
+    lines.append(
+        "If you create native scripts such as `npm test`, `npm run build`, "
+        "`npm run dev`, or browser-journey runners, make them work from a "
+        "fresh checkout/worktree without relying on ambient `node_modules`, "
+        "global binaries, or state left by an earlier slice. Use repo-native "
+        "dependency bootstrap where appropriate, and make check/dev commands "
+        "fail clearly when required dependencies cannot be installed."
+    )
+    lines.append(
+        "The product deliverable is the source checkout, not generated output. "
+        "Do not rely on `dist/`, `node_modules/`, Playwright reports, or other "
+        "built artifacts as the only runnable result. If the product is a web "
+        "app, commit the source, native scripts/config, and tests needed for a "
+        "fresh checkout to run the declared commands, such as `package.json`, "
+        "lockfiles when present, `src/**`, test files, Vite/Vitest/Playwright "
+        "config, and `index.html`."
+    )
+    lines.append(
+        "Do not use broad process cleanup commands (`pkill`, `killall`, "
+        "`lsof | xargs kill`, or arbitrary `kill <pid>`) to recover from a "
+        "hung package-manager or dev-server command. Prefer bounded command "
+        "timeouts, foreground processes that exit on their own, or PID handles "
+        "created by the script itself."
     )
     lines.append("")
 
@@ -2642,6 +3063,83 @@ def _describe_check(check: CheckKind) -> str:
     return name
 
 
+_FAILED_CHECKS_IN_PROMPT_LIMIT = 5
+_CHECK_LOG_LINES_IN_PROMPT_LIMIT = 80
+_CHECK_LOG_CHARS_IN_PROMPT_LIMIT = 8000
+_CHECK_LOG_LINE_WIDTH_LIMIT = 320
+
+
+def _failed_check_repair_narrative(
+    attempt: int,
+    evidence_pairs: list[tuple[CheckKind, Evidence]],
+    attempt_log_dir: Path,
+) -> str:
+    failed_pairs = [
+        (index, check, evidence)
+        for index, (check, evidence) in enumerate(evidence_pairs)
+        if not evidence.passed
+    ]
+    failed_summaries = [evidence.detail for _index, _check, evidence in failed_pairs]
+    lines = [
+        f"checks failed on attempt {attempt}: " + "; ".join(failed_summaries[:5]),
+        "",
+        (
+            "Authoritative Otto check-runner evidence follows. Repair these "
+            "failures before trusting provider-side self-run diagnostics, "
+            "especially browser or dev-server launch errors from the agent "
+            "sandbox."
+        ),
+    ]
+    for failed_index, (check_index, check, evidence) in enumerate(failed_pairs):
+        if failed_index >= _FAILED_CHECKS_IN_PROMPT_LIMIT:
+            remaining = len(failed_pairs) - _FAILED_CHECKS_IN_PROMPT_LIMIT
+            lines.append(f"- {remaining} additional failing check(s) omitted from prompt.")
+            break
+        raw_log_path = attempt_log_dir / f"{check_index:03d}-{type(check).__name__}.log"
+        lines.append(f"- Check {check_index + 1}: {_describe_check(check)}")
+        lines.append(f"  Result: {evidence.detail}")
+        if evidence.artifacts:
+            artifact_list = ", ".join(str(path) for path in evidence.artifacts[:5])
+            if len(evidence.artifacts) > 5:
+                artifact_list += f", ... ({len(evidence.artifacts) - 5} more)"
+            lines.append(f"  Artifacts: {artifact_list}")
+        excerpt = _failed_check_log_excerpt(raw_log_path)
+        if excerpt:
+            lines.append(f"  Otto check log: `{raw_log_path}`")
+            lines.append("  Log excerpt:")
+            for log_line in excerpt.splitlines():
+                lines.append(f"    {log_line}")
+    return "\n".join(lines)
+
+
+def _failed_check_log_excerpt(raw_log_path: Path) -> str:
+    try:
+        text = raw_log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    text = text.strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    clipped_lines = lines[-_CHECK_LOG_LINES_IN_PROMPT_LIMIT:]
+    if len(lines) > len(clipped_lines):
+        clipped_lines.insert(0, f"[{len(lines) - len(clipped_lines)} earlier line(s) omitted]")
+    normalized: list[str] = []
+    for line in clipped_lines:
+        if len(line) > _CHECK_LOG_LINE_WIDTH_LIMIT:
+            normalized.append(line[:_CHECK_LOG_LINE_WIDTH_LIMIT] + " ... [line truncated]")
+        else:
+            normalized.append(line)
+    excerpt = "\n".join(normalized)
+    if len(excerpt) > _CHECK_LOG_CHARS_IN_PROMPT_LIMIT:
+        excerpt = excerpt[-_CHECK_LOG_CHARS_IN_PROMPT_LIMIT:]
+        newline_index = excerpt.find("\n")
+        if newline_index != -1:
+            excerpt = excerpt[newline_index + 1 :]
+        excerpt = "[earlier log text omitted]\n" + excerpt
+    return excerpt
+
+
 async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
     """Default build-agent implementation that drives an LLM via otto.agent.
 
@@ -2694,7 +3192,7 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
             log_dir=log_subdir,
             phase_name="BUILD",
             phase_label=f"slice/{agent_input.group.id}/attempt-{agent_input.attempt}",
-            timeout=None,
+            timeout=agent_input.timeout_s,
             project_dir=agent_input.project_dir,
         )
         return BuildAgentOutput(

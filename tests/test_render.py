@@ -152,6 +152,30 @@ def _merge_result_landed(tmp_path: Path) -> MergeQueueResult:
     )
 
 
+def _merge_result_with_redundant(tmp_path: Path) -> MergeQueueResult:
+    return MergeQueueResult(
+        landed_ids=["shell", "counter"],
+        redundant_ids=["counter"],
+        results=[
+            MergeResult(
+                group_id="shell",
+                status=MergeStatus.LANDED,
+                landed_commit="abc1234",
+                group_recheck_evidence=[_evidence(True, "exit=0")],
+            ),
+            MergeResult(
+                group_id="counter",
+                status=MergeStatus.REDUNDANT,
+                landed_commit="abc1234",
+                group_recheck_evidence=[_evidence(True, "exit=0")],
+                failure_narrative="no new diff",
+            ),
+        ],
+        total_cost_usd=0.10,
+        total_wall_s=30.0,
+    )
+
+
 def _audit_passed() -> AuditResult:
     return AuditResult(
         verdict=AuditVerdict.PASSED,
@@ -188,6 +212,30 @@ def test_compose_proof_packet_basic_shape(tmp_path: Path) -> None:
     assert len(packet.groups) == 2
     assert packet.landed_group_ids == ["shell", "counter"]
     assert packet.blocked_group_ids == []
+    assert packet.redundant_group_ids == []
+
+
+def test_compose_proof_packet_surfaces_redundant_without_counting_landed(
+    tmp_path: Path,
+) -> None:
+    spec = _two_slice_spec(tmp_path)
+    packet = compose_proof_packet(
+        spec,
+        _build_result_passing(tmp_path),
+        _merge_result_with_redundant(tmp_path),
+        _audit_passed(),
+        wall_s=180.0,
+        cost_usd=0.72,
+    )
+
+    assert packet.landed_group_ids == ["shell"]
+    assert packet.redundant_group_ids == ["counter"]
+    counter = next(group for group in packet.groups if group.group_id == "counter")
+    assert counter.status == "redundant"
+    assert counter.landed is False
+    html = render_html(packet, session_dir=tmp_path)
+    assert "1 landed / 1 redundant / 2 total" in html
+    assert "no product diff landed" in html
 
 
 def test_compose_proof_packet_includes_audit_verdicts(tmp_path: Path) -> None:

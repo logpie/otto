@@ -393,6 +393,182 @@ def test_run_merge_queue_runs_cross_slice_checks(tmp_path: Path) -> None:
     assert result.results[0].cross_slice_evidence[0].passed is True
 
 
+def test_run_merge_queue_defers_future_owned_cross_group_check(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    first_branch = "i2p/_session/foundation"
+    subprocess.run(["git", "checkout", "-b", first_branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "foundation.txt").write_text("foundation\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foundation.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(foundation): build", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    final_branch = "i2p/_session/integration"
+    subprocess.run(["git", "checkout", "-b", final_branch], cwd=tmp_path, check=True, capture_output=True)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "final_check.py").write_text(
+        "from pathlib import Path\n"
+        "assert Path('foundation.txt').exists()\n"
+        "print('integrated ok')\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "tests/final_check.py"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(integration): build", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec(
+        [
+            Group(
+                id="foundation",
+                name="Foundation",
+                dependencies=[],
+                owned_paths=["foundation.txt"],
+                feature_ids=["write foundation"],
+                checks=[_passing_check()],
+            ),
+            Group(
+                id="integration",
+                name="Integration",
+                dependencies=["foundation"],
+                owned_paths=["tests/final_check.py"],
+                feature_ids=["write final check"],
+                checks=[_passing_check()],
+            ),
+        ],
+        cross_checks=[
+            RepoTestCheck(command=("python", "tests/final_check.py"), timeout_s=10)
+        ],
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="foundation",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=first_branch,
+                worktree=tmp_path,
+            ),
+            GroupResult(
+                group_id="integration",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=final_branch,
+                worktree=tmp_path,
+            ),
+        ],
+    )
+
+    result = asyncio.run(
+        run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
+    )
+
+    assert result.landed_ids == ["foundation", "integration"]
+    assert result.blocked_ids == []
+    assert result.results[0].cross_slice_evidence == []
+    assert len(result.results[1].cross_slice_evidence) == 1
+    assert result.results[1].cross_slice_evidence[0].passed is True
+
+
+def test_run_merge_queue_defers_missing_unowned_cross_group_runner_until_complete(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    first_branch = "i2p/_session/foundation"
+    subprocess.run(["git", "checkout", "-b", first_branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "foundation.txt").write_text("foundation\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foundation.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(foundation): build", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    second_branch = "i2p/_session/feature"
+    subprocess.run(["git", "checkout", "-b", second_branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "feature.txt").write_text("feature\n", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(feature): build", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec(
+        [
+            Group(
+                id="foundation",
+                name="Foundation",
+                dependencies=[],
+                owned_paths=["foundation.txt"],
+                feature_ids=["write foundation"],
+                checks=[_passing_check()],
+            ),
+            Group(
+                id="feature",
+                name="Feature",
+                dependencies=[],
+                owned_paths=["feature.txt"],
+                feature_ids=["write feature"],
+                checks=[_passing_check()],
+            ),
+        ],
+        cross_checks=[
+            RepoTestCheck(command=("python", "tests/main_workflow.py"), timeout_s=10)
+        ],
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="foundation",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=first_branch,
+                worktree=tmp_path,
+            ),
+            GroupResult(
+                group_id="feature",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=second_branch,
+                worktree=tmp_path,
+            ),
+        ],
+    )
+
+    result = asyncio.run(
+        run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
+    )
+
+    assert result.landed_ids == ["foundation"]
+    assert result.blocked_ids == ["feature"]
+    assert result.results[0].cross_slice_evidence == []
+    assert len(result.results[1].cross_slice_evidence) == 1
+    assert result.results[1].cross_slice_evidence[0].passed is False
+    assert "tests/main_workflow.py" in result.results[1].failure_narrative
+
+
 # ---------------------------------------------------------------------------
 # run_merge_queue — blocking
 # ---------------------------------------------------------------------------
@@ -767,12 +943,214 @@ def test_run_merge_queue_real_merge_blocks_on_conflict(tmp_path: Path) -> None:
     )
     assert result.blocked_ids == ["s1"]
     assert "merge conflict" in result.results[0].failure_narrative.lower()
+    assert "shared.txt" in result.results[0].failure_narrative
     # Verify worktree is left clean (merge --abort ran).
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=tmp_path, capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert status == "", f"worktree should be clean after aborted merge, got: {status}"
+
+
+def test_merge_repair_reproduces_conflict_markers_on_slice_branch(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    (tmp_path / "shared.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base shared", "--no-verify"], cwd=tmp_path, check=True)
+
+    subprocess.run(["git", "checkout", "-b", "i2p/_session/s1"], cwd=tmp_path, check=True)
+    (tmp_path / "shared.txt").write_text("slice\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "slice shared", "--no-verify"], cwd=tmp_path, check=True)
+
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True)
+    (tmp_path / "shared.txt").write_text("target\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "target shared", "--no-verify"], cwd=tmp_path, check=True)
+
+    spec = _spec(
+        [
+            Group(id="s1", name="x", dependencies=[], owned_paths=["shared.txt"],
+                  feature_ids=["edit shared"], checks=[_passing_check()]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1,
+                        branch="i2p/_session/s1", worktree=tmp_path),
+        ],
+    )
+    seen_unmerged: list[str] = []
+
+    async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        unmerged = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            cwd=input_.worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        seen_unmerged.append(unmerged)
+        assert "<<<<<<<" in (input_.worktree / "shared.txt").read_text(encoding="utf-8")
+        assert "Unmerged paths: shared.txt" in input_.last_failure_narrative
+        (input_.worktree / "shared.txt").write_text("target\nslice\n", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=repair_agent,
+            branch_for_group=lambda s: "i2p/_session/s1",
+            budget=MergeBudget(per_slice_repair_retries=1),
+        )
+    )
+
+    assert result.landed_ids == ["s1"]
+    assert seen_unmerged == ["shared.txt"]
+    assert (tmp_path / "shared.txt").read_text(encoding="utf-8") == "target\nslice\n"
+
+
+def test_merge_repair_salvages_committable_edits_after_agent_error(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    (tmp_path / "shared.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base shared", "--no-verify"], cwd=tmp_path, check=True)
+
+    subprocess.run(["git", "checkout", "-b", "i2p/_session/s1"], cwd=tmp_path, check=True)
+    (tmp_path / "shared.txt").write_text("slice\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "slice shared", "--no-verify"], cwd=tmp_path, check=True)
+
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True)
+    (tmp_path / "shared.txt").write_text("target\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "target shared", "--no-verify"], cwd=tmp_path, check=True)
+
+    spec = _spec(
+        [
+            Group(id="s1", name="x", dependencies=[], owned_paths=["shared.txt"],
+                  feature_ids=["edit shared"], checks=[_passing_check()]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1,
+                        branch="i2p/_session/s1", worktree=tmp_path),
+        ],
+    )
+    calls = 0
+
+    async def flaky_repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        nonlocal calls
+        calls += 1
+        assert "<<<<<<<" in (input_.worktree / "shared.txt").read_text(encoding="utf-8")
+        (input_.worktree / "shared.txt").write_text("target\nslice\n", encoding="utf-8")
+        return BuildAgentOutput(succeeded=False, detail="provider stream ended after edits")
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=flaky_repair_agent,
+            branch_for_group=lambda s: "i2p/_session/s1",
+            budget=MergeBudget(per_slice_repair_retries=1),
+        )
+    )
+
+    assert calls == 1
+    assert result.landed_ids == ["s1"]
+    assert result.blocked_ids == []
+    assert (tmp_path / "shared.txt").read_text(encoding="utf-8") == "target\nslice\n"
+
+
+def test_merge_repair_handles_linked_slice_worktree_conflict(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    (tmp_path / "shared.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base shared", "--no-verify"], cwd=tmp_path, check=True)
+
+    subprocess.run(["git", "branch", "i2p/_session/s1"], cwd=tmp_path, check=True)
+    slice_worktree = tmp_path.parent / f"{tmp_path.name}-slice-worktree"
+    subprocess.run(
+        ["git", "worktree", "add", str(slice_worktree), "i2p/_session/s1"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (slice_worktree / "shared.txt").write_text("slice\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=slice_worktree, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "slice shared", "--no-verify"],
+        cwd=slice_worktree,
+        check=True,
+    )
+
+    (tmp_path / "shared.txt").write_text("target\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "target shared", "--no-verify"], cwd=tmp_path, check=True)
+
+    spec = _spec(
+        [
+            Group(id="s1", name="x", dependencies=[], owned_paths=["shared.txt"],
+                  feature_ids=["edit shared"], checks=[_passing_check()]),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1,
+                        branch="i2p/_session/s1", worktree=slice_worktree),
+        ],
+    )
+    seen_worktrees: list[Path] = []
+
+    async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        seen_worktrees.append(input_.worktree)
+        assert input_.worktree == slice_worktree
+        assert "<<<<<<<" in (input_.worktree / "shared.txt").read_text(encoding="utf-8")
+        (input_.worktree / "shared.txt").write_text("target\nslice\n", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True)
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=repair_agent,
+            branch_for_group=lambda s: "i2p/_session/s1",
+            budget=MergeBudget(per_slice_repair_retries=1),
+        )
+    )
+
+    assert seen_worktrees == [slice_worktree]
+    assert result.landed_ids == ["s1"]
+    assert (tmp_path / "shared.txt").read_text(encoding="utf-8") == "target\nslice\n"
 
 
 # ---------------------------------------------------------------------------
@@ -965,6 +1343,232 @@ def test_merge_repair_blocks_out_of_scope_changes(tmp_path: Path) -> None:
     assert result.blocked_ids == ["s1"]
     assert "merge repair scope violation" in result.results[0].failure_narrative
     assert "peer.txt" in result.results[0].failure_narrative
+
+
+def test_merge_repair_ignores_generated_playwright_artifact_conflicts(
+    tmp_path: Path,
+) -> None:
+    """Generated Playwright reports must not make a real source repair fail."""
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    app = tmp_path / "src" / "App.tsx"
+    report = tmp_path / "test-results" / "playwright-report" / "index.html"
+    app.parent.mkdir()
+    report.parent.mkdir(parents=True)
+    app.write_text("base app\n", encoding="utf-8")
+    report.write_text("<html>base report</html>\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "src/App.tsx", "test-results/playwright-report/index.html"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "base app", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    branch = "i2p/_session/s1"
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    app.write_text("slice app\n", encoding="utf-8")
+    report.write_text("<html>slice generated report</html>\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "slice app", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+    app.write_text("main app\n", encoding="utf-8")
+    report.write_text("<html>main generated report</html>\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "main app", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="source",
+                dependencies=[],
+                owned_paths=["src/App.tsx"],
+                feature_ids=["f1"],
+                checks=[_passing_check()],
+            ),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="s1",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=branch,
+                worktree=tmp_path,
+            ),
+        ],
+    )
+
+    async def repair(input_: BuildAgentInput) -> BuildAgentOutput:
+        (input_.worktree / "src" / "App.tsx").write_text(
+            "main app\nslice app\n",
+            encoding="utf-8",
+        )
+        (input_.worktree / "test-results" / "playwright-report" / "index.html").write_text(
+            "<html>latest generated report</html>\n",
+            encoding="utf-8",
+        )
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=repair,
+            branch_for_group=lambda s: branch,
+            budget=MergeBudget(per_slice_repair_retries=1),
+        )
+    )
+
+    assert result.landed_ids == ["s1"]
+    assert result.blocked_ids == []
+    tracked = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert "src/App.tsx" in tracked
+    assert "test-results/playwright-report/index.html" not in tracked
+
+
+def test_merge_repair_scope_ignores_preexisting_target_branch_changes(
+    tmp_path: Path,
+) -> None:
+    """Target-branch edits present before the repair agent starts are not overreach."""
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    (tmp_path / "owned.txt").write_text("base\n", encoding="utf-8")
+    (tmp_path / "peer.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "owned.txt", "peer.txt"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "base files", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    branch = "i2p/_session/s1"
+    subprocess.run(
+        ["git", "checkout", "-b", branch, "main"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "owned.txt").write_text("slice\n", encoding="utf-8")
+    subprocess.run(["git", "add", "owned.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(s1): slice edit", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "owned.txt").write_text("target\n", encoding="utf-8")
+    (tmp_path / "peer.txt").write_text("landed peer\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "owned.txt", "peer.txt"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "target peer edit", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="owner",
+                dependencies=[],
+                owned_paths=["owned.txt"],
+                feature_ids=["f1"],
+                checks=[_passing_check()],
+            ),
+            Group(
+                id="s2",
+                name="peer",
+                dependencies=[],
+                owned_paths=["peer.txt"],
+                feature_ids=["f2"],
+                checks=[],
+            ),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="s1",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=branch,
+                worktree=tmp_path,
+            ),
+        ],
+    )
+
+    async def resolving_repair(input_: BuildAgentInput) -> BuildAgentOutput:
+        assert input_.merge_repair
+        assert (input_.worktree / "peer.txt").read_text(encoding="utf-8") == "landed peer\n"
+        owned = (input_.worktree / "owned.txt").read_text(encoding="utf-8")
+        assert "<<<<<<<" in owned
+        assert "target" in owned
+        assert "slice" in owned
+        (input_.worktree / "owned.txt").write_text("target\nslice\n", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=resolving_repair,
+            branch_for_group=lambda s: branch,
+            budget=MergeBudget(per_slice_repair_retries=1),
+        )
+    )
+
+    assert result.landed_ids == ["s1"]
+    assert result.blocked_ids == []
+    assert (tmp_path / "owned.txt").read_text(encoding="utf-8") == "target\nslice\n"
+    assert (tmp_path / "peer.txt").read_text(encoding="utf-8") == "landed peer\n"
 
 
 # ---------------------------------------------------------------------------

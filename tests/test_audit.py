@@ -17,6 +17,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from otto.audit import (
     AuditAgentInput,
@@ -568,6 +569,7 @@ def test_run_audit_writes_compact_evidence_packet_for_judge(tmp_path: Path) -> N
     assert "messages.jsonl" in " ".join(packet["notes"])
     assert str(packet_path) in captured["prompt"]
     assert "Do not bulk-read `messages.jsonl`" in captured["prompt"]
+    assert "Do not run broad `rg`, `find`, `cat`, or `sed` sweeps" in captured["prompt"]
     assert "Deterministic-first rule" in captured["prompt"]
     assert "Project contract test" in captured["prompt"]
 
@@ -1978,3 +1980,32 @@ def test_compose_verdict_passes_when_no_merge_blocked() -> None:
         total_passing_groups=3,
     )
     assert verdict == AuditVerdict.PASSED
+
+
+def test_compose_verdict_narrates_redundant_merge_without_downgrade() -> None:
+    """No-diff groups are dependency-satisfied, but the audit must say so."""
+    from otto.audit import _compose_verdict, AuditAgentOutput, AuditVerdict
+    from otto.spec_amend import ChainVerification
+
+    agent_output = AuditAgentOutput(
+        verdict=AuditVerdict.PASSED,
+        narrative="ok",
+        group_verdicts=[],
+        feature_audits=[],
+        quality_score=5,
+        quality_findings=[],
+    )
+    chain = ChainVerification(verdict_cap="passed", findings=[])
+    verdict, narrative = _compose_verdict(
+        agent_output=agent_output,
+        contract_passed=True,
+        contract_detail="",
+        chain_review=chain,
+        merge_blocked_ids=[],
+        merge_redundant_ids=["profile-actions"],
+        total_passing_groups=3,
+    )
+
+    assert verdict == AuditVerdict.PASSED
+    assert "redundant/no-diff" in narrative
+    assert "profile-actions" in narrative

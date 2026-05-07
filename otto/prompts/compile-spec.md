@@ -65,6 +65,14 @@ deterministically.
       ]
     }
   ],
+  "cross_group_checks": [
+    {
+      "kind": "browser_journey",
+      "command": ["pytest", "tests/browser/test_main_workflow.py"],
+      "evidence_globs": ["evidence/main-workflow/*.png"],
+      "timeout_s": 600
+    }
+  ],
   "features": [
     {
       "id": "scaffold-spa",
@@ -598,6 +606,29 @@ Example for a library:
    group's tasks. Then every other group's tasks include "create
    `routes/<group>.py` exporting `bp`" or similar.
 
+   **Shared stores/data contracts need the same treatment.** A
+   foundation group may create `src/lib/store.ts`,
+   `src/lib/financeStore.ts`, `models.py`, or equivalent, but sibling
+   groups must not be forced to edit that same monolithic file to add
+   their own CRUD operations, selectors, import/export helpers, or status
+   transitions. For multi-feature local apps, choose one of these
+   patterns:
+
+   - Foundation defines the complete shared state shape and all generic
+     mutation/query primitives that every sibling group will need, then
+     siblings only add feature UI/helpers/tests in their own paths.
+   - Foundation exposes a register-via-discovery reducer/action/section
+     convention, and each sibling group contributes `src/features/<group>/`
+     modules discovered by the store/shell.
+   - If multiple siblings are expected to modify the same store/model file,
+     list that file in `shared_scaffold` or `shared_paths` instead of a
+     single group's `owned_paths`, and document why the shared edit is safe.
+
+   Warning sign: if transactions, budgets, bills, charts, CSV, or filters
+   all need to add methods to one store file, the spec is not safely
+   parallel yet. Either put the full store contract in foundation up front,
+   split the extension surface, or mark the contested file shared.
+
 4. **Every group has at least one check**. Browser journeys are
    `subprocess + glob` for v1: `command` runs (typically a Playwright
    pytest), then matching files in `evidence_globs` are collected as
@@ -778,7 +809,7 @@ a `browser_journey` check pointing at it:
 ```json
 {
   "kind": "browser_journey",
-  "command": ["python", "tests/run_browser_journey.py"],
+  "command": ["python3", "tests/run_browser_journey.py"],
   "evidence_globs": ["otto_artifacts/browser/*.png"],
   "timeout_s": 600
 }
@@ -788,6 +819,18 @@ This script boots the app, drives Playwright through the home page,
 asserts the required forms exist, and screenshots each surface. Without
 this check, the group will pass its other tests but the integrated app
 will fail downstream browser quality evaluators.
+
+A `browser_journey` is behavioral evidence only when its command launches
+and drives a real browser against the product. Do not design checks that
+pass by source scanning, built-asset token checks, mocked DOM checks,
+synthetic screenshots, or "browser unavailable" fallbacks. If a browser
+cannot launch, the check should fail honestly with that reason.
+
+For every multi-group webapp, add at least one `cross_group_checks`
+`browser_journey` or repo-native test that runs the integrated app after
+merge and covers the main user workflow from the original intent. Group
+checks prove local work; the cross-group check proves the product still
+works once independently built groups are combined.
 
 ## Process
 

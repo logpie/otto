@@ -81,6 +81,10 @@ COMMON_BUILD_ARTIFACT_PATTERNS: tuple[str, ...] = (
     # Node
     "node_modules/",
     ".npm/",
+    # Browser/test runner outputs
+    "test-results/",
+    "playwright-report/",
+    "coverage/",
     # General build output
     "dist/",
     "build/",
@@ -186,6 +190,22 @@ def otto_owned_paths_from_porcelain(output: str) -> list[str]:
             continue
         path = git_porcelain_path(line)
         if path and path not in seen and is_otto_owned_path(path):
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def generated_artifact_paths_from_porcelain(output: str) -> list[str]:
+    """Return Otto/runtime/common generated artifact paths from porcelain."""
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        path = git_porcelain_path(line)
+        if not path or path in seen:
+            continue
+        if is_otto_owned_path(path) or is_common_build_artifact_path(path):
             seen.add(path)
             paths.append(path)
     return paths

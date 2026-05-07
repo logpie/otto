@@ -377,6 +377,8 @@ def test_web_state_exposes_effective_project_defaults(tmp_path: Path) -> None:
             "  on_watcher_restart: fail",
             "  task_timeout_s: 1200",
             "  merge_certifier_mode: thorough",
+            "build:",
+            "  group_concurrent: 2",
             "",
         ]),
         encoding="utf-8",
@@ -404,6 +406,7 @@ def test_web_state_exposes_effective_project_defaults(tmp_path: Path) -> None:
     assert defaults["queue_worktree_dir"] == ".otto-trees"
     assert defaults["queue_on_watcher_restart"] == "fail"
     assert defaults["queue_merge_certifier_mode"] == "thorough"
+    assert defaults["group_concurrent"] == 2
     assert defaults["config_file_exists"] is True
     assert defaults["config_error"] is None
 

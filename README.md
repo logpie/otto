@@ -161,6 +161,9 @@ queue:
   concurrent: 3
   worktree_dir: .worktrees
   task_timeout_s: 4200
+
+build:
+  group_concurrent: 3
 ```
 
 Useful one-off overrides:

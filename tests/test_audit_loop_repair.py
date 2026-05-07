@@ -27,6 +27,21 @@ def _spec(*feature_ids: str, group_id: str = "g") -> Spec:
     )
 
 
+def _spec_by_group(feature_to_group: dict[str, str]) -> Spec:
+    groups = [
+        Group(id=group_id, name=group_id.title())
+        for group_id in dict.fromkeys(feature_to_group.values())
+    ]
+    return Spec(
+        intent="x",
+        groups=groups,
+        features=[
+            Feature(id=feature_id, name=feature_id, group_id=group_id)
+            for feature_id, group_id in feature_to_group.items()
+        ],
+    )
+
+
 def _verdict(
     feature_id: str,
     verdict: str = "partial",
@@ -137,7 +152,11 @@ def test_features_without_group_skipped() -> None:
 
 
 def test_out_of_scope_missing_features_do_not_consume_repair_cap() -> None:
-    spec = _spec("target-1", "unrelated", "target-2")
+    spec = _spec_by_group({
+        "target-1": "g1",
+        "unrelated": "g1",
+        "target-2": "g2",
+    })
     fix_agent, fix_calls = _make_fix_agent()
 
     result = asyncio.run(
@@ -161,7 +180,7 @@ def test_out_of_scope_missing_features_do_not_consume_repair_cap() -> None:
         "target-1",
         "target-2",
     ]
-    assert fix_calls == [("target-1", "g"), ("target-2", "g")]
+    assert fix_calls == [("target-1", "g1"), ("target-2", "g2")]
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +189,7 @@ def test_out_of_scope_missing_features_do_not_consume_repair_cap() -> None:
 
 
 def test_repair_dispatches_per_feature(test_max=10) -> None:
-    spec = _spec("f1", "f2")
+    spec = _spec_by_group({"f1": "g1", "f2": "g2"})
     fix_agent, fix_calls = _make_fix_agent(succeed=True)
     re_audit, re_audit_calls = _make_re_audit({"f1": "passed", "f2": "passed"})
 
@@ -189,8 +208,8 @@ def test_repair_dispatches_per_feature(test_max=10) -> None:
     )
     assert len(result.attempts) == 2
     # fix_agent saw both features
-    assert ("f1", "g") in fix_calls
-    assert ("f2", "g") in fix_calls
+    assert ("f1", "g1") in fix_calls
+    assert ("f2", "g2") in fix_calls
     # re_audit was called with both feature ids
     assert re_audit_calls == [["f1", "f2"]]
     # Verdicts backfilled from re_audit
@@ -201,6 +220,33 @@ def test_repair_dispatches_per_feature(test_max=10) -> None:
     assert by_id["f1"].succeeded is True
     assert by_id["f2"].succeeded is True
     assert result.audit_passes_run == 2  # 1 original + 1 re-audit
+
+
+def test_repair_coalesces_same_group_failures_before_reaudit() -> None:
+    """One group-level repair should cover sibling feature failures together."""
+    spec = _spec("f1", "f2")
+    fix_agent, fix_calls = _make_fix_agent(succeed=True)
+    re_audit, re_audit_calls = _make_re_audit({"f1": "passed", "f2": "passed"})
+
+    result = asyncio.run(
+        repair_failing_features(
+            spec=spec,
+            feature_verdicts=[
+                _verdict("f1", "partial", "form is missing"),
+                _verdict("f2", "blocked", "filters are missing"),
+            ],
+            fix_agent=fix_agent,
+            re_audit=re_audit,
+            max_attempts_per_run=10,
+            max_audit_passes=10,
+        )
+    )
+
+    assert [attempt.feature_id for attempt in result.attempts] == ["f1"]
+    assert fix_calls == [("f1", "g")]
+    assert re_audit_calls == [["f1", "f2"]]
+    assert result.attempts[0].new_verdict == "passed"
+    assert result.attempts[0].succeeded is True
 
 
 def test_re_audit_still_partial_does_not_flip_succeeded() -> None:
@@ -229,7 +275,7 @@ def test_re_audit_still_partial_does_not_flip_succeeded() -> None:
 
 
 def test_repair_loop_retries_feature_that_reaudit_keeps_partial() -> None:
-    spec = _spec("f1", "f2")
+    spec = _spec_by_group({"f1": "g1", "f2": "g2"})
     fix_agent, fix_calls = _make_fix_agent(succeed=True)
     re_audit, re_audit_calls = _make_re_audit_sequence([
         {"f1": "passed", "f2": "partial"},
@@ -264,7 +310,7 @@ def test_repair_loop_retries_feature_that_reaudit_keeps_partial() -> None:
 
 
 def test_repair_loop_preserves_unattempted_failures_when_reaudit_is_scoped() -> None:
-    spec = _spec("f1", "f2")
+    spec = _spec_by_group({"f1": "g1", "f2": "g2"})
     fix_agent, fix_calls = _make_fix_agent(succeed=True)
     re_audit, re_audit_calls = _make_re_audit_sequence([
         {"f1": "partial", "f2": "partial"},
@@ -325,7 +371,7 @@ def test_audit_passes_cap_skips_re_audit() -> None:
 
 def test_max_attempts_per_run_caps_selection() -> None:
     """Three failing features but cap=2 → only 2 fix attempts."""
-    spec = _spec("f1", "f2", "f3")
+    spec = _spec_by_group({"f1": "g1", "f2": "g2", "f3": "g3"})
     fix_agent, fix_calls = _make_fix_agent()
 
     result = asyncio.run(
@@ -349,7 +395,11 @@ def test_max_attempts_per_run_caps_selection() -> None:
 
 
 def test_unactionable_blocked_verdicts_do_not_crowd_out_real_repairs() -> None:
-    spec = _spec("not_seen", "crashing_api", "wrong_output")
+    spec = _spec_by_group({
+        "not_seen": "g1",
+        "crashing_api": "g2",
+        "wrong_output": "g3",
+    })
     fix_agent, fix_calls = _make_fix_agent()
     re_audit, re_audit_calls = _make_re_audit({
         "crashing_api": "passed",

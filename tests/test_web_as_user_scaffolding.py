@@ -8,7 +8,9 @@ spawn, or real browser launch.
 
 from __future__ import annotations
 
+import json
 import os
+import signal
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -85,6 +87,30 @@ def test_web_as_user_refuses_without_OTTO_ALLOW_REAL_COST() -> None:
     )
 
 
+def test_browser_bundle_helper_uses_build_not_commit_gate_by_default(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """True WebTest needs a fresh bundle even when the local bundle is uncommitted."""
+    from tests.browser._helpers import build_bundle
+
+    calls: list[str] = []
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "index.js").write_text("console.log('ok')", encoding="utf-8")
+    (assets / "index.css").write_text("body{}", encoding="utf-8")
+    monkeypatch.delenv("OTTO_BROWSER_SKIP_BUILD", raising=False)
+    monkeypatch.delenv("OTTO_BROWSER_REQUIRE_COMMITTED_BUNDLE", raising=False)
+    monkeypatch.setattr(build_bundle, "STATIC_ASSETS_DIR", assets)
+    monkeypatch.setattr(build_bundle, "_run_npm", lambda script: calls.append(script))
+    if hasattr(build_bundle.ensure_bundle_built, "_done"):
+        delattr(build_bundle.ensure_bundle_built, "_done")
+
+    build_bundle.ensure_bundle_built()
+
+    assert calls == ["web:build"]
+
+
 def test_web_record_fixture_refuses_without_OTTO_ALLOW_REAL_COST() -> None:
     """Recording without dry-run + without env var aborts with clear message."""
     result = _run_script(WEB_RECORD_FIXTURE, ["--recording", "R1"])
@@ -130,6 +156,52 @@ def test_web_as_user_dry_run_accepts_custom_intent() -> None:
         f"dry-run W1 custom intent should succeed without real cost; "
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
+
+
+def test_web_as_user_dry_run_accepts_group_concurrency() -> None:
+    """`--group-concurrent` makes true-web concurrency explicit and replayable."""
+    result = _run_script(
+        WEB_AS_USER,
+        [
+            "--dry-run",
+            "--scenario",
+            "W1",
+            "--group-concurrent",
+            "3",
+        ],
+    )
+    assert result.returncode == 0, (
+        f"dry-run W1 group concurrency should succeed without real cost; "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def test_configure_throwaway_project_aligns_timeout_and_queue_guard(tmp_path: Path) -> None:
+    """Long true-web runs must not be preempted by Otto's queue hard-kill guard."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "README.md").write_text("# test\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=tmp_path, check=True)
+
+    web_as_user._configure_throwaway_project(
+        tmp_path,
+        group_concurrent=3,
+        build_timeout_s=7200,
+    )
+
+    config = (tmp_path / "otto.yaml").read_text(encoding="utf-8")
+    assert "run_budget_seconds: 7200" in config
+    assert "queue:\n  task_timeout_s: 8640" in config
+    assert "build:\n  group_concurrent: 3" in config
 
 
 def test_web_record_fixture_dry_run_R1_does_not_invoke_llm() -> None:
@@ -295,6 +367,30 @@ def test_artifact_mine_does_not_require_manifest_for_running_queue_task(tmp_path
     assert failures.failures == []
 
 
+def test_artifact_mine_does_not_require_manifest_for_interrupted_queue_task(
+    tmp_path: Path,
+) -> None:
+    """Watcher-stopped tasks can be visible/resumable before a manifest exists."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".otto-queue-state.json").write_text(
+        '{"tasks": {"build-micro-twitter": {"status": "interrupted"}}}',
+        encoding="utf-8",
+    )
+    failures = web_as_user.RunFailures()
+
+    web_as_user.artifact_mine_pass(project, failures)
+
+    assert failures.failures == []
+
+
 def test_artifact_mine_flags_missing_otto_artifacts_gitignore_after_evidence(tmp_path: Path) -> None:
     sys.path.insert(0, str(SCRIPTS_DIR))
     try:
@@ -430,6 +526,484 @@ def test_web_as_user_semantic_audit_accepts_fixed_stage_language() -> None:
     )
 
     assert findings == []
+
+
+def test_web_as_user_semantic_audit_accepts_explained_seed_artifact_path() -> None:
+    """Artifact/log paths may include seed if the UI also explains fixtures."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    findings = web_as_user._mc_run_detail_semantic_findings(
+        """
+        Stages ● Prepare fixtures done → ◐ Build groups active
+        Artifacts seed/seed.log build/foundation/attempt-01/narrative.log
+        """
+    )
+
+    assert findings == []
+
+
+def test_web_as_user_filters_launcher_state_409_resource_noise() -> None:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    captured = {
+        "network_errors": [{"status": 409, "url": "http://127.0.0.1:9000/api/state"}],
+        "console": [
+            {
+                "type": "error",
+                "text": "Failed to load resource: the server responded with a status of 409 (Conflict)",
+                "location": {"url": "http://127.0.0.1:9000/api/state"},
+            },
+            {"type": "warning", "text": "ordinary warning", "location": {}},
+        ],
+    }
+
+    assert web_as_user._unexpected_network_errors(captured["network_errors"]) == []
+    assert web_as_user._unexpected_console_errors(captured) == []
+
+
+def test_web_as_user_product_roots_prefer_submitted_worktree(tmp_path: Path) -> None:
+    """Generated-product verification must inspect the queue worktree, not the shell repo."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    worktree = project / ".worktrees" / "build-micro-twitter"
+    worktree.mkdir(parents=True)
+    (worktree / "package.json").write_text('{"scripts":{"dev":"vite"}}\n', encoding="utf-8")
+    (project / "README.md").write_text("# shell\n", encoding="utf-8")
+    ctx = web_as_user.ScenarioContext(
+        scenario=web_as_user.SCENARIOS["W1"],
+        project_dir=project,
+        artifact_dir=tmp_path / "artifacts",
+        provider="codex",
+        failures=web_as_user.RunFailures(),
+        debug_log=tmp_path / "debug.log",
+        run_id="root-test",
+    )
+    state = {
+        "history": {
+            "items": [
+                {
+                    "queue_task_id": "build-micro-twitter",
+                    "run_id": "run-1",
+                    "cwd": str(worktree),
+                    "worktree": ".worktrees/build-micro-twitter",
+                }
+            ]
+        }
+    }
+
+    roots = web_as_user._candidate_product_roots(
+        ctx,
+        state=state,
+        submitted_task_id="build-micro-twitter",
+        submitted_run_id="run-1",
+    )
+
+    assert roots[0] == worktree.resolve()
+
+
+def test_web_as_user_product_roots_ignore_stale_richer_worktree(
+    tmp_path: Path,
+) -> None:
+    """Submitted-run verification must not rank stale sibling worktrees above the target."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    target = project / ".worktrees" / "build-micro-twitter"
+    stale = project / ".worktrees" / "old-rich-project"
+    target.mkdir(parents=True)
+    stale.mkdir(parents=True)
+    (target / "index.html").write_text("<main>target</main>", encoding="utf-8")
+    (stale / "package.json").write_text('{"scripts":{"dev":"vite"}}\n', encoding="utf-8")
+    (stale / "index.html").write_text("<main>stale</main>", encoding="utf-8")
+    (stale / "src").mkdir()
+    ctx = web_as_user.ScenarioContext(
+        scenario=web_as_user.SCENARIOS["W1"],
+        project_dir=project,
+        artifact_dir=tmp_path / "artifacts",
+        provider="codex",
+        failures=web_as_user.RunFailures(),
+        debug_log=tmp_path / "debug.log",
+        run_id="root-test",
+    )
+    state = {
+        "history": {
+            "items": [
+                {
+                    "queue_task_id": "build-micro-twitter",
+                    "run_id": "run-1",
+                    "cwd": str(target),
+                    "worktree": ".worktrees/build-micro-twitter",
+                }
+            ]
+        }
+    }
+
+    roots = web_as_user._candidate_product_roots(
+        ctx,
+        state=state,
+        submitted_task_id="build-micro-twitter",
+        submitted_run_id="run-1",
+    )
+
+    assert target.resolve() in roots
+    assert stale.resolve() not in roots
+
+
+def test_web_as_user_terminal_detection_accepts_done_live_row() -> None:
+    """W1 must stop polling when Mission Control keeps success in live rows."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    state = {
+        "live": {
+            "items": [
+                {
+                    "queue_task_id": "build-micro-twitter",
+                    "run_id": "run-1",
+                    "status": "done",
+                    "terminal_outcome": "success",
+                }
+            ]
+        },
+        "history": {"items": []},
+    }
+
+    outcome, run_id = web_as_user._terminal_outcome_for_submitted_task(
+        state,
+        submitted_task_id="build-micro-twitter",
+        submitted_run_id=None,
+    )
+
+    assert outcome == "success"
+    assert run_id == "run-1"
+
+
+def test_web_as_user_terminal_detection_matches_by_run_id_when_task_id_missing() -> None:
+    """Mission Control rows from older surfaces may not include queue_task_id."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    state = {
+        "history": {
+            "items": [
+                {
+                    "run_id": "run-1",
+                    "status": "done",
+                    "terminal_outcome": "success",
+                }
+            ]
+        }
+    }
+
+    outcome, run_id = web_as_user._terminal_outcome_for_submitted_task(
+        state,
+        submitted_task_id=None,
+        submitted_run_id="run-1",
+    )
+
+    assert outcome == "success"
+    assert run_id == "run-1"
+
+
+def test_web_as_user_signal_handler_ignores_self_signal_before_killpg(
+    monkeypatch,
+) -> None:
+    """The cleanup handler must not recurse when it signals its own process group."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    installed: dict[int, object] = {}
+    signal_calls: list[tuple[int, object]] = []
+
+    def fake_signal(signum: int, handler: object) -> object:
+        installed[signum] = handler
+        signal_calls.append((signum, handler))
+        return signal.SIG_DFL
+
+    monkeypatch.setattr(web_as_user.signal, "signal", fake_signal)
+    monkeypatch.setattr(web_as_user.os, "getpgrp", lambda: 12345)
+    monkeypatch.setattr(web_as_user.os, "killpg", lambda _pgid, _sig: None)
+
+    web_as_user._install_signal_handlers()
+    handler = installed[signal.SIGTERM]
+
+    try:
+        handler(signal.SIGTERM, None)  # type: ignore[misc]
+    except SystemExit as exc:
+        assert exc.code == 143
+    else:  # pragma: no cover
+        raise AssertionError("signal handler did not exit")
+
+    assert (signal.SIGTERM, signal.SIG_IGN) in signal_calls
+
+
+def test_web_as_user_concurrency_journal_requires_batch_overlap(tmp_path: Path) -> None:
+    """A concurrent true-web run must prove multiple groups actually executed concurrently."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    session = project / ".worktrees" / "build-micro-twitter" / "otto_logs" / "sessions" / "run-1"
+    session.mkdir(parents=True)
+    (session / "proof-packet.json").write_text(
+        '{"groups":[{"group_id":"feed"},{"group_id":"composer"}]}',
+        encoding="utf-8",
+    )
+    (session / "spec-state.jsonl").write_text(
+        "\n".join(
+            [
+                '{"event":"group.started","group_id":"feed","ts":"2026-05-06T01:00:00Z"}',
+                '{"event":"group.started","group_id":"composer","ts":"2026-05-06T01:00:01Z"}',
+                '{"event":"group.execution.started","group_id":"feed","ts":"2026-05-06T01:00:02Z"}',
+                '{"event":"group.execution.started","group_id":"composer","ts":"2026-05-06T01:00:03Z"}',
+                '{"event":"group.execution.finished","group_id":"feed","ts":"2026-05-06T01:00:09Z"}',
+                '{"event":"group.merge.eligible","group_id":"feed","ts":"2026-05-06T01:00:10Z"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ctx = web_as_user.ScenarioContext(
+        scenario=web_as_user.SCENARIOS["W1"],
+        project_dir=project,
+        artifact_dir=tmp_path / "artifacts",
+        provider="codex",
+        failures=web_as_user.RunFailures(),
+        debug_log=tmp_path / "debug.log",
+        run_id="concurrency-test",
+        group_concurrent=2,
+    )
+    failures = web_as_user.RunFailures()
+
+    web_as_user._assert_group_concurrency_observed(
+        ctx,
+        run_id="run-1",
+        log_fn=lambda _msg: None,
+        failures=failures,
+    )
+
+    assert failures.failures == []
+    report = json.loads((ctx.artifact_dir / "group-concurrency.json").read_text())
+    assert report["started_before_first_terminal"] == ["feed", "composer"]
+    assert report["execution_started_before_first_finished"] == ["feed", "composer"]
+    assert report["max_execution_overlap"] == 2
+    assert report["max_execution_overlap_groups"] == ["composer", "feed"]
+
+
+def test_web_as_user_concurrency_journal_rejects_started_only_false_overlap(
+    tmp_path: Path,
+) -> None:
+    """Started events alone are not proof of real async execution overlap."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    session = project / ".worktrees" / "build-micro-twitter" / "otto_logs" / "sessions" / "run-1"
+    session.mkdir(parents=True)
+    (session / "proof-packet.json").write_text(
+        '{"groups":[{"group_id":"feed"},{"group_id":"composer"}]}',
+        encoding="utf-8",
+    )
+    (session / "spec-state.jsonl").write_text(
+        "\n".join(
+            [
+                '{"event":"group.started","group_id":"feed","ts":"2026-05-06T01:00:00Z"}',
+                '{"event":"group.started","group_id":"composer","ts":"2026-05-06T01:00:01Z"}',
+                '{"event":"group.execution.started","group_id":"feed","ts":"2026-05-06T01:00:02Z"}',
+                '{"event":"group.execution.finished","group_id":"feed","ts":"2026-05-06T01:00:10Z"}',
+                '{"event":"group.execution.started","group_id":"composer","ts":"2026-05-06T01:00:11Z"}',
+                '{"event":"group.execution.finished","group_id":"composer","ts":"2026-05-06T01:00:20Z"}',
+                '{"event":"group.merge.eligible","group_id":"feed","ts":"2026-05-06T01:00:21Z"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ctx = web_as_user.ScenarioContext(
+        scenario=web_as_user.SCENARIOS["W1"],
+        project_dir=project,
+        artifact_dir=tmp_path / "artifacts",
+        provider="codex",
+        failures=web_as_user.RunFailures(),
+        debug_log=tmp_path / "debug.log",
+        run_id="concurrency-test",
+        group_concurrent=2,
+    )
+    failures = web_as_user.RunFailures()
+
+    web_as_user._assert_group_concurrency_observed(
+        ctx,
+        run_id="run-1",
+        log_fn=lambda _msg: None,
+        failures=failures,
+    )
+
+    assert failures.failures
+    assert "within any dependency-ready wave" in failures.failures[0]
+
+
+def test_web_as_user_concurrency_allows_dependency_gated_parallel_wave(
+    tmp_path: Path,
+) -> None:
+    """Sequential foundation followed by a parallel sibling wave is real concurrency."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    session = project / ".worktrees" / "build-issue-tracker" / "otto_logs" / "sessions" / "run-1"
+    session.mkdir(parents=True)
+    (session / "proof-packet.json").write_text(
+        '{"groups":[{"group_id":"foundation"},{"group_id":"projects"},{"group_id":"views"},{"group_id":"filters"}]}',
+        encoding="utf-8",
+    )
+    (session / "spec-state.jsonl").write_text(
+        "\n".join(
+            [
+                '{"event":"group.execution.started","group_id":"foundation","ts":"2026-05-06T01:00:00Z"}',
+                '{"event":"group.execution.finished","group_id":"foundation","ts":"2026-05-06T01:05:00Z"}',
+                '{"event":"group.merge.eligible","group_id":"foundation","ts":"2026-05-06T01:05:01Z"}',
+                '{"event":"group.execution.started","group_id":"projects","ts":"2026-05-06T01:05:02Z"}',
+                '{"event":"group.execution.started","group_id":"views","ts":"2026-05-06T01:05:03Z"}',
+                '{"event":"group.execution.started","group_id":"filters","ts":"2026-05-06T01:05:04Z"}',
+                '{"event":"group.execution.finished","group_id":"filters","ts":"2026-05-06T01:09:00Z"}',
+                '{"event":"group.execution.finished","group_id":"projects","ts":"2026-05-06T01:10:00Z"}',
+                '{"event":"group.execution.finished","group_id":"views","ts":"2026-05-06T01:11:00Z"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ctx = web_as_user.ScenarioContext(
+        scenario=web_as_user.SCENARIOS["W1"],
+        project_dir=project,
+        artifact_dir=tmp_path / "artifacts",
+        provider="codex",
+        failures=web_as_user.RunFailures(),
+        debug_log=tmp_path / "debug.log",
+        run_id="concurrency-test",
+        group_concurrent=3,
+    )
+    failures = web_as_user.RunFailures()
+
+    web_as_user._assert_group_concurrency_observed(
+        ctx,
+        run_id="run-1",
+        log_fn=lambda _msg: None,
+        failures=failures,
+    )
+
+    assert failures.failures == []
+    report = json.loads((ctx.artifact_dir / "group-concurrency.json").read_text())
+    assert report["execution_started_before_first_finished"] == ["foundation"]
+    assert report["max_execution_overlap"] == 3
+    assert report["max_execution_overlap_groups"] == ["filters", "projects", "views"]
+
+
+def test_web_as_user_concurrency_uses_queue_task_session_when_run_id_missing(
+    tmp_path: Path,
+) -> None:
+    """Timeouts can lack a submitted run id; task worktree journals still prove concurrency."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    session = (
+        project
+        / ".worktrees"
+        / "build-micro-twitter"
+        / "otto_logs"
+        / "sessions"
+        / "run-1"
+    )
+    (session / "spec").mkdir(parents=True)
+    (session / "spec" / "spec.json").write_text(
+        '{"groups":[{"id":"feed"},{"id":"composer"}]}',
+        encoding="utf-8",
+    )
+    (session / "spec-state.jsonl").write_text(
+        "\n".join(
+            [
+                '{"event":"group.execution.started","group_id":"feed","ts":"2026-05-06T01:00:02Z"}',
+                '{"event":"group.execution.started","group_id":"composer","ts":"2026-05-06T01:00:03Z"}',
+                '{"event":"group.execution.finished","group_id":"feed","ts":"2026-05-06T01:00:09Z"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ctx = web_as_user.ScenarioContext(
+        scenario=web_as_user.SCENARIOS["W1"],
+        project_dir=project,
+        artifact_dir=tmp_path / "artifacts",
+        provider="codex",
+        failures=web_as_user.RunFailures(),
+        debug_log=tmp_path / "debug.log",
+        run_id="concurrency-test",
+        group_concurrent=2,
+    )
+    failures = web_as_user.RunFailures()
+
+    web_as_user._assert_group_concurrency_observed(
+        ctx,
+        run_id=None,
+        queue_task_id="build-micro-twitter",
+        log_fn=lambda _msg: None,
+        failures=failures,
+    )
+
+    assert failures.failures == []
+    report = json.loads((ctx.artifact_dir / "group-concurrency.json").read_text())
+    assert report["group_count"] == 2
+    assert report["session_dir"] == str(session)
 
 
 def test_web_record_fixture_recording_registry_completeness() -> None:

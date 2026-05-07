@@ -93,7 +93,10 @@ def test_get_run_does_not_show_queue_concurrency_as_group_concurrency(tmp_path: 
         intent="tiny webapp",
         project_kind="webapp",
     )
-    (project / "otto.yaml").write_text("queue:\n  concurrent: 4\n", encoding="utf-8")
+    (project / "otto.yaml").write_text(
+        "queue:\n  concurrent: 4\nbuild:\n  group_concurrent: 1\n",
+        encoding="utf-8",
+    )
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=project, check=True)
 
     body = _app_with_project(project).get(f"/api/run-view/{sid}").json()
@@ -393,6 +396,101 @@ def test_run_view_diff_includes_live_untracked_group_files(tmp_path: Path) -> No
     assert "src/App.tsx" in diff.text
     assert "+export default function App()" in diff.text
     assert "outside.txt" not in diff.text
+
+
+def test_run_view_group_diff_reads_linked_group_worktree(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.email", "test@otto.local"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Otto Tester"], cwd=project, check=True)
+    (project / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=project, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=project, check=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/task", ".worktrees/build-task", "main"],
+        cwd=project,
+        check=True,
+    )
+    worktree = project / ".worktrees" / "build-task"
+    sid = "2026-05-04-200000-linked-group"
+    session = worktree / "otto_logs" / "sessions" / sid
+    (session / "spec").mkdir(parents=True)
+    (session / "spec" / "spec.json").write_text(
+        json.dumps(
+            {
+                "intent": "build grouped app",
+                "project_kind": "webapp",
+                "groups": [
+                    {
+                        "id": "foundation",
+                        "name": "Foundation",
+                        "owned_paths": ["src/App.tsx"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    group_worktree_rel = ".worktrees/build-task/otto_logs/sessions/" + sid + "/worktrees/foundation"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "i2p/session/foundation", group_worktree_rel, "main"],
+        cwd=project,
+        check=True,
+    )
+    group_worktree = session / "worktrees" / "foundation"
+    app_file = group_worktree / "src" / "App.tsx"
+    app_file.parent.mkdir(parents=True)
+    app_file.write_text(
+        "export default function App() { return <main>Issue tracker</main>; }\n",
+        encoding="utf-8",
+    )
+
+    client = _app_with_project(project)
+    diff = client.get(f"/api/run-view/{sid}/groups/foundation/diff")
+
+    assert diff.status_code == 200
+    body = diff.json()
+    assert body["group_id"] == "foundation"
+    assert "Scope: group foundation" in body["diff"]
+    assert "src/App.tsx" in body["diff"]
+    assert "+export default function App()" in body["diff"]
+
+
+def test_run_view_whole_diff_explains_pending_group_worktrees(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.email", "test@otto.local"], cwd=project, check=True)
+    subprocess.run(["git", "config", "user.name", "Otto Tester"], cwd=project, check=True)
+    (project / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=project, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=project, check=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "build/task", ".worktrees/build-task", "main"],
+        cwd=project,
+        check=True,
+    )
+    worktree = project / ".worktrees" / "build-task"
+    sid = "2026-05-04-200000-whole-pending"
+    session = worktree / "otto_logs" / "sessions" / sid
+    session.mkdir(parents=True)
+    group_worktree_rel = ".worktrees/build-task/otto_logs/sessions/" + sid + "/worktrees/foundation"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "i2p/session/foundation", group_worktree_rel, "main"],
+        cwd=project,
+        check=True,
+    )
+
+    client = _app_with_project(project)
+    diff = client.get(f"/api/run-view/{sid}/diff")
+
+    assert diff.status_code == 200
+    assert "No whole-run diff is available yet" in diff.text
+    assert "foundation" in diff.text
+    assert "No changes from base or working tree" not in diff.text
 
 
 def test_group_logs_and_diff_are_real_endpoints(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -19,6 +20,8 @@ from otto.token_usage import TOKEN_USAGE_KEYS
 _SDK_IMPORT_ERROR_MESSAGE = ""
 
 CODEX_STDIO_LIMIT_BYTES = 16 * 1024 * 1024
+CODEX_POST_RESULT_EXIT_GRACE_S = 0.25
+_CLAUDE_ENV_LOCK = asyncio.Lock()
 DEFAULT_DISALLOWED_BASH_TOOLS = (
     "Bash(killall*)",
     "Bash(killall:*)",
@@ -1103,28 +1106,32 @@ async def _query_claude(
                 _remember_agent_process(state, pid)
         return process
 
-    os.environ.clear()
-    os.environ.update(opts.env or {})
-    try:
-        if original_open_process is not None:
-            _sdk_subprocess_cli.anyio.open_process = _open_process_with_session
-        if (opts.can_use_tool or opts.hooks) and _SDKClaudeSDKClient is not None:
-            async with _SDKClaudeSDKClient(sdk_options) as client:
-                await client.query(prompt)
-                async for message in client.receive_response():
+    # Claude SDK transport reads process-global os.environ and the
+    # monkeypatch below is process-global too. Serialize this section so
+    # concurrent Otto group builds cannot corrupt each other's provider env.
+    async with _CLAUDE_ENV_LOCK:
+        os.environ.clear()
+        os.environ.update(opts.env or {})
+        try:
+            if original_open_process is not None:
+                _sdk_subprocess_cli.anyio.open_process = _open_process_with_session
+            if (opts.can_use_tool or opts.hooks) and _SDKClaudeSDKClient is not None:
+                async with _SDKClaudeSDKClient(sdk_options) as client:
+                    await client.query(prompt)
+                    async for message in client.receive_response():
+                        normalized = _normalize_message(message)
+                        if normalized is not None:
+                            yield normalized
+            else:
+                async for message in _sdk_query(prompt=prompt, options=sdk_options):
                     normalized = _normalize_message(message)
                     if normalized is not None:
                         yield normalized
-        else:
-            async for message in _sdk_query(prompt=prompt, options=sdk_options):
-                normalized = _normalize_message(message)
-                if normalized is not None:
-                    yield normalized
-    finally:
-        if original_open_process is not None:
-            _sdk_subprocess_cli.anyio.open_process = original_open_process
-        os.environ.clear()
-        os.environ.update(saved_env)
+        finally:
+            if original_open_process is not None:
+                _sdk_subprocess_cli.anyio.open_process = original_open_process
+            os.environ.clear()
+            os.environ.update(saved_env)
 
 
 def _codex_command(options: AgentOptions) -> list[str]:
@@ -1133,7 +1140,12 @@ def _codex_command(options: AgentOptions) -> list[str]:
         command.extend(["resume", "--json"])
     else:
         command.extend(["--json"])
-    if options.permission_mode == "bypassPermissions":
+    if options.permission_mode in {"bypassPermissions", "acceptEdits"}:
+        # Codex's `--full-auto` still runs inside a sandbox. Build agents run
+        # with Claude-style `acceptEdits`: they are allowed to write product
+        # files and must often launch local dev servers for BrowserJourney
+        # checks. Mapping that mode to full-auto blocks localhost binds, which
+        # makes browser repair much harder than the product itself.
         command.append("--dangerously-bypass-approvals-and-sandbox")
     else:
         command.append("--full-auto")
@@ -1242,6 +1254,7 @@ async def _query_codex(
     emitted_collab_tool_ids: set[str] = set()
     child_tool_use_by_thread_id: dict[str, str] = {}
 
+    wait_task = asyncio.create_task(process.wait())
     try:
         while True:
             raw_line = await stdout.readline()
@@ -1353,9 +1366,22 @@ async def _query_codex(
                     total_cost_usd=0.0,
                     usage=event.get("usage"),
                 )
+                break
 
-        return_code = await process.wait()
-        if not saw_result or return_code != 0:
+        if saw_result:
+            try:
+                return_code = await asyncio.wait_for(
+                    asyncio.shield(wait_task),
+                    timeout=CODEX_POST_RESULT_EXIT_GRACE_S,
+                )
+            except asyncio.TimeoutError:
+                return
+            if return_code == 0:
+                return
+        else:
+            return_code = await asyncio.shield(wait_task)
+
+        if return_code != 0:
             error_lines = raw_lines[-20:]
             error_text = "\n".join(error_lines) or f"codex exited with code {return_code}"
             if state is not None:
@@ -1369,26 +1395,47 @@ async def _query_codex(
                 usage=None,
             )
     finally:
-        await _terminate_provider_process(process)
+        await _terminate_provider_process(process, wait_task=wait_task)
 
 
-async def _terminate_provider_process(process: Any, *, grace_s: float = 2.0) -> None:
+async def _terminate_provider_process(
+    process: Any,
+    *,
+    grace_s: float = 2.0,
+    wait_task: asyncio.Task[Any] | None = None,
+) -> None:
     if getattr(process, "returncode", None) is not None:
         return
+    wait_task = wait_task or asyncio.create_task(process.wait())
 
     _signal_provider_process(process, signal.SIGTERM)
     try:
-        await asyncio.wait_for(process.wait(), timeout=grace_s)
+        await asyncio.wait_for(asyncio.shield(wait_task), timeout=grace_s)
         return
     except asyncio.TimeoutError:
         _signal_provider_process(process, signal.SIGKILL)
         try:
-            await asyncio.wait_for(process.wait(), timeout=grace_s)
+            await asyncio.wait_for(asyncio.shield(wait_task), timeout=grace_s)
         except (asyncio.TimeoutError, ProcessLookupError):
+            _cancel_provider_wait_task(wait_task)
             return
     except asyncio.CancelledError:
         _signal_provider_process(process, signal.SIGKILL)
+        _cancel_provider_wait_task(wait_task)
         raise
+
+
+def _cancel_provider_wait_task(wait_task: asyncio.Task[Any]) -> None:
+    if wait_task.done():
+        return
+    wait_task.cancel()
+    with contextlib.suppress(Exception):
+        wait_task.get_loop().create_task(_drain_cancelled_task(wait_task))
+
+
+async def _drain_cancelled_task(wait_task: asyncio.Task[Any]) -> None:
+    with contextlib.suppress(asyncio.CancelledError):
+        await wait_task
 
 
 def _signal_provider_process(process: Any, sig: signal.Signals) -> None:

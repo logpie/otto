@@ -82,6 +82,37 @@ class _SlowWaitProcess:
         self.returncode = -9
 
 
+class _PostResultHangingProcess:
+    def __init__(self):
+        self.stdin = _FakeStdin()
+        self.stdout = _FakeStdout([
+            '{"type":"thread.started","thread_id":"thread-123"}\n',
+            '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3}}\n',
+        ])
+        self.returncode: int | None = None
+        self.signals: list[str] = []
+
+    async def wait(self) -> int:
+        while self.returncode is None:
+            await asyncio.sleep(0.01)
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.signals.append("term")
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.signals.append("kill")
+        self.returncode = -9
+
+
+async def _collect_query_messages(**kwargs):
+    messages = []
+    async for message in query(**kwargs):
+        messages.append(message)
+    return messages
+
+
 @pytest.mark.asyncio
 async def test_provider_process_cleanup_kills_again_when_wait_is_cancelled():
     process = _SlowWaitProcess()
@@ -93,6 +124,28 @@ async def test_provider_process_cleanup_kills_again_when_wait_is_cancelled():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert process.signals == ["term", "kill"]
+
+
+@pytest.mark.asyncio
+async def test_codex_query_does_not_wait_forever_after_turn_completed(tmp_path, monkeypatch):
+    process = _PostResultHangingProcess()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = await asyncio.wait_for(
+        _collect_query_messages(
+            prompt="Finish",
+            options=ClaudeAgentOptions(provider="codex", cwd=str(tmp_path)),
+        ),
+        timeout=1.0,
+    )
+
+    assert [type(message) for message in messages] == [ResultMessage]
+    assert messages[0].session_id == "thread-123"
+    assert process.signals == ["term"]
 
 
 @pytest.mark.asyncio
@@ -195,6 +248,19 @@ def test_codex_resume_command_uses_resume_subcommand_shape():
     assert "--color" not in command
     assert "-C" not in command
     assert command[-2:] == ["thread-123", "-"]
+
+
+def test_codex_command_accept_edits_runs_unsandboxed_for_browser_checks():
+    from otto.agent import _codex_command
+
+    command = _codex_command(ClaudeAgentOptions(
+        provider="codex",
+        cwd="/tmp/project",
+        permission_mode="acceptEdits",
+    ))
+
+    assert "--dangerously-bypass-approvals-and-sandbox" in command
+    assert "--full-auto" not in command
 
 
 def test_codex_command_passes_reasoning_effort():

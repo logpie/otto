@@ -1136,6 +1136,7 @@ async def run_audit(
             contract_detail=contract_detail,
             chain_review=chain_review,
             merge_blocked_ids=list(merge_result.blocked_ids or []),
+            merge_redundant_ids=list(getattr(merge_result, "redundant_ids", []) or []),
             total_passing_groups=len(getattr(merge_result, "landed_ids", []) or [])
                 + len(merge_result.blocked_ids or []),
         )
@@ -1799,6 +1800,12 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
             "evidence has been reviewed."
         )
         lines.append(
+            "Do not run broad `rg`, `find`, `cat`, or `sed` sweeps over "
+            "`otto_logs/**`, `_otto_build_logs/**`, `.worktrees/**`, or parent "
+            "session directories. Inspect the compact evidence packet, named "
+            "check logs, screenshots, traces, and source files directly."
+        )
+        lines.append(
             "Deterministic-first rule: evaluate contract_test, cross-slice "
             "checks, and browser/walkthrough artifacts before source-reading "
             "or judging product polish. A failed deterministic check is not "
@@ -2122,6 +2129,7 @@ def _compose_verdict(
     contract_detail: str,
     chain_review,  # ChainVerification, but spec_amend imports audit so avoid cycle
     merge_blocked_ids: list[str] | None = None,
+    merge_redundant_ids: list[str] | None = None,
     total_passing_groups: int = 0,
 ) -> tuple[AuditVerdict, str]:
     """Compose final verdict + narrative from all caps, order-independent.
@@ -2177,6 +2185,15 @@ def _compose_verdict(
         sections.append(
             f"[merge: {len(blocked_ids)} group(s) blocked at merge time]\n"
             + "\n".join(f"  - {sid} did not land via merge_queue" for sid in blocked_ids)
+        )
+    redundant_ids = list(merge_redundant_ids or [])
+    if redundant_ids:
+        sections.append(
+            f"[merge: {len(redundant_ids)} group(s) redundant/no-diff]\n"
+            + "\n".join(
+                f"  - {sid} was dependency-satisfied but did not add a product diff"
+                for sid in redundant_ids
+            )
         )
 
     # Quality cap.

@@ -1215,3 +1215,93 @@ Post-merge verification was conflating three duties: source-task product proof, 
 - `uv run pytest -q tests/test_hardening.py::test_parser_extracts_prefixed_story_evidence_blocks tests/test_hardening.py::test_parser_extracts_timestamped_narrative_story_evidence_blocks tests/test_hardening.py::test_parser_preserves_fenced_code_inside_story_evidence`
 - `uv run pytest -q tests/test_certifier_stories.py::test_pow_merge_verification_does_not_require_fresh_ui_demo_video tests/test_certifier_stories.py::test_pow_file_validation_accepts_csv_row_order_evidence tests/test_certifier_stories.py::test_pow_demo_evidence_accepts_walkthrough_with_story_text_evidence tests/test_certifier_stories.py::test_pow_generic_recording_does_not_cover_unvisualized_ui_story`
 - Final live merge verification: `otto merge-verify merge-1777628934-92022-af8fd2c9 --verify risk-based` passed in one round, 44/44 stories, 44/44 evidence, proof gate pass.
+
+# Micro Twitter True WebTest Cross-Group Check Merge Ordering
+
+Date: 2026-05-07
+
+## Observations
+
+- True WebTest run seed `20260509` built Micro Twitter with `group_concurrent=3`.
+- Real group execution overlapped: `composer-authoring`, `timeline-actions`, and `feed-search-filter` all emitted `group.execution.started` at `2026-05-07T10:43:21Z`.
+- `quality-persistence-polish` owns `tests/browser/main-workflow.spec.*` and depends on composer, timeline, and search.
+- During `timeline-actions` merge, Otto ran the cross-group browser journey command `npm run test:browser -- tests/browser/main-workflow.spec.ts` before `quality-persistence-polish` landed.
+- The merge blocked on `Cannot find module .../tests/browser/main-workflow.spec.ts`, even though the missing test file is owned by a later group and was not expected to exist yet.
+
+## Hypotheses
+
+### H1: Merge queue runs every cross-group check after every group, regardless of whether the check's own runner files have landed (ROOT HYPOTHESIS)
+
+- Supports: `otto/merge_queue.py` calls `run_checks(list(spec.cross_group_checks), ...)` inside every per-group merge verification.
+- Supports: the missing `main-workflow.spec.ts` path matches the later `quality-persistence-polish` owned path `tests/browser/main-workflow.spec.*`.
+- Conflicts: cross-group checks that do not depend on future-owned files should still run early.
+- Test: create two git-backed groups where group 2 owns the cross-check runner file; group 1 should land without running that future-owned check, and group 2 should run it.
+
+### H2: The spec compiler assigned the integrated browser journey to the wrong owner
+
+- Supports: cross-group checks are global, not attached to a group.
+- Conflicts: the spec explicitly puts `tests/browser/main-workflow.spec.*` in `quality-persistence-polish` owned paths, which is a reasonable integration group owner.
+- Test: inspect the generated spec and compare command path references to group owned paths.
+
+### H3: The generated browser script should tolerate missing requested spec files
+
+- Supports: `npm run test:browser -- missing-file` could choose to skip missing files.
+- Conflicts: silently skipping an explicitly requested browser journey would create false green runs and hide real missing test bugs once all groups should be landed.
+- Test: keep missing runner files as a failure when no unlanded group owns the path.
+
+## Experiments
+
+- Confirmed the generated `spec.json` cross-group command references `tests/browser/main-workflow.spec.ts`.
+- Confirmed `quality-persistence-polish` owns `tests/browser/main-workflow.spec.*`.
+- Confirmed current merge code runs the full `spec.cross_group_checks` list inside every group merge verification.
+
+## Root Cause
+
+Per-group merge verification treated all cross-group checks as immediately runnable, even when a check's declared runner path belonged to a later group in the dependency graph.
+
+## Fix
+
+- Defer cross-group checks whose explicit path references match owned paths of unlanded groups.
+- Still run global checks without future-owned path references at each merge.
+- Run the deferred check when its owning group is included in the integrated post-merge state.
+
+# Micro Twitter True WebTest Codex Post-Result Hang
+
+Date: 2026-05-07
+
+## Observations
+
+- During the same Micro Twitter True WebTest, merge repair agents emitted terminal Codex `result` / `phase_end` records but their `codex exec` subprocesses stayed alive.
+- Otto did not advance until the exact stale process groups were manually terminated.
+- The provider transcript already contained `turn.completed` and a successful result before the process stalled.
+
+## Hypotheses
+
+### H1: Otto's Codex adapter waits for process/stdout EOF after terminal `turn.completed` (ROOT HYPOTHESIS)
+
+- Supports: `_query_codex` yields `ResultMessage` on `turn.completed` but keeps reading stdout until EOF and then awaits `process.wait()`.
+- Supports: manual termination of the already-terminal Codex process immediately allowed Otto to continue.
+- Conflicts: short Codex runs often exit immediately after `turn.completed`, so the bug only appears when the CLI process lingers.
+- Test: simulate a Codex process that emits `turn.completed` and never exits; `query()` should return the result and terminate the provider process.
+
+### H2: Merge queue repair handling ignores successful provider output
+
+- Supports: the merge queue marked one repair as agent error after a process interruption.
+- Conflicts: the direct blocker was the awaited provider process; after manual termination, merge queue resumed with the parsed provider output.
+- Test: fix the provider wait path first and rerun the live merge path.
+
+### H3: The Codex CLI itself should always exit immediately after `turn.completed`
+
+- Supports: many runs do exit cleanly.
+- Conflicts: Otto must not let a provider lifecycle quirk wedge the product queue after terminal output.
+- Test: adapter-level post-result timeout and cleanup.
+
+## Root Cause
+
+The Codex provider adapter treated process EOF as the terminal condition even though `turn.completed` is already the terminal JSON event for Otto's normalized stream.
+
+## Fix
+
+- Treat Codex `turn.completed` as terminal.
+- Give the process a short grace period to exit, then let the existing provider cleanup terminate it.
+- Add a regression where a fake Codex process emits `turn.completed` but never exits.

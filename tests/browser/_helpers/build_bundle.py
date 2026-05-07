@@ -8,6 +8,9 @@ Why a helper, not inline conftest code:
   session so individual tests pay no cost after the first.
 - ``OTTO_BROWSER_SKIP_BUILD=1`` short-circuits for fast iteration: the
   developer asserts the bundle they have on disk is good enough.
+- ``OTTO_BROWSER_REQUIRE_COMMITTED_BUNDLE=1`` opts into the release-style
+  committed-bundle check. Local browser and True WebTest runs need a fresh
+  bundle, not a clean git index.
 
 The fixture is exposed via ``conftest.py`` as ``build_bundle``.
 """
@@ -24,7 +27,7 @@ STATIC_ASSETS_DIR: Final[Path] = REPO_ROOT / "otto" / "web" / "static" / "assets
 
 
 class BundleBuildError(RuntimeError):
-    """Raised when ``npm run web:verify`` fails."""
+    """Raised when the Mission Control SPA bundle cannot be built."""
 
 
 def ensure_bundle_built() -> Path:
@@ -43,7 +46,12 @@ def ensure_bundle_built() -> Path:
         _verify_assets_present(reason="bundle was previously built but assets disappeared")
         return STATIC_ASSETS_DIR
 
-    _run_npm("web:verify")
+    script = (
+        "web:verify"
+        if os.environ.get("OTTO_BROWSER_REQUIRE_COMMITTED_BUNDLE") == "1"
+        else "web:build"
+    )
+    _run_npm(script)
     _verify_assets_present(reason="npm run web:build succeeded but produced no assets")
     setattr(ensure_bundle_built, "_done", True)
     return STATIC_ASSETS_DIR

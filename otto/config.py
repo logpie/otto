@@ -82,6 +82,11 @@ DEFAULTS: dict[str, Any] = {
         ],
     },
 
+    # Build settings — used inside one i2p run after the Spec DAG exists.
+    "build": {
+        "group_concurrent":     3,             # max ready Groups built at once
+    },
+
     # Mission Control Autopilot. Assisted is intentionally the default:
     # existing users see diagnosis and one-click recovery suggestions, while
     # explicit Full mode grants bounded self-healing authority.
@@ -790,8 +795,9 @@ def ensure_safe_repo_state(project_dir: Path, *, allow_dirty: bool = False) -> N
 
 def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
     """Shallow-merge ``raw`` over DEFAULTS, with one level of nesting for
-    ``agents.<name>`` and ``queue`` so partial overrides work correctly
-    (e.g. ``queue: {concurrent: 5}`` keeps the other queue defaults).
+    ``agents.<name>``, ``queue``, ``build``, and ``autopilot`` so partial
+    overrides work correctly (e.g. ``queue: {concurrent: 5}`` keeps the
+    other queue defaults).
     """
     merged: dict[str, Any] = {}
     for k, v in DEFAULTS.items():
@@ -815,6 +821,14 @@ def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
                 import logging
                 logging.getLogger("otto.config").warning(
                     "Invalid queue config %r, using defaults", v,
+                )
+        elif k == "build":
+            if isinstance(v, dict):
+                merged["build"] = _normalize_build_overrides(v, merged["build"])
+            else:
+                import logging
+                logging.getLogger("otto.config").warning(
+                    "Invalid build config %r, using defaults", v,
                 )
         elif k == "autopilot":
             if isinstance(v, dict):
@@ -934,6 +948,37 @@ def _queue_value_is_valid(key: str, value: Any) -> bool:
     if key == "bookkeeping_files":
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
     return True
+
+
+def _normalize_build_overrides(
+    raw_build: dict[str, Any],
+    base: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate build overrides against base, warning when rejecting bad values."""
+    import logging
+
+    logger = logging.getLogger("otto.config")
+    build = dict(base)
+    for key, value in raw_build.items():
+        if key not in base:
+            choices = ", ".join(sorted(base))
+            raise ConfigError(f"Unknown build config key: build.{key}. Expected one of: {choices}")
+        if _build_value_is_valid(key, value):
+            build[key] = value
+            continue
+        logger.warning(
+            "Invalid build.%s (%r), using default %r",
+            key,
+            value,
+            base[key],
+        )
+    return build
+
+
+def _build_value_is_valid(key: str, value: Any) -> bool:
+    if key == "group_concurrent":
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+    return False
 
 
 def _normalize_autopilot_overrides(
@@ -1480,6 +1525,10 @@ run_budget_seconds: {run_budget_seconds}      # total wall-clock (primary knob)
 #   bookkeeping_files:                # NOT committed to task branches
 #     - intent.md
 #     - otto.yaml
+
+# ─── Build dispatch (inside one i2p run) ─────────────────────────────
+# build:
+#   group_concurrent: 3               # max ready Groups built at once
 """
 
 

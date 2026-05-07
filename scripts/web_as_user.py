@@ -41,21 +41,25 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.server
 import json
 import os
 import random
 import re
 import shutil
+import socket
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Optional
+from urllib.parse import urlparse
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -206,7 +210,7 @@ def artifact_mine_pass(project_dir: Path, failures: RunFailures) -> None:
             status = ""
             if isinstance(task_state, dict):
                 status = str(task_state.get("status") or "").lower()
-            if status not in {"done", "failed", "cancelled", "interrupted", "removed"}:
+            if status not in {"done", "failed", "cancelled", "removed"}:
                 continue
             if not manifest.is_file():
                 failures.fail(
@@ -328,6 +332,7 @@ class ScenarioContext:
     backend: Any = None
     intent_override: Optional[str] = None
     build_timeout_s: Optional[int] = None
+    group_concurrent: Optional[int] = None
 
 
 @dataclass
@@ -513,6 +518,40 @@ def _flush_captured(captured: dict[str, list], artifact_dir: Path) -> None:
     )
 
 
+def _is_expected_network_error(entry: dict[str, Any]) -> bool:
+    status = entry.get("status")
+    url = str(entry.get("url") or "")
+    path = urlparse(url).path
+    if status == 404:
+        return True
+    # Launcher mode intentionally returns 409 from /api/state while no project
+    # is selected. Real-user project-switch probes can hit that transition.
+    return status == 409 and path == "/api/state"
+
+
+def _unexpected_network_errors(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [entry for entry in entries if not _is_expected_network_error(entry)]
+
+
+def _unexpected_console_errors(captured: dict[str, list]) -> list[dict[str, Any]]:
+    expected_urls = {
+        str(entry.get("url") or "")
+        for entry in captured.get("network_errors", [])
+        if _is_expected_network_error(entry)
+    }
+    errors: list[dict[str, Any]] = []
+    for entry in captured.get("console", []):
+        if entry.get("type") != "error":
+            continue
+        location = entry.get("location") if isinstance(entry.get("location"), dict) else {}
+        url = str(location.get("url") or "")
+        text = str(entry.get("text") or "")
+        if url in expected_urls and text.startswith("Failed to load resource:"):
+            continue
+        errors.append(entry)
+    return errors
+
+
 def _safe_screenshot(page: Any, artifact_dir: Path, name: str) -> Optional[Path]:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     path = artifact_dir / f"{name}.png"
@@ -633,7 +672,11 @@ def _mc_run_detail_semantic_findings(body_text: str) -> list[str]:
             "stage contradiction: Spec review is pending while a later stage is active"
         )
 
-    if re.search(r"\bstages?\b", lower) and re.search(r"\bseed\b", lower):
+    if (
+        re.search(r"\bstages?\b", lower)
+        and re.search(r"\bseed\b", lower)
+        and "prepare fixtures" not in lower
+    ):
         findings.append(
             "internal stage label exposed: Seed is visible instead of a user-facing fixture/setup label"
         )
@@ -2067,6 +2110,931 @@ def _api_post(
         return 0, {"error": str(exc)}
 
 
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _run_product_command(
+    command: list[str] | str,
+    *,
+    cwd: Path,
+    artifact_dir: Path,
+    label: str,
+    timeout_s: int,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+    hard: bool,
+    env: dict[str, str] | None = None,
+    shell: bool = False,
+) -> bool:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    log_path = artifact_dir / f"{label}.log"
+    log_fn(f"  product command: {command!r} cwd={cwd}")
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            shell=shell,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        log_path.write_text(
+            f"TIMEOUT after {timeout_s}s\nstdout:\n{exc.stdout or ''}\nstderr:\n{exc.stderr or ''}\n",
+            encoding="utf-8",
+        )
+        msg = f"product command {label} timed out after {timeout_s}s"
+        failures.fail(msg) if hard else failures.note(msg)
+        return False
+    except Exception as exc:  # noqa: BLE001
+        log_path.write_text(f"RAISED: {exc}\n", encoding="utf-8")
+        msg = f"product command {label} raised: {exc}"
+        failures.fail(msg) if hard else failures.note(msg)
+        return False
+    log_path.write_text(
+        f"$ {command if isinstance(command, str) else ' '.join(command)}\n"
+        f"cwd={cwd}\nexit={proc.returncode}\n\nstdout:\n{proc.stdout or ''}\n\nstderr:\n{proc.stderr or ''}\n",
+        encoding="utf-8",
+    )
+    if proc.returncode != 0:
+        msg = f"product command {label} failed with exit={proc.returncode}; see {log_path.name}"
+        failures.fail(msg) if hard else failures.note(msg)
+        return False
+    return True
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _package_manager_for(root: Path) -> str | None:
+    for lockfile, binary in (
+        ("pnpm-lock.yaml", "pnpm"),
+        ("yarn.lock", "yarn"),
+        ("bun.lockb", "bun"),
+    ):
+        if (root / lockfile).exists() and shutil.which(binary):
+            return binary
+    return "npm" if shutil.which("npm") else None
+
+
+def _package_scripts(root: Path) -> dict[str, str]:
+    package = _read_json_file(root / "package.json") or {}
+    scripts = package.get("scripts")
+    if not isinstance(scripts, dict):
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in scripts.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
+
+
+def _candidate_product_roots(
+    ctx: ScenarioContext,
+    *,
+    state: dict[str, Any] | None,
+    submitted_task_id: str | None,
+    submitted_run_id: str | None,
+) -> list[Path]:
+    candidates: list[Path] = []
+    submitted_scope = bool(submitted_task_id or submitted_run_id)
+
+    def add(path: Path | str | None) -> None:
+        if not path:
+            return
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = ctx.project_dir / candidate
+        candidate = candidate.resolve(strict=False)
+        if candidate.exists() and candidate.is_dir() and candidate not in candidates:
+            candidates.append(candidate)
+
+    for row in _state_task_rows(state):
+        keys = _task_row_keys(row)
+        if submitted_task_id and submitted_task_id not in keys:
+            continue
+        if submitted_run_id and submitted_run_id not in keys:
+            continue
+        add(row.get("cwd"))
+        add(row.get("worktree"))
+    if submitted_task_id:
+        add(ctx.project_dir / ".worktrees" / submitted_task_id)
+    if not submitted_scope:
+        for path in sorted(
+            ctx.project_dir.glob(".worktrees/*"),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        ):
+            add(path)
+        add(ctx.project_dir)
+
+    # Agents often scaffold into a nested app/ or frontend/ directory.
+    # Treat nested package.json/index.html parents as candidate product roots
+    # instead of only scanning the queue worktree shell.
+    for base in list(candidates):
+        seen_nested = 0
+        for marker in ("package.json", "index.html"):
+            for marker_path in base.rglob(marker):
+                if any(part in {".git", "node_modules", "otto_logs", "otto_artifacts"} for part in marker_path.parts):
+                    continue
+                add(marker_path.parent)
+                seen_nested += 1
+                if seen_nested >= 40:
+                    break
+            if seen_nested >= 40:
+                break
+
+    scored: list[tuple[int, Path]] = []
+    for root in candidates:
+        score = 0
+        for rel, points in (
+            ("package.json", 5),
+            ("index.html", 4),
+            ("src", 3),
+            ("app.py", 2),
+            ("pyproject.toml", 2),
+            ("requirements.txt", 1),
+        ):
+            if (root / rel).exists():
+                score += points
+        if score > 0:
+            scored.append((score, root))
+    scored.sort(key=lambda item: (-item[0], str(item[1])))
+    return [root for _score, root in scored]
+
+
+def _scan_product_files(root: Path, artifact_dir: Path) -> list[str]:
+    file_list: list[str] = []
+    for path in sorted(root.rglob("*"))[:500]:
+        if not path.is_file():
+            continue
+        if any(part in {".git", "node_modules", "otto_logs", "otto_artifacts"} for part in path.parts):
+            continue
+        rel = path.relative_to(root)
+        file_list.append(str(rel))
+    (artifact_dir / "project-files.txt").write_text(
+        "\n".join(file_list), encoding="utf-8"
+    )
+    return file_list
+
+
+def _latest_session_dir(root: Path) -> Path | None:
+    if not root.is_dir():
+        return None
+    sessions = [path for path in root.iterdir() if path.is_dir()]
+    if not sessions:
+        return None
+    return max(sessions, key=lambda path: path.stat().st_mtime)
+
+
+def _find_session_dir_for_run(
+    ctx: ScenarioContext,
+    run_id: str | None,
+    *,
+    queue_task_id: str | None = None,
+) -> Path | None:
+    if run_id:
+        if queue_task_id:
+            candidate = (
+                ctx.project_dir
+                / ".worktrees"
+                / queue_task_id
+                / "otto_logs"
+                / "sessions"
+                / run_id
+            )
+            if candidate.is_dir():
+                return candidate
+        for candidate in ctx.project_dir.glob(f".worktrees/*/otto_logs/sessions/{run_id}"):
+            if candidate.is_dir():
+                return candidate
+        candidate = ctx.project_dir / "otto_logs" / "sessions" / run_id
+        if candidate.is_dir():
+            return candidate
+    if queue_task_id:
+        return _latest_session_dir(
+            ctx.project_dir / ".worktrees" / queue_task_id / "otto_logs" / "sessions"
+        )
+    return None
+
+
+def _parse_event_ts_s(event: dict[str, Any]) -> float:
+    raw = str(event.get("ts") or event.get("timestamp") or "")
+    if not raw:
+        return 0.0
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _assert_group_concurrency_observed(
+    ctx: ScenarioContext,
+    *,
+    run_id: str | None,
+    queue_task_id: str | None = None,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> None:
+    expected = ctx.group_concurrent
+    if expected is None or expected <= 1:
+        return
+    session_dir = _find_session_dir_for_run(
+        ctx,
+        run_id,
+        queue_task_id=queue_task_id,
+    )
+    if session_dir is None:
+        failures.fail("concurrency requested but could not locate the run session journal")
+        return
+    events_path = session_dir / "spec-state.jsonl"
+    if not events_path.exists():
+        failures.fail("concurrency requested but spec-state.jsonl is missing")
+        return
+    events: list[dict[str, Any]] = []
+    for line in events_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+
+    proof = _read_json_file(session_dir / "proof-packet.json") or {}
+    groups = proof.get("groups") or []
+    group_count = len(groups) if isinstance(groups, list) else 0
+    if group_count == 0:
+        spec_json = _read_json_file(session_dir / "spec" / "spec.json") or {}
+        spec_groups = spec_json.get("groups") or []
+        group_count = len(spec_groups) if isinstance(spec_groups, list) else 0
+    started = [
+        event
+        for event in events
+        if str(event.get("event") or event.get("kind") or "") == "group.started"
+    ]
+    execution_started = [
+        event
+        for event in events
+        if str(event.get("event") or event.get("kind") or "") == "group.execution.started"
+    ]
+    execution_finished = [
+        event
+        for event in events
+        if str(event.get("event") or event.get("kind") or "") == "group.execution.finished"
+    ]
+    terminal = [
+        event
+        for event in events
+        if str(event.get("event") or event.get("kind") or "")
+        in {
+            "group.merge.eligible",
+            "group.blocked",
+            "group.failed_scope",
+            "group.merge.landed",
+            "group.merge.redundant",
+        }
+    ]
+    first_terminal_s = min((_parse_event_ts_s(event) for event in terminal), default=0.0)
+    first_execution_finished_s = min(
+        (_parse_event_ts_s(event) for event in execution_finished),
+        default=first_terminal_s,
+    )
+    overlapping_starts = [
+        event
+        for event in started
+        if first_terminal_s <= 0 or _parse_event_ts_s(event) <= first_terminal_s
+    ]
+    overlapping_execution = [
+        event
+        for event in execution_started
+        if (
+            first_execution_finished_s <= 0
+            or _parse_event_ts_s(event) <= first_execution_finished_s
+        )
+    ]
+    execution_finish_by_group: dict[str, float] = {}
+    for event in [*execution_finished, *terminal]:
+        group_id = str(event.get("group_id") or "")
+        if not group_id:
+            continue
+        ts_s = _parse_event_ts_s(event)
+        if ts_s <= 0:
+            continue
+        previous = execution_finish_by_group.get(group_id)
+        if previous is None or ts_s < previous:
+            execution_finish_by_group[group_id] = ts_s
+
+    timeline: list[tuple[float, int, str]] = []
+    for event in execution_started:
+        group_id = str(event.get("group_id") or "")
+        start_s = _parse_event_ts_s(event)
+        if not group_id or start_s <= 0:
+            continue
+        finish_s = execution_finish_by_group.get(group_id)
+        if finish_s is not None and finish_s <= start_s:
+            continue
+        timeline.append((start_s, 1, group_id))
+        if finish_s is not None:
+            timeline.append((finish_s, 0, group_id))
+    active_groups: set[str] = set()
+    max_overlap = 0
+    max_overlap_groups: list[str] = []
+    for _ts_s, kind_order, group_id in sorted(timeline):
+        if kind_order == 0:
+            active_groups.discard(group_id)
+            continue
+        active_groups.add(group_id)
+        if len(active_groups) > max_overlap:
+            max_overlap = len(active_groups)
+            max_overlap_groups = sorted(active_groups)
+
+    report = {
+        "requested_group_concurrent": expected,
+        "group_count": group_count,
+        "started_count": len(started),
+        "started_before_first_terminal": [
+            str(event.get("group_id") or "") for event in overlapping_starts
+        ],
+        "execution_started_count": len(execution_started),
+        "execution_started_before_first_finished": [
+            str(event.get("group_id") or "") for event in overlapping_execution
+        ],
+        "max_execution_overlap": max_overlap,
+        "max_execution_overlap_groups": max_overlap_groups,
+        "session_dir": str(session_dir),
+    }
+    ctx.artifact_dir.mkdir(parents=True, exist_ok=True)
+    (ctx.artifact_dir / "group-concurrency.json").write_text(
+        json.dumps(report, indent=2, default=str), encoding="utf-8"
+    )
+    log_fn(f"  concurrency report: {report}")
+    if group_count < 2:
+        failures.fail(
+            f"concurrency requested ({expected}) but the generated spec had only {group_count} group(s)"
+        )
+        return
+    if not execution_started:
+        failures.fail(
+            "concurrency requested but the run has no group.execution.started events; "
+            "the harness cannot prove real overlapping execution"
+        )
+        return
+    if max_overlap < min(expected, group_count):
+        failures.fail(
+            "concurrency requested but the run did not overlap multiple group executions "
+            "within any dependency-ready wave; see group-concurrency.json"
+        )
+
+
+def _run_native_product_tests(
+    root: Path,
+    *,
+    artifact_dir: Path,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> None:
+    from otto.config import detect_test_command
+
+    command = detect_test_command(root)
+    if not command:
+        failures.note("product verification: no native test command detected")
+        return
+    if (root / "package.json").exists() and _install_node_dependencies(
+        root,
+        artifact_dir=artifact_dir,
+        log_fn=log_fn,
+        failures=failures,
+    ) is None:
+        return
+    env = dict(os.environ)
+    env.setdefault("CI", "1")
+    _run_product_command(
+        command,
+        cwd=root,
+        artifact_dir=artifact_dir,
+        label="product-native-tests",
+        timeout_s=180,
+        log_fn=log_fn,
+        failures=failures,
+        hard=True,
+        env=env,
+        shell=True,
+    )
+
+
+def _install_node_dependencies(
+    root: Path,
+    *,
+    artifact_dir: Path,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> str | None:
+    if not (root / "package.json").exists():
+        return None
+    manager = _package_manager_for(root)
+    if manager is None:
+        failures.fail("product has package.json but no supported package manager is available")
+        return None
+    if (root / "node_modules").exists():
+        return manager
+    if manager == "pnpm":
+        command = ["pnpm", "install", "--frozen-lockfile=false"]
+    elif manager == "yarn":
+        command = ["yarn", "install", "--non-interactive"]
+    elif manager == "bun":
+        command = ["bun", "install"]
+    else:
+        command = ["npm", "install", "--no-audit", "--no-fund"]
+    if not _run_product_command(
+        command,
+        cwd=root,
+        artifact_dir=artifact_dir,
+        label=f"product-{manager}-install",
+        timeout_s=240,
+        log_fn=log_fn,
+        failures=failures,
+        hard=True,
+    ):
+        return None
+    return manager
+
+
+def _wait_for_http_ready(url: str, *, timeout_s: float) -> bool:
+    import urllib.request
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                if resp.status < 500:
+                    return True
+        except Exception:  # noqa: BLE001
+            time.sleep(0.5)
+    return False
+
+
+def _start_static_product_server(root: Path, port: int) -> tuple[str, Callable[[], None]]:
+    class QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, directory=str(root), **kwargs)
+
+        def log_message(self, _format: str, *args: Any) -> None:  # noqa: A002
+            return None
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), QuietHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def stop() -> None:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    return f"http://127.0.0.1:{port}/", stop
+
+
+def _start_node_product_server(
+    root: Path,
+    *,
+    script: str,
+    manager: str,
+    port: int,
+    artifact_dir: Path,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> tuple[str, Callable[[], None]] | None:
+    if manager == "npm":
+        command = ["npm", "run", script, "--", "--host", "127.0.0.1", "--port", str(port)]
+    else:
+        command = [manager, "run", script, "--host", "127.0.0.1", "--port", str(port)]
+    log_path = artifact_dir / f"product-{script}-server.log"
+    env = dict(os.environ)
+    env.update({"HOST": "127.0.0.1", "PORT": str(port), "BROWSER": "none"})
+    handle = log_path.open("w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=root,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            preexec_fn=os.setsid,
+        )
+    except Exception as exc:  # noqa: BLE001
+        handle.close()
+        failures.fail(f"could not start product script {script}: {exc}")
+        return None
+    url = f"http://127.0.0.1:{port}/"
+    if not _wait_for_http_ready(url, timeout_s=45):
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except Exception:  # noqa: BLE001
+            pass
+        handle.close()
+        failures.fail(f"product script {script} did not serve {url}; see {log_path.name}")
+        return None
+
+    def stop() -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:  # noqa: BLE001
+                pass
+        handle.close()
+
+    log_fn(f"  product server started: {url} via {command!r}")
+    return url, stop
+
+
+def _start_generated_web_app(
+    root: Path,
+    *,
+    artifact_dir: Path,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> tuple[str, Callable[[], None]] | None:
+    for static_dir in (root / "dist", root / "build", root):
+        if (static_dir / "index.html").exists() and not (root / "package.json").exists():
+            port = _free_port()
+            url, stop = _start_static_product_server(static_dir, port)
+            if _wait_for_http_ready(url, timeout_s=5):
+                log_fn(f"  static product server started: {url} root={static_dir}")
+                return url, stop
+
+    scripts = _package_scripts(root)
+    manager: str | None = None
+    if (root / "package.json").exists():
+        manager = _install_node_dependencies(
+            root,
+            artifact_dir=artifact_dir,
+            log_fn=log_fn,
+            failures=failures,
+        )
+        if manager is None:
+            return None
+        if "build" in scripts:
+            _run_product_command(
+                [manager, "run", "build"] if manager != "npm" else ["npm", "run", "build"],
+                cwd=root,
+                artifact_dir=artifact_dir,
+                label="product-build",
+                timeout_s=240,
+                log_fn=log_fn,
+                failures=failures,
+                hard=True,
+            )
+            for static_dir in (root / "dist", root / "build"):
+                if (static_dir / "index.html").exists():
+                    port = _free_port()
+                    url, stop = _start_static_product_server(static_dir, port)
+                    if _wait_for_http_ready(url, timeout_s=5):
+                        log_fn(f"  built product served: {url} root={static_dir}")
+                        return url, stop
+        for script in ("dev", "preview", "start"):
+            if script in scripts:
+                started = _start_node_product_server(
+                    root,
+                    script=script,
+                    manager=manager,
+                    port=_free_port(),
+                    artifact_dir=artifact_dir,
+                    log_fn=log_fn,
+                    failures=failures,
+                )
+                if started is not None:
+                    return started
+
+    for static_dir in (root / "dist", root / "build", root):
+        if (static_dir / "index.html").exists():
+            port = _free_port()
+            url, stop = _start_static_product_server(static_dir, port)
+            if _wait_for_http_ready(url, timeout_s=5):
+                log_fn(f"  static product server started: {url} root={static_dir}")
+                return url, stop
+
+    failures.fail(
+        "build reported success but product verification could not find a launchable web app "
+        "(package script or index.html)"
+    )
+    return None
+
+
+def _fill_first_product_composer(page: Any, text: str) -> bool:
+    selectors = [
+        "textarea",
+        'input[type="text"]',
+        "input:not([type])",
+        '[contenteditable="true"]',
+        '[role="textbox"]',
+    ]
+    for selector in selectors:
+        loc = page.locator(selector).first
+        try:
+            if loc.count() == 0 or not loc.is_visible() or not loc.is_enabled():
+                continue
+            loc.fill(text, timeout=3_000)
+            return True
+        except Exception:  # noqa: BLE001
+            try:
+                loc.click(timeout=1_000)
+                page.keyboard.type(text, delay=10)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
+
+
+def _click_product_submit(page: Any) -> bool:
+    patterns = re.compile(r"(post|tweet|submit|publish|send|add)", re.I)
+    for selector in ("button", 'input[type="submit"]', '[role="button"]'):
+        loc = page.locator(selector).filter(has_text=patterns).first
+        try:
+            if loc.count() > 0 and loc.is_visible() and loc.is_enabled():
+                loc.click(timeout=3_000)
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        page.keyboard.press("Meta+Enter")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _product_layout_findings(page: Any) -> list[str]:
+    try:
+        metrics = page.evaluate(
+            """() => {
+              const doc = document.documentElement;
+              const body = document.body;
+              const text = (body?.innerText || '').trim();
+              const vw = doc.clientWidth;
+              const overflowing = [];
+              for (const el of Array.from(document.querySelectorAll('body *'))) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && (rect.right > vw + 4 || rect.left < -4)) {
+                  overflowing.push((el.getAttribute('data-testid') || el.tagName || 'element') + ':' + Math.round(rect.left) + '-' + Math.round(rect.right));
+                  if (overflowing.length >= 5) break;
+                }
+              }
+              return { textLength: text.length, scrollWidth: doc.scrollWidth, clientWidth: vw, overflowing };
+            }"""
+        )
+    except Exception as exc:  # noqa: BLE001
+        return [f"layout inspection raised: {exc}"]
+    findings: list[str] = []
+    if int(metrics.get("textLength") or 0) < 20:
+        findings.append("product page looks blank or nearly blank")
+    if int(metrics.get("scrollWidth") or 0) > int(metrics.get("clientWidth") or 0) + 8:
+        findings.append("product page has horizontal overflow")
+    overflowing = metrics.get("overflowing") or []
+    if overflowing:
+        findings.append("visible elements overflow viewport: " + ", ".join(map(str, overflowing[:5])))
+    return findings
+
+
+def _record_product_expectation(
+    artifact_dir: Path,
+    *,
+    action: str,
+    expectation: str,
+    observation: str,
+    verdict: str,
+) -> None:
+    with (artifact_dir / "product-expectations.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "action": action,
+                    "expectation": expectation,
+                    "observation": observation,
+                    "verdict": verdict,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+
+def _verify_micro_twitter_product(
+    page: Any,
+    *,
+    artifact_dir: Path,
+    failures: RunFailures,
+    log_fn: Callable[[str], None],
+) -> None:
+    del log_fn
+    unique_post = f"otto true web post {int(time.time())}"
+    if not _fill_first_product_composer(page, unique_post):
+        _record_product_expectation(
+            artifact_dir,
+            action="find composer",
+            expectation="Micro Twitter exposes a text composer for creating a post.",
+            observation="No visible editable textbox was usable.",
+            verdict="blocked",
+        )
+        failures.fail("micro Twitter product has no usable post composer")
+        return
+    _safe_screenshot(page, artifact_dir, "product-01-composer-filled")
+    _record_product_expectation(
+        artifact_dir,
+        action="type post",
+        expectation="Typed post text remains visible in the composer.",
+        observation=f"typed={unique_post!r}",
+        verdict="expected",
+    )
+
+    if not _click_product_submit(page):
+        failures.fail("micro Twitter product has no usable submit/post action")
+        return
+    try:
+        page.get_by_text(unique_post, exact=True).wait_for(timeout=6_000)
+    except Exception:  # noqa: BLE001
+        _safe_screenshot(page, artifact_dir, "product-02-post-missing")
+        failures.fail("micro Twitter product did not show the submitted post in the feed")
+        return
+    _safe_screenshot(page, artifact_dir, "product-02-post-visible")
+    _record_product_expectation(
+        artifact_dir,
+        action="submit post",
+        expectation="Submitted post appears in the feed without a hidden API/disk shortcut.",
+        observation=f"post visible={unique_post!r}",
+        verdict="expected",
+    )
+
+    action_pattern = re.compile(r"(like|favorite|heart|delete|remove|reply)", re.I)
+    action_count = 0
+    for selector in ("button", '[role="button"]'):
+        try:
+            action_count += page.locator(selector).filter(has_text=action_pattern).count()
+        except Exception:  # noqa: BLE001
+            continue
+    if action_count == 0:
+        failures.fail(
+            "micro Twitter product has posting, but no visible social/feed item action "
+            "(like/favorite/delete/reply/remove)"
+        )
+    else:
+        _record_product_expectation(
+            artifact_dir,
+            action="inspect feed actions",
+            expectation="A micro Twitter feed exposes at least one visible post action.",
+            observation=f"action_count={action_count}",
+            verdict="expected",
+        )
+
+    try:
+        page.reload(wait_until="networkidle", timeout=10_000)
+        page.get_by_text(unique_post, exact=True).wait_for(timeout=6_000)
+        _safe_screenshot(page, artifact_dir, "product-03-post-persists-after-refresh")
+        _record_product_expectation(
+            artifact_dir,
+            action="refresh product",
+            expectation="A reasonable micro Twitter keeps the created post visible after refresh.",
+            observation="post still visible after reload",
+            verdict="expected",
+        )
+    except Exception:  # noqa: BLE001
+        _safe_screenshot(page, artifact_dir, "product-03-post-lost-after-refresh")
+        failures.fail("micro Twitter product lost the submitted post after browser refresh")
+
+
+def _verify_generic_web_product(
+    page: Any,
+    *,
+    artifact_dir: Path,
+    failures: RunFailures,
+) -> None:
+    _safe_screenshot(page, artifact_dir, "product-00-desktop")
+    findings = _product_layout_findings(page)
+    for finding in findings:
+        failures.fail(f"generated product UX/layout issue: {finding}")
+    try:
+        page.set_viewport_size({"width": 390, "height": 844})
+        time.sleep(0.5)
+        _safe_screenshot(page, artifact_dir, "product-00-mobile")
+        mobile_findings = _product_layout_findings(page)
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"mobile product layout inspection raised: {exc}")
+        return
+    for finding in mobile_findings:
+        failures.fail(f"generated product mobile UX/layout issue: {finding}")
+
+
+def _verify_generated_product(
+    page: Any,
+    ctx: ScenarioContext,
+    *,
+    build_intent: str,
+    terminal_outcome: str | None,
+    final_state: dict[str, Any] | None,
+    submitted_task_id: str | None,
+    submitted_run_id: str | None,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+) -> None:
+    log_fn("Step 11: product verification — launch and interact")
+    product_artifacts = ctx.artifact_dir / "product-verification"
+    product_artifacts.mkdir(parents=True, exist_ok=True)
+    if terminal_outcome != "success":
+        failures.note("product verification skipped because the build did not report success")
+        return
+
+    roots = _candidate_product_roots(
+        ctx,
+        state=final_state,
+        submitted_task_id=submitted_task_id,
+        submitted_run_id=submitted_run_id,
+    )
+    (product_artifacts / "candidate-roots.json").write_text(
+        json.dumps([str(root) for root in roots], indent=2), encoding="utf-8"
+    )
+    if not roots:
+        failures.fail("build reported success but no plausible product root was found")
+        return
+    root = roots[0]
+    file_list = _scan_product_files(root, product_artifacts)
+    created = [
+        f for f in file_list
+        if f.endswith((".html", ".js", ".jsx", ".ts", ".tsx", ".css", ".py"))
+    ]
+    if not created:
+        failures.fail("build reported success but no source files appeared in the product root")
+        return
+
+    _run_native_product_tests(
+        root,
+        artifact_dir=product_artifacts,
+        log_fn=log_fn,
+        failures=failures,
+    )
+    server = _start_generated_web_app(
+        root,
+        artifact_dir=product_artifacts,
+        log_fn=log_fn,
+        failures=failures,
+    )
+    if server is None:
+        return
+    url, stop_server = server
+    product_page = None
+    try:
+        product_page = page.context.new_page()
+        product_page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+        time.sleep(1.0)
+        _verify_generic_web_product(
+            product_page,
+            artifact_dir=product_artifacts,
+            failures=failures,
+        )
+        try:
+            product_page.set_viewport_size({"width": 1280, "height": 800})
+        except Exception:  # noqa: BLE001
+            pass
+        intent_l = build_intent.lower()
+        if (
+            "micro twitter" in intent_l
+            or "micro-twitter" in intent_l
+            or "microblog" in intent_l
+            or "micro feed" in intent_l
+            or "microfeed" in intent_l
+        ):
+            _verify_micro_twitter_product(
+                product_page,
+                artifact_dir=product_artifacts,
+                failures=failures,
+                log_fn=log_fn,
+            )
+    except Exception as exc:  # noqa: BLE001
+        failures.fail(f"generated product browser verification raised: {exc}")
+    finally:
+        if product_page is not None:
+            try:
+                product_page.close()
+            except Exception:  # noqa: BLE001
+                pass
+        stop_server()
+
+
 def _web_watcher_running(base_url: Optional[str]) -> bool:
     if not base_url:
         return False
@@ -2274,6 +3242,15 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                     provider_select.select_option(value=ctx.provider, timeout=5_000)
                 except Exception as exc:  # noqa: BLE001
                     failures.note(f"could not set provider in dialog: {exc}")
+            if ctx.build_timeout_s is not None:
+                budget_input = page.locator('[data-testid="job-budget-input"]')
+                if budget_input.count() > 0:
+                    try:
+                        budget_input.fill(str(ctx.build_timeout_s), timeout=5_000)
+                    except Exception as exc:  # noqa: BLE001
+                        failures.note(f"could not set visible budget in dialog: {exc}")
+                else:
+                    failures.note("job budget input not found; relying on project default run budget")
 
             submit = page.locator('[data-testid="job-dialog-submit-button"]')
             before_submit_keys = _state_task_keys(_state(ctx.web_url))
@@ -2367,6 +3344,7 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             deadline = time.monotonic() + build_timeout_s
             terminal_outcome: Optional[str] = None
             poll_count = 0
+            last_state: Optional[dict[str, Any]] = None
             if not submitted_to_queue:
                 _log("skipping terminal poll because submit produced no queue row")
             while submitted_to_queue and time.monotonic() < deadline:
@@ -2377,6 +3355,7 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                         _log(f"/api/state returned status={status}")
                     time.sleep(5)
                     continue
+                last_state = body
                 # /api/state schema: live.items[]/history.items[] flat dicts.
                 history = (body.get("history") or {}).get("items") or []
                 live = (body.get("live") or {}).get("items") or []
@@ -2393,18 +3372,11 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                         log_fn=_log,
                         failures=failures,
                     )
-                for item in history:
-                    if submitted_task_id and item.get("queue_task_id") != submitted_task_id:
-                        continue
-                    if submitted_run_id and item.get("run_id") != submitted_run_id:
-                        continue
-                    if not submitted_task_id and not submitted_run_id:
-                        continue
-                    outcome = item.get("terminal_outcome")
-                    if outcome:
-                        terminal_outcome = outcome
-                        submitted_run_id = str(item.get("run_id") or submitted_run_id or "").strip() or submitted_run_id
-                        break
+                terminal_outcome, submitted_run_id = _terminal_outcome_for_submitted_task(
+                    body,
+                    submitted_task_id=submitted_task_id,
+                    submitted_run_id=submitted_run_id,
+                )
                 if terminal_outcome:
                     break
                 time.sleep(5)
@@ -2430,6 +3402,7 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             except Exception as exc:  # noqa: BLE001
                 failures.note(f"reload after build failed: {exc}")
             _safe_screenshot(page, artifact_dir, "08-after-reload")
+            final_state = _state(ctx.web_url) or last_state
 
             # ---------- Step 10: walk inspector tabs ----------
             _log("Step 10: walk inspector tabs")
@@ -2483,35 +3456,38 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"walking inspector tabs raised: {exc}")
 
-            # ---------- Step 11: product verification (best-effort) ----------
-            # The kanban built into ctx.project_dir's queue worktree — we
-            # don't auto-launch the SPA. Just record what files were created.
-            _log("Step 11: product verification (best-effort)")
-            try:
-                file_list = []
-                for path in sorted(ctx.project_dir.rglob("*"))[:200]:
-                    if path.is_file() and ".git" not in path.parts and "otto_logs" not in path.parts:
-                        rel = path.relative_to(ctx.project_dir)
-                        file_list.append(str(rel))
-                (artifact_dir / "project-files.txt").write_text(
-                    "\n".join(file_list), encoding="utf-8"
-                )
-                # Check for any html/js/jsx/tsx/py files as a sign that something was built
-                created = [
-                    f for f in file_list
-                    if f.endswith((".html", ".js", ".jsx", ".tsx", ".css", ".py"))
-                ]
-                failures.soft_assert(
-                    len(created) > 0 or terminal_outcome != "success",
-                    "build reported success but no source files appeared in project_dir",
-                )
-            except Exception as exc:  # noqa: BLE001
-                failures.note(f"file scan raised: {exc}")
+            # ---------- Step 11: product verification ----------
+            if not submitted_run_id and final_state is not None:
+                for row in _state_task_rows(final_state):
+                    if submitted_task_id and submitted_task_id in _task_row_keys(row):
+                        candidate_run_id = str(row.get("run_id") or "").strip()
+                        if candidate_run_id:
+                            submitted_run_id = candidate_run_id
+                            break
+            _verify_generated_product(
+                page,
+                ctx,
+                build_intent=build_intent,
+                terminal_outcome=terminal_outcome,
+                final_state=final_state,
+                submitted_task_id=submitted_task_id,
+                submitted_run_id=submitted_run_id,
+                log_fn=_log,
+                failures=failures,
+            )
+
+            # ---------- Step 12: group concurrency evidence ----------
+            _log("Step 12: group concurrency evidence")
+            _assert_group_concurrency_observed(
+                ctx,
+                run_id=submitted_run_id,
+                queue_task_id=submitted_task_id,
+                log_fn=_log,
+                failures=failures,
+            )
 
             # Final state snapshot
             try:
-                _, body = _api_get(ctx.web_url, "/api/state")
-                final_state = body if isinstance(body, dict) else None
                 if final_state is not None:
                     (artifact_dir / "final-state.json").write_text(
                         json.dumps(final_state, indent=2, default=str), encoding="utf-8"
@@ -2535,22 +3511,15 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 pass
 
     # Treat console errors as soft failures (user-facing UX bugs)
-    if captured["console"]:
-        errors = [
-            c for c in captured["console"] if c.get("type") in ("error",)
-        ]
-        if errors:
-            failures.fail(
-                f"console errors during W1 ({len(errors)}); see console.json"
-            )
+    errors = _unexpected_console_errors(captured)
+    if errors:
+        failures.fail(
+            f"console errors during W1 ({len(errors)}); see console.json"
+        )
     if captured["page_errors"]:
         failures.fail(f"page errors during W1: {len(captured['page_errors'])}")
     if captured["network_errors"]:
-        # Filter out expected 404s (e.g. before run exists)
-        unexpected = [
-            n for n in captured["network_errors"]
-            if n.get("status") not in (404,)
-        ]
+        unexpected = _unexpected_network_errors(captured["network_errors"])
         if unexpected:
             failures.fail(f"unexpected 4xx/5xx responses: {len(unexpected)}; see network-errors.json")
 
@@ -3056,6 +4025,48 @@ def _state_task_keys(state: Optional[dict[str, Any]]) -> set[str]:
     for row in _state_task_rows(state):
         keys.update(_task_row_keys(row))
     return keys
+
+
+def _submitted_row_matches(
+    row: dict[str, Any],
+    *,
+    submitted_task_id: str | None,
+    submitted_run_id: str | None,
+) -> bool:
+    keys = _task_row_keys(row)
+    if submitted_task_id and submitted_task_id in keys:
+        return True
+    if submitted_run_id and submitted_run_id in keys:
+        return True
+    return not submitted_task_id and not submitted_run_id
+
+
+def _terminal_outcome_for_submitted_task(
+    state: Optional[dict[str, Any]],
+    *,
+    submitted_task_id: str | None,
+    submitted_run_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Return a submitted run's terminal outcome from any Mission Control row.
+
+    Mission Control can retain a completed queue run in the live section as
+    ``status=done`` while also listing it in history. The true-web harness must
+    stop when the user-visible run is terminal, regardless of which section
+    currently contains the row.
+    """
+    for row in _state_task_rows(state):
+        if not _submitted_row_matches(
+            row,
+            submitted_task_id=submitted_task_id,
+            submitted_run_id=submitted_run_id,
+        ):
+            continue
+        outcome = str(row.get("terminal_outcome") or "").strip()
+        if not outcome:
+            continue
+        run_id = str(row.get("run_id") or submitted_run_id or "").strip() or submitted_run_id
+        return outcome, run_id
+    return None, submitted_run_id
 
 
 def _wait_for_submitted_task(
@@ -7032,6 +8043,45 @@ def _throwaway_project() -> Iterator[Path]:
             shutil.rmtree(project, ignore_errors=True)
 
 
+def _queue_timeout_for_build_timeout(build_timeout_s: int) -> int:
+    """Return a queue hard-kill guard that cannot preempt the harness timeout."""
+    return max(build_timeout_s + 1200, int(build_timeout_s * 1.2))
+
+
+def _configure_throwaway_project(
+    project_dir: Path,
+    *,
+    group_concurrent: int | None,
+    build_timeout_s: int | None = None,
+) -> None:
+    if group_concurrent is None and build_timeout_s is None:
+        return
+    config_path = project_dir / "otto.yaml"
+    lines: list[str] = []
+    if build_timeout_s is not None:
+        lines.extend(
+            [
+                f"run_budget_seconds: {build_timeout_s}",
+                "queue:",
+                f"  task_timeout_s: {_queue_timeout_for_build_timeout(build_timeout_s)}",
+            ]
+        )
+    if group_concurrent is not None:
+        lines.extend(
+            [
+                "build:",
+                f"  group_concurrent: {group_concurrent}",
+            ]
+        )
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    subprocess.run(["git", "add", "otto.yaml"], cwd=project_dir, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "test: configure Otto web-as-user run"],
+        cwd=project_dir,
+        check=True,
+    )
+
+
 def _project_processes(project_dir: Path) -> list[dict[str, Any]]:
     """Return processes whose command line still references this scenario project."""
     try:
@@ -7186,6 +8236,7 @@ def run_one_scenario(
     user_seed: Optional[int],
     intent_override: Optional[str] = None,
     build_timeout_s: Optional[int] = None,
+    group_concurrent: Optional[int] = None,
 ) -> ScenarioOutcome:
     """Drive one W-scenario end-to-end.
 
@@ -7218,6 +8269,11 @@ def run_one_scenario(
 
     failures = RunFailures()
     with _throwaway_project() as project_dir:
+        _configure_throwaway_project(
+            project_dir,
+            group_concurrent=group_concurrent,
+            build_timeout_s=build_timeout_s,
+        )
         # Start the in-process FastAPI backend for the duration of the scenario.
         backend = None
         try:
@@ -7244,6 +8300,7 @@ def run_one_scenario(
             backend=backend,
             intent_override=intent_override,
             build_timeout_s=build_timeout_s,
+            group_concurrent=group_concurrent,
         )
         _record_mc_user_action(ctx, phase="scenario-start", action="config")
         result: Optional[ScenarioRunResult] = None
@@ -7351,11 +8408,20 @@ def print_summary(run_id: str, outcomes: list[ScenarioOutcome]) -> int:
 
 def _install_signal_handlers() -> None:
     """Best-effort process-group cleanup on SIGTERM/SIGINT (Phase 5E)."""
+    handling_signal = False
 
     def _handle(signum: int, frame: Any) -> None:  # noqa: ANN401
+        nonlocal handling_signal
+        if handling_signal:
+            raise SystemExit(130 if signum == signal.SIGINT else 143)
+        handling_signal = True
+        try:
+            signal.signal(signum, signal.SIG_IGN)
+        except (ValueError, OSError):  # not on main thread / unsupported
+            pass
         try:
             os.killpg(os.getpgrp(), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError, OSError):
             pass
         raise SystemExit(130 if signum == signal.SIGINT else 143)
 
@@ -7416,7 +8482,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--build-timeout-s",
         type=int,
-        help="override the build terminal wait timeout for scenarios that support it",
+        help=(
+            "override the build terminal wait timeout for scenarios that support it; "
+            "throwaway true-web projects also inherit this as the visible run "
+            "budget and get a larger queue hard-kill guard"
+        ),
+    )
+    parser.add_argument(
+        "--group-concurrent",
+        type=int,
+        help="write build.group_concurrent into the throwaway project before starting Otto",
     )
     parser.add_argument(
         "--scenario-delay",
@@ -7455,6 +8530,8 @@ def main(argv: list[str]) -> int:
         raise SystemExit("--user-seed must be >= 0")
     if args.build_timeout_s is not None and args.build_timeout_s <= 0:
         raise SystemExit("--build-timeout-s must be > 0")
+    if args.group_concurrent is not None and args.group_concurrent <= 0:
+        raise SystemExit("--group-concurrent must be > 0")
 
     if not args.dry_run:
         try:
@@ -7481,6 +8558,7 @@ def main(argv: list[str]) -> int:
                 user_seed=args.user_seed,
                 intent_override=args.intent,
                 build_timeout_s=args.build_timeout_s,
+                group_concurrent=args.group_concurrent,
             )
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()

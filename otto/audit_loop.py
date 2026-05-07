@@ -26,7 +26,7 @@ verdict non-PASS even though all explicit Feature audits passed.
 from __future__ import annotations
 
 import time as _time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,6 +45,7 @@ class FailingFeature:
     verdict: str  # "failed" | "partial" | "blocked" | "missing"
     detail: str
     severity_findings: list[str] = field(default_factory=list)
+    related_feature_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -117,6 +118,10 @@ def select_failing_features(
                 detail=str(v.get("detail") or ""),
                 severity_findings=[
                     str(s) for s in (v.get("severity_findings") or [])
+                ],
+                related_feature_ids=[
+                    str(s) for s in (v.get("related_feature_ids") or [])
+                    if str(s).strip()
                 ],
             )
         )
@@ -205,14 +210,77 @@ def features_to_repair(
         else _repair_cap_default()
     )
     failing = select_failing_features(feature_verdicts)
-    candidates: list[FailingFeature] = []
-    for f in failing:
-        if group_for_feature(spec, f.feature_id) is None:
+    by_group: dict[str, list[FailingFeature]] = {}
+    group_order: list[str] = []
+    for feature in failing:
+        group = group_for_feature(spec, feature.feature_id)
+        if group is None:
             continue
-        candidates.append(f)
+        if group.id not in by_group:
+            group_order.append(group.id)
+            by_group[group.id] = []
+        by_group[group.id].append(feature)
+
+    candidates: list[FailingFeature] = []
+    for group_id in group_order:
+        candidates.append(_coalesce_group_failures(group_id, by_group[group_id]))
         if len(candidates) >= cap:
             break
     return candidates
+
+
+def _coalesce_group_failures(
+    group_id: str,
+    failures: list[FailingFeature],
+) -> FailingFeature:
+    """Return one repair dispatch for all current failures in a Group.
+
+    The implementation unit is the Group. When several Features in the
+    same Group fail the same audit pass, sending one over-narrow repair
+    per Feature burns the repair budget and can falsely tell the agent
+    that sibling failures already passed. Coalescing keeps the first
+    Feature as the representative id for legacy result wiring, while the
+    detail and related ids carry the full group repair scope.
+    """
+    if not failures:
+        return FailingFeature(feature_id="", verdict="missing", detail="")
+
+    representative = failures[0]
+    related_ids: list[str] = []
+    severity_findings: list[str] = []
+    for failure in failures:
+        for feature_id in failure.related_feature_ids or [failure.feature_id]:
+            if feature_id and feature_id not in related_ids:
+                related_ids.append(feature_id)
+        severity_findings.extend(failure.severity_findings)
+
+    if len(failures) == 1:
+        return FailingFeature(
+            feature_id=representative.feature_id,
+            verdict=representative.verdict,
+            detail=representative.detail,
+            severity_findings=list(severity_findings),
+            related_feature_ids=related_ids or [representative.feature_id],
+        )
+
+    detail_lines = [
+        f"Multiple actionable audit failures share group `{group_id}`. "
+        "Repair the shared group behavior in one coherent pass, then Otto "
+        "will re-audit the integrated product before spending more repair attempts.",
+        "",
+        "Failing features in this group:",
+    ]
+    for failure in failures:
+        detail = failure.detail.strip() or "(no detail)"
+        detail_lines.append(f"- {failure.feature_id} [{failure.verdict}]: {detail}")
+
+    return FailingFeature(
+        feature_id=representative.feature_id,
+        verdict=representative.verdict,
+        detail="\n".join(detail_lines),
+        severity_findings=list(severity_findings),
+        related_feature_ids=related_ids or [failure.feature_id for failure in failures],
+    )
 
 
 def can_run_another_audit_pass(
@@ -340,11 +408,13 @@ async def repair_failing_features(
 
         # ---- Phase 1: dispatch fix attempts ----
         pass_attempts: list[RepairAttempt] = []
+        related_ids_by_attempt: dict[str, list[str]] = {}
         for failing in selected:
             group = group_for_feature(spec, failing.feature_id)
             if group is None:
                 # Should be filtered by features_to_repair, but defensive.
                 continue
+            related_feature_ids = failing.related_feature_ids or [failing.feature_id]
             next_attempt_number = attempt_numbers_by_feature.get(
                 failing.feature_id, 0
             ) + 1
@@ -352,6 +422,7 @@ async def repair_failing_features(
             emit("audit.feature_repair.started", {
                 "feature_id": failing.feature_id,
                 "group_id": group.id,
+                "related_feature_ids": related_feature_ids,
                 "attempt_number": next_attempt_number,
                 "verdict_before": failing.verdict,
             })
@@ -376,9 +447,11 @@ async def repair_failing_features(
             attempt.attempt_number = next_attempt_number
             result.attempts.append(attempt)
             pass_attempts.append(attempt)
+            related_ids_by_attempt[attempt.feature_id] = related_feature_ids
             emit("audit.feature_repair.finished", {
                 "feature_id": failing.feature_id,
                 "group_id": group.id,
+                "related_feature_ids": related_feature_ids,
                 "attempt_number": next_attempt_number,
                 "succeeded": attempt.succeeded,
                 "wall_s": attempt.wall_s,
@@ -393,9 +466,15 @@ async def repair_failing_features(
         if re_audit is None or result.halted_reason == "audit_passes_cap_exhausted":
             return result
 
-        attempted_ids = [a.feature_id for a in pass_attempts]
+        attempted_ids = _unique_feature_ids(
+            feature_id
+            for attempt in pass_attempts
+            for feature_id in related_ids_by_attempt.get(attempt.feature_id, [attempt.feature_id])
+        )
         succeeded_before_reaudit = {
-            a.feature_id: bool(a.succeeded) for a in pass_attempts
+            feature_id: bool(attempt.succeeded)
+            for attempt in pass_attempts
+            for feature_id in related_ids_by_attempt.get(attempt.feature_id, [attempt.feature_id])
         }
         emit("audit.re_audit.started", {"feature_ids": attempted_ids})
         try:
@@ -420,8 +499,20 @@ async def repair_failing_features(
             if fid and verdict:
                 by_id[fid] = verdict
         for a in pass_attempts:
-            if a.feature_id in by_id:
-                a.new_verdict = by_id[a.feature_id]
+            related_ids = related_ids_by_attempt.get(a.feature_id, [a.feature_id])
+            related_verdicts = [
+                by_id[feature_id] for feature_id in related_ids
+                if feature_id in by_id
+            ]
+            if related_verdicts:
+                a.new_verdict = (
+                    "passed"
+                    if all(verdict == "passed" for verdict in related_verdicts)
+                    else next(
+                        verdict for verdict in related_verdicts
+                        if verdict != "passed"
+                    )
+                )
                 # Once re-audit exists, it is the source of truth for
                 # whether the repair actually succeeded.
                 a.succeeded = a.new_verdict == "passed"
@@ -463,7 +554,7 @@ async def repair_failing_features(
         # If the fix agent crashed or returned failure, immediately asking
         # the same agent again usually repeats the same runtime failure and
         # burns the whole cap without new evidence.
-        attempted_id_set = {a.feature_id for a in pass_attempts}
+        attempted_id_set = set(attempted_ids)
         current_verdicts = [
             merged_payload_by_id[fid]
             for fid in ordered_ids
@@ -480,6 +571,15 @@ async def repair_failing_features(
             return result
 
     return result
+
+
+def _unique_feature_ids(feature_ids: Iterable[str]) -> list[str]:
+    ordered: list[str] = []
+    for feature_id in feature_ids:
+        clean = str(feature_id or "").strip()
+        if clean and clean not in ordered:
+            ordered.append(clean)
+    return ordered
 
 
 __all__ = [

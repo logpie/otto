@@ -566,11 +566,15 @@ def _is_allowed_evidence_target(target: Path, session_dir: Path) -> bool:
 
 
 def _session_diff_text(session_dir: Path, *, group_id: str | None = None) -> str:
-    worktree = _session_worktree_root(session_dir)
+    safe_group_id = _safe_resource_id(group_id)
+    worktree = _diff_worktree_root(session_dir, safe_group_id)
     if not (worktree / ".git").exists():
         return "No git worktree is available for this session.\n"
-    safe_group_id = _safe_resource_id(group_id)
-    pathspecs = _group_pathspecs(session_dir, safe_group_id) if safe_group_id else []
+    pathspecs = (
+        _group_pathspecs(session_dir, safe_group_id)
+        if safe_group_id
+        else _whole_run_pathspecs()
+    )
     path_args = ["--", *pathspecs] if pathspecs else []
     base = _choose_diff_base(worktree)
     status = _git_text(["status", "--short", "--untracked-files=all", *path_args], worktree)
@@ -611,8 +615,49 @@ def _session_diff_text(session_dir: Path, *, group_id: str | None = None) -> str
             sections.extend(["Untracked file previews:", preview.rstrip(), ""])
 
     if not any(section.strip() for section in sections[3:]):
-        sections.append("No changes from base or working tree.\n")
+        if safe_group_id:
+            sections.append("No changes from base or working tree.\n")
+        else:
+            group_ids = _group_worktree_ids(session_dir)
+            if group_ids:
+                sections.append(
+                    "No whole-run diff is available yet because group branches "
+                    "have not been integrated into the task branch. Open a "
+                    f"group Diff below for: {', '.join(group_ids)}.\n"
+                )
+            else:
+                sections.append("No changes from base or working tree.\n")
     return "\n".join(sections).rstrip() + "\n"
+
+
+def _diff_worktree_root(session_dir: Path, group_id: str | None) -> Path:
+    if group_id:
+        group_worktree = session_dir / "worktrees" / group_id
+        if (group_worktree / ".git").exists():
+            return group_worktree
+    return _session_worktree_root(session_dir)
+
+
+def _group_worktree_ids(session_dir: Path) -> list[str]:
+    root = session_dir / "worktrees"
+    if not root.is_dir():
+        return []
+    return sorted(
+        path.name
+        for path in root.iterdir()
+        if path.is_dir() and (path / ".git").exists()
+    )
+
+
+def _whole_run_pathspecs() -> list[str]:
+    return [
+        ".",
+        ":(exclude)otto_logs/**",
+        ":(exclude).worktrees/**",
+        ":(exclude)_otto_build_logs/**",
+        ":(exclude).otto/**",
+        ":(exclude)otto_artifacts/**",
+    ]
 
 
 _SAFE_RESOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")

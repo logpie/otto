@@ -42,6 +42,7 @@ interface FeatureVisualState {
 
 function buildStatusLabel(status: GroupStatus): string {
   if (status === "passing" || status === "landed") return "built";
+  if (status === "redundant") return "satisfied";
   if (status === "in_progress") return "building";
   if (status === "blocked" || status === "failed_scope") return "blocked";
   return "waiting";

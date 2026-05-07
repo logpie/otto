@@ -35,6 +35,7 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,7 +52,7 @@ from otto.build import (
     resolve_integration_base_branch,
 )
 from otto.checks import Evidence, run_checks
-from otto.setup_gitignore import otto_owned_paths_from_porcelain
+from otto.setup_gitignore import generated_artifact_paths_from_porcelain
 from otto.spec_compile import Group, Spec
 from otto.spec_state import aborted_group_ids, emit
 
@@ -449,6 +450,11 @@ async def run_merge_queue(
         result = await _process_candidate(
             spec=spec,
             group_obj=group_obj,
+            cross_group_checks=_cross_group_checks_for_landed_state(
+                spec,
+                landed_ids=[*landed_ids, group_obj.id],
+                project_dir=project_dir,
+            ),
             candidate=candidate,
             project_dir=project_dir,
             session_dir=session_dir,
@@ -505,10 +511,110 @@ async def run_merge_queue(
     )
 
 
+def _cross_group_checks_for_landed_state(
+    spec: Spec,
+    *,
+    landed_ids: Iterable[str],
+    project_dir: Path | None = None,
+) -> list[Any]:
+    """Return cross-group checks that are runnable in the current state.
+
+    Some global checks reference runner files produced by an integration
+    group. Running those checks before that group has landed is a false
+    failure; checks without future-owned explicit path references still
+    run after every merge. Checks with explicit missing path references
+    are also deferred while the integration state is incomplete: the
+    compiler may emit a global runner path before any group has created
+    it, and blaming the first landed group for that absent file creates
+    a false repair loop. Once all units have landed, missing explicit
+    paths are runnable and should fail normally.
+    """
+    landed = set(landed_ids)
+    unlanded_units = [
+        unit
+        for unit in [*spec.groups, *list(getattr(spec, "components", []) or [])]
+        if getattr(unit, "id", "") not in landed
+    ]
+    runnable: list[Any] = []
+    for check in spec.cross_group_checks:
+        refs = _check_path_references(check)
+        if refs and any(
+            _path_matches_owned_path(ref, owned)
+            for ref in refs
+            for unit in unlanded_units
+            for owned in (getattr(unit, "owned_paths", []) or [])
+        ):
+            continue
+        explicit_refs = _explicit_check_path_references(check)
+        if (
+            explicit_refs
+            and unlanded_units
+            and project_dir is not None
+            and any(_explicit_ref_missing(ref, project_dir) for ref in explicit_refs)
+        ):
+            continue
+        runnable.append(check)
+    return runnable
+
+
+def _check_path_references(check: Any) -> list[str]:
+    refs: list[str] = []
+    selector = str(getattr(check, "selector", "") or "")
+    if selector:
+        refs.append(selector.split("::", 1)[0])
+    refs.extend(_explicit_check_path_references(check))
+    return refs
+
+
+def _explicit_check_path_references(check: Any) -> list[str]:
+    refs: list[str] = []
+    for attr in ("command", "evidence_globs", "paths"):
+        value = getattr(check, attr, None)
+        if isinstance(value, str):
+            candidates = [value]
+        else:
+            candidates = [str(item) for item in (value or [])]
+        refs.extend(candidate for candidate in candidates if _looks_like_path_reference(candidate))
+    return refs
+
+
+def _looks_like_path_reference(value: str) -> bool:
+    text = value.strip()
+    if not text or text.startswith("-") or "://" in text:
+        return False
+    if any(char in text for char in "*?[]"):
+        return True
+    if "/" in text or text.startswith("."):
+        return True
+    return bool(Path(text).suffix)
+
+
+def _explicit_ref_missing(path_ref: str, project_dir: Path) -> bool:
+    ref = path_ref.strip().lstrip("./")
+    if not ref:
+        return False
+    if any(char in ref for char in "*?[]"):
+        return not any(project_dir.glob(ref))
+    return not (project_dir / ref).exists()
+
+
+def _path_matches_owned_path(path_ref: str, owned_path: str) -> bool:
+    ref = path_ref.strip().lstrip("./")
+    owned = owned_path.strip().lstrip("./")
+    if not ref or not owned:
+        return False
+    if fnmatch(ref, owned):
+        return True
+    if not any(char in owned for char in "*?[]"):
+        return ref == owned or ref.startswith(f"{owned.rstrip('/')}/")
+    return False
+
+
 async def _process_candidate(
     *,
     spec: Spec,
     group_obj: Group,
+    cross_group_checks: list[Any],
     candidate: MergeCandidate,
     project_dir: Path,
     session_dir: Path,
@@ -532,6 +638,7 @@ async def _process_candidate(
     repair_attempts = 0
     last_failure = ""
     repair_session_id = ""
+    repair_scope_baseline: dict[str, tuple[bool, str]] | None = None
     raw_log_dir = session_dir / "merge" / group_obj.id
     merge_worktree = candidate.merge_worktree or candidate.worktree
     shared_merge_and_repair_worktree = _same_worktree(
@@ -574,8 +681,10 @@ async def _process_candidate(
         if merge_status == MergeStatus.REDUNDANT and not (group_obj.feature_ids or group_obj.owned_paths):
             merge_status = MergeStatus.LANDED
 
+        merge_conflict = False
         # Conflict → route to repair (B1 path).
         if merge_status == MergeStatus.BLOCKED and "merge conflict" in (outcome.detail or "").lower():
+            merge_conflict = True
             last_failure = outcome.detail or "merge conflict"
             slice_failed_summaries = []
             cross_failed_summaries = []
@@ -593,7 +702,7 @@ async def _process_candidate(
             slice_pass = all(ev.passed for ev in group_evidence)
 
             cross_pairs = run_checks(
-                list(spec.cross_group_checks),
+                list(cross_group_checks),
                 project_dir=project_dir,
                 cwd=merge_worktree,
                 base_url=base_url,
@@ -678,9 +787,14 @@ async def _process_candidate(
         # commit on the slice branch, then let the next loop iteration
         # re-merge.
         repair_attempts += 1
+        repair_scope_baseline = None
         on_slice_branch = False
         if _branch_exists(git, candidate.worktree, candidate.branch):
-            co = git(["checkout", candidate.branch], candidate.worktree)
+            co = _checkout_repair_branch(
+                git,
+                candidate.worktree,
+                branch=candidate.branch,
+            )
             on_slice_branch = co.returncode == 0
             if not on_slice_branch:
                 last_failure = (
@@ -692,6 +806,22 @@ async def _process_candidate(
                     group_id=group_obj.id, attempt=repair_attempts, detail=last_failure,
                 )
                 continue
+            if merge_conflict:
+                prepared, detail = _prepare_slice_branch_conflict_context(
+                    git,
+                    candidate.worktree,
+                    branch=candidate.branch,
+                    base_branch=candidate.base_branch,
+                )
+                if detail:
+                    last_failure = f"{last_failure}\n\n{detail}"
+                if not prepared:
+                    emit(
+                        session_dir, "group.attempt.failed",
+                        group_id=group_obj.id, attempt=repair_attempts, detail=last_failure,
+                    )
+                    continue
+            repair_scope_baseline = _repair_scope_baseline(git, candidate.worktree)
         agent_input = BuildAgentInput(
             spec=spec,
             group=group_obj,
@@ -728,6 +858,31 @@ async def _process_candidate(
             if shared_budget is not None:
                 shared_budget.charge_cost(agent_output.cost_usd)
             if not agent_output.succeeded:
+                if on_slice_branch and _commit_repair_candidate_after_agent_error(
+                    git,
+                    candidate.worktree,
+                    group_obj=group_obj,
+                    spec=spec,
+                    branch=candidate.branch,
+                    attempt=repair_attempts,
+                    last_failure=agent_output.detail
+                    or "agent reported failure during merge repair",
+                    baseline=repair_scope_baseline,
+                ):
+                    last_failure = (
+                        "agent reported failure during merge repair after producing "
+                        "a committable repair candidate; retrying merge verification"
+                    )
+                    emit(
+                        session_dir,
+                        "group.attempt.failed",
+                        group_id=group_obj.id,
+                        attempt=repair_attempts,
+                        detail=last_failure,
+                    )
+                    if on_slice_branch and shared_merge_and_repair_worktree:
+                        git(["checkout", candidate.base_branch], candidate.worktree)
+                    continue
                 last_failure = agent_output.detail or "agent reported failure during merge repair"
                 emit(
                     session_dir,
@@ -749,7 +904,9 @@ async def _process_candidate(
             # owned/dependency/shared paths while fixing the merge/check
             # failure.
             if on_slice_branch:
-                modified = _modified_paths_for_repair(git, candidate.worktree)
+                modified = _modified_paths_for_repair_since(
+                    git, candidate.worktree, repair_scope_baseline
+                )
                 scope_violations = detect_scope_violations(
                     group_obj,
                     spec,
@@ -795,6 +952,53 @@ async def _process_candidate(
             if on_slice_branch:
                 add = git(["add", "-A"], candidate.worktree)
                 if add.returncode == 0:
+                    artifact_status = _unstage_generated_artifact_paths(
+                        git,
+                        candidate.worktree,
+                    )
+                    if artifact_status.returncode != 0:
+                        last_failure = (
+                            "repair artifact cleanup failed: "
+                            + _git_failure_excerpt(artifact_status)
+                        )
+                        emit(
+                            session_dir,
+                            "group.attempt.failed",
+                            group_id=group_obj.id,
+                            attempt=repair_attempts,
+                            detail=last_failure,
+                        )
+                        if shared_merge_and_repair_worktree:
+                            git(["checkout", candidate.base_branch], candidate.worktree)
+                        continue
+                    unmerged_after_add = _unmerged_paths(git, candidate.worktree)
+                    if unmerged_after_add:
+                        last_failure = (
+                            "repair left unmerged paths: "
+                            + ", ".join(unmerged_after_add[:5])
+                        )
+                        emit(
+                            session_dir,
+                            "group.attempt.failed",
+                            group_id=group_obj.id,
+                            attempt=repair_attempts,
+                            detail=last_failure,
+                        )
+                        if shared_merge_and_repair_worktree:
+                            git(["checkout", candidate.base_branch], candidate.worktree)
+                        continue
+                    if _worktree_has_conflict_markers(git, candidate.worktree):
+                        last_failure = "repair left conflict markers in the worktree"
+                        emit(
+                            session_dir,
+                            "group.attempt.failed",
+                            group_id=group_obj.id,
+                            attempt=repair_attempts,
+                            detail=last_failure,
+                        )
+                        if shared_merge_and_repair_worktree:
+                            git(["checkout", candidate.base_branch], candidate.worktree)
+                        continue
                     status = git(["status", "--porcelain"], candidate.worktree)
                     if (status.stdout or "").strip():
                         msg = f"i2p({group_obj.id}): repair on {candidate.branch} (attempt {repair_attempts})"
@@ -806,6 +1010,17 @@ async def _process_candidate(
                             logger.warning(
                                 "repair commit failed for slice %s: %s",
                                 group_obj.id, commit.stderr,
+                            )
+                            last_failure = (
+                                "repair commit failed: "
+                                + _git_failure_excerpt(commit)
+                            )
+                            emit(
+                                session_dir,
+                                "group.attempt.failed",
+                                group_id=group_obj.id,
+                                attempt=repair_attempts,
+                                detail=last_failure,
                             )
                 if shared_merge_and_repair_worktree:
                     git(["checkout", candidate.base_branch], candidate.worktree)
@@ -842,6 +1057,113 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _git_failure_excerpt(proc: subprocess.CompletedProcess[str], max_chars: int = 800) -> str:
+    text = "\n".join(
+        part.strip()
+        for part in ((proc.stdout or ""), (proc.stderr or ""))
+        if part and part.strip()
+    )
+    return (text or f"git exited with {proc.returncode}")[:max_chars]
+
+
+def _checkout_repair_branch(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+    *,
+    branch: str,
+) -> subprocess.CompletedProcess[str]:
+    """Reset transient repair state and check out the slice branch."""
+    from otto.build import _ensure_clean_git_state
+
+    _ensure_clean_git_state(worktree)
+    git(["reset", "--hard", "HEAD"], worktree)
+    git(
+        [
+            "clean",
+            "-fdx",
+            "-e",
+            ".otto/",
+            "-e",
+            "_otto_*",
+            "-e",
+            "_session/",
+            "-e",
+            "otto_logs/",
+            "-e",
+            "otto.yaml",
+            "-e",
+            "intent.md",
+        ],
+        worktree,
+    )
+    return git(["checkout", branch], worktree)
+
+
+def _prepare_slice_branch_conflict_context(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+    *,
+    branch: str,
+    base_branch: str,
+) -> tuple[bool, str]:
+    """Reproduce an integration conflict on the slice branch for repair.
+
+    The merge queue keeps the target worktree clean by aborting failed
+    `base <- slice` merges. Repair agents used to see only a clean slice branch,
+    so they had to guess the conflict. For linked branch worktrees, merge the
+    current target into the slice branch before invoking the agent; conflict
+    markers and unmerged paths then show the exact integration problem while
+    Otto still owns the eventual commit.
+    """
+    checkout = git(["checkout", branch], worktree)
+    if checkout.returncode != 0:
+        return False, f"could not checkout slice branch for conflict repair: {_git_failure_excerpt(checkout)}"
+
+    merge = git(
+        [
+            "merge",
+            "--no-ff",
+            "--no-commit",
+            "-m",
+            f"i2p({branch.split('/')[-1]}): integrate {base_branch} for repair",
+            base_branch,
+        ],
+        worktree,
+    )
+    if merge.returncode == 0:
+        commit = git(
+            [
+                "commit",
+                "-q",
+                "-m",
+                f"i2p({branch.split('/')[-1]}): integrate {base_branch} before repair",
+                "--no-verify",
+            ],
+            worktree,
+        )
+        if commit.returncode not in (0, 1):
+            return False, (
+                "target branch merged cleanly into slice branch, but the "
+                f"pre-repair merge commit failed: {_git_failure_excerpt(commit)}"
+            )
+        return True, (
+            "Conflict context: target branch merged cleanly into the slice "
+            "branch before repair; retry merge verification after the agent "
+            "checks the integrated state."
+        )
+
+    unmerged = _unmerged_paths(git, worktree)
+    detail_parts = [
+        "Conflict context: Otto reproduced the target-branch merge on the "
+        "slice branch before invoking repair. Resolve the conflict markers in "
+        "this worktree while preserving both the slice behavior and the "
+        "already-landed target behavior.",
+        f"Unmerged paths: {', '.join(unmerged) if unmerged else '(none reported)'}",
+        _git_failure_excerpt(merge),
+    ]
+    return True, "\n".join(part for part in detail_parts if part)
+
+
 def _modified_paths_for_repair(
     git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
     worktree: Path,
@@ -861,6 +1183,152 @@ def _modified_paths_for_repair(
             if path and path not in paths:
                 paths.append(path)
     return paths
+
+
+def _repair_scope_baseline(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+) -> dict[str, tuple[bool, str]]:
+    """Snapshot dirty repair paths before the repair agent edits.
+
+    Conflict repair may first merge the current target branch into the slice
+    branch. That merge can introduce already-landed peer files into the dirty
+    index even though the repair agent has not touched them. Scope enforcement
+    should police the repair agent's edits, not reject target-branch state that
+    was present before the agent began.
+    """
+    return {
+        path: _repair_path_signature(worktree / path)
+        for path in _modified_paths_for_repair(git, worktree)
+    }
+
+
+def _repair_path_signature(path: Path) -> tuple[bool, str]:
+    if not path.exists() or not path.is_file():
+        return (False, "")
+    import hashlib
+
+    try:
+        return (True, hashlib.sha256(path.read_bytes()).hexdigest())
+    except OSError:
+        return (True, "")
+
+
+def _modified_paths_for_repair_since(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+    baseline: dict[str, tuple[bool, str]] | None,
+) -> list[str]:
+    """Return repair paths changed after an optional pre-agent baseline."""
+    paths = _modified_paths_for_repair(git, worktree)
+    if baseline is None:
+        return _non_generated_repair_paths(paths)
+    changed: list[str] = []
+    for path in paths:
+        signature = _repair_path_signature(worktree / path)
+        if path not in baseline or baseline[path] != signature:
+            changed.append(path)
+    return _non_generated_repair_paths(changed)
+
+
+def _non_generated_repair_paths(paths: list[str]) -> list[str]:
+    from otto.setup_gitignore import is_common_build_artifact_path, is_otto_owned_path
+
+    return [
+        path
+        for path in paths
+        if not is_otto_owned_path(path) and not is_common_build_artifact_path(path)
+    ]
+
+
+def _unmerged_paths(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+) -> list[str]:
+    proc = git(["diff", "--name-only", "--diff-filter=U"], worktree)
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+
+
+def _has_repair_changes(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+) -> bool:
+    status = git(["status", "--porcelain"], worktree)
+    return status.returncode == 0 and bool((status.stdout or "").strip())
+
+
+def _worktree_has_conflict_markers(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+) -> bool:
+    proc = git(["grep", "-n", r"<<<<<<<\|=======\|>>>>>>>", "--", "."], worktree)
+    return proc.returncode == 0 and bool((proc.stdout or "").strip())
+
+
+def _commit_repair_candidate_after_agent_error(
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+    worktree: Path,
+    *,
+    group_obj: Group,
+    spec: Spec,
+    branch: str,
+    attempt: int,
+    last_failure: str,
+    baseline: dict[str, tuple[bool, str]] | None = None,
+) -> bool:
+    """Commit a checkable repair candidate after a late provider failure.
+
+    Codex can exit without a final result after making edits and running the
+    requested checks. Throwing those edits away repeats the same merge conflict.
+    We only salvage when the worktree has no unmerged paths, the edited paths
+    stay in repair scope, and git can create a normal slice-branch commit.
+    The next merge-loop iteration still performs the real merge and checks.
+    """
+    if not _has_repair_changes(git, worktree):
+        return False
+    modified = _modified_paths_for_repair_since(git, worktree, baseline)
+    scope_violations = detect_scope_violations(
+        group_obj,
+        spec,
+        modified,
+        project_root=worktree,
+    )
+    if scope_violations:
+        logger.warning(
+            "not salvaging failed repair for %s after %s; scope violations: %s",
+            group_obj.id,
+            last_failure,
+            ", ".join(scope_violations[:5]),
+        )
+        _discard_uncommitted_repair(git, worktree)
+        return False
+    add = git(["add", "-A"], worktree)
+    if add.returncode != 0:
+        return False
+    if _unstage_generated_artifact_paths(git, worktree).returncode != 0:
+        return False
+    if _unmerged_paths(git, worktree):
+        return False
+    if _worktree_has_conflict_markers(git, worktree):
+        return False
+    status = git(["status", "--porcelain"], worktree)
+    if status.returncode != 0 or not (status.stdout or "").strip():
+        return False
+    msg = (
+        f"i2p({group_obj.id}): repair candidate on {branch} "
+        f"after agent error (attempt {attempt})"
+    )
+    commit = git(["commit", "-q", "-m", msg, "--no-verify"], worktree)
+    if commit.returncode != 0:
+        logger.warning(
+            "failed to salvage repair candidate for %s: %s",
+            group_obj.id,
+            _git_failure_excerpt(commit),
+        )
+        return False
+    return True
 
 
 def _failed_evidence_summaries(evidence: list[Evidence]) -> list[str]:
@@ -952,15 +1420,15 @@ class CommitOutcome:
     detail: str = ""
 
 
-def _unstage_otto_owned_paths(
+def _unstage_generated_artifact_paths(
     git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
     worktree: Path,
 ) -> subprocess.CompletedProcess[str]:
-    """Remove Otto runtime/evidence files from the index after `git add -A`."""
+    """Remove generated runtime/test artifacts from the index after `git add -A`."""
     status = git(["status", "--porcelain"], worktree)
     if status.returncode != 0:
         return status
-    for runtime_path in otto_owned_paths_from_porcelain(status.stdout or ""):
+    for runtime_path in generated_artifact_paths_from_porcelain(status.stdout or ""):
         git(["reset", "HEAD", "--", runtime_path], worktree)
         git(
             ["rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", runtime_path],
@@ -1053,13 +1521,18 @@ def _merge_group_branch(
     msg = f"i2p({group_id}): merge slice branch {branch}"
     merge = git(["merge", "--no-ff", "-m", msg, branch], worktree)
     if merge.returncode != 0:
+        unmerged = _unmerged_paths(git, worktree)
+        detail = f"merge conflict on slice branch {branch}"
+        if unmerged:
+            detail += f" (unmerged: {', '.join(unmerged)})"
+        detail += f": {_git_failure_excerpt(merge)}"
         # Conflict — abort cleanly.
         git(["merge", "--abort"], worktree)
         return CommitOutcome(
             status=MergeStatus.BLOCKED,
             head_before=head_before,
             head_after=head_before,
-            detail=f"merge conflict on slice branch {branch}: {merge.stderr.strip()[:200]}",
+            detail=detail,
         )
 
     head_after_proc = git(["rev-parse", "--short", "HEAD"], worktree)
@@ -1116,7 +1589,7 @@ def _commit_integration(
             detail=f"git add -A failed: {add_proc.stderr.strip()[:200]}",
         )
 
-    status = _unstage_otto_owned_paths(git, worktree)
+    status = _unstage_generated_artifact_paths(git, worktree)
     if status.returncode != 0:
         return CommitOutcome(
             status=MergeStatus.BLOCKED,
