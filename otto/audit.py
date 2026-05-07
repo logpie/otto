@@ -1722,6 +1722,7 @@ def _write_audit_evidence_packet(agent_input: AuditAgentInput) -> None:
             "Prefer deterministic contract/cross-slice results and browser artifacts over provider transcript text.",
             "A failed deterministic contract is a blocker or partial cap unless direct evidence proves the oracle is invalid.",
             "Avoid bulk-reading messages.jsonl; if needed, inspect bounded relevant excerpts only.",
+            "Do not inspect node_modules, dist/assets bundles, coverage, or test-results unless a named evidence artifact points there.",
         ],
     }
     agent_input.evidence_packet_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1801,9 +1802,11 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         )
         lines.append(
             "Do not run broad `rg`, `find`, `cat`, or `sed` sweeps over "
-            "`otto_logs/**`, `_otto_build_logs/**`, `.worktrees/**`, or parent "
-            "session directories. Inspect the compact evidence packet, named "
-            "check logs, screenshots, traces, and source files directly."
+            "`otto_logs/**`, `_otto_build_logs/**`, `.worktrees/**`, "
+            "`node_modules/**`, `dist/assets/**`, `coverage/**`, "
+            "`test-results/**`, or parent session directories. Inspect the "
+            "compact evidence packet, named check logs, screenshots, traces, "
+            "and source files directly."
         )
         lines.append(
             "Deterministic-first rule: evaluate contract_test, cross-slice "

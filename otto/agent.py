@@ -21,6 +21,8 @@ _SDK_IMPORT_ERROR_MESSAGE = ""
 
 CODEX_STDIO_LIMIT_BYTES = 16 * 1024 * 1024
 CODEX_POST_RESULT_EXIT_GRACE_S = 0.25
+CODEX_TOOL_OUTPUT_LOG_LIMIT_CHARS = 20_000
+CODEX_PROVIDER_ERROR_OUTPUT_LIMIT_CHARS = 1_200
 _CLAUDE_ENV_LOCK = asyncio.Lock()
 DEFAULT_DISALLOWED_BASH_TOOLS = (
     "Bash(killall*)",
@@ -1208,6 +1210,54 @@ def _codex_collab_result_text(item: dict[str, Any], child_id: str | None = None)
     return "\n\n".join(messages)
 
 
+def _truncate_for_agent_log(text: str, limit: int) -> str:
+    if limit <= 0 or len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return text[:limit].rstrip() + f"\n[... Otto truncated {omitted} chars ...]"
+
+
+def _compact_codex_event_for_error(event: dict[str, Any]) -> str:
+    event_type = str(event.get("type") or "")
+    item = event.get("item") or {}
+    if not isinstance(item, dict):
+        return _truncate_for_agent_log(json.dumps(event, sort_keys=True), 2_000)
+
+    item_type = str(item.get("type") or "")
+    item_id = str(item.get("id") or "")
+    if item_type == "command_execution":
+        command = _truncate_for_agent_log(
+            str(item.get("command") or ""),
+            240,
+        )
+        if event_type == "item.completed":
+            output = _truncate_for_agent_log(
+                str(item.get("aggregated_output") or ""),
+                CODEX_PROVIDER_ERROR_OUTPUT_LIMIT_CHARS,
+            )
+            return (
+                f"{event_type} command_execution id={item_id!r} "
+                f"status={item.get('status')!r} exit_code={item.get('exit_code')!r} "
+                f"command={command!r} output={output!r}"
+            )
+        return (
+            f"{event_type} command_execution id={item_id!r} "
+            f"status={item.get('status')!r} command={command!r}"
+        )
+    if item_type == "agent_message":
+        text = _truncate_for_agent_log(
+            str(item.get("text") or ""),
+            CODEX_PROVIDER_ERROR_OUTPUT_LIMIT_CHARS,
+        )
+        return f"{event_type} agent_message text={text!r}"
+    if item_type:
+        return (
+            f"{event_type} {item_type} id={item_id!r} "
+            f"status={item.get('status')!r}"
+        )
+    return _truncate_for_agent_log(json.dumps(event, sort_keys=True), 2_000)
+
+
 async def _query_codex(
     *,
     prompt: str,
@@ -1250,7 +1300,7 @@ async def _query_codex(
     session_id = ""
     last_text = ""
     saw_result = False
-    raw_lines: list[str] = []
+    compact_event_lines: list[str] = []
     emitted_collab_tool_ids: set[str] = set()
     child_tool_use_by_thread_id: dict[str, str] = {}
 
@@ -1263,13 +1313,16 @@ async def _query_codex(
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
-            raw_lines.append(line)
-            if state is not None:
-                state["provider_stderr"] = "\n".join(raw_lines[-50:])
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                compact_event_lines.append(_truncate_for_agent_log(line, 2_000))
+                if state is not None:
+                    state["provider_stderr"] = "\n".join(compact_event_lines[-50:])
                 continue
+            compact_event_lines.append(_compact_codex_event_for_error(event))
+            if state is not None:
+                state["provider_stderr"] = "\n".join(compact_event_lines[-50:])
 
             event_type = event.get("type")
             if event_type == "thread.started":
@@ -1297,7 +1350,10 @@ async def _query_codex(
                     )
                     continue
                 if event_type == "item.completed":
-                    output = str(item.get("aggregated_output", "") or "")
+                    output = _truncate_for_agent_log(
+                        str(item.get("aggregated_output", "") or ""),
+                        CODEX_TOOL_OUTPUT_LOG_LIMIT_CHARS,
+                    )
                     yield AssistantMessage(
                         content=[ToolResultBlock(content=output, tool_use_id=item_id)],
                         session_id=session_id,
@@ -1382,7 +1438,7 @@ async def _query_codex(
             return_code = await asyncio.shield(wait_task)
 
         if return_code != 0:
-            error_lines = raw_lines[-20:]
+            error_lines = compact_event_lines[-20:]
             error_text = "\n".join(error_lines) or f"codex exited with code {return_code}"
             if state is not None:
                 state["provider_stderr"] = error_text

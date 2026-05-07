@@ -380,6 +380,7 @@ W13_INTENT = (
 # with real multi-group products; keep the default aligned with Otto's queue
 # task budget rather than the old tiny-kanban estimate.
 W1_BUILD_TIMEOUT_S = 60 * 60
+W1_VISIBLE_PROGRESS_IDLE_TIMEOUT_S = 20 * 60
 W11_BUILD_TIMEOUT_S = 25 * 60
 W2_BUILD_TIMEOUT_S = 20 * 60   # 3 sequential builds, generous bound
 W12A_BUILD_TIMEOUT_S = 10 * 60
@@ -3345,6 +3346,9 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             terminal_outcome: Optional[str] = None
             poll_count = 0
             last_state: Optional[dict[str, Any]] = None
+            last_progress_signature: Optional[str] = None
+            last_progress_at = time.monotonic()
+            stalled = False
             if not submitted_to_queue:
                 _log("skipping terminal poll because submit produced no queue row")
             while submitted_to_queue and time.monotonic() < deadline:
@@ -3356,6 +3360,14 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                     time.sleep(5)
                     continue
                 last_state = body
+                progress_signature = _submitted_task_progress_signature(
+                    body,
+                    submitted_task_id=submitted_task_id,
+                    submitted_run_id=submitted_run_id,
+                )
+                if progress_signature and progress_signature != last_progress_signature:
+                    last_progress_signature = progress_signature
+                    last_progress_at = time.monotonic()
                 # /api/state schema: live.items[]/history.items[] flat dicts.
                 history = (body.get("history") or {}).get("items") or []
                 live = (body.get("live") or {}).get("items") or []
@@ -3379,12 +3391,25 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 )
                 if terminal_outcome:
                     break
+                if (
+                    last_progress_signature
+                    and time.monotonic() - last_progress_at
+                    >= W1_VISIBLE_PROGRESS_IDLE_TIMEOUT_S
+                ):
+                    stalled = True
+                    failures.fail(
+                        "submitted build showed no Mission Control-visible progress change "
+                        f"for {W1_VISIBLE_PROGRESS_IDLE_TIMEOUT_S}s; true-web stopped "
+                        "waiting and treated this as a user-visible stall"
+                    )
+                    break
                 time.sleep(5)
             _log(f"terminal_outcome={terminal_outcome}")
-            failures.soft_assert(
-                terminal_outcome is not None,
-                f"build did not reach terminal in {build_timeout_s}s",
-            )
+            if not stalled:
+                failures.soft_assert(
+                    terminal_outcome is not None,
+                    f"build did not reach terminal in {build_timeout_s}s",
+                )
             if terminal_outcome and terminal_outcome != "success":
                 failures.fail(f"build terminal_outcome={terminal_outcome!r} (expected success)")
             _safe_screenshot(page, artifact_dir, "07-build-terminal")
@@ -3974,8 +3999,16 @@ def _queued_work_count(state: Optional[dict[str, Any]]) -> int:
     )
     runtime = state.get("runtime") or {}
     backlog = (runtime.get("command_backlog") or {}).get("pending") or 0
-    live_count = len(_live_items(state))
-    landing_count = len((state.get("landing") or {}).get("items") or [])
+    live_count = sum(
+        1
+        for item in _live_items(state)
+        if _row_is_active(item)
+    )
+    landing_count = sum(
+        1
+        for item in (state.get("landing") or {}).get("items") or []
+        if _row_is_active(item)
+    )
     return max(
         queued_from_counts,
         int(runtime.get("queue_tasks") or 0),
@@ -3984,6 +4017,43 @@ def _queued_work_count(state: Optional[dict[str, Any]]) -> int:
         live_count,
         landing_count,
     )
+
+
+def _terminal_outcome_from_row(row: dict[str, Any]) -> str | None:
+    outcome = str(row.get("terminal_outcome") or "").strip()
+    if outcome:
+        return outcome
+    status = ""
+    for key in ("status", "queue_status", "display_status", "state"):
+        status = str(row.get(key) or "").strip().lower()
+        if status:
+            break
+    if status in {"done", "success", "passed", "landed"}:
+        return "success"
+    if status in {"failed", "failure", "error", "blocked", "partial"}:
+        return "failure"
+    if status in {"cancelled", "canceled", "interrupted", "removed", "aborted"}:
+        return status
+    return None
+
+
+def _row_is_active(row: dict[str, Any]) -> bool:
+    if _terminal_outcome_from_row(row):
+        return False
+    status = ""
+    for key in ("status", "queue_status", "display_status", "state"):
+        status = str(row.get(key) or "").strip().lower()
+        if status:
+            break
+    return status in {
+        "queued",
+        "pending",
+        "waiting",
+        "starting",
+        "initializing",
+        "running",
+        "terminating",
+    }
 
 
 def _state_task_rows(state: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4061,12 +4131,53 @@ def _terminal_outcome_for_submitted_task(
             submitted_run_id=submitted_run_id,
         ):
             continue
-        outcome = str(row.get("terminal_outcome") or "").strip()
+        outcome = _terminal_outcome_from_row(row)
         if not outcome:
             continue
         run_id = str(row.get("run_id") or submitted_run_id or "").strip() or submitted_run_id
         return outcome, run_id
     return None, submitted_run_id
+
+
+def _submitted_task_progress_signature(
+    state: Optional[dict[str, Any]],
+    *,
+    submitted_task_id: str | None,
+    submitted_run_id: str | None,
+) -> str | None:
+    for row in _state_task_rows(state):
+        if not _submitted_row_matches(
+            row,
+            submitted_task_id=submitted_task_id,
+            submitted_run_id=submitted_run_id,
+        ):
+            continue
+        payload = {
+            key: row.get(key)
+            for key in (
+                "_source",
+                "status",
+                "display_status",
+                "terminal_outcome",
+                "run_id",
+                "queue_task_id",
+                "task_id",
+                "updated_at",
+                "heartbeat_at",
+                "finished_at",
+                "elapsed_s",
+                "duration_s",
+                "progress",
+                "last_event",
+                "stories_passed",
+                "stories_tested",
+                "changed_file_count",
+                "cost_usd",
+            )
+        }
+        payload["token_usage"] = row.get("token_usage") or {}
+        return json.dumps(payload, sort_keys=True, default=str)
+    return None
 
 
 def _wait_for_submitted_task(
@@ -5277,7 +5388,7 @@ def _wait_for_terminal(
     run_id: Optional[str] = None,
     on_poll: Optional[Callable[[int], None]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
-    """Poll /api/state until a matching history row has a terminal_outcome.
+    """Poll /api/state until a matching Mission Control row is terminal.
 
     Returns (terminal_outcome, run_id) or (None, None) on timeout.
     """
@@ -5286,19 +5397,20 @@ def _wait_for_terminal(
     while time.monotonic() < deadline:
         poll += 1
         state = _state(base_url)
-        history = _history_items(state)
-        for it in history:
+        rows = _state_task_rows(state)
+        for it in rows:
             if domain_filter and it.get("domain") not in domain_filter:
                 continue
             if queue_task_id and it.get("queue_task_id") != queue_task_id:
                 continue
             if run_id and it.get("run_id") != run_id:
                 continue
-            outcome = it.get("terminal_outcome")
+            outcome = _terminal_outcome_from_row(it)
             if outcome:
                 return outcome, it.get("run_id")
         if poll % 12 == 1:
             live = _live_items(state)
+            history = _history_items(state)
             log_fn(
                 f"  poll#{poll}: history={len(history)} live={len(live)} "
                 f"live_statuses={[it.get('status') for it in live[:3]]}"
@@ -8188,7 +8300,7 @@ def _teardown_scenario_runtime(
     artifact_dir: Path,
     web_url: str | None,
     keep_snapshot: bool,
-) -> None:
+) -> dict[str, Any]:
     """Stop live Otto work before backend/tempdir teardown."""
     report: dict[str, Any] = {}
     if keep_snapshot:
@@ -8208,12 +8320,14 @@ def _teardown_scenario_runtime(
         report["terminate_watcher_blocking_error"] = str(exc)
     report["project_process_cleanup"] = _terminate_project_processes(project_dir)
     try:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
         (artifact_dir / "teardown.json").write_text(
             json.dumps(report, indent=2, default=str),
             encoding="utf-8",
         )
     except OSError:
         pass
+    return report
 
 
 def classify_failure(failures: RunFailures) -> FailureClassification:
@@ -8326,12 +8440,18 @@ def run_one_scenario(
                 artifact_mine_pass(project_dir, failures)
             except Exception as exc:  # noqa: BLE001
                 failures.fail(f"artifact_mine_pass crashed: {exc}")
-            _teardown_scenario_runtime(
+            teardown_report = _teardown_scenario_runtime(
                 project_dir=project_dir,
                 artifact_dir=artifact_dir,
                 web_url=getattr(backend, "url", None),
                 keep_snapshot=bool(failures.failures),
             )
+            cleanup_report = teardown_report.get("project_process_cleanup")
+            if isinstance(cleanup_report, dict) and cleanup_report.get("after_sigkill"):
+                failures.fail(
+                    "web-as-user teardown left live project processes after SIGKILL; "
+                    "see teardown.json"
+                )
             # Stop the in-process backend.
             if backend is not None:
                 try:

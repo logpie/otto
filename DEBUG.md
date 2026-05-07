@@ -1305,3 +1305,90 @@ The Codex provider adapter treated process EOF as the terminal condition even th
 - Treat Codex `turn.completed` as terminal.
 - Give the process a short grace period to exit, then let the existing provider cleanup terminate it.
 - Add a regression where a fake Codex process emits `turn.completed` but never exits.
+
+# True WebTest Long-Run False Progress Audit
+
+Date: 2026-05-07
+
+## Observations
+
+- Several recent Mission Control queue runners stayed alive for 13-16 hours after their only queued task had already reached terminal failed/completed state.
+- The actual child runs were much shorter: one Microfeed run failed after about 13 minutes, and a later polished Micro Twitter run failed after about 34 minutes.
+- Older browser evidence shows the true-web harness could keep probing a run that was already terminal, because Mission Control sometimes kept terminal queue rows in `live.items`.
+- Shared wait helpers checked only `history.items`, so terminal rows retained in `live.items` could force timeout-length waits.
+
+## Hypotheses
+
+### H1: Terminal-state detection is section-specific instead of user-visible-state-specific (ROOT HYPOTHESIS)
+
+- Supports: `_wait_for_terminal` only scanned history rows, while Mission Control can retain terminal queue rows in the live section.
+- Supports: W1 had a separate helper that already accepted terminal live rows, suggesting this bug existed in the shared path.
+- Conflicts: some scenarios use fresh throwaway projects and terminal rows often move to history promptly.
+- Test: a live queue row with `status=failed` and no history row should terminate `_wait_for_terminal` immediately.
+
+### H2: Stale queue-runner processes are being mistaken for active E2E progress
+
+- Supports: queue runner state heartbeats continued long after task `finished_at`.
+- Conflicts: a long-lived Mission Control queue runner is valid for a real product server; the bug is harness interpretation/cleanup, not necessarily the product default.
+- Test: true-web teardown should record and fail if project-referencing processes survive SIGTERM/SIGKILL.
+
+### H3: Long waits have no visible-progress budget
+
+- Supports: a real user would not accept hours of no visible progress, even if a provider process is still alive.
+- Conflicts: some provider calls can be legitimately quiet for minutes.
+- Test: W1 should treat prolonged absence of Mission Control-visible row changes as a user-visible stall, separate from total build timeout.
+
+## Root Cause
+
+The true-web harness mixed real build runtime with stale Mission Control/process liveness: shared waits did not treat terminal live rows as terminal, queued-work counting included stale live rows, and long waits had no independent visible-progress stall guard.
+
+## Fix
+
+- Read terminal outcome from all Mission Control rows, not just history rows.
+- Infer terminal outcome from terminal status when `terminal_outcome` is absent.
+- Exclude terminal live/landing rows from queued-work counts.
+- Add a W1 visible-progress idle guard so true-web fails on user-visible stalls instead of passively waiting to the build timeout.
+- Make teardown process leaks visible in `teardown.json` and fail if project processes survive cleanup.
+
+# True WebTest Polished Micro Twitter Stall Audit
+
+Date: 2026-05-07
+
+## Observations
+
+- The polished Micro Twitter run used real group concurrency: after the foundation group, composer, timeline, and search groups started together.
+- The three sibling groups wrote real feature files and Playwright journeys into their isolated worktrees, and those browser journeys passed.
+- Their unit checks failed with `No test files found` for commands such as `npm run test -- --run src/features/composer/*.test.tsx`.
+- The files did exist, for example `src/features/composer/PostComposer.test.tsx`; the wildcard was passed as a literal structured subprocess argument, so Vitest did not expand it.
+- Current `main` already contains the root fix in `otto/checks.py`: structured check commands expand path globs before running without a shell. Replaying the exact archived composer check against the failed worktree now passes.
+- The audit agent also bulk-read generated assets and `node_modules` listings, creating huge provider events and a noisy `audit agent crashed` result even though deterministic evidence was already enough to block.
+
+## Hypotheses
+
+### H1: Structured check commands need path-glob expansion before subprocess execution (ROOT HYPOTHESIS)
+
+- Supports: the failed command contained `*.test.tsx`; the matching file existed; replay with current glob expansion passes.
+- Conflicts: shell-based manual runs would expand the wildcard, but Otto intentionally avoids shell execution for structured checks.
+- Test: run `RepoTestCheck(command=("python", "-c", code, "src/features/search/*.test.tsx"))` and assert the subprocess receives concrete file paths.
+
+### H2: No-progress detection hid the real check-runner issue
+
+- Supports: after two identical failed check attempts, Otto reported `no progress` even though useful uncommitted feature work existed in the worktrees.
+- Conflicts: the no-progress guard is still useful for genuine retry loops; the misleading part was the underlying false check failure.
+- Test: fix command glob expansion first; the same group should pass and commit instead of reaching no-progress.
+
+### H3: Audit prompt guardrails were too soft around generated assets
+
+- Supports: the prompt warned against bulk session-log sweeps, but the agent still read generated bundle output and `node_modules` listings.
+- Conflicts: some generated artifacts can be useful when specifically referenced by evidence.
+- Test: prompt and evidence packet should explicitly forbid broad reads of `node_modules/**`, `dist/assets/**`, `coverage/**`, and `test-results/**` unless named evidence points there; Codex adapter should compact huge provider-error lines.
+
+## Root Cause
+
+Two independent issues amplified the long run: check execution used structured subprocesses without shell glob expansion in the failed run, causing false `No test files found` failures; then audit/provider logging preserved huge raw command output when the audit agent inspected generated assets, turning a clear deterministic block into noisy crash evidence.
+
+## Fix
+
+- Verified the existing current-head fix for `RepoTestCheck` path-glob expansion against the archived failed composer worktree.
+- Tightened the audit evidence packet and prompt to avoid broad reads of `node_modules`, generated bundles, coverage, and test-results.
+- Compacted Codex provider nonzero-exit error summaries and truncated huge command-output log blocks so one bad inspection cannot flood Mission Control artifacts or follow-on crash details.

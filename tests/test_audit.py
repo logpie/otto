@@ -570,6 +570,8 @@ def test_run_audit_writes_compact_evidence_packet_for_judge(tmp_path: Path) -> N
     assert str(packet_path) in captured["prompt"]
     assert "Do not bulk-read `messages.jsonl`" in captured["prompt"]
     assert "Do not run broad `rg`, `find`, `cat`, or `sed` sweeps" in captured["prompt"]
+    assert "`node_modules/**`" in captured["prompt"]
+    assert "`dist/assets/**`" in captured["prompt"]
     assert "Deterministic-first rule" in captured["prompt"]
     assert "Project contract test" in captured["prompt"]
 

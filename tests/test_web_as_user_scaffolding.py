@@ -734,6 +734,147 @@ def test_web_as_user_terminal_detection_matches_by_run_id_when_task_id_missing()
     assert run_id == "run-1"
 
 
+def test_web_as_user_wait_for_terminal_accepts_live_terminal_row(
+    monkeypatch,
+) -> None:
+    """Shared terminal waits must not spin until timeout when terminal rows remain live."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    state = {
+        "live": {
+            "items": [
+                {
+                    "domain": "queue",
+                    "queue_task_id": "build-micro-twitter",
+                    "run_id": "run-1",
+                    "status": "failed",
+                }
+            ]
+        },
+        "history": {"items": []},
+    }
+    monkeypatch.setattr(web_as_user, "_state", lambda _url: state)
+
+    outcome, run_id = web_as_user._wait_for_terminal(
+        "http://127.0.0.1:9",
+        timeout_s=60,
+        log_fn=lambda _msg: None,
+        domain_filter={"queue"},
+        queue_task_id="build-micro-twitter",
+    )
+
+    assert outcome == "failure"
+    assert run_id == "run-1"
+
+
+def test_web_as_user_queued_work_count_ignores_terminal_live_rows() -> None:
+    """Stale terminal rows in live[] are not queued/running work."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    state = {
+        "watcher": {"counts": {"queued": 0, "starting": 0, "initializing": 0, "running": 0}},
+        "runtime": {"queue_tasks": 0, "state_tasks": 0},
+        "live": {"items": [{"status": "failed", "terminal_outcome": "failure"}]},
+        "landing": {"items": [{"queue_status": "failed"}]},
+    }
+
+    assert web_as_user._queued_work_count(state) == 0
+
+
+def test_web_as_user_progress_signature_changes_on_visible_progress() -> None:
+    """The W1 stall guard keys off Mission Control-visible row progress."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    first = {
+        "live": {
+            "items": [
+                {
+                    "queue_task_id": "build-micro-twitter",
+                    "run_id": "run-1",
+                    "status": "running",
+                    "last_event": "build started",
+                    "stories_passed": 0,
+                }
+            ]
+        }
+    }
+    second = {
+        "live": {
+            "items": [
+                {
+                    "queue_task_id": "build-micro-twitter",
+                    "run_id": "run-1",
+                    "status": "running",
+                    "last_event": "audit started",
+                    "stories_passed": 3,
+                }
+            ]
+        }
+    }
+
+    assert web_as_user._submitted_task_progress_signature(
+        first,
+        submitted_task_id="build-micro-twitter",
+        submitted_run_id="run-1",
+    ) != web_as_user._submitted_task_progress_signature(
+        second,
+        submitted_task_id="build-micro-twitter",
+        submitted_run_id="run-1",
+    )
+
+
+def test_teardown_scenario_runtime_reports_leftover_processes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Process leaks after teardown must be surfaced as evidence, not hidden."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    monkeypatch.setattr(
+        web_as_user,
+        "_api_post",
+        lambda *_args, **_kwargs: (200, {"ok": True}),
+    )
+    monkeypatch.setattr(
+        web_as_user,
+        "_terminate_project_processes",
+        lambda _project: {
+            "matched": [{"pid": 123, "pgid": 123, "command": "otto queue run"}],
+            "after_sigkill": [{"pid": 123, "pgid": 123, "command": "otto queue run"}],
+        },
+    )
+
+    report = web_as_user._teardown_scenario_runtime(
+        project_dir=tmp_path,
+        artifact_dir=tmp_path / "artifacts",
+        web_url="http://127.0.0.1:1",
+        keep_snapshot=False,
+    )
+
+    assert report["project_process_cleanup"]["after_sigkill"][0]["pid"] == 123
+    assert (tmp_path / "artifacts" / "teardown.json").exists()
+
+
 def test_web_as_user_signal_handler_ignores_self_signal_before_killpg(
     monkeypatch,
 ) -> None:

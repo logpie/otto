@@ -1,6 +1,7 @@
 """Tests for provider-aware agent execution."""
 
 import asyncio
+import json
 
 import os
 
@@ -11,6 +12,7 @@ from otto.agent import (
     AgentOptions,
     AssistantMessage,
     CODEX_STDIO_LIMIT_BYTES,
+    CODEX_TOOL_OUTPUT_LOG_LIMIT_CHARS,
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
@@ -63,6 +65,10 @@ class _FakeProcess:
 
     def kill(self) -> None:
         pass
+
+
+def json_event(payload: dict) -> str:
+    return json.dumps(payload) + "\n"
 
 
 class _SlowWaitProcess:
@@ -201,6 +207,83 @@ async def test_codex_query_normalizes_json_events(tmp_path, monkeypatch):
     assert str(tmp_path) in args
     assert seen["kwargs"]["limit"] == CODEX_STDIO_LIMIT_BYTES
     assert CODEX_STDIO_LIMIT_BYTES >= 16 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_codex_query_truncates_huge_command_output_for_logs(tmp_path, monkeypatch):
+    huge_output = "x" * (CODEX_TOOL_OUTPUT_LOG_LIMIT_CHARS + 500)
+    process = _FakeProcess([
+        '{"type":"thread.started","thread_id":"thread-123"}\n',
+        json_event({
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "command_execution",
+                "command": "/bin/zsh -lc \"cat dist/assets/app.js\"",
+                "aggregated_output": huge_output,
+            },
+        }),
+        '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="Audit",
+        options=ClaudeAgentOptions(provider="codex", cwd=str(tmp_path)),
+    ):
+        messages.append(message)
+
+    block = messages[0].content[0]
+    assert isinstance(block, ToolResultBlock)
+    assert len(block.content) < len(huge_output)
+    assert "Otto truncated 500 chars" in block.content
+
+
+@pytest.mark.asyncio
+async def test_codex_query_nonzero_exit_uses_compact_provider_error(tmp_path, monkeypatch):
+    huge_output = "x" * 50_000
+    process = _FakeProcess([
+        json_event({
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "command_execution",
+                "command": "/bin/zsh -lc \"sed -n '1,220p' dist/assets/app.js\"",
+                "aggregated_output": huge_output,
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }),
+    ], return_code=1)
+    state: dict[str, object] = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="Audit",
+        options=ClaudeAgentOptions(provider="codex", cwd=str(tmp_path)),
+        state=state,
+    ):
+        messages.append(message)
+
+    result = messages[-1]
+    assert isinstance(result, ResultMessage)
+    assert result.is_error is True
+    assert result.result is not None
+    assert len(result.result) < 3_000
+    assert "command_execution" in result.result
+    assert "Otto truncated" in result.result
+    assert huge_output not in result.result
+    assert len(str(state["provider_stderr"])) < 3_000
 
 
 @pytest.mark.asyncio
