@@ -181,6 +181,9 @@ def test_compile_spec_browser_journeys_are_agent_browser_first() -> None:
     assert "stable shared dispatcher owned by the foundation/shared-runner group" in text
     assert "tests/browser_journeys/transactions.py" in text
     assert "Do not\nmake every feature group edit `tests/run_browser_journey.py`" in text
+    assert "Do not also put critical contract `paths` in `shared_scaffold`" in text
+    assert '"any group may extend" surfaces' in text
+    assert "include that path in the owner's `owned_paths`" in text
     assert "Do not emit routine feature checks" in text
     assert "Use repo-native Playwright only when" in text
     assert "Playwright only when" in text

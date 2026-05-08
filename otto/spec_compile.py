@@ -3430,7 +3430,70 @@ def normalize_spec_for_execution(spec: Spec, *, brownfield: bool = False) -> lis
         warnings.extend(_normalize_webapp_scaffold_scope(spec))
     warnings.extend(_normalize_webapp_shared_contract_paths(spec))
     warnings.extend(_ensure_webapp_shared_contracts(spec))
+    warnings.extend(_normalize_shared_contract_owner_scopes(spec))
     warnings.extend(_ensure_webapp_behavior_journeys(spec))
+    return warnings
+
+
+def _normalize_shared_contract_owner_scopes(spec: Spec) -> list[str]:
+    """Make critical shared-contract ownership executable.
+
+    A path cannot simultaneously mean "owned by this contract owner" and
+    "any group may extend it". When compile output leaves contract-owned files
+    in ``shared_scaffold``/``shared_paths``, every feature branch is invited to
+    edit the same hot file and merge repair has to reconstruct intent later.
+    Normalize those paths into the owner's ``owned_paths`` and remove the
+    contradictory any-group scope.
+    """
+    group_by_id = {group.id: group for group in spec.groups}
+    warnings: list[str] = []
+    for contract in spec.shared_contracts:
+        if not contract.critical or not contract.owner_id:
+            continue
+        owner = group_by_id.get(contract.owner_id)
+        if owner is None:
+            continue
+        claimed_paths = [
+            path for path in (contract.paths or [])
+            if path and path not in set(contract.allowed_extension_paths or [])
+        ]
+        if not claimed_paths:
+            continue
+
+        added: list[str] = []
+        owner_paths = list(owner.owned_paths or [])
+        for path in claimed_paths:
+            if path not in owner_paths:
+                owner_paths.append(path)
+                added.append(path)
+        owner.owned_paths = owner_paths
+
+        before_scaffold = list(spec.shared_scaffold or [])
+        before_paths = list(spec.shared_paths or [])
+        spec.shared_scaffold = [
+            path for path in before_scaffold if path not in claimed_paths
+        ]
+        spec.shared_paths = [
+            path for path in before_paths if path not in claimed_paths
+        ]
+        removed = sorted(
+            set(before_scaffold + before_paths)
+            - set(spec.shared_scaffold + spec.shared_paths)
+        )
+        if added or removed:
+            pieces: list[str] = []
+            if added:
+                pieces.append(
+                    f"added {', '.join(added)} to owner {owner.id!r} owned_paths"
+                )
+            if removed:
+                pieces.append(
+                    f"removed {', '.join(removed)} from any-group shared scope"
+                )
+            warnings.append(
+                f"shared contract {contract.id!r} scope normalized: "
+                + "; ".join(pieces)
+            )
     return warnings
 
 

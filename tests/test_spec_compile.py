@@ -23,6 +23,7 @@ from otto.spec_compile import (
     StructureDecisions,
     _ensure_webapp_behavior_journeys,
     _ensure_webapp_shared_contracts,
+    _normalize_shared_contract_owner_scopes,
     _normalize_webapp_shared_contract_paths,
     _normalize_webapp_scaffold_scope,
     append_amendment,
@@ -313,6 +314,68 @@ def test_webapp_browser_contract_does_not_capture_feature_journey_tests() -> Non
     assert "Feature groups may add their own behavior journey tests" in (
         spec.shared_contracts[0].extension_policy
     )
+
+
+def test_shared_contract_owner_scope_removes_any_slice_hot_file() -> None:
+    spec = Spec(
+        intent="finance dashboard",
+        project_kind="webapp",
+        structure=StructureDecisions(payload=_valid_webapp_payload()),
+        groups=[
+            Group(
+                id="foundation",
+                name="Foundation",
+                owned_paths=["src/App.*"],
+            ),
+            Group(
+                id="transactions",
+                name="Transactions",
+                dependencies=["foundation"],
+                owned_paths=["src/features/transactions/**"],
+            ),
+        ],
+        shared_scaffold=[
+            "package.json",
+            "tests/run_browser_journey.py",
+            "src/App.*",
+        ],
+        shared_paths=[
+            "tests/run_browser_journey.py",
+            "src/App.*",
+            "src/features/*/**",
+        ],
+        shared_contracts=[
+            SharedContract(
+                id="browser-journey-dispatcher",
+                name="Browser journey dispatcher",
+                kind="test_runner",
+                owner_id="foundation",
+                paths=["tests/run_browser_journey.py"],
+                allowed_extension_paths=["tests/browser_journeys/*.py"],
+                critical=True,
+            ),
+            SharedContract(
+                id="app-shell",
+                name="App shell",
+                kind="app_shell",
+                owner_id="foundation",
+                paths=["src/App.*"],
+                allowed_extension_paths=["src/features/*/**"],
+                critical=True,
+            ),
+        ],
+    )
+
+    warnings = _normalize_shared_contract_owner_scopes(spec)
+
+    assert warnings
+    foundation = spec.groups[0]
+    assert foundation.owned_paths == [
+        "src/App.*",
+        "tests/run_browser_journey.py",
+    ]
+    assert spec.shared_scaffold == ["package.json"]
+    assert spec.shared_paths == ["src/features/*/**"]
 
 
 def test_validate_spec_warns_on_shared_contract_owned_path_overlap() -> None:

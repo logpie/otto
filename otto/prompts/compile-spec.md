@@ -957,6 +957,13 @@ in a browser/test-runner shared contract, and list feature-owned browser journey
 patterns such as `tests/browser_journeys/*.py` in `allowed_extension_paths`
 when useful.
 
+Do not also put critical contract `paths` in `shared_scaffold` or
+`shared_paths` as "any group may extend" surfaces. If a path has a critical
+shared contract owner, include that path in the owner's `owned_paths`; peers
+consume the contract or add files under `allowed_extension_paths`. Otherwise
+the spec creates exactly the merge-hot-file conflict the contract was meant to
+avoid.
+
 ```json
 {
   "id": "persistent-finance-store",
