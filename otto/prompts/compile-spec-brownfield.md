@@ -138,6 +138,8 @@ Otto's own source code:
   "components": [],
   "guardrails": [],
   "shared_paths": [],
+  "shared_contracts": [],
+  "behavior_journeys": [],
   "audit_fixtures": [],
   "non_goals": [],
   "done_means": [],
@@ -166,6 +168,20 @@ Group; Groups do not need re-doing.
 `scripts/otto/seed_user.py`, `seed_channel.py`, `seed_follow.py`, or
 `seed_data.py`. If those scripts are absent or no fixture is needed, use
 `"audit_fixtures": []`. Never emit placeholder fixture objects.
+
+For webapps, preserve or declare deterministic `behavior_journeys` that describe
+user-checklist behavior as `action -> expectation -> assertion -> artifact`.
+Declare `shared_contracts` for critical shared behavior such as persistence,
+storage schema, data model, app shell/routing, import/export format, and shared
+browser/test runner config. Critical shared contracts should have one `owner_id`
+so repair can route scope crossings instead of silently patching shared state.
+Model contracts as product invariants, not file monopolies: use `paths` for
+files that define the shared invariant, `extension_policy` for how feature
+slices may consume or extend it, and `allowed_extension_paths` for
+feature-owned evidence/adapters that should not be blocked. Keep
+feature-specific behavior journeys, for example `tests/browser/test_transactions.*`,
+owned by their feature groups; a shared browser contract should cover only
+common runner/config files.
 
 Per-Feature `evidence_kinds` should reflect the most natural verification:
 - webapp routes → `BrowserJourney`, `ApiProbe`

@@ -621,6 +621,53 @@ def detect_dependency_scope_extensions(
     return extensions
 
 
+def detect_critical_shared_contract_violations(
+    group_obj: Group,
+    spec: Spec,
+    modified_paths: Iterable[str],
+) -> list[str]:
+    """Return modified paths that cross critical shared-contract ownership.
+
+    Ordinary ``owned_paths`` are write scopes. Critical shared contracts are
+    product contracts: persistence stores, schemas, app shell contracts, import
+    formats, and similar shared behavior should have one owner. A feature group
+    that needs to change such a path should route through that owner or request
+    an amendment instead of silently patching shared state.
+    """
+    contracts = [
+        contract
+        for contract in (getattr(spec, "shared_contracts", []) or [])
+        if getattr(contract, "critical", False)
+        and getattr(contract, "paths", None)
+        and getattr(contract, "owner_id", "")
+        and getattr(contract, "owner_id", "") != group_obj.id
+    ]
+    if not contracts:
+        return []
+    violations: list[str] = []
+    for raw in modified_paths:
+        path = str(raw or "").strip()
+        if not path:
+            continue
+        if (
+            _is_amendment_request_path(path)
+            or is_otto_owned_path(path)
+            or is_common_build_artifact_path(path)
+        ):
+            continue
+        for contract in contracts:
+            if _matches_any(
+                path, list(getattr(contract, "allowed_extension_paths", []) or [])
+            ):
+                continue
+            if _matches_any(path, list(getattr(contract, "paths", []) or [])):
+                violations.append(
+                    f"{path} (shared_contract={contract.id}, owner={contract.owner_id})"
+                )
+                break
+    return violations
+
+
 def _transitive_deps(group_id: str, spec: Spec) -> set[str]:
     """Return all units `group_id` depends on, transitively (excluding self).
 
@@ -2261,6 +2308,38 @@ async def _run_slice(
                 if w not in accumulated_scope_warnings:
                     accumulated_scope_warnings.append(w)
 
+        critical_scope_violations = detect_critical_shared_contract_violations(
+            group_obj,
+            spec,
+            modified,
+        )
+        if critical_scope_violations:
+            last_failure = (
+                "critical shared-contract scope violation: modified "
+                + ", ".join(critical_scope_violations[:5])
+                + ". Repair by preserving the declared shared contract, "
+                "routing the change through the owning foundation/shared-core "
+                "component, or requesting a spec amendment if the product "
+                "contract truly needs to change."
+            )
+            emit(
+                session_dir,
+                "scope.critical",
+                group_id=group_obj.id,
+                attempt=attempt,
+                detail=last_failure,
+                paths=list(critical_scope_violations),
+            )
+            emit(
+                session_dir,
+                "group.attempt.failed",
+                group_id=group_obj.id,
+                attempt=attempt,
+                detail=last_failure,
+            )
+            current_diff_hash = _hash_worktree_diff(worktree)
+            continue
+
         # Run slice's deterministic checks.
         emit(
             session_dir,
@@ -2308,6 +2387,25 @@ async def _run_slice(
             attempt,
             evidence_pairs,
             raw_log_dir / f"attempt-{attempt:02d}",
+        )
+        emit(
+            session_dir,
+            "group.check.feedback",
+            group_id=group_obj.id,
+            attempt=attempt,
+            detail=(
+                "authoritative Otto check evidence will be sent to the same "
+                "provider repair thread on the next resumed attempt"
+            ),
+            failures=[
+                {
+                    "check": type(check).__name__,
+                    "detail": evidence.detail,
+                    "artifacts": [str(path) for path in evidence.artifacts[:5]],
+                }
+                for check, evidence in evidence_pairs
+                if not evidence.passed
+            ],
         )
         # Snapshot the agent's work-so-far for the no-progress bound.
         current_diff_hash = _hash_worktree_diff(worktree)
@@ -2482,6 +2580,8 @@ def _write_build_context_packet(
         },
         "shared_scaffold": list(agent_input.spec.shared_scaffold),
         "shared_paths": list(getattr(agent_input.spec, "shared_paths", []) or []),
+        "shared_contracts": spec_dict.get("shared_contracts", []),
+        "behavior_journeys": spec_dict.get("behavior_journeys", []),
         "cross_group_checks": spec_dict.get("cross_group_checks", []),
         "done_means": list(agent_input.spec.done_means),
         "non_goals": list(agent_input.spec.non_goals),
@@ -2664,6 +2764,15 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         for did, g in dep_owned:
             lines.append(f"  - `{g}` (owned by `{did}`)")
         lines.append("")
+        lines.append(
+            "Dep-owned paths are dependency surfaces, not blanket permission to "
+            "rewrite shared product contracts. If a dep-owned path belongs to a "
+            "critical shared contract such as a store, schema, persistence layer, "
+            "routing shell, import/export format, or config contract, preserve the "
+            "declared contract and request an amendment or owner change instead of "
+            "patching it directly."
+        )
+        lines.append("")
     if spec.shared_scaffold:
         lines.append("**Shared scaffold (any slice may extend):**")
         for g in spec.shared_scaffold:
@@ -2738,7 +2847,8 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
             "If you need exact peer contracts, full structure payload, cross-group "
             "checks, or broader acceptance context, read those files. Do not bulk-read "
             "`messages.jsonl` transcripts for context; use the prompt, context packet, "
-            "spec, checks, and source files first."
+            "spec, checks, and source files first. Do not search user/Codex memory "
+            "or personal dotfiles for product requirements."
         )
         lines.append("")
 
@@ -3063,6 +3173,7 @@ __all__ = [
     "build_groups",
     "build_slices",
     "default_build_agent",
+    "detect_critical_shared_contract_violations",
     "detect_dependency_scope_extensions",
     "detect_scope_violations",
     "ready_components",

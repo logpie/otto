@@ -75,6 +75,7 @@ EVENT_KINDS: tuple[str, ...] = (
     "group.execution.finished",
     "group.check.started",
     "group.check.finished",
+    "group.check.feedback",     # authoritative check evidence fed to same repair thread
     "group.attempt.failed",
     "group.merge.eligible",
     "group.merge.started",
@@ -89,6 +90,7 @@ EVENT_KINDS: tuple[str, ...] = (
     "run.finished",
     # v2.2 — amendments + scope events ----------------------------------
     "scope.warning",            # build agent attempted out-of-scope edit (informational)
+    "scope.critical",           # critical shared-contract scope crossing (attempt-blocking)
     "amendment.requested",      # build agent (or user) requested a tier-3 amendment
     "amendment.applied",        # request passed all tier checks and persisted
     "amendment.rejected",       # request failed a tier rule
@@ -124,6 +126,7 @@ EventKind = Literal[
     "group.execution.finished",
     "group.check.started",
     "group.check.finished",
+    "group.check.feedback",
     "group.attempt.failed",
     "group.merge.eligible",
     "group.merge.started",
@@ -137,6 +140,7 @@ EventKind = Literal[
     "run.started",
     "run.finished",
     "scope.warning",
+    "scope.critical",
     "amendment.requested",
     "amendment.applied",
     "amendment.rejected",
@@ -215,6 +219,7 @@ _PHASE_FOR_KIND: dict[str, str] = {
     "group.started": BUILDING,
     "group.check.started": CHECKING,
     "group.check.finished": CHECKING,
+    "group.check.feedback": CHECKING,
     "group.attempt.failed": FAILED,
     "group.merge.eligible": ELIGIBLE,
     "group.merge.started": MERGING,

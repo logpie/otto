@@ -38,6 +38,14 @@ need prior failure context, use the prompt's failure narrative, the compact
 context packet, the full spec, and specific check logs named by Otto instead of
 grepping broad runtime logs.
 
+Do not search or read user/Codex/agent memory, personal dotfiles, shell history,
+or unrelated files outside the project worktree for product context. Paths such
+as `~/.codex/**`, `~/.claude/**`, `~/.agents/**`, `~/.config/**`, and
+`/Users/*/.codex/**` are operator memory/config, not product requirements.
+Use only the prompt, canonical spec, context packet, check feedback, declared
+artifacts, and files inside the product worktree unless Otto explicitly points
+you to a path.
+
 **BrowserJourney checks must stay behavioral.**
 
 If a check is `browser_journey`, its command must launch and drive a real
@@ -75,6 +83,12 @@ local browser launch is blocked on retry, make the source fix from the existing
 artifacts and report the exact browser blocker; do not claim the browser
 journey passed until a real browser run verifies it.
 
+Otto may run declared checks outside your provider sandbox and feed the
+authoritative result back into your resumed repair thread. Treat that
+Otto-owned check evidence as the source of truth for repair. Provider-side
+self-runs are useful only when they agree with the authoritative Otto
+check-runner evidence.
+
 Write BrowserJourney Playwright locators like a durable user test. Scope
 short/common controls and text to named forms, regions, landmarks, lists,
 tables, or cards before interacting or asserting. Use exact accessible names for
@@ -107,6 +121,11 @@ file without accidentally running unrelated journeys. Before returning, prove
 that the declared `npm run browser -- <journey>` command can resolve relative
 URLs through that config; an "invalid URL" failure is a runner/config bug, not
 product evidence.
+
+Expect Otto to preflight BrowserJourney config before launching a real browser.
+Hard-coded loopback ports, missing `webServer`/`baseURL`, overbroad browser test
+selection, or shared/default agent-browser sessions are repairable runner bugs.
+Fix those before investigating product UI behavior.
 
 If the project chooses `agent-browser` for a BrowserJourney script, use a
 unique named session per journey/worktree and the same Otto base-url env values,

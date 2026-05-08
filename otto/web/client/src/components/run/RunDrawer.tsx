@@ -199,8 +199,9 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
     );
   }, [sessionId, view.meta.proof_packet_html]);
   const onViewSpec = useCallback(() => {
+    if (!view.meta.spec_path) return;
     window.location.href = `?view=spec-review&spec=${encodeURIComponent(sessionId)}`;
-  }, [sessionId]);
+  }, [sessionId, view.meta.spec_path]);
   const openResource = useCallback((kind: ResourcePanel, groupId: string | null = null) => {
     setResourcePanel((current) =>
       current?.kind === kind && current.groupId === groupId ? null : {kind, groupId},
@@ -246,6 +247,8 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
           className="run-quick-action"
           data-testid="run-quick-action-spec"
           onClick={onViewSpec}
+          disabled={!view.meta.spec_path}
+          title={view.meta.spec_path ? "Open the compiled spec" : "Spec is not available yet"}
         >
           View spec
         </button>

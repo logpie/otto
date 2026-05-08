@@ -10,18 +10,25 @@ import pytest
 from otto.spec_compile import (
     ApiProbe,
     BrowserJourney,
+    BehaviorJourney,
+    BehaviorStep,
     Feature,
     PROJECT_KINDS,
     PytestCheck,
     RepoTestCheck,
     Group,
+    SharedContract,
     Spec,
     SpecValidationError,
     StructureDecisions,
+    _ensure_webapp_behavior_journeys,
+    _ensure_webapp_shared_contracts,
+    _normalize_webapp_shared_contract_paths,
     _normalize_webapp_scaffold_scope,
     append_amendment,
     infer_feature_group_routes_from_owned_paths,
     load_spec,
+    parse_spec_md,
     parse_spec,
     persist_spec,
     render_spec_md,
@@ -116,6 +123,152 @@ def test_spec_roundtrip_supports_all_check_kinds() -> None:
     rebuilt = spec_from_dict(spec_to_dict(spec))
     kinds = [c.kind for c in rebuilt.groups[0].checks]
     assert kinds == ["pytest", "api_probe", "browser_journey"]
+
+
+def test_spec_markdown_roundtrip_preserves_behavior_journeys_and_contracts() -> None:
+    spec = _valid_webapp_spec()
+    spec.features = [Feature(id="compose-post", name="Compose post", group_id="shell")]
+    spec.behavior_journeys = [
+        BehaviorJourney(
+            id="planned-main-user-flow",
+            name="Main user flow",
+            steps=[
+                BehaviorStep(
+                    action="Type and submit a post.",
+                    expectation="The post appears in the feed.",
+                    assertion="Submitted text remains visible after refresh.",
+                    artifact="screenshot",
+                    feature_ids=["compose-post"],
+                )
+            ],
+        )
+    ]
+    spec.shared_contracts = [
+        SharedContract(
+            id="shared-product-core",
+            name="Shared product core",
+            owner_id="shell",
+            paths=["src/store/**"],
+            invariants=["Feed data persists across refresh."],
+        )
+    ]
+
+    markdown = render_spec_md(spec)
+    rebuilt, warnings = parse_spec_md(markdown, base=spec)
+
+    assert warnings == []
+    assert "## Planned behavior journeys" in markdown
+    assert "## Shared contracts" in markdown
+    assert rebuilt.behavior_journeys[0].steps[0].feature_ids == ["compose-post"]
+    assert rebuilt.shared_contracts[0].paths == ["src/store/**"]
+
+
+def test_webapp_behavior_journey_normalization_uses_feature_acceptance() -> None:
+    spec = Spec(
+        intent="micro feed",
+        project_kind="webapp",
+        structure=StructureDecisions(payload=_valid_webapp_payload()),
+        groups=[
+            Group(
+                id="feed",
+                name="Feed",
+                feature_ids=["compose-post"],
+                owned_paths=["src/feed/**"],
+            )
+        ],
+        features=[
+            Feature(
+                id="compose-post",
+                name="Compose post",
+                acceptance_detail="User can type a post, submit it, and see it in the feed.",
+                group_id="feed",
+            )
+        ],
+    )
+
+    warnings = _ensure_webapp_behavior_journeys(spec)
+
+    assert warnings
+    assert spec.behavior_journeys[0].id == "planned-main-user-flow"
+    assert spec.behavior_journeys[0].steps[0].feature_ids == ["compose-post"]
+    assert "type a post" in spec.behavior_journeys[0].steps[0].expectation
+
+
+def test_webapp_shared_contract_normalization_uses_declared_shared_paths() -> None:
+    spec = Spec(
+        intent="finance dashboard",
+        project_kind="webapp",
+        structure=StructureDecisions(payload=_valid_webapp_payload()),
+        groups=[
+            Group(
+                id="foundation",
+                name="App foundation",
+                feature_ids=["shell"],
+                owned_paths=["src/App.tsx"],
+            ),
+            Group(
+                id="reports",
+                name="Reports",
+                feature_ids=["reports"],
+                owned_paths=["src/reports/**"],
+            ),
+        ],
+        shared_paths=["src/store/**", "playwright.config.ts", "docs/notes.md"],
+        features=[
+            Feature(id="reports", name="Reports", group_id="reports"),
+        ],
+    )
+
+    warnings = _ensure_webapp_shared_contracts(spec)
+
+    assert warnings
+    contract = spec.shared_contracts[0]
+    assert contract.id == "shared-product-core"
+    assert contract.owner_id == "foundation"
+    assert contract.critical is True
+    assert contract.paths == ["src/store/**", "playwright.config.ts"]
+    assert spec.groups[1].dependencies == ["foundation"]
+
+
+def test_webapp_browser_contract_does_not_capture_feature_journey_tests() -> None:
+    spec = Spec(
+        intent="finance dashboard",
+        project_kind="webapp",
+        structure=StructureDecisions(payload=_valid_webapp_payload()),
+        groups=[
+            Group(id="foundation", name="Foundation"),
+            Group(id="insights", name="Insights", dependencies=["foundation"]),
+        ],
+        shared_contracts=[
+            SharedContract(
+                id="browser-quality-contract",
+                name="Browser quality and evidence",
+                kind="test_runner",
+                owner_id="foundation",
+                paths=[
+                    "tests/run_browser_journey.py",
+                    "tests/browser/**",
+                    "otto_artifacts/browser/**",
+                    "playwright.config.ts",
+                ],
+            )
+        ],
+    )
+
+    warnings = _normalize_webapp_shared_contract_paths(spec)
+
+    assert warnings
+    assert spec.shared_contracts[0].paths == [
+        "tests/run_browser_journey.py",
+        "playwright.config.ts",
+    ]
+    assert spec.shared_contracts[0].allowed_extension_paths == [
+        "tests/browser/**",
+        "otto_artifacts/browser/**",
+    ]
+    assert "Feature groups may add their own behavior journey tests" in (
+        spec.shared_contracts[0].extension_policy
+    )
 
 
 def test_unknown_check_kind_is_dropped_with_warning() -> None:

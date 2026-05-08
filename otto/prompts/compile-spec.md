@@ -18,7 +18,7 @@ deterministically.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "intent": "<verbatim user intent>",
   "project_kind": "webapp",
   "structure": {
@@ -111,7 +111,40 @@ deterministically.
       "audit_pre_merge": false
     }
   ],
+  "behavior_journeys": [
+    {
+      "id": "main-workflow",
+      "name": "Main user workflow",
+      "surface": "web",
+      "deterministic": true,
+      "feature_ids": ["scaffold-spa", "navbar-home-about"],
+      "steps": [
+        {
+          "action": "Open the app and navigate Home -> About -> Home",
+          "expectation": "Each navigation shows the expected visible page content",
+          "assertion": "The visible heading/content changes without console errors",
+          "artifact": "screenshots for each page"
+        }
+      ]
+    }
+  ],
+  "shared_contracts": [
+    {
+      "id": "app-shell-routing",
+      "name": "App shell routing",
+      "kind": "app_shell",
+      "description": "Shared SPA boot, route registration, and visible shell behavior.",
+      "owner_id": "shell",
+      "paths": ["src/App.*", "src/main.*", "vite.config.*", "playwright.config.*"],
+      "invariants": ["routes render through one app shell", "browser checks honor Otto browser env"],
+      "consumed_by": ["scaffold-spa", "navbar-home-about", "home-about-routes"],
+      "extension_policy": "Feature groups may add feature-owned route files and browser journeys that consume this shell. Changing shared route registration or browser runner behavior requires the owner or a spec amendment.",
+      "allowed_extension_paths": ["tests/browser/test_*.py", "tests/browser/test_*.playwright.ts"],
+      "critical": true
+    }
+  ],
   "shared_scaffold": ["package.json", "vite.config.*"],
+  "shared_paths": ["package.json", "vite.config.*", "playwright.config.*"],
   "non_goals": ["multi-user accounts (single-user MVP)"],
   "done_means": [
     "user can navigate to /, /about and see distinct content",
@@ -831,6 +864,63 @@ For every multi-group webapp, add at least one `cross_group_checks`
 merge and covers the main user workflow from the original intent. Group
 checks prove local work; the cross-group check proves the product still
 works once independently built groups are combined.
+
+**Planned behavior journeys**: for every real webapp, emit
+`behavior_journeys` as deterministic user-checklist plans. These are not
+random exploration scripts. They are the planned user behaviors Otto must
+verify later through BrowserJourney, agent-browser, or true-web Mission
+Control evidence.
+
+Each journey step must be specific enough to debug:
+
+```json
+{
+  "id": "main-workflow",
+  "name": "Main user workflow",
+  "surface": "web",
+  "deterministic": true,
+  "feature_ids": ["transactions", "budgets"],
+  "steps": [
+    {
+      "action": "Add a transaction with description Coffee and amount 5",
+      "expectation": "The transaction appears in the visible list",
+      "assertion": "A visible row contains Coffee and $5",
+      "artifact": "screenshot after add"
+    }
+  ]
+}
+```
+
+**Shared contracts**: identify product-wide contracts that should have one
+owner before parallel groups start. Use `shared_contracts` for persistence,
+storage schema, data model, app shell/routing, import/export format, and shared
+test/build runner configuration. A critical contract must name `owner_id` as
+the foundation/shared-core group or Component responsible for modifying the
+contract paths. Model contracts as product invariants, not file monopolies:
+use `paths` for files that define the shared invariant, `extension_policy` for
+how feature slices may consume or extend it, and `allowed_extension_paths` for
+feature-owned evidence/adapters that should not be blocked. Do not put
+feature-owned behavior journey files such as `tests/browser/test_transactions.*`
+under a foundation-owned shared contract path; feature groups may own their own
+browser journeys. Put only shared runner/config files such as
+`playwright.config.*`, `tests/run_browser_journey.py`, or common test fixtures
+in a browser/test-runner shared contract, and list feature-owned browser journey
+patterns in `allowed_extension_paths` when useful.
+
+```json
+{
+  "id": "persistent-finance-store",
+  "name": "Persistent finance store",
+  "kind": "persistence",
+  "owner_id": "foundation",
+  "paths": ["src/lib/financeStore.*", "src/types/finance.*"],
+  "invariants": ["transactions and budgets survive refresh"],
+  "consumed_by": ["transactions", "planning", "insights"],
+  "extension_policy": "Feature groups may call the store APIs and add feature-owned views/tests. Changing storage schema, persistence semantics, or shared selectors requires the owner or a spec amendment.",
+  "allowed_extension_paths": ["tests/browser/test_*.py", "tests/browser/test_*.playwright.ts"],
+  "critical": true
+}
+```
 
 ## Process
 

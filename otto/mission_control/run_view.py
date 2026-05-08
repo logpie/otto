@@ -265,7 +265,13 @@ def _build_provider_view(session_dir: Path) -> dict[str, Any] | None:
     status = str((latest_event or {}).get("status") or "")
     session_id = str((latest_event or {}).get("session_id") or "")
     turn_id = str((latest_event or {}).get("turn_id") or "")
-    activity = _provider_activity(event_name, method, status)
+    latest_data = (latest_event or {}).get("data")
+    activity = _provider_activity(
+        event_name,
+        method,
+        status,
+        latest_data if isinstance(latest_data, dict) else None,
+    )
     return {
         "provider": provider or "unknown",
         "status": status,
@@ -283,7 +289,17 @@ def _build_provider_view(session_dir: Path) -> dict[str, Any] | None:
     }
 
 
-def _provider_activity(event: str, method: str, status: str) -> str:
+def _provider_activity(
+    event: str,
+    method: str,
+    status: str,
+    data: dict[str, Any] | None = None,
+) -> str:
+    if event == "agent_message_delta":
+        preview = str((data or {}).get("preview") or "").strip()
+        if preview:
+            return f"Writing: {preview}"
+        return "Writing response"
     if event == "token_usage_updated":
         return "Updating token usage"
     if event == "diff_updated":

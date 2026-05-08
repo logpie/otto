@@ -405,6 +405,47 @@ class AuditFixture:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class BehaviorStep:
+    """One deterministic user-behavior expectation in a planned journey."""
+
+    action: str
+    expectation: str
+    assertion: str = ""
+    artifact: str = ""
+    feature_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BehaviorJourney:
+    """A planned checklist-style behavior journey for product verification."""
+
+    id: str
+    name: str
+    description: str = ""
+    surface: str = "web"
+    deterministic: bool = True
+    feature_ids: list[str] = field(default_factory=list)
+    steps: list[BehaviorStep] = field(default_factory=list)
+
+
+@dataclass
+class SharedContract:
+    """A product-wide contract that should have one clear owner."""
+
+    id: str
+    name: str
+    kind: str = "shared"
+    description: str = ""
+    owner_id: str = ""
+    paths: list[str] = field(default_factory=list)
+    invariants: list[str] = field(default_factory=list)
+    consumed_by: list[str] = field(default_factory=list)
+    extension_policy: str = ""
+    allowed_extension_paths: list[str] = field(default_factory=list)
+    critical: bool = True
+
+
 # ===========================================================================
 # A2 — Audit Feature-tagging (research §4 + §2.7 walkthrough schema)
 # ===========================================================================
@@ -1046,6 +1087,31 @@ def render_spec_md(spec: Spec) -> str:
             )
             parts.append(f"- ⊘ {g.text}{scope_note}\n")
 
+    # Planned behavior journeys
+    if spec.behavior_journeys:
+        parts.append("\n## Planned behavior journeys\n")
+        parts.append(
+            "\nEditable deterministic user-behavior checklist. Each step should "
+            "describe a real user action, expected visible outcome, assertion, "
+            "and artifact.\n"
+        )
+        parts.append("<!-- behavior-journeys -->\n")
+        parts.append("```json\n")
+        parts.append(_behavior_journeys_to_markdown_json(spec.behavior_journeys))
+        parts.append("\n```\n")
+
+    # Shared contracts
+    if spec.shared_contracts:
+        parts.append("\n## Shared contracts\n")
+        parts.append(
+            "\nEditable product-wide contracts for shared state, schemas, app "
+            "shell, routing, persistence, config, and browser-test behavior.\n"
+        )
+        parts.append("<!-- shared-contracts -->\n")
+        parts.append("```json\n")
+        parts.append(_shared_contracts_to_markdown_json(spec.shared_contracts))
+        parts.append("\n```\n")
+
     # Planned checks
     if spec.groups or spec.cross_group_checks:
         parts.append("\n## Planned checks\n")
@@ -1067,6 +1133,14 @@ def render_spec_md(spec: Spec) -> str:
 
 def _checks_to_markdown_json(checks: list[CheckKind] | tuple[CheckKind, ...]) -> str:
     return json.dumps([_check_to_dict(check) for check in checks], indent=2)
+
+
+def _behavior_journeys_to_markdown_json(journeys: list[BehaviorJourney]) -> str:
+    return json.dumps([_behavior_journey_to_dict(journey) for journey in journeys], indent=2)
+
+
+def _shared_contracts_to_markdown_json(contracts: list[SharedContract]) -> str:
+    return json.dumps([_shared_contract_to_dict(contract) for contract in contracts], indent=2)
 
 
 def _features_for_spec_markdown(spec: Spec) -> list[Feature]:
@@ -1150,6 +1224,8 @@ def parse_spec_md(
     project_kind = "webapp"
     features_section: list[str] = []
     guardrails_section: list[str] = []
+    behavior_journeys_section: list[str] = []
+    shared_contracts_section: list[str] = []
     planned_checks_section: list[str] = []
 
     section = "intent"
@@ -1168,6 +1244,10 @@ def parse_spec_md(
                 section = "features"
             elif heading == "guardrails":
                 section = "guardrails"
+            elif heading == "planned behavior journeys":
+                section = "behavior_journeys"
+            elif heading == "shared contracts":
+                section = "shared_contracts"
             elif heading == "planned checks":
                 section = "planned_checks"
             else:
@@ -1184,6 +1264,10 @@ def parse_spec_md(
             features_section.append(line)
         elif section == "guardrails":
             guardrails_section.append(line)
+        elif section == "behavior_journeys":
+            behavior_journeys_section.append(line)
+        elif section == "shared_contracts":
+            shared_contracts_section.append(line)
         elif section == "planned_checks":
             planned_checks_section.append(line)
 
@@ -1210,6 +1294,12 @@ def parse_spec_md(
     acceptance_re = re.compile(r"^\*\*Acceptance:\*\*\s*(.*)$")
     parsed_group_checks, parsed_cross_checks = _parse_planned_checks_section(
         planned_checks_section, warnings
+    )
+    parsed_behavior_journeys = _parse_behavior_journeys_section(
+        behavior_journeys_section, warnings
+    )
+    parsed_shared_contracts = _parse_shared_contracts_section(
+        shared_contracts_section, warnings
     )
 
     def _flush_feature() -> None:
@@ -1375,8 +1465,27 @@ def parse_spec_md(
         spec_kwargs["components"] = list(base.components)
         spec_kwargs["shared_paths"] = list(base.shared_paths)
         spec_kwargs["audit_fixtures"] = list(base.audit_fixtures)
+        spec_kwargs["behavior_journeys"] = (
+            list(parsed_behavior_journeys)
+            if parsed_behavior_journeys is not None
+            else list(base.behavior_journeys)
+        )
+        spec_kwargs["shared_contracts"] = (
+            list(parsed_shared_contracts)
+            if parsed_shared_contracts is not None
+            else list(base.shared_contracts)
+        )
     elif parsed_cross_checks is not None:
         spec_kwargs["cross_group_checks"] = list(parsed_cross_checks)
+        if parsed_behavior_journeys is not None:
+            spec_kwargs["behavior_journeys"] = list(parsed_behavior_journeys)
+        if parsed_shared_contracts is not None:
+            spec_kwargs["shared_contracts"] = list(parsed_shared_contracts)
+    else:
+        if parsed_behavior_journeys is not None:
+            spec_kwargs["behavior_journeys"] = list(parsed_behavior_journeys)
+        if parsed_shared_contracts is not None:
+            spec_kwargs["shared_contracts"] = list(parsed_shared_contracts)
 
     return Spec(**spec_kwargs), warnings
 
@@ -1440,6 +1549,95 @@ def _parse_planned_checks_section(
     if collecting:
         _flush()
     return group_checks, cross_group_checks
+
+
+def _parse_behavior_journeys_section(
+    lines: list[str],
+    warnings: list[str],
+) -> list[BehaviorJourney] | None:
+    raw_json = _extract_markdown_json_block(
+        lines,
+        comment_pattern=r"<!--\s*behavior-journeys\s*-->",
+    )
+    if raw_json is None:
+        return None
+    try:
+        payload = json.loads(raw_json or "[]")
+    except json.JSONDecodeError as exc:
+        warnings.append(f"behavior journeys: invalid JSON ({exc.msg})")
+        return None
+    if not isinstance(payload, list):
+        warnings.append("behavior journeys: expected a JSON list")
+        return None
+    journeys: list[BehaviorJourney] = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            warnings.append(
+                f"behavior_journeys[{index}]: expected object, got {type(item).__name__}"
+            )
+            continue
+        journeys.append(_behavior_journey_from_dict(item))
+    return journeys
+
+
+def _parse_shared_contracts_section(
+    lines: list[str],
+    warnings: list[str],
+) -> list[SharedContract] | None:
+    raw_json = _extract_markdown_json_block(
+        lines,
+        comment_pattern=r"<!--\s*shared-contracts\s*-->",
+    )
+    if raw_json is None:
+        return None
+    try:
+        payload = json.loads(raw_json or "[]")
+    except json.JSONDecodeError as exc:
+        warnings.append(f"shared contracts: invalid JSON ({exc.msg})")
+        return None
+    if not isinstance(payload, list):
+        warnings.append("shared contracts: expected a JSON list")
+        return None
+    contracts: list[SharedContract] = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            warnings.append(
+                f"shared_contracts[{index}]: expected object, got {type(item).__name__}"
+            )
+            continue
+        contracts.append(_shared_contract_from_dict(item))
+    return contracts
+
+
+def _extract_markdown_json_block(
+    lines: list[str],
+    *,
+    comment_pattern: str,
+) -> str | None:
+    comment_re = re.compile(comment_pattern)
+    armed = False
+    collecting = False
+    json_lines: list[str] = []
+    for raw in lines:
+        line = raw.rstrip()
+        if comment_re.search(line):
+            armed = True
+            collecting = False
+            json_lines = []
+            continue
+        if not armed:
+            continue
+        if line.strip().startswith("```"):
+            if collecting:
+                return "\n".join(json_lines).strip()
+            collecting = True
+            json_lines = []
+            continue
+        if collecting:
+            json_lines.append(line)
+    if collecting:
+        return "\n".join(json_lines).strip()
+    return None
 
 
 def _parse_checks_json(
@@ -1757,6 +1955,8 @@ class Spec:
     guardrails: list[Guardrail] = field(default_factory=list)
     shared_paths: list[str] = field(default_factory=list)
     audit_fixtures: list[AuditFixture] = field(default_factory=list)
+    behavior_journeys: list[BehaviorJourney] = field(default_factory=list)
+    shared_contracts: list[SharedContract] = field(default_factory=list)
     non_goals: list[str] = field(default_factory=list)
     done_means: list[str] = field(default_factory=list)
     amendments: list[Amendment] = field(default_factory=list)
@@ -1781,6 +1981,8 @@ class Spec:
         guardrails: list[Guardrail] | None = None,
         shared_paths: list[str] | None = None,
         audit_fixtures: list[AuditFixture] | None = None,
+        behavior_journeys: list[BehaviorJourney] | None = None,
+        shared_contracts: list[SharedContract] | None = None,
     ) -> None:
         self.schema_version = schema_version
         self.intent = intent
@@ -1799,6 +2001,8 @@ class Spec:
         self.guardrails = guardrails if guardrails is not None else []
         self.shared_paths = shared_paths if shared_paths is not None else []
         self.audit_fixtures = audit_fixtures if audit_fixtures is not None else []
+        self.behavior_journeys = behavior_journeys if behavior_journeys is not None else []
+        self.shared_contracts = shared_contracts if shared_contracts is not None else []
 
 
 # ---------------------------------------------------------------------------
@@ -1975,6 +2179,8 @@ def spec_to_dict(spec: Spec) -> dict[str, Any]:
         "guardrails": [dataclasses.asdict(g) for g in spec.guardrails],
         "shared_paths": list(spec.shared_paths),
         "audit_fixtures": [dataclasses.asdict(fx) for fx in spec.audit_fixtures],
+        "behavior_journeys": [_behavior_journey_to_dict(j) for j in spec.behavior_journeys],
+        "shared_contracts": [_shared_contract_to_dict(c) for c in spec.shared_contracts],
     }
 
 
@@ -2020,6 +2226,80 @@ def _feature_from_dict(payload: dict[str, Any]) -> Feature:
         multi_actor_required=bool(payload.get("multi_actor_required", False)),
         audit_pre_merge=bool(payload.get("audit_pre_merge", False)),
     )
+
+
+def _behavior_step_from_dict(payload: dict[str, Any]) -> BehaviorStep:
+    return BehaviorStep(
+        action=str(payload.get("action") or ""),
+        expectation=str(payload.get("expectation") or payload.get("expected") or ""),
+        assertion=str(payload.get("assertion") or ""),
+        artifact=str(payload.get("artifact") or payload.get("artifact_hint") or ""),
+        feature_ids=[str(item) for item in (payload.get("feature_ids") or [])],
+    )
+
+
+def _behavior_journey_from_dict(payload: dict[str, Any]) -> BehaviorJourney:
+    raw_steps = payload.get("steps") or []
+    steps = [
+        _behavior_step_from_dict(step)
+        for step in raw_steps
+        if isinstance(step, dict)
+    ]
+    return BehaviorJourney(
+        id=str(payload.get("id") or ""),
+        name=str(payload.get("name") or ""),
+        description=str(payload.get("description") or ""),
+        surface=str(payload.get("surface") or "web"),
+        deterministic=bool(payload.get("deterministic", True)),
+        feature_ids=[str(item) for item in (payload.get("feature_ids") or [])],
+        steps=steps,
+    )
+
+
+def _behavior_journey_to_dict(journey: BehaviorJourney) -> dict[str, Any]:
+    return {
+        "id": journey.id,
+        "name": journey.name,
+        "description": journey.description,
+        "surface": journey.surface,
+        "deterministic": journey.deterministic,
+        "feature_ids": list(journey.feature_ids),
+        "steps": [dataclasses.asdict(step) for step in journey.steps],
+    }
+
+
+def _shared_contract_from_dict(payload: dict[str, Any]) -> SharedContract:
+    return SharedContract(
+        id=str(payload.get("id") or ""),
+        name=str(payload.get("name") or ""),
+        kind=str(payload.get("kind") or "shared"),
+        description=str(payload.get("description") or ""),
+        owner_id=str(payload.get("owner_id") or payload.get("owner") or ""),
+        paths=[str(item) for item in (payload.get("paths") or [])],
+        invariants=[str(item) for item in (payload.get("invariants") or [])],
+        consumed_by=[str(item) for item in (payload.get("consumed_by") or [])],
+        extension_policy=str(payload.get("extension_policy") or ""),
+        allowed_extension_paths=[
+            str(item) for item in (payload.get("allowed_extension_paths") or [])
+        ],
+        critical=bool(payload.get("critical", True)),
+    )
+
+
+def _shared_contract_to_dict(contract: SharedContract) -> dict[str, Any]:
+    return {
+        "id": contract.id,
+        "name": contract.name,
+        "kind": contract.kind,
+        "description": contract.description,
+        "owner_id": contract.owner_id,
+        "paths": list(contract.paths),
+        "invariants": list(contract.invariants),
+        "consumed_by": list(contract.consumed_by),
+        "extension_policy": contract.extension_policy,
+        "allowed_extension_paths": list(contract.allowed_extension_paths),
+        "critical": contract.critical,
+    }
 
 
 def _normalize_feature_group_ids(
@@ -2745,6 +3025,54 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
                 message=f"audit_fixture entry is {type(fx_payload).__name__}, not dict; skipped",
             )
 
+    raw_behavior_journeys = data.get("behavior_journeys") or []
+    behavior_journeys_parsed: list[BehaviorJourney] = []
+    for index, journey_payload in enumerate(raw_behavior_journeys):
+        if isinstance(journey_payload, dict):
+            journey = _behavior_journey_from_dict(journey_payload)
+            if journey.id.strip() or journey.name.strip() or journey.steps:
+                if not journey.id.strip():
+                    journey.id = f"behavior-{index + 1}"
+                if not journey.name.strip():
+                    journey.name = journey.id
+                behavior_journeys_parsed.append(journey)
+            else:
+                collector.add(
+                    code="spec.coerce.field",
+                    path=f"behavior_journeys[{index}]",
+                    message="behavior journey has no id/name/steps; skipped",
+                )
+        else:
+            collector.add(
+                code="spec.coerce.field",
+                path=f"behavior_journeys[{index}]",
+                message=f"behavior journey entry is {type(journey_payload).__name__}, not dict; skipped",
+            )
+
+    raw_shared_contracts = data.get("shared_contracts") or []
+    shared_contracts_parsed: list[SharedContract] = []
+    for index, contract_payload in enumerate(raw_shared_contracts):
+        if isinstance(contract_payload, dict):
+            contract = _shared_contract_from_dict(contract_payload)
+            if contract.id.strip() or contract.name.strip() or contract.paths:
+                if not contract.id.strip():
+                    contract.id = f"shared-contract-{index + 1}"
+                if not contract.name.strip():
+                    contract.name = contract.id
+                shared_contracts_parsed.append(contract)
+            else:
+                collector.add(
+                    code="spec.coerce.field",
+                    path=f"shared_contracts[{index}]",
+                    message="shared contract has no id/name/paths; skipped",
+                )
+        else:
+            collector.add(
+                code="spec.coerce.field",
+                path=f"shared_contracts[{index}]",
+                message=f"shared contract entry is {type(contract_payload).__name__}, not dict; skipped",
+            )
+
     raw_schema_version = data.get("schema_version")
     if raw_schema_version is None or raw_schema_version == "":
         # Absent schema_version on disk — treat as v1 because every spec
@@ -2838,6 +3166,8 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
         guardrails=guardrails_parsed,
         shared_paths=[str(p) for p in (data.get("shared_paths") or [])],
         audit_fixtures=audit_fixtures_parsed,
+        behavior_journeys=behavior_journeys_parsed,
+        shared_contracts=shared_contracts_parsed,
     )
     return spec, list(collector.warnings)
 
@@ -2915,6 +3245,307 @@ def _select_webapp_scaffold_group(groups: list[Group]) -> Group:
         return value, -index
 
     return max(enumerate(groups), key=lambda item: score(item[1], item[0]))[1]
+
+
+def _ensure_webapp_behavior_journeys(spec: Spec) -> list[str]:
+    """Ensure webapp specs carry deterministic user-facing behavior checks.
+
+    The compile prompt asks the model to author these, but the contract is
+    important enough that Otto should not depend on prompt compliance alone.
+    If a webapp spec has user-facing features and no planned journeys, create
+    one conservative checklist from the feature acceptance details. Browser
+    runners can then execute or translate these bullets without drifting into
+    purely random exploration.
+    """
+    if spec.project_kind != "webapp" or spec.behavior_journeys:
+        return []
+
+    steps: list[BehaviorStep] = []
+    feature_ids: list[str] = []
+    for feature in spec.features:
+        if not feature.id:
+            continue
+        feature_ids.append(feature.id)
+        expectation = (
+            feature.acceptance_detail
+            or feature.description
+            or f"{feature.name or feature.id} works through the visible product UI"
+        )
+        steps.append(
+            BehaviorStep(
+                action=(
+                    f"Use the visible product UI to exercise "
+                    f"{feature.name or feature.id}."
+                ),
+                expectation=expectation,
+                assertion=expectation,
+                artifact="screenshot",
+                feature_ids=[feature.id],
+            )
+        )
+
+    if not steps:
+        for index, item in enumerate(spec.done_means, 1):
+            steps.append(
+                BehaviorStep(
+                    action=f"Exercise done-means item {index} through the visible product UI.",
+                    expectation=item,
+                    assertion=item,
+                    artifact="screenshot",
+                    feature_ids=[],
+                )
+            )
+
+    if not steps:
+        return []
+
+    spec.behavior_journeys.append(
+        BehaviorJourney(
+            id="planned-main-user-flow",
+            name="Planned main user flow",
+            description=(
+                "Otto-synthesized deterministic checklist from the approved "
+                "feature acceptance details."
+            ),
+            surface="web",
+            deterministic=True,
+            feature_ids=feature_ids,
+            steps=steps,
+        )
+    )
+    return [
+        "webapp behavior journeys normalized: synthesized planned-main-user-flow "
+        "from feature acceptance details"
+    ]
+
+
+_CRITICAL_SHARED_CONTRACT_MARKERS: tuple[str, ...] = (
+    "store",
+    "model",
+    "schema",
+    "state",
+    "db",
+    "data",
+    "persistence",
+    "config",
+    "package.json",
+    "vite.config",
+    "playwright.config",
+    "src/app",
+    "src/main",
+    "src/router",
+)
+
+
+_FEATURE_BROWSER_JOURNEY_PATHS: tuple[str, ...] = (
+    "tests/browser/**",
+    "tests/browser/*",
+    "tests/e2e/**",
+    "tests/e2e/*",
+)
+
+
+_BROWSER_ARTIFACT_PATHS: tuple[str, ...] = (
+    "otto_artifacts/browser/**",
+    "test-results/**",
+    "playwright-report/**",
+)
+
+
+def _is_browser_runner_contract(contract: SharedContract) -> bool:
+    text = " ".join(
+        [
+            contract.id,
+            contract.name,
+            contract.kind,
+            contract.description,
+        ]
+    ).lower()
+    return (
+        "browser" in text
+        or "playwright" in text
+        or "test_runner" in text
+        or "test runner" in text
+    )
+
+
+def _normalize_webapp_shared_contract_paths(spec: Spec) -> list[str]:
+    """Keep shared browser contracts focused on shared runner/config files.
+
+    Feature slices should be able to add their own behavior journeys such as
+    ``tests/browser/test_transactions.*``. The shared contract is the runner
+    and config behavior, not every feature-specific browser test or generated
+    screenshot/trace artifact.
+    """
+    if spec.project_kind != "webapp":
+        return []
+    warnings: list[str] = []
+    for contract in spec.shared_contracts:
+        if not _is_browser_runner_contract(contract):
+            continue
+        original = list(contract.paths)
+        kept = [
+            path
+            for path in original
+            if path not in _FEATURE_BROWSER_JOURNEY_PATHS
+            and path not in _BROWSER_ARTIFACT_PATHS
+        ]
+        if kept == original:
+            continue
+        contract.paths = kept
+        removed = [path for path in original if path not in kept]
+        allowed = list(contract.allowed_extension_paths or [])
+        for path in removed:
+            if path not in allowed:
+                allowed.append(path)
+        contract.allowed_extension_paths = allowed
+        if not contract.extension_policy:
+            contract.extension_policy = (
+                "The owner controls shared browser runner/config behavior. "
+                "Feature groups may add their own behavior journey tests and "
+                "browser evidence files without changing the shared runner "
+                "contract."
+            )
+        warnings.append(
+            "webapp shared contracts normalized: removed feature browser "
+            f"journey/artifact paths from {contract.id!r} and recorded them "
+            f"as allowed extensions: {', '.join(removed)}"
+        )
+    return warnings
+
+
+def _ensure_webapp_shared_contracts(spec: Spec) -> list[str]:
+    """Promote declared shared paths into an owned shared-core contract.
+
+    This is intentionally conservative: Otto only synthesizes from paths the
+    spec already marked shared/scaffolded. It does not guess arbitrary product
+    files. The goal is to turn obvious shared-state surfaces into first-class
+    contracts before parallel work starts, so later agents repair or request an
+    amendment instead of repeatedly patching the same foundation.
+    """
+    if spec.project_kind != "webapp" or spec.shared_contracts:
+        return []
+
+    declared_paths: list[str] = []
+    for path in [*spec.shared_paths, *spec.shared_scaffold]:
+        lowered = path.lower()
+        if any(marker in lowered for marker in _CRITICAL_SHARED_CONTRACT_MARKERS):
+            if path not in declared_paths:
+                declared_paths.append(path)
+
+    if not declared_paths:
+        return []
+
+    owner = _select_shared_contract_owner(spec)
+    consumed_by = [feature.id for feature in spec.features if feature.id]
+    contract = SharedContract(
+        id="shared-product-core",
+        name="Shared product core",
+        kind="shared_core",
+        description=(
+            "Otto-synthesized contract for declared shared app, state, "
+            "configuration, or test-runner paths."
+        ),
+        owner_id=owner,
+        paths=declared_paths,
+        invariants=[
+            "Shared state, app shell, build configuration, and browser-test "
+            "runner contracts stay compatible across all feature groups.",
+            "Feature groups that need to change this contract request an "
+            "amendment instead of silently redefining it.",
+        ],
+        consumed_by=consumed_by,
+        extension_policy=(
+            "Feature groups may add feature-owned routes, components, tests, "
+            "and evidence that consume this contract. Changes to shared "
+            "storage/schema/app-shell/build-runner behavior require the owner "
+            "or a spec amendment."
+        ),
+        critical=True,
+    )
+    spec.shared_contracts.append(contract)
+    dependency_targets = _apply_shared_contract_dependencies(spec, contract)
+    dep_note = (
+        f"; added dependency from {', '.join(dependency_targets)}"
+        if dependency_targets else ""
+    )
+    return [
+        "webapp shared contracts normalized: synthesized shared-product-core "
+        f"owned by {owner!r} from declared shared paths{dep_note}"
+    ]
+
+
+def _select_shared_contract_owner(spec: Spec) -> str:
+    candidates: list[tuple[int, str]] = []
+    for index, component in enumerate(spec.components):
+        text = f"{component.id} {component.name} {component.description}".lower()
+        score = 0
+        if any(marker in text for marker in ("shared", "core", "foundation", "shell")):
+            score += 10
+        if not component.dependencies:
+            score += 2
+        candidates.append((score * 1000 - index, component.id))
+    for index, group in enumerate(spec.groups):
+        text = f"{group.id} {group.name}".lower()
+        score = 0
+        if any(marker in text for marker in ("shared", "core", "foundation", "shell", "app")):
+            score += 8
+        if not group.dependencies:
+            score += 2
+        candidates.append((score * 1000 - index, group.id))
+    if not candidates:
+        return ""
+    return max(candidates)[1]
+
+
+def _apply_shared_contract_dependencies(
+    spec: Spec,
+    contract: SharedContract,
+) -> list[str]:
+    owner = contract.owner_id
+    if not owner:
+        return []
+    known_group_ids = {group.id for group in spec.groups}
+    known_component_ids = {component.id for component in spec.components}
+    if owner not in known_group_ids and owner not in known_component_ids:
+        return []
+    consumed_feature_ids = set(contract.consumed_by or [])
+    feature_group_by_id = {feature.id: feature.group_id for feature in spec.features}
+    target_group_ids = {
+        feature_group_by_id.get(feature_id, "")
+        for feature_id in consumed_feature_ids
+        if feature_group_by_id.get(feature_id, "")
+    }
+    if not target_group_ids:
+        target_group_ids = {group.id for group in spec.groups}
+
+    added: list[str] = []
+    for group in spec.groups:
+        if group.id == owner or group.id not in target_group_ids:
+            continue
+        if owner in group.dependencies:
+            continue
+        if owner in known_group_ids and _group_dep_would_cycle(spec, group.id, owner):
+            continue
+        group.dependencies.append(owner)
+        added.append(group.id)
+    return added
+
+
+def _group_dep_would_cycle(spec: Spec, group_id: str, dependency_id: str) -> bool:
+    graph = {group.id: set(group.dependencies or []) for group in spec.groups}
+    graph.setdefault(group_id, set()).add(dependency_id)
+    stack = [dependency_id]
+    seen: set[str] = set()
+    while stack:
+        current = stack.pop()
+        if current == group_id:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(graph.get(current, set()))
+    return False
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9_-]+")
@@ -3125,6 +3756,16 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
             "(integration testing is missing — groups may pass in "
             "isolation while their composition is broken)"
         )
+    if (
+        spec.project_kind == "webapp"
+        and len(spec.groups) > 1
+        and not spec.behavior_journeys
+    ):
+        warnings.append(
+            "multi-group webapp spec declares no behavior_journeys "
+            "(planned user-behavior checklist is missing; true-web debugging "
+            "will drift toward ad hoc exploration)"
+        )
 
     seen_ids: set[str] = set()
     for group_ in spec.groups:
@@ -3161,6 +3802,33 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
         for dep in group_.dependencies:
             if dep not in seen_ids:
                 warnings.append(f"group {group_.id!r}: dep {dep!r} not in spec")
+
+    known_unit_ids = set(seen_ids)
+    known_unit_ids.update(c.id for c in (spec.components or []))
+    for contract in spec.shared_contracts:
+        if contract.critical and contract.paths and not contract.owner_id:
+            warnings.append(
+                f"shared_contract {contract.id!r}: critical contract has paths "
+                "but no owner_id (scope repair cannot route cleanly)"
+            )
+        if contract.owner_id and contract.owner_id not in known_unit_ids:
+            warnings.append(
+                f"shared_contract {contract.id!r}: owner_id {contract.owner_id!r} "
+                "does not match a group/component id"
+            )
+
+    for journey in spec.behavior_journeys:
+        if not journey.steps:
+            warnings.append(
+                f"behavior_journey {journey.id!r}: no steps declared "
+                "(journey cannot drive deterministic true-web validation)"
+            )
+        for index, step in enumerate(journey.steps):
+            if not step.action.strip() or not step.expectation.strip():
+                warnings.append(
+                    f"behavior_journey {journey.id!r} step {index + 1}: "
+                    "action and expectation are required for deterministic checks"
+                )
 
     feature_ids_seen: set[str] = set()
     for feature in spec.features:
@@ -4133,7 +4801,13 @@ async def compile_spec(
     )
 
     options = make_agent_options(project_dir, config, agent_type="spec")
-    _assign_output_format(options, _spec_output_format())
+    # Codex app-server currently applies outputSchema to intermediate
+    # tool-using assistant messages, not only the final answer. In compile
+    # turns that made progress narration arrive as {"spec_json": "..."} and
+    # encouraged malformed/unfinished specs. Keep the compile contract durable:
+    # write spec.json, with <spec_json> text fallback.
+    if getattr(options, "provider", "") != "codex-app-server":
+        _assign_output_format(options, _spec_output_format())
     spec_cap = get_spec_timeout(config)
     timeout: int = min(budget.for_call(), spec_cap) if budget is not None else spec_cap
 
@@ -4186,6 +4860,9 @@ async def compile_spec(
         ]
     if not brownfield:
         normalization_warnings = _normalize_webapp_scaffold_scope(spec)
+    normalization_warnings.extend(_normalize_webapp_shared_contract_paths(spec))
+    normalization_warnings.extend(_ensure_webapp_shared_contracts(spec))
+    normalization_warnings.extend(_ensure_webapp_behavior_journeys(spec))
 
     # A6.4: brownfield additive mode reconciles the agent's "what's new"
     # output with the prior base_spec, preserving mechanical / historical

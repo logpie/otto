@@ -40,6 +40,7 @@ from otto.spec_compile import (
     StateInvariant,
     StructureDecisions,
 )
+from otto.spec_state import iter_events
 
 
 def _spec(slices: list[Group], cross_checks=None) -> Spec:
@@ -739,10 +740,12 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
 
     seen_configs: list[dict] = []
     seen_timeouts: list[int | None] = []
+    seen_context_packets: list[Path | None] = []
 
     async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
         seen_configs.append(dict(input_.config))
         seen_timeouts.append(input_.timeout_s)
+        seen_context_packets.append(input_.context_packet_path)
         # Repair by creating the missing marker.
         (input_.worktree / "marker.txt").write_text("ok", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.05)
@@ -764,6 +767,15 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
     assert len(seen_timeouts) == 1
     assert seen_timeouts[0] is not None
     assert 1 <= seen_timeouts[0] <= 17
+    assert seen_context_packets[0] is not None
+    assert seen_context_packets[0].is_file()
+    assert "behavior_journeys" in seen_context_packets[0].read_text(encoding="utf-8")
+    events = list(iter_events(session_dir))
+    feedback = [event for event in events if event.kind == "group.check.feedback"]
+    assert feedback
+    assert feedback[0].group_id == "s1"
+    assert feedback[0].extra["phase"] == "merge"
+    assert "post-merge verification failed" in feedback[0].detail
 
 
 def test_run_merge_queue_blocks_when_repair_retries_exhausted(tmp_path: Path) -> None:

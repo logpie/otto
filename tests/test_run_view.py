@@ -292,6 +292,32 @@ def test_build_run_view_projects_provider_events_without_prompt_text(tmp_path: P
     assert view["provider"]["structured_output_error"] == "missing field"
 
 
+def test_build_run_view_projects_app_server_delta_progress(tmp_path: Path) -> None:
+    session = _setup_session(tmp_path, spec={"intent": "x", "project_kind": "webapp", "groups": []})
+    messages = session / "spec" / "compile-agent" / "messages.jsonl"
+    messages.parent.mkdir(parents=True)
+    messages.write_text(
+        json.dumps(
+            {
+                "type": "provider_event",
+                "provider": "codex-app-server",
+                "event": "agent_message_delta",
+                "method": "item/agentMessage/delta",
+                "session_id": "thread-1",
+                "turn_id": "turn-1",
+                "data": {"preview": "Writing the compiled spec now.", "chars": 31},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    view = build_run_view(session)
+
+    assert view["provider"]["event"] == "agent_message_delta"
+    assert view["provider"]["current_activity"] == "Writing: Writing the compiled spec now."
+
+
 def test_build_run_view_initializing_compile_agent_is_compiling(tmp_path: Path) -> None:
     """Active compile-agent logs should not be reported as merely queued."""
 

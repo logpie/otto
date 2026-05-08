@@ -11,12 +11,15 @@ from __future__ import annotations
 
 from otto.spec_compile import (
     AuditFixture,
+    BehaviorJourney,
+    BehaviorStep,
     Component,
     FINDING_SEVERITIES,
     Feature,
     Finding,
     Group,
     Guardrail,
+    SharedContract,
     Spec,
 )
 
@@ -348,6 +351,62 @@ def test_round_trip_with_audit_fixtures() -> None:
     assert parsed.audit_fixtures[0].kind == "user"
     assert parsed.audit_fixtures[0].payload["username"] == "alice"
     assert parsed.audit_fixtures[1].kind == "follow"
+
+
+def test_round_trip_with_behavior_journeys_and_shared_contracts() -> None:
+    from otto.spec_compile import parse_spec, spec_to_dict
+
+    original = Spec(
+        intent="finance dashboard",
+        project_kind="webapp",
+        groups=[
+            Group(id="foundation", name="Foundation"),
+            Group(id="transactions", name="Transactions", dependencies=["foundation"]),
+        ],
+        behavior_journeys=[
+            BehaviorJourney(
+                id="finance-main",
+                name="Finance main workflow",
+                feature_ids=["transactions"],
+                steps=[
+                    BehaviorStep(
+                        action="Add a Coffee transaction for 5 dollars",
+                        expectation="Coffee appears in the visible transaction list",
+                        assertion="A visible row contains Coffee and $5",
+                        artifact="screenshot after add",
+                        feature_ids=["transactions"],
+                    )
+                ],
+            )
+        ],
+        shared_contracts=[
+            SharedContract(
+                id="finance-store",
+                name="Finance store",
+                kind="persistence",
+                owner_id="foundation",
+                paths=["src/lib/financeStore.*"],
+                invariants=["transactions survive refresh"],
+                consumed_by=["transactions"],
+                extension_policy=(
+                    "Feature groups may call store APIs and add feature-owned "
+                    "tests; schema changes require foundation."
+                ),
+                allowed_extension_paths=["tests/browser/test_*.py"],
+            )
+        ],
+    )
+
+    parsed, warnings = parse_spec(spec_to_dict(original))
+
+    assert parsed.behavior_journeys[0].steps[0].expectation.startswith("Coffee")
+    assert parsed.shared_contracts[0].owner_id == "foundation"
+    assert parsed.shared_contracts[0].extension_policy.startswith("Feature groups")
+    assert parsed.shared_contracts[0].allowed_extension_paths == [
+        "tests/browser/test_*.py"
+    ]
+    assert parsed.shared_contracts[0].critical is True
+    assert not any("behavior_journeys" in warning.message for warning in warnings)
 
 
 def test_legacy_spec_without_new_fields_parses_clean() -> None:

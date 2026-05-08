@@ -51,10 +51,11 @@ from otto.build import (
     GroupStatus,
     detect_scope_violations,
     resolve_integration_base_branch,
+    _write_build_context_packet,
 )
 from otto.checks import Evidence, run_checks
 from otto.setup_gitignore import non_product_paths_from_porcelain
-from otto.spec_compile import Group, Spec
+from otto.spec_compile import SPEC_FILENAME, Group, Spec
 from otto.spec_state import aborted_group_ids, emit
 
 logger = logging.getLogger("otto.merge_queue")
@@ -783,6 +784,17 @@ async def _process_candidate(
                 last_failure += f" — slice: {'; '.join(slice_failed_summaries[:3])}"
             if cross_failed_summaries:
                 last_failure += f" — cross-slice: {'; '.join(cross_failed_summaries[:3])}"
+        if slice_failed_summaries or cross_failed_summaries:
+            emit(
+                session_dir,
+                "group.check.feedback",
+                group_id=group_obj.id,
+                attempt=repair_attempts + 1,
+                detail=last_failure,
+                phase="merge",
+                failure_summaries=[*slice_failed_summaries, *cross_failed_summaries],
+                artifacts=_evidence_artifact_refs([*group_evidence, *cross_evidence]),
+            )
 
         # If we have no agent or no repair retries left → BLOCKED.
         if build_agent is None:
@@ -865,7 +877,11 @@ async def _process_candidate(
             agent_session_id=repair_session_id,
             config=config,
             merge_repair=True,
+            context_packet_path=raw_log_dir / f"repair-attempt-{repair_attempts:02d}" / "context-packet.json",
+            full_spec_path=_default_spec_path(session_dir),
         )
+        if agent_input.context_packet_path:
+            _write_build_context_packet(agent_input, agent_input.context_packet_path)
         # C1 fix: bail out if the shared cost pool is exhausted.
         # Without this, repair retries can drain past the global cap.
         if shared_budget is not None and shared_budget.remaining_total_cost_usd() <= 0:
@@ -1384,6 +1400,26 @@ def _commit_repair_candidate_after_agent_error(
 
 def _failed_evidence_summaries(evidence: list[Evidence]) -> list[str]:
     return [_evidence_failure_summary(ev) for ev in evidence if not ev.passed]
+
+
+def _evidence_artifact_refs(evidence: list[Evidence]) -> list[str]:
+    refs: list[str] = []
+    for item in evidence:
+        for artifact in item.artifacts:
+            ref = str(artifact)
+            if ref not in refs:
+                refs.append(ref)
+    return refs
+
+
+def _default_spec_path(session_dir: Path) -> Path | None:
+    for candidate in (
+        session_dir / "spec" / SPEC_FILENAME,
+        session_dir / SPEC_FILENAME,
+    ):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _evidence_failure_summary(evidence: Evidence) -> str:

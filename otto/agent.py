@@ -23,6 +23,9 @@ _OPENAI_AGENTS_IMPORT_ERROR_MESSAGE = ""
 
 CODEX_STDIO_LIMIT_BYTES = 16 * 1024 * 1024
 CODEX_POST_RESULT_EXIT_GRACE_S = 0.25
+CODEX_APP_SERVER_RECONNECT_GRACE_S = 120.0
+CODEX_APP_SERVER_DELTA_PROGRESS_INTERVAL_S = 2.0
+CODEX_APP_SERVER_DELTA_PROGRESS_CHARS = 800
 CODEX_TOOL_OUTPUT_LOG_LIMIT_CHARS = 20_000
 CODEX_PROVIDER_ERROR_OUTPUT_LIMIT_CHARS = 1_200
 _CLAUDE_ENV_LOCK = asyncio.Lock()
@@ -32,6 +35,17 @@ DEFAULT_DISALLOWED_BASH_TOOLS = (
     "Bash(pkill*)",
     "Bash(pkill:*)",
 )
+
+
+def _codex_app_server_reconnect_grace_s() -> float:
+    raw = os.environ.get("OTTO_CODEX_APP_SERVER_RECONNECT_GRACE_S")
+    if raw is None:
+        return CODEX_APP_SERVER_RECONNECT_GRACE_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return CODEX_APP_SERVER_RECONNECT_GRACE_S
+    return max(value, 0.001)
 
 try:
     from claude_agent_sdk import ClaudeSDKClient as _SDKClaudeSDKClient
@@ -2446,9 +2460,12 @@ async def _query_codex_app_server(
     last_diff = ""
     command_outputs: dict[str, str] = {}
     agent_message_buffers: dict[str, str] = {}
+    agent_delta_progress: dict[str, tuple[float, int]] = {}
     emitted_agent_items: set[str] = set()
     emitted_collab_tool_ids: set[str] = set()
     child_tool_use_by_thread_id: dict[str, str] = {}
+    reconnect_error: dict[str, Any] | None = None
+    reconnect_deadline: float | None = None
 
     def provider_event(
         event_name: str,
@@ -2490,9 +2507,12 @@ async def _query_codex_app_server(
     async def send_error(current_id: Any, message: str) -> None:
         await send({"id": current_id, "error": {"code": -32603, "message": message}})
 
-    async def read_event() -> dict[str, Any] | None:
+    async def read_event(timeout_s: float | None = None) -> dict[str, Any] | None:
         while True:
-            raw_line = await stdout.readline()
+            if timeout_s is None:
+                raw_line = await stdout.readline()
+            else:
+                raw_line = await asyncio.wait_for(stdout.readline(), timeout=timeout_s)
             if not raw_line:
                 return None
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -2584,7 +2604,31 @@ async def _query_codex_app_server(
         saw_result = False
         turn_seen = False
         while True:
-            event = await read_event()
+            read_timeout: float | None = None
+            if reconnect_deadline is not None:
+                read_timeout = max(reconnect_deadline - asyncio.get_running_loop().time(), 0.001)
+            try:
+                event = await read_event(read_timeout)
+            except asyncio.TimeoutError:
+                error = reconnect_error or {}
+                message = str(error.get("message") or "codex app-server stream stalled after reconnect")
+                timeout_message = (
+                    "codex app-server stream stalled after recoverable error: "
+                    f"{message}. No provider events arrived for "
+                    f"{_codex_app_server_reconnect_grace_s():.0f}s."
+                )
+                if state is not None:
+                    state["provider_stderr"] = timeout_message
+                yield ResultMessage(
+                    subtype="error",
+                    is_error=True,
+                    session_id=thread_id,
+                    result=timeout_message,
+                    usage=last_usage,
+                    total_cost_usd=0.0,
+                )
+                saw_result = True
+                break
             if event is None:
                 break
             if await handle_server_request(event):
@@ -2605,6 +2649,9 @@ async def _query_codex_app_server(
             method = str(event.get("method") or "")
             params = event.get("params") if isinstance(event.get("params"), dict) else {}
             event_thread_id = str(params.get("threadId") or thread_id)
+            if method != "error" and reconnect_deadline is not None:
+                reconnect_error = None
+                reconnect_deadline = None
 
             if event.get("id") == turn_id and not event.get("error"):
                 turn_seen = True
@@ -2625,6 +2672,42 @@ async def _query_codex_app_server(
                     status="started",
                 )
                 continue
+
+            if method == "error":
+                error = params.get("error") if isinstance(params.get("error"), dict) else {}
+                message = str((error or {}).get("message") or "codex app-server error")
+                will_retry = bool(params.get("willRetry"))
+                yield provider_event(
+                    "provider_error",
+                    method=method,
+                    params=params,
+                    status="retrying" if will_retry else "failed",
+                    data={
+                        "message": message,
+                        "will_retry": will_retry,
+                        "additional_details": str(params.get("additionalDetails") or ""),
+                    },
+                )
+                if will_retry:
+                    reconnect_error = {
+                        "message": message,
+                        "additional_details": str(params.get("additionalDetails") or ""),
+                    }
+                    reconnect_deadline = (
+                        asyncio.get_running_loop().time()
+                        + _codex_app_server_reconnect_grace_s()
+                    )
+                    continue
+                yield ResultMessage(
+                    subtype="error",
+                    is_error=True,
+                    session_id=event_thread_id,
+                    result=message,
+                    total_cost_usd=0.0,
+                    usage=last_usage,
+                )
+                saw_result = True
+                break
 
             if method == "thread/tokenUsage/updated":
                 usage = _codex_app_server_usage_dict(params.get("tokenUsage"))
@@ -2658,6 +2741,23 @@ async def _query_codex_app_server(
                         agent_message_buffers.get(item_id, "")
                         + str(params.get("delta") or "")
                     )
+                    buffered = agent_message_buffers[item_id]
+                    now = asyncio.get_running_loop().time()
+                    last_at, last_len = agent_delta_progress.get(item_id, (0.0, 0))
+                    if (
+                        len(buffered) - last_len >= CODEX_APP_SERVER_DELTA_PROGRESS_CHARS
+                        or now - last_at >= CODEX_APP_SERVER_DELTA_PROGRESS_INTERVAL_S
+                    ):
+                        agent_delta_progress[item_id] = (now, len(buffered))
+                        yield provider_event(
+                            "agent_message_delta",
+                            method=method,
+                            params=params,
+                            data={
+                                "chars": len(buffered),
+                                "preview": _truncate_for_agent_log(buffered[-240:], 240),
+                            },
+                        )
                 continue
 
             if method in {"item/commandExecution/outputDelta", "command/exec/outputDelta"}:

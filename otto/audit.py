@@ -1786,10 +1786,13 @@ def _write_audit_evidence_packet(agent_input: AuditAgentInput) -> None:
         "deterministic_first_order": [
             "contract_test",
             "cross_slice_evidence",
+            "planned_behavior_journeys",
             "walkthrough_artifacts",
             "source_inspection",
             "provider_transcript_excerpt_only_if_needed",
         ],
+        "planned_behavior_journeys": _compact_behavior_journeys(agent_input.spec),
+        "shared_contracts": _compact_shared_contracts(agent_input.spec),
         "build_summary": agent_input.build_summary,
         "merge_summary": agent_input.merge_summary,
         "cross_slice_evidence": [
@@ -1836,6 +1839,49 @@ def _compact_evidence(evidence: Evidence) -> dict[str, Any]:
         "artifacts": [str(path) for path in evidence.artifacts],
         "raw": compact_raw,
     }
+
+
+def _compact_behavior_journeys(spec: Spec) -> list[dict[str, Any]]:
+    journeys: list[dict[str, Any]] = []
+    for journey in getattr(spec, "behavior_journeys", []) or []:
+        journeys.append(
+            {
+                "id": journey.id,
+                "name": journey.name,
+                "surface": journey.surface,
+                "deterministic": journey.deterministic,
+                "feature_ids": list(journey.feature_ids),
+                "steps": [
+                    {
+                        "action": step.action,
+                        "expectation": step.expectation,
+                        "assertion": step.assertion,
+                        "artifact": step.artifact,
+                        "feature_ids": list(step.feature_ids),
+                    }
+                    for step in journey.steps
+                ],
+            }
+        )
+    return journeys
+
+
+def _compact_shared_contracts(spec: Spec) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": contract.id,
+            "name": contract.name,
+            "kind": contract.kind,
+            "owner_id": contract.owner_id,
+            "critical": contract.critical,
+            "paths": list(contract.paths),
+            "invariants": list(contract.invariants),
+            "consumed_by": list(contract.consumed_by),
+            "extension_policy": contract.extension_policy,
+            "allowed_extension_paths": list(contract.allowed_extension_paths),
+        }
+        for contract in (getattr(spec, "shared_contracts", []) or [])
+    ]
 
 
 def _artifact_kind(path: Path) -> str:
@@ -1954,6 +2000,42 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         for feature in spec.features:
             suffix = f" (group {feature.group_id})" if feature.group_id else ""
             lines.append(f"- {feature.id}: {feature.name}{suffix}")
+        lines.append("")
+    if spec.behavior_journeys:
+        lines.append("## Planned behavior journeys (execute before exploratory audit)")
+        lines.append(
+            "These are the approved deterministic user expectations. Follow them "
+            "as the audit checklist, compare the page after each action against "
+            "the expected result, and tag the resulting `walkthrough.jsonl` "
+            "entries with the listed feature ids. Add focused exploratory actions "
+            "only after this checklist has been covered or proven blocked."
+        )
+        for journey in spec.behavior_journeys:
+            lines.append(f"- {journey.id}: {journey.name} ({journey.surface})")
+            for index, step in enumerate(journey.steps, 1):
+                feature_suffix = (
+                    f" feature_ids={','.join(step.feature_ids)}"
+                    if step.feature_ids else ""
+                )
+                lines.append(f"  {index}. Action: {step.action}{feature_suffix}")
+                lines.append(f"     Expect: {step.expectation}")
+                if step.assertion:
+                    lines.append(f"     Assert: {step.assertion}")
+        lines.append("")
+    if spec.shared_contracts:
+        lines.append("## Shared contracts to inspect")
+        lines.append(
+            "Critical shared contracts are product-wide. If a failure touches one, "
+            "treat it as a shared integration issue rather than a single-feature "
+            "polish bug."
+        )
+        for contract in spec.shared_contracts:
+            critical = "critical" if contract.critical else "advisory"
+            lines.append(
+                f"- {contract.id}: {contract.name} ({critical}, owner={contract.owner_id or 'unowned'})"
+            )
+            for invariant in contract.invariants[:4]:
+                lines.append(f"  - {invariant}")
         lines.append("")
     if agent_input.feature_scope_ids:
         scoped = ", ".join(agent_input.feature_scope_ids)

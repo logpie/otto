@@ -40,6 +40,14 @@ class _FakeStdout:
         return b""
 
 
+class _HangingStdout(_FakeStdout):
+    async def readline(self) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        await asyncio.sleep(60)
+        return b""
+
+
 class _FakeStdin:
     def __init__(self):
         self.buffer = bytearray()
@@ -68,6 +76,22 @@ class _FakeProcess:
 
     def kill(self) -> None:
         pass
+
+
+class _HangingProcess(_FakeProcess):
+    def __init__(self, lines: list[str], return_code: int = 0):
+        super().__init__(lines, return_code)
+        self.stdout = _HangingStdout(lines)
+        self.terminated = False
+
+    async def wait(self) -> int:
+        if not self.terminated:
+            await asyncio.sleep(60)
+        self.returncode = self._return_code
+        return self._return_code
+
+    def terminate(self) -> None:
+        self.terminated = True
 
 
 def json_event(payload: dict) -> str:
@@ -396,6 +420,113 @@ async def test_codex_app_server_query_normalizes_thread_turn_events(tmp_path, mo
     assert written[3]["params"]["effort"] == "low"
     assert written[3]["params"]["input"][0]["text"] == "Run tests"
     assert seen["kwargs"]["env"] is None
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_reconnect_stall_fails_before_outer_timeout(
+    tmp_path,
+    monkeypatch,
+):
+    """A recoverable AppServer stream error must not burn the whole agent timeout."""
+
+    process = _HangingProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        json_event(
+            {
+                "method": "error",
+                "params": {
+                    "threadId": "thread-app",
+                    "turnId": "turn-1",
+                    "error": {
+                        "message": "Reconnecting... 2/5",
+                        "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}},
+                    },
+                    "willRetry": True,
+                    "additionalDetails": (
+                        "stream disconnected before completion: WebSocket protocol error"
+                    ),
+                },
+            }
+        ),
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setenv("OTTO_CODEX_APP_SERVER_RECONNECT_GRACE_S", "0.01")
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    state: dict[str, object] = {}
+    messages = []
+    async for message in query(
+        prompt="Run tests",
+        options=ClaudeAgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            permission_mode="bypassPermissions",
+            effort="low",
+        ),
+        state=state,
+    ):
+        messages.append(message)
+
+    provider_events = [m for m in messages if isinstance(m, ProviderEventMessage)]
+    results = [m for m in messages if isinstance(m, ResultMessage)]
+    assert provider_events[-1].event == "provider_error"
+    assert provider_events[-1].status == "retrying"
+    assert results[-1].is_error is True
+    assert "stream stalled after recoverable error" in str(results[-1].result)
+    assert "Reconnecting... 2/5" in str(results[-1].result)
+    assert process.terminated is True
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_agent_message_deltas_emit_progress(
+    tmp_path,
+    monkeypatch,
+):
+    process = _LongLivedFakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        json_event(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thread-app",
+                    "turnId": "turn-1",
+                    "itemId": "msg-1",
+                    "delta": "Writing the compiled spec now.",
+                },
+            }
+        ),
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Writing the compiled spec now."}}}\n',
+        '{"method":"thread/status/changed","params":{"threadId":"thread-app","status":{"type":"idle"}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="Run tests",
+        options=ClaudeAgentOptions(provider="codex-app-server", cwd=str(tmp_path)),
+    ):
+        messages.append(message)
+
+    progress_events = [
+        message
+        for message in messages
+        if isinstance(message, ProviderEventMessage)
+        and message.event == "agent_message_delta"
+    ]
+    assert progress_events
+    assert progress_events[0].data["preview"] == "Writing the compiled spec now."
+    assert progress_events[0].data["chars"] == len("Writing the compiled spec now.")
 
 
 @pytest.mark.asyncio

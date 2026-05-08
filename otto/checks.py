@@ -357,7 +357,8 @@ def _run_browser_journey(
         return _malformed_check_evidence(
             started, t0, "BrowserJourney.command is empty (informational; nothing to run)"
         )
-    preflight_error = _playwright_browser_journey_preflight(check, cwd)
+    browser_env = _browser_journey_env(cwd)
+    preflight_error = _browser_journey_preflight(check, cwd, browser_env)
     if preflight_error:
         if raw_log_path is not None:
             _write_raw(raw_log_path, preflight_error)
@@ -365,12 +366,13 @@ def _run_browser_journey(
             passed=False,
             started_at=started,
             duration_s=time.monotonic() - t0,
-            detail="playwright runner config invalid artifacts=0",
+            detail="browser journey preflight failed artifacts=0",
             artifacts=[],
             raw={
                 "command": list(check.command),
                 "preflight_error": preflight_error,
                 "evidence_globs": list(check.evidence_globs),
+                "browser_env": browser_env,
             },
         )
     bootstrap = _run_node_bootstrap_if_needed(
@@ -395,7 +397,6 @@ def _run_browser_journey(
                 "evidence_globs": list(check.evidence_globs),
             },
         )
-    browser_env = _browser_journey_env(cwd)
     browser_lock_wait_s: float | None = None
     if os.environ.get("OTTO_SERIALIZE_BROWSER_JOURNEYS") == "1":
         with _browser_journey_lock() as lock_wait_s:
@@ -457,7 +458,50 @@ def _run_browser_journey(
     )
 
 
-def _playwright_browser_journey_preflight(check: BrowserJourney, cwd: Path) -> str | None:
+def _browser_journey_preflight(
+    check: BrowserJourney,
+    cwd: Path,
+    browser_env: Mapping[str, str],
+) -> str | None:
+    agent_browser_error = _agent_browser_journey_preflight(check.command)
+    if agent_browser_error:
+        return agent_browser_error
+    return _playwright_browser_journey_preflight(check, cwd, browser_env)
+
+
+def _agent_browser_journey_preflight(command: tuple[str, ...] | list[str]) -> str | None:
+    lowered = [str(part).lower() for part in command]
+    if not any("agent-browser" in part for part in lowered):
+        return None
+    if "--session" not in lowered:
+        return (
+            "Agent-browser BrowserJourney preflight failed: command uses "
+            "`agent-browser` without a unique `--session`. Parallel journeys "
+            "must use a per-worktree/per-journey session so browser state does "
+            "not collide."
+        )
+    try:
+        session_index = lowered.index("--session") + 1
+        session_name = lowered[session_index]
+    except (ValueError, IndexError):
+        return (
+            "Agent-browser BrowserJourney preflight failed: `--session` is "
+            "present but no session name follows it."
+        )
+    if session_name in {"", "default", "main", "shared", "browser"}:
+        return (
+            "Agent-browser BrowserJourney preflight failed: session name "
+            f"{session_name!r} is too generic for concurrent Otto checks. "
+            "Use a unique journey/worktree session name."
+        )
+    return None
+
+
+def _playwright_browser_journey_preflight(
+    check: BrowserJourney,
+    cwd: Path,
+    browser_env: Mapping[str, str],
+) -> str | None:
     """Catch generated Playwright runners that cannot resolve relative routes.
 
     A repeated I2P failure mode is a BrowserJourney that creates tests with
@@ -470,6 +514,20 @@ def _playwright_browser_journey_preflight(check: BrowserJourney, cwd: Path) -> s
     if not _browser_command_uses_playwright(check.command, cwd):
         return None
     test_paths = _playwright_browser_test_paths(cwd)
+    config_paths = _playwright_config_paths(cwd)
+    config_text = "\n".join(_read_text(path) for path in config_paths)
+    test_text = "\n".join(_read_text(path) for path in test_paths)
+    package_text = _read_text(cwd / "package.json")
+    combined_runner_text = "\n".join([config_text, test_text, package_text])
+    if len(test_paths) > 1 and _playwright_command_runs_overbroad_suite(check.command, cwd, test_paths):
+        examples = ", ".join(str(path.relative_to(cwd)) for path in test_paths[:3])
+        return (
+            "Playwright BrowserJourney preflight failed: command appears to run "
+            "the full browser suite instead of the intended journey. Affected "
+            f"test files include: {examples}. Select one planned journey file "
+            "or pass a specific test selector so repairs are targeted and "
+            "deterministic."
+        )
     if not test_paths:
         return None
     relative_goto_paths = [
@@ -477,21 +535,53 @@ def _playwright_browser_journey_preflight(check: BrowserJourney, cwd: Path) -> s
         for path in test_paths
         if _file_contains_relative_playwright_goto(path)
     ]
-    if not relative_goto_paths:
-        return None
-    config_paths = _playwright_config_paths(cwd)
+    if not config_paths and relative_goto_paths:
+        examples = ", ".join(str(path.relative_to(cwd)) for path in relative_goto_paths[:3])
+        return (
+            "Playwright BrowserJourney preflight failed: browser tests use "
+            f"relative `page.goto(...)` routes but no playwright config file "
+            f"was found. Affected test file(s): {examples}. Commit a "
+            "`playwright.config.*` with `webServer` and `use.baseURL` that "
+            "honors Otto browser env values."
+        )
     base_url_declared = any(_file_mentions_base_url(path) for path in [*config_paths, *test_paths])
-    if base_url_declared:
-        return None
+    if relative_goto_paths and not base_url_declared:
+        examples = ", ".join(str(path.relative_to(cwd)) for path in relative_goto_paths[:3])
+        return (
+            "Playwright BrowserJourney preflight failed: browser tests use relative "
+            f"`page.goto(...)` routes but no `baseURL` was found in playwright config "
+            f"or test files. Affected test file(s): {examples}. Fix by committing a "
+            "`playwright.config.*` with a `webServer` command/url and `use: { baseURL: "
+            "\"http://127.0.0.1:<port>\" }`, or change the journey to navigate to an "
+            "absolute URL. This is runner configuration, not product evidence."
+        )
+    if config_paths and "webServer" not in config_text:
+        return (
+            "Playwright BrowserJourney preflight failed: playwright config has "
+            "`baseURL`/tests but no `webServer`. The BrowserJourney must launch "
+            "the product server itself so Otto can run it deterministically."
+        )
+    if config_paths and not _runner_mentions_browser_env(combined_runner_text):
+        hardcoded_ports = _hardcoded_loopback_ports(combined_runner_text)
+        if hardcoded_ports:
+            port_details = ", ".join(str(port) for port in sorted(hardcoded_ports)[:5])
+            occupied = sorted(port for port in hardcoded_ports if not _port_available(port))
+            occupied_detail = (
+                f" Occupied port(s) detected now: {', '.join(str(port) for port in occupied[:5])}."
+                if occupied else ""
+            )
+            return (
+                "Playwright BrowserJourney preflight failed: runner hard-codes "
+                f"loopback port(s) {port_details} and does not reference "
+                "`OTTO_BROWSER_PORT`, `OTTO_BROWSER_BASE_URL`, "
+                "`PLAYWRIGHT_BASE_URL`, or `PORT`. Otto assigned "
+                f"{browser_env.get('OTTO_BROWSER_BASE_URL')} for this worktree; "
+                "the journey must honor that env to avoid concurrent browser "
+                f"port conflicts.{occupied_detail}"
+            )
     examples = ", ".join(str(path.relative_to(cwd)) for path in relative_goto_paths[:3])
-    return (
-        "Playwright BrowserJourney preflight failed: browser tests use relative "
-        f"`page.goto(...)` routes but no `baseURL` was found in playwright config "
-        f"or test files. Affected test file(s): {examples}. Fix by committing a "
-        "`playwright.config.*` with a `webServer` command/url and `use: { baseURL: "
-        "\"http://127.0.0.1:<port>\" }`, or change the journey to navigate to an "
-        "absolute URL. This is runner configuration, not product evidence."
-    )
+    _ = examples
+    return None
 
 
 def _browser_command_uses_playwright(command: tuple[str, ...] | list[str], cwd: Path) -> bool:
@@ -528,6 +618,79 @@ def _playwright_browser_test_paths(cwd: Path) -> list[Path]:
         for suffix in ("*.spec.ts", "*.spec.tsx", "*.spec.js", "*.spec.jsx", "*.test.ts", "*.test.js"):
             candidates.extend(path for path in root.rglob(suffix) if path.is_file())
     return sorted(set(candidates))
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _runner_mentions_browser_env(text: str) -> bool:
+    return any(
+        token in text
+        for token in (
+            "OTTO_BROWSER_PORT",
+            "OTTO_BROWSER_BASE_URL",
+            "PLAYWRIGHT_BASE_URL",
+            "process.env.PORT",
+            "import.meta.env.PORT",
+        )
+    )
+
+
+_LOOPBACK_PORT_RE = re.compile(r"(?:127\.0\.0\.1|localhost):(\d{2,5})")
+
+
+def _hardcoded_loopback_ports(text: str) -> set[int]:
+    ports: set[int] = set()
+    for raw in _LOOPBACK_PORT_RE.findall(text):
+        try:
+            port = int(raw)
+        except ValueError:
+            continue
+        if 0 < port < 65536:
+            ports.add(port)
+    return ports
+
+
+def _playwright_command_runs_overbroad_suite(
+    command: tuple[str, ...] | list[str],
+    cwd: Path,
+    test_paths: list[Path],
+) -> bool:
+    lowered = [str(part).lower() for part in command]
+    if any(_command_part_selects_test(part, test_paths, cwd) for part in lowered):
+        return False
+    if len(lowered) >= 3 and lowered[0] in {"npm", "pnpm", "yarn"} and lowered[1] == "run":
+        script_name = lowered[2]
+        if "--" in lowered and lowered.index("--") < len(lowered) - 1:
+            return False
+        package_json = cwd / "package.json"
+        try:
+            package_data = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return True
+        script = str(package_data.get("scripts", {}).get(script_name, "")).lower()
+        if any(_command_part_selects_test(script, test_paths, cwd) for _ in (0,)):
+            return False
+        return "playwright" in script
+    if "playwright" in lowered and "test" in lowered:
+        test_index = lowered.index("test")
+        return not any(
+            part and not part.startswith("-")
+            for part in lowered[test_index + 1 :]
+        )
+    return False
+
+
+def _command_part_selects_test(part: str, test_paths: list[Path], cwd: Path) -> bool:
+    for path in test_paths:
+        rel = str(path.relative_to(cwd)).lower()
+        if rel in part or path.name.lower() in part:
+            return True
+    return False
 
 
 _RELATIVE_PLAYWRIGHT_GOTO_RE = re.compile(r"\bpage\.goto\(\s*[\"']/(?!/)")

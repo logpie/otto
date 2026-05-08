@@ -27,6 +27,7 @@ from otto.build import (
     _commit_group_work,
     _write_build_context_packet,
     default_build_agent,
+    detect_critical_shared_contract_violations,
     detect_dependency_scope_extensions,
     detect_scope_violations,
     ready_groups,
@@ -37,6 +38,7 @@ from otto.spec_compile import (
     RepoTestCheck,
     Group,
     PytestCheck,
+    SharedContract,
     Spec,
     StateInvariant,
     StructureDecisions,
@@ -563,6 +565,108 @@ def test_run_build_reuses_agent_session_between_retries(tmp_path: Path) -> None:
     assert seen_sessions == ["", "provider-session-1"]
 
 
+def test_detect_critical_shared_contract_violations() -> None:
+    foundation = Group(id="foundation", name="Foundation", owned_paths=["src/lib/store.ts"])
+    feature = Group(id="transactions", name="Transactions", dependencies=["foundation"])
+    spec = Spec(
+        intent="finance",
+        groups=[foundation, feature],
+        shared_contracts=[
+            SharedContract(
+                id="store",
+                name="Store",
+                owner_id="foundation",
+                paths=["src/lib/store.*"],
+            )
+        ],
+    )
+
+    violations = detect_critical_shared_contract_violations(
+        feature,
+        spec,
+        ["src/lib/store.ts"],
+    )
+
+    assert violations == ["src/lib/store.ts (shared_contract=store, owner=foundation)"]
+
+
+def test_detect_critical_shared_contract_allows_declared_extensions() -> None:
+    foundation = Group(id="foundation", name="Foundation")
+    feature = Group(id="transactions", name="Transactions", dependencies=["foundation"])
+    spec = Spec(
+        intent="finance",
+        groups=[foundation, feature],
+        shared_contracts=[
+            SharedContract(
+                id="browser-runner",
+                name="Browser runner",
+                kind="test_runner",
+                owner_id="foundation",
+                paths=["tests/run_browser_journey.py", "tests/browser/**"],
+                allowed_extension_paths=[
+                    "tests/browser/test_*.py",
+                    "tests/browser/test_*.playwright.ts",
+                ],
+            )
+        ],
+    )
+
+    violations = detect_critical_shared_contract_violations(
+        feature,
+        spec,
+        [
+            "tests/browser/test_transactions.py",
+            "tests/browser/test_transactions.playwright.ts",
+            "tests/run_browser_journey.py",
+        ],
+    )
+
+    assert violations == [
+        "tests/run_browser_journey.py (shared_contract=browser-runner, owner=foundation)"
+    ]
+
+
+def test_run_build_emits_check_feedback_for_same_thread_repair(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    seen_last_failures: list[str] = []
+
+    flag = tmp_path / "pass.flag"
+    check = RepoTestCheck(
+        command=(
+            "python",
+            "-c",
+            "from pathlib import Path; import sys; sys.exit(0 if Path('pass.flag').exists() else 3)",
+        ),
+        timeout_s=10,
+    )
+
+    async def fixing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        seen_last_failures.append(input_.last_failure_narrative)
+        if input_.attempt == 2:
+            flag.write_text("ok", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True, session_id="provider-thread")
+
+    spec = _spec([
+        Group(id="s1", name="x", owned_paths=["pass.flag"], feature_ids=["feature one"], checks=[check])
+    ])
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fixing_agent,
+        )
+    )
+
+    journal = (session_dir / "spec-state.jsonl").read_text(encoding="utf-8")
+    assert result.all_passing
+    assert "group.check.feedback" in journal
+    assert "Authoritative Otto check-runner evidence follows" in seen_last_failures[1]
+
+
 def test_run_build_uses_resume_agent_session_from_prior_run(tmp_path: Path) -> None:
     """A resumed outer run should seed the first attempt with the prior thread."""
     _init_git(tmp_path)
@@ -1043,6 +1147,8 @@ def test_build_agent_prompt_steers_dep_owned_entrypoints_to_registration_points(
 
     assert "`app.py` (owned by `shell`)" in prompt
     assert "appears only through **Dep-owned**" in prompt
+    assert "not blanket permission to rewrite shared product contracts" in prompt
+    assert "request an amendment or owner change" in prompt
     assert "prefer the dependency's registration point" in prompt
     assert "request an amendment via `.otto/amendment_request.json`" in prompt
 
@@ -1125,6 +1231,8 @@ def test_build_context_packet_keeps_full_structure_available_without_prompt_dump
     assert str(full_spec_path) in prompt
     assert "huge_contract" in prompt
     assert "X" * 1000 not in prompt
+    assert "Do not search user/Codex memory" in prompt
+    assert "Do not search or read user/Codex/agent memory" in prompt
 
 
 def test_build_agent_prompt_includes_last_failure_on_retry(tmp_path: Path) -> None:

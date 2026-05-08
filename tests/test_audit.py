@@ -31,6 +31,7 @@ from otto.audit import (
     _fallback_contract_test_argv,
     _parse_audit_output,
     _run_project_contract_test,
+    _write_audit_evidence_packet,
     default_walkthrough_from_spec,
     run_audit,
 )
@@ -43,8 +44,11 @@ from otto.build import (
 )
 from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.spec_compile import (
+    BehaviorJourney,
+    BehaviorStep,
     Feature,
     Group,
+    SharedContract,
     Spec,
     StateInvariant,
     StructureDecisions,
@@ -561,9 +565,10 @@ def test_run_audit_writes_compact_evidence_packet_for_judge(tmp_path: Path) -> N
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
     assert packet["kind"] == "audit_evidence_packet"
     assert packet["full_spec_path"] == str(spec_path)
-    assert packet["deterministic_first_order"][:3] == [
+    assert packet["deterministic_first_order"][:4] == [
         "contract_test",
         "cross_slice_evidence",
+        "planned_behavior_journeys",
         "walkthrough_artifacts",
     ]
     assert "messages.jsonl" in " ".join(packet["notes"])
@@ -573,7 +578,62 @@ def test_run_audit_writes_compact_evidence_packet_for_judge(tmp_path: Path) -> N
     assert "`node_modules/**`" in captured["prompt"]
     assert "`dist/assets/**`" in captured["prompt"]
     assert "Deterministic-first rule" in captured["prompt"]
-    assert "Project contract test" in captured["prompt"]
+
+
+def test_audit_prompt_and_packet_include_planned_behavior_and_shared_contracts(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(["feed"])
+    spec.features = [Feature(id="compose-post", name="Compose post", group_id="feed")]
+    spec.behavior_journeys = [
+        BehaviorJourney(
+            id="planned-main-user-flow",
+            name="Main feed flow",
+            feature_ids=["compose-post"],
+            steps=[
+                BehaviorStep(
+                    action="Type a post and submit it.",
+                    expectation="The post appears in the feed.",
+                    assertion="The submitted text is visible after refresh.",
+                    feature_ids=["compose-post"],
+                )
+            ],
+        )
+    ]
+    spec.shared_contracts = [
+        SharedContract(
+            id="shared-product-core",
+            name="Shared product core",
+            owner_id="feed",
+            paths=["src/store/**"],
+            invariants=["Feed state persists across refresh."],
+        )
+    ]
+    packet_path = tmp_path / "evidence-packet.json"
+    input_ = AuditAgentInput(
+        spec=spec,
+        project_dir=tmp_path,
+        integrated_worktree=tmp_path,
+        build_summary={},
+        merge_summary={},
+        cross_slice_evidence=[],
+        walkthrough_artifacts=[],
+        evidence_packet_path=packet_path,
+    )
+    _write_audit_evidence_packet(input_)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    prompt = _audit_prompt(input_)
+
+    assert packet["planned_behavior_journeys"][0]["steps"][0]["feature_ids"] == [
+        "compose-post"
+    ]
+    assert packet["shared_contracts"][0]["paths"] == ["src/store/**"]
+    assert "Planned behavior journeys" in prompt
+    assert "Type a post and submit it." in prompt
+    assert "The post appears in the feed." in prompt
+    assert "Shared contracts to inspect" in prompt
+    assert "Feed state persists across refresh." in prompt
+    assert "Project contract test" in prompt
 
 
 def test_run_audit_expands_group_feature_ids_for_audit_prompt(tmp_path: Path) -> None:

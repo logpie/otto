@@ -255,6 +255,51 @@ def test_compile_prefers_structured_output_over_text_fallback(
     assert persisted["features"][0]["id"] == "lint-main"
 
 
+def test_compile_skips_app_server_output_schema_for_tool_using_spec_authoring(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project = tmp_path / "proj"
+    _seed_python_project(project)
+    run_dir = tmp_path / "session" / "spec"
+    spec_payload = _minimal_spec_dict()
+    options = SimpleNamespace(provider="codex-app-server")
+
+    async def fake_run_agent_with_timeout(_prompt, seen_options, **_kwargs):
+        assert seen_options is options
+        assert not hasattr(seen_options, "output_format")
+        return (
+            f"<spec_json>{json.dumps(spec_payload)}</spec_json>",
+            0.0,
+            "stub-session",
+            {},
+        )
+
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+    monkeypatch.setattr("otto.agent.make_agent_options", lambda *_a, **_kw: options)
+    monkeypatch.setattr("otto.config.get_spec_timeout", lambda _c: 30)
+    monkeypatch.setattr(
+        "otto.observability.save_rendered_prompt",
+        lambda *_a, **_kw: {"sha256": "x", "path": "x"},
+    )
+    monkeypatch.setattr(
+        "otto.observability.update_input_provenance",
+        lambda *_a, **_kw: None,
+    )
+
+    spec = asyncio.run(
+        compile_spec(
+            "document this CLI tool",
+            project,
+            run_dir,
+            _minimal_config(),
+            project_kind="cli",
+            brownfield=True,
+        )
+    )
+
+    assert spec.features[0].id == "lint-main"
+
+
 def test_brownfield_target_mode_treats_intent_as_future_contract(
     tmp_path: Path, monkeypatch
 ) -> None:

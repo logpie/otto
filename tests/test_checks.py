@@ -493,9 +493,97 @@ def test_browser_journey_preflights_playwright_relative_routes_without_base_url(
     evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
 
     assert evidence.passed is False
-    assert evidence.detail == "playwright runner config invalid artifacts=0"
+    assert evidence.detail == "browser journey preflight failed artifacts=0"
     assert "baseURL" in evidence.raw["preflight_error"]
     assert "transactions.spec.ts" in evidence.raw["preflight_error"]
+
+
+def test_browser_journey_preflights_playwright_hardcoded_port_without_otto_env(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"browser": "playwright test tests/browser/main.spec.ts"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "playwright.config.ts").write_text(
+        "import { defineConfig } from '@playwright/test';\n"
+        "export default defineConfig({ webServer: { command: 'npm run dev -- --port 4173', "
+        "url: 'http://127.0.0.1:4173' }, use: { baseURL: 'http://127.0.0.1:4173' } });\n",
+        encoding="utf-8",
+    )
+    browser_dir = tmp_path / "tests" / "browser"
+    browser_dir.mkdir(parents=True)
+    (browser_dir / "main.spec.ts").write_text(
+        "import { test } from '@playwright/test';\n"
+        "test('journey', async ({ page }) => { await page.goto('/'); });\n",
+        encoding="utf-8",
+    )
+
+    evidence = run_check(
+        BrowserJourney(
+            command=("npm", "run", "browser"),
+            evidence_globs=("test-results/**/*.png",),
+            timeout_s=15,
+        ),
+        project_dir=tmp_path,
+        cwd=tmp_path,
+    )
+
+    assert evidence.passed is False
+    assert evidence.detail == "browser journey preflight failed artifacts=0"
+    assert "hard-codes loopback port" in evidence.raw["preflight_error"]
+    assert "OTTO_BROWSER_BASE_URL" in evidence.raw["preflight_error"]
+
+
+def test_browser_journey_preflights_agent_browser_without_unique_session(
+    tmp_path: Path,
+) -> None:
+    check = BrowserJourney(
+        command=("agent-browser", "open", "http://127.0.0.1:3000"),
+        evidence_globs=("*.png",),
+        timeout_s=15,
+    )
+
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+
+    assert evidence.passed is False
+    assert evidence.detail == "browser journey preflight failed artifacts=0"
+    assert "without a unique `--session`" in evidence.raw["preflight_error"]
+
+
+def test_browser_journey_preflights_overbroad_playwright_suite(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"browser": "playwright test"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "playwright.config.ts").write_text(
+        "import { defineConfig } from '@playwright/test';\n"
+        "const port = process.env.OTTO_BROWSER_PORT || '4173';\n"
+        "const baseURL = process.env.OTTO_BROWSER_BASE_URL || `http://127.0.0.1:${port}`;\n"
+        "export default defineConfig({ webServer: { command: `npm run dev -- --port ${port}`, url: baseURL }, use: { baseURL } });\n",
+        encoding="utf-8",
+    )
+    browser_dir = tmp_path / "tests" / "browser"
+    browser_dir.mkdir(parents=True)
+    for name in ("main.spec.ts", "settings.spec.ts"):
+        (browser_dir / name).write_text(
+            "import { test } from '@playwright/test';\n"
+            "test('journey', async ({ page }) => { await page.goto('/'); });\n",
+            encoding="utf-8",
+        )
+
+    evidence = run_check(
+        BrowserJourney(
+            command=("npm", "run", "browser"),
+            evidence_globs=("test-results/**/*.png",),
+            timeout_s=15,
+        ),
+        project_dir=tmp_path,
+        cwd=tmp_path,
+    )
+
+    assert evidence.passed is False
+    assert "full browser suite" in evidence.raw["preflight_error"]
 
 
 def test_browser_journey_empty_command_is_informational(tmp_path: Path) -> None:
