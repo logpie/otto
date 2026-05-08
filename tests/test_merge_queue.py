@@ -917,6 +917,87 @@ def test_run_merge_queue_blocks_when_repair_retries_exhausted(tmp_path: Path) ->
     assert "repair retries exhausted" in r.failure_narrative
 
 
+def test_run_merge_queue_grants_bounded_extra_repair_on_new_failure(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    subprocess.run(["git", "checkout", "-b", "i2p/_session/s1"], cwd=tmp_path, check=True)
+    (tmp_path / "feature.txt").write_text("feature\n", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "slice feature", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True)
+
+    check_script = """
+from pathlib import Path
+marker = Path("marker.txt")
+if not marker.exists():
+    raise AssertionError("Expected alpha marker")
+if marker.read_text(encoding="utf-8").strip() != "beta":
+    raise AssertionError("Expected beta marker")
+"""
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="x",
+                dependencies=[],
+                owned_paths=["feature.txt", "marker.txt"],
+                feature_ids=["edit marker"],
+                checks=[RepoTestCheck(command=("python", "-c", check_script), timeout_s=10)],
+            ),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="s1",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch="i2p/_session/s1",
+                worktree=tmp_path,
+            ),
+        ],
+    )
+    calls = 0
+
+    async def progressive_repair(input_: BuildAgentInput) -> BuildAgentOutput:
+        nonlocal calls
+        calls += 1
+        value = "alpha" if calls == 1 else "beta"
+        (input_.worktree / "marker.txt").write_text(f"{value}\n", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True)
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=progressive_repair,
+            budget=MergeBudget(
+                per_slice_repair_retries=1,
+                per_slice_progress_repair_extensions=1,
+            ),
+        )
+    )
+
+    assert result.landed_ids == ["s1"]
+    assert calls == 2
+    assert result.results[0].repair_attempts == 2
+    events = list(iter_events(session_dir))
+    assert any(event.kind == "group.repair.progress_extension" for event in events)
+    assert (tmp_path / "marker.txt").read_text(encoding="utf-8") == "beta\n"
+
+
 def test_run_merge_queue_handles_agent_crash_during_repair(tmp_path: Path) -> None:
     _init_git(tmp_path)
     session_dir = tmp_path / "_session"

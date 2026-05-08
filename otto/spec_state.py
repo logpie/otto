@@ -20,6 +20,7 @@ Event kinds (mirror the design doc):
   group.check.started     — a Check began running on group <id>
   group.check.finished    — a Check completed on group <id> (passed/failed)
   group.attempt.failed    — group's check round failed; retry counter ticks
+  group.repair.progress_extension — merge repair made progress; grant bounded retry
   group.merge.eligible    — group cleared deps + freshness checks; queued
   group.merge.started     — merge runner started landing this group
   group.merge.landed      — group merged into target
@@ -77,6 +78,7 @@ EVENT_KINDS: tuple[str, ...] = (
     "group.check.finished",
     "group.check.feedback",     # authoritative check evidence fed to same repair thread
     "group.attempt.failed",
+    "group.repair.progress_extension",  # repair failure changed; grant bounded retry
     "group.merge.eligible",
     "group.merge.started",
     "group.merge.landed",

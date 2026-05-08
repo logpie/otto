@@ -110,6 +110,7 @@ class MergeBudget:
     """Bounds for the merge phase."""
 
     per_slice_repair_retries: int = 2
+    per_slice_progress_repair_extensions: int = 1
     per_slice_wall_s: int = 15 * 60  # 15 min per slice for merge repair
 
 
@@ -752,6 +753,8 @@ async def _process_candidate(
     cost_total = 0.0
     repair_attempts = 0
     last_failure = ""
+    last_repair_failure_fingerprint = ""
+    progress_repair_extensions_used = 0
     repair_session_id = ""
     repair_scope_baseline: dict[str, tuple[bool, str]] | None = None
     raw_log_dir = session_dir / "merge" / group_obj.id
@@ -900,6 +903,11 @@ async def _process_candidate(
                 failure_summaries=[*slice_failed_summaries, *cross_failed_summaries],
                 artifacts=_evidence_artifact_refs([*group_evidence, *cross_evidence]),
             )
+        current_failure_fingerprint = _merge_failure_fingerprint(
+            last_failure,
+            slice_failed_summaries,
+            cross_failed_summaries,
+        )
 
         # If we have no agent or no repair retries left → BLOCKED.
         if build_agent is None:
@@ -915,16 +923,42 @@ async def _process_candidate(
                 wall_s=time.monotonic() - t0,
             )
         if repair_attempts >= budget.per_slice_repair_retries:
-            return MergeResult(
+            progressed = (
+                repair_attempts > 0
+                and current_failure_fingerprint
+                and last_repair_failure_fingerprint
+                and current_failure_fingerprint != last_repair_failure_fingerprint
+            )
+            if (
+                not progressed
+                or progress_repair_extensions_used
+                >= budget.per_slice_progress_repair_extensions
+            ):
+                return MergeResult(
+                    group_id=group_obj.id,
+                    status=MergeStatus.BLOCKED,
+                    cross_slice_evidence=cross_evidence,
+                    group_recheck_evidence=group_evidence,
+                    contract_deltas=list(candidate.contract_deltas),
+                    failure_narrative=last_failure + " (repair retries exhausted)",
+                    repair_attempts=repair_attempts,
+                    cost_usd=cost_total,
+                    wall_s=time.monotonic() - t0,
+                )
+            progress_repair_extensions_used += 1
+            emit(
+                session_dir,
+                "group.repair.progress_extension",
                 group_id=group_obj.id,
-                status=MergeStatus.BLOCKED,
-                cross_slice_evidence=cross_evidence,
-                group_recheck_evidence=group_evidence,
-                contract_deltas=list(candidate.contract_deltas),
-                failure_narrative=last_failure + " (repair retries exhausted)",
-                repair_attempts=repair_attempts,
-                cost_usd=cost_total,
-                wall_s=time.monotonic() - t0,
+                attempt=repair_attempts + 1,
+                detail=(
+                    "merge repair produced a different verification failure; "
+                    "granting one bounded extra repair attempt"
+                ),
+                previous_failure=last_repair_failure_fingerprint,
+                current_failure=current_failure_fingerprint,
+                extensions_used=progress_repair_extensions_used,
+                extensions_allowed=budget.per_slice_progress_repair_extensions,
             )
 
         # 4: invoke the build agent for repair.
@@ -936,6 +970,7 @@ async def _process_candidate(
         # same conflict. Checkout the slice's branch first, repair,
         # commit on the slice branch, then let the next loop iteration
         # re-merge.
+        last_repair_failure_fingerprint = current_failure_fingerprint
         repair_attempts += 1
         repair_scope_baseline = None
         on_slice_branch = False
@@ -1510,6 +1545,16 @@ def _commit_repair_candidate_after_agent_error(
 
 def _failed_evidence_summaries(evidence: list[Evidence]) -> list[str]:
     return [_evidence_failure_summary(ev) for ev in evidence if not ev.passed]
+
+
+def _merge_failure_fingerprint(
+    last_failure: str,
+    slice_failed_summaries: list[str],
+    cross_failed_summaries: list[str],
+) -> str:
+    """Return a stable enough signature for merge-repair progress detection."""
+    text = "\n".join([last_failure, *slice_failed_summaries, *cross_failed_summaries])
+    return " ".join(text.lower().split())[:2000]
 
 
 def _evidence_artifact_refs(evidence: list[Evidence]) -> list[str]:
