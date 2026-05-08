@@ -846,11 +846,18 @@ def _file_mentions_base_url(path: Path) -> bool:
 def _browser_journey_env(cwd: Path) -> dict[str, str]:
     port = _allocate_browser_journey_port(cwd)
     base_url = f"http://127.0.0.1:{port}"
-    socket_dir = Path(tempfile.gettempdir()) / "otto-agent-browser" / str(port)
+    # Keep this path intentionally short. agent-browser derives per-session
+    # socket paths from this directory plus the journey session name, and
+    # generated feature names can be long enough to exceed Unix socket limits
+    # unless Otto owns the short base path centrally.
+    socket_root = Path(os.environ.get("OTTO_AGENT_BROWSER_SOCKET_ROOT", "/tmp"))
+    socket_dir = socket_root / "ab" / str(port)
     socket_dir.mkdir(parents=True, exist_ok=True)
+    session = f"ab{port}"
     return {
         "OTTO_BROWSER_PORT": str(port),
         "OTTO_BROWSER_BASE_URL": base_url,
+        "OTTO_BROWSER_SESSION": session,
         "PLAYWRIGHT_BASE_URL": base_url,
         "PORT": str(port),
         "VITE_PORT": str(port),

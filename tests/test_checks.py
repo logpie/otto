@@ -418,6 +418,9 @@ def test_browser_journey_subprocess_and_globs_collect_artifacts(tmp_path: Path) 
     assert evidence.artifacts[1].name == "step-2.png"
     assert evidence.raw["resolved_command"][0].endswith(("python", "python3"))
     assert evidence.raw["browser_env"]["OTTO_BROWSER_BASE_URL"].startswith("http://127.0.0.1:")
+    assert evidence.raw["browser_env"]["OTTO_BROWSER_SESSION"].startswith("ab")
+    assert "/ab/" in evidence.raw["browser_env"]["AGENT_BROWSER_SOCKET_DIR"]
+    assert len(evidence.raw["browser_env"]["AGENT_BROWSER_SOCKET_DIR"]) <= 18
 
 
 def test_browser_journey_bootstraps_locked_node_project_for_python_wrapper(
