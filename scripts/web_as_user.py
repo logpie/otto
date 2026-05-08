@@ -8508,7 +8508,6 @@ def _preserve_failed_project_snapshot(project_dir: Path, artifact_dir: Path) -> 
             "dist",
             "build",
             "coverage",
-            "test-results",
             ".pytest_cache",
             "__pycache__",
         }
@@ -8681,7 +8680,13 @@ def run_one_scenario(
                 project_dir=project_dir,
                 artifact_dir=artifact_dir,
                 web_url=getattr(backend, "url", None),
-                keep_snapshot=bool(failures.failures),
+                keep_snapshot=(
+                    bool(failures.failures)
+                    or (
+                        result is not None
+                        and result.outcome in {"FAIL", "INFRA"}
+                    )
+                ),
             )
             cleanup_report = teardown_report.get("project_process_cleanup")
             if isinstance(cleanup_report, dict) and cleanup_report.get("after_sigkill"):
@@ -8697,7 +8702,12 @@ def run_one_scenario(
                     failures.note(f"backend.stop raised: {exc}")
 
     explicit_outcome = result.outcome if result is not None else None
-    cleanup_heavy_browser_artifacts(artifact_dir, keep=keep_heavy_artifacts)
+    keep_failure_debug_artifacts = (
+        keep_heavy_artifacts
+        or bool(failures.failures)
+        or explicit_outcome in ("FAIL", "INFRA")
+    )
+    cleanup_heavy_browser_artifacts(artifact_dir, keep=keep_failure_debug_artifacts)
 
     if failures.failures or (explicit_outcome is not None and explicit_outcome != "PASS"):
         classification = (

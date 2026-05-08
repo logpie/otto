@@ -2869,7 +2869,16 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         for g in spec.shared_scaffold:
             lines.append(f"  - `{g}`")
         lines.append("")
-    if not s.owned_paths and not dep_owned and not spec.shared_scaffold:
+    shared_paths_only = [
+        g for g in (getattr(spec, "shared_paths", []) or [])
+        if g not in set(spec.shared_scaffold or [])
+    ]
+    if shared_paths_only:
+        lines.append("**Shared paths (any slice may extend compatibly):**")
+        for g in shared_paths_only:
+            lines.append(f"  - `{g}`")
+        lines.append("")
+    if not s.owned_paths and not dep_owned and not spec.shared_scaffold and not shared_paths_only:
         lines.append("(No declared paths — create only new files matching your tasks.)")
         lines.append("")
     lines.append(
@@ -3251,11 +3260,15 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
             session_id=session_id or agent_input.agent_session_id,
         )
     except AgentCallError as exc:
+        detail = f"agent error: {exc}"
+        if exc.crash_path:
+            detail += f" (crash details: {exc.crash_path})"
         return BuildAgentOutput(
             succeeded=False,
-            cost_usd=0.0,
+            cost_usd=exc.total_cost_usd or 0.0,
             wall_s=time.monotonic() - t0,
-            detail=f"agent error: {exc}",
+            detail=detail,
+            session_id=exc.session_id or agent_input.agent_session_id,
         )
 
 

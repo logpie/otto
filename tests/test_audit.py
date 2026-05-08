@@ -2272,8 +2272,8 @@ def test_default_walkthrough_picks_cross_slice_journey_first(tmp_path: Path) -> 
     cross-slice one wins (it's the integrated test)."""
     from otto.spec_compile import BrowserJourney
 
-    cross = BrowserJourney(command=("echo", "cross"), evidence_globs=("c-*.png",))
-    slice_journey = BrowserJourney(command=("echo", "slice"), evidence_globs=("s-*.png",))
+    cross = BrowserJourney(command=("echo", "cross"), evidence_globs=())
+    slice_journey = BrowserJourney(command=("echo", "slice"), evidence_globs=())
     spec = Spec(
         intent="x",
         cross_group_checks=[cross],
@@ -2292,7 +2292,7 @@ def test_default_walkthrough_falls_back_to_slice_journey(tmp_path: Path) -> None
     """No cross-slice BrowserJourney → first slice's BrowserJourney is used."""
     from otto.spec_compile import BrowserJourney
 
-    slice_journey = BrowserJourney(command=("echo", "slice"), evidence_globs=("*.png",))
+    slice_journey = BrowserJourney(command=("echo", "slice"), evidence_globs=())
     spec = Spec(
         intent="x",
         groups=[Group(id="s", name="t", checks=[slice_journey])],

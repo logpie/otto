@@ -429,7 +429,15 @@ def _run_browser_journey(
         artifacts,
         _collect_output_artifacts(completed.stdout or "", cwd=cwd, project_dir=project_dir),
     )
-    passed = completed.returncode == 0
+    missing_declared_evidence = (
+        completed.returncode == 0
+        and bool(check.evidence_globs)
+        and not artifacts
+    )
+    passed = completed.returncode == 0 and not missing_declared_evidence
+    detail = f"exit={completed.returncode} artifacts={len(artifacts)}"
+    if missing_declared_evidence:
+        detail += " missing declared evidence"
     raw = {
         "command": list(check.command),
         "resolved_command": resolved_command,
@@ -437,6 +445,7 @@ def _run_browser_journey(
         "stdout": completed.stdout or "",
         "stderr": completed.stderr or "",
         "evidence_globs": list(check.evidence_globs),
+        "missing_declared_evidence": missing_declared_evidence,
         "browser_env": browser_env,
     }
     if browser_lock_wait_s is not None:
@@ -452,7 +461,7 @@ def _run_browser_journey(
         passed=passed,
         started_at=started,
         duration_s=time.monotonic() - t0,
-        detail=f"exit={completed.returncode} artifacts={len(artifacts)}",
+        detail=detail,
         artifacts=artifacts,
         raw=raw,
     )

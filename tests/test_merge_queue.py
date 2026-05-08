@@ -35,6 +35,7 @@ from otto.merge_queue import (
     run_merge_queue,
 )
 from otto.spec_compile import (
+    BrowserJourney,
     RepoTestCheck,
     Group,
     Spec,
@@ -699,6 +700,77 @@ def test_run_merge_queue_reselects_cross_group_checks_after_merge(
     assert len(result.results[0].cross_slice_evidence) == 1
     assert result.results[0].cross_slice_evidence[0].passed is False
     assert "cross-slice" in result.results[0].failure_narrative
+
+
+def test_run_merge_queue_does_not_treat_evidence_globs_as_missing_inputs(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    branch = "i2p/_session/s1"
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "feature.txt").write_text("feature\n", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(s1): build", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="Feature",
+                dependencies=[],
+                owned_paths=["feature.txt"],
+                feature_ids=["Add feature marker file"],
+                checks=[_passing_check()],
+            ),
+        ],
+        cross_checks=[
+            BrowserJourney(
+                command=(
+                    "python",
+                    "-c",
+                    "from pathlib import Path; p=Path('otto_artifacts/browser/full-workflow'); "
+                    "p.mkdir(parents=True, exist_ok=True); (p/'step.png').write_bytes(b'png')",
+                ),
+                evidence_globs=("otto_artifacts/browser/full-workflow/*.png",),
+                timeout_s=10,
+            )
+        ],
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="s1",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=branch,
+                worktree=tmp_path,
+            ),
+        ],
+    )
+
+    result = asyncio.run(
+        run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
+    )
+
+    assert result.landed_ids == ["s1"]
+    assert result.results[0].cross_slice_evidence[0].passed is True
+    assert not (
+        session_dir
+        / "merge"
+        / "s1"
+        / "cross-attempt-00"
+        / "000-MissingCrossGroupCheckArtifact.log"
+    ).exists()
 
 
 # ---------------------------------------------------------------------------

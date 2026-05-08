@@ -465,6 +465,23 @@ def test_browser_journey_collects_printed_artifacts_when_glob_misses(tmp_path: P
     assert evidence.detail == "exit=0 artifacts=1"
 
 
+def test_browser_journey_fails_when_declared_evidence_missing(tmp_path: Path) -> None:
+    script = tmp_path / "fake_browser.py"
+    script.write_text("print('done without screenshots')\n", encoding="utf-8")
+    check = BrowserJourney(
+        command=("python", str(script)),
+        evidence_globs=("evidence/*.png",),
+        timeout_s=15,
+    )
+
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+
+    assert evidence.passed is False
+    assert evidence.artifacts == []
+    assert evidence.detail == "exit=0 artifacts=0 missing declared evidence"
+    assert evidence.raw["missing_declared_evidence"] is True
+
+
 def test_browser_journey_preflights_playwright_relative_routes_without_base_url(
     tmp_path: Path,
 ) -> None:

@@ -208,6 +208,30 @@ def test_web_as_user_cleanup_keeps_videos_but_prunes_trace_bundles(tmp_path: Pat
     assert "test-results/case/network.har" in deleted
 
 
+def test_failed_project_snapshot_preserves_browser_test_results(tmp_path: Path) -> None:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    result_dir = project / "test-results" / "case"
+    node_modules = project / "node_modules"
+    result_dir.mkdir(parents=True)
+    node_modules.mkdir(parents=True)
+    (result_dir / "trace.zip").write_bytes(b"trace")
+    (node_modules / "large.js").write_text("ignored", encoding="utf-8")
+
+    artifact_dir = tmp_path / "artifacts"
+    report = web_as_user._preserve_failed_project_snapshot(project, artifact_dir)
+
+    assert report["copied"] is True
+    assert (artifact_dir / "project-snapshot" / "test-results" / "case" / "trace.zip").exists()
+    assert not (artifact_dir / "project-snapshot" / "node_modules").exists()
+
+
 def test_web_as_user_writes_bounded_meta_debug_packet(tmp_path: Path) -> None:
     """A stalled monitor gets root-cause evidence without dumping messages.jsonl."""
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -403,6 +427,19 @@ def test_web_as_user_honors_scenario_returned_failure(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(web_as_user, "_throwaway_project", fake_project)
     monkeypatch.setattr(web_as_user, "_start_otto_web_in_process", lambda _project, _artifact, **_kwargs: DummyBackend())
     monkeypatch.setattr(web_as_user, "artifact_mine_pass", lambda _project, _failures: None)
+    teardown_calls: list[bool] = []
+    cleanup_calls: list[bool] = []
+
+    def fake_teardown(**kwargs: object) -> dict[str, object]:
+        teardown_calls.append(bool(kwargs["keep_snapshot"]))
+        return {"project_process_cleanup": {}}
+
+    monkeypatch.setattr(web_as_user, "_teardown_scenario_runtime", fake_teardown)
+    monkeypatch.setattr(
+        web_as_user,
+        "cleanup_heavy_browser_artifacts",
+        lambda _artifact_dir, *, keep=False: cleanup_calls.append(bool(keep)) or {},
+    )
 
     scenario = web_as_user.Scenario(
         id="WX",
@@ -426,6 +463,8 @@ def test_web_as_user_honors_scenario_returned_failure(monkeypatch, tmp_path: Pat
 
     assert outcome.outcome == "FAIL"
     assert outcome.note == "scenario-specific failure"
+    assert teardown_calls == [True]
+    assert cleanup_calls == [True]
 
 
 def test_needs_product_verification_requires_product_browser_step(

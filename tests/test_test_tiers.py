@@ -21,6 +21,7 @@ def test_web_tier_typechecks_before_pytest() -> None:
     commands = [argv for _env, argv in tier_commands]
 
     assert commands[0] == ["npm", "run", "web:typecheck"]
+    assert commands[1] == ["npm", "run", "web:build"]
     assert {
         "tests/test_run_view.py",
         "tests/test_run_view_evidence_kinds.py",
@@ -38,14 +39,14 @@ def test_web_tier_typechecks_before_pytest() -> None:
         "tests/test_mission_control_polish.py",
         "tests/test_web_bundle_freshness.py",
         "tests/test_web_cache_headers.py",
-    }.issubset(commands[1])
-    assert commands[2][1:3] == ["-m", "pytest"]
+    }.issubset(commands[2])
+    assert commands[3][1:3] == ["-m", "pytest"]
     assert (
         "tests/browser/test_launcher_run_view_gate.py::"
         "test_mission_control_product_smoke_launch_and_group_run_view"
-    ) in commands[2]
-    assert "playwright" in commands[2]
-    assert tier_commands[2][0] == {"OTTO_BROWSER_SKIP_BUILD": "1"}
+    ) in commands[3]
+    assert "playwright" in commands[3]
+    assert tier_commands[3][0] == {"OTTO_BROWSER_SKIP_BUILD": "1"}
 
 
 def test_fast_tier_excludes_slow_and_integration() -> None:

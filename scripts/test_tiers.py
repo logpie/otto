@@ -45,6 +45,7 @@ def commands_for_tier(tier: str, pytest_args: Sequence[str]) -> list[tuple[dict[
     if tier == "web":
         return [
             (None, ["npm", "run", "web:typecheck"]),
+            (None, ["npm", "run", "web:build"]),
             (None, pytest_cmd(
                 "-q",
                 "tests/test_run_view.py",

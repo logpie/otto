@@ -634,7 +634,7 @@ def _check_path_references(check: Any) -> list[str]:
 
 def _explicit_check_path_references(check: Any) -> list[str]:
     refs: list[str] = []
-    for attr in ("command", "evidence_globs", "paths"):
+    for attr in ("command", "paths"):
         value = getattr(check, attr, None)
         if isinstance(value, str):
             candidates = [value]
@@ -647,6 +647,8 @@ def _explicit_check_path_references(check: Any) -> list[str]:
 def _looks_like_path_reference(value: str) -> bool:
     text = value.strip()
     if not text or text.startswith("-") or "://" in text:
+        return False
+    if any(char.isspace() for char in text):
         return False
     if any(char in text for char in "*?[]"):
         return True

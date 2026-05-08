@@ -876,6 +876,47 @@ def test_default_build_agent_passes_resume_session_to_provider(tmp_path: Path, m
     assert seen["resume"] == "provider-session-1"
 
 
+def test_default_build_agent_preserves_provider_failure_continuity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from otto.agent import AgentCallError, AgentOptions
+
+    group = Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[])
+    spec = _spec([group])
+
+    def fake_make_options(*_args, **_kwargs) -> AgentOptions:
+        return AgentOptions()
+
+    async def fake_run_agent(_prompt, _options, **_kwargs):
+        raise AgentCallError(
+            "app-server stream ended",
+            session_id="provider-session-error",
+            total_cost_usd=0.07,
+            crash_path=str(tmp_path / "crash.json"),
+        )
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent)
+
+    output = asyncio.run(
+        default_build_agent(
+            BuildAgentInput(
+                spec=spec,
+                group=group,
+                project_dir=tmp_path,
+                worktree=tmp_path,
+                branch="i2p/test/s1",
+                attempt=1,
+            )
+        )
+    )
+
+    assert output.succeeded is False
+    assert output.session_id == "provider-session-error"
+    assert output.cost_usd == 0.07
+    assert "crash details:" in output.detail
+
+
 def test_default_build_agent_uses_input_config_for_provider_options(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1240,6 +1281,33 @@ def test_build_agent_prompt_allows_explicit_shared_entrypoint_edits(tmp_path: Pa
     assert "If one is listed under **Yours** or **Shared scaffold**" in prompt
     assert "may make the smallest necessary edit" in prompt
     assert "DO NOT modify them" not in prompt
+
+
+def test_build_agent_prompt_lists_shared_paths_as_writable_contracts(tmp_path: Path) -> None:
+    group = Group(
+        id="ledger",
+        name="Ledger",
+        owned_paths=["src/ledger.ts"],
+        feature_ids=["add ledger view"],
+        checks=[],
+    )
+    spec = _spec([group])
+    spec.shared_paths = ["src/store/**", "playwright.config.*"]
+    inp = BuildAgentInput(
+        spec=spec,
+        group=group,
+        project_dir=tmp_path,
+        worktree=tmp_path,
+        branch="x",
+        attempt=1,
+    )
+
+    prompt = _build_agent_prompt(inp)
+
+    assert "**Shared paths (any slice may extend compatibly):**" in prompt
+    assert "`src/store/**`" in prompt
+    assert "`playwright.config.*`" in prompt
+    assert "(No declared paths" not in prompt
 
 
 def test_build_agent_prompt_steers_dep_owned_entrypoints_to_registration_points(
