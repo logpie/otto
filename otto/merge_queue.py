@@ -585,15 +585,14 @@ def _cross_group_checks_for_landed_state(
 ) -> list[Any]:
     """Return cross-group checks that are runnable in the current state.
 
-    Some global checks reference runner files produced by an integration
-    group. Running those checks before that group has landed is a false
-    failure; checks without future-owned explicit path references still
-    run after every merge. Checks with explicit missing path references
-    are also deferred while the integration state is incomplete: the
-    compiler may emit a global runner path before any group has created
-    it, and blaming the first landed group for that absent file creates
-    a false repair loop. Once all units have landed, missing explicit
-    paths are runnable and should fail normally.
+    Cross-group checks are integrated product checks. They should run only once
+    the build graph represented by the spec has landed; running them against a
+    partial integration branch blames an early group for functionality that a
+    later group has not merged yet. Per-group checks remain the incremental
+    gate while the queue is still landing work.
+
+    Once the state is complete, missing explicit paths are runnable and should
+    fail normally.
     """
     landed = set(landed_ids)
     unlanded_units = [
@@ -601,6 +600,8 @@ def _cross_group_checks_for_landed_state(
         for unit in [*spec.groups, *list(getattr(spec, "components", []) or [])]
         if getattr(unit, "id", "") not in landed
     ]
+    if unlanded_units:
+        return []
     runnable: list[Any] = []
     for check in spec.cross_group_checks:
         refs = _check_path_references(check)

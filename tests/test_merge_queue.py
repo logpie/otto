@@ -615,7 +615,7 @@ def test_run_merge_queue_defers_missing_unowned_cross_group_runner_until_complet
 def test_run_merge_queue_reselects_cross_group_checks_after_merge(
     tmp_path: Path,
 ) -> None:
-    """A check runner created by the candidate must run after it lands."""
+    """Integrated checks wait for complete graph, even if runner landed early."""
     _init_git(tmp_path)
     session_dir = tmp_path / "_session"
     session_dir.mkdir()
@@ -695,11 +695,12 @@ def test_run_merge_queue_reselects_cross_group_checks_after_merge(
         run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
     )
 
-    assert result.landed_ids == []
-    assert result.blocked_ids == ["foundation"]
-    assert len(result.results[0].cross_slice_evidence) == 1
-    assert result.results[0].cross_slice_evidence[0].passed is False
-    assert "cross-slice" in result.results[0].failure_narrative
+    assert result.landed_ids == ["foundation"]
+    assert result.blocked_ids == ["feature"]
+    assert result.results[0].cross_slice_evidence == []
+    assert len(result.results[1].cross_slice_evidence) == 1
+    assert result.results[1].cross_slice_evidence[0].passed is False
+    assert "cross-slice" in result.results[1].failure_narrative
 
 
 def test_run_merge_queue_does_not_treat_evidence_globs_as_missing_inputs(
