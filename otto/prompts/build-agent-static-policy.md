@@ -128,10 +128,11 @@ Use the real `agent-browser` command surface. Semantic `find` supports
 unsupported commands such as `agent-browser find label Type select expense`.
 When a label or button name is common, short, or appears inside parent region
 names, form labels, helper text, or repeated cards, do not use a broad global
-semantic locator such as `find label Search ...`. Use a scoped exact role
-locator through `agent-browser eval`, a snapshot ref, or a unique accessible
-name/data-testid so the journey fails on product behavior rather than
-Playwright strict-mode ambiguity.
+semantic locator such as `find label Search ...`, `find label To ...`, or
+`find label From ...`. Use a scoped exact role locator through
+`agent-browser eval`, a snapshot ref, or a unique accessible name/data-testid
+so the journey fails on product behavior rather than Playwright strict-mode
+ambiguity.
 
 Only choose repo-native Playwright when the journey needs capabilities that
 agent-browser cannot express cleanly, such as multi-context auth, network
