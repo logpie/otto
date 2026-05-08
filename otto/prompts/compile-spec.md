@@ -689,6 +689,13 @@ Example for a library:
    debugging, or an already established project Playwright suite. Do not
    invent a `steps:` array — that's a future field.
 
+   Group checks must be stage-local. A group-level BrowserJourney may assert
+   only that group's feature_ids plus behavior supplied by its dependencies.
+   Do not make a foundation/shell check require buttons, form labels, or user
+   flows owned by downstream groups that have not run yet. Put the complete
+   original-intent workflow in `cross_group_checks` or `behavior_journeys`,
+   and let feature-owned journey modules cover their own controls.
+
 5. **`deps` is a DAG**. No cycles. Groups with no deps run first.
 
    **Maximize safe parallelism.** Do not add a dependency merely because
@@ -881,6 +888,10 @@ dispatch, while feature groups add feature-owned journey modules under
 make every feature group edit `tests/run_browser_journey.py` to add one more
 journey case; that creates predictable merge conflicts and hides whether the
 product failed or the runner was flattened during merge.
+The foundation/shell journey should prove app boot, visible shell, extension
+slots, shared store contracts, and honest empty states. It should not click
+transaction/filter/import/export controls unless those controls are owned by
+that same group or an already-declared dependency.
 Use repo-native Playwright real event primitives only when
 the scenario needs Playwright-only capabilities such as file upload, network
 interception, multiple browser contexts, or an existing Playwright suite, and

@@ -169,6 +169,8 @@ def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -
     assert "zero matching artifacts is a runner/evidence bug" in text
     assert "page.goto(\"/transactions\")" in text
     assert "invalid URL" in text
+    assert "screenshot is blank or\nnear-blank" in text
+    assert "Group-level BrowserJourney modules must stay stage-local" in text
     audit_text = (PROMPTS_DIR / "audit-final-task.md").read_text(encoding="utf-8")
     assert "OTTO_BROWSER_SESSION=audit-main" in audit_text
     assert "AGENT_BROWSER_SOCKET_DIR=/tmp/otto-ab/audit-main" in audit_text
@@ -181,6 +183,8 @@ def test_compile_spec_browser_journeys_are_agent_browser_first() -> None:
     assert "stable shared dispatcher owned by the foundation/shared-runner group" in text
     assert "tests/browser_journeys/transactions.py" in text
     assert "Do not\nmake every feature group edit `tests/run_browser_journey.py`" in text
+    assert "Group checks must be stage-local" in text
+    assert "foundation/shell check require buttons" in text
     assert "Do not also put critical contract `paths` in `shared_scaffold`" in text
     assert '"any group may extend" surfaces' in text
     assert "include that path in the owner's `owned_paths`" in text

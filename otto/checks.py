@@ -28,12 +28,14 @@ import os
 import re
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 import tempfile
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -444,6 +446,9 @@ def _run_browser_journey(
     detail = f"exit={completed.returncode} artifacts={len(artifacts)}"
     if missing_declared_evidence:
         detail += " missing declared evidence"
+    artifact_diagnostics = _browser_artifact_diagnostics(artifacts)
+    if not passed and any(item.get("appears_blank") for item in artifact_diagnostics):
+        detail += " blank screenshot evidence"
     raw = {
         "command": list(check.command),
         "resolved_command": resolved_command,
@@ -454,6 +459,8 @@ def _run_browser_journey(
         "missing_declared_evidence": missing_declared_evidence,
         "browser_env": browser_env,
     }
+    if artifact_diagnostics:
+        raw["artifact_diagnostics"] = artifact_diagnostics
     if browser_lock_wait_s is not None:
         raw["browser_lock_wait_s"] = browser_lock_wait_s
     if bootstrap is not None:
@@ -1802,6 +1809,161 @@ def _collect_output_artifacts(output: str, *, cwd: Path, project_dir: Path) -> l
                 artifacts.append(candidate)
                 break
     return _merge_artifacts([], artifacts)
+
+
+def _browser_artifact_diagnostics(artifacts: list[Path]) -> list[dict[str, Any]]:
+    """Summarize screenshot evidence in text so repair agents can use it.
+
+    Build agents often cannot visually inspect binary artifacts that Otto's
+    outer check runner captured. A failed browser journey with a blank PNG is
+    materially different from a locator typo: it usually means a runtime crash,
+    missing mount, blank route, or invisible UI. Keep this dependency-free so
+    check execution does not require Pillow.
+    """
+    diagnostics: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        if artifact.suffix.lower() != ".png":
+            continue
+        summary = _png_visual_diagnostic(artifact)
+        if summary:
+            diagnostics.append(summary)
+    return diagnostics
+
+
+def _png_visual_diagnostic(path: Path) -> dict[str, Any] | None:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+
+    offset = 8
+    width = height = bit_depth = color_type = None
+    idat_parts: list[bytes] = []
+    try:
+        while offset + 8 <= len(data):
+            length = struct.unpack(">I", data[offset:offset + 4])[0]
+            chunk_type = data[offset + 4:offset + 8]
+            chunk_data = data[offset + 8:offset + 8 + length]
+            offset += 12 + length
+            if chunk_type == b"IHDR":
+                width, height, bit_depth, color_type, _compression, _filter, interlace = struct.unpack(
+                    ">IIBBBBB", chunk_data
+                )
+                if interlace != 0:
+                    return {
+                        "path": str(path),
+                        "kind": "png",
+                        "bytes": len(data),
+                        "dimensions": f"{width}x{height}",
+                        "diagnostic": "png interlaced; visual variance not analyzed",
+                    }
+            elif chunk_type == b"IDAT":
+                idat_parts.append(chunk_data)
+            elif chunk_type == b"IEND":
+                break
+    except Exception:
+        return None
+
+    if not width or not height or bit_depth != 8 or color_type not in (2, 6) or not idat_parts:
+        dimensions = f"{width}x{height}" if width and height else "unknown"
+        return {
+            "path": str(path),
+            "kind": "png",
+            "bytes": len(data),
+            "dimensions": dimensions,
+            "diagnostic": "png format unsupported for visual variance analysis",
+        }
+
+    bpp = 4 if color_type == 6 else 3
+    stride = width * bpp
+    try:
+        inflated = zlib.decompress(b"".join(idat_parts))
+    except Exception:
+        return None
+    expected_min = (stride + 1) * height
+    if len(inflated) < expected_min:
+        return None
+
+    prev = bytearray(stride)
+    unique: set[tuple[int, int, int]] = set()
+    mins = [255, 255, 255]
+    maxs = [0, 0, 0]
+    sample_step = max(1, (width * height) // 4096)
+    pixel_index = 0
+
+    for row_index in range(height):
+        row_start = row_index * (stride + 1)
+        filter_type = inflated[row_start]
+        raw = bytearray(inflated[row_start + 1:row_start + 1 + stride])
+        row = _png_unfilter_row(raw, prev, filter_type, bpp)
+        for col in range(width):
+            base = col * bpp
+            rgb = (row[base], row[base + 1], row[base + 2])
+            if pixel_index % sample_step == 0 and len(unique) <= 64:
+                unique.add(rgb)
+            for channel, value in enumerate(rgb):
+                if value < mins[channel]:
+                    mins[channel] = value
+                if value > maxs[channel]:
+                    maxs[channel] = value
+            pixel_index += 1
+        prev = row
+
+    channel_delta = max(maxs[index] - mins[index] for index in range(3))
+    appears_blank = len(unique) <= 2 and channel_delta <= 3
+    diagnostic = (
+        "screenshot appears blank or near-blank; investigate runtime render, "
+        "mount, route, console error, CSS visibility, or app crash before "
+        "loosening locators/assertions"
+        if appears_blank
+        else "screenshot has visible pixel variance"
+    )
+    return {
+        "path": str(path),
+        "kind": "png",
+        "bytes": len(data),
+        "dimensions": f"{width}x{height}",
+        "sampled_colors": len(unique),
+        "channel_delta": channel_delta,
+        "appears_blank": appears_blank,
+        "diagnostic": diagnostic,
+    }
+
+
+def _png_unfilter_row(raw: bytearray, prev: bytearray, filter_type: int, bpp: int) -> bytearray:
+    if filter_type == 0:
+        return raw
+    row = bytearray(raw)
+    for index, value in enumerate(raw):
+        left = row[index - bpp] if index >= bpp else 0
+        up = prev[index] if index < len(prev) else 0
+        up_left = prev[index - bpp] if index >= bpp and index - bpp < len(prev) else 0
+        if filter_type == 1:
+            predictor = left
+        elif filter_type == 2:
+            predictor = up
+        elif filter_type == 3:
+            predictor = (left + up) // 2
+        elif filter_type == 4:
+            predictor = _png_paeth(left, up, up_left)
+        else:
+            predictor = 0
+        row[index] = (value + predictor) & 0xFF
+    return row
+
+
+def _png_paeth(left: int, up: int, up_left: int) -> int:
+    estimate = left + up - up_left
+    pa = abs(estimate - left)
+    pb = abs(estimate - up)
+    pc = abs(estimate - up_left)
+    if pa <= pb and pa <= pc:
+        return left
+    if pb <= pc:
+        return up
+    return up_left
 
 
 def _merge_artifacts(existing: list[Path], extra: list[Path]) -> list[Path]:

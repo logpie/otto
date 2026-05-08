@@ -26,6 +26,7 @@ from otto.build import (
     GroupStatus,
     _build_agent_prompt,
     _commit_group_work,
+    _failed_check_repair_narrative,
     _write_build_context_packet,
     collect_critical_shared_contract_deltas,
     default_build_agent,
@@ -35,7 +36,9 @@ from otto.build import (
     ready_groups,
     run_build,
 )
+from otto.checks import Evidence
 from otto.spec_compile import (
+    BrowserJourney,
     Feature,
     RepoTestCheck,
     Group,
@@ -50,6 +53,50 @@ from otto.spec_compile import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def test_failed_check_repair_narrative_includes_artifact_diagnostics(tmp_path: Path) -> None:
+    log_dir = tmp_path / "attempt-01"
+    log_dir.mkdir()
+    (log_dir / "001-BrowserJourney.log").write_text("locator failed\n", encoding="utf-8")
+    evidence = Evidence(
+        passed=False,
+        started_at="2026-05-08T00:00:00Z",
+        duration_s=1.0,
+        detail="exit=1 artifacts=1 blank screenshot evidence",
+        artifacts=[tmp_path / "blank.png"],
+        raw={
+            "artifact_diagnostics": [
+                {
+                    "path": str(tmp_path / "blank.png"),
+                    "dimensions": "1280x720",
+                    "sampled_colors": 1,
+                    "channel_delta": 0,
+                    "appears_blank": True,
+                    "diagnostic": "screenshot appears blank or near-blank",
+                }
+            ]
+        },
+    )
+
+    narrative = _failed_check_repair_narrative(
+        1,
+        [
+            (
+                BrowserJourney(
+                    command=("python3", "tests/run_browser_journey.py", "--journey", "shell"),
+                    evidence_globs=("otto_artifacts/browser/shell/*.png",),
+                ),
+                evidence,
+            )
+        ],
+        log_dir,
+    )
+
+    assert "Artifact diagnostics:" in narrative
+    assert "blank.png: 1280x720" in narrative
+    assert "sampled_colors=1" in narrative
+    assert "screenshot appears blank or near-blank" in narrative
 
 
 def _spec(groups: list[Group]) -> Spec:

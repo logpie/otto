@@ -18,8 +18,10 @@ import http.server
 import json
 import os
 import socket
+import struct
 import sys
 import threading
+import zlib
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -37,6 +39,29 @@ from otto.spec_compile import (
     StateInvariant,
     TypeCheck,
 )
+
+
+def _write_png(path: Path, width: int, height: int, rows: list[list[tuple[int, int, int]]]) -> None:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+
+    raw = bytearray()
+    for row in rows:
+        raw.append(0)
+        for red, green, blue in row:
+            raw.extend([red, green, blue])
+    payload = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk("IHDR".encode(), struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk("IDAT".encode(), zlib.compress(bytes(raw)))
+        + chunk("IEND".encode(), b"")
+    )
+    path.write_bytes(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +540,67 @@ def test_browser_journey_subprocess_failure_keeps_partial_artifacts(tmp_path: Pa
     # Even on failure, artifacts that exist are collected.
     assert len(evidence.artifacts) == 1
     assert evidence.artifacts[0].name == "partial.png"
+
+
+def test_browser_journey_failure_reports_blank_screenshot_diagnostic(tmp_path: Path) -> None:
+    blank = tmp_path / "evidence" / "blank.png"
+    script = tmp_path / "fake_browser.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path('evidence').mkdir(exist_ok=True)\n"
+        "sys.exit(2)\n",
+        encoding="utf-8",
+    )
+    blank.parent.mkdir(parents=True)
+    _write_png(blank, 8, 8, [[(245, 247, 244)] * 8 for _ in range(8)])
+
+    evidence = run_check(
+        BrowserJourney(
+            command=("python", str(script)),
+            evidence_globs=("evidence/*.png",),
+            timeout_s=15,
+        ),
+        project_dir=tmp_path,
+        cwd=tmp_path,
+    )
+
+    assert evidence.passed is False
+    assert evidence.detail == "exit=2 artifacts=1 blank screenshot evidence"
+    assert evidence.raw["artifact_diagnostics"][0]["appears_blank"] is True
+    assert "runtime render" in evidence.raw["artifact_diagnostics"][0]["diagnostic"]
+
+
+def test_browser_journey_failure_reports_visible_screenshot_variance(tmp_path: Path) -> None:
+    screenshot = tmp_path / "evidence" / "visible.png"
+    script = tmp_path / "fake_browser.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path('evidence').mkdir(exist_ok=True)\n"
+        "sys.exit(2)\n",
+        encoding="utf-8",
+    )
+    screenshot.parent.mkdir(parents=True)
+    rows = [
+        [(255, 255, 255), (0, 0, 0), (255, 0, 0), (0, 128, 0)] * 2
+        for _ in range(8)
+    ]
+    _write_png(screenshot, 8, 8, rows)
+
+    evidence = run_check(
+        BrowserJourney(
+            command=("python", str(script)),
+            evidence_globs=("evidence/*.png",),
+            timeout_s=15,
+        ),
+        project_dir=tmp_path,
+        cwd=tmp_path,
+    )
+
+    assert evidence.passed is False
+    assert evidence.detail == "exit=2 artifacts=1"
+    assert evidence.raw["artifact_diagnostics"][0]["appears_blank"] is False
 
 
 def test_browser_journey_collects_printed_artifacts_when_glob_misses(tmp_path: Path) -> None:

@@ -3155,6 +3155,24 @@ def _failed_check_repair_narrative(
             if len(evidence.artifacts) > 5:
                 artifact_list += f", ... ({len(evidence.artifacts) - 5} more)"
             lines.append(f"  Artifacts: {artifact_list}")
+        diagnostics = evidence.raw.get("artifact_diagnostics")
+        if isinstance(diagnostics, list) and diagnostics:
+            lines.append("  Artifact diagnostics:")
+            for item in diagnostics[:5]:
+                if not isinstance(item, dict):
+                    continue
+                path = Path(str(item.get("path", ""))).name or str(item.get("path", ""))
+                dimensions = str(item.get("dimensions", "unknown"))
+                diagnostic = str(item.get("diagnostic", "")).strip()
+                sampled = item.get("sampled_colors")
+                delta = item.get("channel_delta")
+                metrics = []
+                if sampled is not None:
+                    metrics.append(f"sampled_colors={sampled}")
+                if delta is not None:
+                    metrics.append(f"channel_delta={delta}")
+                metrics_text = f" ({', '.join(metrics)})" if metrics else ""
+                lines.append(f"    - {path}: {dimensions}{metrics_text}; {diagnostic}")
         excerpt = _failed_check_log_excerpt(raw_log_path)
         if excerpt:
             lines.append(f"  Otto check log: `{raw_log_path}`")

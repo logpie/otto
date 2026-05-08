@@ -97,6 +97,13 @@ is blocked on retry, make the source fix from the existing artifacts and report
 the exact browser blocker; do not claim the browser journey passed until a real
 browser run verifies it.
 
+If Otto's authoritative check feedback says a screenshot is blank or
+near-blank, treat that as a runtime/product render failure first. Do not loosen
+text assertions, delete visible-state checks, or click around the failure until
+you have inspected the app mount path, route, console/runtime errors, store
+subscription behavior, CSS visibility, and the screenshot evidence named by
+Otto. A page title or HTTP 200 with a blank body is not a passing shell.
+
 Otto may run declared checks outside your provider sandbox and feed the
 authoritative result back into your resumed repair thread. Treat that
 Otto-owned check evidence as the source of truth for repair. Provider-side
@@ -165,6 +172,12 @@ later-feature journey to fail on missing visible controls before that feature
 group is merged; it is not acceptable for the runner itself to fail with
 `invalid choice`, `unknown journey`, or an unimplemented placeholder. That is a
 shared-runner contract bug.
+
+Group-level BrowserJourney modules must stay stage-local. The current group's
+check may assert this group's features plus already-merged dependencies; it
+must not require controls, labels, or behavior owned only by downstream groups
+that have not run yet. Put whole-product workflows in cross-group checks or in
+feature-owned journey modules that run after their owning feature exists.
 
 If this group does not own the shared runner, do not edit
 `tests/run_browser_journey.py` just to add your feature journey. Add a
