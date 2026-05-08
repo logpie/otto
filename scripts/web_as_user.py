@@ -617,6 +617,13 @@ def _agent_browser_session(ctx: ScenarioContext) -> str:
     return slug[:80] or "otto-true-web"
 
 
+def _agent_browser_socket_dir(ctx: ScenarioContext) -> Path:
+    digest = hashlib.sha256(str(ctx.artifact_dir).encode("utf-8")).hexdigest()[:12]
+    socket_dir = Path(tempfile.gettempdir()) / "otto-agent-browser" / digest
+    socket_dir.mkdir(parents=True, exist_ok=True)
+    return socket_dir
+
+
 def _record_agent_browser_action(
     ctx: ScenarioContext,
     *,
@@ -657,9 +664,12 @@ def _run_agent_browser(
     timeout_s: float = 20.0,
 ) -> subprocess.CompletedProcess[str]:
     command = ["agent-browser", "--session", _agent_browser_session(ctx), *args]
+    env = os.environ.copy()
+    env["AGENT_BROWSER_SOCKET_DIR"] = str(_agent_browser_socket_dir(ctx))
     completed = subprocess.run(
         command,
         cwd=str(REPO_ROOT),
+        env=env,
         text=True,
         capture_output=True,
         timeout=timeout_s,

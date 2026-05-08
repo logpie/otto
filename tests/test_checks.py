@@ -642,6 +642,7 @@ def test_browser_journey_preflights_agent_browser_without_unique_session(
     assert evidence.passed is False
     assert evidence.detail == "browser journey preflight failed artifacts=0"
     assert "without a unique `--session`" in evidence.raw["preflight_error"]
+    assert "AGENT_BROWSER_SOCKET_DIR" in evidence.raw["browser_env"]
 
 
 def test_browser_journey_preflights_overbroad_playwright_suite(tmp_path: Path) -> None:

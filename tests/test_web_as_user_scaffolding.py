@@ -747,6 +747,7 @@ def test_web_as_user_agent_browser_probe_records_real_tool_path(
 
     def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(command)
+        assert "AGENT_BROWSER_SOCKET_DIR" in _kwargs.get("env", {})
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(web_as_user.shutil, "which", lambda name: "/opt/bin/agent-browser")

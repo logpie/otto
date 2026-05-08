@@ -170,6 +170,14 @@ Agent-browser can reduce repeated browser launch/session conflicts, but it does
 not replace the need for a unique product dev-server port and real user-visible
 assertions.
 
+When invoking `agent-browser` from a project-owned BrowserJourney helper, set a
+short per-run socket directory such as
+`AGENT_BROWSER_SOCKET_DIR=/tmp/otto-agent-browser/<short-id>`. Do not redirect
+`HOME` just to isolate agent-browser; that can hide the installed browser cache
+and cause fake "browser missing" failures. Keep the normal HOME unless there is
+a real reason to isolate profile/state, and use `AGENT_BROWSER_SOCKET_DIR` for
+daemon/socket path length or permission issues.
+
 Do not leave non-functional placeholder controls in the final product. A
 foundation/app-shell group may expose empty extension slots or honest empty
 states, but disabled duplicate controls with the same labels as later real

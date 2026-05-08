@@ -845,6 +845,8 @@ def _file_mentions_base_url(path: Path) -> bool:
 def _browser_journey_env(cwd: Path) -> dict[str, str]:
     port = _allocate_browser_journey_port(cwd)
     base_url = f"http://127.0.0.1:{port}"
+    socket_dir = Path(tempfile.gettempdir()) / "otto-agent-browser" / str(port)
+    socket_dir.mkdir(parents=True, exist_ok=True)
     return {
         "OTTO_BROWSER_PORT": str(port),
         "OTTO_BROWSER_BASE_URL": base_url,
@@ -852,6 +854,7 @@ def _browser_journey_env(cwd: Path) -> dict[str, str]:
         "PORT": str(port),
         "VITE_PORT": str(port),
         "HOST": "127.0.0.1",
+        "AGENT_BROWSER_SOCKET_DIR": str(socket_dir),
     }
 
 
