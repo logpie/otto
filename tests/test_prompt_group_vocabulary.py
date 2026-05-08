@@ -138,9 +138,19 @@ def test_runtime_agent_prompt_policy_snippets_are_persistent_files() -> None:
 
 def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -> None:
     text = (PROMPTS_DIR / "build-agent-static-policy.md").read_text(encoding="utf-8")
+    assert "Default BrowserJourney tool policy: use `agent-browser`" in text
+    assert "Only choose repo-native Playwright" in text
     assert "use.baseURL" in text
     assert "OTTO_BROWSER_PORT" in text
     assert "OTTO_BROWSER_BASE_URL" in text
     assert "agent-browser --session" in text
     assert "page.goto(\"/transactions\")" in text
     assert "invalid URL" in text
+
+
+def test_compile_spec_browser_journeys_are_agent_browser_first() -> None:
+    text = (PROMPTS_DIR / "compile-spec.md").read_text(encoding="utf-8")
+    assert "prefer `agent-browser --session" in text
+    assert "Use repo-native" in text
+    assert "Playwright only when" in text
+    assert "typically a Playwright" not in text

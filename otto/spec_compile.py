@@ -160,9 +160,10 @@ class BrowserJourney:
     """v1 contract: subprocess + evidence-glob.
 
     Implemented in `otto/checks.py` as the `browser_journey` executor:
-    we shell out to a runner (typically a Playwright pytest), then glob
-    the configured artifact paths. The check executor does not own the
-    Playwright session lifecycle; the runner does.
+    we shell out to a runner (preferably agent-browser for routine web
+    user journeys, or Playwright when the journey needs Playwright-only
+    controls), then glob the configured artifact paths. The check executor
+    does not own the browser session lifecycle; the runner does.
     """
     kind: Literal["browser_journey"] = "browser_journey"
     command: tuple[str, ...] = ()                   # e.g. ("pytest", "tests/browser/test_x.py")

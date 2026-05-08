@@ -87,13 +87,14 @@ rerun the declared browser journey after your group returns.
 
 If a browser journey launches the app and then fails on product behavior, treat
 that as a real user-facing bug. Before changing CSS, locators, or tests,
-inspect the Playwright error context, screenshot, trace path, and any saved
-artifacts. For responsive/layout failures, use DOM measurements when possible
-(for example document scrollWidth/clientWidth and the widest overflowing
-elements) so the fix targets the offending element instead of guessing. If
-local browser launch is blocked on retry, make the source fix from the existing
-artifacts and report the exact browser blocker; do not claim the browser
-journey passed until a real browser run verifies it.
+inspect the agent-browser snapshot/screenshot/error output or the Playwright
+error context, screenshot, trace path, and any saved artifacts. For
+responsive/layout failures, use DOM measurements when possible (for example
+document scrollWidth/clientWidth and the widest overflowing elements) so the
+fix targets the offending element instead of guessing. If local browser launch
+is blocked on retry, make the source fix from the existing artifacts and report
+the exact browser blocker; do not claim the browser journey passed until a real
+browser run verifies it.
 
 Otto may run declared checks outside your provider sandbox and feed the
 authoritative result back into your resumed repair thread. Treat that
@@ -101,7 +102,27 @@ Otto-owned check evidence as the source of truth for repair. Provider-side
 self-runs are useful only when they agree with the authoritative Otto
 check-runner evidence.
 
-Write BrowserJourney Playwright locators like a durable user test. Scope
+Default BrowserJourney tool policy: use `agent-browser` for routine generated
+webapp journeys. A routine journey is a single-user browser flow that opens the
+app, clicks visible controls, types realistic input, checks visible state,
+reloads or navigates, and saves screenshots/video. Use a unique session name
+per journey/worktree; every command should include `agent-browser --session
+<unique-id>`. Example runner calls:
+
+```python
+session = os.environ.get("OTTO_BROWSER_SESSION", f"journey-{Path.cwd().name}")
+base_url = os.environ["OTTO_BROWSER_BASE_URL"]
+run(["agent-browser", "--session", session, "open", base_url])
+run(["agent-browser", "--session", session, "snapshot", "-i"])
+run(["agent-browser", "--session", session, "find", "role", "button", "click", "--name", "Add"])
+run(["agent-browser", "--session", session, "screenshot", "otto_artifacts/browser/add.png"])
+run(["agent-browser", "--session", session, "close"])
+```
+
+Only choose repo-native Playwright when the journey needs capabilities that
+agent-browser cannot express cleanly, such as multi-context auth, network
+interception, trace-heavy debugging, or an established project Playwright
+suite. If you choose Playwright, write locators like a durable user test. Scope
 short/common controls and text to named forms, regions, landmarks, lists,
 tables, or cards before interacting or asserting. Use exact accessible names for
 short labels and buttons such as `Status`, `Comment`, `List`, `Done`, `Import`,
@@ -145,12 +166,9 @@ selection, direct `npx playwright test` wrappers, or shared/default
 agent-browser sessions are repairable runner bugs. Fix those before
 investigating product UI behavior.
 
-If the project chooses `agent-browser` for a BrowserJourney script, use a
-unique named session per journey/worktree and the same Otto base-url env values,
-for example `agent-browser --session "$SESSION_NAME" open "$OTTO_BROWSER_BASE_URL/..."`.
-Clean up the session at the end. Agent-browser can reduce repeated browser
-launch/session conflicts, but it does not replace the need for a unique product
-dev-server port and real user-visible assertions.
+Agent-browser can reduce repeated browser launch/session conflicts, but it does
+not replace the need for a unique product dev-server port and real user-visible
+assertions.
 
 **Project commands must be self-contained and bounded.**
 

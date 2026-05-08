@@ -663,9 +663,14 @@ Example for a library:
    split the extension surface, or mark the contested file shared.
 
 4. **Every group has at least one check**. Browser journeys are
-   `subprocess + glob` for v1: `command` runs (typically a Playwright
-   pytest), then matching files in `evidence_globs` are collected as
-   evidence. Do not invent a `steps:` array — that's a future field.
+   `subprocess + glob` for v1: `command` runs a real browser runner, then
+   matching files in `evidence_globs` are collected as evidence. For routine
+   webapp click/type/screenshot journeys, prefer `agent-browser --session
+   <unique-id>` inside the committed runner script. Use repo-native
+   Playwright only when the journey needs Playwright-only controls such as
+   file download/upload orchestration, network interception, multiple browser
+   contexts, trace debugging, or an already established project Playwright
+   suite. Do not invent a `steps:` array — that's a future field.
 
 5. **`deps` is a DAG**. No cycles. Groups with no deps run first.
 
@@ -912,7 +917,7 @@ test/build runner configuration. A critical contract must name `owner_id` as
 the foundation/shared-core group or Component responsible for modifying the
 contract paths. Model contracts as product invariants, not file monopolies:
 use `paths` for files that define the shared invariant, `extension_policy` for
-how feature slices may consume or extend it, and `allowed_extension_paths` for
+how feature groups may consume or extend it, and `allowed_extension_paths` for
 feature-owned evidence/adapters that should not be blocked. Do not put
 feature-owned behavior journey files such as `tests/browser/test_transactions.*`
 under a foundation-owned shared contract path; feature groups may own their own
