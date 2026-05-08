@@ -477,7 +477,7 @@ def test_web_as_user_honors_scenario_returned_failure(monkeypatch, tmp_path: Pat
     assert outcome.outcome == "FAIL"
     assert outcome.note == "scenario-specific failure"
     assert teardown_calls == [True]
-    assert cleanup_calls == [True]
+    assert cleanup_calls == [False]
 
 
 def test_needs_product_verification_requires_product_browser_step(

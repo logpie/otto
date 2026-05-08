@@ -8874,12 +8874,7 @@ def run_one_scenario(
                     failures.note(f"backend.stop raised: {exc}")
 
     explicit_outcome = result.outcome if result is not None else None
-    keep_failure_debug_artifacts = (
-        keep_heavy_artifacts
-        or bool(failures.failures)
-        or explicit_outcome in ("FAIL", "INFRA")
-    )
-    cleanup_heavy_browser_artifacts(artifact_dir, keep=keep_failure_debug_artifacts)
+    cleanup_heavy_browser_artifacts(artifact_dir, keep=keep_heavy_artifacts)
 
     if failures.failures or (explicit_outcome is not None and explicit_outcome != "PASS"):
         classification = (
