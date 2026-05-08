@@ -21,8 +21,9 @@ Design notes (honest gaps):
 * ``run_audit`` retains an internal Group-level repair loop for
   direct/legacy callers when ``fix_agent`` is provided. This runner
   deliberately calls it with ``fix_agent=None``. Feature-level Layer 2
-  repair is opt-in for explicit improve/repair flows; greenfield builds
-  keep final audit as evidence instead of a default repair trigger.
+  repair is the autonomous default when a fix agent is wired; final audit
+  evidence should feed the same repair loop instead of stopping at a
+  repairable partial.
 * Brownfield mode skips ``run_build`` / ``run_merge_queue`` entirely:
   the existing project IS the integrated worktree, so there are no
   slices to drive. ``BuildResult`` / ``MergeQueueResult`` are honestly
@@ -172,11 +173,11 @@ async def run_pipeline(
             repair attempts. Production wires ``default_build_agent``;
             tests pass a stub.
         audit_agent: Callable for the LLM judge in ``run_audit``.
-        fix_agent: Optional repair agent. Greenfield builds do not use it
-            for audit-driven repair unless ``enable_audit_repair`` or
-            ``workflow.enable_audit_repair`` is true. Brownfield improve
-            flows opt in explicitly. ``run_audit`` still receives
-            ``fix_agent=None`` so its legacy inner repair loop stays off.
+        fix_agent: Optional repair agent. When present, non-PASS final audit
+            verdicts can route through Feature-level Layer 2 repair unless
+            ``enable_audit_repair`` or ``workflow.enable_audit_repair`` is
+            explicitly false. ``run_audit`` still receives ``fix_agent=None``
+            so its legacy inner repair loop stays off.
         walkthrough: Optional walkthrough hook (default: derived from
             spec via ``default_walkthrough_from_spec``).
         base_branch: Integration branch for build/merge. Defaults to the
@@ -186,8 +187,7 @@ async def run_pipeline(
         audit_budget: Audit phase bounds. ``None`` uses library default.
         enable_audit_repair: If true, non-PASS final audit verdicts may
             route failing Features through Layer 2 repair. Defaults to the
-            workflow config, with brownfield + fix_agent kept enabled for
-            improve-style flows.
+            workflow config, otherwise to ``fix_agent is not None``.
         allow_in_flight_spec_edits: If true, the runner opens the legacy
             mid-build edit/redispatch window. Defaults false so one run
             executes one approved spec.
@@ -215,7 +215,7 @@ async def run_pipeline(
         config,
         key="enable_audit_repair",
         explicit=enable_audit_repair,
-        default=brownfield and fix_agent is not None,
+        default=fix_agent is not None,
     )
     workflow_in_flight_spec_edits = _resolve_workflow_flag(
         config,

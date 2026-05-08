@@ -87,11 +87,11 @@ DEFAULTS: dict[str, Any] = {
         "group_concurrent":     3,             # max ready Groups built at once
     },
 
-    # Workflow simplification defaults. Greenfield builds execute one approved
-    # spec and treat final audit as evidence by default; explicit improve flows
-    # opt into repair at the runner boundary.
+    # Workflow simplification defaults. Autonomous builds execute one approved
+    # spec, then route repairable final-audit failures through Layer 2 when a
+    # fix agent is wired.
     "workflow": {
-        "enable_audit_repair": False,
+        "enable_audit_repair": True,
         "allow_in_flight_spec_edits": False,
     },
 
@@ -1593,7 +1593,7 @@ run_budget_seconds: {run_budget_seconds}      # total wall-clock (primary knob)
 
 # ─── I2P workflow simplification ─────────────────────────────────────
 # workflow:
-#   enable_audit_repair: false        # greenfield build: final audit reports, does not auto-repair
+#   enable_audit_repair: true         # autonomous build: repair final-audit failures when possible
 #   allow_in_flight_spec_edits: false # freeze approved spec for the current run
 
 # ─── Queue + merge (used by `otto queue` and `otto merge`) ───────────

@@ -967,10 +967,10 @@ def test_seed_failure_halts_before_audit(tmp_path: Path, monkeypatch) -> None:
     assert result.merge_result is None
 
 
-def test_greenfield_layer2_repair_skipped_by_default(
+def test_greenfield_layer2_repair_runs_by_default_with_fix_agent(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Greenfield final audit is evidence by default, not a repair trigger."""
+    """Autonomous builds repair non-PASS final audit verdicts when possible."""
     spec = _spec(with_features=True)
     session_dir = tmp_path / "sess"
     session_dir.mkdir()
@@ -992,8 +992,38 @@ def test_greenfield_layer2_repair_skipped_by_default(
         )
     )
 
-    assert "repair" not in order.events
+    assert "repair" in order.events
     assert captured["audit_kwargs"]["fix_agent"] is None
+    assert captured["repair_calls"] == 1
+    assert result.repair_result is not None
+
+
+def test_greenfield_layer2_repair_can_be_disabled_by_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    spec = _spec(with_features=True)
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured = _wire_stubs(
+        monkeypatch,
+        audit=_partial_audit_with_failing_feature(spec),
+        order=order,
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None,
+            config={"workflow": {"enable_audit_repair": False}},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_stub_agent,
+            spec=spec,
+        )
+    )
+
+    assert "repair" not in order.events
     assert captured["repair_calls"] == 0
     assert result.repair_result is None
 

@@ -20,7 +20,7 @@ def test_baked_in_only_when_no_yaml_no_cli(tmp_path: Path) -> None:
     assert snap.per_group_cost_usd == 5.0
     assert snap.audit_walkthrough_per_feature is False
     assert snap.audit_pre_merge_audit_groups == ()
-    assert snap.workflow_enable_audit_repair is False
+    assert snap.workflow_enable_audit_repair is True
     assert snap.workflow_allow_in_flight_spec_edits is False
     assert snap.agent_default_provider == "codex-app-server"
     assert snap.agent_default_model == ""

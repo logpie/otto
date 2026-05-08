@@ -170,6 +170,13 @@ Agent-browser can reduce repeated browser launch/session conflicts, but it does
 not replace the need for a unique product dev-server port and real user-visible
 assertions.
 
+Do not leave non-functional placeholder controls in the final product. A
+foundation/app-shell group may expose empty extension slots or honest empty
+states, but disabled duplicate controls with the same labels as later real
+features (search, filter, import, export, edit, delete, etc.) are user-facing
+bugs. When feature groups add the real surface, remove or replace placeholders
+instead of leaving a second inert copy above or beside the working UI.
+
 **Project commands must be self-contained and bounded.**
 
 If you create native scripts such as `npm test`, `npm run build`, `npm run dev`,

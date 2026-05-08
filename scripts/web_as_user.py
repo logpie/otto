@@ -611,6 +611,131 @@ def _record_mc_user_action(
         handle.write(json.dumps(payload, default=str, sort_keys=True) + "\n")
 
 
+def _agent_browser_session(ctx: ScenarioContext) -> str:
+    source = f"{ctx.run_id}-{ctx.scenario.id}-{ctx.project_dir.name}"
+    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", source).strip("-").lower()
+    return slug[:80] or "otto-true-web"
+
+
+def _record_agent_browser_action(
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    command: list[str],
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    expectation: str,
+    artifact: Path | None = None,
+) -> None:
+    ctx.artifact_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "scenario": ctx.scenario.id,
+        "phase": phase,
+        "tool": "agent-browser",
+        "session": _agent_browser_session(ctx),
+        "expectation": expectation,
+        "command": command,
+        "exit_code": exit_code,
+        "stdout_sample": stdout[:2_000],
+        "stderr_sample": stderr[:2_000],
+    }
+    if artifact is not None:
+        payload["artifact"] = str(artifact.relative_to(ctx.artifact_dir))
+    with (ctx.artifact_dir / "agent-browser-actions.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, default=str, sort_keys=True) + "\n")
+
+
+def _run_agent_browser(
+    ctx: ScenarioContext,
+    phase: str,
+    args: list[str],
+    *,
+    expectation: str,
+    artifact: Path | None = None,
+    timeout_s: float = 20.0,
+) -> subprocess.CompletedProcess[str]:
+    command = ["agent-browser", "--session", _agent_browser_session(ctx), *args]
+    completed = subprocess.run(
+        command,
+        cwd=str(REPO_ROOT),
+        text=True,
+        capture_output=True,
+        timeout=timeout_s,
+        check=False,
+    )
+    _record_agent_browser_action(
+        ctx,
+        phase=phase,
+        command=command,
+        exit_code=completed.returncode,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+        expectation=expectation,
+        artifact=artifact,
+    )
+    return completed
+
+
+def _agent_browser_mc_probe(
+    ctx: ScenarioContext,
+    *,
+    phase: str,
+    url: str,
+    expectation: str,
+    log_fn: Callable[[str], None],
+    failures: RunFailures,
+    hard: bool = False,
+) -> None:
+    if ctx.user_behavior == "off":
+        return
+    if shutil.which("agent-browser") is None:
+        message = "agent-browser is not installed; true-web cannot collect agent-browser evidence"
+        (failures.fail if hard else failures.note)(message)
+        _record_mc_user_action(ctx, phase=phase, action="agent-browser-unavailable", expectation=expectation)
+        return
+
+    artifact = ctx.artifact_dir / f"agent-browser-{_mc_slug(phase)}.png"
+    commands = [
+        ["set", "viewport", "1440", "900"],
+        ["open", url],
+        ["snapshot", "-i"],
+        ["screenshot", str(artifact)],
+    ]
+    for args in commands:
+        try:
+            completed = _run_agent_browser(
+                ctx,
+                phase,
+                args,
+                expectation=expectation,
+                artifact=artifact if args[0] == "screenshot" else None,
+            )
+        except subprocess.TimeoutExpired as exc:
+            message = f"agent-browser {' '.join(args)} timed out during {phase}: {exc}"
+            log_fn(f"  {message}")
+            (failures.fail if hard else failures.note)(message)
+            return
+        if completed.returncode != 0:
+            message = (
+                f"agent-browser {' '.join(args)} failed during {phase}: "
+                f"{(completed.stderr or completed.stdout or '').strip()[:500]}"
+            )
+            log_fn(f"  {message}")
+            (failures.fail if hard else failures.note)(message)
+            return
+    _record_mc_user_action(
+        ctx,
+        phase=phase,
+        action="agent-browser-probe",
+        expectation=expectation,
+        url=url,
+        screenshot=artifact.name,
+        session=_agent_browser_session(ctx),
+    )
+
+
 def _mc_selector_summary(page: Any, selectors: list[str]) -> dict[str, dict[str, Any]]:
     summary: dict[str, dict[str, Any]] = {}
     for selector in selectors:
@@ -3082,7 +3207,7 @@ def _stub_scenario(ctx: ScenarioContext) -> ScenarioRunResult:
 
 
 def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
-    """W1 — first-time user end-to-end via Playwright + real LLM build."""
+    """W1 — first-time user end-to-end through Mission Control + real LLM build."""
     from playwright.sync_api import sync_playwright
 
     started = time.monotonic()
@@ -3148,6 +3273,15 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 ctx,
                 log_fn=_log,
                 failures=failures,
+            )
+            _agent_browser_mc_probe(
+                ctx,
+                phase="shell-loaded",
+                url=page.url,
+                expectation="Agent-browser sees the same actionable Mission Control shell a real user sees.",
+                log_fn=_log,
+                failures=failures,
+                hard=True,
             )
             if ctx.user_behavior != "off":
                 _mc_check_expectation(
@@ -3379,6 +3513,14 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                     _log(
                         f"poll#{poll_count}: live={live_statuses[:3]} history_outcomes={history_outcomes[:3]}"
                     )
+                    _agent_browser_mc_probe(
+                        ctx,
+                        phase=f"running-poll-{poll_count}",
+                        url=page.url,
+                        expectation="Agent-browser can inspect Mission Control while the build is running.",
+                        log_fn=_log,
+                        failures=failures,
+                    )
                     _mc_user_probe(
                         page,
                         ctx,
@@ -3441,6 +3583,14 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                 page,
                 ctx,
                 phase="terminal-state",
+                log_fn=_log,
+                failures=failures,
+            )
+            _agent_browser_mc_probe(
+                ctx,
+                phase="terminal-state",
+                url=page.url,
+                expectation="Agent-browser can inspect the terminal Mission Control state and evidence controls.",
                 log_fn=_log,
                 failures=failures,
             )
@@ -8850,7 +9000,7 @@ def _install_signal_handlers() -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Mission Control web-as-user scenarios with Playwright + real LLM."
+        description="Run Mission Control true-web as-user scenarios with real browser automation + real LLM."
     )
     parser.add_argument("--list", action="store_true", help="enumerate scenarios + tiers and exit")
     parser.add_argument(

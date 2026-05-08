@@ -732,6 +732,56 @@ def test_web_as_user_semantic_audit_accepts_fixed_stage_language() -> None:
     assert findings == []
 
 
+def test_web_as_user_agent_browser_probe_records_real_tool_path(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """True-web W1 must collect first-class agent-browser evidence."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(web_as_user.shutil, "which", lambda name: "/opt/bin/agent-browser")
+    monkeypatch.setattr(web_as_user.subprocess, "run", fake_run)
+
+    ctx = web_as_user.ScenarioContext(
+        scenario=web_as_user.SCENARIOS["W1"],
+        project_dir=tmp_path / "project",
+        artifact_dir=tmp_path / "artifacts",
+        provider="codex",
+        failures=web_as_user.RunFailures(),
+        debug_log=tmp_path / "debug.log",
+        run_id="agent-browser-test",
+        user_behavior="mc-realistic",
+        user_seed=123,
+    )
+
+    web_as_user._agent_browser_mc_probe(
+        ctx,
+        phase="shell-loaded",
+        url="http://127.0.0.1:9000",
+        expectation="probe shell",
+        log_fn=lambda _msg: None,
+        failures=ctx.failures,
+        hard=True,
+    )
+
+    assert ctx.failures.failures == []
+    assert calls
+    assert all(call[:3] == ["agent-browser", "--session", calls[0][2]] for call in calls)
+    assert [call[3] for call in calls] == ["set", "open", "snapshot", "screenshot"]
+    actions = (ctx.artifact_dir / "agent-browser-actions.jsonl").read_text(encoding="utf-8")
+    assert '"tool": "agent-browser"' in actions
+
+
 def test_web_as_user_semantic_audit_accepts_explained_seed_artifact_path() -> None:
     """Artifact/log paths may include seed if the UI also explains fixtures."""
     sys.path.insert(0, str(SCRIPTS_DIR))

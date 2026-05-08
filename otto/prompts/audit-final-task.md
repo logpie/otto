@@ -24,6 +24,20 @@ output:
      `evidence_completeness: "partial"` or `coverage_confidence: "low"` unless
      it is paired with a reproducible user-action failure.
 
+     Source-level architecture findings are not user-facing failures by
+     themselves. Use source review to explain a verdict only when it maps to a
+     measurable product failure, failing deterministic contract, broken public
+     API, data-loss/persistence risk, security risk, or explicit user-requested
+     architecture requirement. If live user behavior, deterministic browser
+     checks, and contract tests pass but the implementation uses a different
+     internal extension pattern than the spec suggested, record that as a
+     quality/advisory finding instead of marking a user-facing Feature partial.
+
+     Non-functional duplicate controls are a real user-facing UX failure. If a
+     placeholder/disabled/search/import/export/control copy remains visible
+     alongside the real control with the same or confusing accessible label,
+     mark the affected Feature partial and route it to repair.
+
      For repaired or newly implemented behavior, a `passed` Feature needs
      direct executable evidence for the exact acceptance examples and
      edge/error cases in the intent or audit detail. Do NOT infer that an
