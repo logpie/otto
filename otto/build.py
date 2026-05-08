@@ -1283,24 +1283,19 @@ def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
             ["git", "reset", "HEAD", "--", non_product_path],
             cwd=worktree, capture_output=True, text=True, check=False,
         )
-        subprocess.run(
-            ["git", "rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", non_product_path],
-            cwd=worktree, capture_output=True, text=True, check=False,
-        )
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=worktree, capture_output=True, text=True, check=False,
     )
-    # V14 nuance: --porcelain reports BOTH staged changes (e.g. ` A foo`,
-    # `M  bar`) and untracked files (`?? path`). We deliberately excluded
-    # `_session/`, `otto_logs/`, etc. from staging — those still appear
-    # as untracked. They must NOT count as "changes to commit" or
-    # `git commit` fails with "nothing added". Filter to staged-only.
-    staged_lines = [
-        line for line in (status.stdout or "").splitlines()
-        if line.strip() and not line.startswith("??")
-    ]
-    if not staged_lines:
+    if status.returncode != 0:
+        return False
+    cached = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    if cached.returncode != 0:
+        return False
+    if not (cached.stdout or "").strip():
         # Nothing to commit. Slice contributed no diff; merge_queue
         # will surface this as REDUNDANT.
         return True

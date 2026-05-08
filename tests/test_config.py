@@ -116,6 +116,24 @@ class TestLoadConfig:
         cfg = load_config(config_path)
         assert cfg["build"]["group_concurrent"] == 2
 
+    def test_workflow_section_defaults_present(self, tmp_bare_git_repo):
+        cfg = load_config(tmp_bare_git_repo / "otto.yaml")
+        assert cfg["workflow"]["enable_audit_repair"] is False
+        assert cfg["workflow"]["allow_in_flight_spec_edits"] is False
+
+    def test_workflow_partial_override_preserves_other_defaults(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"workflow": {"enable_audit_repair": "yes"}}))
+        cfg = load_config(config_path)
+        assert cfg["workflow"]["enable_audit_repair"] is True
+        assert cfg["workflow"]["allow_in_flight_spec_edits"] is False
+
+    def test_workflow_section_unknown_keys_are_rejected(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"workflow": {"future_key": "x"}}))
+        with pytest.raises(ConfigError, match="Unknown workflow config key: workflow.future_key"):
+            load_config(config_path)
+
     def test_build_section_unknown_keys_are_rejected(self, tmp_bare_git_repo):
         config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({"build": {"future_key": "x"}}))

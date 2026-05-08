@@ -3414,6 +3414,23 @@ def _normalize_webapp_shared_contract_paths(spec: Spec) -> list[str]:
     return warnings
 
 
+def normalize_spec_for_execution(spec: Spec, *, brownfield: bool = False) -> list[str]:
+    """Apply Otto-owned normalization before any build agent sees a spec.
+
+    This pass is intentionally deterministic and should be shared by compile
+    output and Mission Control review edits. Prompt guidance helps, but the
+    runner must not rely on a model or a human edit preserving invariants such
+    as "feature-owned browser journeys are not foundation-owned contracts".
+    """
+    warnings: list[str] = []
+    if not brownfield:
+        warnings.extend(_normalize_webapp_scaffold_scope(spec))
+    warnings.extend(_normalize_webapp_shared_contract_paths(spec))
+    warnings.extend(_ensure_webapp_shared_contracts(spec))
+    warnings.extend(_ensure_webapp_behavior_journeys(spec))
+    return warnings
+
+
 def _ensure_webapp_shared_contracts(spec: Spec) -> list[str]:
     """Promote declared shared paths into an owned shared-core contract.
 
@@ -3816,6 +3833,7 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
                 f"shared_contract {contract.id!r}: owner_id {contract.owner_id!r} "
                 "does not match a group/component id"
             )
+        warnings.extend(_shared_contract_owned_path_overlap_warnings(contract, spec))
 
     for journey in spec.behavior_journeys:
         if not journey.steps:
@@ -3881,6 +3899,68 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
         warnings = []
 
     return ValidationResult(valid=not errors, errors=errors, warnings=warnings)
+
+
+def _shared_contract_owned_path_overlap_warnings(
+    contract: SharedContract,
+    spec: Spec,
+) -> list[str]:
+    if not contract.critical or not contract.paths or not contract.owner_id:
+        return []
+    warnings: list[str] = []
+    allowed = list(contract.allowed_extension_paths or [])
+    for group in spec.groups:
+        if group.id == contract.owner_id:
+            continue
+        for owned in group.owned_paths or []:
+            if _path_ref_matches_any_owned_pattern(owned, allowed):
+                continue
+            for contract_path in contract.paths:
+                if _patterns_may_overlap(contract_path, owned):
+                    warnings.append(
+                        f"shared_contract {contract.id!r}: path {contract_path!r} "
+                        f"overlaps non-owner group {group.id!r} owned_path {owned!r}; "
+                        "move feature-owned paths to allowed_extension_paths or narrow "
+                        "the shared contract to structural runner/config files"
+                    )
+                    break
+    return warnings
+
+
+def _patterns_may_overlap(a: str, b: str) -> bool:
+    left = str(a or "").strip().lstrip("./")
+    right = str(b or "").strip().lstrip("./")
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if _path_ref_matches_any_owned_pattern(left, [right]):
+        return True
+    if _path_ref_matches_any_owned_pattern(right, [left]):
+        return True
+    left_prefix = _literal_pattern_prefix(left)
+    right_prefix = _literal_pattern_prefix(right)
+    return bool(
+        left_prefix
+        and right_prefix
+        and (
+            left_prefix.startswith(right_prefix.rstrip("/") + "/")
+            or right_prefix.startswith(left_prefix.rstrip("/") + "/")
+        )
+    )
+
+
+def _literal_pattern_prefix(pattern: str) -> str:
+    text = str(pattern or "").strip().lstrip("./")
+    marker_indexes = [
+        index for index in (text.find("*"), text.find("?"), text.find("["))
+        if index >= 0
+    ]
+    if marker_indexes:
+        text = text[: min(marker_indexes)]
+    if "/" in text:
+        return text.rsplit("/", 1)[0]
+    return text
 
 
 def _owned_check_artifact_patterns(spec: Spec) -> list[str]:
@@ -4933,10 +5013,9 @@ async def compile_spec(
             warning.message for warning in feature_collector.warnings
         ]
     if not brownfield:
-        normalization_warnings = _normalize_webapp_scaffold_scope(spec)
-    normalization_warnings.extend(_normalize_webapp_shared_contract_paths(spec))
-    normalization_warnings.extend(_ensure_webapp_shared_contracts(spec))
-    normalization_warnings.extend(_ensure_webapp_behavior_journeys(spec))
+        normalization_warnings = normalize_spec_for_execution(spec, brownfield=False)
+    else:
+        normalization_warnings = normalize_spec_for_execution(spec, brownfield=True)
 
     # A6.4: brownfield additive mode reconciles the agent's "what's new"
     # output with the prior base_spec, preserving mechanical / historical

@@ -370,7 +370,7 @@ async def _drive_full_pipeline(
     session_dir: Path,
     base_url: str | None,
 ) -> tuple[BuildResult, MergeQueueResult, AuditResult]:
-    """Drive build → merge → audit using the default LLM agents."""
+    """Legacy helper for build → merge → audit using the default LLM agents."""
     console.print()
     # C1 fix: ONE BuildBudget instance threaded across build, merge,
     # and audit phases so cost/repair-time accumulate into a single
@@ -429,7 +429,7 @@ async def _drive_full_pipeline(
         audit_agent=default_audit_agent,
         base_url=base_url,
         walkthrough=default_walkthrough_from_spec(spec, base_url=base_url),
-        fix_agent=default_build_agent,
+        fix_agent=None,
         budget=AuditBudget(),
         shared_budget=shared_budget,
     )
@@ -1048,7 +1048,7 @@ def orchestrate_run(
         checkpoint_path=session_dir / "checkpoint.json",
     )
 
-    # Drive seed → build → merge → audit → repair → render via runner.
+    # Drive seed → build → merge → audit → render via runner.
     try:
         run_result = asyncio.run(
             run_pipeline(
@@ -1347,6 +1347,7 @@ def _drive_brownfield_pipeline(
                 on_phase=on_phase,
                 resume_plan=resume_plan,
                 command=command,
+                enable_audit_repair=fix_agent is not None,
             )
         )
     except Exception as exc:
@@ -1426,7 +1427,7 @@ def orchestrate_improve(
     """Drive the new-stack `otto improve` flow (Phase B.2).
 
     Brownfield-compiles a baseline Spec (preserving `focus` as scope hint),
-    then delegates audit → repair → render to ``runner.run_pipeline``
+    then delegates audit → render to ``runner.run_pipeline``
     (with ``brownfield=True`` to skip build/merge and
     ``fix_agent=default_build_agent`` to enable the repair loop —
     the load-bearing difference from certify mode). ``rounds`` maps to

@@ -264,6 +264,7 @@ def test_layer2_repair_runs_for_group_level_feature_audit(
             audit_agent=_stub_agent,
             fix_agent=_stub_agent,
             spec=spec,
+            enable_audit_repair=True,
         )
     )
 
@@ -336,6 +337,7 @@ def test_layer2_repair_runs_for_compact_group_feature_ids(
             audit_agent=_stub_agent,
             fix_agent=_stub_agent,
             spec=spec,
+            enable_audit_repair=True,
         )
     )
 
@@ -472,6 +474,7 @@ def test_layer2_repair_runs_for_product_quality_only_partial(
             audit_agent=_stub_agent,
             fix_agent=_stub_agent,
             spec=spec,
+            enable_audit_repair=True,
         )
     )
 
@@ -532,12 +535,20 @@ def _wire_stubs(
 
     Returns a dict the test can inspect (call counts, captured kwargs).
     """
-    captured: dict[str, Any] = {"seed_calls": 0, "build_calls": 0,
-                                "merge_calls": 0, "audit_calls": 0,
-                                "repair_calls": 0, "render_calls": 0}
+    captured: dict[str, Any] = {
+        "seed_calls": 0,
+        "build_calls": 0,
+        "merge_calls": 0,
+        "audit_calls": 0,
+        "repair_calls": 0,
+        "render_calls": 0,
+        "seed_specs": [],
+        "build_specs": [],
+    }
 
     def _seed(spec, project_dir, session_dir=None):
         captured["seed_calls"] += 1
+        captured["seed_specs"].append(spec)
         order.add("seed")
         if seed_result is not None:
             return seed_result
@@ -545,6 +556,7 @@ def _wire_stubs(
 
     async def _build(spec, *, project_dir, session_dir, **kwargs):
         captured["build_calls"] += 1
+        captured["build_specs"].append(spec)
         captured["build_kwargs"] = kwargs
         order.add("build")
         return build or _ok_build(spec, session_dir)
@@ -955,10 +967,71 @@ def test_seed_failure_halts_before_audit(tmp_path: Path, monkeypatch) -> None:
     assert result.merge_result is None
 
 
-def test_repair_called_on_non_pass_with_fix_agent(
+def test_greenfield_layer2_repair_skipped_by_default(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Layer 2 repair triggers only when verdict != PASSED AND fix_agent set."""
+    """Greenfield final audit is evidence by default, not a repair trigger."""
+    spec = _spec(with_features=True)
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured = _wire_stubs(
+        monkeypatch,
+        audit=_partial_audit_with_failing_feature(spec),
+        order=order,
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None, config={},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_stub_agent,
+            spec=spec,
+        )
+    )
+
+    assert "repair" not in order.events
+    assert captured["audit_kwargs"]["fix_agent"] is None
+    assert captured["repair_calls"] == 0
+    assert result.repair_result is None
+
+
+def test_greenfield_layer2_repair_can_be_enabled_by_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    spec = _spec(with_features=True)
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured = _wire_stubs(
+        monkeypatch,
+        audit=_partial_audit_with_failing_feature(spec),
+        order=order,
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None,
+            config={"workflow": {"enable_audit_repair": True}},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_stub_agent,
+            spec=spec,
+        )
+    )
+
+    assert "repair" in order.events
+    assert captured["repair_calls"] == 1
+    assert result.repair_result is not None
+
+
+def test_repair_called_on_non_pass_with_explicit_audit_repair(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Layer 2 repair is still available as an explicit workflow choice."""
     spec = _spec(with_features=True)
     session_dir = tmp_path / "sess"
     session_dir.mkdir()
@@ -977,6 +1050,7 @@ def test_repair_called_on_non_pass_with_fix_agent(
             audit_agent=_stub_agent,
             fix_agent=_stub_agent,  # KEY: Layer 2 enabled
             spec=spec,
+            enable_audit_repair=True,
         )
     )
 
@@ -1143,6 +1217,7 @@ def test_layer2_repair_reaudits_and_updates_final_verdict(
             audit_agent=_stub_agent,
             fix_agent=_fix,
             spec=spec,
+            enable_audit_repair=True,
         )
     )
 
@@ -1839,6 +1914,7 @@ def test_resume_plan_threads_layer2_agent_sessions(
             build_agent=_stub_agent, audit_agent=_stub_agent, fix_agent=_stub_agent,
             spec=spec,
             resume_plan=plan,
+            enable_audit_repair=True,
         )
     )
 
@@ -1961,6 +2037,7 @@ def test_spec_edit_invalidation_redispatches_affected_groups(
             project_kind="webapp", brownfield=False, base_url=None, config={},
             build_agent=_stub_agent, audit_agent=_stub_agent, fix_agent=None,
             spec=spec,
+            allow_in_flight_spec_edits=True,
         )
     )
 
@@ -1984,6 +2061,75 @@ def test_spec_edit_invalidation_redispatches_affected_groups(
     assert g_result.status == GroupStatus.PASSING
     # Costs accumulate across both passes.
     assert result.build_result.total_cost_usd == pytest.approx(0.05 + 0.07)
+
+
+def test_spec_edit_invalidation_does_not_redispatch_by_default(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Default builds execute the approved spec as a frozen run contract."""
+    from otto.spec_compile import Group as G, Spec as S, persist_spec
+
+    spec = S(intent="x", groups=[G(id="g", name="G")])
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    (session_dir / "spec").mkdir()
+    persist_spec(spec, session_dir / "spec" / "spec.json", allow_initial=True)
+    call_count = {"n": 0}
+
+    async def _build(spec_arg, *, project_dir, session_dir, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            from otto.spec_state import emit as _emit
+
+            _emit(
+                session_dir,
+                "group.invalidated_by_spec_edit",
+                group_id="g",
+                detail="spec edit changed name",
+                direct=True,
+            )
+        return BuildResult(
+            spec_session_dir=session_dir,
+            group_results=[
+                GroupResult(
+                    group_id="g",
+                    status=GroupStatus.PASSING,
+                    attempts=1,
+                    branch="b",
+                    worktree=session_dir,
+                ),
+            ],
+        )
+
+    async def _merge(*args, **kwargs):
+        return MergeQueueResult(landed_ids=["g"])
+
+    def _seed(spec_arg, project_dir, session_dir=None):
+        return SeedResult(succeeded=True, detail="no fixtures")
+
+    async def _audit(spec_arg, **kwargs):
+        return _passing_audit(spec_arg)
+
+    def _render(spec_arg, *, session_dir, **kwargs):
+        return session_dir / "h.html", session_dir / "j.json"
+
+    monkeypatch.setattr("otto.runner.seed_fixtures", _seed)
+    monkeypatch.setattr("otto.runner.run_build", _build)
+    monkeypatch.setattr("otto.runner.run_merge_queue", _merge)
+    monkeypatch.setattr("otto.runner.run_audit", _audit)
+    monkeypatch.setattr("otto.runner.render_run", _render)
+
+    asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None, config={},
+            build_agent=_stub_agent, audit_agent=_stub_agent, fix_agent=None,
+            spec=spec,
+        )
+    )
+
+    assert call_count["n"] == 1
+    assert not (session_dir / "spec" / "lifecycle.json").exists()
 
 
 def test_spec_edit_invalidation_no_op_when_no_event(
@@ -2097,6 +2243,52 @@ def test_review_gate_pauses_until_approved(
     pending_idx = kinds.index("spec.review_pending")
     approved_idx = kinds.index("spec.review_approved")
     assert pending_idx < approved_idx
+
+
+def test_review_gate_reloads_approved_spec_before_seed_and_build(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from otto.spec_state import emit
+
+    original = _spec()
+    edited = _spec()
+    edited.intent = "edited intent"
+    edited.groups[0].name = "Edited Group"
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    (session_dir / "spec").mkdir()
+    persist_spec(edited, session_dir / "spec" / "spec.json", allow_initial=True)
+    order = _Order()
+    captured = _wire_stubs(
+        monkeypatch, audit=_passing_audit(edited), order=order,
+    )
+
+    async def driver():
+        async def approve_after_delay():
+            await asyncio.sleep(0.05)
+            emit(session_dir, "spec.review_approved", detail="user approved")
+
+        approval_task = asyncio.create_task(approve_after_delay())
+        try:
+            return await run_pipeline(
+                "x", tmp_path, session_dir,
+                project_kind="webapp", brownfield=False, base_url=None,
+                config={},
+                build_agent=_stub_agent, audit_agent=_stub_agent,
+                fix_agent=None,
+                spec=original,
+                review_gate=True,
+                gate_timeout_s=10.0,
+                gate_poll_s=0.01,
+            )
+        finally:
+            await approval_task
+
+    result = asyncio.run(driver())
+
+    assert result.spec.intent == "edited intent"
+    assert captured["seed_specs"][0].intent == "edited intent"
+    assert captured["build_specs"][0].groups[0].name == "Edited Group"
 
 
 def test_review_gate_times_out_blocks_build(

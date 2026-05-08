@@ -19,6 +19,9 @@ Schema (research §5):
     audit.walkthrough_per_feature                    # bool
     audit.pre_merge_audit_groups                     # list[str]
 
+    workflow.enable_audit_repair                     # bool
+    workflow.allow_in_flight_spec_edits              # bool
+
     agents.default_provider                          # str
     agents.default_model                             # str
     agents.per_group                                 # dict[group_id, {provider, model}]
@@ -62,6 +65,10 @@ _DEFAULT_PER_GROUP_COST_USD = 5.0
 _DEFAULT_AUDIT_WALKTHROUGH_PER_FEATURE = False
 _DEFAULT_AUDIT_PRE_MERGE_AUDIT_GROUPS: list[str] = []
 
+# Workflow simplification knobs
+_DEFAULT_WORKFLOW_ENABLE_AUDIT_REPAIR = False
+_DEFAULT_WORKFLOW_ALLOW_IN_FLIGHT_SPEC_EDITS = False
+
 # Agents
 _DEFAULT_AGENT_PROVIDER = "codex-app-server"
 _DEFAULT_AGENT_MODEL = ""
@@ -94,6 +101,8 @@ class _Snapshot:
     per_group_cost_usd: float
     audit_walkthrough_per_feature: bool
     audit_pre_merge_audit_groups: tuple[str, ...]
+    workflow_enable_audit_repair: bool
+    workflow_allow_in_flight_spec_edits: bool
     agent_default_provider: str
     agent_default_model: str
     agent_per_group: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -115,6 +124,8 @@ _DOTTED_TO_FIELD: dict[str, str] = {
     "budgets.per_group_cost_usd": "per_group_cost_usd",
     "audit.walkthrough_per_feature": "audit_walkthrough_per_feature",
     "audit.pre_merge_audit_groups": "audit_pre_merge_audit_groups",
+    "workflow.enable_audit_repair": "workflow_enable_audit_repair",
+    "workflow.allow_in_flight_spec_edits": "workflow_allow_in_flight_spec_edits",
     "agents.default_provider": "agent_default_provider",
     "agents.default_model": "agent_default_model",
     "agents.per_group": "agent_per_group",
@@ -221,6 +232,18 @@ def snapshot_for(
                 _DEFAULT_AUDIT_PRE_MERGE_AUDIT_GROUPS,
             )
         ),
+        workflow_enable_audit_repair=_coerce_bool(
+            pick(
+                "workflow.enable_audit_repair",
+                _DEFAULT_WORKFLOW_ENABLE_AUDIT_REPAIR,
+            )
+        ),
+        workflow_allow_in_flight_spec_edits=_coerce_bool(
+            pick(
+                "workflow.allow_in_flight_spec_edits",
+                _DEFAULT_WORKFLOW_ALLOW_IN_FLIGHT_SPEC_EDITS,
+            )
+        ),
         agent_default_provider=str(
             pick("agents.default_provider", _DEFAULT_AGENT_PROVIDER)
         ),
@@ -278,6 +301,20 @@ def _coerce_optional_float(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Coerce YAML/CLI bool-like values without treating 'false' as true."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off", ""}:
+        return False
+    return bool(value)
 
 
 # ---------------------------------------------------------------------------

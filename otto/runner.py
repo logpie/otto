@@ -3,8 +3,7 @@
 Single source of truth for the new-stack pipeline chain:
 
     intent → compile_spec → seed_fixtures → run_build → run_merge_queue
-           → run_audit    → repair_failing_features (Layer 2)
-           → render_run
+           → run_audit → render_run
 
 Before this module landed, the chain was duplicated inline inside
 ``otto/cli_run.py:orchestrate_run`` and partially mirrored in
@@ -21,9 +20,9 @@ Design notes (honest gaps):
 
 * ``run_audit`` retains an internal Group-level repair loop for
   direct/legacy callers when ``fix_agent`` is provided. This runner
-  deliberately calls it with ``fix_agent=None`` and reserves repair for
-  ``repair_failing_features`` — the Feature-level Layer 2 loop. Without
-  ``fix_agent`` (e.g. certify mode), repair is skipped.
+  deliberately calls it with ``fix_agent=None``. Feature-level Layer 2
+  repair is opt-in for explicit improve/repair flows; greenfield builds
+  keep final audit as evidence instead of a default repair trigger.
 * Brownfield mode skips ``run_build`` / ``run_merge_queue`` entirely:
   the existing project IS the integrated worktree, so there are no
   slices to drive. ``BuildResult`` / ``MergeQueueResult`` are honestly
@@ -151,6 +150,8 @@ async def run_pipeline(
     gate_poll_s: float = 1.0,
     gate_announce: "Callable[[str], None] | None" = None,
     command: str = "run",
+    enable_audit_repair: bool | None = None,
+    allow_in_flight_spec_edits: bool | None = None,
 ) -> RunResult:
     """Drive the full intent-to-product pipeline.
 
@@ -171,12 +172,11 @@ async def run_pipeline(
             repair attempts. Production wires ``default_build_agent``;
             tests pass a stub.
         audit_agent: Callable for the LLM judge in ``run_audit``.
-        fix_agent: Optional. When provided AND audit verdict is non-PASS,
-            the runner invokes Layer 2 (``repair_failing_features``) to
-            route failing Features back to their owning Group's agent for
-            one repair attempt each. ALSO threaded into ``run_audit`` as
-            its inner-loop fix_agent. ``None`` disables both repair loops
-            (certify mode: judge what's there, no repair).
+        fix_agent: Optional repair agent. Greenfield builds do not use it
+            for audit-driven repair unless ``enable_audit_repair`` or
+            ``workflow.enable_audit_repair`` is true. Brownfield improve
+            flows opt in explicitly. ``run_audit`` still receives
+            ``fix_agent=None`` so its legacy inner repair loop stays off.
         walkthrough: Optional walkthrough hook (default: derived from
             spec via ``default_walkthrough_from_spec``).
         base_branch: Integration branch for build/merge. Defaults to the
@@ -184,6 +184,13 @@ async def run_pipeline(
         spec: If non-None, the runner skips the compile phase and uses
             this spec directly. Caller still owns writing it to disk.
         audit_budget: Audit phase bounds. ``None`` uses library default.
+        enable_audit_repair: If true, non-PASS final audit verdicts may
+            route failing Features through Layer 2 repair. Defaults to the
+            workflow config, with brownfield + fix_agent kept enabled for
+            improve-style flows.
+        allow_in_flight_spec_edits: If true, the runner opens the legacy
+            mid-build edit/redispatch window. Defaults false so one run
+            executes one approved spec.
 
     Returns:
         ``RunResult`` with every phase result populated honestly.
@@ -204,6 +211,18 @@ async def run_pipeline(
         )
 
     run_t0 = time.monotonic()
+    workflow_audit_repair = _resolve_workflow_flag(
+        config,
+        key="enable_audit_repair",
+        explicit=enable_audit_repair,
+        default=brownfield and fix_agent is not None,
+    )
+    workflow_in_flight_spec_edits = _resolve_workflow_flag(
+        config,
+        key="allow_in_flight_spec_edits",
+        explicit=allow_in_flight_spec_edits,
+        default=False,
+    )
 
     def _phase(name: str) -> None:
         # A7: between phases, honor an operator-initiated pause. We poll
@@ -313,6 +332,19 @@ async def run_pipeline(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("emit run.finished failed: %s", exc)
             return result
+        try:
+            from otto.spec_compile import load_spec
+
+            approved_spec = load_spec(session_dir / "spec" / "spec.json")
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "review gate approved but failed to reload spec from %s: %s",
+                session_dir / "spec" / "spec.json",
+                exc,
+            )
+        else:
+            spec = approved_spec
+            result.spec = spec
 
     # ---- 2. Seed (research §4 audit fixtures) ----
     # Empty audit_fixtures is a no-op success (SeedResult.detail says so).
@@ -396,12 +428,10 @@ async def run_pipeline(
         build_result = BuildResult(spec_session_dir=session_dir / "spec")
     else:
         _phase("build")
-        # A6: open the mid-build edit window. Spec-review's POST /edit
-        # accepts edits while lifecycle == "editing_in_flight"; after
-        # build (and any re-dispatch) returns we revert to "approved"
-        # so downstream amendment-flow promises hold. Best-effort:
-        # write failures are logged, never fatal.
-        _set_lifecycle_best_effort(session_dir, "editing_in_flight")
+        if workflow_in_flight_spec_edits:
+            # Legacy escape hatch: open the mid-build edit window and
+            # re-dispatch once if the approved spec changes while workers run.
+            _set_lifecycle_best_effort(session_dir, "editing_in_flight")
         try:
             build_result = await run_build(
                 spec,
@@ -415,14 +445,8 @@ async def run_pipeline(
                 skip_components=skip_components,
                 resume_agent_sessions=resume_agent_sessions,
             )
-            # A6: if mid-build spec edits invalidated any Groups, re-dispatch
-            # the affected Groups against the (now persisted) post-edit Spec.
-            # We re-load from disk because the edit endpoint persisted the
-            # canonical post-edit Spec there. One pass: a second edit during
-            # re-dispatch is observable in the journal but doesn't trigger
-            # a third dispatch (operator runs `otto build --resume`).
             redispatch_ids = _invalidated_group_ids(session_dir)
-            if redispatch_ids:
+            if workflow_in_flight_spec_edits and redispatch_ids:
                 logger.info(
                     "spec edit invalidation: re-dispatching groups %s",
                     sorted(redispatch_ids),
@@ -443,7 +467,8 @@ async def run_pipeline(
                 )
                 result.spec = spec
         finally:
-            _set_lifecycle_best_effort(session_dir, "approved")
+            if workflow_in_flight_spec_edits:
+                _set_lifecycle_best_effort(session_dir, "approved")
     result.build_result = build_result
 
     # ---- 4. Merge (greenfield only) ----
@@ -542,6 +567,7 @@ async def run_pipeline(
     if (
         audit_result.verdict != AuditVerdict.PASSED
         and fix_agent is not None
+        and workflow_audit_repair
         and repair_spec.features
         and not _merge_result_blocks_layer2_repair(merge_result)
     ):
@@ -670,6 +696,34 @@ async def run_pipeline(
 # filesystem during a long pause. Tests monkeypatch this to 0 to make
 # pause-resume cycles deterministic.
 PAUSE_POLL_INTERVAL_S = 1.0
+
+
+def _resolve_workflow_flag(
+    config: dict[str, Any] | None,
+    *,
+    key: str,
+    explicit: bool | None,
+    default: bool,
+) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    workflow = (config or {}).get("workflow")
+    if isinstance(workflow, dict) and key in workflow:
+        return _coerce_bool(workflow.get(key))
+    return default
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off", ""}:
+        return False
+    return bool(value)
 
 
 def _set_lifecycle_best_effort(session_dir: Path, lifecycle: str) -> None:

@@ -64,7 +64,7 @@ DEFAULTS: dict[str, Any] = {
     # Phase B.3 cutover (tick 62): default flipped from "legacy" to "i2p".
     # `otto build` / `otto certify` / `otto improve` now route through the
     # new intent-to-product stack (compile → seed → build → merge → audit
-    # → repair → render). Users hitting regressions fall back via
+    # → audit → render). Users hitting regressions fall back via
     # `--legacy` for one cycle before Phase C deletes the legacy paths.
     "default_pipeline":       "i2p",      # "legacy" | "i2p"
 
@@ -85,6 +85,14 @@ DEFAULTS: dict[str, Any] = {
     # Build settings — used inside one i2p run after the Spec DAG exists.
     "build": {
         "group_concurrent":     3,             # max ready Groups built at once
+    },
+
+    # Workflow simplification defaults. Greenfield builds execute one approved
+    # spec and treat final audit as evidence by default; explicit improve flows
+    # opt into repair at the runner boundary.
+    "workflow": {
+        "enable_audit_repair": False,
+        "allow_in_flight_spec_edits": False,
     },
 
     # Mission Control Autopilot. Assisted is intentionally the default:
@@ -810,8 +818,8 @@ def ensure_safe_repo_state(project_dir: Path, *, allow_dirty: bool = False) -> N
 
 def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
     """Shallow-merge ``raw`` over DEFAULTS, with one level of nesting for
-    ``agents.<name>``, ``queue``, ``build``, and ``autopilot`` so partial
-    overrides work correctly (e.g. ``queue: {concurrent: 5}`` keeps the
+    ``agents.<name>``, ``queue``, ``build``, ``workflow``, and ``autopilot`` so
+    partial overrides work correctly (e.g. ``queue: {concurrent: 5}`` keeps the
     other queue defaults).
     """
     merged: dict[str, Any] = {}
@@ -844,6 +852,16 @@ def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
                 import logging
                 logging.getLogger("otto.config").warning(
                     "Invalid build config %r, using defaults", v,
+                )
+        elif k == "workflow":
+            if isinstance(v, dict):
+                merged["workflow"] = _normalize_workflow_overrides(
+                    v, merged["workflow"]
+                )
+            else:
+                import logging
+                logging.getLogger("otto.config").warning(
+                    "Invalid workflow config %r, using defaults", v,
                 )
         elif k == "autopilot":
             if isinstance(v, dict):
@@ -994,6 +1012,49 @@ def _build_value_is_valid(key: str, value: Any) -> bool:
     if key == "group_concurrent":
         return isinstance(value, int) and not isinstance(value, bool) and value >= 1
     return False
+
+
+def _normalize_workflow_overrides(
+    raw_workflow: dict[str, Any],
+    base: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate workflow simplification overrides against base."""
+    import logging
+
+    logger = logging.getLogger("otto.config")
+    workflow = dict(base)
+    for key, value in raw_workflow.items():
+        if key not in base:
+            choices = ", ".join(sorted(base))
+            raise ConfigError(
+                f"Unknown workflow config key: workflow.{key}. Expected one of: {choices}"
+            )
+        parsed = _parse_boolish(value)
+        if parsed is not None:
+            workflow[key] = parsed
+            continue
+        logger.warning(
+            "Invalid workflow.%s (%r), using default %r",
+            key,
+            value,
+            base[key],
+        )
+    return workflow
+
+
+def _parse_boolish(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value in (0, 1):
+            return bool(value)
+        return None
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def _normalize_autopilot_overrides(
@@ -1529,6 +1590,11 @@ run_budget_seconds: {run_budget_seconds}      # total wall-clock (primary knob)
 
 # ─── Features ────────────────────────────────────────────────────────
 # memory: false                       # cross-run certifier memory (opt-in)
+
+# ─── I2P workflow simplification ─────────────────────────────────────
+# workflow:
+#   enable_audit_repair: false        # greenfield build: final audit reports, does not auto-repair
+#   allow_in_flight_spec_edits: false # freeze approved spec for the current run
 
 # ─── Queue + merge (used by `otto queue` and `otto merge`) ───────────
 # queue:

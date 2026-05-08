@@ -436,6 +436,39 @@ def test_build_run_view_surfaces_redundant_group_status(tmp_path: Path) -> None:
     assert groups["actions"]["status"] == "redundant"
 
 
+def test_build_run_view_failed_check_attempt_is_not_passing(tmp_path: Path) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [{"id": "ledger", "name": "Ledger", "owned_paths": [], "checks": []}],
+    }
+    session = _setup_session(
+        tmp_path,
+        spec=spec,
+        state_events=[
+            {"kind": "group.started", "group_id": "ledger", "ts": "2026-05-04T20:00:00Z"},
+            {"kind": "group.check.started", "group_id": "ledger", "ts": "2026-05-04T20:00:10Z"},
+            {
+                "kind": "group.check.finished",
+                "group_id": "ledger",
+                "detail": "fail",
+                "ts": "2026-05-04T20:00:11Z",
+            },
+            {
+                "kind": "group.attempt.failed",
+                "group_id": "ledger",
+                "detail": "checks failed",
+                "ts": "2026-05-04T20:00:12Z",
+            },
+        ],
+    )
+
+    view = build_run_view(session)
+
+    assert view["groups"][0]["status"] == "in_progress"
+    assert "ledger" not in view["dispatch"]["completed_group_ids"]
+
+
 def test_build_run_view_in_flight_status_from_state_events(tmp_path: Path) -> None:
     """Pre-verdict run: status derived from latest stage.started event."""
     spec = {"intent": "test", "project_kind": "webapp", "groups": []}

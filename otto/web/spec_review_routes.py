@@ -36,6 +36,7 @@ from otto.spec_amend import compute_invalidation
 from otto.spec_compile import (
     Spec,
     load_spec,
+    normalize_spec_for_execution,
     parse_spec_md,
     render_spec_md,
     spec_to_dict,
@@ -157,6 +158,10 @@ def install_spec_review_routes(
                 status_code=400,
                 detail=f"failed to parse spec markdown: {exc}",
             ) from exc
+        warnings = [
+            *warnings,
+            *normalize_spec_for_execution(edited, brownfield=False),
+        ]
 
         invalidation = (
             compute_invalidation(spec, edited)

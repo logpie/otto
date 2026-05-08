@@ -271,6 +271,40 @@ def test_webapp_browser_contract_does_not_capture_feature_journey_tests() -> Non
     )
 
 
+def test_validate_spec_warns_on_shared_contract_owned_path_overlap() -> None:
+    spec = Spec(
+        intent="finance dashboard",
+        project_kind="webapp",
+        structure=StructureDecisions(payload=_valid_webapp_payload()),
+        groups=[
+            Group(id="foundation", name="Foundation"),
+            Group(
+                id="transactions",
+                name="Transactions",
+                dependencies=["foundation"],
+                owned_paths=["tests/browser/test_transactions.*"],
+            ),
+        ],
+        shared_contracts=[
+            SharedContract(
+                id="browser-quality-contract",
+                name="Browser quality",
+                kind="test_runner",
+                owner_id="foundation",
+                paths=["tests/browser/**"],
+            )
+        ],
+    )
+
+    result = validate_spec(spec)
+
+    assert result.valid
+    assert any(
+        "overlaps non-owner group 'transactions'" in warning
+        for warning in result.warnings
+    )
+
+
 def test_unknown_check_kind_is_dropped_with_warning() -> None:
     """v2.1: unknown check kinds parse permissively. The check is dropped
     from the slice and a warning is recorded; parsing does not raise.

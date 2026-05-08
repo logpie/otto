@@ -1008,8 +1008,13 @@ def _group_status_from_events(
         kind = str(event.get("event") or event.get("kind") or "")
         if kind in {"group.started", "group.check.started", "group.repair.started"}:
             status = "in_progress"
-        elif kind in {"group.check.finished", "group.merge.eligible", "group.scope.passed"}:
+        elif kind == "group.check.finished":
+            detail = str(event.get("detail") or "").strip().lower()
+            status = "in_progress" if detail in {"fail", "failed"} else "passing"
+        elif kind in {"group.merge.eligible", "group.scope.passed"}:
             status = "passing"
+        elif kind in {"group.attempt.failed", "group.check.feedback"}:
+            status = "in_progress"
         elif kind in {"group.merge.landed", "group.landed"}:
             status = "landed"
         elif kind == "group.merge.redundant":

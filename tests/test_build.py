@@ -1917,6 +1917,31 @@ def test_commit_group_work_excludes_common_generated_artifacts(
     assert not any(path.startswith("test-results/") for path in committed_paths)
 
 
+def test_commit_group_work_ignores_unstaged_non_product_modifications(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    (tmp_path / "otto_logs").mkdir()
+    (tmp_path / "otto_logs" / "watcher.log").write_text("baseline\n", encoding="utf-8")
+    subprocess.run(["git", "add", "otto_logs/watcher.log"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "track runtime path", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+    )
+    (tmp_path / "otto_logs" / "watcher.log").write_text("runtime\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('real change')\n", encoding="utf-8")
+
+    assert _commit_group_work(tmp_path, group_id="g", branch="layer2/g")
+
+    committed_paths = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    assert committed_paths == ["src/app.py"]
+
+
 def test_run_build_marks_blocked_on_commit_failure(tmp_path: Path) -> None:
     """B2/B4: if _commit_group_work fails (e.g., git not configured),
     the slice is marked BLOCKED rather than PASSING. branch_by_group is
