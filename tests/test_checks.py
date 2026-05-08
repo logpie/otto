@@ -420,6 +420,61 @@ def test_browser_journey_subprocess_and_globs_collect_artifacts(tmp_path: Path) 
     assert evidence.raw["browser_env"]["OTTO_BROWSER_BASE_URL"].startswith("http://127.0.0.1:")
 
 
+def test_browser_journey_bootstraps_locked_node_project_for_python_wrapper(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_npm = bin_dir / "npm"
+    fake_npm.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo \"$*\" >> npm.log\n"
+        "if [ \"$1\" = \"ci\" ]; then mkdir -p node_modules/.bin; exit 0; fi\n"
+        "exit 9\n",
+        encoding="utf-8",
+    )
+    fake_npm.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"dev":"vite --host 127.0.0.1"}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    script = tmp_path / "tests" / "browser" / "journey.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from pathlib import Path\n"
+        "assert Path('node_modules/.bin').exists()\n"
+        "out = Path('otto_artifacts/browser/check.png')\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_bytes(b'png')\n",
+        encoding="utf-8",
+    )
+
+    evidence = run_check(
+        BrowserJourney(
+            command=("python3", "tests/browser/journey.py"),
+            evidence_globs=("otto_artifacts/browser/*.png",),
+            timeout_s=15,
+        ),
+        project_dir=tmp_path,
+        cwd=tmp_path,
+    )
+
+    assert evidence.passed is True
+    assert evidence.raw["bootstrap_command"] == [
+        "npm",
+        "ci",
+        "--prefer-offline",
+        "--no-audit",
+        "--no-fund",
+    ]
+    assert (tmp_path / "npm.log").read_text(encoding="utf-8").splitlines() == [
+        "ci --prefer-offline --no-audit --no-fund",
+    ]
+
+
 def test_browser_journey_subprocess_failure_keeps_partial_artifacts(tmp_path: Path) -> None:
     script = tmp_path / "fake_browser.py"
     script.write_text(

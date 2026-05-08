@@ -195,6 +195,15 @@ invoked function expression such as
 `(() => { function setByLabel(...) { ... } setByLabel("amount", "12"); return true; })()`.
 Do not pass raw top-level `function ...; statement;` text to `agent-browser
 eval`; Chrome will reject it with `SyntaxError: Unexpected token 'function'`.
+When `eval` returns structured data or a string produced by `JSON.stringify`,
+decode the CLI output robustly before treating it as an object. The CLI may
+wrap the JavaScript return value as a JSON string literal, so one
+`json.loads(...)` can still produce a string. Use a small helper that parses
+until the value is no longer a JSON-encoded string, then assert on the decoded
+object/text. A BrowserJourney should not fail with Python errors such as
+`'str' object has no attribute 'get'` or `string indices must be integers`
+after an `agent-browser eval` call; that is a journey decoding bug, not
+product evidence.
 
 Do not leave non-functional placeholder controls in the final product. A
 foundation/app-shell group may expose empty extension slots or honest empty

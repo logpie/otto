@@ -148,6 +148,8 @@ def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -
     assert "specific missing `agent-browser` capability" in text
     assert "Semantic `find` supports" in text
     assert "agent-browser find label Type select expense" in text
+    assert "decode the CLI output robustly" in text
+    assert "'str' object has no attribute 'get'" in text
     assert "page.goto(\"/transactions\")" in text
     assert "invalid URL" in text
 

@@ -382,6 +382,7 @@ def _run_browser_journey(
     bootstrap = _run_node_bootstrap_if_needed(
         list(check.command), cwd=cwd, timeout_s=check.timeout_s,
         extra_pythonpath=[project_dir, cwd],
+        allow_project_bootstrap=True,
     )
     if bootstrap is not None and bootstrap.returncode != 0:
         output = _format_subprocess_output(bootstrap.args, bootstrap)
@@ -1393,6 +1394,7 @@ def _run_node_bootstrap_if_needed(
     cwd: Path,
     timeout_s: int,
     extra_pythonpath: list[Path] | None = None,
+    allow_project_bootstrap: bool = False,
 ) -> subprocess.CompletedProcess[str] | None:
     """Install locked npm deps before npm checks in a clean worktree.
 
@@ -1405,13 +1407,15 @@ def _run_node_bootstrap_if_needed(
     """
     if not command:
         return None
-    if Path(command[0]).name != "npm":
+    is_npm_command = Path(command[0]).name == "npm"
+    if not is_npm_command and not allow_project_bootstrap:
         return None
     if not (cwd / "package.json").exists():
         return None
     if not (cwd / "package-lock.json").exists():
         return None
-    if (cwd / "node_modules").exists():
+    node_modules = cwd / "node_modules"
+    if node_modules.exists() and (node_modules / ".bin").exists():
         return None
     bootstrap_cmd = ["npm", "ci", "--prefer-offline", "--no-audit", "--no-fund"]
     return _run_command(
