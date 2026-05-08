@@ -161,7 +161,11 @@ def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -
 
 def test_compile_spec_browser_journeys_are_agent_browser_first() -> None:
     text = (PROMPTS_DIR / "compile-spec.md").read_text(encoding="utf-8")
-    assert "prefer `agent-browser --session" in text
-    assert "Use repo-native" in text
+    assert "`agent-browser --session <unique-id>`" in text
+    assert "default browser runner is a project-owned" in text
+    assert "Do not emit routine feature checks" in text
+    assert "Use repo-native Playwright only when" in text
     assert "Playwright only when" in text
+    assert '"command": ["pytest", "tests/browser/test_shell.py"]' not in text
+    assert "`npm run test:browser -- tests/browser/<feature>.spec.ts`" in text
     assert "typically a Playwright" not in text

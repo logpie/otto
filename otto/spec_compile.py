@@ -3664,6 +3664,44 @@ def spec_content_sha256(spec: Spec) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _browser_journey_agent_browser_warnings(
+    check: CheckKind,
+    *,
+    path: str,
+    project_kind: str,
+) -> list[str]:
+    """Warn when routine generated webapp journeys drift away from agent-browser."""
+    if project_kind != "webapp" or not isinstance(check, BrowserJourney):
+        return []
+    command = tuple(str(part) for part in check.command)
+    if not command:
+        return []
+
+    command_text = " ".join(command).lower()
+    uses_agent_browser_runner = (
+        "agent-browser" in command_text
+        or "tests/run_browser_journey.py" in command_text
+        or "tests/run_browser_journey.sh" in command_text
+    )
+    if uses_agent_browser_runner:
+        return []
+
+    looks_like_repo_browser_suite = (
+        "test:browser" in command_text
+        or "playwright" in command_text
+        or ("tests/browser" in command_text and command[0] in {"pytest", "python", "python3", "uv"})
+    )
+    if not looks_like_repo_browser_suite:
+        return []
+
+    return [
+        f"{path}: routine webapp BrowserJourney uses a repo-native browser "
+        "test command instead of an Otto-owned agent-browser runner; prefer "
+        "`python3 tests/run_browser_journey.py --journey <id>` unless the "
+        "journey explicitly needs Playwright-only capabilities"
+    ]
+
+
 @dataclass
 class ValidationResult:
     """Result of `validate_spec`.
@@ -3796,6 +3834,14 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
             warnings.append(f"group {group_.id!r}: name is empty")
         if not group_.checks:
             warnings.append(f"group {group_.id!r}: no checks declared (vacuously passes)")
+        for check_index, check in enumerate(group_.checks):
+            warnings.extend(
+                _browser_journey_agent_browser_warnings(
+                    check,
+                    path=f"group {group_.id!r}.checks[{check_index}]",
+                    project_kind=spec.project_kind,
+                )
+            )
         # S1 fix: feature_ids must be present and concrete enough that
         # two independent build agents cannot drift on what to do. Empty
         # feature_ids → vacuous group (BLOCKED downstream is unhelpful;
@@ -3851,6 +3897,13 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
 
     owned_artifact_patterns = _owned_check_artifact_patterns(spec)
     for index, check in enumerate(spec.cross_group_checks):
+        warnings.extend(
+            _browser_journey_agent_browser_warnings(
+                check,
+                path=f"cross_group_checks[{index}]",
+                project_kind=spec.project_kind,
+            )
+        )
         for path_ref in _cross_group_check_command_path_refs(check):
             if not _path_ref_matches_any_owned_pattern(path_ref, owned_artifact_patterns):
                 warnings.append(

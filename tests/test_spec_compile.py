@@ -859,6 +859,64 @@ def test_validator_accepts_cross_group_runner_path_with_owner() -> None:
     )
 
 
+def test_validator_warns_on_routine_webapp_browser_journey_without_agent_browser_runner() -> None:
+    spec = Spec(
+        intent="test",
+        project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        groups=[
+            Group(
+                id="filtering",
+                name="Filtering",
+                feature_ids=["filter transactions by text"],
+                checks=[
+                    BrowserJourney(
+                        command=("npm", "run", "test:browser", "--", "tests/browser/filtering.spec.ts"),
+                        evidence_globs=("otto_artifacts/browser/filtering/*.png",),
+                    )
+                ],
+            )
+        ],
+    )
+
+    result = validate_spec(spec)
+
+    assert any(
+        "Otto-owned agent-browser runner" in warning
+        and "tests/run_browser_journey.py" in warning
+        for warning in result.warnings
+    )
+
+
+def test_validator_accepts_webapp_browser_journey_agent_browser_runner() -> None:
+    spec = Spec(
+        intent="test",
+        project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        groups=[
+            Group(
+                id="filtering",
+                name="Filtering",
+                feature_ids=["filter transactions by text"],
+                owned_paths=["tests/run_browser_journey.py"],
+                checks=[
+                    BrowserJourney(
+                        command=("python3", "tests/run_browser_journey.py", "--journey", "filtering"),
+                        evidence_globs=("otto_artifacts/browser/filtering/*.png",),
+                    )
+                ],
+            )
+        ],
+    )
+
+    result = validate_spec(spec)
+
+    assert not any(
+        "Otto-owned agent-browser runner" in warning
+        for warning in result.warnings
+    )
+
+
 # ---------------------------------------------------------------------------
 # S5: parser warns on missing/wrong-type tasks/deps/owned_paths
 # ---------------------------------------------------------------------------

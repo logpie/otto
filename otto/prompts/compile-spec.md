@@ -54,12 +54,12 @@ deterministically.
         "home-about-routes"
       ],
       "dependencies": [],
-      "owned_paths": ["src/App.*", "src/index.*", "src/components/Navbar.*"],
+      "owned_paths": ["src/App.*", "src/index.*", "src/components/Navbar.*", "tests/run_browser_journey.py"],
       "checks": [
         {
           "kind": "browser_journey",
-          "command": ["pytest", "tests/browser/test_shell.py"],
-          "evidence_globs": ["evidence/shell/*.png"],
+          "command": ["python3", "tests/run_browser_journey.py", "--journey", "shell"],
+          "evidence_globs": ["otto_artifacts/browser/shell/*.png"],
           "timeout_s": 600
         }
       ]
@@ -68,8 +68,8 @@ deterministically.
   "cross_group_checks": [
     {
       "kind": "browser_journey",
-      "command": ["pytest", "tests/browser/test_main_workflow.py"],
-      "evidence_globs": ["evidence/main-workflow/*.png"],
+      "command": ["python3", "tests/run_browser_journey.py", "--journey", "main-workflow"],
+      "evidence_globs": ["otto_artifacts/browser/main-workflow/*.png"],
       "timeout_s": 600
     }
   ],
@@ -135,8 +135,8 @@ deterministically.
       "kind": "app_shell",
       "description": "Shared SPA boot, route registration, and visible shell behavior.",
       "owner_id": "shell",
-      "paths": ["src/App.*", "src/main.*", "vite.config.*", "playwright.config.*"],
-      "invariants": ["routes render through one app shell", "browser checks honor Otto browser env"],
+      "paths": ["src/App.*", "src/main.*", "vite.config.*", "tests/run_browser_journey.py"],
+      "invariants": ["routes render through one app shell", "browser checks honor Otto browser env and use agent-browser for routine journeys"],
       "consumed_by": ["scaffold-spa", "navbar-home-about", "home-about-routes"],
       "extension_policy": "Feature groups may add feature-owned route files and browser journeys that consume this shell. Changing shared route registration or browser runner behavior requires the owner or a spec amendment.",
       "allowed_extension_paths": ["tests/browser/test_*.py", "tests/browser/test_*.playwright.ts"],
@@ -664,13 +664,18 @@ Example for a library:
 
 4. **Every group has at least one check**. Browser journeys are
    `subprocess + glob` for v1: `command` runs a real browser runner, then
-   matching files in `evidence_globs` are collected as evidence. For routine
-   webapp click/type/screenshot journeys, prefer `agent-browser --session
-   <unique-id>` inside the committed runner script. Use repo-native
-   Playwright only when the journey needs Playwright-only controls such as
-   file download/upload orchestration, network interception, multiple browser
-   contexts, trace debugging, or an already established project Playwright
-   suite. Do not invent a `steps:` array — that's a future field.
+   matching files in `evidence_globs` are collected as evidence. For generated
+   greenfield webapps, the default browser runner is a project-owned
+   `tests/run_browser_journey.py` that shells out to
+   `agent-browser --session <unique-id>` for real click/type/screenshot
+   behavior. Do not emit routine feature checks such as
+   `npm run test:browser -- tests/browser/<feature>.spec.ts` as
+   `browser_journey`; that steers the build back into Playwright and hides
+   the intended Otto-owned browser path. Use repo-native Playwright only when
+   the journey needs Playwright-only controls such as file download/upload
+   orchestration, network interception, multiple browser contexts, trace
+   debugging, or an already established project Playwright suite. Do not
+   invent a `steps:` array — that's a future field.
 
 5. **`deps` is a DAG**. No cycles. Groups with no deps run first.
 
@@ -853,14 +858,17 @@ a `browser_journey` check pointing at it:
 }
 ```
 
-This script boots the app, drives a real browser through the home page
-preferably using `agent-browser --session <unique-id>` for routine user-level
-click/type/screenshot flows, or repo-native Playwright real event primitives
-when the scenario needs Playwright-only capabilities such as file upload,
-network interception, multiple browser contexts, or an existing Playwright
-suite. The journey asserts the required forms exist and screenshots each
-surface. Without this check, the group will pass its other tests but the
-integrated app will fail downstream browser quality evaluators.
+This script boots the app, drives a real browser through the home page using
+`agent-browser --session <unique-id>` for routine user-level
+click/type/screenshot flows, and may accept an argument such as
+`--journey <id>` so feature and cross-group checks can reuse the same
+Otto-owned runner. Use repo-native Playwright real event primitives only when
+the scenario needs Playwright-only capabilities such as file upload, network
+interception, multiple browser contexts, or an existing Playwright suite, and
+make that exception explicit in the feature/check rationale. The journey
+asserts the required forms exist and screenshots each surface. Without this
+check, the group will pass its other tests but the integrated app will fail
+downstream browser quality evaluators.
 
 A `browser_journey` is behavioral evidence only when its command launches
 and drives a real browser against the product. Do not design checks that
@@ -876,13 +884,15 @@ works once independently built groups are combined.
 
 Do not invent a concrete command path for a cross-group check unless that
 file already exists in the project or exactly one group owns creating it.
-For generated webapp test runners, assign the runner file to the foundation
-or shared test-runner group, for example `tests/browser/full-workflow.spec.ts`
-under that group's `owned_paths`. Otherwise emit the intended workflow as
+For generated webapp test runners, assign `tests/run_browser_journey.py` to
+the foundation or shared test-runner group and have it support named journeys
+such as `--journey main-workflow`. Otherwise emit the intended workflow as
 `behavior_journeys` and let the owned runner/check stage materialize the
 executable artifact. A command such as
 `npm run test:browser -- tests/browser/full-workflow.spec.ts` is invalid if
-no group is responsible for creating `tests/browser/full-workflow.spec.ts`.
+no group is responsible for creating `tests/browser/full-workflow.spec.ts`,
+and it is the wrong default for routine greenfield webapp journeys even when
+the file is owned.
 
 **Planned behavior journeys**: for every real webapp, emit
 `behavior_journeys` as deterministic user-checklist plans. These are not
