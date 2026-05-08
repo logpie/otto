@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 GENERIC_AGENT_BROWSER_SESSIONS = {"", "default", "main", "shared", "browser"}
+MAX_AGENT_BROWSER_SESSION_LEN = 32
 
 
 def classify_browser_command(command: Sequence[str]) -> str:
@@ -52,6 +53,13 @@ def validate_agent_browser_command(command: Sequence[str]) -> str | None:
             f"{session_name!r} is too generic for concurrent Otto checks. "
             "Use a unique journey/worktree session name."
         )
+    if len(session_name) > MAX_AGENT_BROWSER_SESSION_LEN:
+        return (
+            "Agent-browser BrowserJourney preflight failed: session name "
+            f"{session_name!r} is too long for reliable Unix socket paths. "
+            f"Keep agent-browser sessions <= {MAX_AGENT_BROWSER_SESSION_LEN} "
+            "characters and put path isolation in AGENT_BROWSER_SOCKET_DIR."
+        )
     return None
 
 
@@ -73,7 +81,9 @@ def agent_browser_argv(session_name: str, *args: str) -> list[str]:
 
 def _session_slug(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(value or "").strip()).strip("-")
-    return slug or "otto-browser"
+    if not slug:
+        return "otto-browser"
+    return slug[:MAX_AGENT_BROWSER_SESSION_LEN].rstrip("-_.") or "otto-browser"
 
 
 def browser_artifact_kind(path: Path) -> str:

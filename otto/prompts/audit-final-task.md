@@ -61,6 +61,13 @@ output:
      behavior, do not treat the Feature as fully tested merely because a
      docstring example or manual command passed.
 
+     When you run any project-owned `agent-browser` BrowserJourney manually,
+     set a short session and socket directory, for example
+     `OTTO_BROWSER_SESSION=audit-main AGENT_BROWSER_SOCKET_DIR=/tmp/otto-ab/audit-main`.
+     Do not mark product behavior partial just because a default generated
+     session name is too long for the local socket path; rerun once with a short
+     session/socket and then judge the real product behavior from that result.
+
   4. A final verdict: `passed`, `partial`, or `blocked`.
   5. A quality assessment of the user-facing experience (REQUIRED, independent
      of the functional verdict):

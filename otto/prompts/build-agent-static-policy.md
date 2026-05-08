@@ -116,29 +116,42 @@ webapp journeys. A routine journey is a single-user browser flow that opens the
 app, clicks visible controls, types realistic input, checks visible state,
 reloads or navigates, and saves screenshots/video. If you write the journey as
 a Python or shell file, it should shell out to `agent-browser`; do not import
-Playwright or launch Chromium directly for routine flows. Use a unique session
-name per journey/worktree; every command should include `agent-browser
---session <unique-id>`. Example runner calls:
+Playwright or launch Chromium directly for routine flows. Use a unique, short
+session name per journey/worktree; every command should include
+`agent-browser --session <unique-id>`. Keep the actual session token at or
+below 32 ASCII slug characters. Long session names derived from product titles,
+worktree directory names, or feature prose exceed Unix socket path limits on
+macOS and are runner bugs. Put path isolation in `AGENT_BROWSER_SOCKET_DIR`,
+not in the session name. Example runner calls:
 
 ```python
-session = os.environ.get("OTTO_BROWSER_SESSION", f"journey-{Path.cwd().name}")
+import os
+import re
+
+def short_session(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value).strip("-") or "journey"
+    return slug[:32].rstrip("-_.") or "journey"
+
+session = short_session(os.environ.get("OTTO_BROWSER_SESSION", "journey-main"))
+socket_dir = os.environ.get("AGENT_BROWSER_SOCKET_DIR", f"/tmp/otto-ab/{session}")
 base_url = os.environ["OTTO_BROWSER_BASE_URL"]
-run(["agent-browser", "--session", session, "open", base_url])
-run(["agent-browser", "--session", session, "snapshot", "-i"])
-run(["agent-browser", "--session", session, "find", "role", "button", "click", "--name", "Add"])
-run(["agent-browser", "--session", session, "screenshot", "otto_artifacts/browser/add.png"])
-run(["agent-browser", "--session", session, "close"])
+env = {**os.environ, "AGENT_BROWSER_SOCKET_DIR": socket_dir}
+run(["agent-browser", "--session", session, "open", base_url], env=env)
+run(["agent-browser", "--session", session, "snapshot", "-i"], env=env)
+run(["agent-browser", "--session", session, "find", "role", "button", "click", "--name", "Add"], env=env)
+run(["agent-browser", "--session", session, "screenshot", "otto_artifacts/browser/add.png"], env=env)
+run(["agent-browser", "--session", session, "close"], env=env)
 ```
 
-If this slice owns a shared BrowserJourney runner such as
+If this group owns a shared BrowserJourney runner such as
 `tests/run_browser_journey.py`, read the full spec/check list and implement
-every declared runner entry point up front, not only this slice's immediate
+every declared runner entry point up front, not only this group's immediate
 journey. For example, if group or cross-group checks call
 `python3 tests/run_browser_journey.py --journey transactions`, `--journey
 filters`, `--journey csv`, and `--journey main-workflow`, the shared runner
 must accept all of those journey IDs and dispatch to meaningful browser
 actions for each. It is acceptable for a later-feature journey to fail on
-missing visible controls before that feature slice is merged; it is not
+missing visible controls before that feature group is merged; it is not
 acceptable for the runner itself to fail with `invalid choice`,
 `unknown journey`, or an unimplemented placeholder. That is a shared-runner
 contract bug.

@@ -13,6 +13,18 @@ def test_browser_command_policy_requires_agent_browser_session() -> None:
     assert "without a unique" in (
         validate_agent_browser_command(["agent-browser", "open", "http://x"]) or ""
     )
+    assert "too long" in (
+        validate_agent_browser_command(
+            [
+                "agent-browser",
+                "--session",
+                "finance-transactions-crud--a-personal-finance-dashboard-web",
+                "open",
+                "http://x",
+            ]
+        )
+        or ""
+    )
     assert validate_agent_browser_command(
         ["agent-browser", "--session", "journey-1", "open", "http://x"]
     ) is None
@@ -26,6 +38,7 @@ def test_agent_browser_argv_adds_explicit_session() -> None:
         "open",
         "http://x",
     ]
+    assert len(agent_browser_argv("x" * 80, "open", "http://x")[2]) <= 32
 
 
 def test_declared_browser_evidence_missing_policy() -> None:

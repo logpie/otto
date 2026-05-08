@@ -148,6 +148,9 @@ def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -
     assert "not proof\nthat a product server is already running" in text
     assert "wait until\n`OTTO_BROWSER_BASE_URL` accepts connections" in text
     assert "agent-browser --session" in text
+    assert "below 32 ASCII slug characters" in text
+    assert "AGENT_BROWSER_SOCKET_DIR" in text
+    assert "Long session names derived from product titles" in text
     assert "do not import\nPlaywright or launch Chromium directly" in text
     assert "specific missing `agent-browser` capability" in text
     assert "Semantic `find` supports" in text
@@ -161,6 +164,9 @@ def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -
     assert "zero matching artifacts is a runner/evidence bug" in text
     assert "page.goto(\"/transactions\")" in text
     assert "invalid URL" in text
+    audit_text = (PROMPTS_DIR / "audit-final-task.md").read_text(encoding="utf-8")
+    assert "OTTO_BROWSER_SESSION=audit-main" in audit_text
+    assert "AGENT_BROWSER_SOCKET_DIR=/tmp/otto-ab/audit-main" in audit_text
 
 
 def test_compile_spec_browser_journeys_are_agent_browser_first() -> None:
