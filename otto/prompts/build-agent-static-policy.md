@@ -178,6 +178,13 @@ and cause fake "browser missing" failures. Keep the normal HOME unless there is
 a real reason to isolate profile/state, and use `AGENT_BROWSER_SOCKET_DIR` for
 daemon/socket path length or permission issues.
 
+For `agent-browser eval`, pass a single JavaScript expression. If the journey
+needs multiple statements or helper functions, wrap them in an immediately
+invoked function expression such as
+`(() => { function setByLabel(...) { ... } setByLabel("amount", "12"); return true; })()`.
+Do not pass raw top-level `function ...; statement;` text to `agent-browser
+eval`; Chrome will reject it with `SyntaxError: Unexpected token 'function'`.
+
 Do not leave non-functional placeholder controls in the final product. A
 foundation/app-shell group may expose empty extension slots or honest empty
 states, but disabled duplicate controls with the same labels as later real
