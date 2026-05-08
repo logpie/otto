@@ -105,9 +105,11 @@ check-runner evidence.
 Default BrowserJourney tool policy: use `agent-browser` for routine generated
 webapp journeys. A routine journey is a single-user browser flow that opens the
 app, clicks visible controls, types realistic input, checks visible state,
-reloads or navigates, and saves screenshots/video. Use a unique session name
-per journey/worktree; every command should include `agent-browser --session
-<unique-id>`. Example runner calls:
+reloads or navigates, and saves screenshots/video. If you write the journey as
+a Python or shell file, it should shell out to `agent-browser`; do not import
+Playwright or launch Chromium directly for routine flows. Use a unique session
+name per journey/worktree; every command should include `agent-browser
+--session <unique-id>`. Example runner calls:
 
 ```python
 session = os.environ.get("OTTO_BROWSER_SESSION", f"journey-{Path.cwd().name}")
@@ -128,7 +130,10 @@ unsupported commands such as `agent-browser find label Type select expense`.
 Only choose repo-native Playwright when the journey needs capabilities that
 agent-browser cannot express cleanly, such as multi-context auth, network
 interception, trace-heavy debugging, or an established project Playwright
-suite. If you choose Playwright, write locators like a durable user test. Scope
+suite. If you choose Playwright for a newly generated journey, state the
+specific missing `agent-browser` capability in the script comments or final
+notes; otherwise this is a runner bug to repair. If you choose Playwright,
+write locators like a durable user test. Scope
 short/common controls and text to named forms, regions, landmarks, lists,
 tables, or cards before interacting or asserting. Use exact accessible names for
 short labels and buttons such as `Status`, `Comment`, `List`, `Done`, `Import`,
