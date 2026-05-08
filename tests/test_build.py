@@ -663,6 +663,34 @@ def test_collect_critical_shared_contract_deltas_groups_paths_by_contract() -> N
     }
 
 
+def test_collect_critical_shared_contract_deltas_does_not_overmatch_feature_subtrees() -> None:
+    foundation = Group(id="foundation", name="Foundation")
+    feature = Group(id="budgets", name="Budgets", dependencies=["foundation"])
+    spec = Spec(
+        intent="finance",
+        groups=[foundation, feature],
+        shared_contracts=[
+            SharedContract(
+                id="app-shell",
+                name="App shell",
+                owner_id="foundation",
+                paths=["src/features/featureRegistry.*", "src/features/types.*"],
+                allowed_extension_paths=["src/features/*/**"],
+            )
+        ],
+    )
+
+    deltas = collect_critical_shared_contract_deltas(
+        feature,
+        spec,
+        ["src/features/featureRegistry.tsx", "src/features/budgets/panel.tsx"],
+    )
+
+    assert len(deltas) == 1
+    assert deltas[0].contract_id == "app-shell"
+    assert deltas[0].paths == ["src/features/featureRegistry.tsx"]
+
+
 def test_run_build_records_contract_delta_without_blocking(tmp_path: Path) -> None:
     _init_git(tmp_path)
     session_dir = tmp_path / "_session"

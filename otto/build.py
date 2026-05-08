@@ -791,9 +791,11 @@ def _matches_any(path: str, globs: list[str]) -> bool:
                 left, right = parts
                 left = left.rstrip("/")
                 right = right.lstrip("/")
-                # Require one or more intermediate path components, including
-                # zero (so a/**/b matches a/b)
-                for depth in range(0, 6):
+                # ``a/**`` means descendants under ``a``, not ``a`` itself.
+                # For ``a/**/b`` keep the usual zero-or-more middle segment
+                # behavior so it still matches ``a/b``.
+                min_depth = 1 if not right else 0
+                for depth in range(min_depth, 6):
                     middle = "/".join(["*"] * depth) if depth else ""
                     candidate = "/".join(
                         part for part in (left, middle, right) if part
