@@ -121,6 +121,19 @@ run(["agent-browser", "--session", session, "screenshot", "otto_artifacts/browse
 run(["agent-browser", "--session", session, "close"])
 ```
 
+If this slice owns a shared BrowserJourney runner such as
+`tests/run_browser_journey.py`, read the full spec/check list and implement
+every declared runner entry point up front, not only this slice's immediate
+journey. For example, if group or cross-group checks call
+`python3 tests/run_browser_journey.py --journey transactions`, `--journey
+filters`, `--journey csv`, and `--journey main-workflow`, the shared runner
+must accept all of those journey IDs and dispatch to meaningful browser
+actions for each. It is acceptable for a later-feature journey to fail on
+missing visible controls before that feature slice is merged; it is not
+acceptable for the runner itself to fail with `invalid choice`,
+`unknown journey`, or an unimplemented placeholder. That is a shared-runner
+contract bug.
+
 `OTTO_BROWSER_BASE_URL` is an assigned URL/port for this journey, not proof
 that a product server is already running. A Python or shell `agent-browser`
 BrowserJourney must start the app on `OTTO_BROWSER_PORT`/`PORT` (for example

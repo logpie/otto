@@ -150,6 +150,8 @@ def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -
     assert "specific missing `agent-browser` capability" in text
     assert "Semantic `find` supports" in text
     assert "agent-browser find label Type select expense" in text
+    assert "implement\nevery declared runner entry point up front" in text
+    assert "`unknown journey`" in text
     assert "do not use a broad global\nsemantic locator such as `find label Search" in text
     assert "`find label To ...`" in text
     assert "decode the CLI output robustly" in text
