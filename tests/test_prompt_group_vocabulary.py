@@ -134,3 +134,13 @@ def test_runtime_agent_prompt_policy_snippets_are_persistent_files() -> None:
         for prompt_name in prompt_names:
             assert (PROMPTS_DIR / prompt_name).exists()
             assert prompt_name in source
+
+
+def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -> None:
+    text = (PROMPTS_DIR / "build-agent-static-policy.md").read_text(encoding="utf-8")
+    assert "use.baseURL" in text
+    assert "OTTO_BROWSER_PORT" in text
+    assert "OTTO_BROWSER_BASE_URL" in text
+    assert "agent-browser --session" in text
+    assert "page.goto(\"/transactions\")" in text
+    assert "invalid URL" in text

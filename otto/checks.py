@@ -26,14 +26,17 @@ import glob
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from otto.observability import iso_timestamp, write_text_atomic
 from otto.spec_compile import (
@@ -354,6 +357,22 @@ def _run_browser_journey(
         return _malformed_check_evidence(
             started, t0, "BrowserJourney.command is empty (informational; nothing to run)"
         )
+    preflight_error = _playwright_browser_journey_preflight(check, cwd)
+    if preflight_error:
+        if raw_log_path is not None:
+            _write_raw(raw_log_path, preflight_error)
+        return Evidence(
+            passed=False,
+            started_at=started,
+            duration_s=time.monotonic() - t0,
+            detail="playwright runner config invalid artifacts=0",
+            artifacts=[],
+            raw={
+                "command": list(check.command),
+                "preflight_error": preflight_error,
+                "evidence_globs": list(check.evidence_globs),
+            },
+        )
     bootstrap = _run_node_bootstrap_if_needed(
         list(check.command), cwd=cwd, timeout_s=check.timeout_s,
         extra_pythonpath=[project_dir, cwd],
@@ -376,10 +395,22 @@ def _run_browser_journey(
                 "evidence_globs": list(check.evidence_globs),
             },
         )
-    completed = _run_command(
-        list(check.command), cwd=cwd, timeout_s=check.timeout_s,
-        extra_pythonpath=[project_dir, cwd],
-    )
+    browser_env = _browser_journey_env(cwd)
+    browser_lock_wait_s: float | None = None
+    if os.environ.get("OTTO_SERIALIZE_BROWSER_JOURNEYS") == "1":
+        with _browser_journey_lock() as lock_wait_s:
+            browser_lock_wait_s = lock_wait_s
+            completed = _run_command(
+                list(check.command), cwd=cwd, timeout_s=check.timeout_s,
+                extra_pythonpath=[project_dir, cwd],
+                env_overrides=browser_env,
+            )
+    else:
+        completed = _run_command(
+            list(check.command), cwd=cwd, timeout_s=check.timeout_s,
+            extra_pythonpath=[project_dir, cwd],
+            env_overrides=browser_env,
+        )
     resolved_command = (
         list(completed.args) if isinstance(completed.args, (list, tuple)) else list(check.command)
     )
@@ -405,7 +436,10 @@ def _run_browser_journey(
         "stdout": completed.stdout or "",
         "stderr": completed.stderr or "",
         "evidence_globs": list(check.evidence_globs),
+        "browser_env": browser_env,
     }
+    if browser_lock_wait_s is not None:
+        raw["browser_lock_wait_s"] = browser_lock_wait_s
     if bootstrap is not None:
         raw.update({
             "bootstrap_command": list(bootstrap.args),
@@ -421,6 +455,163 @@ def _run_browser_journey(
         artifacts=artifacts,
         raw=raw,
     )
+
+
+def _playwright_browser_journey_preflight(check: BrowserJourney, cwd: Path) -> str | None:
+    """Catch generated Playwright runners that cannot resolve relative routes.
+
+    A repeated I2P failure mode is a BrowserJourney that creates tests with
+    ``page.goto("/")`` or ``page.goto("/feature")`` but omits
+    ``use.baseURL`` from ``playwright.config.*``. Playwright then fails before
+    testing product behavior with "Cannot navigate to invalid URL", causing
+    wasteful repair loops. Detect that contract violation before launching the
+    browser and return a targeted repair diagnostic.
+    """
+    if not _browser_command_uses_playwright(check.command, cwd):
+        return None
+    test_paths = _playwright_browser_test_paths(cwd)
+    if not test_paths:
+        return None
+    relative_goto_paths = [
+        path
+        for path in test_paths
+        if _file_contains_relative_playwright_goto(path)
+    ]
+    if not relative_goto_paths:
+        return None
+    config_paths = _playwright_config_paths(cwd)
+    base_url_declared = any(_file_mentions_base_url(path) for path in [*config_paths, *test_paths])
+    if base_url_declared:
+        return None
+    examples = ", ".join(str(path.relative_to(cwd)) for path in relative_goto_paths[:3])
+    return (
+        "Playwright BrowserJourney preflight failed: browser tests use relative "
+        f"`page.goto(...)` routes but no `baseURL` was found in playwright config "
+        f"or test files. Affected test file(s): {examples}. Fix by committing a "
+        "`playwright.config.*` with a `webServer` command/url and `use: { baseURL: "
+        "\"http://127.0.0.1:<port>\" }`, or change the journey to navigate to an "
+        "absolute URL. This is runner configuration, not product evidence."
+    )
+
+
+def _browser_command_uses_playwright(command: tuple[str, ...] | list[str], cwd: Path) -> bool:
+    lowered = [part.lower() for part in command]
+    if any("playwright" in part for part in lowered):
+        return True
+    if len(lowered) >= 3 and lowered[0] in {"npm", "pnpm", "yarn"} and lowered[1] == "run":
+        script_name = lowered[2]
+        package_json = cwd / "package.json"
+        try:
+            package_data = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        script = str(package_data.get("scripts", {}).get(script_name, "")).lower()
+        return "playwright" in script
+    return False
+
+
+def _playwright_config_paths(cwd: Path) -> list[Path]:
+    return sorted(
+        path
+        for pattern in ("playwright.config.*", "playwright.*.config.*")
+        for path in cwd.glob(pattern)
+        if path.is_file()
+    )
+
+
+def _playwright_browser_test_paths(cwd: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for root_name in ("tests/browser", "e2e", "playwright"):
+        root = cwd / root_name
+        if not root.is_dir():
+            continue
+        for suffix in ("*.spec.ts", "*.spec.tsx", "*.spec.js", "*.spec.jsx", "*.test.ts", "*.test.js"):
+            candidates.extend(path for path in root.rglob(suffix) if path.is_file())
+    return sorted(set(candidates))
+
+
+_RELATIVE_PLAYWRIGHT_GOTO_RE = re.compile(r"\bpage\.goto\(\s*[\"']/(?!/)")
+
+
+def _file_contains_relative_playwright_goto(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return bool(_RELATIVE_PLAYWRIGHT_GOTO_RE.search(text))
+
+
+def _file_mentions_base_url(path: Path) -> bool:
+    try:
+        return "baseURL" in path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def _browser_journey_env(cwd: Path) -> dict[str, str]:
+    port = _allocate_browser_journey_port(cwd)
+    base_url = f"http://127.0.0.1:{port}"
+    return {
+        "OTTO_BROWSER_PORT": str(port),
+        "OTTO_BROWSER_BASE_URL": base_url,
+        "PLAYWRIGHT_BASE_URL": base_url,
+        "PORT": str(port),
+        "VITE_PORT": str(port),
+        "HOST": "127.0.0.1",
+    }
+
+
+def _allocate_browser_journey_port(cwd: Path) -> int:
+    """Pick a likely-free, per-worktree port for concurrent browser checks."""
+    base = 20_000 + (abs(hash(str(cwd.resolve()))) % 20_000)
+    for offset in range(200):
+        port = base + offset
+        if _port_available(port):
+            return port
+    return _ephemeral_port()
+
+
+def _port_available(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def _ephemeral_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+@contextmanager
+def _browser_journey_lock() -> Any:
+    """Serialize real browser journey launches across concurrent groups.
+
+    Build agents can edit/test in parallel, but launching several Playwright or
+    Chromium sessions at once on a developer Mac repeatedly causes port,
+    profile, and Mach/TCC contention. A host-level file lock keeps the proof
+    command real while preventing browser-launch conflicts between groups.
+    """
+    lock_path = Path(tempfile.gettempdir()) / "otto-browser-journey.lock"
+    start = time.monotonic()
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - Windows fallback.
+            yield 0.0
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield time.monotonic() - start
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 # ---------------------------------------------------------------------------
@@ -833,6 +1024,7 @@ def _run_command(
     cwd: Path,
     timeout_s: int,
     extra_pythonpath: list[Path] | None = None,
+    env_overrides: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command list with PATH + venv injection. Returns completed process.
 
@@ -848,7 +1040,7 @@ def _run_command(
     return subprocess.run(
         resolved_command,
         cwd=cwd,
-        env=_subprocess_env(extra_pythonpath=extra_pythonpath),
+        env=_subprocess_env(extra_pythonpath=extra_pythonpath, extra=env_overrides),
         capture_output=True,
         text=True,
         timeout=timeout_s,
@@ -933,7 +1125,11 @@ def _run_node_bootstrap_if_needed(
     )
 
 
-def _subprocess_env(extra_pythonpath: list[Path] | None = None) -> dict[str, str]:
+def _subprocess_env(
+    extra_pythonpath: list[Path] | None = None,
+    *,
+    extra: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Return a subprocess env without preferring Otto's own virtualenv.
 
     If `extra_pythonpath` is provided, those paths are prepended to
@@ -965,6 +1161,8 @@ def _subprocess_env(extra_pythonpath: list[Path] | None = None) -> dict[str, str
                 merged.append(entry)
                 seen.add(entry)
         env["PYTHONPATH"] = os.pathsep.join(merged)
+    if extra:
+        env.update({key: value for key, value in extra.items() if value})
     return env
 
 

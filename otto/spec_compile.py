@@ -3996,6 +3996,8 @@ def _structured_spec_payload_from_breakdown(
     if not isinstance(structured, dict):
         return None
     if isinstance(structured.get("spec_json"), str):
+        if not structured["spec_json"].strip():
+            return None
         try:
             parsed = json.loads(structured["spec_json"])
         except json.JSONDecodeError as exc:

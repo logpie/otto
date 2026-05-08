@@ -15,6 +15,7 @@ Coverage per Check kind:
 from __future__ import annotations
 
 import http.server
+import json
 import os
 import socket
 import threading
@@ -416,6 +417,7 @@ def test_browser_journey_subprocess_and_globs_collect_artifacts(tmp_path: Path) 
     assert evidence.artifacts[0].name == "step-1.png"
     assert evidence.artifacts[1].name == "step-2.png"
     assert evidence.raw["resolved_command"][0].endswith(("python", "python3"))
+    assert evidence.raw["browser_env"]["OTTO_BROWSER_BASE_URL"].startswith("http://127.0.0.1:")
 
 
 def test_browser_journey_subprocess_failure_keeps_partial_artifacts(tmp_path: Path) -> None:
@@ -461,6 +463,39 @@ def test_browser_journey_collects_printed_artifacts_when_glob_misses(tmp_path: P
     assert evidence.passed is True
     assert evidence.artifacts == [screenshot]
     assert evidence.detail == "exit=0 artifacts=1"
+
+
+def test_browser_journey_preflights_playwright_relative_routes_without_base_url(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"browser": "playwright test"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "playwright.config.ts").write_text(
+        "import { defineConfig } from '@playwright/test';\n"
+        "export default defineConfig({ webServer: { command: 'npm run dev', url: 'http://127.0.0.1:4173' } });\n",
+        encoding="utf-8",
+    )
+    browser_dir = tmp_path / "tests" / "browser"
+    browser_dir.mkdir(parents=True)
+    (browser_dir / "transactions.spec.ts").write_text(
+        "import { test } from '@playwright/test';\n"
+        "test('journey', async ({ page }) => { await page.goto('/transactions'); });\n",
+        encoding="utf-8",
+    )
+
+    check = BrowserJourney(
+        command=("npm", "run", "browser", "--", "transactions"),
+        evidence_globs=("test-results/**/*.png",),
+        timeout_s=15,
+    )
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+
+    assert evidence.passed is False
+    assert evidence.detail == "playwright runner config invalid artifacts=0"
+    assert "baseURL" in evidence.raw["preflight_error"]
+    assert "transactions.spec.ts" in evidence.raw["preflight_error"]
 
 
 def test_browser_journey_empty_command_is_informational(tmp_path: Path) -> None:

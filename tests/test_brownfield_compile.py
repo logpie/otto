@@ -349,6 +349,52 @@ def test_brownfield_compile_prefers_written_spec_file(
     assert [feature.id for feature in spec.features] == ["lint-main"]
 
 
+def test_compile_falls_back_to_written_spec_when_structured_output_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex app-server can return an empty structured wrapper after writing spec.json."""
+    project = tmp_path / "proj"
+    _seed_python_project(project)
+    run_dir = tmp_path / "session" / "spec"
+
+    async def _write_file_agent(*_args: object, **_kwargs: object):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "spec.json").write_text(
+            json.dumps(_minimal_spec_dict()),
+            encoding="utf-8",
+        )
+        return "", 0.0, "stub-session", {"structured_output": {"spec_json": ""}}
+
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", _write_file_agent)
+    monkeypatch.setattr(
+        "otto.agent.make_agent_options",
+        lambda *_a, **_kw: object(),
+    )
+    monkeypatch.setattr("otto.config.get_spec_timeout", lambda _c: 30)
+    monkeypatch.setattr(
+        "otto.observability.save_rendered_prompt",
+        lambda *_a, **_kw: {"sha256": "x", "path": "x"},
+    )
+    monkeypatch.setattr(
+        "otto.observability.update_input_provenance",
+        lambda *_a, **_kw: None,
+    )
+
+    spec = asyncio.run(
+        compile_spec(
+            "document this CLI tool",
+            project,
+            run_dir,
+            _minimal_config(),
+            project_kind="cli",
+            brownfield=True,
+        )
+    )
+
+    assert spec.project_kind == "cli"
+    assert [feature.id for feature in spec.features] == ["lint-main"]
+
+
 def test_greenfield_compile_unchanged(tmp_path: Path, monkeypatch) -> None:
     """compile_spec(brownfield=False) does NOT render the preamble or
     the brownfield-mode template — greenfield path is untouched."""

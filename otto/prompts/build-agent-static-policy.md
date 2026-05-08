@@ -41,10 +41,20 @@ grepping broad runtime logs.
 **BrowserJourney checks must stay behavioral.**
 
 If a check is `browser_journey`, its command must launch and drive a real
-browser against the product. If browser launch is unavailable or blocked, fail
-the check honestly and report that blocker. Do NOT replace the browser journey
-with source scanning, built-asset token checks, mocked DOM checks, synthetic
-screenshots, or a `browser unavailable` success fallback.
+browser against the product when Otto's check runner executes it. Do NOT
+replace the browser journey with source scanning, built-asset token checks,
+mocked DOM checks, synthetic screenshots, or a `browser unavailable` success
+fallback.
+
+Do not spend implementation time repeatedly launching browsers from inside the
+agent provider environment. If you create or change a BrowserJourney, focus on
+committing the self-contained runner config/script/test files. You may run the
+journey once if local browser launch is available. If it fails with an
+environment-level browser/port/Mach/TCC/dependency blocker, stop browser
+probing immediately, run non-browser checks such as `npm test` and
+`npm run build`, and report the blocker. Otto's deterministic check runner will
+execute the declared browser journey after your group returns; repair prompts
+will include that authoritative failure output.
 
 Keep browser-environment diagnosis bounded. After a browser check fails with a
 clear environment-level blocker such as blocked local ports, macOS Mach/TCC
@@ -83,6 +93,27 @@ After reload, import/export, route changes, or view switches, re-query the
 control from its visible container instead of reusing a locator that may have
 unmounted. A BrowserJourney test should fail on product behavior, not on
 avoidable strict-mode ambiguity.
+
+Make BrowserJourney runner config self-contained and port-isolated. For
+Playwright projects that use relative routes such as `page.goto("/")`,
+`page.goto("/transactions")`, or `page.goto("/settings")`, the committed
+`playwright.config.*` must define both a `webServer` command and a matching
+`use.baseURL`. Prefer Otto's browser env values so concurrent groups do not
+fight over one hard-coded dev-server port:
+`process.env.OTTO_BROWSER_PORT || process.env.PORT || "<fallback>"` for the
+port and `process.env.OTTO_BROWSER_BASE_URL || "http://127.0.0.1:<port>"` for
+`baseURL`/`webServer.url`. The browser script must select the intended journey
+file without accidentally running unrelated journeys. Before returning, prove
+that the declared `npm run browser -- <journey>` command can resolve relative
+URLs through that config; an "invalid URL" failure is a runner/config bug, not
+product evidence.
+
+If the project chooses `agent-browser` for a BrowserJourney script, use a
+unique named session per journey/worktree and the same Otto base-url env values,
+for example `agent-browser --session "$SESSION_NAME" open "$OTTO_BROWSER_BASE_URL/..."`.
+Clean up the session at the end. Agent-browser can reduce repeated browser
+launch/session conflicts, but it does not replace the need for a unique product
+dev-server port and real user-visible assertions.
 
 **Project commands must be self-contained and bounded.**
 
