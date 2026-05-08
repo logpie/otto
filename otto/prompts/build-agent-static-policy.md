@@ -119,6 +119,12 @@ run(["agent-browser", "--session", session, "screenshot", "otto_artifacts/browse
 run(["agent-browser", "--session", session, "close"])
 ```
 
+Use the real `agent-browser` command surface. Semantic `find` supports
+`click`, `fill`, and `check` subactions only. For dropdowns/selects, first run
+`snapshot -i`, identify the select control ref, then use
+`agent-browser --session <id> select @ref "<value-or-label>"`. Do not invent
+unsupported commands such as `agent-browser find label Type select expense`.
+
 Only choose repo-native Playwright when the journey needs capabilities that
 agent-browser cannot express cleanly, such as multi-context auth, network
 interception, trace-heavy debugging, or an established project Playwright

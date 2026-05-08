@@ -144,6 +144,8 @@ def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -
     assert "OTTO_BROWSER_PORT" in text
     assert "OTTO_BROWSER_BASE_URL" in text
     assert "agent-browser --session" in text
+    assert "Semantic `find` supports" in text
+    assert "agent-browser find label Type select expense" in text
     assert "page.goto(\"/transactions\")" in text
     assert "invalid URL" in text
 
