@@ -700,6 +700,7 @@ def _agent_browser_mc_probe(
     commands = [
         ["set", "viewport", "1440", "900"],
         ["open", url],
+        ["wait", '[data-mc-shell="ready"]'],
         ["snapshot", "-i"],
         ["screenshot", str(artifact)],
     ]
