@@ -1664,6 +1664,8 @@ def test_resume_plan_runs_audit_when_not_finished(
         landed_components=frozenset(),
         pending_components=frozenset({"g"}),
         audit_finished=False,
+        audit_agent_session_id="audit-thread-prior",
+        layer2_agent_session_ids={"f1": "repair-thread-prior"},
     )
 
     asyncio.run(
@@ -1677,6 +1679,55 @@ def test_resume_plan_runs_audit_when_not_finished(
     )
     assert "audit" in order.events
     assert captured["audit_calls"] == 1
+    assert captured["audit_kwargs"]["resume_agent_session_id"] == "audit-thread-prior"
+
+
+def test_resume_plan_threads_layer2_agent_sessions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from otto.resume import ResumePlan
+
+    spec = _spec(with_features=True)
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    captured = _wire_stubs(
+        monkeypatch,
+        audit=_partial_audit_with_failing_feature(spec),
+        order=order,
+    )
+
+    async def _unused_bridge(*_args, **_kwargs):
+        raise AssertionError("repair_failing_features is stubbed")
+
+    def _capture_layer2_bridge(**kwargs):
+        captured["layer2_resume_agent_sessions"] = kwargs.get("resume_agent_sessions")
+        return _unused_bridge
+
+    monkeypatch.setattr("otto.runner._make_layer2_fix_agent", _capture_layer2_bridge)
+
+    plan = ResumePlan(
+        session_id="sess",
+        paused_session_dir=session_dir,
+        spec_hash="deadbeef",
+        landed_components=frozenset(),
+        pending_components=frozenset({"g"}),
+        audit_finished=False,
+        layer2_agent_session_ids={"f1": "repair-thread-prior"},
+    )
+
+    asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None, config={},
+            build_agent=_stub_agent, audit_agent=_stub_agent, fix_agent=_stub_agent,
+            spec=spec,
+            resume_plan=plan,
+        )
+    )
+
+    assert captured["repair_calls"] == 1
+    assert captured["layer2_resume_agent_sessions"] == {"f1": "repair-thread-prior"}
 
 
 # ---------------------------------------------------------------------------

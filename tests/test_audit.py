@@ -677,6 +677,38 @@ def test_run_audit_passes_judge_timeout_to_agent_input(tmp_path: Path) -> None:
     assert seen["timeout"] == 17
 
 
+def test_run_audit_threads_resume_session_to_judge(tmp_path: Path) -> None:
+    spec = _spec(["s1"])
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    seen: dict[str, str] = {}
+
+    async def resume_aware_agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        seen["session"] = input_.agent_session_id
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="ok",
+            session_id="audit-thread-next",
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=resume_aware_agent,
+            budget=AuditBudget(audit_retries=0),
+            resume_agent_session_id="audit-thread-prior",
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert seen["session"] == "audit-thread-prior"
+    assert result.agent_session_id == "audit-thread-next"
+
+
 def test_default_audit_agent_uses_judge_timeout_from_input(tmp_path: Path, monkeypatch) -> None:
     from otto.audit import default_audit_agent
 
@@ -715,6 +747,48 @@ def test_default_audit_agent_uses_judge_timeout_from_input(tmp_path: Path, monke
 
     assert result.verdict == AuditVerdict.PASSED
     assert captured["timeout"] == 23
+
+
+def test_default_audit_agent_passes_resume_session(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import default_audit_agent
+
+    options = SimpleNamespace(cwd="", permission_mode="", resume="")
+    captured: dict[str, str] = {}
+
+    def fake_make_agent_options(*_args, **_kwargs):
+        return options
+
+    async def fake_run_agent_with_timeout(_prompt, seen_options, **_kwargs):
+        captured["resume"] = seen_options.resume
+        return (
+            '```json\n{"verdict":"passed","narrative":"ok","quality_score":3}\n```',
+            0.0,
+            "audit-thread-next",
+            {},
+        )
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_agent_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+
+    result = asyncio.run(
+        default_audit_agent(
+            AuditAgentInput(
+                spec=_spec(["s1"]),
+                project_dir=tmp_path,
+                integrated_worktree=tmp_path,
+                build_summary={},
+                merge_summary={},
+                cross_slice_evidence=[],
+                walkthrough_artifacts=[],
+                config={"agents": {}},
+                agent_session_id="audit-thread-prior",
+            )
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert captured["resume"] == "audit-thread-prior"
+    assert result.session_id == "audit-thread-next"
 
 
 def test_default_audit_agent_prefers_structured_output(tmp_path: Path, monkeypatch) -> None:

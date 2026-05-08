@@ -117,6 +117,10 @@ class ResumePlan:
       The runner passes these back into ``run_build`` so a resumed run
       can continue the same inner Codex App Server thread instead of
       starting blind after an Otto process crash.
+    * ``audit_agent_session_id``: latest provider-side thread/session id
+      for the audit judge, derived from ``audit/*/judge/messages.jsonl``.
+    * ``layer2_agent_session_ids``: latest provider-side thread/session id
+      per Feature repair, derived from ``repair/<feature>/...`` logs.
     """
 
     session_id: str
@@ -133,6 +137,8 @@ class ResumePlan:
     paused_by_user: bool = False
     prior_invalidated_group_ids: frozenset[str] = field(default_factory=frozenset)
     agent_session_ids: dict[str, str] = field(default_factory=dict)
+    audit_agent_session_id: str = ""
+    layer2_agent_session_ids: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +227,8 @@ def plan_resume(
     paused = is_run_paused_by_user(session_dir)
     prior_invalidated = _scan_prior_invalidations(session_dir)
     agent_session_ids = _read_agent_session_ids(session_dir)
+    audit_agent_session_id = _read_audit_agent_session_id(session_dir)
+    layer2_agent_session_ids = _read_layer2_agent_session_ids(session_dir)
 
     session_id = session_dir.name
 
@@ -241,6 +249,8 @@ def plan_resume(
         paused_by_user=paused,
         prior_invalidated_group_ids=frozenset(prior_invalidated),
         agent_session_ids=agent_session_ids,
+        audit_agent_session_id=audit_agent_session_id,
+        layer2_agent_session_ids=layer2_agent_session_ids,
     )
 
 
@@ -454,6 +464,56 @@ def _read_agent_session_ids(session_dir: Path) -> dict[str, str]:
             sessions[unit_id] = (latest_mtime, latest_session)
 
     return {unit_id: session_id for unit_id, (_mtime, session_id) in sessions.items()}
+
+
+def _read_audit_agent_session_id(session_dir: Path) -> str:
+    latest_mtime = -1.0
+    latest_session = ""
+    for judge_dir in sorted(session_dir.glob("audit/attempt-*/judge")):
+        for messages in sorted(judge_dir.rglob("messages.jsonl")):
+            try:
+                mtime = messages.stat().st_mtime
+            except OSError:
+                continue
+            session_id = _latest_result_session_id(messages)
+            if session_id and mtime >= latest_mtime:
+                latest_mtime = mtime
+                latest_session = session_id
+    return latest_session
+
+
+def _read_layer2_agent_session_ids(session_dir: Path) -> dict[str, str]:
+    repair_dir = session_dir / "repair"
+    if not repair_dir.exists():
+        return {}
+    sessions: dict[str, str] = {}
+    try:
+        feature_dirs = [p for p in repair_dir.iterdir() if p.is_dir()]
+    except OSError as exc:
+        logger.warning("resume: cannot scan repair dirs in %s: %s", repair_dir, exc)
+        return {}
+    for feature_dir in sorted(feature_dirs):
+        session_id = _latest_result_session_under(feature_dir)
+        if session_id:
+            sessions[feature_dir.name] = session_id
+    return sessions
+
+
+def _latest_result_session_under(root: Path) -> str:
+    latest_mtime = -1.0
+    latest_session = ""
+    if not root.exists():
+        return ""
+    for messages in sorted(root.rglob("messages.jsonl")):
+        try:
+            mtime = messages.stat().st_mtime
+        except OSError:
+            continue
+        session_id = _latest_result_session_id(messages)
+        if session_id and mtime >= latest_mtime:
+            latest_mtime = mtime
+            latest_session = session_id
+    return latest_session
 
 
 def _latest_result_session_id(messages_path: Path) -> str:

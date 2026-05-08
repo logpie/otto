@@ -180,6 +180,34 @@ def test_plan_resume_derives_agent_session_ids_from_build_logs(tmp_path: Path) -
     }
 
 
+def test_plan_resume_derives_audit_and_layer2_agent_session_ids(
+    tmp_path: Path,
+) -> None:
+    """Audit and Layer 2 provider threads are recoverable after a crash."""
+    session_dir, _ = _seed_session(tmp_path)
+    judge_dir = session_dir / "audit" / "attempt-00" / "judge"
+    judge_dir.mkdir(parents=True)
+    (judge_dir / "messages.jsonl").write_text(
+        json.dumps({"type": "result", "session_id": "audit-thread"}) + "\n",
+        encoding="utf-8",
+    )
+    repair_dir = session_dir / "repair" / "feat-a" / "attempt-01"
+    repair_dir.mkdir(parents=True)
+    (repair_dir / "messages.jsonl").write_text(
+        "\n".join([
+            json.dumps({"type": "result", "session_id": "layer2-old"}),
+            json.dumps({"type": "result", "session_id": "layer2-new"}),
+        ])
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plan = plan_resume(session_dir)
+
+    assert plan.audit_agent_session_id == "audit-thread"
+    assert plan.layer2_agent_session_ids == {"feat-a": "layer2-new"}
+
+
 def test_plan_resume_missing_session_raises(tmp_path: Path) -> None:
     with pytest.raises(ResumeError, match="does not exist"):
         plan_resume(tmp_path / "nope")

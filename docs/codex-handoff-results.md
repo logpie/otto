@@ -2294,10 +2294,30 @@ Inner-agent continuity status:
 - Before this wave, Otto had in-process retry continuity for build/fix attempts,
   but a process crash plus outer `--resume` did not recover provider thread
   ids from disk.
-- This wave adds build-phase crash/resume continuity by deriving provider
-  thread ids from durable logs and feeding them back through
-  `AgentOptions.resume`.
-- Remaining gap: audit and Layer 2 repair are still outer-journal resumable but
-  do not yet persist and restore their own provider thread ids across process
-  crashes. That should be the next crash-recovery slice if we want full
-  phase-wide inner-agent continuity.
+- This wave adds phase-wide crash/resume continuity for the live i2p path:
+  build derives Group/Component provider thread ids from `build/**/messages.jsonl`;
+  audit derives the judge thread id from `audit/attempt-*/judge/messages.jsonl`;
+  Layer 2 repair writes durable per-Feature logs under `repair/<feature>/` and
+  derives those thread ids on resume.
+- Outer product truth still wins: if a spec edit invalidated a Group, Otto drops
+  stale build and Layer 2 thread ids for the affected unit/features before
+  resuming.
+- Remaining limitation: this restores provider-thread continuity for Otto's
+  Python process crash/restart path. It is not PID reuse, and it depends on the
+  provider honoring `AgentOptions.resume`.
+
+Live provider continuity probe:
+- Command: direct `otto.agent.query` probe with `AgentOptions(provider="codex-app-server",
+  resume=<prior-thread>)`.
+- First turn result: `apricot`.
+- Provider thread id: `019e04e7-7a3b-7291-b7e1-19fcbbaede9d`.
+- Second turn with `resume` asked for the previous word and returned `apricot`
+  on the same thread id.
+- Decision: App Server honors the resume id that Otto now persists/restores.
+
+Continuity verification:
+- `uv run pytest -q tests/test_resume.py::test_plan_resume_derives_audit_and_layer2_agent_session_ids tests/test_audit.py::test_run_audit_threads_resume_session_to_judge tests/test_audit.py::test_default_audit_agent_passes_resume_session tests/test_runner_layer2_fix.py::test_layer2_uses_resume_session_and_persistent_log_dir tests/test_runner.py::test_resume_plan_runs_audit_when_not_finished tests/test_runner.py::test_resume_plan_threads_layer2_agent_sessions`
+  -> `6 passed`.
+- `uv run ruff check otto/audit.py otto/resume.py otto/runner.py tests/test_audit.py tests/test_resume.py tests/test_runner.py tests/test_runner_layer2_fix.py`
+  -> passed.
+- `uv run python scripts/test_tiers.py fast` -> `1588 passed, 565 deselected`.

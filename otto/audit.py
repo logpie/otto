@@ -187,6 +187,7 @@ class AuditResult:
     # surfaces these so an operator can see WHY the final verdict differs
     # from the LLM judge's output.
     verdict_cap_reasons: list[str] = field(default_factory=list)
+    agent_session_id: str = ""
 
 
 @dataclass
@@ -223,6 +224,7 @@ class AuditAgentInput:
     contract_test_detail: str = ""
     evidence_packet_path: Path | None = None
     full_spec_path: Path | None = None
+    agent_session_id: str = ""
 
 
 @dataclass
@@ -251,6 +253,7 @@ class AuditAgentOutput:
     quality_findings: list[str] = field(default_factory=list)
     cost_usd: float = 0.0
     wall_s: float = 0.0
+    session_id: str = ""
 
 
 class AuditAgentCallable(Protocol):
@@ -950,6 +953,7 @@ async def run_audit(
     shared_budget: BuildBudget | None = None,
     base_branch: str = "main",
     feature_scope_ids: Iterable[str] | None = None,
+    resume_agent_session_id: str = "",
 ) -> AuditResult:
     """Run the end-of-run audit.
 
@@ -1000,6 +1004,7 @@ async def run_audit(
     # PASSED on a later attempt while real repair work never landed.
     fix_loop_failed_attempts: list[int] = []
     fix_session_by_group: dict[str, str] = {}
+    audit_agent_session_id = str(resume_agent_session_id or "")
     attempt_start = _next_audit_attempt_index(session_dir)
 
     emit(session_dir, "audit.started")
@@ -1061,6 +1066,7 @@ async def run_audit(
                 if (session_dir / "spec" / "spec.json").exists()
                 else None
             ),
+            agent_session_id=audit_agent_session_id,
         )
         try:
             _write_audit_evidence_packet(agent_input)
@@ -1106,8 +1112,11 @@ async def run_audit(
                 wall_s=time.monotonic() - t0,
                 walkthrough_coverage=walk_coverage,
                 walkthrough_entries=list(walk_entries),
+                agent_session_id=audit_agent_session_id,
             )
         agent_output = await audit_agent(agent_input)
+        if agent_output.session_id:
+            audit_agent_session_id = agent_output.session_id
         if scoped_feature_ids:
             agent_output = dataclasses.replace(
                 agent_output,
@@ -1211,6 +1220,7 @@ async def run_audit(
             walkthrough_coverage=walk_coverage,
             walkthrough_entries=list(walk_entries),
             verdict_cap_reasons=verdict_cap_reasons,
+            agent_session_id=audit_agent_session_id,
         )
 
         # Pattern A: emit a per-attempt verdict event so the journal
@@ -2725,6 +2735,8 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
     _assign_output_format(options, _audit_output_format())
     options.cwd = str(agent_input.integrated_worktree)
     options.env = _audit_search_env(getattr(options, "env", None), log_dir)
+    if agent_input.agent_session_id:
+        options.resume = agent_input.agent_session_id
     options.permission_mode = "bypassPermissions"  # audit reads, doesn't edit
     # C3 fix: hard-assert the read-only invariant. The certifier
     # reports symptoms, not fixes; if a refactor flips this to
@@ -2738,7 +2750,7 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
 
     t0 = time.monotonic()
     try:
-        text, cost, _session_id, _breakdown = await run_agent_with_timeout(
+        text, cost, session_id, _breakdown = await run_agent_with_timeout(
             prompt,
             options,
             log_dir=log_dir,
@@ -2757,6 +2769,7 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
             parsed = _parse_audit_output(text)
         parsed.cost_usd = cost or 0.0
         parsed.wall_s = time.monotonic() - t0
+        parsed.session_id = session_id or getattr(options, "resume", "") or ""
         return parsed
     except AgentCallError as exc:
         failure_detail = f"audit agent crashed: {exc}"
@@ -2764,11 +2777,13 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
         if recovered is not None:
             recovered.cost_usd = exc.total_cost_usd or 0.0
             recovered.wall_s = time.monotonic() - t0
+            recovered.session_id = getattr(options, "resume", "") or ""
             return recovered
         return AuditAgentOutput(
             verdict=AuditVerdict.BLOCKED,
             narrative=failure_detail,
             wall_s=time.monotonic() - t0,
+            session_id=getattr(options, "resume", "") or "",
         )
 
 
