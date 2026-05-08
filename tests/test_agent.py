@@ -423,6 +423,36 @@ async def test_codex_app_server_query_normalizes_thread_turn_events(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_codex_app_server_ignores_non_object_json_stream_events(tmp_path, monkeypatch):
+    process = _LongLivedFakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        json.dumps("transient app-server status line") + "\n",
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Done."}}}\n',
+        '{"method":"thread/status/changed","params":{"threadId":"thread-app","status":{"type":"idle"}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="Run tests",
+        options=ClaudeAgentOptions(provider="codex-app-server", cwd=str(tmp_path)),
+        state={},
+    ):
+        messages.append(message)
+
+    result = messages[-1]
+    assert isinstance(result, ResultMessage)
+    assert result.is_error is False
+    assert result.result == "Done."
+
+
+@pytest.mark.asyncio
 async def test_codex_app_server_reconnect_stall_fails_before_outer_timeout(
     tmp_path,
     monkeypatch,

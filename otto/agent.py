@@ -2540,9 +2540,12 @@ async def _query_codex_app_server(
             if state is not None:
                 state["provider_stderr"] = "\n".join(raw_lines[-50:])
             try:
-                return json.loads(line)
+                event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(event, dict):
+                return event
+            continue
 
     async def handle_server_request(event: dict[str, Any]) -> bool:
         if "id" not in event or not isinstance(event.get("method"), str):
