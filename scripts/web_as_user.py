@@ -3489,8 +3489,12 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
 
             # ---------- Step 8: wait for terminal state ----------
             _log("Step 8: poll /api/state for terminal status")
-            build_timeout_s = ctx.build_timeout_s or W1_BUILD_TIMEOUT_S
-            deadline = time.monotonic() + build_timeout_s
+            build_budget_s = ctx.build_timeout_s or W1_BUILD_TIMEOUT_S
+            terminal_wait_s = _terminal_wait_for_build_timeout(build_budget_s)
+            _log(
+                f"  Otto build budget={build_budget_s}s; true-web terminal wait={terminal_wait_s}s"
+            )
+            deadline = time.monotonic() + terminal_wait_s
             terminal_outcome: Optional[str] = None
             poll_count = 0
             last_state: Optional[dict[str, Any]] = None
@@ -3575,7 +3579,8 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             if not stalled:
                 failures.soft_assert(
                     terminal_outcome is not None,
-                    f"build did not reach terminal in {build_timeout_s}s",
+                    f"build did not reach terminal in {terminal_wait_s}s "
+                    f"(Otto build budget {build_budget_s}s)",
                 )
             if terminal_outcome and terminal_outcome != "success":
                 _write_meta_debug_packet(
@@ -8550,6 +8555,11 @@ def _queue_timeout_for_build_timeout(build_timeout_s: int) -> int:
     return max(build_timeout_s + 1200, int(build_timeout_s * 1.2))
 
 
+def _terminal_wait_for_build_timeout(build_timeout_s: int) -> int:
+    """Return the outer true-web wait for a run with this Otto build budget."""
+    return _queue_timeout_for_build_timeout(build_timeout_s)
+
+
 def _configure_throwaway_project(
     project_dir: Path,
     *,
@@ -9058,9 +9068,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--build-timeout-s",
         type=int,
         help=(
-            "override the build terminal wait timeout for scenarios that support it; "
+            "override the Otto build budget for scenarios that support it; "
             "throwaway true-web projects also inherit this as the visible run "
-            "budget and get a larger queue hard-kill guard"
+            "budget and get larger queue hard-kill / harness terminal guards"
         ),
     )
     parser.add_argument(

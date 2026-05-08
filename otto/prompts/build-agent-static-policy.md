@@ -53,7 +53,8 @@ grepping broad runtime logs.
 Do not search or read user/Codex/agent memory, personal dotfiles, shell history,
 or unrelated files outside the project worktree for product context. Paths such
 as `~/.codex/**`, `~/.claude/**`, `~/.agents/**`, `~/.config/**`, and
-`/Users/*/.codex/**` are operator memory/config, not product requirements.
+`/Users/*/.codex/**`, `/Users/*/.agents/**` are operator memory/config, not
+product requirements.
 Use only the prompt, canonical spec, context packet, check feedback, declared
 artifacts, and files inside the product worktree unless Otto explicitly points
 you to a path.

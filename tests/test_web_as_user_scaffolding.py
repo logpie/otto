@@ -337,6 +337,19 @@ def test_configure_throwaway_project_aligns_timeout_and_queue_guard(tmp_path: Pa
     assert "build:\n  group_concurrent: 3" in config
 
 
+def test_web_as_user_outer_terminal_wait_exceeds_build_budget() -> None:
+    """The browser harness must allow Otto time to terminalize after its own budget."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    assert web_as_user._terminal_wait_for_build_timeout(3600) == 4800
+    assert web_as_user._terminal_wait_for_build_timeout(7200) == 8640
+
+
 def test_web_record_fixture_dry_run_R1_does_not_invoke_llm() -> None:
     """`--dry-run --recording R1` should not need OTTO_ALLOW_REAL_COST."""
     result = _run_script(WEB_RECORD_FIXTURE, ["--dry-run", "--recording", "R1"])
