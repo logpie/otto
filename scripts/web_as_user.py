@@ -613,8 +613,9 @@ def _record_mc_user_action(
 
 def _agent_browser_session(ctx: ScenarioContext) -> str:
     source = f"{ctx.run_id}-{ctx.scenario.id}-{ctx.project_dir.name}"
-    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", source).strip("-").lower()
-    return slug[:80] or "otto-true-web"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
+    scenario = re.sub(r"[^a-zA-Z0-9_.-]+", "-", ctx.scenario.id).strip("-").lower()
+    return f"tw-{scenario[:8] or 'w'}-{digest}"
 
 
 def _agent_browser_socket_dir(ctx: ScenarioContext) -> Path:
