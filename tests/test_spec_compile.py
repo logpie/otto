@@ -26,6 +26,7 @@ from otto.spec_compile import (
     _normalize_webapp_shared_contract_paths,
     _normalize_webapp_scaffold_scope,
     append_amendment,
+    compile_spec,
     infer_feature_group_routes_from_owned_paths,
     load_spec,
     parse_spec_md,
@@ -76,6 +77,10 @@ def _valid_webapp_spec() -> Spec:
     )
 
 
+def _agent_text_for_spec(spec: Spec) -> str:
+    return f"<spec_json>{json.dumps(spec_to_dict(spec))}</spec_json>"
+
+
 # ---------------------------------------------------------------------------
 # Round-trip
 # ---------------------------------------------------------------------------
@@ -99,6 +104,43 @@ def test_spec_roundtrip_through_json_preserves_structure() -> None:
     assert slice_a.checks[0].command == slice_b.checks[0].command
     assert slice_a.checks[0].evidence_globs == slice_b.checks[0].evidence_globs
     assert deserialized.amendments == spec.amendments
+
+
+@pytest.mark.asyncio
+async def test_compile_spec_retries_transient_provider_stall_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from otto.agent import AgentCallError
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    run_dir = project_dir / "otto_logs" / "sessions" / "run-1" / "spec"
+    calls: list[Path] = []
+
+    async def flaky_compile_agent(*_args: object, **kwargs: object):
+        log_dir = Path(kwargs["log_dir"])
+        calls.append(log_dir)
+        if len(calls) == 1:
+            raise AgentCallError(
+                "codex app-server stream stalled after recoverable error: "
+                "Reconnecting... 2/5. No provider events arrived for 120s.",
+                last_provider_stderr="Reconnecting... 2/5",
+            )
+        return _agent_text_for_spec(_valid_webapp_spec()), 0.0, "retry-session", {}
+
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", flaky_compile_agent)
+
+    spec = await compile_spec(
+        "build a bookmark manager",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        config={"provider": "codex-app-server", "spec_timeout": 30},
+        project_kind="webapp",
+    )
+
+    assert spec.intent == "a bookmark manager"
+    assert [path.name for path in calls] == ["compile-agent", "compile-agent-retry-02"]
 
 
 def test_spec_roundtrip_supports_all_check_kinds() -> None:

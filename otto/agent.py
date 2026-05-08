@@ -434,6 +434,24 @@ class AgentCallError(Exception):
         super().__init__(self.reason)
 
 
+def is_transient_provider_error(exc: BaseException) -> bool:
+    """Return true for provider transport failures that are safe to retry upstream."""
+    if not isinstance(exc, AgentCallError):
+        return False
+    haystack = " ".join(
+        str(part or "")
+        for part in (
+            exc.reason,
+            exc.last_provider_stderr,
+            exc.traceback_text,
+        )
+    ).lower()
+    return (
+        "stream stalled after recoverable error" in haystack
+        or "reconnecting..." in haystack
+    )
+
+
 class _TranscriptAccumulator:
     """Keep structured markers plus bounded transcript tails."""
 

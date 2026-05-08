@@ -4875,7 +4875,11 @@ async def compile_spec(
     UNWRAPPED so callers can write a paused checkpoint, matching the
     contract in `otto/spec.py:259`.
     """
-    from otto.agent import make_agent_options, run_agent_with_timeout
+    from otto.agent import (
+        is_transient_provider_error,
+        make_agent_options,
+        run_agent_with_timeout,
+    )
     from otto.config import get_spec_timeout
     from otto.observability import save_rendered_prompt, sha256_text, update_input_provenance
     from otto.prompts import render_prompt
@@ -4965,18 +4969,31 @@ async def compile_spec(
     spec_cap = get_spec_timeout(config)
     timeout: int = min(budget.for_call(), spec_cap) if budget is not None else spec_cap
 
-    log_subdir = run_dir / "compile-agent"
-    log_subdir.mkdir(parents=True, exist_ok=True)
+    async def _run_compile_agent(attempt: int) -> tuple[str, float, str, dict[str, Any]]:
+        log_subdir = run_dir / (
+            "compile-agent" if attempt == 1 else f"compile-agent-retry-{attempt:02d}"
+        )
+        log_subdir.mkdir(parents=True, exist_ok=True)
+        return await run_agent_with_timeout(
+            prompt,
+            options,
+            log_dir=log_subdir,
+            phase_name="SPEC_COMPILE",
+            phase_label="compile",
+            timeout=timeout,
+            project_dir=project_dir,
+        )
 
-    text, _cost, _session_id, _breakdown = await run_agent_with_timeout(
-        prompt,
-        options,
-        log_dir=log_subdir,
-        phase_name="SPEC_COMPILE",
-        phase_label="compile",
-        timeout=timeout,
-        project_dir=project_dir,
-    )
+    try:
+        text, _cost, _session_id, _breakdown = await _run_compile_agent(1)
+    except Exception as exc:
+        if not is_transient_provider_error(exc):
+            raise
+        logger.warning(
+            "compile agent hit transient provider error; retrying once: %s",
+            exc,
+        )
+        text, _cost, _session_id, _breakdown = await _run_compile_agent(2)
 
     payload = _structured_spec_payload_from_breakdown(_breakdown)
     if payload is not None:
