@@ -1981,9 +1981,9 @@ def _codex_app_server_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
 def _codex_app_server_usage_dict(token_usage: Any) -> dict[str, Any] | None:
     if not isinstance(token_usage, dict):
         return None
-    breakdown = token_usage.get("last")
+    breakdown = token_usage.get("total")
     if not isinstance(breakdown, dict):
-        breakdown = token_usage.get("total")
+        breakdown = token_usage.get("last")
     if not isinstance(breakdown, dict):
         breakdown = token_usage
     usage = {
@@ -2006,6 +2006,113 @@ def _codex_app_server_usage_dict(token_usage: Any) -> dict[str, Any] | None:
             + usage["reasoning_tokens"]
         )
     return {key: value for key, value in usage.items() if value}
+
+
+def _is_path_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _codex_app_server_safe_permission_root(
+    params: dict[str, Any],
+    options: AgentOptions | None,
+) -> Path:
+    cwd = (options.cwd if options is not None else None) or params.get("cwd") or os.getcwd()
+    return Path(str(cwd)).expanduser().resolve()
+
+
+def _codex_app_server_safe_permission_base(
+    params: dict[str, Any],
+    *,
+    root: Path,
+) -> Path:
+    cwd = params.get("cwd")
+    if not isinstance(cwd, str):
+        return root
+    resolved = Path(cwd).expanduser().resolve()
+    return resolved if _is_path_under(resolved, root) else root
+
+
+def _codex_app_server_safe_filesystem_permissions(
+    file_system: Any,
+    *,
+    root: Path,
+    base: Path,
+) -> dict[str, Any]:
+    if not isinstance(file_system, dict):
+        return {}
+
+    granted: dict[str, Any] = {}
+    for key in ("read", "write"):
+        paths: list[str] = []
+        raw_paths = file_system.get(key)
+        if isinstance(raw_paths, list):
+            for raw_path in raw_paths:
+                path = Path(str(raw_path)).expanduser()
+                if not path.is_absolute():
+                    path = base / path
+                resolved = path.resolve()
+                if _is_path_under(resolved, root):
+                    paths.append(str(resolved))
+        if paths:
+            granted[key] = paths
+
+    entries: list[dict[str, Any]] = []
+    raw_entries = file_system.get("entries")
+    if isinstance(raw_entries, list):
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            path_spec = entry.get("path")
+            if not isinstance(path_spec, dict):
+                continue
+            if path_spec.get("type") == "path":
+                raw_path = path_spec.get("path")
+                if not isinstance(raw_path, str):
+                    continue
+                path = Path(raw_path).expanduser()
+                if not path.is_absolute():
+                    path = base / path
+                resolved = path.resolve()
+                if _is_path_under(resolved, root):
+                    safe_entry = dict(entry)
+                    safe_entry["path"] = {"type": "path", "path": str(resolved)}
+                    entries.append(safe_entry)
+                continue
+            if path_spec.get("type") == "special":
+                value = path_spec.get("value")
+                if isinstance(value, dict) and value.get("kind") == "project_roots":
+                    entries.append(dict(entry))
+    if entries:
+        granted["entries"] = entries
+        depth = file_system.get("globScanMaxDepth")
+        if isinstance(depth, int) and depth > 0:
+            granted["globScanMaxDepth"] = depth
+
+    return granted
+
+
+def _codex_app_server_granted_permissions(
+    params: dict[str, Any],
+    options: AgentOptions | None,
+) -> dict[str, Any]:
+    permissions = params.get("permissions")
+    if not isinstance(permissions, dict):
+        return {}
+    root = _codex_app_server_safe_permission_root(params, options)
+    base = _codex_app_server_safe_permission_base(params, root=root)
+    granted: dict[str, Any] = {}
+    file_system = _codex_app_server_safe_filesystem_permissions(
+        permissions.get("fileSystem"),
+        root=root,
+        base=base,
+    )
+    if file_system:
+        granted["fileSystem"] = file_system
+    return granted
 
 
 def _json_schema_type_matches(value: Any, expected_type: str) -> bool:
@@ -2275,6 +2382,7 @@ def _codex_app_server_normalize_item(
 def _codex_app_server_approval_result(
     method: str,
     params: dict[str, Any],
+    options: AgentOptions | None = None,
 ) -> dict[str, Any] | None:
     if method == "item/commandExecution/requestApproval":
         reason = _unsafe_bash_command_reason(str(params.get("command") or ""))
@@ -2288,9 +2396,8 @@ def _codex_app_server_approval_result(
     if method == "applyPatchApproval":
         return {"decision": "approved"}
     if method == "item/permissions/requestApproval":
-        permissions = params.get("permissions")
         return {
-            "permissions": permissions if isinstance(permissions, dict) else {},
+            "permissions": _codex_app_server_granted_permissions(params, options),
             "scope": "turn",
             "strictAutoReview": False,
         }
@@ -2407,6 +2514,7 @@ async def _query_codex_app_server(
         result = _codex_app_server_approval_result(
             method,
             params if isinstance(params, dict) else {},
+            opts,
         )
         if result is None:
             await send_error(event.get("id"), f"Otto codex-app-server provider does not support {method}")

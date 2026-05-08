@@ -24,6 +24,7 @@ from otto.audit import (
     AuditAgentInput,
     AuditAgentOutput,
     AuditVerdict,
+    FeatureAudit,
     WalkthroughResult,
     run_audit,
 )
@@ -100,10 +101,20 @@ def _agent_returning(verdict: AuditVerdict):
     """Stub audit_agent that returns the given verdict, no findings."""
 
     async def _agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        status = "passed" if verdict == AuditVerdict.PASSED else verdict.value
         return AuditAgentOutput(
             verdict=verdict,
             narrative=f"llm-judge says {verdict.value}",
             group_verdicts=[],
+            feature_audits=[
+                FeatureAudit(
+                    feature_id=feature.id,
+                    name=feature.name,
+                    status=status,
+                    detail=f"{feature.id} {status}",
+                )
+                for feature in _input.spec.features
+            ],
             cost_usd=0.0,
         )
 
@@ -119,10 +130,20 @@ def _agent_writing_walkthrough(verdict: AuditVerdict, entries: list[dict]):
         input_.walkthrough_jsonl_path.write_text(
             "\n".join(json.dumps(e) for e in entries) + ("\n" if entries else "")
         )
+        status = "passed" if verdict == AuditVerdict.PASSED else verdict.value
         return AuditAgentOutput(
             verdict=verdict,
             narrative=f"llm-judge says {verdict.value}",
             group_verdicts=[],
+            feature_audits=[
+                FeatureAudit(
+                    feature_id=feature.id,
+                    name=feature.name,
+                    status=status,
+                    detail=f"{feature.id} {status}",
+                )
+                for feature in input_.spec.features
+            ],
             cost_usd=0.0,
         )
 

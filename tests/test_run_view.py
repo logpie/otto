@@ -316,6 +316,32 @@ def test_build_run_view_initializing_compile_agent_is_compiling(tmp_path: Path) 
     assert compile_stage["started_at"] == "2026-05-04T20:00:00Z"
 
 
+def test_build_run_view_review_pending_after_compile_is_awaiting_review(
+    tmp_path: Path,
+) -> None:
+    """A review gate after compile must beat stale compile/live-log signals."""
+
+    session = _setup_session(
+        tmp_path,
+        state_events=[
+            {"event": "stage.compile.started", "ts": "2026-05-04T20:00:00Z"},
+            {"event": "stage.compile.finished", "ts": "2026-05-04T20:00:30Z"},
+            {"kind": "spec.review_pending", "ts": "2026-05-04T20:00:31Z"},
+        ],
+    )
+    compile_dir = session / "spec" / "compile-agent"
+    compile_dir.mkdir(parents=True)
+    (compile_dir / "narrative.log").write_text("[+0:30] compile complete\n", encoding="utf-8")
+
+    view = build_run_view(session, live_state={"status": "compiling"})
+
+    stages = {stage["name"]: stage for stage in view["stages"]}
+    assert view["status"] == "awaiting_spec_review"
+    assert stages["compile"]["status"] == "done"
+    assert stages["spec_review"]["status"] == "active"
+    assert stages["spec_review"]["started_at"] == "2026-05-04T20:00:31Z"
+
+
 def test_build_run_view_legacy_slices_key_maps_to_groups(tmp_path: Path) -> None:
     """Pre-A0.3 specs that use 'slices' key still produce groups in RunView."""
     spec = {
@@ -906,6 +932,35 @@ def test_build_run_view_interrupted_queue_state_is_terminal(tmp_path: Path) -> N
     assert view["meta"]["started_at"] == "2026-05-04T20:00:00Z"
     assert view["meta"]["finished_at"] == "2026-05-04T20:05:00Z"
     assert next(s for s in view["stages"] if s["name"] == "build")["status"] == "failed"
+
+
+def test_build_run_view_paused_live_state_overrides_stale_progress(
+    tmp_path: Path,
+) -> None:
+    spec = {
+        "intent": "test",
+        "project_kind": "webapp",
+        "groups": [{"id": "g1", "name": "G1", "feature_ids": ["f1"]}],
+    }
+    state = [{"kind": "group.started", "group_id": "g1", "ts": "2026-05-04T20:00:02Z"}]
+    session = _setup_session(tmp_path, spec=spec, state_events=state)
+
+    view = build_run_view(
+        session,
+        live_state={
+            "status": "paused",
+            "started_at": "2026-05-04T20:00:00Z",
+            "duration_s": 180,
+            "last_event": "operator paused",
+        },
+    )
+
+    assert view["status"] == "paused"
+    assert view["control_plane"]["status"] == "paused"
+    assert view["control_plane"]["raw_status"] == "paused"
+    assert view["control_plane"]["failure_reason"] == "operator paused"
+    assert view["wall_s"] == 180.0
+    assert next(s for s in view["stages"] if s["name"] == "build")["status"] == "active"
 
 
 def test_passed_i2p_run_marks_terminal_stages_done(tmp_path: Path) -> None:

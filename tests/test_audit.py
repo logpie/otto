@@ -601,7 +601,19 @@ def test_run_audit_expands_group_feature_ids_for_audit_prompt(tmp_path: Path) ->
     async def passing_agent(input_: AuditAgentInput) -> AuditAgentOutput:
         captured["feature_ids"] = [feature.id for feature in input_.spec.features]
         captured["prompt"] = _audit_prompt(input_)
-        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="ok")
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="ok",
+            feature_audits=[
+                FeatureAudit(
+                    feature_id=feature.id,
+                    name=feature.name,
+                    status="passed",
+                    detail="ok",
+                )
+                for feature in input_.spec.features
+            ],
+        )
 
     result = asyncio.run(
         run_audit(
@@ -1642,6 +1654,107 @@ def test_audit_blocked_capability_caps_passed_to_partial(tmp_path: Path) -> None
     blocked = [c for c in result.feature_audits if c.status == "blocked"]
     assert len(blocked) == 1
     assert "feature cap" in result.narrative
+
+
+def test_audit_missing_feature_audits_caps_passed_to_partial(tmp_path: Path) -> None:
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    spec = Spec(
+        intent="x",
+        project_kind="webapp",
+        groups=[Group(id="s1", name="t")],
+        features=[
+            Feature(id="f1", name="Feed", group_id="s1"),
+            Feature(id="f2", name="Post composer", group_id="s1"),
+        ],
+    )
+
+    async def incomplete_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="agent says complete",
+            group_verdicts=[GroupVerdict(group_id="s1", passed=True, detail="ok")],
+            feature_audits=[],
+            quality_score=4,
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=incomplete_agent,
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PARTIAL
+    assert "feature audit coverage missing" in result.narrative
+    assert "f1" in result.narrative
+    assert "f2" in result.narrative
+
+
+def test_audit_cross_slice_failure_caps_passed_to_partial(tmp_path: Path) -> None:
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    spec = _spec(
+        ["s1"],
+        cross_checks=[StateInvariant(description="must fail", expression="False")],
+    )
+
+    async def passing_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="agent ignored deterministic failure",
+            group_verdicts=[GroupVerdict(group_id="s1", passed=True, detail="ok")],
+            quality_score=4,
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=passing_agent,
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PARTIAL
+    assert "cross-slice deterministic checks FAILED" in result.narrative
+
+
+def test_malformed_otto_yaml_caps_contract_gate(tmp_path: Path) -> None:
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    (tmp_path / "otto.yaml").write_text(":\n", encoding="utf-8")
+    spec = _spec(["s1"])
+
+    async def passing_agent(_input: AuditAgentInput) -> AuditAgentOutput:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="agent ignored malformed config",
+            group_verdicts=[GroupVerdict(group_id="s1", passed=True, detail="ok")],
+            quality_score=4,
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=passing_agent,
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PARTIAL
+    assert result.contract_test_passed is False
+    assert "otto.yaml unreadable" in result.contract_test_detail
+    assert "contract test FAILED" in result.narrative
 
 
 def test_audit_majority_partial_capabilities_caps_passed(tmp_path: Path) -> None:

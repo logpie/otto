@@ -110,6 +110,9 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const [resourcePanel, setResourcePanel] = useState<ResourceSelection | null>(null);
   const inFlight = view.verdict === null && !TERMINAL_STATUSES.has(view.status);
+  const isPaused = view.status === "paused" || view.control_plane?.status === "paused";
+  const canPause = inFlight && !isPaused;
+  const canResume = inFlight && isPaused;
   const sessionId = view.meta.session_id;
 
   const closeConfirm = useCallback(() => {
@@ -284,26 +287,30 @@ export function RunDrawer({ view, onSelectFeature, onAfterAction }: Props) {
           }
         />
       ) : null}
-      {inFlight && (
+      {(canPause || canResume) && (
         <div className="run-action-bar" data-testid="run-action-bar">
-          <button
-            type="button"
-            className="run-action-pause"
-            data-testid="run-action-pause"
-            onClick={requestPause}
-            disabled={pending === "pause"}
-          >
-            Pause
-          </button>
-          <button
-            type="button"
-            className="run-action-resume"
-            data-testid="run-action-resume"
-            onClick={onResume}
-            disabled={pending === "resume"}
-          >
-            Resume
-          </button>
+          {canPause ? (
+            <button
+              type="button"
+              className="run-action-pause"
+              data-testid="run-action-pause"
+              onClick={requestPause}
+              disabled={pending === "pause"}
+            >
+              Pause
+            </button>
+          ) : null}
+          {canResume ? (
+            <button
+              type="button"
+              className="run-action-resume"
+              data-testid="run-action-resume"
+              onClick={onResume}
+              disabled={pending === "resume"}
+            >
+              Resume
+            </button>
+          ) : null}
           {banner && (
             <span
               className="run-action-banner"

@@ -97,11 +97,32 @@ def add_worktree(
     if result.returncode == 0:
         return
 
-    # Branch may already exist — try without -b. We deliberately ignore
-    # base_ref here: git's "checkout existing branch" path doesn't accept a
-    # start-point, and re-pointing an existing branch ref via the worktree
-    # add command would be surprising. The branch already encodes its own
-    # history; if base_ref differs we surface that as a hard error below.
+    # Branch may already exist — try without -b. If a base_ref was requested,
+    # validate the existing branch already contains that base. Silently
+    # checking out a stale same-name branch forks improve work away from the
+    # prior run it was supposed to build on.
+    if base_ref:
+        branch_check = subprocess.run(
+            ["git", "rev-parse", "--verify", branch],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        if branch_check.returncode == 0:
+            ancestry = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", base_ref, branch],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+            )
+            if ancestry.returncode != 0:
+                detail = (ancestry.stderr or result.stderr or "").strip()
+                raise RuntimeError(
+                    f"existing branch {branch!r} does not contain requested "
+                    f"base_ref {base_ref!r}; refusing to create {worktree_path}. "
+                    f"{detail}"
+                )
+
     result2 = subprocess.run(
         ["git", "worktree", "add", str(worktree_path), branch],
         cwd=project_dir, capture_output=True, text=True,

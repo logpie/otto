@@ -1162,6 +1162,8 @@ async def run_audit(
             contract_passed=contract_passed,
             contract_detail=contract_detail,
             chain_review=chain_review,
+            cross_slice_evidence=cross_evidence,
+            expected_feature_ids=scoped_feature_ids or [feature.id for feature in spec.features],
             merge_blocked_ids=list(merge_result.blocked_ids or []),
             merge_redundant_ids=list(getattr(merge_result, "redundant_ids", []) or []),
             total_passing_groups=len(getattr(merge_result, "landed_ids", []) or [])
@@ -1525,7 +1527,7 @@ def _run_project_contract_test(
         from otto.config import load_config
         config = load_config(project_dir / "otto.yaml")
     except Exception as exc:
-        return None, f"otto.yaml unreadable: {exc}"
+        return False, f"otto.yaml unreadable: {exc}"
     test_command = str(config.get("test_command") or "").strip()
     if not test_command:
         return None, "no test_command configured in otto.yaml"
@@ -2079,6 +2081,8 @@ def _compose_verdict(
     contract_passed: bool | None,
     contract_detail: str,
     chain_review,  # ChainVerification, but spec_amend imports audit so avoid cycle
+    cross_slice_evidence: list[Evidence] | None = None,
+    expected_feature_ids: Iterable[str] | None = None,
     merge_blocked_ids: list[str] | None = None,
     merge_redundant_ids: list[str] | None = None,
     total_passing_groups: int = 0,
@@ -2094,8 +2098,10 @@ def _compose_verdict(
     Caps:
       - LLM-judge verdict (the agent's own output) is the floor.
       - Contract test failed → at least PARTIAL.
+      - Cross-slice deterministic checks failed → at least PARTIAL.
       - Chain review BLOCKED → BLOCKED. PARTIAL → at least PARTIAL.
       - Quality score < 3 → at least PARTIAL.
+      - Missing required per-Feature audits → at least PARTIAL.
       - Capability has any BLOCKED → at least PARTIAL. With ALL/MOSTLY
         blocked → BLOCKED (escalation that the old code couldn't do).
       - Capability >50% partial → at least PARTIAL.
@@ -2108,6 +2114,17 @@ def _compose_verdict(
     if contract_passed is False:
         verdict = _strictest(verdict, AuditVerdict.PARTIAL)
         sections.append(f"[contract test FAILED]\n{contract_detail}")
+
+    failed_cross_evidence = [
+        ev for ev in (cross_slice_evidence or [])
+        if not getattr(ev, "passed", False)
+    ]
+    if failed_cross_evidence:
+        verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+        sections.append(
+            f"[cross-slice deterministic checks FAILED: {len(failed_cross_evidence)}]\n"
+            + "\n".join(f"  - {ev.detail}" for ev in failed_cross_evidence[:10])
+        )
 
     # Amendment chain cap.
     if chain_review.verdict_cap == "blocked":
@@ -2170,6 +2187,16 @@ def _compose_verdict(
 
     # Capability cap.
     caps = agent_output.feature_audits
+    expected_features = {str(fid).strip() for fid in (expected_feature_ids or ()) if str(fid).strip()}
+    if expected_features:
+        audited_features = {str(c.feature_id).strip() for c in caps if str(c.feature_id).strip()}
+        missing_features = sorted(expected_features - audited_features)
+        if missing_features:
+            verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+            sections.append(
+                f"[feature audit coverage missing: {len(missing_features)}/{len(expected_features)}]\n"
+                + "\n".join(f"  - {feature_id}" for feature_id in missing_features[:10])
+            )
     if caps:
         blocked = [c for c in caps if c.status == "blocked"]
         partial = [c for c in caps if c.status == "partial"]

@@ -1527,8 +1527,25 @@ def _merge_group_branch(
     On conflict, aborts the merge cleanly so the worktree is left on
     `base_branch` ready for the caller to repair or skip the slice.
     """
-    # 1. Verify slice branch exists. If not, fall back to commit-in-worktree.
+    # 1. Verify slice branch exists. In a real git worktree, a declared
+    # missing branch is a hard merge blocker: falling back to committing the
+    # integration worktree can sweep unrelated local state into a product
+    # commit. Keep the legacy commit-in-worktree fallback only for fixtures or
+    # callers that do not provide a branch.
     if not _branch_exists(git, worktree, branch):
+        inside = git(["rev-parse", "--is-inside-work-tree"], worktree)
+        status = git(["status", "--porcelain"], worktree) if inside.returncode == 0 else None
+        dirty = bool(status is not None and (status.stdout or "").strip())
+        if branch and inside.returncode == 0 and dirty and "/" in branch:
+            return CommitOutcome(
+                status=MergeStatus.BLOCKED,
+                head_before="",
+                head_after="",
+                detail=(
+                    f"declared slice branch {branch!r} does not exist; "
+                    "refusing to commit current integration worktree state"
+                ),
+            )
         return _commit_integration(git, worktree, group_id=group_id, branch=branch)
 
     # V9 fix: abort any in-progress merge/rebase/cherry-pick BEFORE the

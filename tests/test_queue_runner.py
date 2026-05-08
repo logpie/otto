@@ -159,7 +159,10 @@ def test_child_is_alive_true_for_actual_process(tmp_path: Path):
         }
         assert child_is_alive(child) is True
     finally:
-        proc.terminate()
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         proc.wait(timeout=5)
 
 
@@ -194,13 +197,24 @@ def test_child_is_alive_false_on_start_time_mismatch(tmp_path: Path):
         # function should detect the mismatch and return False
         assert child_is_alive(child) is False
     finally:
-        proc.terminate()
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         proc.wait(timeout=5)
 
 
-def test_child_is_alive_false_on_cwd_mismatch(tmp_path: Path):
-    """Synthetic state with wrong cwd → not our child."""
-    proc = subprocess.Popen(["/bin/sh", "-c", "sleep 5"], preexec_fn=os.setsid)
+def test_child_is_alive_true_when_child_changes_cwd(tmp_path: Path):
+    """Cwd is not process identity; a legitimate child may chdir after spawn."""
+    original_cwd = tmp_path / "start"
+    changed_cwd = tmp_path / "changed"
+    original_cwd.mkdir()
+    changed_cwd.mkdir()
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", f"cd {changed_cwd}; sleep 5"],
+        cwd=original_cwd,
+        preexec_fn=os.setsid,
+    )
     try:
         time.sleep(0.05)
         import psutil
@@ -209,10 +223,10 @@ def test_child_is_alive_false_on_cwd_mismatch(tmp_path: Path):
             "pid": proc.pid,
             "pgid": proc.pid,
             "start_time_ns": start_time_ns,
-            "argv": ["/bin/sh", "-c", "sleep 5"],
-            "cwd": "/totally/different/path/does/not/exist",
+            "argv": ["/bin/sh", "-c", f"cd {changed_cwd}; sleep 5"],
+            "cwd": str(original_cwd),
         }
-        assert child_is_alive(child) is False
+        assert child_is_alive(child) is True
     finally:
         proc.terminate()
         proc.wait(timeout=5)
@@ -2912,6 +2926,40 @@ def test_cancel_rechecks_child_exit_race_before_killing(tmp_path: Path, monkeypa
     assert task_state["failure_reason"] is None
 
 
+def test_cancel_running_task_finalizes_existing_success_manifest_without_cancelling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    _write_queue_manifest(repo, "t1", exit_status="success")
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "running",
+        "started_at": runner_module.now_iso(),
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": {"pid": 12345, "pgid": 12345, "start_time_ns": 1, "argv": ["sleep"], "cwd": str(repo)},
+    }
+    monkeypatch.setattr(runner_module.os, "waitpid", lambda _pid, _flags: (0, 0))
+    monkeypatch.setattr(
+        runner_module,
+        "kill_child_safely",
+        lambda _child, _sig=signal.SIGTERM: (_ for _ in ()).throw(AssertionError("cancel killed successful child")),
+    )
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+
+    runner._apply_command({"cmd": "cancel", "id": "t1"}, state)
+
+    assert state["tasks"]["t1"]["status"] == "done"
+    assert state["tasks"]["t1"]["failure_reason"] is None
+    assert state["tasks"]["t1"]["child"] is None
+
+
 def test_timeout_rechecks_child_exit_race_before_failing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
@@ -2943,6 +2991,43 @@ def test_timeout_rechecks_child_exit_race_before_failing(tmp_path: Path, monkeyp
 
     assert state_for_reap["tasks"]["t1"]["status"] == "done"
     assert state_for_reap["tasks"]["t1"].get("terminal_status") is None
+
+
+def test_timeout_finalizes_existing_success_manifest_instead_of_failing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="t1",
+        command_argv=["build", "x"],
+        branch="build/t1",
+        worktree=".worktrees/t1",
+    ))
+    _write_queue_manifest(repo, "t1", exit_status="success")
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "running",
+        "started_at": "2026-04-19T00:00:00Z",
+        "attempt_run_id": "2026-04-23-010203-abc123",
+        "child": {"pid": 12345, "pgid": 12345, "start_time_ns": 1, "argv": ["sleep"], "cwd": str(repo)},
+    }
+    sent: list[int] = []
+
+    monkeypatch.setattr(runner_module.os, "waitpid", lambda _pid, _flags: (0, 0))
+    monkeypatch.setattr(
+        runner_module,
+        "kill_child_safely",
+        lambda _child, sig=signal.SIGTERM: sent.append(sig) or True,
+    )
+    runner = Runner(repo, RunnerConfig(concurrent=1, task_timeout_s=1.0), otto_bin="/bin/true")
+
+    runner._enforce_task_timeouts([("t1", state["tasks"]["t1"])])
+
+    assert state["tasks"]["t1"]["status"] == "done"
+    assert state["tasks"]["t1"].get("terminal_status") is None
+    assert state["tasks"]["t1"]["failure_reason"] is None
+    assert sent == [signal.SIGTERM]
 
 
 def test_remove_running_task_keeps_definition_until_terminal_history(

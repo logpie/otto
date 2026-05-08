@@ -13,7 +13,8 @@ SIGCHLD handler.
 
 Process groups: every child spawned with ``start_new_session=True``;
 cancel uses ``os.killpg(pgid, SIGTERM)`` with PID-reuse validation
-(pid+pgid+start_time_ns+cwd all match before any kill).
+(pid+pgid+start_time_ns all match before any kill; cwd is diagnostic
+because a live child may legitimately chdir).
 
 Exclusive lock: ``.otto-queue.lock`` with ``flock(LOCK_EX | LOCK_NB)``.
 A second ``otto queue run`` against the same project refuses to start.
@@ -404,8 +405,9 @@ def _token_usage_from_summary(summary: dict[str, Any]) -> dict[str, int]:
 def child_is_alive(child: dict[str, Any]) -> bool:
     """Return True iff the recorded PID still belongs to OUR child.
 
-    Validates pid+pgid+start_time_ns+cwd. Any mismatch → child is
-    gone (PID may have been reused by an unrelated process).
+    Validates pid+pgid+start_time_ns. Any mismatch means the child is gone
+    or PID has been reused by an unrelated process. Cwd changes are not
+    identity failures because a legitimate child can chdir after spawn.
     """
     if not child:
         return False
@@ -441,14 +443,19 @@ def child_is_alive(child: dict[str, Any]) -> bool:
             try:
                 actual_cwd = str(proc.cwd())
                 if os.path.realpath(actual_cwd) != os.path.realpath(recorded_cwd):
-                    return False
+                    logger.debug(
+                        "child pid=%s cwd changed from %s to %s; preserving identity",
+                        pid,
+                        recorded_cwd,
+                        actual_cwd,
+                    )
             except (psutil.AccessDenied, psutil.NoSuchProcess):
                 # Can't verify; conservatively assume alive
                 pass
         # NOTE on argv check: the shell or wrapper scripts may exec-replace
         # into a different program (e.g. `/bin/sh -c "sleep 5"` → cmdline is
         # ['sleep', '5'], not ['/bin/sh', '-c', 'sleep 5']). PID-reuse safety
-        # relies primarily on start_time_ns + pgid + cwd; argv match is a
+        # relies primarily on start_time_ns + pgid; argv match is a
         # weak signal we don't enforce. We could re-enable it for direct
         # `otto build` invocations (which don't go through a shell) but the
         # blanket strict check produces false negatives for legitimate uses.
@@ -806,7 +813,8 @@ class Runner:
                         ts.get("terminal_status", "cancelled"),
                     )
                     continue
-                self._finish_terminating(ts)
+                if not self._finalize_success_manifest_if_present(tid, ts):
+                    self._finish_terminating(ts)
                 logger.info(
                     "reconciling: task %s finished while watcher was down -> %s",
                     tid,
@@ -914,6 +922,9 @@ class Runner:
                 logger.warning("cancel ignored for %s in status=%s", tid, status)
                 return
             if status in {INITIALIZING_STATUS, RUNNING_STATUS}:
+                if self._finalize_success_manifest_if_present(tid, ts):
+                    logger.info("cancel ignored for %s after success manifest finalized", tid)
+                    return
                 if self._finalize_child_if_finished(tid, ts):
                     logger.info("cancel ignored for %s after child finalized as %s", tid, ts.get("status"))
                     return
@@ -924,6 +935,9 @@ class Runner:
                 self._mark_terminating(ts, final_status="cancelled", reason="cancelled by user")
                 return
             if status == "terminating":
+                if self._finalize_success_manifest_if_present(tid, ts):
+                    logger.info("cancel ignored for %s after success manifest finalized", tid)
+                    return
                 ts["terminal_status"] = "cancelled"
                 ts["failure_reason"] = "cancelled by user"
                 return
@@ -1056,6 +1070,12 @@ class Runner:
                 continue
             if self._finalize_child_if_finished(tid, ts):
                 continue
+            if self._finalize_success_manifest_if_present(
+                tid,
+                ts,
+                terminate_lingering_child=True,
+            ):
+                continue
             child = ts.get("child") or {}
             logger.warning(
                 "task %s exceeded timeout (%.0fs > %.0fs); SIGTERM",
@@ -1125,7 +1145,8 @@ class Runner:
                     )
                     continue
                 if status == "terminating":
-                    self._finish_terminating(ts)
+                    if not self._finalize_success_manifest_if_present(tid, ts):
+                        self._finish_terminating(ts)
                 else:
                     self._finalize_task_from_manifest(ts, tid)
                 self._join_output_pump(pid)
@@ -1139,7 +1160,8 @@ class Runner:
             exit_code = int(os.waitstatus_to_exitcode(wstatus))
             if status == "terminating":
                 ts["exit_code"] = exit_code
-                self._finish_terminating(ts)
+                if not self._finalize_success_manifest_if_present(tid, ts):
+                    self._finish_terminating(ts)
                 self._join_output_pump(pid)
                 logger.info("reaped %s: %s", tid, ts.get("status"))
                 continue
@@ -1820,6 +1842,12 @@ class Runner:
         for tid, ts in state["tasks"].items():
             if ts.get("status") not in IN_FLIGHT_STATUSES:
                 continue
+            if self._finalize_success_manifest_if_present(
+                tid,
+                ts,
+                terminate_lingering_child=force,
+            ):
+                continue
             child = ts.get("child") or {}
             kill_child_safely(child, signal.SIGTERM)
             final_status = ts.get("terminal_status", "cancelled")
@@ -1920,6 +1948,12 @@ class Runner:
     def _maybe_escalate_terminating(self, task_id: str, ts: dict[str, Any]) -> None:
         if ts.get("status") != "terminating" or ts.get("sigkill_sent_at"):
             return
+        if self._finalize_success_manifest_if_present(
+            task_id,
+            ts,
+            terminate_lingering_child=True,
+        ):
+            return
         elapsed = self._terminating_elapsed_s(ts)
         if elapsed is None:
             ts.setdefault("terminating_since", now_iso())
@@ -1935,7 +1969,33 @@ class Runner:
                 elapsed,
             )
         elif not child_is_alive(child):
-            self._finish_terminating(ts)
+            if not self._finalize_success_manifest_if_present(task_id, ts):
+                self._finish_terminating(ts)
+
+    def _success_manifest_is_present(self, task_id: str) -> bool:
+        manifest_p = queue_index_path_for(self.project_dir, task_id)
+        if manifest_p is None or not manifest_p.exists():
+            return False
+        manifest = _read_json(manifest_p)
+        if not isinstance(manifest, dict):
+            return False
+        return str(manifest.get("exit_status") or "success") == "success"
+
+    def _finalize_success_manifest_if_present(
+        self,
+        task_id: str,
+        ts: dict[str, Any],
+        *,
+        terminate_lingering_child: bool = False,
+    ) -> bool:
+        """Let an already-written success manifest win destructive transitions."""
+        if not self._success_manifest_is_present(task_id):
+            return False
+        child = dict(ts.get("child") or {})
+        self._finalize_task_from_manifest(ts, task_id, exit_code=0)
+        if terminate_lingering_child and ts.get("status") == "done":
+            kill_child_safely(child, signal.SIGTERM)
+        return ts.get("status") not in IN_FLIGHT_STATUSES
 
     def _finalize_task_from_manifest(
         self,

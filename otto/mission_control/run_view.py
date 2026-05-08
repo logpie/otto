@@ -1178,6 +1178,17 @@ def _build_stages(
             stages["audit"]["started_at"] = ts
             stages["audit"]["status"] = "active"
             continue
+        if kind == "spec.review_pending":
+            ts = event.get("ts") or event.get("timestamp")
+            if stages["compile"]["status"] == "active":
+                _mark_stage_done(stages["compile"], ts)
+            stages["spec_review"]["started_at"] = stages["spec_review"]["started_at"] or ts
+            stages["spec_review"]["status"] = "active"
+            continue
+        if kind == "spec.review_approved":
+            ts = event.get("ts") or event.get("timestamp")
+            _mark_stage_done(stages["spec_review"], ts)
+            continue
         stage_name, sub = _stage_event_target(kind)
         if stage_name is None or sub is None:
             continue
@@ -1580,6 +1591,8 @@ def _derive_status(
     live_status = _normalize_live_status(live_state)
     if live_status in {"interrupted", "aborted", "failed", "landed"}:
         return live_status
+    if live_status == "paused":
+        return "paused"
     # In-flight or pre-verdict — derive from latest stage event
     last_started = None
     saw_group_started = False
@@ -1591,6 +1604,12 @@ def _derive_status(
             saw_group_started = True
         if kind == "audit.started" and str(event.get("detail") or "") != "run start":
             last_started = "audit"
+            continue
+        if kind == "spec.review_pending":
+            last_started = "spec_review"
+            continue
+        if kind == "spec.review_approved" and last_started == "spec_review":
+            last_started = None
             continue
         stage_name, sub = _stage_event_target(kind)
         if stage_name is not None and sub == "started":
@@ -1645,6 +1664,8 @@ def _normalize_live_status(live_state: dict[str, Any] | None) -> str | None:
         return "landed"
     if raw in {"queued", "starting", "initializing"}:
         return "queued"
+    if raw == "paused":
+        return "paused"
     if raw == "running":
         return None
     if raw in {

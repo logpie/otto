@@ -391,12 +391,8 @@ def test_mc_enqueue_improve_with_unknown_prior_run_id_raises(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_add_worktree_existing_branch_still_works_with_base_ref(tmp_path: Path) -> None:
-    """If the target branch already exists, base_ref is silently ignored.
-
-    Re-pointing an existing branch ref via ``git worktree add`` would be
-    surprising. We keep the legacy "checkout existing branch" path.
-    """
+def test_add_worktree_existing_branch_must_contain_base_ref(tmp_path: Path) -> None:
+    """A same-name improve branch must not silently fork away from base_ref."""
     repo = init_repo(tmp_path)
     build_branch = "build/greet-2026-04-25"
     _commit_file_on_branch(
@@ -410,12 +406,33 @@ def test_add_worktree_existing_branch_still_works_with_base_ref(tmp_path: Path) 
     _run_git(repo, "branch", "improve/greet-2026-04-25", "main")
 
     wt_path = repo / ".worktrees" / "improve-existing"
+    with pytest.raises(RuntimeError, match="does not contain requested base_ref"):
+        add_worktree(
+            project_dir=repo,
+            worktree_path=wt_path,
+            branch="improve/greet-2026-04-25",
+            base_ref=build_branch,
+        )
+    assert not wt_path.exists()
+
+
+def test_add_worktree_existing_branch_containing_base_ref_still_works(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    build_branch = "build/greet-2026-04-25"
+    _commit_file_on_branch(
+        repo,
+        branch=build_branch,
+        file_path="greet.py",
+        content="from build",
+        message="feat: greet",
+    )
+    _run_git(repo, "branch", "improve/greet-2026-04-25", build_branch)
+
+    wt_path = repo / ".worktrees" / "improve-existing"
     add_worktree(
         project_dir=repo,
         worktree_path=wt_path,
         branch="improve/greet-2026-04-25",
         base_ref=build_branch,
     )
-    # The pre-existing branch was rooted on main, so greet.py shouldn't be
-    # there — proving we did NOT silently re-point the ref.
-    assert not (wt_path / "greet.py").exists()
+    assert (wt_path / "greet.py").read_text(encoding="utf-8") == "from build"

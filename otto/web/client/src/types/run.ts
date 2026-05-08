@@ -239,6 +239,7 @@ export type RunStatus =
   | "rendering"
   | "landing"
   | "landed"
+  | "paused"
   | "blocked"
   | "partial"
   | "passed"

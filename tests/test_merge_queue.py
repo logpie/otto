@@ -28,6 +28,7 @@ from otto.merge_queue import (
     MergeBudget,
     MergeStatus,
     _commit_integration,
+    _merge_group_branch,
     eligible_candidates,
     passing_group_ids,
     run_merge_queue,
@@ -1062,6 +1063,48 @@ def test_commit_integration_excludes_otto_runtime_evidence_from_product_commit(
     assert "src/app.py" in committed_paths
     assert not any(path.startswith("otto_artifacts/") for path in committed_paths)
     assert "__audit_home_body__.html" not in committed_paths
+
+
+def test_merge_group_branch_blocks_missing_declared_branch_without_committing_dirty_state(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    (tmp_path / "unrelated.txt").write_text("must not be committed\n", encoding="utf-8")
+
+    outcome = _merge_group_branch(
+        _git,
+        tmp_path,
+        group_id="s1",
+        branch="i2p/missing/s1",
+        base_branch="main",
+    )
+
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert outcome.status == MergeStatus.BLOCKED
+    assert "does not exist" in outcome.detail
+    assert head_after == head_before
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "unrelated.txt" in status
 
 
 def test_run_merge_queue_real_merge_blocks_on_conflict(tmp_path: Path) -> None:

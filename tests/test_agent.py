@@ -316,7 +316,7 @@ async def test_codex_app_server_query_normalizes_thread_turn_events(tmp_path, mo
         '{"method":"item/commandExecution/outputDelta","params":{"threadId":"thread-app","turnId":"turn-1","itemId":"cmd-1","delta":"1 passed\\n"}}\n',
         '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"pytest -q","cwd":"/tmp/project","status":"completed","aggregatedOutput":null,"exitCode":0,"durationMs":12,"commandActions":[],"source":"exec","processId":null}}}\n',
         '{"method":"turn/diff/updated","params":{"threadId":"thread-app","turnId":"turn-1","diff":"diff --git a/app.py b/app.py"}}\n',
-        '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-app","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":10,"cachedInputTokens":2,"outputTokens":4,"reasoningOutputTokens":1,"totalTokens":15},"total":{"inputTokens":10,"cachedInputTokens":2,"outputTokens":4,"reasoningOutputTokens":1,"totalTokens":15},"modelContextWindow":128000}}}\n',
+        '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-app","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":1,"outputTokens":1,"totalTokens":2},"total":{"inputTokens":10,"cachedInputTokens":2,"outputTokens":4,"reasoningOutputTokens":1,"totalTokens":15},"modelContextWindow":128000}}}\n',
         '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Done."}}}\n',
         '{"method":"thread/status/changed","params":{"threadId":"thread-app","status":{"type":"idle"}}}\n',
     ])
@@ -605,6 +605,142 @@ async def test_codex_app_server_declines_unsafe_command_approval(tmp_path, monke
     ]
     approval_response = next(line for line in written if line.get("id") == 99)
     assert approval_response["result"] == {"decision": "decline"}
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_filters_permission_expansion_requests(tmp_path, monkeypatch):
+    inside = tmp_path / "inside"
+    outside = tmp_path.parent / "outside"
+    process = _FakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        json_event({
+            "method": "item/permissions/requestApproval",
+            "id": 99,
+            "params": {
+                "threadId": "thread-app",
+                "turnId": "turn-1",
+                "itemId": "perm-1",
+                "cwd": str(tmp_path),
+                "permissions": {
+                    "fileSystem": {
+                        "read": [str(inside), str(outside)],
+                        "write": [str(outside)],
+                        "entries": [
+                            {
+                                "access": "write",
+                                "path": {"type": "path", "path": str(inside)},
+                            },
+                            {
+                                "access": "write",
+                                "path": {"type": "path", "path": str(outside)},
+                            },
+                            {
+                                "access": "read",
+                                "path": {
+                                    "type": "special",
+                                    "value": {"kind": "root"},
+                                },
+                            },
+                        ],
+                    },
+                    "network": {"enabled": True},
+                },
+            },
+        }),
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"turn/completed","params":{"threadId":"thread-app","turn":{"id":"turn-1","status":"completed","items":[],"error":null,"startedAt":1,"completedAt":2,"durationMs":1000}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    async for _message in query(
+        prompt="Request permissions",
+        options=ClaudeAgentOptions(provider="codex-app-server", cwd=str(tmp_path)),
+    ):
+        pass
+
+    written = [
+        json.loads(line)
+        for line in process.stdin.buffer.decode("utf-8").splitlines()
+    ]
+    approval_response = next(line for line in written if line.get("id") == 99)
+    assert approval_response["result"] == {
+        "permissions": {
+            "fileSystem": {
+                "read": [str(inside.resolve())],
+                "entries": [
+                    {
+                        "access": "write",
+                        "path": {"type": "path", "path": str(inside.resolve())},
+                    }
+                ],
+            }
+        },
+        "scope": "turn",
+        "strictAutoReview": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_returns_empty_permission_grants_for_outside_workspace(
+    tmp_path,
+    monkeypatch,
+):
+    outside = tmp_path.parent / "outside"
+    process = _FakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        json_event({
+            "method": "item/permissions/requestApproval",
+            "id": 99,
+            "params": {
+                "threadId": "thread-app",
+                "turnId": "turn-1",
+                "itemId": "perm-1",
+                "cwd": str(tmp_path.parent),
+                "permissions": {
+                    "fileSystem": {
+                        "write": [str(outside)],
+                        "entries": [
+                            {
+                                "access": "write",
+                                "path": {"type": "path", "path": str(outside)},
+                            }
+                        ],
+                    },
+                    "network": {"enabled": True},
+                },
+            },
+        }),
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"turn/completed","params":{"threadId":"thread-app","turn":{"id":"turn-1","status":"completed","items":[],"error":null,"startedAt":1,"completedAt":2,"durationMs":1000}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    async for _message in query(
+        prompt="Request permissions",
+        options=ClaudeAgentOptions(provider="codex-app-server", cwd=str(tmp_path)),
+    ):
+        pass
+
+    written = [
+        json.loads(line)
+        for line in process.stdin.buffer.decode("utf-8").splitlines()
+    ]
+    approval_response = next(line for line in written if line.get("id") == 99)
+    assert approval_response["result"] == {
+        "permissions": {},
+        "scope": "turn",
+        "strictAutoReview": False,
+    }
 
 
 @pytest.mark.asyncio
