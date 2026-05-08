@@ -26,6 +26,7 @@ import glob
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -1455,15 +1456,63 @@ def _run_command(
     """
     expanded_command = _expand_command_globs(command, cwd)
     resolved_command = _resolve_subprocess_command(expanded_command, cwd, extra_pythonpath)
-    return subprocess.run(
+    proc = subprocess.Popen(
         resolved_command,
         cwd=cwd,
         env=_subprocess_env(extra_pythonpath=extra_pythonpath, extra=env_overrides),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout_s,
-        check=False,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_group(proc)
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(
+            cmd=resolved_command,
+            timeout=timeout_s,
+            output=stdout if stdout is not None else exc.output,
+            stderr=stderr if stderr is not None else exc.stderr,
+        ) from exc
+    return subprocess.CompletedProcess(
+        resolved_command,
+        proc.returncode,
+        stdout,
+        stderr,
+    )
+
+
+def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
+    """Terminate a subprocess tree started by _run_command.
+
+    npm/vitest and browser runners can leave descendants holding stdout/stderr
+    pipes after the direct process has exited. Killing the whole process group
+    keeps Otto's check timeout authoritative for the full command tree.
+    """
+    pgid = proc.pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        try:
+            proc.terminate()
+        except OSError:
+            return
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                return
 
 
 def _expand_command_globs(command: list[str], cwd: Path) -> list[str]:

@@ -18,6 +18,7 @@ import http.server
 import json
 import os
 import socket
+import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -128,6 +129,23 @@ def test_repo_test_timeout_marked_as_failure(tmp_path: Path) -> None:
     assert evidence.passed is False
     assert "timed out" in evidence.detail
     assert evidence.raw.get("timeout") is True
+
+
+def test_repo_test_timeout_kills_descendants_holding_output_pipe(tmp_path: Path) -> None:
+    script = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        "\"import sys, time; print('grandchild-started', flush=True); time.sleep(30)\"])\n"
+        "print('parent-exited', flush=True)\n"
+    )
+    check = RepoTestCheck(command=(sys.executable, "-c", script), timeout_s=1)
+
+    evidence = run_check(check, project_dir=tmp_path)
+
+    assert evidence.passed is False
+    assert "timed out" in evidence.detail
+    assert evidence.raw.get("timeout") is True
+    assert evidence.duration_s < 5
 
 
 def test_repo_test_writes_raw_log_when_path_given(tmp_path: Path) -> None:
