@@ -360,6 +360,35 @@ async def run_pipeline(
     if resume_plan is not None and resume_plan.prior_cost_usd > 0.0:
         shared_budget.charge_cost(resume_plan.prior_cost_usd)
 
+    # Resume: skip already-LANDED Components/Groups and seed durable
+    # provider thread ids for build, audit, and Layer 2 repair phases.
+    skip_components: set[str] = (
+        set(resume_plan.landed_components) if resume_plan is not None else set()
+    )
+    resume_agent_sessions: dict[str, str] = (
+        dict(resume_plan.agent_session_ids) if resume_plan is not None else {}
+    )
+    audit_resume_agent_session_id = (
+        resume_plan.audit_agent_session_id if resume_plan is not None else ""
+    )
+    layer2_resume_agent_sessions: dict[str, str] = (
+        dict(resume_plan.layer2_agent_session_ids) if resume_plan is not None else {}
+    )
+    if resume_plan is not None and resume_plan.prior_invalidated_group_ids:
+        # Outer product truth wins over inner-agent memory. If a unit was
+        # invalidated by a spec edit, do not resume a thread that was primed
+        # with the old contract.
+        for invalidated_id in resume_plan.prior_invalidated_group_ids:
+            resume_agent_sessions.pop(invalidated_id, None)
+        invalidated_features = {
+            feature.id
+            for feature in spec.features
+            if feature.group_id in resume_plan.prior_invalidated_group_ids
+        }
+        for feature_id in invalidated_features:
+            layer2_resume_agent_sessions.pop(feature_id, None)
+            layer2_resume_agent_sessions.pop(_branch_slug(feature_id), None)
+
     # ---- 3. Build (greenfield only) ----
     if brownfield:
         # Brownfield: project IS the integrated worktree. No slices to
@@ -367,12 +396,6 @@ async def run_pipeline(
         build_result = BuildResult(spec_session_dir=session_dir / "spec")
     else:
         _phase("build")
-        # Resume: skip already-LANDED Components/Groups. ``run_build``
-        # synthesises BLOCKED-status entries for skipped ids from the
-        # prior run so render's accounting still sees them.
-        skip_components: set[str] = (
-            set(resume_plan.landed_components) if resume_plan is not None else set()
-        )
         # A6: open the mid-build edit window. Spec-review's POST /edit
         # accepts edits while lifecycle == "editing_in_flight"; after
         # build (and any re-dispatch) returns we revert to "approved"
@@ -390,6 +413,7 @@ async def run_pipeline(
                 budget=shared_budget,
                 base_branch=base_branch,
                 skip_components=skip_components,
+                resume_agent_sessions=resume_agent_sessions,
             )
             # A6: if mid-build spec edits invalidated any Groups, re-dispatch
             # the affected Groups against the (now persisted) post-edit Spec.
@@ -415,6 +439,7 @@ async def run_pipeline(
                     shared_budget=shared_budget,
                     base_branch=base_branch,
                     skip_components=skip_components,
+                    resume_agent_sessions=resume_agent_sessions,
                 )
                 result.spec = spec
         finally:
@@ -451,6 +476,7 @@ async def run_pipeline(
             shared_budget=shared_budget,
             base_branch=base_branch,
             skip_components=skip_components,
+            resume_agent_sessions=resume_agent_sessions,
         )
         result.build_result = build_result
     result.merge_result = merge_result
@@ -500,7 +526,10 @@ async def run_pipeline(
             budget=audit_budget or AuditBudget(),
             shared_budget=shared_budget,
             base_branch=base_branch,
+            resume_agent_session_id=audit_resume_agent_session_id,
         )
+        if audit_result.agent_session_id:
+            audit_resume_agent_session_id = audit_result.agent_session_id
     result.audit_result = audit_result
     audit_cost_total = float(audit_result.cost_usd or 0.0)
     repair_cost_total = 0.0
@@ -531,6 +560,7 @@ async def run_pipeline(
                 base_url=base_url,
                 config=config,
                 shared_budget=shared_budget,
+                resume_agent_sessions=layer2_resume_agent_sessions,
             )
             audit_budget_for_recheck = audit_budget or AuditBudget()
 
@@ -543,7 +573,7 @@ async def run_pipeline(
                 # omitting older failures that did not fit in the retry
                 # cap, which turns a partial product into a false pass.
                 _ = feature_ids
-                nonlocal audit_result, audit_cost_total
+                nonlocal audit_result, audit_cost_total, audit_resume_agent_session_id
                 recheck = await run_audit(
                     spec,
                     project_dir=project_dir,
@@ -562,8 +592,11 @@ async def run_pipeline(
                     ),
                     shared_budget=shared_budget,
                     base_branch=base_branch,
+                    resume_agent_session_id=audit_resume_agent_session_id,
                 )
                 audit_cost_total += float(recheck.cost_usd or 0.0)
+                if recheck.agent_session_id:
+                    audit_resume_agent_session_id = recheck.agent_session_id
                 audit_result = replace(recheck, cost_usd=audit_cost_total)
                 result.audit_result = audit_result
                 return _repair_verdicts_for_audit(spec, audit_result)
@@ -718,6 +751,7 @@ async def _redispatch_invalidated_groups(
     shared_budget: BuildBudget,
     base_branch: str,
     skip_components: set[str],
+    resume_agent_sessions: dict[str, str] | None = None,
 ) -> tuple[Spec, BuildResult]:
     """Re-load the post-edit spec, re-build invalidated Groups,
     and merge the new GroupResult entries into the prior BuildResult.
@@ -764,6 +798,7 @@ async def _redispatch_invalidated_groups(
             budget=shared_budget,
             base_branch=base_branch,
             skip_components=second_skip,
+            resume_agent_sessions=resume_agent_sessions,
         )
     except Exception as exc:  # noqa: BLE001 — never crash the runner here
         logger.warning(
@@ -811,6 +846,7 @@ async def _rebuild_dependency_setup_blocked_units(
     shared_budget: BuildBudget,
     base_branch: str,
     skip_components: set[str],
+    resume_agent_sessions: dict[str, str] | None = None,
 ) -> tuple[BuildResult, MergeQueueResult]:
     """Give downstream units one pass after dependency merge repair.
 
@@ -845,6 +881,7 @@ async def _rebuild_dependency_setup_blocked_units(
             budget=shared_budget,
             base_branch=base_branch,
             skip_components=second_skip,
+            resume_agent_sessions=resume_agent_sessions,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -1445,6 +1482,7 @@ def _make_layer2_fix_agent(
     base_url: str | None,
     config: dict[str, Any] | None = None,
     shared_budget: BuildBudget | None = None,
+    resume_agent_sessions: dict[str, str] | None = None,
 ):
     """Adapt a ``BuildAgentCallable`` to the ``FixAgentCallable`` contract.
 
@@ -1473,8 +1511,9 @@ def _make_layer2_fix_agent(
     on the merged main branch produced by the merge queue). The branch
     name is left empty — Layer 2 does not own a dedicated branch yet.
     """
-    _ = (session_dir, base_url)  # reserved for future per-feature log routing
-    session_by_feature: dict[str, str] = {}
+    _ = base_url
+    session_by_feature: dict[str, str] = dict(resume_agent_sessions or {})
+    attempt_by_feature: dict[str, int] = {}
 
     async def bridge(failing: FailingFeature, group: Group) -> RepairAttempt:
         if shared_budget is not None and shared_budget.remaining_total_cost_usd() <= 0:
@@ -1488,18 +1527,29 @@ def _make_layer2_fix_agent(
                 cost_usd=0.0,
                 wall_s=0.0,
             )
+        feature_log_key = _branch_slug(failing.feature_id)
+        attempt_number = attempt_by_feature.get(failing.feature_id, 0) + 1
+        attempt_by_feature[failing.feature_id] = attempt_number
+        resume_session_id = (
+            session_by_feature.get(failing.feature_id)
+            or session_by_feature.get(feature_log_key)
+            or ""
+        )
         agent_input = BuildAgentInput(
             spec=spec,
             group=group,
             project_dir=project_dir,
             worktree=project_dir,
             branch="",
-            attempt=1,
+            attempt=attempt_number,
             last_failure_narrative=failing.detail,
-            log_dir=None,
+            log_dir=(
+                session_dir / "repair" / feature_log_key
+                / f"attempt-{attempt_number:02d}"
+            ),
             feature_id=failing.feature_id,
             related_feature_ids=tuple(failing.related_feature_ids or [failing.feature_id]),
-            agent_session_id=session_by_feature.get(failing.feature_id, ""),
+            agent_session_id=resume_session_id,
             config=dict(config or {}),
         )
         t0 = time.monotonic()
@@ -1509,7 +1559,7 @@ def _make_layer2_fix_agent(
             return RepairAttempt(
                 feature_id=failing.feature_id,
                 group_id=group.id,
-                attempt_number=1,
+                attempt_number=attempt_number,
                 succeeded=False,
                 new_verdict=None,
                 detail=(
@@ -1523,6 +1573,7 @@ def _make_layer2_fix_agent(
             shared_budget.charge_cost(float(output.cost_usd or 0.0))
         if output.session_id:
             session_by_feature[failing.feature_id] = output.session_id
+            session_by_feature[feature_log_key] = output.session_id
         succeeded = bool(output.succeeded)
         detail = output.detail
         if succeeded:

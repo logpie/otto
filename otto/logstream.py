@@ -31,6 +31,7 @@ from rich.markup import escape as rich_escape
 
 from otto.agent import (
     AssistantMessage,
+    ProviderEventMessage,
     ResultMessage,
     TextBlock,
     ThinkingBlock,
@@ -315,10 +316,28 @@ class JsonlMessageWriter:
                 record["result"] = _maybe_redact_text(message.result, redact=self._redact)
             if message.structured_output is not None:
                 record["structured_output"] = message.structured_output
+            if message.structured_output_error:
+                record["structured_output_error"] = message.structured_output_error
             if message.total_cost_usd is not None:
                 record["cost_usd"] = message.total_cost_usd
             if message.usage is not None:
                 record["usage"] = _coerce_usage(message.usage)
+        elif isinstance(message, ProviderEventMessage):
+            record["type"] = "provider_event"
+            record["event"] = message.event
+            record["provider"] = message.provider
+            if message.method:
+                record["method"] = message.method
+            if message.turn_id:
+                record["turn_id"] = message.turn_id
+            if message.item_id:
+                record["item_id"] = message.item_id
+            if message.status:
+                record["status"] = message.status
+            if message.usage is not None:
+                record["usage"] = _coerce_usage(message.usage)
+            if message.data:
+                record["data"] = _redact_obj(message.data, redact=self._redact)
         elif isinstance(message, UserMessage):
             record["type"] = "user"
             record["blocks"] = [_block_to_dict(b, redact=self._redact) for b in message.content]

@@ -65,6 +65,23 @@ from otto.spec_state import emit
 
 logger = logging.getLogger("otto.audit")
 
+_AUDIT_RIPGREP_EXCLUDED_GLOBS: tuple[str, ...] = (
+    "**/otto_logs/**",
+    "**/_otto_build_logs/**",
+    "**/messages.jsonl",
+    "**/narrative.log",
+    "**/live.log",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "**/.cache/**",
+    "**/node_modules/**",
+    "**/.git/**",
+)
+
 
 # ---------------------------------------------------------------------------
 # Types
@@ -170,6 +187,7 @@ class AuditResult:
     # surfaces these so an operator can see WHY the final verdict differs
     # from the LLM judge's output.
     verdict_cap_reasons: list[str] = field(default_factory=list)
+    agent_session_id: str = ""
 
 
 @dataclass
@@ -206,6 +224,7 @@ class AuditAgentInput:
     contract_test_detail: str = ""
     evidence_packet_path: Path | None = None
     full_spec_path: Path | None = None
+    agent_session_id: str = ""
 
 
 @dataclass
@@ -234,6 +253,7 @@ class AuditAgentOutput:
     quality_findings: list[str] = field(default_factory=list)
     cost_usd: float = 0.0
     wall_s: float = 0.0
+    session_id: str = ""
 
 
 class AuditAgentCallable(Protocol):
@@ -933,6 +953,7 @@ async def run_audit(
     shared_budget: BuildBudget | None = None,
     base_branch: str = "main",
     feature_scope_ids: Iterable[str] | None = None,
+    resume_agent_session_id: str = "",
 ) -> AuditResult:
     """Run the end-of-run audit.
 
@@ -983,6 +1004,7 @@ async def run_audit(
     # PASSED on a later attempt while real repair work never landed.
     fix_loop_failed_attempts: list[int] = []
     fix_session_by_group: dict[str, str] = {}
+    audit_agent_session_id = str(resume_agent_session_id or "")
     attempt_start = _next_audit_attempt_index(session_dir)
 
     emit(session_dir, "audit.started")
@@ -1044,6 +1066,7 @@ async def run_audit(
                 if (session_dir / "spec" / "spec.json").exists()
                 else None
             ),
+            agent_session_id=audit_agent_session_id,
         )
         try:
             _write_audit_evidence_packet(agent_input)
@@ -1089,8 +1112,11 @@ async def run_audit(
                 wall_s=time.monotonic() - t0,
                 walkthrough_coverage=walk_coverage,
                 walkthrough_entries=list(walk_entries),
+                agent_session_id=audit_agent_session_id,
             )
         agent_output = await audit_agent(agent_input)
+        if agent_output.session_id:
+            audit_agent_session_id = agent_output.session_id
         if scoped_feature_ids:
             agent_output = dataclasses.replace(
                 agent_output,
@@ -1195,6 +1221,7 @@ async def run_audit(
             walkthrough_coverage=walk_coverage,
             walkthrough_entries=list(walk_entries),
             verdict_cap_reasons=verdict_cap_reasons,
+            agent_session_id=audit_agent_session_id,
         )
 
         # Pattern A: emit a per-attempt verdict event so the journal
@@ -1491,6 +1518,7 @@ def _run_project_contract_test(
     import shlex
     import shutil
     import subprocess as _sp
+    import sys
 
     try:
         from otto.config import load_config
@@ -1511,6 +1539,7 @@ def _run_project_contract_test(
     if not argv:
         return None, "test_command parsed to empty argv"
 
+    original_argv = list(argv)
     env = _subprocess_env(extra_pythonpath=[project_dir])
     command_for_output = test_command
     fallback_note = ""
@@ -1524,19 +1553,41 @@ def _run_project_contract_test(
         command_for_output = shlex.join(resolved_argv)
         fallback_note = f"{fallback_note}; resolved from {test_command!r}"
     try:
-        completed = _sp.run(
+        completed = _run_contract_subprocess(
             resolved_argv,
-            cwd=project_dir,
+            project_dir=project_dir,
             env=env,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
         )
     except _sp.TimeoutExpired:
         return False, f"test_command timed out: {command_for_output}"
     except Exception as exc:  # noqa: BLE001 — surface any subprocess failure
         return False, f"test_command launch failed: {type(exc).__name__}: {exc}"
+
+    retry_note = ""
+    if (
+        completed.returncode != 0
+        and _is_pytest_command(original_argv)
+        and _looks_like_pytest_import_environment_failure(completed)
+        and resolved_argv[:3] != [sys.executable, "-m", "pytest"]
+    ):
+        retry_argv = [sys.executable, "-m", "pytest", *original_argv[1:]]
+        try:
+            retry_completed = _run_contract_subprocess(
+                retry_argv,
+                project_dir=project_dir,
+                env=env,
+            )
+        except _sp.TimeoutExpired:
+            retry_completed = None
+        except Exception:
+            retry_completed = None
+        if retry_completed is not None and retry_completed.returncode == 0:
+            completed = retry_completed
+            command_for_output = shlex.join(retry_argv)
+            retry_note = (
+                f"; retried with Otto runtime after pytest import failure "
+                f"from {shlex.join(resolved_argv)!r}"
+            )
 
     output = (
         f"$ {command_for_output}\nexit_code={completed.returncode}\n\n"
@@ -1551,10 +1602,42 @@ def _run_project_contract_test(
 
     detail = (
         f"test_command={command_for_output!r} exit={completed.returncode}"
-        f"{fallback_note}; "
+        f"{fallback_note}{retry_note}; "
         + ((completed.stdout or "")[-400:].strip() or "(no stdout)")
     )
     return completed.returncode == 0, detail
+
+
+def _run_contract_subprocess(
+    argv: list[str],
+    *,
+    project_dir: Path,
+    env: dict[str, str],
+):
+    import subprocess as _sp
+
+    return _sp.run(
+        argv,
+        cwd=project_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+
+def _is_pytest_command(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    return Path(str(argv[0])).name.lower() in {"pytest", "pytest.exe"}
+
+
+def _looks_like_pytest_import_environment_failure(completed: Any) -> bool:
+    text = f"{getattr(completed, 'stdout', '') or ''}\n{getattr(completed, 'stderr', '') or ''}"
+    if "ImportError while loading conftest" not in text:
+        return False
+    return "ModuleNotFoundError" in text or "ImportError" in text
 
 
 def _fallback_contract_test_argv(
@@ -1765,6 +1848,29 @@ def _artifact_kind(path: Path) -> str:
     return "file"
 
 
+def _write_audit_ripgrep_config(log_dir: Path) -> Path:
+    """Write an audit-only ripgrep config that hides Otto runtime transcripts."""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    config_path = log_dir / "ripgrep-audit-ignore.conf"
+    lines: list[str] = [
+        "# Auto-generated by Otto audit. Runtime transcripts are not product evidence.",
+    ]
+    for glob in _AUDIT_RIPGREP_EXCLUDED_GLOBS:
+        lines.append(f"--glob=!{glob}")
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return config_path
+
+
+def _audit_search_env(base_env: dict[str, str] | None, log_dir: Path) -> dict[str, str]:
+    """Return provider env with audit search guards installed."""
+    env = dict(base_env or {})
+    config_path = _write_audit_ripgrep_config(log_dir)
+    env["RIPGREP_CONFIG_PATH"] = str(config_path)
+    env["OTTO_AUDIT_RIPGREP_CONFIG"] = str(config_path)
+    env["OTTO_AUDIT_EXCLUDED_GLOBS"] = ",".join(_AUDIT_RIPGREP_EXCLUDED_GLOBS)
+    return env
+
+
 def _audit_prompt(agent_input: AuditAgentInput) -> str:
     """Compose the audit-agent prompt.
 
@@ -1801,12 +1907,17 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
             "evidence has been reviewed."
         )
         lines.append(
-            "Do not run broad `rg`, `find`, `cat`, or `sed` sweeps over "
-            "`otto_logs/**`, `_otto_build_logs/**`, `.worktrees/**`, "
-            "`node_modules/**`, `dist/assets/**`, `coverage/**`, "
-            "`test-results/**`, or parent session directories. Inspect the "
-            "compact evidence packet, named check logs, screenshots, traces, "
-            "and source files directly."
+            "Your shell environment sets `RIPGREP_CONFIG_PATH` to an Otto "
+            "audit ignore file. Use `rg` normally for product source search; "
+            "do not override that config or broad-search Otto runtime logs, "
+            "`_otto_build_logs`, `messages.jsonl`, caches, or dependency "
+            "directories. These transcripts are diagnostic fallback evidence, "
+            "not product behavior. Do not run broad `rg`, `find`, `cat`, or "
+            "`sed` sweeps over session directories either; inspect the compact "
+            "evidence packet, named check logs, screenshots, traces, and source "
+            "files directly. The ignore policy also covers dependency/build "
+            "outputs such as `node_modules/**`, `dist/assets/**`, `coverage/**`, "
+            "and `test-results/**`."
         )
         lines.append(
             "Deterministic-first rule: evaluate contract_test, cross-slice "
@@ -2251,20 +2362,7 @@ def _compose_verdict(
     return verdict, narrative
 
 
-def _parse_audit_output(text: str) -> AuditAgentOutput:
-    """Parse the audit agent's JSON-fenced response."""
-    import json as _json
-    import re as _re
-
-    match = _re.search(r"```json\s*(\{.*?\})\s*```", text, flags=_re.DOTALL)
-    raw = match.group(1) if match else text.strip()
-    try:
-        data = _json.loads(raw)
-    except _json.JSONDecodeError:
-        return AuditAgentOutput(
-            verdict=AuditVerdict.BLOCKED,
-            narrative=f"audit agent returned non-JSON output: {text[:200]}",
-        )
+def _audit_output_from_dict(data: dict[str, Any]) -> AuditAgentOutput:
     verdict_str = str(data.get("verdict") or "blocked").lower()
     verdict = (
         AuditVerdict.PASSED if verdict_str == "passed"
@@ -2337,6 +2435,96 @@ def _parse_audit_output(text: str) -> AuditAgentOutput:
         quality_score=quality_score,
         quality_findings=quality_findings,
     )
+
+
+def _parse_audit_output(text: str) -> AuditAgentOutput:
+    """Parse the audit agent's JSON-fenced response."""
+    import json as _json
+    import re as _re
+
+    match = _re.search(r"```json\s*(\{.*?\})\s*```", text, flags=_re.DOTALL)
+    raw = match.group(1) if match else text.strip()
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        return AuditAgentOutput(
+            verdict=AuditVerdict.BLOCKED,
+            narrative=f"audit agent returned non-JSON output: {text[:200]}",
+        )
+    if not isinstance(data, dict):
+        return AuditAgentOutput(
+            verdict=AuditVerdict.BLOCKED,
+            narrative="audit agent returned JSON that was not an object",
+        )
+    return _audit_output_from_dict(data)
+
+
+def _audit_output_format() -> dict[str, Any]:
+    schema = {
+        "type": "object",
+        "required": [
+            "verdict",
+            "narrative",
+            "group_verdicts",
+            "feature_audits",
+            "quality_score",
+            "quality_findings",
+        ],
+        "properties": {
+            "verdict": {"type": "string", "enum": ["passed", "partial", "blocked"]},
+            "narrative": {"type": "string"},
+            "group_verdicts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["group_id", "passed", "detail"],
+                    "properties": {
+                        "group_id": {"type": "string"},
+                        "passed": {"type": "boolean"},
+                        "detail": {"type": "string"},
+                    },
+                },
+            },
+            "feature_audits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["feature_id", "name", "status", "detail", "evidence_refs"],
+                    "properties": {
+                        "feature_id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "status": {"type": "string", "enum": ["passed", "partial", "blocked"]},
+                        "detail": {"type": "string"},
+                        "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+            "quality_score": {"type": "integer"},
+            "quality_findings": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    return {
+        "type": "json_schema",
+        "name": "otto_audit_result",
+        "strict": False,
+        "json_schema": {"name": "otto_audit_result", "schema": schema},
+    }
+
+
+def _assign_output_format(options: Any, output_format: dict[str, Any]) -> None:
+    try:
+        setattr(options, "output_format", output_format)
+    except Exception:
+        logger.debug("agent options object does not support output_format assignment")
+
+
+def _structured_audit_output_from_breakdown(
+    breakdown: dict[str, Any],
+) -> AuditAgentOutput | None:
+    structured = breakdown.get("structured_output") if isinstance(breakdown, dict) else None
+    if not isinstance(structured, dict):
+        return None
+    return _audit_output_from_dict(structured)
 
 
 def _recover_audit_output_from_artifacts(
@@ -2561,7 +2749,11 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
     options = make_agent_options(
         agent_input.project_dir, config, agent_type="certifier"
     )
+    _assign_output_format(options, _audit_output_format())
     options.cwd = str(agent_input.integrated_worktree)
+    options.env = _audit_search_env(getattr(options, "env", None), log_dir)
+    if agent_input.agent_session_id:
+        options.resume = agent_input.agent_session_id
     options.permission_mode = "bypassPermissions"  # audit reads, doesn't edit
     # C3 fix: hard-assert the read-only invariant. The certifier
     # reports symptoms, not fixes; if a refactor flips this to
@@ -2575,7 +2767,7 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
 
     t0 = time.monotonic()
     try:
-        text, cost, _session_id, _breakdown = await run_agent_with_timeout(
+        text, cost, session_id, _breakdown = await run_agent_with_timeout(
             prompt,
             options,
             log_dir=log_dir,
@@ -2584,9 +2776,17 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
             timeout=agent_input.judge_timeout_s,
             project_dir=agent_input.project_dir,
         )
-        parsed = _parse_audit_output(text)
+        parsed = _structured_audit_output_from_breakdown(_breakdown)
+        if parsed is None:
+            if _breakdown.get("structured_output_error"):
+                logger.warning(
+                    "audit agent structured output unusable; falling back to text: %s",
+                    _breakdown["structured_output_error"],
+                )
+            parsed = _parse_audit_output(text)
         parsed.cost_usd = cost or 0.0
         parsed.wall_s = time.monotonic() - t0
+        parsed.session_id = session_id or getattr(options, "resume", "") or ""
         return parsed
     except AgentCallError as exc:
         failure_detail = f"audit agent crashed: {exc}"
@@ -2594,11 +2794,13 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
         if recovered is not None:
             recovered.cost_usd = exc.total_cost_usd or 0.0
             recovered.wall_s = time.monotonic() - t0
+            recovered.session_id = getattr(options, "resume", "") or ""
             return recovered
         return AuditAgentOutput(
             verdict=AuditVerdict.BLOCKED,
             narrative=failure_detail,
             wall_s=time.monotonic() - t0,
+            session_id=getattr(options, "resume", "") or "",
         )
 
 

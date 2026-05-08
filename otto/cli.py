@@ -664,7 +664,7 @@ def _format_budget_value(seconds: Any) -> str:
 
 def _runtime_model_name(provider: str | None) -> str | None:
     provider = (provider or "").strip().lower()
-    if provider == "codex":
+    if provider in {"codex", "codex-app-server"}:
         for path in (
             Path.home() / ".codex" / "config.toml",
             Path.home() / ".config" / "codex" / "config.toml",
@@ -1030,7 +1030,7 @@ def _exit_legacy_certify_removed() -> None:
 @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
 @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
 @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
-@click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
+@click.option("--provider", default=None, help="Override provider for every agent: codex-app-server | codex | claude")
 @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
 @click.option("--build-provider", default=None, help="Override provider for the build phase")
 @click.option("--build-model", default=None, help="Override model for the build phase")
@@ -1252,7 +1252,7 @@ def _build_locked(*_args, **_kwargs) -> None:
 @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
 @click.option("--strict", is_flag=True, help="Require two consecutive PASS runs before reporting success")
 @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
-@click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
+@click.option("--provider", default=None, help="Override provider for every agent: codex-app-server | codex | claude")
 @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
 @click.option("--certifier-provider", default=None, help="Override provider for this certification run")
 @click.option("--certifier-model", default=None, help="Override model for this certification run")

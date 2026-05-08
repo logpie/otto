@@ -32,10 +32,16 @@ uv run otto --help
 From an existing git repository:
 
 ```bash
-otto run "add saved searches to this dashboard" --provider codex
-otto improve bugs "look for auth and data isolation bugs" --provider codex
-otto certify "users can save, restore, rename, and delete saved searches" --provider codex
+otto run "add saved searches to this dashboard"
+otto improve bugs "look for auth and data isolation bugs"
+otto certify "users can save, restore, rename, and delete saved searches"
 ```
+
+The default provider is `codex-app-server`, which uses Codex App Server's
+thread/turn protocol with local Codex subscription auth. Other explicit provider
+choices are `codex` for the older `codex exec --json` adapter and `claude`
+where configured. The API-key based `openai-agents` experiment remains in the
+codebase but is not a normal CLI or Mission Control path.
 
 Run the web Mission Control portal:
 
@@ -57,7 +63,7 @@ Textual TUI has been removed.
 ```bash
 # Intent-to-product
 otto run "REST API for a todo app with SQLite"
-otto run "expense approval portal" --provider codex --budget 3600
+otto run "expense approval portal" --budget 3600
 otto run --project-kind cli "a small linter"
 otto run --review-gate "build a markdown notebook"
 otto run --resume --auto-approve
@@ -144,7 +150,7 @@ criteria. Runtime terminology is **Group**: older design notes may still use
 Provider defaults live in `otto.yaml`; CLI flags override them for one run.
 
 ```yaml
-provider: codex
+provider: codex-app-server
 model: null
 effort: null
 run_budget_seconds: 3600
@@ -152,10 +158,10 @@ max_turns_per_call: 200
 
 # Optional per-agent overrides inherit the global provider/model/effort.
 # agents:
-#   build:     {provider: codex, model: null, effort: null}
-#   certifier: {provider: codex, model: null, effort: null}
-#   spec:      {provider: codex, model: null, effort: null}
-#   fix:       {provider: codex, model: null, effort: null}
+#   build:     {provider: codex-app-server, model: null, effort: null}
+#   certifier: {provider: codex-app-server, model: null, effort: null}
+#   spec:      {provider: codex-app-server, model: null, effort: null}
+#   fix:       {provider: codex-app-server, model: null, effort: null}
 
 queue:
   concurrent: 3
@@ -170,7 +176,6 @@ Useful one-off overrides:
 
 ```bash
 otto run "add billing exports" \
-  --provider codex \
   --build-effort high \
   --certifier-effort high \
   --budget 5400 \

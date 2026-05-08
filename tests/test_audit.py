@@ -680,6 +680,38 @@ def test_run_audit_passes_judge_timeout_to_agent_input(tmp_path: Path) -> None:
     assert seen["timeout"] == 17
 
 
+def test_run_audit_threads_resume_session_to_judge(tmp_path: Path) -> None:
+    spec = _spec(["s1"])
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    seen: dict[str, str] = {}
+
+    async def resume_aware_agent(input_: AuditAgentInput) -> AuditAgentOutput:
+        seen["session"] = input_.agent_session_id
+        return AuditAgentOutput(
+            verdict=AuditVerdict.PASSED,
+            narrative="ok",
+            session_id="audit-thread-next",
+        )
+
+    result = asyncio.run(
+        run_audit(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_result=_build_result(["s1"], tmp_path),
+            merge_result=_merge_result(["s1"]),
+            audit_agent=resume_aware_agent,
+            budget=AuditBudget(audit_retries=0),
+            resume_agent_session_id="audit-thread-prior",
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert seen["session"] == "audit-thread-prior"
+    assert result.agent_session_id == "audit-thread-next"
+
+
 def test_default_audit_agent_uses_judge_timeout_from_input(tmp_path: Path, monkeypatch) -> None:
     from otto.audit import default_audit_agent
 
@@ -718,6 +750,158 @@ def test_default_audit_agent_uses_judge_timeout_from_input(tmp_path: Path, monke
 
     assert result.verdict == AuditVerdict.PASSED
     assert captured["timeout"] == 23
+
+
+def test_default_audit_agent_passes_resume_session(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import default_audit_agent
+
+    options = SimpleNamespace(cwd="", permission_mode="", resume="")
+    captured: dict[str, str] = {}
+
+    def fake_make_agent_options(*_args, **_kwargs):
+        return options
+
+    async def fake_run_agent_with_timeout(_prompt, seen_options, **_kwargs):
+        captured["resume"] = seen_options.resume
+        return (
+            '```json\n{"verdict":"passed","narrative":"ok","quality_score":3}\n```',
+            0.0,
+            "audit-thread-next",
+            {},
+        )
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_agent_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+
+    result = asyncio.run(
+        default_audit_agent(
+            AuditAgentInput(
+                spec=_spec(["s1"]),
+                project_dir=tmp_path,
+                integrated_worktree=tmp_path,
+                build_summary={},
+                merge_summary={},
+                cross_slice_evidence=[],
+                walkthrough_artifacts=[],
+                config={"agents": {}},
+                agent_session_id="audit-thread-prior",
+            )
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert captured["resume"] == "audit-thread-prior"
+    assert result.session_id == "audit-thread-next"
+
+
+def test_default_audit_agent_prefers_structured_output(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import default_audit_agent
+
+    options = SimpleNamespace(cwd="", permission_mode="")
+
+    def fake_make_agent_options(*_args, **_kwargs):
+        return options
+
+    async def fake_run_agent_with_timeout(_prompt, seen_options, **_kwargs):
+        assert seen_options is options
+        assert options.output_format["json_schema"]["name"] == "otto_audit_result"
+        return (
+            "this is deliberately not JSON",
+            0.0,
+            "session-1",
+            {
+                "structured_output": {
+                    "verdict": "passed",
+                    "narrative": "structured ok",
+                    "group_verdicts": [
+                        {"group_id": "g1", "passed": True, "detail": "ok"}
+                    ],
+                    "feature_audits": [
+                        {
+                            "feature_id": "f1",
+                            "name": "Feature 1",
+                            "status": "passed",
+                            "detail": "ok",
+                            "evidence_refs": ["walkthrough.jsonl#L1"],
+                        }
+                    ],
+                    "quality_score": 4,
+                    "quality_findings": ["usable"],
+                }
+            },
+        )
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_agent_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+
+    result = asyncio.run(
+        default_audit_agent(
+            AuditAgentInput(
+                spec=_spec(["f1"]),
+                project_dir=tmp_path,
+                integrated_worktree=tmp_path,
+                build_summary={},
+                merge_summary={},
+                cross_slice_evidence=[],
+                walkthrough_artifacts=[],
+                config={"agents": {}},
+                judge_timeout_s=23,
+            )
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    assert result.narrative == "structured ok"
+    assert result.group_verdicts[0].group_id == "g1"
+    assert result.feature_audits[0].feature_id == "f1"
+    assert result.quality_score == 4
+
+
+def test_default_audit_agent_sets_search_guard_env(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import default_audit_agent
+
+    captured: dict[str, Any] = {}
+
+    def fake_make_agent_options(*_args, **_kwargs):
+        return SimpleNamespace(cwd="", permission_mode="", env={"PATH": "/bin"})
+
+    async def fake_run_agent_with_timeout(_prompt, options, **_kwargs):
+        captured["env"] = options.env
+        return (
+            '```json\n{"verdict":"passed","narrative":"ok","quality_score":3}\n```',
+            0.0,
+            "session-1",
+            {},
+        )
+
+    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_agent_options)
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+
+    result = asyncio.run(
+        default_audit_agent(
+            AuditAgentInput(
+                spec=_spec(["s1"]),
+                project_dir=tmp_path,
+                integrated_worktree=tmp_path,
+                build_summary={},
+                merge_summary={},
+                cross_slice_evidence=[],
+                walkthrough_artifacts=[],
+                log_dir=tmp_path / "audit" / "attempt-00" / "judge",
+                config={"agents": {}},
+            )
+        )
+    )
+
+    assert result.verdict == AuditVerdict.PASSED
+    env = captured["env"]
+    assert env["PATH"] == "/bin"
+    config_path = Path(env["RIPGREP_CONFIG_PATH"])
+    assert config_path.exists()
+    config_text = config_path.read_text(encoding="utf-8")
+    assert "--glob=!**/otto_logs/**" in config_text
+    assert "--glob=!**/_otto_build_logs/**" in config_text
+    assert "--glob=!**/messages.jsonl" in config_text
 
 
 def test_default_audit_agent_recovers_complete_feature_verdicts_on_timeout(
@@ -1114,6 +1298,49 @@ def test_contract_test_tox_falls_back_to_uvx_when_tox_missing(
     assert "uvx --with tox-uv tox -e py" in detail
     assert "fallback from 'tox -e py'" in detail
     assert args_path.read_text(encoding="utf-8").strip() == "--with tox-uv tox -e py"
+
+
+def test_contract_test_pytest_retries_otto_runtime_on_import_env_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import sys
+
+    user_bin = tmp_path / "user-bin"
+    otto_bin = tmp_path / "otto-bin"
+    user_bin.mkdir()
+    otto_bin.mkdir()
+    user_pytest = user_bin / "pytest"
+    user_pytest.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"ImportError while loading conftest '/tmp/project/tests/conftest.py'.\" >&2\n"
+        "printf '%s\\n' \"E   ModuleNotFoundError: No module named 'fastapi'\" >&2\n"
+        "exit 4\n",
+        encoding="utf-8",
+    )
+    user_pytest.chmod(0o755)
+    otto_python = otto_bin / "python"
+    otto_python.write_text(
+        "#!/bin/sh\n"
+        "test \"$1\" = '-m' && test \"$2\" = 'pytest' || exit 99\n"
+        "printf 'runtime pytest passed\\n'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    otto_python.chmod(0o755)
+
+    monkeypatch.setenv("PATH", str(user_bin))
+    monkeypatch.setattr(sys, "executable", str(otto_python))
+    _seed_otto_yaml(tmp_path, "pytest tests/visible -q")
+
+    passed, detail = _run_project_contract_test(
+        tmp_path,
+        log_dir=tmp_path / "contract",
+    )
+
+    assert passed is True
+    assert f"{otto_python} -m pytest tests/visible -q" in detail
+    assert "retried with Otto runtime after pytest import failure" in detail
+    assert "runtime pytest passed" in detail
 
 
 def test_contract_test_tox_fallback_not_used_when_tox_exists() -> None:

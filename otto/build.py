@@ -40,11 +40,15 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Callable, Protocol
 
 from otto.checks import Evidence, run_checks
-from otto.setup_gitignore import generated_artifact_paths_from_porcelain
+from otto.setup_gitignore import (
+    is_common_build_artifact_path,
+    is_otto_owned_path,
+    non_product_paths_from_porcelain,
+)
 from otto.spec_compile import CheckKind, Component, Feature, Group, Spec
 from otto.spec_state import emit, is_group_aborted_by_user
 
@@ -537,7 +541,11 @@ def detect_scope_violations(
         path = str(raw or "").strip()
         if not path:
             continue
-        if _is_amendment_request_path(path):
+        if (
+            _is_amendment_request_path(path)
+            or is_otto_owned_path(path)
+            or is_common_build_artifact_path(path)
+        ):
             continue
         if _matches_any(path, own_globs):
             continue
@@ -1138,13 +1146,13 @@ def _commit_group_work(worktree: Path, *, group_id: str, branch: str) -> bool:
     )
     if status_after_add.returncode != 0:
         return False
-    for runtime_path in generated_artifact_paths_from_porcelain(status_after_add.stdout or ""):
+    for non_product_path in non_product_paths_from_porcelain(status_after_add.stdout or ""):
         subprocess.run(
-            ["git", "reset", "HEAD", "--", runtime_path],
+            ["git", "reset", "HEAD", "--", non_product_path],
             cwd=worktree, capture_output=True, text=True, check=False,
         )
         subprocess.run(
-            ["git", "rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", runtime_path],
+            ["git", "rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", non_product_path],
             cwd=worktree, capture_output=True, text=True, check=False,
         )
     status = subprocess.run(
@@ -1260,6 +1268,7 @@ async def run_build(
     worktree_for_group: Callable[[Group], Path] | None = None,
     on_state_change: Callable[[str, str, dict[str, Any]], None] | None = None,
     skip_components: Iterable[str] | None = None,
+    resume_agent_sessions: Mapping[str, str] | None = None,
 ) -> BuildResult:
     """Execute the build loop for an approved Spec.
 
@@ -1315,6 +1324,7 @@ async def run_build(
             worktree_for_group = _project_worktree_for_group
             group_concurrent = 1
     assert worktree_for_group is not None
+    resume_agent_sessions = dict(resume_agent_sessions or {})
 
     completed_ids: set[str] = set()
     blocked_ids: set[str] = set()
@@ -1673,6 +1683,7 @@ async def run_build(
                 initial_failure_narrative=(
                     dep_setup_c.conflict_context if additional_dep_refs_c else ""
                 ),
+                initial_agent_session_id=resume_agent_sessions.get(next_component.id, ""),
             )
             if branch_real_c and comp_result.status == ComponentStatus.PASSING:
                 committed_c = _commit_group_work(
@@ -1743,6 +1754,7 @@ async def run_build(
                     base_url=base_url,
                     budget=budget,
                     initial_failure_narrative=dispatch.setup_narrative,
+                    initial_agent_session_id=resume_agent_sessions.get(dispatch.group.id, ""),
                 )
             finally:
                 emit(
@@ -1906,6 +1918,7 @@ async def _run_slice(
     base_url: str | None,
     budget: BuildBudget,
     initial_failure_narrative: str = "",
+    initial_agent_session_id: str = "",
 ) -> GroupResult:
     """Run one slice through tasks→checks→fix retries.
 
@@ -1930,7 +1943,7 @@ async def _run_slice(
     # while the agent makes incremental progress).
     prior_diff_hash: str = ""
     current_diff_hash: str = ""
-    agent_session_id = ""
+    agent_session_id = initial_agent_session_id
 
     while attempt < budget.per_group_retries_hard_cap:
         attempt += 1
@@ -2351,6 +2364,7 @@ async def _run_component(
     base_url: str | None,
     budget: BuildBudget,
     initial_failure_narrative: str = "",
+    initial_agent_session_id: str = "",
 ) -> ComponentResult:
     """Run one Component through tasks→checks→fix retries (research §2.6).
 
@@ -2371,6 +2385,7 @@ async def _run_component(
         base_url=base_url,
         budget=budget,
         initial_failure_narrative=initial_failure_narrative,
+        initial_agent_session_id=initial_agent_session_id,
     )
     if slice_result.status == GroupStatus.PASSING:
         comp_status = ComponentStatus.PASSING

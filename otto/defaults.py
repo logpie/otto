@@ -63,8 +63,8 @@ _DEFAULT_AUDIT_WALKTHROUGH_PER_FEATURE = False
 _DEFAULT_AUDIT_PRE_MERGE_AUDIT_GROUPS: list[str] = []
 
 # Agents
-_DEFAULT_AGENT_PROVIDER = "claude"
-_DEFAULT_AGENT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_AGENT_PROVIDER = "codex-app-server"
+_DEFAULT_AGENT_MODEL = ""
 
 # Brownfield-compile preamble (A6.1). Caps on what the Python helper
 # bundles into the prompt before handing the agent its discovery tools

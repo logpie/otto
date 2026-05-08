@@ -3955,6 +3955,59 @@ def _extract_spec_json(text: str) -> dict[str, Any]:
         raise SpecValidationError(f"compile agent emitted invalid JSON: {exc}") from exc
 
 
+def _spec_output_format() -> dict[str, Any]:
+    """Provider-neutral structured-output contract for compile agents.
+
+    The Spec itself contains project-kind-specific free-form payloads. Codex
+    app-server's strict schema dialect cannot represent arbitrary JSON objects
+    safely, so the provider-level contract is a small wrapper and Otto still
+    performs the authoritative `Spec` validation after decoding `spec_json`.
+    """
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["spec_json"],
+        "properties": {
+            "spec_json": {
+                "type": "string",
+                "description": "A complete Otto Spec JSON object serialized as a string.",
+            }
+        },
+    }
+    return {
+        "type": "json_schema",
+        "name": "otto_spec",
+        "strict": False,
+        "json_schema": {"name": "otto_spec", "schema": schema},
+    }
+
+
+def _assign_output_format(options: Any, output_format: dict[str, Any]) -> None:
+    try:
+        setattr(options, "output_format", output_format)
+    except Exception:
+        logger.debug("agent options object does not support output_format assignment")
+
+
+def _structured_spec_payload_from_breakdown(
+    breakdown: dict[str, Any],
+) -> dict[str, Any] | None:
+    structured = breakdown.get("structured_output") if isinstance(breakdown, dict) else None
+    if not isinstance(structured, dict):
+        return None
+    if isinstance(structured.get("spec_json"), str):
+        try:
+            parsed = json.loads(structured["spec_json"])
+        except json.JSONDecodeError as exc:
+            raise SpecValidationError(
+                f"compile agent structured spec_json was invalid JSON: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise SpecValidationError("compile agent structured spec_json was not a JSON object")
+        return parsed
+    return structured if {"groups", "features"}.issubset(structured) else None
+
+
 def _brownfield_mode_guidance(mode: str) -> str:
     if mode == "baseline":
         return (
@@ -4067,6 +4120,13 @@ async def compile_spec(
             spec_path=str(spec_path),
             project_context=f"project_kind={project_kind}",
         )
+    prompt += (
+        "\n\n## Structured output channel\n"
+        "If your runtime provides a structured output field named `spec_json`, "
+        "put the complete Spec JSON object in that field as a serialized JSON "
+        f"string. Otherwise write `{spec_path}` and use the `<spec_json>` "
+        "fallback exactly as instructed above."
+    )
     prompt_entry = save_rendered_prompt(
         run_dir.parent / "prompts",
         template=prompt_template,
@@ -4085,6 +4145,7 @@ async def compile_spec(
     )
 
     options = make_agent_options(project_dir, config, agent_type="spec")
+    _assign_output_format(options, _spec_output_format())
     spec_cap = get_spec_timeout(config)
     timeout: int = min(budget.for_call(), spec_cap) if budget is not None else spec_cap
 
@@ -4101,7 +4162,14 @@ async def compile_spec(
         project_dir=project_dir,
     )
 
-    if spec_path.exists():
+    payload = _structured_spec_payload_from_breakdown(_breakdown)
+    if payload is not None:
+        if _breakdown.get("structured_output_error"):
+            logger.warning(
+                "compile agent structured output had provider validation warning: %s",
+                _breakdown["structured_output_error"],
+            )
+    elif spec_path.exists():
         try:
             payload = json.loads(spec_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:

@@ -14,6 +14,7 @@ import json
 import logging
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 from otto.spec_compile import (
     Feature,
@@ -205,6 +206,53 @@ def test_repo_index_packet_is_metadata_not_source_dump(tmp_path: Path) -> None:
     assert "tests/test_linter.py" in packet["test_files"]
     assert "def main" not in text
     assert "raise SystemExit" not in text
+
+
+def test_compile_prefers_structured_output_over_text_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project = tmp_path / "proj"
+    _seed_python_project(project)
+    run_dir = tmp_path / "session" / "spec"
+    structured_spec = _minimal_spec_dict()
+    options = SimpleNamespace()
+
+    async def fake_run_agent_with_timeout(_prompt, seen_options, **_kwargs):
+        assert seen_options is options
+        assert seen_options.output_format["json_schema"]["name"] == "otto_spec"
+        return (
+            "this is deliberately not JSON",
+            0.0,
+            "stub-session",
+            {"structured_output": {"spec_json": json.dumps(structured_spec)}},
+        )
+
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+    monkeypatch.setattr("otto.agent.make_agent_options", lambda *_a, **_kw: options)
+    monkeypatch.setattr("otto.config.get_spec_timeout", lambda _c: 30)
+    monkeypatch.setattr(
+        "otto.observability.save_rendered_prompt",
+        lambda *_a, **_kw: {"sha256": "x", "path": "x"},
+    )
+    monkeypatch.setattr(
+        "otto.observability.update_input_provenance",
+        lambda *_a, **_kw: None,
+    )
+
+    spec = asyncio.run(
+        compile_spec(
+            "document this CLI tool",
+            project,
+            run_dir,
+            _minimal_config(),
+            project_kind="cli",
+            brownfield=True,
+        )
+    )
+
+    assert spec.features[0].id == "lint-main"
+    persisted = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
+    assert persisted["features"][0]["id"] == "lint-main"
 
 
 def test_brownfield_target_mode_treats_intent_as_future_contract(

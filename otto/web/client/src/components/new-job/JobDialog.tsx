@@ -497,7 +497,8 @@ export function JobDialog({project, dirtyFiles, priorRunOptions, onClose, onQueu
             <label>Provider
               <select data-testid="job-provider-select" value={provider} onChange={(event) => setProvider(event.target.value)}>
                 <option value="">{providerDefaultLabel(project)}</option>
-                <option value="codex">Codex</option>
+                <option value="codex-app-server">Codex App Server</option>
+                <option value="codex">Codex Exec</option>
                 <option value="claude">Claude</option>
               </select>
             </label>
@@ -826,7 +827,8 @@ export function PhaseRoutingFields({label, testKey, provider, model, effort, onP
         <label>Provider override
           <select data-testid={`job-${testKey}-provider-select`} value={provider} onChange={(event) => onProvider(event.target.value)}>
             <option value="">Inherit</option>
-            <option value="codex">Codex</option>
+            <option value="codex-app-server">Codex App Server</option>
+            <option value="codex">Codex Exec</option>
             <option value="claude">Claude</option>
           </select>
         </label>
@@ -982,7 +984,13 @@ export function certificationPolicyAllowed(command: JobCommand, subcommand: Impr
 export function providerDefaultLabel(project: StateResponse["project"] | undefined): string {
   const defaults = project?.defaults;
   if (!defaults) return "Inherit default";
-  return `Inherit: ${titleCase(defaults.provider || "claude")}`;
+  return `Inherit: ${providerDisplayName(defaults.provider || "codex-app-server")}`;
+}
+
+function providerDisplayName(provider: string): string {
+  if (provider === "codex-app-server") return "Codex App Server";
+  if (provider === "openai-agents") return "OpenAI Agents SDK";
+  return titleCase(provider);
 }
 
 export function effortDefaultLabel(project: StateResponse["project"] | undefined): string {

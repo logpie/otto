@@ -57,6 +57,7 @@ export interface RunView {
   token_usage?: TokenUsage;
   phase_usage?: Record<string, PhaseUsage>;
   agent_usage_top?: AgentUsageEntry[];
+  provider?: ProviderView | null;
 
   // Run metadata: collapsed dl in drawer.
   meta: RunMeta;
@@ -169,6 +170,28 @@ export interface PhaseUsage extends TokenUsage {
 export interface AgentUsageEntry extends PhaseUsage {
   phase: string;
   path: string;
+}
+
+export interface ProviderView {
+  provider: string;
+  status: string;
+  current_activity: string;
+  event: string;
+  method: string;
+  session_id: string;
+  turn_id: string;
+  last_event_at: string;
+  last_event_elapsed_s: number | null;
+  event_count: number;
+  token_usage?: TokenUsage;
+  diff_summary?: {
+    changed_files?: string[];
+    files_changed?: number;
+    added_lines?: number;
+    deleted_lines?: number;
+    [key: string]: unknown;
+  };
+  structured_output_error?: string;
 }
 
 export interface ControlPlaneView {

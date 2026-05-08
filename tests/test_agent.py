@@ -4,6 +4,8 @@ import asyncio
 import json
 
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +16,7 @@ from otto.agent import (
     CODEX_STDIO_LIMIT_BYTES,
     CODEX_TOOL_OUTPUT_LOG_LIMIT_CHARS,
     ClaudeAgentOptions,
+    ProviderEventMessage,
     ResultMessage,
     TextBlock,
     ToolResultBlock,
@@ -69,6 +72,21 @@ class _FakeProcess:
 
 def json_event(payload: dict) -> str:
     return json.dumps(payload) + "\n"
+
+
+class _LongLivedFakeProcess(_FakeProcess):
+    def __init__(self, lines: list[str], return_code: int = 0):
+        super().__init__(lines, return_code)
+        self.terminated = False
+
+    async def wait(self) -> int:
+        if not self.terminated:
+            raise AssertionError("long-lived app-server must be terminated after a completed turn")
+        self.returncode = self._return_code
+        return self._return_code
+
+    def terminate(self) -> None:
+        self.terminated = True
 
 
 class _SlowWaitProcess:
@@ -205,6 +223,7 @@ async def test_codex_query_normalizes_json_events(tmp_path, monkeypatch):
     assert "--dangerously-bypass-approvals-and-sandbox" in args
     assert "-C" in args
     assert str(tmp_path) in args
+    assert seen["kwargs"]["env"] is None
     assert seen["kwargs"]["limit"] == CODEX_STDIO_LIMIT_BYTES
     assert CODEX_STDIO_LIMIT_BYTES >= 16 * 1024 * 1024
 
@@ -287,6 +306,308 @@ async def test_codex_query_nonzero_exit_uses_compact_provider_error(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_codex_app_server_query_normalizes_thread_turn_events(tmp_path, monkeypatch):
+    seen: dict[str, object] = {}
+    process = _LongLivedFakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"item/started","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"pytest -q","cwd":"/tmp/project","status":"inProgress","aggregatedOutput":null,"exitCode":null,"durationMs":null,"commandActions":[],"source":"exec","processId":null}}}\n',
+        '{"method":"item/commandExecution/outputDelta","params":{"threadId":"thread-app","turnId":"turn-1","itemId":"cmd-1","delta":"1 passed\\n"}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"pytest -q","cwd":"/tmp/project","status":"completed","aggregatedOutput":null,"exitCode":0,"durationMs":12,"commandActions":[],"source":"exec","processId":null}}}\n',
+        '{"method":"turn/diff/updated","params":{"threadId":"thread-app","turnId":"turn-1","diff":"diff --git a/app.py b/app.py"}}\n',
+        '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-app","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":10,"cachedInputTokens":2,"outputTokens":4,"reasoningOutputTokens":1,"totalTokens":15},"total":{"inputTokens":10,"cachedInputTokens":2,"outputTokens":4,"reasoningOutputTokens":1,"totalTokens":15},"modelContextWindow":128000}}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Done."}}}\n',
+        '{"method":"thread/status/changed","params":{"threadId":"thread-app","status":{"type":"idle"}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    state: dict[str, object] = {}
+    messages = []
+    async for message in query(
+        prompt="Run tests",
+        options=ClaudeAgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            permission_mode="bypassPermissions",
+            effort="low",
+        ),
+        state=state,
+    ):
+        messages.append(message)
+
+    provider_events = [m for m in messages if isinstance(m, ProviderEventMessage)]
+    flow_messages = [m for m in messages if not isinstance(m, ProviderEventMessage)]
+    assert [type(m) for m in flow_messages] == [
+        AssistantMessage,
+        AssistantMessage,
+        AssistantMessage,
+        ResultMessage,
+    ]
+    assert [event.event for event in provider_events] == [
+        "turn_acknowledged",
+        "diff_updated",
+        "token_usage_updated",
+        "thread_status_changed",
+    ]
+    assert provider_events[1].data["changed_files"] == ["app.py"]
+    assert provider_events[2].usage["total_tokens"] == 15
+    assert isinstance(flow_messages[0].content[0], ToolUseBlock)
+    assert flow_messages[0].content[0].name == "Bash"
+    assert flow_messages[0].content[0].input["command"] == "pytest -q"
+    assert isinstance(flow_messages[1].content[0], ToolResultBlock)
+    assert flow_messages[1].content[0].content == "1 passed\n"
+    assert isinstance(flow_messages[2].content[0], TextBlock)
+    assert flow_messages[2].content[0].text == "Done."
+    assert isinstance(flow_messages[3], ResultMessage)
+    assert flow_messages[3].session_id == "thread-app"
+    assert flow_messages[3].usage == {
+        "input_tokens": 10,
+        "cached_input_tokens": 2,
+        "output_tokens": 4,
+        "reasoning_tokens": 1,
+        "total_tokens": 15,
+    }
+    assert state["session_id"] == "thread-app"
+    assert state["codex_app_server_thread_id"] == "thread-app"
+    assert state["codex_app_server_diff"] == "diff --git a/app.py b/app.py"
+
+    args = seen["args"]
+    assert args[:4] == ("codex", "app-server", "--listen", "stdio://")
+    assert seen["kwargs"]["limit"] == CODEX_STDIO_LIMIT_BYTES
+    written = [
+        json.loads(line)
+        for line in process.stdin.buffer.decode("utf-8").splitlines()
+    ]
+    assert [line["method"] for line in written[:4]] == [
+        "initialize",
+        "initialized",
+        "thread/start",
+        "turn/start",
+    ]
+    assert written[2]["params"]["approvalPolicy"] == "never"
+    assert written[2]["params"]["sandbox"] == "danger-full-access"
+    assert written[3]["params"]["effort"] == "low"
+    assert written[3]["params"]["input"][0]["text"] == "Run tests"
+    assert seen["kwargs"]["env"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_with_timeout_persists_codex_app_server_events_and_diff(tmp_path, monkeypatch):
+    process = _LongLivedFakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"turn/diff/updated","params":{"threadId":"thread-app","turnId":"turn-1","diff":"diff --git a/app.py b/app.py\\n+print(1)\\n"}}\n',
+        '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-app","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":10,"outputTokens":4,"totalTokens":14},"total":{"inputTokens":10,"outputTokens":4,"totalTokens":14}}}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Done."}}}\n',
+        '{"method":"thread/status/changed","params":{"threadId":"thread-app","status":{"type":"idle"}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    log_dir = tmp_path / "logs"
+    text, _cost, session_id, breakdown = await run_agent_with_timeout(
+        "Run tests",
+        AgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            permission_mode="bypassPermissions",
+        ),
+        log_dir=log_dir,
+        phase_name="SPEC_COMPILE",
+        phase_label="compile",
+        timeout=30,
+        project_dir=tmp_path,
+    )
+
+    assert text == "Done."
+    assert session_id == "thread-app"
+    diff_path = Path(breakdown["provider_diff_path"])
+    assert diff_path.exists()
+    assert diff_path.read_text(encoding="utf-8").startswith("diff --git a/app.py")
+    assert breakdown["provider_diff_summary"]["changed_files"] == ["app.py"]
+    records = [
+        json.loads(line)
+        for line in (log_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    provider_events = [record for record in records if record.get("type") == "provider_event"]
+    assert [record["event"] for record in provider_events] == [
+        "turn_acknowledged",
+        "diff_updated",
+        "token_usage_updated",
+        "thread_status_changed",
+    ]
+    assert provider_events[1]["data"]["changed_files"] == ["app.py"]
+    assert provider_events[2]["usage"]["total_tokens"] == 14
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_uses_thread_resume_when_requested(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-prior","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-2","status":"inProgress","items":[]}}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-prior","turnId":"turn-2","item":{"type":"agentMessage","id":"msg-1","text":"Resumed."}}}\n',
+        '{"method":"turn/completed","params":{"threadId":"thread-prior","turn":{"id":"turn-2","status":"completed","items":[],"error":null,"startedAt":1,"completedAt":2,"durationMs":1000}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="Continue",
+        options=AgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            resume="thread-prior",
+        ),
+    ):
+        messages.append(message)
+
+    assert isinstance(messages[-1], ResultMessage)
+    assert messages[-1].session_id == "thread-prior"
+    written = [
+        json.loads(line)
+        for line in process.stdin.buffer.decode("utf-8").splitlines()
+    ]
+    assert [line["method"] for line in written[:4]] == [
+        "initialize",
+        "initialized",
+        "thread/resume",
+        "turn/start",
+    ]
+    assert written[2]["params"]["threadId"] == "thread-prior"
+    assert written[3]["params"]["threadId"] == "thread-prior"
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_passes_output_schema_and_structured_result(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"{\\"verdict\\": \\"PASS\\", \\"stories\\": 1}"}}}\n',
+        '{"method":"turn/completed","params":{"threadId":"thread-app","turn":{"id":"turn-1","status":"completed","items":[],"error":null,"startedAt":1,"completedAt":2,"durationMs":1000}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="Return a verdict",
+        options=ClaudeAgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            output_format={
+                "json_schema": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {"verdict": {"type": "string"}},
+                        "required": ["verdict"],
+                    }
+                }
+            },
+        ),
+    ):
+        messages.append(message)
+
+    result = messages[-1]
+    assert isinstance(result, ResultMessage)
+    assert result.structured_output == {"verdict": "PASS", "stories": 1}
+    written = [
+        json.loads(line)
+        for line in process.stdin.buffer.decode("utf-8").splitlines()
+    ]
+    assert written[3]["params"]["outputSchema"]["required"] == ["verdict"]
+    assert written[3]["params"]["outputSchema"]["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_reports_structured_schema_errors(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"item/completed","params":{"threadId":"thread-app","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"{\\"stories\\": 1}"}}}\n',
+        '{"method":"turn/completed","params":{"threadId":"thread-app","turn":{"id":"turn-1","status":"completed","items":[],"error":null,"startedAt":1,"completedAt":2,"durationMs":1000}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="Return a verdict",
+        options=ClaudeAgentOptions(
+            provider="codex-app-server",
+            cwd=str(tmp_path),
+            output_format={
+                "json_schema": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {"verdict": {"type": "string"}},
+                        "required": ["verdict"],
+                    }
+                }
+            },
+        ),
+    ):
+        messages.append(message)
+
+    result = messages[-1]
+    assert isinstance(result, ResultMessage)
+    assert result.structured_output == {"stories": 1}
+    assert "missing required field" in result.structured_output_error
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_declines_unsafe_command_approval(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"id":0,"result":{"codexHome":"/tmp/codex"}}\n',
+        '{"id":1,"result":{"thread":{"id":"thread-app","turns":[]}}}\n',
+        '{"method":"item/commandExecution/requestApproval","id":99,"params":{"threadId":"thread-app","turnId":"turn-1","itemId":"cmd-1","command":"killall node"}}\n',
+        '{"id":2,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}\n',
+        '{"method":"turn/completed","params":{"threadId":"thread-app","turn":{"id":"turn-1","status":"completed","items":[],"error":null,"startedAt":1,"completedAt":2,"durationMs":1000}}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    async for _message in query(
+        prompt="Try command",
+        options=ClaudeAgentOptions(provider="codex-app-server", cwd=str(tmp_path)),
+    ):
+        pass
+
+    written = [
+        json.loads(line)
+        for line in process.stdin.buffer.decode("utf-8").splitlines()
+    ]
+    approval_response = next(line for line in written if line.get("id") == 99)
+    assert approval_response["result"] == {"decision": "decline"}
+
+
+@pytest.mark.asyncio
 async def test_codex_query_prepends_project_claude_md(tmp_path, monkeypatch):
     (tmp_path / "CLAUDE.md").write_text("Prefer focused tests.\n")
     process = _FakeProcess([
@@ -331,19 +652,6 @@ def test_codex_resume_command_uses_resume_subcommand_shape():
     assert "--color" not in command
     assert "-C" not in command
     assert command[-2:] == ["thread-123", "-"]
-
-
-def test_codex_command_accept_edits_runs_unsandboxed_for_browser_checks():
-    from otto.agent import _codex_command
-
-    command = _codex_command(ClaudeAgentOptions(
-        provider="codex",
-        cwd="/tmp/project",
-        permission_mode="acceptEdits",
-    ))
-
-    assert "--dangerously-bypass-approvals-and-sandbox" in command
-    assert "--full-auto" not in command
 
 
 def test_codex_command_passes_reasoning_effort():
@@ -538,8 +846,22 @@ def test_make_agent_options_env_prefers_target_project_src(tmp_path, monkeypatch
 def test_make_agent_options_sets_default_max_turns(tmp_path):
     options = make_agent_options(tmp_path, {})
 
+    assert options.provider == "codex-app-server"
     assert options.max_turns == 200
     assert options.max_subagent_dispatches == 160
+
+
+@pytest.mark.asyncio
+async def test_query_defaults_to_codex_app_server(monkeypatch):
+    async def fake_query(*, prompt, options=None, state=None):
+        assert prompt == "test"
+        yield ResultMessage(total_cost_usd=0.0, session_id="app-server-default")
+
+    monkeypatch.setattr("otto.agent._query_codex_app_server", fake_query)
+
+    messages = [message async for message in query(prompt="test", options=AgentOptions())]
+
+    assert [message.session_id for message in messages] == ["app-server-default"]
 
 
 @pytest.mark.asyncio
@@ -560,7 +882,7 @@ async def test_run_agent_query_streams_markers_without_retaining_full_tool_blob(
 
     text, _cost, _result = await run_agent_query(
         "test",
-        AgentOptions(),
+        AgentOptions(provider="claude"),
         capture_tool_output=True,
     )
 
@@ -608,7 +930,7 @@ async def test_run_agent_query_dedupes_marker_block_when_final_assistant_repeats
 
     text, _cost, _result = await run_agent_query(
         "test",
-        AgentOptions(),
+        AgentOptions(provider="claude"),
         capture_tool_output=False,
     )
 
@@ -664,7 +986,7 @@ async def test_run_agent_query_strips_duplicate_certify_round_recap(monkeypatch)
 
     text, _cost, _result = await run_agent_query(
         "test",
-        AgentOptions(),
+        AgentOptions(provider="claude"),
         capture_tool_output=True,
     )
 
@@ -687,7 +1009,7 @@ async def test_run_agent_query_limits_subagent_dispatches(monkeypatch):
     with pytest.raises(AgentCallError, match="max_subagent dispatch cap reached"):
         await run_agent_query(
             "test",
-            AgentOptions(max_subagent_dispatches=2),
+            AgentOptions(provider="claude", max_subagent_dispatches=2),
         )
 
 
@@ -769,9 +1091,229 @@ def test_cleanup_orphan_processes_skips_reused_process_group(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_openai_agents_query_streams_tools_usage_and_structured_output(tmp_path, monkeypatch):
+    import otto.agent as agent_mod
+
+    calls: dict[str, object] = {}
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            calls["agent_kwargs"] = kwargs
+
+    class FakeRunConfig:
+        def __init__(self, **kwargs):
+            calls["run_config_kwargs"] = kwargs
+            self.kwargs = kwargs
+
+    class FakeModelSettings:
+        def __init__(self, **kwargs):
+            calls["model_settings_kwargs"] = kwargs
+            self.kwargs = kwargs
+
+    class FakeManifest:
+        def __init__(self, **kwargs):
+            calls["manifest_kwargs"] = kwargs
+
+    class FakeSandboxRunConfig:
+        def __init__(self, **kwargs):
+            calls["sandbox_kwargs"] = kwargs
+
+    class FakeUnixLocalSandboxClient:
+        pass
+
+    class FakeStream:
+        final_output = {"verdict": "PASS", "stories": 2}
+        raw_responses = [
+            SimpleNamespace(
+                response_id="resp-123",
+                usage=SimpleNamespace(
+                    requests=1,
+                    input_tokens=11,
+                    input_tokens_details=SimpleNamespace(cached_tokens=3),
+                    output_tokens=5,
+                    output_tokens_details=SimpleNamespace(reasoning_tokens=2),
+                    total_tokens=18,
+                ),
+            )
+        ]
+
+        @property
+        def last_response_id(self):
+            return "resp-123"
+
+        def ensure_sandbox_cleanup_on_completion(self):
+            calls["cleanup_registered"] = True
+
+        async def stream_events(self):
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                item=SimpleNamespace(
+                    type="message_output_item",
+                    raw_item=SimpleNamespace(
+                        content=[SimpleNamespace(text="Planning\n")]
+                    ),
+                ),
+            )
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                item=SimpleNamespace(
+                    type="tool_call_item",
+                    raw_item=SimpleNamespace(
+                        type="shell_call",
+                        call_id="call-1",
+                        name="exec_command",
+                        arguments='{"cmd": "pytest -q"}',
+                    ),
+                ),
+            )
+            yield SimpleNamespace(
+                type="run_item_stream_event",
+                item=SimpleNamespace(
+                    type="tool_call_output_item",
+                    output={"output": "2 passed\n"},
+                    raw_item=SimpleNamespace(call_id="call-1"),
+                ),
+            )
+
+    class FakeRunner:
+        @staticmethod
+        def run_streamed(agent, input, **kwargs):
+            calls["runner_agent"] = agent
+            calls["runner_input"] = input
+            calls["runner_kwargs"] = kwargs
+            return FakeStream()
+
+    monkeypatch.setattr(agent_mod, "_OpenAIRunner", FakeRunner)
+    monkeypatch.setattr(agent_mod, "_OpenAISandboxAgent", FakeAgent)
+    monkeypatch.setattr(agent_mod, "_OpenAIAgent", FakeAgent)
+    monkeypatch.setattr(agent_mod, "_OpenAIRunConfig", FakeRunConfig)
+    monkeypatch.setattr(agent_mod, "_OpenAIModelSettings", FakeModelSettings)
+    monkeypatch.setattr(agent_mod, "_OpenAIManifest", FakeManifest)
+    monkeypatch.setattr(agent_mod, "_OpenAISandboxRunConfig", FakeSandboxRunConfig)
+    monkeypatch.setattr(agent_mod, "_OpenAIUnixLocalSandboxClient", FakeUnixLocalSandboxClient)
+    monkeypatch.setattr(agent_mod, "_OpenAIFilesystemCapability", None)
+    monkeypatch.setattr(agent_mod, "_OpenAIShellCapability", None)
+    monkeypatch.setattr(agent_mod, "_OpenAICompactionCapability", None)
+
+    state: dict[str, object] = {}
+    text, cost, result = await run_agent_query(
+        "Build the app",
+        AgentOptions(
+            provider="openai-agents",
+            cwd=str(tmp_path),
+            max_turns=12,
+            effort="low",
+            setting_sources=["project"],
+            env={"OTTO_TEST_FLAG": "1"},
+        ),
+        capture_tool_output=True,
+        state=state,
+    )
+
+    assert "Planning" in text
+    assert "2 passed" in text
+    assert cost == 0.0
+    assert isinstance(result, ResultMessage)
+    assert result.session_id == "resp-123"
+    assert result.structured_output == {"verdict": "PASS", "stories": 2}
+    assert result.usage == {
+        "requests": 1,
+        "input_tokens": 11,
+        "cached_input_tokens": 3,
+        "output_tokens": 5,
+        "reasoning_tokens": 2,
+        "total_tokens": 18,
+    }
+    assert state["session_id"] == "resp-123"
+    assert calls["runner_input"] == "Build the app"
+    assert calls["runner_kwargs"]["max_turns"] == 12
+    assert calls["runner_kwargs"]["previous_response_id"] is None
+    assert calls["cleanup_registered"] is True
+    assert calls["run_config_kwargs"]["tracing_disabled"] is True
+    assert calls["model_settings_kwargs"]["include_usage"] is True
+    assert calls["model_settings_kwargs"]["parallel_tool_calls"] is True
+    assert calls["model_settings_kwargs"]["reasoning"] == {"effort": "low"}
+    assert calls["manifest_kwargs"]["root"] == str(tmp_path.resolve())
+    assert calls["manifest_kwargs"]["environment"] == {"value": {"OTTO_TEST_FLAG": "1"}}
+
+
+@pytest.mark.asyncio
+async def test_openai_agents_missing_sdk_surfaces_install_hint(monkeypatch):
+    import otto.agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "_OpenAIRunner", None)
+    monkeypatch.setattr(agent_mod, "_OPENAI_AGENTS_IMPORT_ERROR_MESSAGE", "missing agents")
+
+    with pytest.raises(RuntimeError, match="openai"):
+        async for _message in query(
+            prompt="test",
+            options=AgentOptions(provider="openai-agents"),
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_openai_agents_subscription_auth_gets_clear_hint(tmp_path, monkeypatch):
+    import otto.agent as agent_mod
+
+    auth_dir = tmp_path / ".codex"
+    auth_dir.mkdir()
+    (auth_dir / "auth.json").write_text(
+        (
+            '{"OPENAI_API_KEY": null, '
+            '"tokens": {"access_token": "oauth-token", "refresh_token": "refresh"}}'
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_ADMIN_KEY", raising=False)
+    monkeypatch.setattr(agent_mod.Path, "home", lambda: tmp_path)
+
+    with pytest.raises(RuntimeError, match="Codex subscription login"):
+        async for _message in query(
+            prompt="test",
+            options=AgentOptions(provider="openai-agents"),
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_openai_agents_shell_tool_blocks_process_kill_commands(monkeypatch):
+    import otto.agent as agent_mod
+
+    class FakeExecCommandTool:
+        def __init__(self, *, session, user=None):
+            self.session = session
+            self.user = user
+
+        async def run(self, args):
+            return f"ran {args.cmd}"
+
+    monkeypatch.setattr(agent_mod, "_OpenAIExecCommandTool", FakeExecCommandTool)
+    toolset = SimpleNamespace(
+        exec_command=FakeExecCommandTool(session=object(), user="otto")
+    )
+
+    agent_mod._configure_openai_shell_tools(toolset)
+
+    blocked = await toolset.exec_command.run(SimpleNamespace(cmd="killall node"))
+    allowed = await toolset.exec_command.run(SimpleNamespace(cmd="echo ok"))
+
+    assert blocked.startswith("Otto blocked a broad killall command")
+    assert allowed == "ran echo ok"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("provider", "backend_attr"),
-    [("claude", "_query_claude"), ("codex", "_query_codex")],
+    [
+        ("claude", "_query_claude"),
+        ("codex", "_query_codex"),
+        ("codex-app-server", "_query_codex_app_server"),
+        ("openai-agents", "_query_openai_agents"),
+    ],
 )
 async def test_run_agent_with_timeout_supports_debug_unredacted_for_all_providers(
     tmp_path,

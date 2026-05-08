@@ -53,7 +53,7 @@ from otto.build import (
     resolve_integration_base_branch,
 )
 from otto.checks import Evidence, run_checks
-from otto.setup_gitignore import generated_artifact_paths_from_porcelain
+from otto.setup_gitignore import non_product_paths_from_porcelain
 from otto.spec_compile import Group, Spec
 from otto.spec_state import aborted_group_ids, emit
 
@@ -503,6 +503,13 @@ async def run_merge_queue(
                 detail=result.failure_narrative,
             )
 
+    _checkout_base_branch_after_merge(
+        project_dir=project_dir,
+        session_dir=session_dir,
+        base_branch=base_branch,
+        git=git,
+    )
+
     return MergeQueueResult(
         landed_ids=landed_ids,
         blocked_ids=blocked_ids,
@@ -511,6 +518,23 @@ async def run_merge_queue(
         total_cost_usd=total_cost,
         total_wall_s=time.monotonic() - total_t0,
     )
+
+
+def _checkout_base_branch_after_merge(
+    *,
+    project_dir: Path,
+    session_dir: Path,
+    base_branch: str,
+    git: Callable[[list[str], Path], subprocess.CompletedProcess[str]],
+) -> None:
+    """Leave the project on the integrated branch for audit/Layer 2 repair."""
+    current = git(["rev-parse", "--abbrev-ref", "HEAD"], project_dir)
+    if current.returncode == 0 and current.stdout.strip() == base_branch:
+        return
+    checkout = git(["checkout", base_branch], project_dir)
+    if checkout.returncode != 0:
+        detail = checkout.stderr.strip()[:500] or checkout.stdout.strip()[:500]
+        logger.warning("could not return to integration branch %s: %s", base_branch, detail)
 
 
 def _cross_group_checks_for_landed_state(
@@ -1111,6 +1135,12 @@ def _checkout_repair_branch(
             "-e",
             "otto_logs/",
             "-e",
+            ".venv/",
+            "-e",
+            "venv/",
+            "-e",
+            ".env/",
+            "-e",
             "otto.yaml",
             "-e",
             "intent.md",
@@ -1414,6 +1444,12 @@ def _discard_uncommitted_repair(
             "-e",
             "otto_logs/",
             "-e",
+            ".venv/",
+            "-e",
+            "venv/",
+            "-e",
+            ".env/",
+            "-e",
             "otto.yaml",
             "-e",
             "intent.md",
@@ -1449,10 +1485,10 @@ def _unstage_generated_artifact_paths(
     status = git(["status", "--porcelain"], worktree)
     if status.returncode != 0:
         return status
-    for runtime_path in generated_artifact_paths_from_porcelain(status.stdout or ""):
-        git(["reset", "HEAD", "--", runtime_path], worktree)
+    for non_product_path in non_product_paths_from_porcelain(status.stdout or ""):
+        git(["reset", "HEAD", "--", non_product_path], worktree)
         git(
-            ["rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", runtime_path],
+            ["rm", "--cached", "-rf", "--ignore-unmatch", "--quiet", non_product_path],
             worktree,
         )
     return git(["status", "--porcelain"], worktree)
@@ -1512,6 +1548,7 @@ def _merge_group_branch(
     # V18: preserve user-owned project config files alongside Otto runtime paths.
     git(["clean", "-fdx",
          "-e", ".otto/", "-e", "_otto_*", "-e", "_session/", "-e", "otto_logs/",
+         "-e", ".venv/", "-e", "venv/", "-e", ".env/",
          "-e", "otto.yaml", "-e", "intent.md"], worktree)
 
     # 2. Checkout base_branch.

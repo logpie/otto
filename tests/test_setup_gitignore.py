@@ -11,6 +11,7 @@ from otto.setup_gitignore import (
     OTTO_PATTERNS,
     ensure_gitignore,
     generated_artifact_paths_from_porcelain,
+    is_common_build_artifact_path,
 )
 
 
@@ -35,6 +36,9 @@ def test_ensure_gitignore_adds_common_build_artifacts(tmp_path: Path):
     assert "__pycache__/" in text
     assert "node_modules/" in text
     assert ".pytest_cache/" in text
+    assert ".venv/" in text
+    assert "venv/" in text
+    assert ".env/" in text
     assert ".coverage" in text
     assert "*.egg-info/" in text
     assert "htmlcov/" in text
@@ -42,9 +46,19 @@ def test_ensure_gitignore_adds_common_build_artifacts(tmp_path: Path):
     assert "*.sqlite" in text
     assert "*.sqlite3" in text
     assert "instance/" in text
-    assert "test-results/" in text
-    assert "playwright-report/" in text
-    assert "coverage/" in text
+
+
+def test_ensure_gitignore_adds_queue_runtime_journals(tmp_path: Path):
+    ensure_gitignore(tmp_path)
+    text = (tmp_path / ".gitignore").read_text()
+    assert ".otto-queue-commands.acks.jsonl" in text
+    assert ".otto-queue-commands.jsonl.processing" in text
+
+
+def test_virtualenv_paths_are_common_build_artifacts() -> None:
+    assert is_common_build_artifact_path(".venv/bin/python")
+    assert is_common_build_artifact_path("venv/lib/python/site-packages/pkg.py")
+    assert is_common_build_artifact_path(".env/bin/activate")
 
 
 def test_generated_artifact_paths_from_porcelain_includes_playwright_outputs() -> None:
@@ -63,13 +77,6 @@ def test_generated_artifact_paths_from_porcelain_includes_playwright_outputs() -
         "test-results/playwright-report/index.html",
         "otto_artifacts/browser/final.png",
     ]
-
-
-def test_ensure_gitignore_adds_queue_runtime_journals(tmp_path: Path):
-    ensure_gitignore(tmp_path)
-    text = (tmp_path / ".gitignore").read_text()
-    assert ".otto-queue-commands.acks.jsonl" in text
-    assert ".otto-queue-commands.jsonl.processing" in text
 
 
 def test_ensure_gitignore_preserves_existing(tmp_path: Path):

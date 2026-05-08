@@ -98,6 +98,51 @@ def test_layer2_passes_feature_id_to_build_agent(tmp_path: Path) -> None:
     assert "fixed it" in attempt.detail
 
 
+def test_layer2_uses_resume_session_and_persistent_log_dir(tmp_path: Path) -> None:
+    """Layer 2 continuity must survive process restarts via repair logs."""
+    spec = _spec_with_two_features()
+    seen: list[tuple[str, Path | None, int]] = []
+
+    async def recording_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
+        seen.append((
+            agent_input.agent_session_id,
+            agent_input.log_dir,
+            agent_input.attempt,
+        ))
+        return BuildAgentOutput(
+            succeeded=True,
+            cost_usd=0.0,
+            wall_s=0.1,
+            detail="fixed",
+            session_id="thread-after-repair",
+        )
+
+    session_dir = tmp_path / "sess"
+    bridge = _make_layer2_fix_agent(
+        fix_agent=recording_build_agent,
+        spec=spec,
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        base_url=None,
+        resume_agent_sessions={"feat-a": "thread-before-repair"},
+    )
+
+    failing = FailingFeature(feature_id="feat-a", verdict="partial", detail="d")
+    asyncio.run(bridge(failing, spec.groups[0]))
+    asyncio.run(bridge(failing, spec.groups[0]))
+
+    assert seen[0] == (
+        "thread-before-repair",
+        session_dir / "repair" / "feat-a" / "attempt-01",
+        1,
+    )
+    assert seen[1] == (
+        "thread-after-repair",
+        session_dir / "repair" / "feat-a" / "attempt-02",
+        2,
+    )
+
+
 def test_layer2_success_path(tmp_path: Path) -> None:
     """build_agent.succeeded=True → RepairAttempt.succeeded=True."""
     spec = _spec_with_two_features()

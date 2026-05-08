@@ -176,7 +176,10 @@ def _gitdir_has_merge_head(project_dir: Path) -> bool:
     r = run_git(project_dir, "rev-parse", "--git-dir")
     if not r.ok:
         return False
-    return (Path(r.stdout.strip()) / "MERGE_HEAD").exists()
+    git_dir = Path(r.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = project_dir / git_dir
+    return (git_dir / "MERGE_HEAD").exists()
 
 
 def add_paths(project_dir: Path, paths: list[str]) -> GitResult:

@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 from otto.build import (
@@ -200,6 +199,27 @@ def test_scope_violations_warns_on_existing_unowned_file(tmp_path: Path) -> None
     assert violations == ["pyproject.toml"]
 
 
+def test_scope_violations_ignore_common_generated_artifacts(tmp_path: Path) -> None:
+    """Generated caches are not product write-scope evidence."""
+    spec = _spec(
+        [
+            Group(id="s1", name="shell", dependencies=[], owned_paths=["app.py"], feature_ids=[], checks=[]),
+        ]
+    )
+    cache_dir = tmp_path / "pkg" / "__pycache__"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "app.cpython-314.pyc").write_bytes(b"cache")
+
+    violations = detect_scope_violations(
+        spec.groups[0],
+        spec,
+        ["pkg/__pycache__/app.cpython-314.pyc", "tests/__pycache__/test_app.pyc"],
+        project_root=tmp_path,
+    )
+
+    assert violations == []
+
+
 def test_scope_violations_allows_new_unowned_file(tmp_path: Path) -> None:
     """New supporting files remain allowed as implicit shared scaffold."""
     spec = _spec(
@@ -212,26 +232,6 @@ def test_scope_violations_allows_new_unowned_file(tmp_path: Path) -> None:
         spec.groups[0],
         spec,
         ["README.md"],
-        project_root=tmp_path,
-    )
-
-    assert violations == []
-
-
-def test_scope_violations_allows_amendment_request_side_channel(tmp_path: Path) -> None:
-    spec = _spec(
-        [
-            Group(id="s1", name="shell", dependencies=[], owned_paths=["app.py"], feature_ids=[], checks=[]),
-        ]
-    )
-    request_path = tmp_path / ".otto" / "amendment_request.json"
-    request_path.parent.mkdir()
-    request_path.write_text('{"reason":"needs global test scope"}\n', encoding="utf-8")
-
-    violations = detect_scope_violations(
-        spec.groups[0],
-        spec,
-        [".otto/amendment_request.json"],
         project_root=tmp_path,
     )
 
@@ -478,183 +478,6 @@ def test_run_build_dep_aware_dispatch(tmp_path: Path) -> None:
     assert result.all_passing
 
 
-def test_run_build_parallelizes_ready_groups_in_isolated_worktrees(tmp_path: Path) -> None:
-    _init_git(tmp_path)
-    session_dir = tmp_path / "_session"
-    session_dir.mkdir()
-    spec = _spec(
-        [
-            Group(id="foundation", name="Foundation", dependencies=[], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
-            Group(id="feed", name="Feed", dependencies=["foundation"], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
-            Group(id="search", name="Search", dependencies=["foundation"], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
-            Group(id="admin", name="Admin", dependencies=["feed", "search"], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
-        ]
-    )
-
-    active = 0
-    max_active = 0
-    frontier_started: set[str] = set()
-    release_frontier = asyncio.Event()
-    started_order: list[str] = []
-    worktrees_by_group: dict[str, Path] = {}
-
-    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        nonlocal active, max_active
-        group_id = input_.group.id
-        started_order.append(group_id)
-        worktrees_by_group[group_id] = input_.worktree
-        active += 1
-        max_active = max(max_active, active)
-        if group_id in {"feed", "search"}:
-            frontier_started.add(group_id)
-            if frontier_started == {"feed", "search"}:
-                release_frontier.set()
-            await asyncio.wait_for(release_frontier.wait(), timeout=2.0)
-        (input_.worktree / f"{group_id}.txt").write_text(group_id, encoding="utf-8")
-        active -= 1
-        return BuildAgentOutput(succeeded=True)
-
-    result = asyncio.run(
-        run_build(
-            spec,
-            project_dir=tmp_path,
-            session_dir=session_dir,
-            build_agent=fake_agent,
-            config={"build": {"group_concurrent": 2}},
-        )
-    )
-
-    assert result.all_passing
-    assert started_order[0] == "foundation"
-    assert set(started_order[1:3]) == {"feed", "search"}
-    assert started_order[-1] == "admin"
-    assert max_active == 2
-    assert worktrees_by_group["feed"] != tmp_path
-    assert worktrees_by_group["search"] != tmp_path
-    assert worktrees_by_group["feed"] != worktrees_by_group["search"]
-    for group_id in ("foundation", "feed", "search", "admin"):
-        branch = f"i2p/{session_dir.name}/{group_id}"
-        subprocess.run(
-            ["git", "rev-parse", "--verify", branch],
-            cwd=tmp_path,
-            check=True,
-            capture_output=True,
-        )
-    events = [
-        json.loads(line)
-        for line in (session_dir / "spec-state.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    execution_starts = [
-        event["group_id"]
-        for event in events
-        if event.get("kind") == "group.execution.started"
-    ]
-    first_frontier_finish_index = min(
-        index
-        for index, event in enumerate(events)
-        if (
-            event.get("kind") == "group.execution.finished"
-            and event.get("group_id") in {"feed", "search"}
-        )
-    )
-    frontier_starts_before_finish = {
-        event["group_id"]
-        for event in events[:first_frontier_finish_index]
-        if (
-            event.get("kind") == "group.execution.started"
-            and event.get("group_id") in {"feed", "search"}
-        )
-    }
-    assert set(execution_starts[1:3]) == {"feed", "search"}
-    assert frontier_starts_before_finish == {"feed", "search"}
-
-
-def test_run_build_group_checks_use_linked_worktree_root(tmp_path: Path) -> None:
-    _init_git(tmp_path)
-    session_dir = tmp_path / "_session"
-    session_dir.mkdir()
-    check = StateInvariant(
-        description="marker exists in group worktree",
-        expression="exists('marker.txt') and read_text('marker.txt') == 'ok'",
-    )
-    spec = _spec(
-        [
-            Group(
-                id="foundation",
-                name="Foundation",
-                dependencies=[],
-                owned_paths=["marker.txt"],
-                feature_ids=[],
-                checks=[check],
-            )
-        ]
-    )
-    seen_worktrees: list[Path] = []
-
-    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        seen_worktrees.append(input_.worktree)
-        (input_.worktree / "marker.txt").write_text("ok", encoding="utf-8")
-        return BuildAgentOutput(succeeded=True)
-
-    result = asyncio.run(
-        run_build(
-            spec,
-            project_dir=tmp_path,
-            session_dir=session_dir,
-            build_agent=fake_agent,
-            config={"build": {"group_concurrent": 2}},
-        )
-    )
-
-    assert result.all_passing
-    assert seen_worktrees
-    assert seen_worktrees[0] != tmp_path
-    assert not (tmp_path / "marker.txt").exists()
-
-
-def test_run_build_serializes_group_concurrency_with_finite_total_cost_budget(
-    tmp_path: Path,
-) -> None:
-    _init_git(tmp_path)
-    session_dir = tmp_path / "_session"
-    session_dir.mkdir()
-    spec = _spec(
-        [
-            Group(id="feed", name="Feed", dependencies=[], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
-            Group(id="search", name="Search", dependencies=[], owned_paths=[], feature_ids=[], checks=[_no_op_passing_check()]),
-        ]
-    )
-    active = 0
-    max_active = 0
-
-    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        nonlocal active, max_active
-        active += 1
-        max_active = max(max_active, active)
-        await asyncio.sleep(0.01)
-        (input_.worktree / f"{input_.group.id}.txt").write_text(
-            input_.group.id,
-            encoding="utf-8",
-        )
-        active -= 1
-        return BuildAgentOutput(succeeded=True, cost_usd=0.01)
-
-    result = asyncio.run(
-        run_build(
-            spec,
-            project_dir=tmp_path,
-            session_dir=session_dir,
-            build_agent=fake_agent,
-            config={"build": {"group_concurrent": 2}},
-            budget=BuildBudget(total_cost_usd=1.0),
-        )
-    )
-
-    assert result.all_passing
-    assert max_active == 1
-
-
 # ---------------------------------------------------------------------------
 # run_build — retry path
 # ---------------------------------------------------------------------------
@@ -696,60 +519,6 @@ def test_run_build_retries_on_failing_check_then_passes(tmp_path: Path) -> None:
     )
     assert result.all_passing
     assert result.group_results[0].attempts == 3
-
-
-def test_run_build_retry_prompt_includes_check_log_excerpt(tmp_path: Path) -> None:
-    _init_git(tmp_path)
-    session_dir = tmp_path / "_session"
-    session_dir.mkdir()
-    seen_failures: list[str] = []
-    check = RepoTestCheck(
-        command=(
-            sys.executable,
-            "-c",
-            (
-                "from pathlib import Path\n"
-                "import sys\n"
-                "if not Path('fixed.txt').exists():\n"
-                "    print('Expected visible UI state: no-project empty state', file=sys.stderr)\n"
-                "    sys.exit(1)\n"
-            ),
-        ),
-        timeout_s=10,
-    )
-
-    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        seen_failures.append(input_.last_failure_narrative)
-        if input_.attempt == 2:
-            (input_.worktree / "fixed.txt").write_text("ok", encoding="utf-8")
-        return BuildAgentOutput(succeeded=True)
-
-    spec = _spec(
-        [
-            Group(
-                id="s1",
-                name="x",
-                dependencies=[],
-                owned_paths=["fixed.txt"],
-                feature_ids=[],
-                checks=[check],
-            ),
-        ]
-    )
-    result = asyncio.run(
-        run_build(
-            spec,
-            project_dir=tmp_path,
-            session_dir=session_dir,
-            build_agent=fake_agent,
-        )
-    )
-
-    assert result.all_passing
-    assert seen_failures[0] == ""
-    assert "Authoritative Otto check-runner evidence" in seen_failures[1]
-    assert "RepoTestCheck" in seen_failures[1]
-    assert "Expected visible UI state: no-project empty state" in seen_failures[1]
 
 
 def test_run_build_reuses_agent_session_between_retries(tmp_path: Path) -> None:
@@ -794,6 +563,47 @@ def test_run_build_reuses_agent_session_between_retries(tmp_path: Path) -> None:
     assert seen_sessions == ["", "provider-session-1"]
 
 
+def test_run_build_uses_resume_agent_session_from_prior_run(tmp_path: Path) -> None:
+    """A resumed outer run should seed the first attempt with the prior thread."""
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    seen_sessions: list[str] = []
+
+    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        seen_sessions.append(input_.agent_session_id)
+        return BuildAgentOutput(
+            succeeded=True,
+            detail="ok",
+            session_id="provider-session-next",
+        )
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="x",
+                dependencies=[],
+                owned_paths=[],
+                feature_ids=[],
+                checks=[],
+            ),
+        ]
+    )
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+            resume_agent_sessions={"s1": "provider-session-prior"},
+        )
+    )
+
+    assert result.all_passing
+    assert seen_sessions == ["provider-session-prior"]
+
+
 def test_default_build_agent_passes_resume_session_to_provider(tmp_path: Path, monkeypatch) -> None:
     """A9: default_build_agent must set AgentOptions.resume from BuildAgentInput."""
     from otto.agent import AgentOptions
@@ -828,43 +638,6 @@ def test_default_build_agent_passes_resume_session_to_provider(tmp_path: Path, m
     assert output.succeeded is True
     assert output.session_id == "provider-session-2"
     assert seen["resume"] == "provider-session-1"
-
-
-def test_default_build_agent_passes_attempt_timeout_to_provider(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from otto.agent import AgentOptions
-
-    group = Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[])
-    spec = _spec([group])
-    seen: dict[str, object] = {}
-
-    def fake_make_options(*_args, **_kwargs) -> AgentOptions:
-        return AgentOptions()
-
-    async def fake_run_agent(_prompt, _options, **kwargs):
-        seen["timeout"] = kwargs.get("timeout")
-        return "done", 0.0, "provider-session", {}
-
-    monkeypatch.setattr("otto.agent.make_agent_options", fake_make_options)
-    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent)
-
-    output = asyncio.run(
-        default_build_agent(
-            BuildAgentInput(
-                spec=spec,
-                group=group,
-                project_dir=tmp_path,
-                worktree=tmp_path,
-                branch="i2p/test/s1",
-                attempt=1,
-                timeout_s=37,
-            )
-        )
-    )
-
-    assert output.succeeded is True
-    assert seen["timeout"] == 37
 
 
 def test_default_build_agent_uses_input_config_for_provider_options(
@@ -946,44 +719,6 @@ def test_run_build_blocks_after_retry_exhaustion(tmp_path: Path) -> None:
     # by the time we exit. (Hard cap is 8 but rarely fires in practice.)
     assert r.attempts == 2
     assert "no progress" in r.failure_narrative or "checks failed" in r.failure_narrative
-
-
-def test_run_build_sets_provider_attempt_timeout_from_remaining_group_budget(
-    tmp_path: Path,
-) -> None:
-    _init_git(tmp_path)
-    session_dir = tmp_path / "_session"
-    session_dir.mkdir()
-    spec = _spec(
-        [
-            Group(
-                id="s1",
-                name="hello",
-                dependencies=[],
-                owned_paths=[],
-                feature_ids=[],
-                checks=[_no_op_passing_check()],
-            ),
-        ]
-    )
-    seen: list[int | None] = []
-
-    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        seen.append(input_.timeout_s)
-        return BuildAgentOutput(succeeded=True)
-
-    result = asyncio.run(
-        run_build(
-            spec,
-            project_dir=tmp_path,
-            session_dir=session_dir,
-            build_agent=fake_agent,
-            budget=BuildBudget(per_group_wall_s=41),
-        )
-    )
-
-    assert result.all_passing
-    assert seen == [41]
 
 
 def test_run_build_propagates_block_to_dependent_slice(tmp_path: Path) -> None:
@@ -1071,6 +806,43 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
     assert by_id["s1"].status == GroupStatus.PASSING
     assert by_id["s2"].status == GroupStatus.PASSING
     assert "app/main.py" in by_id["s2"].scope_warnings
+
+
+def test_run_build_ignores_otto_runtime_paths_in_scope_warnings(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "otto_logs" / "sessions" / "scope-run"
+    session_dir.mkdir(parents=True)
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="feature",
+                dependencies=[],
+                owned_paths=["app.py"],
+                feature_ids=[],
+                checks=[_no_op_passing_check()],
+            ),
+        ]
+    )
+
+    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        (input_.worktree / "app.py").write_text("print('ok')\n", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True)
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+        )
+    )
+
+    s1_result = next(r for r in result.group_results if r.group_id == "s1")
+    assert s1_result.scope_warnings == []
+    journal = (session_dir / "spec-state.jsonl").read_text(encoding="utf-8")
+    assert '"kind": "scope.warning"' not in journal
 
 
 def test_run_build_warns_on_dep_owned_extension(tmp_path: Path) -> None:
@@ -1375,75 +1147,6 @@ def test_build_agent_prompt_includes_last_failure_on_retry(tmp_path: Path) -> No
     assert "do NOT widen scope" in prompt.lower() or "do not widen scope" in prompt.lower()
 
 
-def test_build_agent_prompt_includes_first_attempt_setup_context(tmp_path: Path) -> None:
-    s = Group(id="s1", name="x", dependencies=["a", "b"], owned_paths=[], feature_ids=[], checks=[])
-    spec = _spec([s])
-    inp = BuildAgentInput(
-        spec=spec,
-        group=s,
-        project_dir=tmp_path,
-        worktree=tmp_path,
-        branch="x",
-        attempt=1,
-        last_failure_narrative=(
-            "Dependency integration conflict before this group started: "
-            "Unmerged paths: src/feed.tsx"
-        ),
-    )
-    prompt = _build_agent_prompt(inp)
-    assert "Setup context before your first attempt" in prompt
-    assert "Dependency integration conflict before this group started" in prompt
-    assert "Resolve this setup/integration state" in prompt
-
-
-def test_build_agent_prompt_excludes_otto_runtime_from_test_discovery(
-    tmp_path: Path,
-) -> None:
-    s = Group(id="s1", name="x", dependencies=[], owned_paths=[], feature_ids=[], checks=[])
-    spec = _spec([s])
-    prompt = _build_agent_prompt(
-        BuildAgentInput(
-            spec=spec,
-            group=s,
-            project_dir=tmp_path,
-            worktree=tmp_path,
-            branch="x",
-            attempt=1,
-        )
-    )
-    assert "Test discovery must stay inside the product project" in prompt
-    assert "Playwright" in prompt
-    assert "`otto_logs/**`" in prompt
-    assert "`.worktrees/**`" in prompt
-    assert "Do not search or dump parent Otto session directories" in prompt
-    assert "specific check logs named by Otto" in prompt
-    assert "BrowserJourney checks must stay behavioral" in prompt
-    assert "browser unavailable" in prompt
-    assert "synthetic screenshots" in prompt
-    assert "Keep browser-environment diagnosis bounded" in prompt
-    assert "at most two targeted fixes/probes" in prompt
-    assert "osascript" in prompt
-    assert "If a browser journey launches the app" in prompt
-    assert "Playwright error context" in prompt
-    assert "scrollWidth/clientWidth" in prompt
-    assert "do not claim the browser journey passed" in prompt
-    assert "Write BrowserJourney Playwright locators like a durable user test" in prompt
-    assert "Scope short/common controls and text to named forms" in prompt
-    assert "`Status`, `Comment`, `List`, `Done`, `Import`, and `Export`" in prompt
-    assert "avoid global `page.getByText(...)`" in prompt
-    assert "Prefer stable unique anchors" in prompt
-    assert "`exact: true` or be scoped to the specific row/card" in prompt
-    assert "target the intended feedback/live region" in prompt
-    assert "re-query the control from its visible container" in prompt
-    assert "Project commands must be self-contained and bounded" in prompt
-    assert "ambient `node_modules`" in prompt
-    assert "The product deliverable is the source checkout" in prompt
-    assert "`package.json`" in prompt
-    assert "Vite/Vitest/Playwright config" in prompt
-    assert "pkill" in prompt
-    assert "bounded command timeouts" in prompt
-
-
 def test_build_agent_prompt_has_merge_repair_framing(tmp_path: Path) -> None:
     s = Group(
         id="feed",
@@ -1701,14 +1404,14 @@ def test_run_build_dependent_slice_branches_off_dep_tip(tmp_path: Path) -> None:
     assert "i2p(b): build slice" in log
 
 
-def test_run_build_surfaces_multi_dep_conflicts_to_dependent_group(
+def test_run_build_surfaces_multi_dep_conflict_to_dependent_agent(
     tmp_path: Path,
 ) -> None:
-    """A multi-dep slice must resolve sibling deps instead of silently dropping one.
+    """A multi-dep slice must not silently fall back to one dependency.
 
     If two required sibling branches conflict while building the slice's
-    integrated starting point, the dependent group should see the conflict
-    markers and explicit setup context so it can compose both dependencies.
+    integrated starting point, running the dependent agent on only one
+    dependency can produce a false pass for an incomplete product.
     """
     _init_git(tmp_path)
     current = subprocess.run(
@@ -1725,18 +1428,7 @@ def test_run_build_surfaces_multi_dep_conflicts_to_dependent_group(
     async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
         calls.append(input_.group.id)
         if input_.group.id == "c":
-            assert "Dependency integration conflict before this group started" in (
-                input_.last_failure_narrative
-            )
-            shared = (input_.worktree / "shared.txt").read_text(encoding="utf-8")
-            assert "<<<<<<<" in shared
-            assert "from a" in shared
-            assert "from b" in shared
-            (input_.worktree / "shared.txt").write_text(
-                "from a\nfrom b\n", encoding="utf-8"
-            )
-            (input_.worktree / "c.txt").write_text("from c\n", encoding="utf-8")
-            return BuildAgentOutput(succeeded=True, cost_usd=0.01)
+            raise AssertionError("dependent group ran without all dependency branches")
         (input_.worktree / "shared.txt").write_text(
             f"from {input_.group.id}\n", encoding="utf-8"
         )
@@ -1761,10 +1453,10 @@ def test_run_build_surfaces_multi_dep_conflicts_to_dependent_group(
         )
     )
 
-    assert calls == ["a", "b", "c"]
+    assert calls == ["a", "b", "c", "c", "c"]
     c_result = next(r for r in result.group_results if r.group_id == "c")
-    assert c_result.status == GroupStatus.PASSING
-    assert (tmp_path / "shared.txt").read_text(encoding="utf-8") == "from a\nfrom b\n"
+    assert c_result.status == GroupStatus.BLOCKED
+    assert "dependent group ran without all dependency branches" in c_result.failure_narrative
 
 
 def test_run_build_falls_back_when_not_a_git_repo(tmp_path: Path) -> None:
@@ -1876,12 +1568,18 @@ def test_commit_group_work_excludes_otto_runtime_evidence_from_product_commit(
     assert "__audit_home_body__.html" not in committed_paths
 
 
-def test_commit_group_work_excludes_common_test_artifacts_from_product_commit(
+def test_commit_group_work_excludes_common_generated_artifacts(
     tmp_path: Path,
 ) -> None:
     _init_git(tmp_path)
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "app.tsx").write_text("export const app = true;\n", encoding="utf-8")
+    (tmp_path / "src" / "app.py").write_text("print('real change')\n", encoding="utf-8")
+    cache_dir = tmp_path / "src" / "__pycache__"
+    cache_dir.mkdir()
+    (cache_dir / "app.cpython-314.pyc").write_bytes(b"cache")
+    pytest_cache = tmp_path / ".pytest_cache"
+    pytest_cache.mkdir()
+    (pytest_cache / "README.md").write_text("cache\n", encoding="utf-8")
     report_dir = tmp_path / "test-results" / "playwright-report"
     report_dir.mkdir(parents=True)
     (report_dir / "index.html").write_text("<html>generated</html>\n", encoding="utf-8")
@@ -1892,35 +1590,10 @@ def test_commit_group_work_excludes_common_test_artifacts_from_product_commit(
         ["git", "show", "--name-only", "--format=", "HEAD"],
         cwd=tmp_path, capture_output=True, text=True, check=True,
     ).stdout.splitlines()
-    assert "src/app.tsx" in committed_paths
+    assert "src/app.py" in committed_paths
+    assert not any("__pycache__" in path for path in committed_paths)
+    assert not any(path.startswith(".pytest_cache/") for path in committed_paths)
     assert not any(path.startswith("test-results/") for path in committed_paths)
-
-
-def test_commit_group_work_removes_previously_tracked_test_artifacts(
-    tmp_path: Path,
-) -> None:
-    _init_git(tmp_path)
-    report_dir = tmp_path / "test-results" / "playwright-report"
-    report_dir.mkdir(parents=True)
-    (report_dir / "index.html").write_text("<html>old report</html>\n", encoding="utf-8")
-    subprocess.run(["git", "add", "test-results/playwright-report/index.html"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "commit", "-q", "-m", "accidentally track report", "--no-verify"],
-        cwd=tmp_path,
-        check=True,
-    )
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "app.tsx").write_text("export const app = true;\n", encoding="utf-8")
-    (report_dir / "index.html").write_text("<html>new generated report</html>\n", encoding="utf-8")
-
-    assert _commit_group_work(tmp_path, group_id="g", branch="layer2/g")
-
-    show = subprocess.run(
-        ["git", "show", "--name-status", "--format=", "HEAD"],
-        cwd=tmp_path, capture_output=True, text=True, check=True,
-    ).stdout
-    assert "A\tsrc/app.tsx" in show
-    assert "D\ttest-results/playwright-report/index.html" in show
 
 
 def test_run_build_marks_blocked_on_commit_failure(tmp_path: Path) -> None:

@@ -1994,3 +1994,330 @@ Decision:
 - Classify as `Otto UI/API truthfulness bugs fixed`.
 - This remains an audit/repair round against the Acme pressure-test evidence,
   not a new pressure-test tier.
+
+## 2026-05-07 — Codex App Server Spike Follow-Up: Audit Token Blow-Up And Generated Artifacts
+
+Context:
+- Compared `codex-app-server` against `codex` on the same ledgerlite CLI intent
+  under `/tmp/otto-appserver-validation`.
+- App Server run: `2026-05-07-163432-dad295`, verdict `passed`, wall `271s`,
+  `244,007` tokens.
+- Codex exec run: `2026-05-07-164129-440b30`, verdict `partial`, wall `658s`,
+  `2,813,417` tokens.
+
+Bug found: audit agent accidentally searched Otto runtime transcripts
+- Evidence: Codex exec audit attempt 1 contained one `rg -n ... -S .` result
+  with `676,387` chars. The search matched `otto_logs/`,
+  `_otto_build_logs/`, prior `messages.jsonl`, prompts, and narrative logs.
+- Impact: audit attempt 1 used `651,182` tokens for a small CLI app; the whole
+  audit phase used `1,083,043` tokens across two attempts.
+- Root cause: the prompt warned against bulk-reading `messages.jsonl`, but the
+  harness did not prevent broad content search from indirectly ingesting the
+  same transcripts.
+- Generic fix: `default_audit_agent` now installs an audit-only
+  `RIPGREP_CONFIG_PATH` that excludes Otto runtime logs, provider transcripts,
+  generated caches, `.git`, and dependency directories from normal `rg`
+  searches. The audit prompt now names this guard and clarifies that transcripts
+  are diagnostic fallback evidence, not product behavior.
+- Verification: rerunning the exact dangerous `rg -n ... -S .` query against
+  the failed ledgerlite project with the new config reduced output from about
+  `1.5MB` to `2.7KB` and produced zero `messages.jsonl` / `otto_logs` /
+  `_otto_build_logs` hits.
+
+Bug found: generated Python artifacts leaked into i2p branch commits
+- Evidence: both providers produced scope warnings for `__pycache__/*.pyc`; the
+  Codex exec run then failed dependency branch setup because sibling branches
+  conflicted on tracked binary `ledgerlite/__pycache__/cli.cpython-314.pyc`.
+- Root cause: build/merge commit staging defensively unstaged Otto-owned paths,
+  but did not defensively unstage common generated artifacts when `.gitignore`
+  was incomplete or bypassed.
+- Generic fix: build and merge commit paths now unstage both Otto runtime files
+  and common generated artifacts from `git add -A`; scope violation reporting
+  ignores generated build/test artifacts.
+
+Regression tests added:
+- `tests/test_audit.py::test_default_audit_agent_sets_search_guard_env`
+- `tests/test_build.py::test_scope_violations_ignore_common_generated_artifacts`
+- `tests/test_build.py::test_commit_group_work_excludes_common_generated_artifacts`
+- `tests/test_merge_queue.py::test_commit_integration_excludes_common_generated_artifacts`
+
+Verification:
+- `uv run pytest -q tests/test_audit.py::test_default_audit_agent_sets_search_guard_env tests/test_audit.py::test_default_audit_agent_uses_judge_timeout_from_input`
+  -> `2 passed`.
+- `uv run pytest -q tests/test_build.py::test_scope_violations_ignore_common_generated_artifacts tests/test_build.py::test_commit_group_work_excludes_common_generated_artifacts tests/test_build.py::test_commit_group_work_excludes_otto_build_logs_from_product_commit`
+  -> `3 passed`.
+- `uv run pytest -q tests/test_merge_queue.py::test_commit_integration_excludes_common_generated_artifacts tests/test_merge_queue.py::test_commit_integration_excludes_otto_runtime_evidence_from_product_commit`
+  -> `2 passed`.
+- `uv run pytest -q tests/test_audit.py tests/test_build.py tests/test_merge_queue.py --maxfail=3`
+  -> `145 passed`.
+- `uv run ruff check otto/audit.py otto/build.py otto/merge_queue.py otto/setup_gitignore.py tests/test_audit.py tests/test_build.py tests/test_merge_queue.py`
+  -> passed.
+
+Decision:
+- Classify as `Otto bug fixed`.
+- App Server remains a successful provider spike, but the provider comparison
+  should be rerun after this generic artifact/search hardening because the
+  previous Codex exec baseline was confounded by the fixed Otto bugs.
+
+## 2026-05-07 — Codex App Server Default + Token Audit
+
+Context:
+- Switched Otto's default provider from Claude/Codex exec to
+  `codex-app-server`.
+- Kept `codex` as the explicit fallback provider and kept `openai-agents` as
+  an explicit API-key experiment only; visible CLI/Mission Control defaults now
+  steer normal users to Codex App Server.
+- Validation used real `otto run` commands without `--provider`, so the default
+  provider path was exercised rather than a forced provider override.
+
+Bug found: direct Codex provider calls did not inherit PATH
+- Evidence: a direct low-level
+  `query("Reply OK", AgentOptions(provider="codex-app-server", ...))` probe
+  failed with `RuntimeError: codex CLI not found` even though the normal shell
+  could resolve `codex`.
+- Root cause: `_query_codex_app_server` passed `env={}` when `AgentOptions.env`
+  was `None`, stripping PATH for direct calls. The same latent issue existed in
+  the Codex exec path.
+- Generic fix: both Codex provider entrypoints now pass `env=None` when no
+  explicit provider env is supplied, while preserving sanitized Otto envs when
+  the caller provides them.
+- Regression coverage: direct provider normalization tests now assert the
+  subprocess/app-server call inherits the ambient environment, and a new query
+  default test asserts bare `AgentOptions()` uses `codex-app-server`.
+
+Bug found: i2p could return from merge/audit on the wrong branch
+- Evidence: the LogSlice run's final external verifier passed, but the initial
+  summary mixed a stale build failure narrative with a passing audit/proof.
+- Root cause: when no groups were eligible for a merge-loop pass, the merge
+  queue could leave the process on a leftover group branch; the audit then
+  reasoned over branch state that was not the intended integrated product.
+- Generic fix: merge queue now explicitly checks out the integration base branch
+  before returning. Checkout failures are logged as `merge.checkout_failed`.
+- Regression coverage:
+  `tests/test_merge_queue.py::test_run_merge_queue_returns_to_base_when_no_groups_are_eligible`.
+
+Bug found: repaired proofs still carried stale blockers
+- Evidence: the LogSlice proof had a passing residual product audit, but render
+  still carried stale blocked group status from an earlier build state.
+- Root cause: proof composition did not treat an audit-level pass after repair
+  as authoritative for residual product state.
+- Generic fix: proof rendering clears stale blockers and marks non-landed
+  groups as passing when the residual audit verdict is passed.
+- Regression coverage:
+  `tests/test_render.py::test_compose_proof_packet_clears_stale_blockers_after_repair_pass`.
+
+Bug found: merge cleanup deleted project virtualenvs
+- Evidence: the Acme run deleted the project's `.venv`, and the later external
+  verifier had to run with system Python. This exposed an environment-dependent
+  PDF fallback failure that was not related to the requested manager-summary
+  feature.
+- Root cause: merge cleanup used `git clean -fdx` with Otto-specific excludes
+  but did not protect common local virtualenv directories.
+- Generic fix: `.venv/`, `venv/`, and `.env/` are now common generated artifact
+  patterns and are excluded from merge cleanup.
+- Regression coverage:
+  `tests/test_setup_gitignore.py::test_virtualenv_paths_are_common_build_artifacts`
+  and
+  `tests/test_merge_queue.py::test_run_merge_queue_preserves_project_virtualenv_during_clean`.
+
+E2E run 1: LogSlice CLI/library
+- Project: `/tmp/otto-appserver-default-e2e/logslice-cli`.
+- Shape: medium CLI/library with real package layout, CLI, README, and pytest
+  tests.
+- Command:
+  `OTTO_ALLOW_REAL_COST=1 /usr/bin/time -p .venv/bin/python3 -m otto.cli run --project-kind cli --model gpt-5.4-mini --effort low --budget 1500 --max-turns 80 --auto-approve "Add a --service option to filter log summaries to one service name. The filter should combine with --min-level, be case-sensitive to match existing service names exactly, update README usage, and add tests for matching and no-match behavior."`
+- Session: `2026-05-07-220206-530d6c`.
+- Wall: `/usr/bin/time real 281.03`; Otto summary duration `241s`.
+- Final verdict: `passed`.
+- External verifier: `python3 -m pytest -q` -> `7 passed`.
+- Proof packet:
+  `/tmp/otto-appserver-default-e2e/logslice-cli/otto_logs/sessions/2026-05-07-220206-530d6c/proof-packet.html`.
+- Token usage: `265,033 total`, `253,184 cached`, `11,849 fresh`,
+  `97% input-cache`.
+- Phase hot spots:
+  `audit 143,403 total / 7,595 fresh / 142s`,
+  `build 75,060 total / 2,612 fresh / 61s`,
+  `spec 46,570 total / 1,642 fresh / 39s`.
+- Token judgment: reasonable for a real CLI i2p run with audit repair. Audit is
+  the largest phase, but the fresh-token spend is low and logs were small
+  enough to rule out runaway transcript ingestion.
+- Decision: `passed; escalate/fix root-cause Otto bugs found`.
+
+E2E run 2: Acme Expense Portal brownfield webapp
+- Project: `/Users/yuxuan/otto-projects/acme-expense-portal`.
+- Shape: brownfield Flask app with persistence, dashboard/export behavior, and
+  pytest coverage.
+- Baseline verifier before run: `.venv/bin/python -m pytest -q` -> `36 passed`.
+- Command:
+  `OTTO_ALLOW_REAL_COST=1 /usr/bin/time -p .venv/bin/python3 -m otto.cli run --project-kind webapp --model gpt-5.4-mini --effort low --budget 1800 --max-turns 100 --auto-approve "Add a manager summary JSON endpoint at /api/manager-summary. It should accept the same status, priority, category, and assignee filters as the dashboard, return JSON with ticket_count, total_amount_cents, and counts_by_priority for the filtered expenses, reject no valid existing filters, and add pytest coverage for the default response and a filtered pending/high response. Preserve the existing dashboard, CSV, PDF, and saved filter behavior."`
+- Session: `2026-05-07-221135-d8e884`.
+- Wall: `/usr/bin/time real 634.78`; Otto summary duration `591s`.
+- Final verdict: `partial`.
+- Feature audit result: all three manager-summary features passed; run was
+  capped partial by the existing full-suite PDF export contract failure after
+  Otto deleted the local `.venv`.
+- External verifier after run: `python3 -m pytest -q` -> `1 failed, 37 passed`;
+  failed test:
+  `tests/test_pdf_export.py::test_pdf_export_all_expenses_is_valid_pdf_with_expected_content`.
+- Proof packet:
+  `/Users/yuxuan/otto-projects/acme-expense-portal/otto_logs/sessions/2026-05-07-221135-d8e884/proof-packet.html`.
+- Browser/HTTP evidence: audit generated webapp/body and browser-capture logs
+  under the session's `audit/attempt-*/walkthrough/` directories.
+- Token usage: `427,531 total`, `416,896 cached`, `10,635 fresh`,
+  `98% input-cache`.
+- Phase hot spots:
+  `audit 210,208 total / 6,304 fresh / 299s`,
+  `build 102,728 total / 3,144 fresh / 183s`,
+  `merge 54,355 total / 723 fresh / 66s`,
+  `spec 60,240 total / 464 fresh / 43s`.
+- Token judgment: reasonable for brownfield webapp + merge repair + three audit
+  attempts. Wall time is high because audit/retry work is sequential and
+  browser/HTTP evidence is collected, but token spend is dominated by cached
+  input reads rather than fresh context expansion.
+- Decision: `partial due verifier failure; fix generic Otto cleanup bug`.
+
+Token audit conclusion:
+- The post-default App Server runs are not showing the earlier Codex exec
+  runaway pattern where broad `rg` pulled `otto_logs` and `messages.jsonl` into
+  audit context.
+- Session logs are modest in size:
+  LogSlice audit artifacts are about `264K`; Acme audit artifacts are about
+  `524K`; largest individual `messages.jsonl` files are roughly `66K` for
+  LogSlice and `130K` for Acme.
+- The hot phase is consistently audit, not Playwright by itself. Audit spends
+  time running deterministic contract checks, synthesizing web walkthrough
+  evidence, and then judging/repairing. That is product-quality work, but it
+  should stay bounded by the existing transcript/search guard.
+- For user-facing reporting, `total_tokens` alone is misleading for App Server
+  because `cached_input_tokens` is a subset of input traffic. The useful display
+  remains `fresh + cached · hit%`; these runs were about `12K fresh + 253K
+  cached` and `11K fresh + 417K cached`.
+- Current judgment: reasonable enough to keep App Server as the default.
+  Remaining optimization should target wall time and audit attempt count, not
+  capability-reducing context cuts.
+
+Verification:
+- `uv run pytest -q tests/test_agent.py::test_codex_query_normalizes_json_events tests/test_agent.py::test_codex_app_server_query_normalizes_thread_turn_events tests/test_agent.py::test_query_defaults_to_codex_app_server tests/test_render.py::test_compose_proof_packet_clears_stale_blockers_after_repair_pass tests/test_render.py::test_compose_proof_packet_blocked_slice_carries_narrative tests/test_merge_queue.py::test_run_merge_queue_returns_to_base_when_no_groups_are_eligible tests/test_merge_queue.py::test_run_merge_queue_preserves_project_virtualenv_during_clean tests/test_setup_gitignore.py::test_ensure_gitignore_adds_common_build_artifacts tests/test_setup_gitignore.py::test_virtualenv_paths_are_common_build_artifacts tests/test_config.py::TestProviderHelpers::test_agent_provider_defaults_to_codex_app_server tests/test_defaults.py::test_baked_in_only_when_no_yaml_no_cli`
+  -> `11 passed`.
+- `uv run ruff check otto/agent.py otto/cli.py otto/cli_improve.py otto/cli_run.py otto/config.py otto/defaults.py otto/merge_queue.py otto/render.py otto/setup_gitignore.py scripts/web_as_user.py tests/test_agent.py tests/test_config.py tests/test_defaults.py tests/test_merge_queue.py tests/test_render.py tests/test_setup_gitignore.py`
+  -> passed.
+- `npm run web:typecheck` -> passed.
+- `npm run web:build` -> passed; static Mission Control bundle regenerated.
+
+## 2026-05-07 — Codex App Server Backbone Hardening + Secure-Session E2E
+
+Context:
+- Continued the App Server migration after the default-provider switch. The
+  focus here was making `codex-app-server` reliable as Otto's normal i2p
+  backbone, not just a provider spike.
+- Validated direct `otto run --from-spec` with `--provider codex-app-server`
+  against a committed `otto.yaml` that still named `claude`, so the run
+  exercised CLI override semantics rather than relying on project defaults.
+
+Generic fixes:
+- `otto run --from-spec` now loads the project config and applies provider,
+  budget, max-turns, model, effort, and per-agent CLI overrides. Before this,
+  the from-spec path used an empty config dict and could silently ignore the
+  requested runtime/provider knobs.
+- Build-phase outer resume now restores inner agent continuity from durable
+  provider logs. `plan_resume()` derives the latest provider session/thread id
+  per group from prior `messages.jsonl` result rows, and runner/build pass that
+  id back through `AgentOptions.resume`. Prior spec-edit invalidations still
+  clear stale group continuity.
+- Mission Control run-view data now exposes compact provider state: provider
+  name, status/activity, token usage, app-server diff changed-file counts, and
+  provider error summaries. A new events endpoint returns sequence-aware
+  provider metadata without prompt text.
+- Run-view diffs now include persisted App Server `codex-app-server-diff.patch`
+  files even when the target project is not a normal git worktree.
+- Contract-test execution now retries bare `pytest ...` commands under Otto's
+  own Python runtime when the first failure is a pytest import/environment
+  mismatch. This fixes the common `/opt/homebrew/bin/pytest` vs project venv
+  mismatch without weakening the oracle.
+- Scope-warning logic now ignores Otto runtime paths such as `otto_logs/`,
+  preventing evidence artifacts from being reported as product-scope changes.
+
+Regression coverage added:
+- `tests/test_agent.py::test_codex_app_server_uses_thread_resume_when_requested`
+- `tests/test_resume.py::test_plan_resume_derives_agent_session_ids_from_build_logs`
+- `tests/test_build.py::test_run_build_uses_resume_agent_session_from_prior_run`
+- `tests/test_runner.py` resume plumbing assertions for build and repair paths
+- `tests/test_run_view.py::test_build_run_view_projects_provider_events_without_prompt_text`
+- `tests/test_run_view_routes.py::test_run_view_diff_includes_persisted_app_server_patch`
+- `tests/test_run_view_routes.py::test_run_view_events_returns_sequence_provider_metadata`
+- `tests/test_audit.py::test_contract_test_pytest_retries_otto_runtime_on_import_env_failure`
+- `tests/test_build.py::test_run_build_ignores_otto_runtime_paths_in_scope_warnings`
+- `tests/test_cli_run.py::test_run_from_spec_applies_runtime_overrides`
+
+E2E run: secure FastAPI session repair
+- Project:
+  `/tmp/otto-appserver-secure-w4uvom/n1_secure_sessions`.
+- Shape: persistence-backed FastAPI app with visible and hidden pytest suites,
+  seeded SQLite data, login cookies, task APIs, label APIs, and an existing
+  multi-user leak.
+- Why harder than prior CLI smoke: this is an API/persistence security repair
+  with hidden tests, session integrity, query-count performance expectations,
+  merge/audit/proof, and an external verifier.
+- Command:
+  `/Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2/.venv/bin/python -m otto.cli run --from-spec otto_logs/sessions/appserver-secure/spec/spec.json --provider codex-app-server --budget 1500 --max-turns 80 --project-kind api --verbose`
+- Session: `appserver-secure`.
+- Provider/model: `codex-app-server`; model/effort inherited from project and
+  CLI defaults.
+- App Server thread ids:
+  build `019e04d6-7e09-7910-98a8-b06c71c16dd6`, audit
+  `019e04d9-689c-7d02-89ee-ac9c62ac80ae`.
+- Wall: build `190s`, merge `<1s`, audit `197s`; terminal CLI summary reported
+  build/audit/proof completed successfully.
+- Cost: `$0.00` reported by the local App Server subscription path.
+- Final Otto verdict: `passed`.
+- Proof packet:
+  `/tmp/otto-appserver-secure-w4uvom/n1_secure_sessions/otto_logs/sessions/appserver-secure/proof-packet.html`
+  and `proof-packet.json`.
+- External verifier:
+  `PYTHONDONTWRITEBYTECODE=1 /Users/yuxuan/work/cc-autonomous/.worktrees/codex-i2p-v2/.venv/bin/python -m pytest tests/visible tests/hidden -q`
+  -> `6 passed in 0.04s`.
+- Audit walkthrough:
+  `otto_logs/sessions/appserver-secure/audit/attempt-00/walkthrough/walkthrough.jsonl`
+  includes raw forged cookie rejection, tampered signed-cookie rejection, Bob
+  login scoping, filtered task scoping, label scoping, and the visible+hidden
+  pytest command.
+- Product result: App Server repaired the app by issuing HMAC-signed `user_id`
+  cookies, requiring signed cookies on protected routes, scoping task/label
+  queries by authenticated user, and adding a tamper regression test.
+- Bugs found: the first run exposed bare-pytest environment mismatch, runtime
+  scope-warning noise, and from-spec CLI override loss. All were fixed
+  generically with regression coverage before this passing rerun.
+- Decision: `passed; app-server path is viable as Otto's default backbone for
+  this class of i2p run`.
+
+Inner-agent continuity status:
+- Before this wave, Otto had in-process retry continuity for build/fix attempts,
+  but a process crash plus outer `--resume` did not recover provider thread
+  ids from disk.
+- This wave adds phase-wide crash/resume continuity for the live i2p path:
+  build derives Group/Component provider thread ids from `build/**/messages.jsonl`;
+  audit derives the judge thread id from `audit/attempt-*/judge/messages.jsonl`;
+  Layer 2 repair writes durable per-Feature logs under `repair/<feature>/` and
+  derives those thread ids on resume.
+- Outer product truth still wins: if a spec edit invalidated a Group, Otto drops
+  stale build and Layer 2 thread ids for the affected unit/features before
+  resuming.
+- Remaining limitation: this restores provider-thread continuity for Otto's
+  Python process crash/restart path. It is not PID reuse, and it depends on the
+  provider honoring `AgentOptions.resume`.
+
+Live provider continuity probe:
+- Command: direct `otto.agent.query` probe with `AgentOptions(provider="codex-app-server",
+  resume=<prior-thread>)`.
+- First turn result: `apricot`.
+- Provider thread id: `019e04e7-7a3b-7291-b7e1-19fcbbaede9d`.
+- Second turn with `resume` asked for the previous word and returned `apricot`
+  on the same thread id.
+- Decision: App Server honors the resume id that Otto now persists/restores.
+
+Continuity verification:
+- `uv run pytest -q tests/test_resume.py::test_plan_resume_derives_audit_and_layer2_agent_session_ids tests/test_audit.py::test_run_audit_threads_resume_session_to_judge tests/test_audit.py::test_default_audit_agent_passes_resume_session tests/test_runner_layer2_fix.py::test_layer2_uses_resume_session_and_persistent_log_dir tests/test_runner.py::test_resume_plan_runs_audit_when_not_finished tests/test_runner.py::test_resume_plan_threads_layer2_agent_sessions`
+  -> `6 passed`.
+- `uv run ruff check otto/audit.py otto/resume.py otto/runner.py tests/test_audit.py tests/test_resume.py tests/test_runner.py tests/test_runner_layer2_fix.py`
+  -> passed.
+- `uv run python scripts/test_tiers.py fast` -> `1588 passed, 565 deselected`.

@@ -69,6 +69,9 @@ COMMON_BUILD_ARTIFACT_PATTERNS: tuple[str, ...] = (
     "*.pyc",
     "*.pyo",
     ".pytest_cache/",
+    ".venv/",
+    "venv/",
+    ".env/",
     ".coverage",
     "htmlcov/",
     "*.egg-info/",
@@ -195,8 +198,8 @@ def otto_owned_paths_from_porcelain(output: str) -> list[str]:
     return paths
 
 
-def generated_artifact_paths_from_porcelain(output: str) -> list[str]:
-    """Return Otto/runtime/common generated artifact paths from porcelain."""
+def non_product_paths_from_porcelain(output: str) -> list[str]:
+    """Return generated/runtime paths that must not be committed as product code."""
     paths: list[str] = []
     seen: set[str] = set()
     for line in output.splitlines():
@@ -209,6 +212,11 @@ def generated_artifact_paths_from_porcelain(output: str) -> list[str]:
             seen.add(path)
             paths.append(path)
     return paths
+
+
+def generated_artifact_paths_from_porcelain(output: str) -> list[str]:
+    """Compatibility alias for callers that still use the old helper name."""
+    return non_product_paths_from_porcelain(output)
 
 
 def is_common_build_artifact_path(path: str) -> bool:

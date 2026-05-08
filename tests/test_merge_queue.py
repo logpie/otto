@@ -956,6 +956,50 @@ def test_run_merge_queue_real_merge_when_slice_branch_exists(tmp_path: Path) -> 
     assert (tmp_path / "slice-work.txt").exists()
 
 
+def test_run_merge_queue_preserves_local_virtualenv_during_cleanup(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("local runtime\n", encoding="utf-8")
+    branch = "i2p/_session/s1"
+    subprocess.run(["git", "checkout", "-b", branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "slice-work.txt").write_text("from slice", encoding="utf-8")
+    subprocess.run(["git", "add", "slice-work.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "slice work", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec([
+        Group(id="s1", name="x", dependencies=[], owned_paths=["slice-work.txt"], feature_ids=[], checks=[]),
+    ])
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch=branch, worktree=tmp_path),
+        ],
+    )
+
+    result = asyncio.run(
+        run_merge_queue(
+            spec,
+            build_result,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            branch_for_group=lambda _s: branch,
+        )
+    )
+
+    assert result.landed_ids == ["s1"]
+    assert venv_python.read_text(encoding="utf-8") == "local runtime\n"
+
+
 def test_run_merge_queue_real_merge_redundant_when_branch_empty(tmp_path: Path) -> None:
     """Pattern D: a slice branch that exists but has no commits beyond
     base_branch reports REDUNDANT (slice produced no diff).

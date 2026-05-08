@@ -188,6 +188,14 @@ def install_run_view_routes(
         session_dir = resolve_session_dir(project, session_id)
         return JSONResponse(_session_logs_payload(session_dir, group_id=group_id))
 
+    @router.get("/{session_id}/events")
+    def get_events(session_id: str, after: int = -1, limit: int = 500) -> JSONResponse:
+        project = _resolve_project_dir()
+        session_dir = resolve_session_dir(project, session_id)
+        return JSONResponse(
+            _session_provider_events_payload(session_dir, after=after, limit=limit)
+        )
+
     @router.get("/{session_id}/groups/{group_id}/logs")
     def get_group_logs(session_id: str, group_id: str) -> JSONResponse:
         project = _resolve_project_dir()
@@ -461,6 +469,96 @@ def _session_logs_payload(session_dir: Path, *, group_id: str | None = None) -> 
     return payload
 
 
+def _session_provider_events_payload(
+    session_dir: Path,
+    *,
+    after: int = -1,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Return sequence-aware provider events without prompt/log text.
+
+    This is deliberately narrower than `/logs`: consumers get metadata
+    rows that are safe to poll frequently, while full transcripts remain
+    behind the explicit logs panel.
+    """
+    events: list[dict[str, Any]] = []
+    seq = -1
+    max_items = max(1, min(int(limit or 500), 1000))
+    threshold = int(after)
+
+    for path in sorted(session_dir.rglob("messages.jsonl")):
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                for raw in fh:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        record = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    if record.get("type") not in {"provider_event", "result"}:
+                        continue
+                    if record.get("type") == "result" and not record.get("structured_output_error"):
+                        continue
+                    seq += 1
+                    if seq <= threshold:
+                        continue
+                    projected = _project_provider_event_record(record)
+                    projected["seq"] = seq
+                    projected["path"] = str(path.relative_to(session_dir))
+                    events.append(projected)
+                    if len(events) >= max_items:
+                        return {
+                            "session_id": session_dir.name,
+                            "events": events,
+                            "next_after": events[-1]["seq"],
+                            "truncated": True,
+                        }
+        except OSError:
+            continue
+    return {
+        "session_id": session_dir.name,
+        "events": events,
+        "next_after": events[-1]["seq"] if events else threshold,
+        "truncated": False,
+    }
+
+
+def _project_provider_event_record(record: dict[str, Any]) -> dict[str, Any]:
+    if record.get("type") == "result":
+        return {
+            "type": "result",
+            "ts": record.get("ts"),
+            "elapsed_s": record.get("elapsed_s"),
+            "session_id": record.get("session_id") or "",
+            "event": "structured_output_error",
+            "provider": "",
+            "method": "",
+            "turn_id": "",
+            "status": "error",
+            "usage": record.get("usage") if isinstance(record.get("usage"), dict) else {},
+            "data": {
+                "structured_output_error": str(record.get("structured_output_error") or ""),
+            },
+        }
+    return {
+        "type": "provider_event",
+        "ts": record.get("ts"),
+        "elapsed_s": record.get("elapsed_s"),
+        "session_id": record.get("session_id") or "",
+        "event": record.get("event") or "",
+        "provider": record.get("provider") or "",
+        "method": record.get("method") or "",
+        "turn_id": record.get("turn_id") or "",
+        "status": record.get("status") or "",
+        "usage": record.get("usage") if isinstance(record.get("usage"), dict) else {},
+        "data": record.get("data") if isinstance(record.get("data"), dict) else {},
+    }
+
+
 def _group_diff_payload(session_dir: Path, group: dict[str, Any]) -> dict[str, Any]:
     group_id = str(group.get("id") or "")
     branch = str(group.get("branch") or "").strip()
@@ -567,8 +665,15 @@ def _is_allowed_evidence_target(target: Path, session_dir: Path) -> bool:
 
 def _session_diff_text(session_dir: Path, *, group_id: str | None = None) -> str:
     safe_group_id = _safe_resource_id(group_id)
+    provider_patches = _provider_diff_patches(session_dir, group_id=safe_group_id)
     worktree = _diff_worktree_root(session_dir, safe_group_id)
     if not (worktree / ".git").exists():
+        if provider_patches:
+            return _provider_diff_section(
+                provider_patches,
+                group_id=safe_group_id,
+                prefix="No git worktree is available for this session.",
+            )
         return "No git worktree is available for this session.\n"
     pathspecs = (
         _group_pathspecs(session_dir, safe_group_id)
@@ -614,6 +719,13 @@ def _session_diff_text(session_dir: Path, *, group_id: str | None = None) -> str
         if preview:
             sections.extend(["Untracked file previews:", preview.rstrip(), ""])
 
+    if provider_patches:
+        sections.extend([
+            "Provider live diff patch:",
+            _join_provider_patches(provider_patches).rstrip(),
+            "",
+        ])
+
     if not any(section.strip() for section in sections[3:]):
         if safe_group_id:
             sections.append("No changes from base or working tree.\n")
@@ -628,7 +740,6 @@ def _session_diff_text(session_dir: Path, *, group_id: str | None = None) -> str
             else:
                 sections.append("No changes from base or working tree.\n")
     return "\n".join(sections).rstrip() + "\n"
-
 
 def _diff_worktree_root(session_dir: Path, group_id: str | None) -> Path:
     if group_id:
@@ -658,6 +769,51 @@ def _whole_run_pathspecs() -> list[str]:
         ":(exclude).otto/**",
         ":(exclude)otto_artifacts/**",
     ]
+
+
+def _provider_diff_patches(session_dir: Path, *, group_id: str | None = None) -> list[Path]:
+    if group_id:
+        root = session_dir / "build" / group_id
+        if not root.exists():
+            return []
+        return sorted(
+            p for p in root.rglob("codex-app-server-diff.patch")
+            if p.is_file()
+        )
+    return sorted(
+        p for p in session_dir.rglob("codex-app-server-diff.patch")
+        if p.is_file()
+    )
+
+
+def _provider_diff_section(
+    patches: list[Path],
+    *,
+    group_id: str | None,
+    prefix: str,
+) -> str:
+    scope = f"Scope: group {group_id}" if group_id else "Scope: whole run"
+    return "\n".join([
+        scope,
+        prefix,
+        "",
+        "Provider live diff patch:",
+        _join_provider_patches(patches).rstrip(),
+        "",
+    ]).rstrip() + "\n"
+
+
+def _join_provider_patches(patches: list[Path]) -> str:
+    chunks: list[str] = []
+    for patch_path in patches:
+        try:
+            text = patch_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not text.strip():
+            continue
+        chunks.append(f"# {patch_path.name} ({patch_path.parent.name})\n{text.rstrip()}")
+    return "\n\n".join(chunks) + ("\n" if chunks else "")
 
 
 _SAFE_RESOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")

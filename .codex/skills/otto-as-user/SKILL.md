@@ -410,10 +410,10 @@ uv run --extra dev python -m otto.cli queue run --no-dashboard
 Use for power-user/agent pressure tests:
 
 ```bash
-uv run --extra dev python -m otto.cli run "build a product..." --project-kind webapp --provider codex --budget 3600 --max-turns 160 --verbose
-uv run --extra dev python -m otto.cli run "build a CLI tool..." --project-kind cli --provider codex --effort high --budget 2400
-uv run --extra dev python -m otto.cli run --from-spec otto_logs/sessions/<id>/spec/spec.json --provider codex --budget 2400
-uv run --extra dev python -m otto.cli run --resume --provider codex --auto-approve
+uv run --extra dev python -m otto.cli run "build a product..." --project-kind webapp --budget 3600 --max-turns 160 --verbose
+uv run --extra dev python -m otto.cli run "build a CLI tool..." --project-kind cli --effort high --budget 2400
+uv run --extra dev python -m otto.cli run --from-spec otto_logs/sessions/<id>/spec/spec.json --budget 2400
+uv run --extra dev python -m otto.cli run --resume --auto-approve
 ```
 
 Important `otto run` flags:
@@ -446,9 +446,9 @@ Useful commands:
 ```bash
 uv run --extra dev python scripts/e2e_web_mission_control.py --scenario all --artifacts /tmp/otto-web-e2e --viewport 1440x900
 uv run --extra dev python scripts/web_as_user.py --list
-OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --mode quick --provider codex
-OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --scenario W1 --provider codex --user-behavior mc-realistic --user-seed 42
-OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --tier nightly --provider codex --scenario-delay 10
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --mode quick
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --scenario W1 --user-behavior mc-realistic --user-seed 42
+OTTO_ALLOW_REAL_COST=1 uv run --extra dev python scripts/web_as_user.py --tier nightly --scenario-delay 10
 ```
 
 Current high-signal browser scenarios:

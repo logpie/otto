@@ -398,6 +398,31 @@ def test_run_view_diff_includes_live_untracked_group_files(tmp_path: Path) -> No
     assert "outside.txt" not in diff.text
 
 
+def test_run_view_diff_includes_persisted_app_server_patch(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    sid = "2026-05-04-200000-provider-diff"
+    session = project / "otto_logs" / "sessions" / sid
+    _write_minimal_session(session, intent="provider diff", project_kind="webapp")
+    patch = session / "build" / "foundation" / "attempt-01" / "codex-app-server-diff.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text(
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@\n"
+        "+print('provider patch')\n",
+        encoding="utf-8",
+    )
+
+    client = _app_with_project(project)
+    diff = client.get(f"/api/run-view/{sid}/diff", params={"group_id": "foundation"})
+
+    assert diff.status_code == 200
+    assert "No git worktree is available" in diff.text
+    assert "Provider live diff patch:" in diff.text
+    assert "+print('provider patch')" in diff.text
+
+
 def test_run_view_group_diff_reads_linked_group_worktree(tmp_path: Path) -> None:
     project = tmp_path / "proj"
     project.mkdir()

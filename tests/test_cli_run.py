@@ -1088,6 +1088,70 @@ def test_run_from_spec_loads_existing_spec(tmp_path: Path, monkeypatch) -> None:
     assert "manual-session" in str(captured["session_dir"])
 
 
+def test_run_from_spec_applies_runtime_overrides(tmp_path: Path, monkeypatch) -> None:
+    from otto.audit import AuditResult, AuditVerdict
+    from otto.build import BuildResult
+    from otto.merge_queue import MergeQueueResult
+    from otto.spec_compile import persist_spec
+
+    _init_project(tmp_path)
+    (tmp_path / "otto.yaml").write_text(
+        "provider: claude\n"
+        "run_budget_seconds: 3600\n"
+        "max_turns_per_call: 200\n",
+        encoding="utf-8",
+    )
+    fake_spec = _fixture_spec("from-spec-overrides")
+    spec_dir = tmp_path / "otto_logs" / "sessions" / "manual-session" / "spec"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    persist_spec(fake_spec, spec_dir / "spec.json", allow_initial=True)
+
+    captured: dict[str, object] = {}
+
+    async def fake_build(spec, *, project_dir, session_dir, config, **kwargs):
+        captured["config"] = config
+        return BuildResult(spec_session_dir=session_dir, group_results=[])
+
+    async def fake_merge(spec, build_result, **kwargs):
+        return MergeQueueResult()
+
+    async def fake_audit(spec, **kwargs):
+        return AuditResult(verdict=AuditVerdict.PASSED, narrative="from-spec passed")
+
+    monkeypatch.setattr("otto.runner.run_build", fake_build)
+    monkeypatch.setattr("otto.runner.run_merge_queue", fake_merge)
+    monkeypatch.setattr("otto.runner.run_audit", fake_audit)
+
+    code, out = _run(
+        [
+            "run",
+            "--from-spec",
+            str(spec_dir / "spec.json"),
+            "--provider",
+            "codex",
+            "--budget",
+            "900",
+            "--max-turns",
+            "80",
+            "--build-provider",
+            "codex",
+            "--fix-provider",
+            "codex",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert code == 0, out
+    config = captured["config"]
+    assert isinstance(config, dict)
+    assert config["provider"] == "codex"
+    assert config["run_budget_seconds"] == 900
+    assert config["max_turns_per_call"] == 80
+    assert config["_cli_overrides"]["provider"] == "codex"
+    assert config["agents"]["build"]["provider"] == "codex"
+    assert config["agents"]["fix"]["provider"] == "codex"
+
+
 # ---------------------------------------------------------------------------
 # `otto build --resume` and `otto certify --resume` (i2p resume planner)
 # ---------------------------------------------------------------------------
