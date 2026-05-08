@@ -848,10 +848,12 @@ a `browser_journey` check pointing at it:
 }
 ```
 
-This script boots the app, drives Playwright through the home page,
-asserts the required forms exist, and screenshots each surface. Without
-this check, the group will pass its other tests but the integrated app
-will fail downstream browser quality evaluators.
+This script boots the app, drives a real browser through the home page
+using either `agent-browser --session <unique-id>` or repo-native
+Playwright real event primitives, asserts the required forms exist, and
+screenshots each surface. Without this check, the group will pass its
+other tests but the integrated app will fail downstream browser quality
+evaluators.
 
 A `browser_journey` is behavioral evidence only when its command launches
 and drives a real browser against the product. Do not design checks that

@@ -130,6 +130,56 @@ def test_no_failing_features_returns_immediately() -> None:
     assert fix_calls == []
 
 
+def test_visual_only_feature_verdict_does_not_trigger_repair() -> None:
+    spec = _spec("f1")
+    fix_agent, fix_calls = _make_fix_agent()
+
+    result = asyncio.run(
+        repair_failing_features(
+            spec=spec,
+            feature_verdicts=[
+                _verdict(
+                    "f1",
+                    "partial",
+                    detail="Screenshot looks sparse but no workflow failed.",
+                    evidence_refs=["home.png"],
+                )
+                | {"surface": "screenshot", "methodology": "visual-only"},
+            ],
+            fix_agent=fix_agent,
+        )
+    )
+
+    assert result.attempts == []
+    assert result.halted_reason == "no_failing_features"
+    assert fix_calls == []
+
+
+def test_live_ui_feature_verdict_triggers_repair() -> None:
+    spec = _spec("f1")
+    fix_agent, fix_calls = _make_fix_agent()
+
+    asyncio.run(
+        repair_failing_features(
+            spec=spec,
+            feature_verdicts=[
+                _verdict(
+                    "f1",
+                    "partial",
+                    detail="Clicking Save leaves the form dirty and no row appears.",
+                    evidence_refs=["walkthrough.jsonl#L4"],
+                )
+                | {"surface": "DOM", "methodology": "live-ui-events"},
+            ],
+            fix_agent=fix_agent,
+            re_audit=None,
+            max_audit_passes=2,
+        )
+    )
+
+    assert fix_calls == [("f1", "g")]
+
+
 def test_features_without_group_skipped() -> None:
     """An orphan feature (group_id="") can't be repaired — features_to_repair
     excludes it, so repair_failing_features sees an empty selection."""

@@ -1192,6 +1192,34 @@ End."""
     assert parsed.group_verdicts[1].passed is False
 
 
+def test_parse_audit_output_preserves_feature_evidence_gate_fields() -> None:
+    text = """```json
+{
+  "verdict": "partial",
+  "narrative": "needs repair",
+  "feature_audits": [
+    {
+      "feature_id": "save-flow",
+      "name": "Save flow",
+      "status": "partial",
+      "detail": "Clicked Save but row did not appear",
+      "evidence_refs": ["walkthrough.jsonl#L4"],
+      "surface": "DOM",
+      "methodology": "live-ui-events",
+      "evidence_completeness": "full",
+      "coverage_confidence": "high"
+    }
+  ]
+}
+```"""
+    parsed = _parse_audit_output(text)
+
+    assert parsed.feature_audits[0].surface == "DOM"
+    assert parsed.feature_audits[0].methodology == "live-ui-events"
+    assert parsed.feature_audits[0].evidence_completeness == "full"
+    assert parsed.feature_audits[0].coverage_confidence == "high"
+
+
 def test_parse_audit_output_partial_verdict() -> None:
     text = '```json\n{"verdict": "partial", "narrative": "x"}\n```'
     parsed = _parse_audit_output(text)

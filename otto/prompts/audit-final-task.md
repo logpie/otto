@@ -9,11 +9,20 @@ output:
      spec above. Use the exact `feature_id`; `name` is display text only. Each
      entry MUST cite specific evidence — what file/page/log you inspected to
      reach the verdict. Format:
-       {feature_id: "<exact Feature.id>", name: "<Feature.name>", status: "passed"|"partial"|"blocked", detail: "1-2 sentence rationale", evidence_refs: ["path/to/file:line" or URL or screenshot path]}
+       {feature_id: "<exact Feature.id>", name: "<Feature.name>", status: "passed"|"partial"|"blocked", detail: "1-2 sentence rationale", evidence_refs: ["path/to/file:line" or URL or screenshot path], surface: "DOM|HTTP|CLI|source-level|screenshot|video|...", methodology: "live-ui-events|http-request|cli-execution|source-review|visual-only|...", evidence_completeness: "full|proxy_only|partial", coverage_confidence: "high|medium|low"}
 
      Emit one entry per Feature. If a Feature is implemented but with caveats,
      mark partial and explain. Empty list is NOT acceptable when done_means has
      items.
+
+     Evidence-gating rule: screenshots/video are proof artifacts, not product
+     repair triggers by themselves. For browser UI features, `passed` and
+     repairable `partial`/`blocked` verdicts need live UI events, deterministic
+     DOM/browser assertions, contract tests, or a concrete measurable failure
+     such as hidden/clipped/unreachable controls. `visual-only` or
+     `http-request` evidence for a UI feature should use
+     `evidence_completeness: "partial"` or `coverage_confidence: "low"` unless
+     it is paired with a reproducible user-action failure.
 
      For repaired or newly implemented behavior, a `passed` Feature needs
      direct executable evidence for the exact acceptance examples and
@@ -107,7 +116,10 @@ Output as a single fenced JSON block with keys:
   group_verdicts: [{group_id, passed: bool, detail: str}, ...],
   feature_audits: [{feature_id: str, name: str,
                     status: passed|partial|blocked,
-                    detail: str, evidence_refs: [str, ...]}, ...],
+                    detail: str, evidence_refs: [str, ...],
+                    surface: str, methodology: str,
+                    evidence_completeness: full|proxy_only|partial,
+                    coverage_confidence: high|medium|low}, ...],
   quality_score: int (1-5),
   quality_findings: [str, ...]
 }

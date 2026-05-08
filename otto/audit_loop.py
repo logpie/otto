@@ -30,6 +30,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from otto.repair_gates import repair_gate_for_verdict
 from otto.spec_compile import Group, Spec
 
 
@@ -168,14 +169,20 @@ def _is_actionable_repair_verdict(
     detail = str(verdict_payload.get("detail") or "").casefold()
     if any(marker in detail for marker in _UNACTIONABLE_REPAIR_DETAIL_MARKERS):
         return False
+    has_strength_metadata = any(
+        str(verdict_payload.get(key) or "").strip()
+        for key in ("surface", "methodology", "evidence_completeness", "coverage_confidence")
+    )
     if verdict != "blocked":
-        return True
+        return repair_gate_for_verdict(verdict_payload).actionable if has_strength_metadata else True
     evidence_refs = verdict_payload.get("evidence_refs") or []
     if isinstance(evidence_refs, list) and any(str(ref).strip() for ref in evidence_refs):
-        return True
+        return repair_gate_for_verdict(verdict_payload).actionable if has_strength_metadata else True
     if not detail:
-        return True
-    return not any(marker in detail for marker in _UNACTIONABLE_BLOCKED_DETAIL_MARKERS)
+        return repair_gate_for_verdict(verdict_payload).actionable if has_strength_metadata else True
+    if any(marker in detail for marker in _UNACTIONABLE_BLOCKED_DETAIL_MARKERS):
+        return False
+    return repair_gate_for_verdict(verdict_payload).actionable if has_strength_metadata else True
 
 
 def group_for_feature(spec: Spec, feature_id: str) -> Group | None:

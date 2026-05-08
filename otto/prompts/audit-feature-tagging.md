@@ -107,6 +107,8 @@ After the walkthrough, emit `feature-verdicts.json`:
       "verdict": "passed | partial | blocked | failed | missing",
       "detail": "<one-sentence why>",
       "evidence_refs": ["walkthrough.jsonl#L2-L5"],
+      "surface": "DOM | HTTP | CLI | source-level | screenshot | video",
+      "methodology": "live-ui-events | http-request | cli-execution | source-review | visual-only",
       "evidence_completeness": "full | proxy_only | partial",
       "coverage_confidence": "high | medium | low"
     },

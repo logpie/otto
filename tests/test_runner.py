@@ -121,6 +121,42 @@ def test_feature_audits_to_verdicts_prefers_feature_id() -> None:
     ]
 
 
+def test_feature_audits_to_verdicts_preserves_evidence_gate_fields() -> None:
+    from otto.audit import FeatureAudit
+
+    spec = _spec(with_features=True)
+    audit = AuditResult(
+        verdict=AuditVerdict.PARTIAL,
+        narrative="x",
+        feature_audits=[
+            FeatureAudit(
+                feature_id="f1",
+                name="f1",
+                status="partial",
+                detail="Save button did not persist the row",
+                evidence_refs=["walkthrough.jsonl#L4"],
+                surface="DOM",
+                methodology="live-ui-events",
+                evidence_completeness="full",
+                coverage_confidence="high",
+            )
+        ],
+    )
+
+    assert _feature_audits_to_verdicts(spec, audit) == [
+        {
+            "feature_id": "f1",
+            "verdict": "partial",
+            "detail": "Save button did not persist the row",
+            "evidence_refs": ["walkthrough.jsonl#L4"],
+            "surface": "DOM",
+            "methodology": "live-ui-events",
+            "evidence_completeness": "full",
+            "coverage_confidence": "high",
+        }
+    ]
+
+
 def test_feature_audits_to_verdicts_maps_group_id_to_best_matching_feature() -> None:
     """A group-level audit miss must still route to a concrete Feature repair."""
     from otto.audit import FeatureAudit

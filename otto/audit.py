@@ -135,6 +135,10 @@ class FeatureAudit:
     HTML, screenshots, contract-test logs) — empty list is allowed
     when the verdict is from code-reading alone, but paths anchor the
     judgment.
+
+    The optional evidence-strength fields are used by Layer 2 repair gating.
+    They do not change the audit verdict by themselves; they decide whether a
+    non-PASS verdict is reproducible enough to spend a repair attempt.
     """
 
     name: str  # short label (e.g. "user signup", "RSS discoverability")
@@ -142,6 +146,10 @@ class FeatureAudit:
     detail: str = ""  # 1-2 sentence rationale
     evidence_refs: list[str] = field(default_factory=list)
     feature_id: str = ""
+    surface: str = ""
+    methodology: str = ""
+    evidence_completeness: str = ""
+    coverage_confidence: str = ""
 
 
 @dataclass
@@ -2400,6 +2408,10 @@ def _audit_output_from_dict(data: dict[str, Any]) -> AuditAgentOutput:
                 detail=str(entry.get("detail") or ""),
                 evidence_refs=evidence_refs,
                 feature_id=feature_id,
+                surface=str(entry.get("surface") or ""),
+                methodology=str(entry.get("methodology") or ""),
+                evidence_completeness=str(entry.get("evidence_completeness") or ""),
+                coverage_confidence=str(entry.get("coverage_confidence") or ""),
             ))
 
     return AuditAgentOutput(

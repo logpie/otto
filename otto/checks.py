@@ -38,6 +38,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from otto.browser_testing import (
+    declared_browser_evidence_missing,
+    validate_agent_browser_command,
+)
 from otto.observability import iso_timestamp, write_text_atomic
 from otto.spec_compile import (
     ApiProbe,
@@ -429,10 +433,10 @@ def _run_browser_journey(
         artifacts,
         _collect_output_artifacts(completed.stdout or "", cwd=cwd, project_dir=project_dir),
     )
-    missing_declared_evidence = (
-        completed.returncode == 0
-        and bool(check.evidence_globs)
-        and not artifacts
+    missing_declared_evidence = declared_browser_evidence_missing(
+        returncode=completed.returncode,
+        evidence_globs=check.evidence_globs,
+        artifact_count=len(artifacts),
     )
     passed = completed.returncode == 0 and not missing_declared_evidence
     detail = f"exit={completed.returncode} artifacts={len(artifacts)}"
@@ -472,38 +476,14 @@ def _browser_journey_preflight(
     cwd: Path,
     browser_env: Mapping[str, str],
 ) -> str | None:
-    agent_browser_error = _agent_browser_journey_preflight(check.command)
+    agent_browser_error = validate_agent_browser_command(check.command)
     if agent_browser_error:
         return agent_browser_error
     return _playwright_browser_journey_preflight(check, cwd, browser_env)
 
 
 def _agent_browser_journey_preflight(command: tuple[str, ...] | list[str]) -> str | None:
-    lowered = [str(part).lower() for part in command]
-    if not any("agent-browser" in part for part in lowered):
-        return None
-    if "--session" not in lowered:
-        return (
-            "Agent-browser BrowserJourney preflight failed: command uses "
-            "`agent-browser` without a unique `--session`. Parallel journeys "
-            "must use a per-worktree/per-journey session so browser state does "
-            "not collide."
-        )
-    try:
-        session_index = lowered.index("--session") + 1
-        session_name = lowered[session_index]
-    except (ValueError, IndexError):
-        return (
-            "Agent-browser BrowserJourney preflight failed: `--session` is "
-            "present but no session name follows it."
-        )
-    if session_name in {"", "default", "main", "shared", "browser"}:
-        return (
-            "Agent-browser BrowserJourney preflight failed: session name "
-            f"{session_name!r} is too generic for concurrent Otto checks. "
-            "Use a unique journey/worktree session name."
-        )
-    return None
+    return validate_agent_browser_command(command)
 
 
 def _playwright_browser_journey_preflight(

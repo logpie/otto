@@ -26,12 +26,14 @@ from pathlib import Path
 from typing import Callable
 
 from otto import paths
+from otto.browser_testing import agent_browser_argv
 from otto.merge.state import BranchOutcome, MergeState, write_state as write_merge_state
 from otto.queue.schema import QueueTask, append_task, load_queue, write_state as write_queue_state
 from otto.runs.registry import make_run_record, write_record
 
 
 BROWSER_LOCK_DIR = Path(tempfile.gettempdir()) / "otto-agent-browser.lock"
+_BROWSER_SESSION = "otto-web-e2e"
 
 
 @dataclass(slots=True)
@@ -96,6 +98,8 @@ COVERAGE_MODEL: dict[str, list[dict[str, str]]] = {
 
 
 def main() -> int:
+    global _BROWSER_SESSION
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--otto-root", type=Path, default=Path.cwd(), help="Otto source tree to test.")
     parser.add_argument(
@@ -151,6 +155,7 @@ def main() -> int:
             print(f"[web-e2e] {scenario.name}: {scenario.description}")
             try:
                 with browser_session_lock(scenario.name):
+                    _BROWSER_SESSION = f"otto-web-e2e-{index:02d}-{scenario.name}"
                     try:
                         try:
                             scenario.run(ctx)
@@ -1194,7 +1199,7 @@ def assert_cli_args(argv: list[str], values: dict[str, str], *, flags: list[str]
 
 def browser(*args: str, check: bool = True, timeout_s: float = 30) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
-        ["agent-browser", *args],
+        agent_browser_argv(_BROWSER_SESSION, *args),
         text=True,
         capture_output=True,
         timeout=timeout_s,

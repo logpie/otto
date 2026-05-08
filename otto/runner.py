@@ -1361,12 +1361,17 @@ def _spec_with_group_feature_fallbacks(spec: Spec) -> Spec:
 
 
 def _feature_verdict_payload(feature_id: str, feature_audit: Any) -> dict[str, Any]:
-    return {
+    payload = {
         "feature_id": feature_id,
         "verdict": feature_audit.status,
         "detail": feature_audit.detail,
         "evidence_refs": list(feature_audit.evidence_refs),
     }
+    for key in ("surface", "methodology", "evidence_completeness", "coverage_confidence"):
+        value = str(getattr(feature_audit, key, "") or "").strip()
+        if value:
+            payload[key] = value
+    return payload
 
 
 def _feature_ids_for_group_audit(spec: Spec, feature_audit: Any) -> list[str]:
