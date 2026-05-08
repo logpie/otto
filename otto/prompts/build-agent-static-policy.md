@@ -126,6 +126,12 @@ Use the real `agent-browser` command surface. Semantic `find` supports
 `snapshot -i`, identify the select control ref, then use
 `agent-browser --session <id> select @ref "<value-or-label>"`. Do not invent
 unsupported commands such as `agent-browser find label Type select expense`.
+When a label or button name is common, short, or appears inside parent region
+names, form labels, helper text, or repeated cards, do not use a broad global
+semantic locator such as `find label Search ...`. Use a scoped exact role
+locator through `agent-browser eval`, a snapshot ref, or a unique accessible
+name/data-testid so the journey fails on product behavior rather than
+Playwright strict-mode ambiguity.
 
 Only choose repo-native Playwright when the journey needs capabilities that
 agent-browser cannot express cleanly, such as multi-context auth, network
@@ -151,6 +157,12 @@ After reload, import/export, route changes, or view switches, re-query the
 control from its visible container instead of reusing a locator that may have
 unmounted. A BrowserJourney test should fail on product behavior, not on
 avoidable strict-mode ambiguity.
+
+Every successful BrowserJourney must write at least one declared evidence
+artifact, usually a screenshot under the check's `evidence_globs`, after the
+real user-visible state has been reached. Do not exit 0 before verifying that
+the files matching the declared globs exist. A passing behavior script with
+zero matching artifacts is a runner/evidence bug, not a product pass.
 
 Make BrowserJourney runner config self-contained and port-isolated. For
 Playwright projects that use relative routes such as `page.goto("/")`,
