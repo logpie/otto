@@ -102,6 +102,15 @@ Otto-owned check evidence as the source of truth for repair. Provider-side
 self-runs are useful only when they agree with the authoritative Otto
 check-runner evidence.
 
+Generated package manifests must use valid, reproducible dependency ranges.
+Do not write `"latest"`, `"^latest"`, `"*"`, or invented package versions in
+`package.json`; npm rejects some of these and the rest make verifier behavior
+non-reproducible. Use concrete semver ranges from known current packages or
+query package metadata before locking. If npm fails because the default cache
+is not writable, set a short project/temp cache for the command, for example
+`npm_config_cache=/tmp/otto-npm-cache npm install`, instead of changing global
+npm settings or repeatedly retrying the same failing command.
+
 Default BrowserJourney tool policy: use `agent-browser` for routine generated
 webapp journeys. A routine journey is a single-user browser flow that opens the
 app, clicks visible controls, types realistic input, checks visible state,

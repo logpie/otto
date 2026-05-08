@@ -139,6 +139,8 @@ def test_runtime_agent_prompt_policy_snippets_are_persistent_files() -> None:
 def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -> None:
     text = (PROMPTS_DIR / "build-agent-static-policy.md").read_text(encoding="utf-8")
     assert "Default BrowserJourney tool policy: use `agent-browser`" in text
+    assert 'Do not write `"latest"`, `"^latest"`, `"*"`, or invented package versions' in text
+    assert "npm_config_cache=/tmp/otto-npm-cache npm install" in text
     assert "Only choose repo-native Playwright" in text
     assert "use.baseURL" in text
     assert "OTTO_BROWSER_PORT" in text
