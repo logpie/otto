@@ -598,7 +598,17 @@ def test_run_merge_queue_defers_missing_unowned_cross_group_runner_until_complet
     assert result.results[0].cross_slice_evidence == []
     assert len(result.results[1].cross_slice_evidence) == 1
     assert result.results[1].cross_slice_evidence[0].passed is False
+    assert result.results[1].cross_slice_evidence[0].detail.startswith(
+        "planned cross-group check artifact missing"
+    )
     assert "tests/main_workflow.py" in result.results[1].failure_narrative
+    assert (
+        session_dir
+        / "merge"
+        / "feature"
+        / "cross-attempt-00"
+        / "000-MissingCrossGroupCheckArtifact.log"
+    ).is_file()
 
 
 def test_run_merge_queue_reselects_cross_group_checks_after_merge(

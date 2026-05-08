@@ -515,7 +515,13 @@ def _playwright_browser_journey_preflight(
         return None
     test_paths = _playwright_browser_test_paths(cwd)
     config_paths = _playwright_config_paths(cwd)
+    config_error = _playwright_config_artifact_preflight(cwd, config_paths)
+    if config_error:
+        return config_error
     config_text = "\n".join(_read_text(path) for path in config_paths)
+    ignore_error = _playwright_test_ignore_preflight(config_paths, config_text)
+    if ignore_error:
+        return ignore_error
     test_text = "\n".join(_read_text(path) for path in test_paths)
     package_text = _read_text(cwd / "package.json")
     combined_runner_text = "\n".join([config_text, test_text, package_text])
@@ -605,8 +611,60 @@ def _playwright_config_paths(cwd: Path) -> list[Path]:
         path
         for pattern in ("playwright.config.*", "playwright.*.config.*")
         for path in cwd.glob(pattern)
-        if path.is_file()
+        if path.is_file() and not path.name.endswith(".d.ts")
     )
+
+
+def _playwright_config_artifact_preflight(cwd: Path, config_paths: list[Path]) -> str | None:
+    names = {path.name for path in config_paths}
+    ts_configs = {name for name in names if name.endswith((".ts", ".tsx"))}
+    js_configs = {name for name in names if name.endswith((".js", ".mjs", ".cjs"))}
+    if ts_configs and js_configs:
+        return (
+            "Playwright BrowserJourney preflight failed: both TypeScript and "
+            "JavaScript playwright config files exist in the product root "
+            f"({', '.join(sorted(ts_configs | js_configs))}). Playwright may load "
+            "a stale generated JS config and report misleading errors such as "
+            "`No tests found`. Keep one source config only; if TypeScript build "
+            "emitted config JS, add `noEmit: true` for the node/config tsconfig "
+            "or exclude runner config from emission, then remove generated "
+            "`playwright.config.js`/`.d.ts` artifacts."
+        )
+    generated_declarations = sorted(path.name for path in cwd.glob("playwright.config*.d.ts"))
+    if ts_configs and generated_declarations:
+        return (
+            "Playwright BrowserJourney preflight failed: generated playwright "
+            f"config declaration artifacts exist ({', '.join(generated_declarations)}). "
+            "Keep runner config source-only; add `noEmit: true` for the "
+            "node/config tsconfig or exclude runner config from emission, then "
+            "remove generated `.d.ts` artifacts."
+        )
+    return None
+
+
+def _playwright_test_ignore_preflight(config_paths: list[Path], config_text: str) -> str | None:
+    if not config_paths or "testIgnore" not in config_text:
+        return None
+    bare_runtime_ignores = (
+        "otto_logs/**",
+        "_otto_build_logs/**",
+        ".worktrees/**",
+        ".otto/**",
+        "otto_artifacts/**",
+    )
+    for pattern in bare_runtime_ignores:
+        if re.search(rf"['\"]{re.escape(pattern)}['\"]", config_text):
+            examples = ", ".join(path.name for path in config_paths[:3])
+            return (
+                "Playwright BrowserJourney preflight failed: playwright config "
+                f"uses bare runtime ignore `{pattern}` in {examples}. Otto "
+                "worktree paths can themselves contain `otto_logs` and "
+                "`.worktrees`, so bare or recursive runtime ignores may hide the "
+                "entire product checkout and surface as `No tests found`. Use "
+                "absolute direct-child ignores based on `process.cwd()` or keep "
+                "test discovery narrowly scoped to product tests instead."
+            )
+    return None
 
 
 def _playwright_browser_test_paths(cwd: Path) -> list[Path]:

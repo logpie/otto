@@ -29,6 +29,7 @@ old `otto build` / `otto certify` paths during Phase A coexistence.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import subprocess
@@ -55,6 +56,7 @@ from otto.build import (
     _write_build_context_packet,
 )
 from otto.checks import Evidence, run_checks
+from otto.observability import iso_timestamp
 from otto.setup_gitignore import non_product_paths_from_porcelain
 from otto.spec_compile import SPEC_FILENAME, Group, Spec
 from otto.spec_state import aborted_group_ids, emit
@@ -662,6 +664,52 @@ def _explicit_ref_missing(path_ref: str, project_dir: Path) -> bool:
     return not (project_dir / ref).exists()
 
 
+def _missing_cross_group_check_evidence(
+    checks: list[Any],
+    project_dir: Path,
+    raw_log_dir: Path,
+) -> list[Evidence]:
+    """Record absent planned check artifacts directly instead of vague runner output."""
+    evidence: list[Evidence] = []
+    for index, check in enumerate(checks):
+        missing = [
+            ref
+            for ref in _explicit_check_path_references(check)
+            if _explicit_ref_missing(ref, project_dir)
+        ]
+        if not missing:
+            continue
+        detail = "planned cross-group check artifact missing: " + ", ".join(missing[:5])
+        raw = {
+            "check_index": index,
+            "command": list(getattr(check, "command", ()) or ()),
+            "missing_refs": missing,
+            "project_dir": str(project_dir),
+            "reason": (
+                "The integration plan declared executable check paths that do not "
+                "exist in the merged product. Assign ownership for creating the "
+                "check artifact or generate it from planned behavior_journeys "
+                "before running the command."
+            ),
+        }
+        raw_log_dir.mkdir(parents=True, exist_ok=True)
+        (raw_log_dir / f"{index:03d}-MissingCrossGroupCheckArtifact.log").write_text(
+            detail + "\n" + json.dumps(raw, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        evidence.append(
+            Evidence(
+                passed=False,
+                started_at=iso_timestamp(),
+                duration_s=0.0,
+                detail=detail,
+                artifacts=[],
+                raw=raw,
+            )
+        )
+    return evidence
+
+
 def _path_matches_owned_path(path_ref: str, owned_path: str) -> bool:
     ref = path_ref.strip().lstrip("./")
     owned = owned_path.strip().lstrip("./")
@@ -771,14 +819,29 @@ async def _process_candidate(
                 landed_ids=[*prior_landed_ids, group_obj.id],
                 project_dir=merge_worktree,
             )
-            cross_pairs = run_checks(
+            missing_cross_evidence = _missing_cross_group_check_evidence(
                 list(cross_checks),
+                merge_worktree,
+                raw_log_dir / f"cross-attempt-{repair_attempts:02d}",
+            )
+            missing_cross_indexes = {
+                int(ev.raw.get("check_index", -1))
+                for ev in missing_cross_evidence
+                if isinstance(ev.raw, dict)
+            }
+            runnable_cross_checks = [
+                check
+                for index, check in enumerate(cross_checks)
+                if index not in missing_cross_indexes
+            ]
+            cross_pairs = run_checks(
+                list(runnable_cross_checks),
                 project_dir=project_dir,
                 cwd=merge_worktree,
                 base_url=base_url,
                 raw_log_dir=raw_log_dir / f"cross-attempt-{repair_attempts:02d}",
             )
-            cross_evidence = [ev for _check, ev in cross_pairs]
+            cross_evidence = [*missing_cross_evidence, *[ev for _check, ev in cross_pairs]]
             cross_pass = all(ev.passed for ev in cross_evidence) if cross_evidence else True
 
             if slice_pass and cross_pass:

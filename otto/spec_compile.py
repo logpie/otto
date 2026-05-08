@@ -3830,6 +3830,18 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
                     "action and expectation are required for deterministic checks"
                 )
 
+    owned_artifact_patterns = _owned_check_artifact_patterns(spec)
+    for index, check in enumerate(spec.cross_group_checks):
+        for path_ref in _cross_group_check_command_path_refs(check):
+            if not _path_ref_matches_any_owned_pattern(path_ref, owned_artifact_patterns):
+                warnings.append(
+                    f"cross_group_checks[{index}]: command path {path_ref!r} is "
+                    "not covered by any group/component owned_paths or owned "
+                    "shared_contract paths (planned integration checks need an "
+                    "owner to create executable artifacts; otherwise keep this "
+                    "as behavior_journeys until a runner is materialized)"
+                )
+
     feature_ids_seen: set[str] = set()
     for feature in spec.features:
         if not feature.id.strip():
@@ -3869,6 +3881,68 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
         warnings = []
 
     return ValidationResult(valid=not errors, errors=errors, warnings=warnings)
+
+
+def _owned_check_artifact_patterns(spec: Spec) -> list[str]:
+    patterns: list[str] = []
+    for unit in [*spec.groups, *list(spec.components or [])]:
+        patterns.extend(str(path).strip() for path in (unit.owned_paths or []) if str(path).strip())
+    known_unit_ids = {unit.id for unit in [*spec.groups, *list(spec.components or [])]}
+    for contract in spec.shared_contracts:
+        if contract.owner_id and contract.owner_id in known_unit_ids:
+            patterns.extend(
+                str(path).strip() for path in (contract.paths or []) if str(path).strip()
+            )
+    return patterns
+
+
+def _cross_group_check_command_path_refs(check: CheckKind) -> list[str]:
+    refs: list[str] = []
+    command = getattr(check, "command", None)
+    if isinstance(command, str):
+        candidates = shlex.split(command)
+    else:
+        candidates = [str(item) for item in (command or [])]
+    selector = getattr(check, "selector", None)
+    if isinstance(selector, str):
+        candidates.extend(selector.split())
+    paths = getattr(check, "paths", None)
+    if isinstance(paths, str):
+        candidates.append(paths)
+    else:
+        candidates.extend(str(item) for item in (paths or []))
+    for candidate in candidates:
+        if _looks_like_check_artifact_path(candidate):
+            refs.append(candidate.strip().lstrip("./"))
+    return refs
+
+
+def _looks_like_check_artifact_path(value: str) -> bool:
+    text = value.strip()
+    if not text or text.startswith("-") or "://" in text:
+        return False
+    if any(char in text for char in "*?[]"):
+        return True
+    if "/" in text or text.startswith("."):
+        return True
+    return bool(Path(text).suffix)
+
+
+def _path_ref_matches_any_owned_pattern(path_ref: str, patterns: list[str]) -> bool:
+    ref = path_ref.strip().lstrip("./")
+    if not ref:
+        return True
+    for raw_pattern in patterns:
+        pattern = raw_pattern.strip().lstrip("./")
+        if not pattern:
+            continue
+        if fnmatch.fnmatch(ref, pattern):
+            return True
+        if not any(char in pattern for char in "*?[]") and (
+            ref == pattern or ref.startswith(f"{pattern.rstrip('/')}/")
+        ):
+            return True
+    return False
 
 
 def _detect_dep_cycles(groups: list[Group]) -> list[str]:

@@ -535,6 +535,82 @@ def test_browser_journey_preflights_playwright_hardcoded_port_without_otto_env(
     assert "OTTO_BROWSER_BASE_URL" in evidence.raw["preflight_error"]
 
 
+def test_browser_journey_preflights_duplicate_generated_playwright_config(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"browser": "playwright test tests/browser/main.spec.ts"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "playwright.config.ts").write_text(
+        "import { defineConfig } from '@playwright/test';\n"
+        "const port = process.env.OTTO_BROWSER_PORT || '4173';\n"
+        "const baseURL = process.env.OTTO_BROWSER_BASE_URL || `http://127.0.0.1:${port}`;\n"
+        "export default defineConfig({ webServer: { command: `npm run dev -- --port ${port}`, url: baseURL }, use: { baseURL } });\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "playwright.config.js").write_text(
+        "export default { testIgnore: ['otto_logs/**'], testMatch: ['missing/**/*.spec.ts'] };\n",
+        encoding="utf-8",
+    )
+    browser_dir = tmp_path / "tests" / "browser"
+    browser_dir.mkdir(parents=True)
+    (browser_dir / "main.spec.ts").write_text(
+        "import { test } from '@playwright/test';\n"
+        "test('journey', async ({ page }) => { await page.goto('/'); });\n",
+        encoding="utf-8",
+    )
+
+    evidence = run_check(
+        BrowserJourney(
+            command=("npm", "run", "browser"),
+            evidence_globs=("test-results/**/*.png",),
+            timeout_s=15,
+        ),
+        project_dir=tmp_path,
+        cwd=tmp_path,
+    )
+
+    assert evidence.passed is False
+    assert "stale generated JS config" in evidence.raw["preflight_error"]
+    assert "noEmit" in evidence.raw["preflight_error"]
+
+
+def test_browser_journey_preflights_bare_runtime_test_ignore(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"browser": "playwright test tests/browser/main.spec.ts"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "playwright.config.ts").write_text(
+        "import { defineConfig } from '@playwright/test';\n"
+        "const port = process.env.OTTO_BROWSER_PORT || '4173';\n"
+        "const baseURL = process.env.OTTO_BROWSER_BASE_URL || `http://127.0.0.1:${port}`;\n"
+        "export default defineConfig({ testIgnore: ['otto_logs/**'], webServer: { command: `npm run dev -- --port ${port}`, url: baseURL }, use: { baseURL } });\n",
+        encoding="utf-8",
+    )
+    browser_dir = tmp_path / "tests" / "browser"
+    browser_dir.mkdir(parents=True)
+    (browser_dir / "main.spec.ts").write_text(
+        "import { test } from '@playwright/test';\n"
+        "test('journey', async ({ page }) => { await page.goto('/'); });\n",
+        encoding="utf-8",
+    )
+
+    evidence = run_check(
+        BrowserJourney(
+            command=("npm", "run", "browser"),
+            evidence_globs=("test-results/**/*.png",),
+            timeout_s=15,
+        ),
+        project_dir=tmp_path,
+        cwd=tmp_path,
+    )
+
+    assert evidence.passed is False
+    assert "bare runtime ignore" in evidence.raw["preflight_error"]
+    assert "No tests found" in evidence.raw["preflight_error"]
+
+
 def test_browser_journey_preflights_agent_browser_without_unique_session(
     tmp_path: Path,
 ) -> None:

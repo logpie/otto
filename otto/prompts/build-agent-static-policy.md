@@ -26,10 +26,22 @@ group's branch via git merge.
 
 If you create or edit test runner config/scripts (Playwright, Vitest, Jest,
 Pytest, etc.), restrict discovery to product test paths and exclude
-Otto/runtime/generated directories: `otto_logs/**`, `.worktrees/**`,
-`_otto_build_logs/**`, `.otto/**`, `otto_artifacts/**`, `node_modules/**`,
-`dist/**`, `test-results/**`. Never let project tests recurse into Otto
-session or worktree artifacts.
+Otto/runtime/generated directories only as product-root direct children.
+Do not use bare or recursive ignore globs such as `otto_logs/**`,
+`**/otto_logs/**`, `.worktrees/**`, or `**/.worktrees/**` inside Playwright
+config: Otto worktree paths may themselves contain `otto_logs` and
+`.worktrees`, and those globs can hide the entire product checkout as
+`No tests found`. Prefer narrow `testDir`/`testMatch` values plus absolute
+direct-child ignores based on `process.cwd()` when ignores are needed. Never
+let project tests recurse into Otto session or worktree artifacts.
+
+If a TypeScript build includes runner config files such as
+`playwright.config.ts` or `vite.config.ts`, ensure the config tsconfig uses
+`noEmit: true` or otherwise excludes those files from emission. Do not leave
+generated `playwright.config.js`, `playwright.config.d.ts`, `vite.config.js`,
+or `vite.config.d.ts` artifacts in the product root; Playwright may load a
+stale generated JS config instead of the source config and report misleading
+browser failures.
 
 When exploring source, run searches from your group worktree and keep them
 scoped to product files. Do not search or dump parent Otto session directories,

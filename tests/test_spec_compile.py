@@ -726,6 +726,63 @@ def test_validator_silent_on_single_slice_without_cross_checks() -> None:
     assert not any("cross_group_checks" in w for w in result.warnings)
 
 
+def test_validator_warns_when_cross_group_runner_path_has_no_owner() -> None:
+    spec = Spec(
+        intent="test", project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        groups=[
+            _group_with_features(["Add foo to app.py"], group_id="a"),
+            _group_with_features(["Add bar to app.py"], group_id="b"),
+        ],
+        cross_group_checks=[
+            BrowserJourney(
+                command=("npm", "run", "test:browser", "--", "tests/browser/full-workflow.spec.ts"),
+                evidence_globs=("otto_artifacts/browser/full-workflow/*.png",),
+            )
+        ],
+    )
+
+    result = validate_spec(spec)
+
+    assert any(
+        "tests/browser/full-workflow.spec.ts" in warning
+        and "not covered by any group/component owned_paths" in warning
+        for warning in result.warnings
+    )
+
+
+def test_validator_accepts_cross_group_runner_path_with_owner() -> None:
+    spec = Spec(
+        intent="test", project_kind="webapp",
+        structure=StructureDecisions(payload={}),
+        groups=[
+            Group(
+                id="foundation",
+                name="Foundation",
+                dependencies=[],
+                owned_paths=["tests/browser/full-workflow.spec.ts"],
+                feature_ids=["Create integrated full-workflow browser journey"],
+                checks=[PytestCheck(selector="tests/")],
+            ),
+            _group_with_features(["Add bar to app.py"], group_id="b"),
+        ],
+        cross_group_checks=[
+            BrowserJourney(
+                command=("npm", "run", "test:browser", "--", "tests/browser/full-workflow.spec.ts"),
+                evidence_globs=("otto_artifacts/browser/full-workflow/*.png",),
+            )
+        ],
+    )
+
+    result = validate_spec(spec)
+
+    assert not any(
+        "tests/browser/full-workflow.spec.ts" in warning
+        and "not covered by any group/component owned_paths" in warning
+        for warning in result.warnings
+    )
+
+
 # ---------------------------------------------------------------------------
 # S5: parser warns on missing/wrong-type tasks/deps/owned_paths
 # ---------------------------------------------------------------------------

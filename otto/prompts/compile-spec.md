@@ -865,6 +865,16 @@ merge and covers the main user workflow from the original intent. Group
 checks prove local work; the cross-group check proves the product still
 works once independently built groups are combined.
 
+Do not invent a concrete command path for a cross-group check unless that
+file already exists in the project or exactly one group owns creating it.
+For generated webapp test runners, assign the runner file to the foundation
+or shared test-runner group, for example `tests/browser/full-workflow.spec.ts`
+under that group's `owned_paths`. Otherwise emit the intended workflow as
+`behavior_journeys` and let the owned runner/check stage materialize the
+executable artifact. A command such as
+`npm run test:browser -- tests/browser/full-workflow.spec.ts` is invalid if
+no group is responsible for creating `tests/browser/full-workflow.spec.ts`.
+
 **Planned behavior journeys**: for every real webapp, emit
 `behavior_journeys` as deterministic user-checklist plans. These are not
 random exploration scripts. They are the planned user behaviors Otto must
