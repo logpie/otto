@@ -776,7 +776,8 @@ def test_web_as_user_agent_browser_probe_records_real_tool_path(
     )
 
     assert ctx.failures.failures == []
-    assert len(web_as_user._agent_browser_session(ctx)) <= 32
+    assert len(web_as_user._agent_browser_session(ctx)) <= 16
+    assert len(str(web_as_user._agent_browser_socket_dir(ctx))) <= 16
     assert calls
     assert all(call[:3] == ["agent-browser", "--session", calls[0][2]] for call in calls)
     assert [call[3] for call in calls] == ["set", "open", "wait", "snapshot", "screenshot"]

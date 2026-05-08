@@ -613,14 +613,14 @@ def _record_mc_user_action(
 
 def _agent_browser_session(ctx: ScenarioContext) -> str:
     source = f"{ctx.run_id}-{ctx.scenario.id}-{ctx.project_dir.name}"
-    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:8]
     scenario = re.sub(r"[^a-zA-Z0-9_.-]+", "-", ctx.scenario.id).strip("-").lower()
-    return f"tw-{scenario[:8] or 'w'}-{digest}"
+    return f"tw{scenario[:3] or 'w'}{digest}"
 
 
 def _agent_browser_socket_dir(ctx: ScenarioContext) -> Path:
-    digest = hashlib.sha256(str(ctx.artifact_dir).encode("utf-8")).hexdigest()[:12]
-    socket_dir = Path(tempfile.gettempdir()) / "otto-agent-browser" / digest
+    digest = hashlib.sha256(str(ctx.artifact_dir).encode("utf-8")).hexdigest()[:8]
+    socket_dir = Path("/tmp") / "ab" / digest
     socket_dir.mkdir(parents=True, exist_ok=True)
     return socket_dir
 
