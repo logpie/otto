@@ -271,6 +271,33 @@ class BuildBudget:
 
 
 @dataclass
+class ContractDelta:
+    """A slice touched a shared contract surface during build.
+
+    This is not automatically bad. It is integration evidence: the merge/audit
+    stages should inspect whether the change preserves the shared invariant and
+    composes with peer branches.
+    """
+
+    group_id: str
+    contract_id: str
+    owner_id: str
+    paths: list[str] = field(default_factory=list)
+    invariants: list[str] = field(default_factory=list)
+    extension_policy: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "contract_id": self.contract_id,
+            "owner_id": self.owner_id,
+            "paths": list(self.paths),
+            "invariants": list(self.invariants),
+            "extension_policy": self.extension_policy,
+        }
+
+
+@dataclass
 class GroupResult:
     """Per-slice outcome of the build loop."""
 
@@ -282,6 +309,7 @@ class GroupResult:
     last_evidence: list[Evidence] = field(default_factory=list)
     failure_narrative: str = ""
     scope_warnings: list[str] = field(default_factory=list)
+    contract_deltas: list[ContractDelta] = field(default_factory=list)
     cost_usd: float = 0.0
     wall_s: float = 0.0
 
@@ -317,6 +345,7 @@ class ComponentResult:
     last_evidence: list[Evidence] = field(default_factory=list)
     failure_narrative: str = ""
     scope_warnings: list[str] = field(default_factory=list)
+    contract_deltas: list[ContractDelta] = field(default_factory=list)
     cost_usd: float = 0.0
     wall_s: float = 0.0
 
@@ -377,6 +406,15 @@ class BuildResult:
             for r in self.component_results
         )
 
+    @property
+    def contract_deltas(self) -> list[ContractDelta]:
+        deltas: list[ContractDelta] = []
+        for result in self.group_results:
+            deltas.extend(result.contract_deltas)
+        for result in self.component_results:
+            deltas.extend(result.contract_deltas)
+        return deltas
+
 
 # ---------------------------------------------------------------------------
 # Build agent abstraction (mockable)
@@ -409,6 +447,7 @@ class BuildAgentInput:
     context_packet_path: Path | None = None
     full_spec_path: Path | None = None
     merge_repair: bool = False  # true when merge_queue asks this slice to integrate
+    contract_deltas: tuple[ContractDelta, ...] = ()
     timeout_s: int | None = None  # wall timeout for this provider attempt
 
 
@@ -634,6 +673,27 @@ def detect_critical_shared_contract_violations(
     that needs to change such a path should route through that owner or request
     an amendment instead of silently patching shared state.
     """
+    deltas = collect_critical_shared_contract_deltas(group_obj, spec, modified_paths)
+    violations: list[str] = []
+    for delta in deltas:
+        violations.extend(
+            f"{path} (shared_contract={delta.contract_id}, owner={delta.owner_id})"
+            for path in delta.paths
+        )
+    return violations
+
+
+def collect_critical_shared_contract_deltas(
+    group_obj: Group,
+    spec: Spec,
+    modified_paths: Iterable[str],
+) -> list[ContractDelta]:
+    """Return structured shared-contract touches for merge/audit integration.
+
+    Initial build treats these as risk signals, not automatic failures. The
+    integrated product still has to satisfy the declared invariant; merge repair
+    and audit receive these deltas as an explicit checklist.
+    """
     contracts = [
         contract
         for contract in (getattr(spec, "shared_contracts", []) or [])
@@ -644,7 +704,7 @@ def detect_critical_shared_contract_violations(
     ]
     if not contracts:
         return []
-    violations: list[str] = []
+    touched: dict[str, ContractDelta] = {}
     for raw in modified_paths:
         path = str(raw or "").strip()
         if not path:
@@ -661,11 +721,26 @@ def detect_critical_shared_contract_violations(
             ):
                 continue
             if _matches_any(path, list(getattr(contract, "paths", []) or [])):
-                violations.append(
-                    f"{path} (shared_contract={contract.id}, owner={contract.owner_id})"
-                )
+                key = str(getattr(contract, "id", "") or "")
+                delta = touched.get(key)
+                if delta is None:
+                    delta = ContractDelta(
+                        group_id=group_obj.id,
+                        contract_id=key,
+                        owner_id=str(getattr(contract, "owner_id", "") or ""),
+                        invariants=[
+                            str(item)
+                            for item in (getattr(contract, "invariants", []) or [])
+                        ],
+                        extension_policy=str(
+                            getattr(contract, "extension_policy", "") or ""
+                        ),
+                    )
+                    touched[key] = delta
+                if path not in delta.paths:
+                    delta.paths.append(path)
                 break
-    return violations
+    return [delta for delta in touched.values() if delta.paths]
 
 
 def _transitive_deps(group_id: str, spec: Spec) -> set[str]:
@@ -1983,6 +2058,7 @@ async def _run_slice(
     last_failure = initial_failure_narrative
     last_evidence: list[Evidence] = []
     accumulated_scope_warnings: list[str] = []
+    accumulated_contract_deltas: list[ContractDelta] = []
     cost_total = 0.0
     attempt = 0
     raw_log_dir = session_dir / "build" / group_obj.id
@@ -2308,37 +2384,43 @@ async def _run_slice(
                 if w not in accumulated_scope_warnings:
                     accumulated_scope_warnings.append(w)
 
-        critical_scope_violations = detect_critical_shared_contract_violations(
+        contract_deltas = collect_critical_shared_contract_deltas(
             group_obj,
             spec,
             modified,
         )
-        if critical_scope_violations:
-            last_failure = (
-                "critical shared-contract scope violation: modified "
-                + ", ".join(critical_scope_violations[:5])
-                + ". Repair by preserving the declared shared contract, "
-                "routing the change through the owning foundation/shared-core "
-                "component, or requesting a spec amendment if the product "
-                "contract truly needs to change."
+        if contract_deltas:
+            for delta in contract_deltas:
+                existing = next(
+                    (
+                        item
+                        for item in accumulated_contract_deltas
+                        if item.contract_id == delta.contract_id
+                    ),
+                    None,
+                )
+                if existing is None:
+                    accumulated_contract_deltas.append(delta)
+                else:
+                    for path in delta.paths:
+                        if path not in existing.paths:
+                            existing.paths.append(path)
+            detail = (
+                "shared contract delta recorded for merge integration: "
+                + "; ".join(
+                    f"{delta.contract_id} owned by {delta.owner_id}: "
+                    f"{', '.join(delta.paths[:5])}"
+                    for delta in contract_deltas
+                )
             )
             emit(
                 session_dir,
-                "scope.critical",
+                "contract.delta",
                 group_id=group_obj.id,
                 attempt=attempt,
-                detail=last_failure,
-                paths=list(critical_scope_violations),
+                detail=detail,
+                deltas=[delta.to_dict() for delta in contract_deltas],
             )
-            emit(
-                session_dir,
-                "group.attempt.failed",
-                group_id=group_obj.id,
-                attempt=attempt,
-                detail=last_failure,
-            )
-            current_diff_hash = _hash_worktree_diff(worktree)
-            continue
 
         # Run slice's deterministic checks.
         emit(
@@ -2375,6 +2457,7 @@ async def _run_slice(
                 last_evidence=last_evidence,
                 failure_narrative="",
                 scope_warnings=list(accumulated_scope_warnings),
+                contract_deltas=list(accumulated_contract_deltas),
                 cost_usd=cost_total,
                 wall_s=time.monotonic() - slice_t0,
             )
@@ -2427,6 +2510,7 @@ async def _run_slice(
         last_evidence=last_evidence,
         failure_narrative=last_failure or "exceeded per-slice retry budget",
         scope_warnings=list(accumulated_scope_warnings),
+        contract_deltas=list(accumulated_contract_deltas),
         cost_usd=cost_total,
         wall_s=time.monotonic() - slice_t0,
     )
@@ -2581,6 +2665,9 @@ def _write_build_context_packet(
         "shared_scaffold": list(agent_input.spec.shared_scaffold),
         "shared_paths": list(getattr(agent_input.spec, "shared_paths", []) or []),
         "shared_contracts": spec_dict.get("shared_contracts", []),
+        "contract_deltas": [
+            delta.to_dict() for delta in (agent_input.contract_deltas or ())
+        ],
         "behavior_journeys": spec_dict.get("behavior_journeys", []),
         "cross_group_checks": spec_dict.get("cross_group_checks", []),
         "done_means": list(agent_input.spec.done_means),
@@ -2768,9 +2855,11 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
             "Dep-owned paths are dependency surfaces, not blanket permission to "
             "rewrite shared product contracts. If a dep-owned path belongs to a "
             "critical shared contract such as a store, schema, persistence layer, "
-            "routing shell, import/export format, or config contract, preserve the "
-            "declared contract and request an amendment or owner change instead of "
-            "patching it directly."
+            "routing shell, import/export format, or config contract, first try to "
+            "consume its existing API. If your feature truly requires a compatible "
+            "extension, make the smallest deliberate change and Otto will record it "
+            "as a contract delta for merge/audit integration. If the product "
+            "contract itself changes, request an amendment or owner change."
         )
         lines.append("")
     if spec.shared_scaffold:
@@ -2785,7 +2874,9 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         "**Hard rule**: do NOT write files outside the lists above. "
         "If you need to (e.g., to make a check pass), STOP and request "
         "an amendment via `.otto/amendment_request.json` rather than "
-        "silently over-reaching."
+        "silently over-reaching. Compatible changes to declared critical "
+        "shared-contract paths are allowed only when needed for your feature; "
+        "Otto records them as contract deltas for merge/audit integration."
     )
     lines.append("")
     _append_prompt_snippet(lines, "build-agent-static-policy.md")
@@ -2810,6 +2901,25 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
             "to satisfy the slice's acceptance checks. Do NOT widen scope "
             "to make whole-product tests pass — that's other slices' job."
         )
+        lines.append("")
+
+    if agent_input.merge_repair and agent_input.contract_deltas:
+        lines.append("## Contract deltas from this branch")
+        lines.append(
+            "These are shared product-contract surfaces this branch touched. "
+            "They are not automatic violations. During merge repair, inspect "
+            "the branch diff and integrate the best compatible behavior while "
+            "preserving the listed invariants and already-landed product behavior."
+        )
+        for delta in agent_input.contract_deltas:
+            lines.append(
+                f"- `{delta.contract_id}` owner=`{delta.owner_id}` "
+                f"paths={', '.join(delta.paths[:6])}"
+            )
+            for invariant in delta.invariants[:4]:
+                lines.append(f"  - invariant: {invariant}")
+            if delta.extension_policy:
+                lines.append(f"  - extension policy: {delta.extension_policy}")
         lines.append("")
 
     # === CONTEXT BLOCK (whole-product signals, clearly framed as informational) ===
@@ -3168,10 +3278,12 @@ __all__ = [
     "BuildResult",
     "ComponentResult",
     "ComponentStatus",
+    "ContractDelta",
     "GroupResult",
     "GroupStatus",
     "build_groups",
     "build_slices",
+    "collect_critical_shared_contract_deltas",
     "default_build_agent",
     "detect_critical_shared_contract_violations",
     "detect_dependency_scope_extensions",

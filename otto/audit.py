@@ -1675,6 +1675,9 @@ def _build_summary(build_result: BuildResult) -> dict:
         "total_cost_usd": build_result.total_cost_usd,
         "total_wall_s": build_result.total_wall_s,
         "group_count": len(build_result.group_results),
+        "contract_deltas": [
+            delta.to_dict() for delta in getattr(build_result, "contract_deltas", [])
+        ],
         "per_group": [
             {
                 "group_id": r.group_id,
@@ -1683,6 +1686,9 @@ def _build_summary(build_result: BuildResult) -> dict:
                 "wall_s": r.wall_s,
                 "cost_usd": r.cost_usd,
                 "narrative": r.failure_narrative,
+                "contract_deltas": [
+                    delta.to_dict() for delta in getattr(r, "contract_deltas", [])
+                ],
             }
             for r in build_result.group_results
         ],
@@ -1695,6 +1701,11 @@ def _merge_summary(merge_result: MergeQueueResult) -> dict:
         "blocked_ids": list(merge_result.blocked_ids),
         "total_cost_usd": merge_result.total_cost_usd,
         "total_wall_s": merge_result.total_wall_s,
+        "contract_deltas": [
+            delta.to_dict()
+            for result in merge_result.results
+            for delta in getattr(result, "contract_deltas", [])
+        ],
         "per_group": [
             {
                 "group_id": r.group_id,
@@ -1704,6 +1715,9 @@ def _merge_summary(merge_result: MergeQueueResult) -> dict:
                 "wall_s": r.wall_s,
                 "cost_usd": r.cost_usd,
                 "narrative": r.failure_narrative,
+                "contract_deltas": [
+                    delta.to_dict() for delta in getattr(r, "contract_deltas", [])
+                ],
             }
             for r in merge_result.results
         ],
@@ -2036,6 +2050,21 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
             )
             for invariant in contract.invariants[:4]:
                 lines.append(f"  - {invariant}")
+        lines.append("")
+    contract_delta_count = len(agent_input.build_summary.get("contract_deltas") or []) + len(
+        agent_input.merge_summary.get("contract_deltas") or []
+    )
+    if contract_delta_count:
+        lines.append("## Contract deltas to verify")
+        lines.append(
+            "Some build branches touched shared contract surfaces. This is allowed "
+            "as integration evidence, but audit must explicitly verify the "
+            "integrated product still satisfies the listed shared invariants and "
+            "that peer behavior was retained."
+        )
+        lines.append(
+            "The exact deltas are included in the build and merge summary JSON below."
+        )
         lines.append("")
     if agent_input.feature_scope_ids:
         scoped = ", ".join(agent_input.feature_scope_ids)

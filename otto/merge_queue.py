@@ -47,6 +47,7 @@ from otto.build import (
     BuildResult,
     ComponentResult,
     ComponentStatus,
+    ContractDelta,
     GroupResult,
     GroupStatus,
     detect_scope_violations,
@@ -83,6 +84,7 @@ class MergeCandidate:
     base_branch: str  # the integration target (typically "main")
     worktree: Path  # slice branch worktree used for repair
     merge_worktree: Path | None = None  # integration target worktree
+    contract_deltas: list[ContractDelta] = field(default_factory=list)
 
 
 @dataclass
@@ -94,6 +96,7 @@ class MergeResult:
     landed_commit: str = ""  # short hash of the landed integration commit
     cross_slice_evidence: list[Evidence] = field(default_factory=list)
     group_recheck_evidence: list[Evidence] = field(default_factory=list)
+    contract_deltas: list[ContractDelta] = field(default_factory=list)
     failure_narrative: str = ""
     repair_attempts: int = 0
     cost_usd: float = 0.0
@@ -303,6 +306,20 @@ def _candidate_worktree(
     return Path(worktree) if worktree else project_dir
 
 
+def _candidate_contract_deltas(
+    group_obj: Group,
+    *,
+    unit_kind: str,
+    latest_group_results: dict[str, GroupResult],
+    latest_component_results: dict[str, ComponentResult],
+) -> list[ContractDelta]:
+    if unit_kind == "component":
+        result = latest_component_results.get(group_obj.id)
+    else:
+        result = latest_group_results.get(group_obj.id)
+    return list(getattr(result, "contract_deltas", []) or [])
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
@@ -447,7 +464,27 @@ async def run_merge_queue(
                 latest_component_results=latest_component_results,
             ),
             merge_worktree=project_dir,
+            contract_deltas=_candidate_contract_deltas(
+                group_obj,
+                unit_kind=unit_kind,
+                latest_group_results=latest_group_results,
+                latest_component_results=latest_component_results,
+            ),
         )
+        if candidate.contract_deltas:
+            emit(
+                session_dir,
+                "contract.delta.merge",
+                group_id=group_obj.id,
+                detail=(
+                    "contract deltas will be inspected during merge integration: "
+                    + "; ".join(
+                        f"{delta.contract_id}: {', '.join(delta.paths[:5])}"
+                        for delta in candidate.contract_deltas
+                    )
+                ),
+                deltas=[delta.to_dict() for delta in candidate.contract_deltas],
+            )
         emit(
             session_dir,
             "group.merge.started",
@@ -682,6 +719,7 @@ async def _process_candidate(
                 cross_slice_evidence=[],
                 failure_narrative=f"merge wall budget exhausted after {wall:.0f}s",
                 repair_attempts=repair_attempts,
+                contract_deltas=list(candidate.contract_deltas),
                 cost_usd=cost_total,
                 wall_s=wall,
             )
@@ -750,6 +788,7 @@ async def _process_candidate(
                     landed_commit=outcome.head_after,
                     cross_slice_evidence=cross_evidence,
                     group_recheck_evidence=group_evidence,
+                    contract_deltas=list(candidate.contract_deltas),
                     repair_attempts=repair_attempts,
                     cost_usd=cost_total,
                     wall_s=time.monotonic() - t0,
@@ -803,6 +842,7 @@ async def _process_candidate(
                 status=MergeStatus.BLOCKED,
                 cross_slice_evidence=cross_evidence,
                 group_recheck_evidence=group_evidence,
+                contract_deltas=list(candidate.contract_deltas),
                 failure_narrative=last_failure + " (no build_agent for repair)",
                 repair_attempts=repair_attempts,
                 cost_usd=cost_total,
@@ -814,6 +854,7 @@ async def _process_candidate(
                 status=MergeStatus.BLOCKED,
                 cross_slice_evidence=cross_evidence,
                 group_recheck_evidence=group_evidence,
+                contract_deltas=list(candidate.contract_deltas),
                 failure_narrative=last_failure + " (repair retries exhausted)",
                 repair_attempts=repair_attempts,
                 cost_usd=cost_total,
@@ -879,6 +920,7 @@ async def _process_candidate(
             merge_repair=True,
             context_packet_path=raw_log_dir / f"repair-attempt-{repair_attempts:02d}" / "context-packet.json",
             full_spec_path=_default_spec_path(session_dir),
+            contract_deltas=tuple(candidate.contract_deltas),
         )
         if agent_input.context_packet_path:
             _write_build_context_packet(agent_input, agent_input.context_packet_path)
@@ -905,6 +947,7 @@ async def _process_candidate(
                 status=MergeStatus.BLOCKED,
                 cross_slice_evidence=cross_evidence,
                 group_recheck_evidence=group_evidence,
+                contract_deltas=list(candidate.contract_deltas),
                 failure_narrative=f"merge wall budget exhausted after {wall:.0f}s",
                 repair_attempts=repair_attempts,
                 cost_usd=cost_total,
@@ -1002,6 +1045,7 @@ async def _process_candidate(
                         status=MergeStatus.BLOCKED,
                         cross_slice_evidence=cross_evidence,
                         group_recheck_evidence=group_evidence,
+                        contract_deltas=list(candidate.contract_deltas),
                         failure_narrative=last_failure,
                         repair_attempts=repair_attempts,
                         cost_usd=cost_total,

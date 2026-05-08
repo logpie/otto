@@ -90,7 +90,9 @@ EVENT_KINDS: tuple[str, ...] = (
     "run.finished",
     # v2.2 — amendments + scope events ----------------------------------
     "scope.warning",            # build agent attempted out-of-scope edit (informational)
-    "scope.critical",           # critical shared-contract scope crossing (attempt-blocking)
+    "scope.critical",           # reserved for hard safety scope crossings
+    "contract.delta",           # build branch touched a shared contract surface
+    "contract.delta.merge",     # merge will inspect branch contract deltas
     "amendment.requested",      # build agent (or user) requested a tier-3 amendment
     "amendment.applied",        # request passed all tier checks and persisted
     "amendment.rejected",       # request failed a tier rule
@@ -141,6 +143,8 @@ EventKind = Literal[
     "run.finished",
     "scope.warning",
     "scope.critical",
+    "contract.delta",
+    "contract.delta.merge",
     "amendment.requested",
     "amendment.applied",
     "amendment.rejected",

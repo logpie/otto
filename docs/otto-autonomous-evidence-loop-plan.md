@@ -60,8 +60,11 @@ the planned behavior contract is satisfied.
 
 7. `[x]` Scope enforcement with contract semantics
    - Harmless scope crossings can remain warnings.
-   - Critical shared-contract crossings route to the owning component, request
-     an amendment, or fail the attempt with actionable repair evidence.
+   - Critical shared-contract crossings during initial build become structured
+     contract deltas for merge/audit integration instead of brittle automatic
+     attempt failures.
+   - Truly unsafe scope crossings and merge-repair overreach still block with
+     actionable repair evidence.
    - Enforcement is driven by declared contract ownership, not a large brittle
      path heuristic list.
    - Contract enforcement must distinguish product invariants from file
@@ -97,6 +100,8 @@ the planned behavior contract is satisfied.
 - Specs can persist planned behavior journeys and shared contracts, and these
   fields round-trip through parse/serialize.
 - Critical shared-contract path edits are no longer only silent/soft warnings.
+- Critical shared-contract path edits become visible contract deltas that merge
+  and audit must inspect against the shared invariant.
 - Merge/integration checks remain tied to the product contract rather than
   ad hoc retry loops.
 - Final validation includes focused unit tests and a true-web run on a recent
@@ -114,8 +119,8 @@ the planned behavior contract is satisfied.
   check failures are explicit evidence for the same resumed provider repair
   thread.
 - 2026-05-07: Added critical shared-contract scope detection in build attempts.
-  A non-owner edit to a critical contract path now fails the attempt with an
-  actionable repair/amendment narrative instead of being only a soft warning.
+  A non-owner edit to a critical contract path became actionable evidence
+  instead of only a soft warning.
 - 2026-05-07: AppServer audit note from current code: Otto already uses
   AppServer `thread/start`, `thread/resume`, `turn/start`, structured output,
   diff updates, approval handling, and normalized events. A native Otto check
@@ -164,6 +169,11 @@ the planned behavior contract is satisfied.
   structured contract-delta capture when a slice touches shared behavior, an
   intelligent merge/integration stage that retains the best compatible work
   across branches, and one integrated behavior/invariant validation pass before
-  repair. Until that merge-integrator contract-delta path exists, hard blocks
-  remain only for critical shared-contract writes that cannot be represented as
-  allowed extensions or accepted spec amendments.
+  repair.
+- 2026-05-08: Implemented the first workflow-level contract-delta path. Initial
+  build no longer hard-fails compatible non-owner edits to declared critical
+  shared-contract paths. It emits `contract.delta`, stores deltas on
+  `GroupResult`/`BuildResult`, passes them into merge repair prompts/context
+  packets, emits `contract.delta.merge`, and includes them in audit summaries
+  so integration validates the final product invariant instead of policing a
+  broad path glob.

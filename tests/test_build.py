@@ -22,10 +22,12 @@ from otto.build import (
     BuildAgentInput,
     BuildAgentOutput,
     BuildBudget,
+    ContractDelta,
     GroupStatus,
     _build_agent_prompt,
     _commit_group_work,
     _write_build_context_packet,
+    collect_critical_shared_contract_deltas,
     default_build_agent,
     detect_critical_shared_contract_violations,
     detect_dependency_scope_extensions,
@@ -624,6 +626,108 @@ def test_detect_critical_shared_contract_allows_declared_extensions() -> None:
     assert violations == [
         "tests/run_browser_journey.py (shared_contract=browser-runner, owner=foundation)"
     ]
+
+
+def test_collect_critical_shared_contract_deltas_groups_paths_by_contract() -> None:
+    foundation = Group(id="foundation", name="Foundation")
+    feature = Group(id="transactions", name="Transactions", dependencies=["foundation"])
+    spec = Spec(
+        intent="finance",
+        groups=[foundation, feature],
+        shared_contracts=[
+            SharedContract(
+                id="store",
+                name="Store",
+                owner_id="foundation",
+                paths=["src/lib/store.*"],
+                invariants=["transactions survive refresh"],
+                extension_policy="feature groups may call store APIs",
+            )
+        ],
+    )
+
+    deltas = collect_critical_shared_contract_deltas(
+        feature,
+        spec,
+        ["src/lib/store.ts", "src/lib/store.test.ts"],
+    )
+
+    assert len(deltas) == 1
+    assert deltas[0].to_dict() == {
+        "group_id": "transactions",
+        "contract_id": "store",
+        "owner_id": "foundation",
+        "paths": ["src/lib/store.ts", "src/lib/store.test.ts"],
+        "invariants": ["transactions survive refresh"],
+        "extension_policy": "feature groups may call store APIs",
+    }
+
+
+def test_run_build_records_contract_delta_without_blocking(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    (tmp_path / "src" / "lib").mkdir(parents=True)
+    (tmp_path / "src" / "lib" / "store.ts").write_text(
+        "export const version = 1;\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "src/lib/store.ts"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "store", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+    )
+    spec = _spec(
+        [
+            Group(id="foundation", name="Foundation", owned_paths=["src/lib/store.ts"]),
+            Group(
+                id="transactions",
+                name="Transactions",
+                dependencies=["foundation"],
+                owned_paths=["src/routes/Transactions.tsx"],
+                feature_ids=["transactions"],
+                checks=[_no_op_passing_check()],
+            ),
+        ]
+    )
+    spec.shared_contracts = [
+        SharedContract(
+            id="finance-store",
+            name="Finance store",
+            owner_id="foundation",
+            paths=["src/lib/store.*"],
+            invariants=["transactions survive refresh"],
+        )
+    ]
+
+    async def agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        if input_.group.id == "transactions":
+            (input_.worktree / "src" / "lib" / "store.ts").write_text(
+                "export const version = 2;\n",
+                encoding="utf-8",
+            )
+        return BuildAgentOutput(succeeded=True)
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=agent,
+        )
+    )
+
+    tx = next(r for r in result.group_results if r.group_id == "transactions")
+    assert tx.status == GroupStatus.PASSING
+    assert tx.contract_deltas
+    assert tx.contract_deltas[0].contract_id == "finance-store"
+    assert tx.contract_deltas[0].paths == ["src/lib/store.ts"]
+    events = [
+        json.loads(line)
+        for line in (session_dir / "spec-state.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(event["kind"] == "contract.delta" for event in events)
 
 
 def test_run_build_emits_check_feedback_for_same_thread_repair(tmp_path: Path) -> None:
@@ -1274,6 +1378,16 @@ def test_build_agent_prompt_has_merge_repair_framing(tmp_path: Path) -> None:
         attempt=1,
         last_failure_narrative="merge conflict on slice branch i2p/session/feed",
         merge_repair=True,
+        contract_deltas=(
+            ContractDelta(
+                group_id="feed",
+                contract_id="timeline-store",
+                owner_id="foundation",
+                paths=["src/lib/store.ts"],
+                invariants=["posts survive refresh"],
+                extension_policy="feature groups may add compatible selectors",
+            ),
+        ),
     )
 
     prompt = _build_agent_prompt(inp)
@@ -1284,6 +1398,9 @@ def test_build_agent_prompt_has_merge_repair_framing(tmp_path: Path) -> None:
     assert "Compose both sides where compatible" in prompt
     assert "already-integrated product behavior" in prompt
     assert "incompatible product decision" in prompt
+    assert "Contract deltas from this branch" in prompt
+    assert "timeline-store" in prompt
+    assert "posts survive refresh" in prompt
     assert "Integration failure detail" in prompt
     assert "merge conflict on slice branch i2p/session/feed" in prompt
 

@@ -20,6 +20,7 @@ from otto.build import (
     BuildAgentInput,
     BuildAgentOutput,
     BuildResult,
+    ContractDelta,
     GroupResult,
     GroupStatus,
     run_build,
@@ -734,18 +735,35 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
     build_result = BuildResult(
         spec_session_dir=session_dir,
         group_results=[
-            GroupResult(group_id="s1", status=GroupStatus.PASSING, attempts=1, branch="b1", worktree=tmp_path),
+            GroupResult(
+                group_id="s1",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch="b1",
+                worktree=tmp_path,
+                contract_deltas=[
+                    ContractDelta(
+                        group_id="s1",
+                        contract_id="shared-store",
+                        owner_id="foundation",
+                        paths=["src/lib/store.ts"],
+                        invariants=["marker state remains compatible"],
+                    )
+                ],
+            ),
         ],
     )
 
     seen_configs: list[dict] = []
     seen_timeouts: list[int | None] = []
     seen_context_packets: list[Path | None] = []
+    seen_contract_deltas: list[tuple[ContractDelta, ...]] = []
 
     async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
         seen_configs.append(dict(input_.config))
         seen_timeouts.append(input_.timeout_s)
         seen_context_packets.append(input_.context_packet_path)
+        seen_contract_deltas.append(input_.contract_deltas)
         # Repair by creating the missing marker.
         (input_.worktree / "marker.txt").write_text("ok", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.05)
@@ -769,8 +787,13 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
     assert 1 <= seen_timeouts[0] <= 17
     assert seen_context_packets[0] is not None
     assert seen_context_packets[0].is_file()
-    assert "behavior_journeys" in seen_context_packets[0].read_text(encoding="utf-8")
+    packet_text = seen_context_packets[0].read_text(encoding="utf-8")
+    assert "behavior_journeys" in packet_text
+    assert "contract_deltas" in packet_text
+    assert seen_contract_deltas[0][0].contract_id == "shared-store"
+    assert result.results[0].contract_deltas[0].contract_id == "shared-store"
     events = list(iter_events(session_dir))
+    assert any(event.kind == "contract.delta.merge" for event in events)
     feedback = [event for event in events if event.kind == "group.check.feedback"]
     assert feedback
     assert feedback[0].group_id == "s1"

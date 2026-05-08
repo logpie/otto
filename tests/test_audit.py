@@ -39,6 +39,7 @@ from otto.build import (
     BuildAgentInput,
     BuildAgentOutput,
     BuildResult,
+    ContractDelta,
     GroupResult,
     GroupStatus,
 )
@@ -614,7 +615,17 @@ def test_audit_prompt_and_packet_include_planned_behavior_and_shared_contracts(
         spec=spec,
         project_dir=tmp_path,
         integrated_worktree=tmp_path,
-        build_summary={},
+        build_summary={
+            "contract_deltas": [
+                ContractDelta(
+                    group_id="feed",
+                    contract_id="shared-product-core",
+                    owner_id="foundation",
+                    paths=["src/store/index.ts"],
+                    invariants=["Feed state persists across refresh."],
+                ).to_dict()
+            ]
+        },
         merge_summary={},
         cross_slice_evidence=[],
         walkthrough_artifacts=[],
@@ -633,6 +644,7 @@ def test_audit_prompt_and_packet_include_planned_behavior_and_shared_contracts(
     assert "The post appears in the feed." in prompt
     assert "Shared contracts to inspect" in prompt
     assert "Feed state persists across refresh." in prompt
+    assert "Contract deltas to verify" in prompt
     assert "Project contract test" in prompt
 
 
