@@ -500,6 +500,9 @@ def _playwright_browser_journey_preflight(
     wasteful repair loops. Detect that contract violation before launching the
     browser and return a targeted repair diagnostic.
     """
+    command_error = _playwright_command_entrypoint_preflight(check.command, cwd)
+    if command_error:
+        return command_error
     if not _browser_command_uses_playwright(check.command, cwd):
         return None
     test_paths = _playwright_browser_test_paths(cwd)
@@ -593,6 +596,87 @@ def _browser_command_uses_playwright(command: tuple[str, ...] | list[str], cwd: 
         script = str(package_data.get("scripts", {}).get(script_name, "")).lower()
         return "playwright" in script
     return False
+
+
+def _playwright_command_entrypoint_preflight(
+    command: tuple[str, ...] | list[str],
+    cwd: Path,
+) -> str | None:
+    """Require one canonical npm browser entrypoint for npm Playwright projects.
+
+    Feature agents often write tiny Python BrowserJourney wrappers. If those
+    wrappers call ``npx playwright test`` directly, a clean post-merge verifier
+    can resolve a different Playwright binary than the project script uses and
+    fail with misleading command errors such as ``unknown command 'test'``.
+    Route all npm Playwright journeys through the repo's browser script so
+    dependency bootstrap, runner flags, and binary resolution stay centralized.
+    """
+    package_json = cwd / "package.json"
+    try:
+        package_data = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    scripts = package_data.get("scripts", {})
+    browser_script = scripts.get("browser") if isinstance(scripts, dict) else None
+    if not isinstance(browser_script, str) or "playwright" not in browser_script.lower():
+        return None
+
+    joined_command = " ".join(str(part) for part in command).lower()
+    direct_command = _contains_direct_playwright_invocation(joined_command)
+    wrapper_paths = _browser_command_python_script_paths(command, cwd)
+    direct_wrappers = [
+        path.relative_to(cwd)
+        for path in wrapper_paths
+        if _contains_direct_playwright_invocation(_read_text(path).lower())
+    ]
+    if direct_command or direct_wrappers:
+        examples = ", ".join(str(path) for path in direct_wrappers[:3])
+        example_detail = f" Affected wrapper(s): {examples}." if examples else ""
+        return (
+            "Playwright BrowserJourney preflight failed: npm project has a "
+            "`browser` script, but the BrowserJourney bypasses it with a direct "
+            "`npx playwright test`/`playwright test` invocation. Route browser "
+            "journeys through `npm run browser -- <journey-file> --config "
+            "playwright.config.*` so dependency bootstrap, binary resolution, "
+            f"ports, and runner flags stay centralized.{example_detail}"
+        )
+    return None
+
+
+def _contains_direct_playwright_invocation(text: str) -> bool:
+    if re.search(
+        r"\b(?:npx|pnpm\s+exec|pnpm\s+dlx|yarn\s+dlx)?\s*playwright\s+test\b",
+        text,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"['\"]playwright['\"]\s*,\s*['\"]test['\"]",
+            text,
+        )
+    )
+
+
+def _browser_command_python_script_paths(
+    command: tuple[str, ...] | list[str],
+    cwd: Path,
+) -> list[Path]:
+    if not command:
+        return []
+    executable = Path(str(command[0])).name.lower()
+    if executable not in {"python", "python3", "pytest"}:
+        return []
+    paths: list[Path] = []
+    for raw_part in command[1:]:
+        part = str(raw_part)
+        if not part.endswith(".py"):
+            continue
+        path = Path(part)
+        if not path.is_absolute():
+            path = cwd / path
+        if path.is_file():
+            paths.append(path)
+    return paths
 
 
 def _playwright_config_paths(cwd: Path) -> list[Path]:

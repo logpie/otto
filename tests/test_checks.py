@@ -679,6 +679,48 @@ def test_browser_journey_preflights_overbroad_playwright_suite(tmp_path: Path) -
     assert "full browser suite" in evidence.raw["preflight_error"]
 
 
+def test_browser_journey_preflights_python_wrapper_bypassing_browser_script(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"browser": "playwright test tests/browser/main.spec.ts"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "playwright.config.ts").write_text(
+        "import { defineConfig } from '@playwright/test';\n"
+        "const port = process.env.OTTO_BROWSER_PORT || '4173';\n"
+        "const baseURL = process.env.OTTO_BROWSER_BASE_URL || `http://127.0.0.1:${port}`;\n"
+        "export default defineConfig({ webServer: { command: `npm run dev -- --port ${port}`, url: baseURL }, use: { baseURL } });\n",
+        encoding="utf-8",
+    )
+    browser_dir = tmp_path / "tests" / "browser"
+    browser_dir.mkdir(parents=True)
+    (browser_dir / "main.spec.ts").write_text(
+        "import { test } from '@playwright/test';\n"
+        "test('journey', async ({ page }) => { await page.goto('/'); });\n",
+        encoding="utf-8",
+    )
+    (browser_dir / "test_main.py").write_text(
+        "import subprocess\n"
+        "subprocess.run(['npx', 'playwright', 'test', 'tests/browser/main.spec.ts'], check=True)\n",
+        encoding="utf-8",
+    )
+
+    evidence = run_check(
+        BrowserJourney(
+            command=("python3", "tests/browser/test_main.py"),
+            evidence_globs=("test-results/**/*.png",),
+            timeout_s=15,
+        ),
+        project_dir=tmp_path,
+        cwd=tmp_path,
+    )
+
+    assert evidence.passed is False
+    assert "bypasses it with a direct" in evidence.raw["preflight_error"]
+    assert "tests/browser/test_main.py" in evidence.raw["preflight_error"]
+
+
 def test_browser_journey_empty_command_is_informational(tmp_path: Path) -> None:
     """v2.1: empty browser command → informational PASS."""
     check = BrowserJourney(command=(), evidence_globs=(), timeout_s=10)

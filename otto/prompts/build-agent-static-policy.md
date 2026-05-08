@@ -132,12 +132,18 @@ port and `process.env.OTTO_BROWSER_BASE_URL || "http://127.0.0.1:<port>"` for
 file without accidentally running unrelated journeys. Before returning, prove
 that the declared `npm run browser -- <journey>` command can resolve relative
 URLs through that config; an "invalid URL" failure is a runner/config bug, not
-product evidence.
+product evidence. If you create a Python or shell wrapper for a BrowserJourney
+in an npm project, the wrapper must call the repo-owned script, for example
+`npm run browser -- tests/browser/test_feature.ts --config playwright.config.ts`.
+Do not call `npx playwright test` or `playwright test` directly from wrappers;
+that bypasses dependency bootstrap and can resolve the wrong Playwright binary
+in clean verifier worktrees.
 
 Expect Otto to preflight BrowserJourney config before launching a real browser.
 Hard-coded loopback ports, missing `webServer`/`baseURL`, overbroad browser test
-selection, or shared/default agent-browser sessions are repairable runner bugs.
-Fix those before investigating product UI behavior.
+selection, direct `npx playwright test` wrappers, or shared/default
+agent-browser sessions are repairable runner bugs. Fix those before
+investigating product UI behavior.
 
 If the project chooses `agent-browser` for a BrowserJourney script, use a
 unique named session per journey/worktree and the same Otto base-url env values,
