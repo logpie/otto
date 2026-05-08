@@ -2123,6 +2123,11 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
             "Write or update the walkthrough JSONL at this exact path: "
             f"{agent_input.walkthrough_jsonl_path}"
         )
+        feature_verdicts_path = agent_input.walkthrough_jsonl_path.parent.parent / "feature-verdicts.json"
+        lines.append(
+            "Write the per-Feature verdict artifact at this exact path before "
+            f"any optional exploratory browsing: {feature_verdicts_path}"
+        )
         lines.append("")
     lines.append(
         "Before recording your verdicts, you must walk the integrated "
@@ -2130,6 +2135,23 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         "contract below. Per-Feature evidence is derived from these "
         "tagged actions; untagged or weakly-tagged walkthroughs cause "
         "the audit pass to be rejected."
+    )
+    lines.append(
+        "Order of work is mandatory: first inspect deterministic evidence, then "
+        "write a complete draft `feature-verdicts.json` covering every Feature "
+        "with `missing`/`blocked` for unknowns, then run only the focused "
+        "browser probes needed to upgrade or correct those verdicts. Refresh "
+        "the artifact after each meaningful finding. This guarantees Otto can "
+        "recover honest structured coverage if the provider times out."
+    )
+    lines.append(
+        "For routine webapp interaction, use `agent-browser` directly with a "
+        "short `--session` and `AGENT_BROWSER_SOCKET_DIR`. Do not read Codex "
+        "operator skill files such as Playwright or agent-browser SKILL.md; "
+        "this prompt contains the browser-tool policy you need. Use Playwright "
+        "only when a named gap requires file upload/download control, network "
+        "interception, multiple contexts, or an existing Playwright suite, and "
+        "say why in the evidence."
     )
     lines.append(
         "If the evidence packet or walkthrough artifacts already include a "

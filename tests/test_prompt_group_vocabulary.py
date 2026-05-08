@@ -155,9 +155,12 @@ def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -
     assert "Do not invoke Codex skills, read `SKILL.md`, or open user-level" in text
     assert "do not import\nPlaywright or launch Chromium directly" in text
     assert "specific missing `agent-browser` capability" in text
+    assert "keep it as a stable dispatcher" in text
+    assert "tests/browser_journeys/<feature>.py" in text
+    assert "do not edit\n`tests/run_browser_journey.py` just to add your feature journey" in text
     assert "Semantic `find` supports" in text
     assert "agent-browser find label Type select expense" in text
-    assert "implement\nevery declared runner entry point up front" in text
+    assert "implement server boot, `agent-browser` session/socket\nsetup" in text
     assert "`unknown journey`" in text
     assert "do not use a broad global\nsemantic locator such as `find label Search" in text
     assert "`find label To ...`" in text
@@ -175,6 +178,9 @@ def test_compile_spec_browser_journeys_are_agent_browser_first() -> None:
     text = (PROMPTS_DIR / "compile-spec.md").read_text(encoding="utf-8")
     assert "`agent-browser --session <unique-id>`" in text
     assert "default browser runner is a project-owned" in text
+    assert "stable shared dispatcher owned by the foundation/shared-runner group" in text
+    assert "tests/browser_journeys/transactions.py" in text
+    assert "Do not\nmake every feature group edit `tests/run_browser_journey.py`" in text
     assert "Do not emit routine feature checks" in text
     assert "Use repo-native Playwright only when" in text
     assert "Playwright only when" in text

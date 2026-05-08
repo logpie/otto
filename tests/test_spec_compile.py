@@ -289,6 +289,7 @@ def test_webapp_browser_contract_does_not_capture_feature_journey_tests() -> Non
                 owner_id="foundation",
                 paths=[
                     "tests/run_browser_journey.py",
+                    "tests/browser_journeys/**",
                     "tests/browser/**",
                     "otto_artifacts/browser/**",
                     "playwright.config.ts",
@@ -305,6 +306,7 @@ def test_webapp_browser_contract_does_not_capture_feature_journey_tests() -> Non
         "playwright.config.ts",
     ]
     assert spec.shared_contracts[0].allowed_extension_paths == [
+        "tests/browser_journeys/**",
         "tests/browser/**",
         "otto_artifacts/browser/**",
     ]

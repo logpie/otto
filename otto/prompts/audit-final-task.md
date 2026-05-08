@@ -68,6 +68,21 @@ output:
      session name is too long for the local socket path; rerun once with a short
      session/socket and then judge the real product behavior from that result.
 
+     For routine webapp audits, use `agent-browser` as the browser tool. Do not
+     open Codex operator skill files to decide how to browse; this prompt is the
+     audit contract. Use Playwright only for a concrete capability gap such as
+     upload/download orchestration, network interception, multiple browser
+     contexts, trace debugging, or an existing project Playwright suite, and
+     cite that reason in the evidence.
+
+     Write structured verdict artifacts before optional deep exploration:
+     `feature-verdicts.json` must contain one verdict per Feature as soon as
+     deterministic/browser evidence is sufficient to make a draft judgment.
+     Unknown or unverified Features should be marked `blocked`/`missing`
+     first, then upgraded only after real evidence. Refresh this artifact after
+     each material browser finding so Otto can recover honest coverage if the
+     provider times out before the final chat JSON.
+
   4. A final verdict: `passed`, `partial`, or `blocked`.
   5. A quality assessment of the user-facing experience (REQUIRED, independent
      of the functional verdict):

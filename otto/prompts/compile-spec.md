@@ -54,7 +54,7 @@ deterministically.
         "home-about-routes"
       ],
       "dependencies": [],
-      "owned_paths": ["src/App.*", "src/index.*", "src/components/Navbar.*", "tests/run_browser_journey.py"],
+      "owned_paths": ["src/App.*", "src/index.*", "src/components/Navbar.*", "tests/run_browser_journey.py", "tests/browser_journeys/shell.py"],
       "checks": [
         {
           "kind": "browser_journey",
@@ -138,8 +138,8 @@ deterministically.
       "paths": ["src/App.*", "src/main.*", "vite.config.*", "tests/run_browser_journey.py"],
       "invariants": ["routes render through one app shell", "browser checks honor Otto browser env and use agent-browser for routine journeys"],
       "consumed_by": ["scaffold-spa", "navbar-home-about", "home-about-routes"],
-      "extension_policy": "Feature groups may add feature-owned route files and browser journeys that consume this shell. Changing shared route registration or browser runner behavior requires the owner or a spec amendment.",
-      "allowed_extension_paths": ["tests/browser/test_*.py", "tests/browser/test_*.playwright.ts"],
+      "extension_policy": "Feature groups may add feature-owned route files and browser journey modules that the shared runner discovers. Changing shared route registration, browser runner boot behavior, artifact locations, or command shape requires the owner or a spec amendment.",
+      "allowed_extension_paths": ["tests/browser_journeys/*.py", "tests/browser/test_*.py", "tests/browser/test_*.playwright.ts"],
       "critical": true
     }
   ],
@@ -668,7 +668,19 @@ Example for a library:
    greenfield webapps, the default browser runner is a project-owned
    `tests/run_browser_journey.py` that shells out to
    `agent-browser --session <unique-id>` for real click/type/screenshot
-   behavior. Do not emit routine feature checks such as
+   behavior.
+
+   Avoid the merge-hot-file failure mode: `tests/run_browser_journey.py` is a
+   stable shared dispatcher owned by the foundation/shared-runner group. It
+   should discover or import feature-owned journey modules such as
+   `tests/browser_journeys/transactions.py` or
+   `tests/browser_journeys/filters.py`. Feature groups should own and edit
+   their module, not the shared dispatcher. The dispatcher may map
+   `--journey <id>` to modules by filename or a registry that auto-discovers
+   modules; it must not require every later feature to append another branch to
+   the same shared file.
+
+   Do not emit routine feature checks such as
    `npm run test:browser -- tests/browser/<feature>.spec.ts` as
    `browser_journey`; that steers the build back into Playwright and hides
    the intended Otto-owned browser path. Use repo-native Playwright only when
@@ -862,7 +874,14 @@ This script boots the app, drives a real browser through the home page using
 `agent-browser --session <unique-id>` for routine user-level
 click/type/screenshot flows, and may accept an argument such as
 `--journey <id>` so feature and cross-group checks can reuse the same
-Otto-owned runner. Use repo-native Playwright real event primitives only when
+Otto-owned runner. Treat it as a stable dispatcher: the foundation/shared-runner
+group owns server boot, session/socket isolation, artifact paths, and journey
+dispatch, while feature groups add feature-owned journey modules under
+`tests/browser_journeys/` or another declared allowed-extension path. Do not
+make every feature group edit `tests/run_browser_journey.py` to add one more
+journey case; that creates predictable merge conflicts and hides whether the
+product failed or the runner was flattened during merge.
+Use repo-native Playwright real event primitives only when
 the scenario needs Playwright-only capabilities such as file upload, network
 interception, multiple browser contexts, or an existing Playwright suite, and
 make that exception explicit in the feature/check rationale. The journey
@@ -886,7 +905,8 @@ Do not invent a concrete command path for a cross-group check unless that
 file already exists in the project or exactly one group owns creating it.
 For generated webapp test runners, assign `tests/run_browser_journey.py` to
 the foundation or shared test-runner group and have it support named journeys
-such as `--journey main-workflow`. Otherwise emit the intended workflow as
+such as `--journey main-workflow` through discovery of feature-owned journey
+modules. Otherwise emit the intended workflow as
 `behavior_journeys` and let the owned runner/check stage materialize the
 executable artifact. A command such as
 `npm run test:browser -- tests/browser/full-workflow.spec.ts` is invalid if
@@ -934,7 +954,8 @@ under a foundation-owned shared contract path; feature groups may own their own
 browser journeys. Put only shared runner/config files such as
 `playwright.config.*`, `tests/run_browser_journey.py`, or common test fixtures
 in a browser/test-runner shared contract, and list feature-owned browser journey
-patterns in `allowed_extension_paths` when useful.
+patterns such as `tests/browser_journeys/*.py` in `allowed_extension_paths`
+when useful.
 
 ```json
 {

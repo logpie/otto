@@ -1159,6 +1159,32 @@ def test_audit_prompt_includes_timeout_stop_rule(tmp_path: Path) -> None:
     assert "required fenced JSON verdict" in prompt
     assert "return `partial` with the specific missing evidence instead of timing out" in prompt
     assert "translating those observed actions into tagged `walkthrough.jsonl` entries" in prompt
+    assert "write a complete draft `feature-verdicts.json`" in prompt
+    assert "use `agent-browser` directly" in prompt
+    assert "Do not read Codex operator skill files" in prompt
+    assert "Write the per-Feature verdict artifact at this exact path" not in prompt
+
+
+def test_audit_prompt_with_walkthrough_path_names_structured_artifacts(tmp_path: Path) -> None:
+    prompt = _audit_prompt(
+        AuditAgentInput(
+            spec=_spec(["s1"]),
+            project_dir=tmp_path,
+            integrated_worktree=tmp_path,
+            build_summary={},
+            merge_summary={},
+            cross_slice_evidence=[],
+            walkthrough_artifacts=[],
+            judge_timeout_s=300,
+            evidence_packet_path=tmp_path / "evidence-packet.json",
+            walkthrough_jsonl_path=tmp_path / "audit" / "attempt-00" / "walkthrough" / "walkthrough.jsonl",
+        )
+    )
+
+    assert "Write or update the walkthrough JSONL at this exact path" in prompt
+    assert "audit/attempt-00/walkthrough/walkthrough.jsonl" in prompt
+    assert "Write the per-Feature verdict artifact at this exact path" in prompt
+    assert "audit/attempt-00/feature-verdicts.json" in prompt
 
 
 def test_audit_default_judge_timeout_allows_real_web_audit() -> None:

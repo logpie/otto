@@ -151,17 +151,28 @@ run(["agent-browser", "--session", session, "close"], env=env)
 ```
 
 If this group owns a shared BrowserJourney runner such as
-`tests/run_browser_journey.py`, read the full spec/check list and implement
-every declared runner entry point up front, not only this group's immediate
-journey. For example, if group or cross-group checks call
+`tests/run_browser_journey.py`, keep it as a stable dispatcher. Read the full
+spec/check list and implement server boot, `agent-browser` session/socket
+setup, artifact conventions, and `--journey <id>` dispatch up front. Prefer
+auto-discovery of feature-owned modules such as
+`tests/browser_journeys/transactions.py` over hard-coding every feature journey
+inside the dispatcher. For example, if group or cross-group checks call
 `python3 tests/run_browser_journey.py --journey transactions`, `--journey
 filters`, `--journey csv`, and `--journey main-workflow`, the shared runner
-must accept all of those journey IDs and dispatch to meaningful browser
-actions for each. It is acceptable for a later-feature journey to fail on
-missing visible controls before that feature group is merged; it is not
-acceptable for the runner itself to fail with `invalid choice`,
-`unknown journey`, or an unimplemented placeholder. That is a shared-runner
-contract bug.
+must accept all of those journey IDs and route them to meaningful browser
+actions or to the appropriate feature module. It is acceptable for a
+later-feature journey to fail on missing visible controls before that feature
+group is merged; it is not acceptable for the runner itself to fail with
+`invalid choice`, `unknown journey`, or an unimplemented placeholder. That is a
+shared-runner contract bug.
+
+If this group does not own the shared runner, do not edit
+`tests/run_browser_journey.py` just to add your feature journey. Add a
+feature-owned module under the spec's allowed extension path, for example
+`tests/browser_journeys/<feature>.py`, and make it callable/discoverable by the
+existing dispatcher. If the dispatcher cannot discover feature modules, report
+that as a shared-runner defect instead of flattening the runner from a sibling
+group.
 
 `OTTO_BROWSER_BASE_URL` is an assigned URL/port for this journey, not proof
 that a product server is already running. A Python or shell `agent-browser`

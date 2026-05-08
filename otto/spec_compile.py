@@ -3339,6 +3339,8 @@ _CRITICAL_SHARED_CONTRACT_MARKERS: tuple[str, ...] = (
 
 
 _FEATURE_BROWSER_JOURNEY_PATHS: tuple[str, ...] = (
+    "tests/browser_journeys/**",
+    "tests/browser_journeys/*",
     "tests/browser/**",
     "tests/browser/*",
     "tests/e2e/**",
