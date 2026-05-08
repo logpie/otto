@@ -226,9 +226,9 @@ function certificationArg(command: JobCommand, subcommand: ImproveSubcommand, ce
 
 function pushPlanningArgs(extraArgs: string[], planning: PlanningMode, specFilePath: string): void {
   if (planning === "spec-review") {
-    extraArgs.push("--spec", "--spec-review-mode", "web");
+    extraArgs.push("--review-gate");
   } else if (planning === "spec-auto") {
-    extraArgs.push("--spec", "--yes");
+    extraArgs.push("--auto-approve");
   } else if (planning === "spec-file" && specFilePath) {
     extraArgs.push("--spec-file", specFilePath);
   }

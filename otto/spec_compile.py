@@ -3313,12 +3313,23 @@ def persist_spec(
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _write_canonical(target: Path, value: Spec) -> None:
+        target.write_text(
+            json.dumps(spec_to_dict(value), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if target.suffix == ".json":
+            target.with_suffix(".md").write_text(
+                render_spec_md(value),
+                encoding="utf-8",
+            )
+
     if not path.exists():
         if not allow_initial:
             raise SpecValidationError(
                 f"spec {path} does not exist; call persist_spec(..., allow_initial=True) for the first write"
             )
-        path.write_text(json.dumps(spec_to_dict(spec), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _write_canonical(path, spec)
         return path
 
     if allow_initial:
@@ -3330,7 +3341,7 @@ def persist_spec(
         # — that's a no-op-equivalent canonicalization, not an
         # amendment-requiring change. Without this branch, fresh runs
         # cheap-fail on flaky agent JSON formatting.
-        path.write_text(json.dumps(spec_to_dict(spec), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _write_canonical(path, spec)
         return path
 
     on_disk_data = json.loads(path.read_text(encoding="utf-8"))
@@ -3382,7 +3393,7 @@ def persist_spec(
             f"expected {new_hash!r}, got {latest.diff_sha256_after!r}"
         )
 
-    path.write_text(json.dumps(spec_to_dict(spec), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_canonical(path, spec)
     return path
 
 

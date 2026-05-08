@@ -1156,9 +1156,14 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
         # In i2p mode, ``--resume`` and ``--force`` map to the new
         # resume planner (see otto/resume.py); the rest remain
         # legacy-only knobs.
-        # ``--yes`` is silently accepted: the i2p path has no interactive
-        # spec-approval step, so the flag is a definitional no-op (kept
-        # for CI/script compatibility with the legacy CLI).
+        # Legacy Mission Control queue entries used --spec plus
+        # --spec-review-mode/--yes before i2p grew first-class flags.
+        # Map those spellings onto the real i2p review behavior instead
+        # of warning that they are ignored.
+        legacy_review_gate = bool(spec and spec_review_mode == "web" and not yes)
+        legacy_auto_approve = bool(spec and yes)
+        effective_review_gate = bool(review_gate or legacy_review_gate)
+        effective_auto_approve = bool(auto_approve or legacy_auto_approve)
         _ignored = [
             name
             for name, val in (
@@ -1171,7 +1176,7 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
                 ("--rounds", rounds is not None),
                 ("--strict", strict),
                 ("--force-cross-command-resume", force_cross_command_resume),
-                ("--spec", spec),
+                ("--spec", spec and not (legacy_review_gate or legacy_auto_approve)),
                 ("--spec-file", spec_file),
                 ("--in-worktree", in_worktree),
                 ("--allow-dirty", allow_dirty),
@@ -1183,7 +1188,7 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
                 "  [yellow]i2p mode: these flags are ignored: "
                 f"{', '.join(_ignored)}[/yellow]"
             )
-        if review_gate and auto_approve:
+        if effective_review_gate and effective_auto_approve:
             raise click.UsageError(
                 "--review-gate and --auto-approve are mutually exclusive."
             )
@@ -1199,7 +1204,7 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
             resume=resume,
             reset_budget=reset_budget,
             force=force,
-            review_gate=review_gate,
+            review_gate=effective_review_gate,
             gate_timeout_s=gate_timeout_s,
             budget=budget,
             max_turns=max_turns,

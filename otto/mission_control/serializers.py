@@ -704,6 +704,10 @@ def _argv_split_mode(argv: Any) -> bool | None:
 def _argv_planning(argv: Any) -> str:
     if _argv_option(argv, "--spec-file"):
         return "spec_file"
+    if _argv_flag(argv, "--review-gate"):
+        return "spec_review"
+    if _argv_flag(argv, "--auto-approve"):
+        return "spec_auto"
     if _argv_flag(argv, "--spec"):
         return "spec_auto" if _argv_flag(argv, "--yes") else "spec_review"
     return "direct"

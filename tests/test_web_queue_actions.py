@@ -215,10 +215,8 @@ def test_web_queue_build_spec_defaults_to_web_review_mode(tmp_path: Path) -> Non
     assert task.command_argv == [
         "build",
         "add reports",
-        "--spec",
+        "--review-gate",
         "--split",
-        "--spec-review-mode",
-        "web",
     ]
     config = _client(repo).get("/api/state").json()["live"]["items"][0]["build_config"]
     assert config["planning"] == "spec_review"

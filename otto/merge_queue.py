@@ -374,14 +374,19 @@ async def run_merge_queue(
         c.id for c in (getattr(spec, "components", None) or [])
     ]
     landed_ids: list[str] = [unit_id for unit_id in ordered_unit_ids if unit_id in skip_set]
-    # A7: pre-populate blocked_ids with operator-aborted groups so the
-    # eligibility check skips them. The build phase already returns
-    # BLOCKED for aborted groups (see otto/build.py `_run_slice`), so
-    # they shouldn't appear in `passing_ids`; this is a defense-in-depth
-    # belt-and-suspenders for cases where a group passed build but the
-    # operator aborted before merge could pick it up.
+    # Pre-populate blocked_ids with units that cannot enter merge. This
+    # is part of the final product verdict contract: a build-blocked unit
+    # is just as unlanded as a merge-blocked unit, and downstream audit
+    # must not be able to declare success while it is missing.
     aborted_ids = set(aborted_group_ids(session_dir))
-    blocked_ids: list[str] = [unit_id for unit_id in ordered_unit_ids if unit_id in aborted_ids]
+    structurally_blocked = {
+        *aborted_ids,
+        *set(build_result.blocked_ids),
+        *set(getattr(build_result, "blocked_component_ids", [])),
+    }
+    blocked_ids: list[str] = [
+        unit_id for unit_id in ordered_unit_ids if unit_id in structurally_blocked
+    ]
     redundant_ids: list[str] = []
     results: list[MergeResult] = []
     total_t0 = time.monotonic()
@@ -451,11 +456,7 @@ async def run_merge_queue(
         result = await _process_candidate(
             spec=spec,
             group_obj=group_obj,
-            cross_group_checks=_cross_group_checks_for_landed_state(
-                spec,
-                landed_ids=[*landed_ids, group_obj.id],
-                project_dir=project_dir,
-            ),
+            prior_landed_ids=landed_ids,
             candidate=candidate,
             project_dir=project_dir,
             session_dir=session_dir,
@@ -615,7 +616,7 @@ async def _process_candidate(
     *,
     spec: Spec,
     group_obj: Group,
-    cross_group_checks: list[Any],
+    prior_landed_ids: list[str],
     candidate: MergeCandidate,
     project_dir: Path,
     session_dir: Path,
@@ -702,8 +703,13 @@ async def _process_candidate(
             group_evidence = [ev for _check, ev in slice_pairs]
             slice_pass = all(ev.passed for ev in group_evidence)
 
+            cross_checks = _cross_group_checks_for_landed_state(
+                spec,
+                landed_ids=[*prior_landed_ids, group_obj.id],
+                project_dir=merge_worktree,
+            )
             cross_pairs = run_checks(
-                list(cross_group_checks),
+                list(cross_checks),
                 project_dir=project_dir,
                 cwd=merge_worktree,
                 base_url=base_url,

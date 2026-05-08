@@ -228,6 +228,35 @@ def test_run_merge_queue_lands_single_slice_when_checks_pass(tmp_path: Path) -> 
     assert result.results[0].landed_commit  # short hash present
 
 
+def test_run_merge_queue_carries_build_blocked_ids_to_final_result(tmp_path: Path) -> None:
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    spec = _spec([
+        Group(id="s1", name="blocked at build", dependencies=[], owned_paths=[], feature_ids=[]),
+    ])
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="s1",
+                status=GroupStatus.BLOCKED,
+                attempts=1,
+                branch="i2p/x/s1",
+                worktree=tmp_path,
+                failure_narrative="build failed",
+            ),
+        ],
+    )
+
+    result = asyncio.run(
+        run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
+    )
+
+    assert result.landed_ids == []
+    assert result.blocked_ids == ["s1"]
+    assert result.results == []
+
+
 def test_build_and_merge_use_active_branch_in_linked_worktree(tmp_path: Path) -> None:
     """Queue task worktrees must merge into their task branch, not `main`.
 
@@ -527,7 +556,7 @@ def test_run_merge_queue_defers_missing_unowned_cross_group_runner_until_complet
             Group(
                 id="feature",
                 name="Feature",
-                dependencies=[],
+                dependencies=["foundation"],
                 owned_paths=["feature.txt"],
                 feature_ids=["write feature"],
                 checks=[_passing_check()],
@@ -567,6 +596,96 @@ def test_run_merge_queue_defers_missing_unowned_cross_group_runner_until_complet
     assert len(result.results[1].cross_slice_evidence) == 1
     assert result.results[1].cross_slice_evidence[0].passed is False
     assert "tests/main_workflow.py" in result.results[1].failure_narrative
+
+
+def test_run_merge_queue_reselects_cross_group_checks_after_merge(
+    tmp_path: Path,
+) -> None:
+    """A check runner created by the candidate must run after it lands."""
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    first_branch = "i2p/_session/foundation"
+    subprocess.run(["git", "checkout", "-b", first_branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "main_workflow.py").write_text(
+        "raise SystemExit(7)\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "tests/main_workflow.py"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(foundation): add failing runner", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    second_branch = "i2p/_session/feature"
+    subprocess.run(["git", "checkout", "-b", second_branch], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "feature.txt").write_text("feature\n", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "i2p(feature): build", "--no-verify"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=tmp_path, check=True, capture_output=True)
+
+    spec = _spec(
+        [
+            Group(
+                id="foundation",
+                name="Foundation",
+                dependencies=[],
+                owned_paths=["tests/main_workflow.py"],
+                feature_ids=["write workflow check"],
+                checks=[_passing_check()],
+            ),
+            Group(
+                id="feature",
+                name="Feature",
+                dependencies=["foundation"],
+                owned_paths=["feature.txt"],
+                feature_ids=["write feature"],
+                checks=[_passing_check()],
+            ),
+        ],
+        cross_checks=[
+            RepoTestCheck(command=("python", "tests/main_workflow.py"), timeout_s=10)
+        ],
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="foundation",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=first_branch,
+                worktree=tmp_path,
+            ),
+            GroupResult(
+                group_id="feature",
+                status=GroupStatus.PASSING,
+                attempts=1,
+                branch=second_branch,
+                worktree=tmp_path,
+            ),
+        ],
+    )
+
+    result = asyncio.run(
+        run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
+    )
+
+    assert result.landed_ids == []
+    assert result.blocked_ids == ["foundation"]
+    assert len(result.results[0].cross_slice_evidence) == 1
+    assert result.results[0].cross_slice_evidence[0].passed is False
+    assert "cross-slice" in result.results[0].failure_narrative
 
 
 # ---------------------------------------------------------------------------

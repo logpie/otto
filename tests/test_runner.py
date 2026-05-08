@@ -985,6 +985,54 @@ def test_layer2_repair_skipped_when_merge_has_blocked_groups(
     assert result.repair_result is None
 
 
+def test_structural_build_block_skips_expensive_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing group cannot become green by spending on product audit."""
+    spec = _spec()
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    order = _Order()
+    blocked_build = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="g",
+                status=GroupStatus.BLOCKED,
+                attempts=1,
+                branch="b",
+                worktree=session_dir,
+                failure_narrative="build failed",
+            )
+        ],
+    )
+    captured = _wire_stubs(
+        monkeypatch,
+        audit=_passing_audit(spec),
+        order=order,
+        build=blocked_build,
+        merge=MergeQueueResult(landed_ids=[], blocked_ids=["g"]),
+    )
+
+    result = asyncio.run(
+        run_pipeline(
+            "x", tmp_path, session_dir,
+            project_kind="webapp", brownfield=False, base_url=None, config={},
+            build_agent=_stub_agent,
+            audit_agent=_stub_agent,
+            fix_agent=_stub_agent,
+            spec=spec,
+        )
+    )
+
+    assert order.events == ["seed", "build", "merge", "render"]
+    assert captured["audit_calls"] == 0
+    assert result.audit_result is not None
+    assert result.audit_result.verdict == AuditVerdict.BLOCKED
+    assert "structurally incomplete" in result.audit_result.narrative
+    assert captured["repair_calls"] == 0
+
+
 def test_layer2_repair_reaudits_and_updates_final_verdict(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -402,9 +402,13 @@ async def repair_failing_features(
             audit_passes_run=result.audit_passes_run,
             max_audit_passes=max_audit_passes,
         ):
-            # No budget for re-audit: still attempt the fixes but record
-            # honestly that we cannot verify them.
+            # No budget for re-audit: do not dispatch hidden fixes that
+            # cannot be verified in this run. Earlier behavior attempted
+            # repairs anyway, which created slow "maybe fixed" loops and
+            # no fresh audit evidence for the operator.
             result.halted_reason = "audit_passes_cap_exhausted"
+            emit("audit.repair_loop.halted", {"reason": result.halted_reason})
+            return result
 
         # ---- Phase 1: dispatch fix attempts ----
         pass_attempts: list[RepairAttempt] = []

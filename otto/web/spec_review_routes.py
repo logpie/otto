@@ -164,8 +164,9 @@ def install_spec_review_routes(
             else None
         )
 
+        canonical_markdown = render_spec_md(edited)
         _archive_current_version(sd)
-        _write_spec(sd, edited, payload.markdown)
+        _write_spec(sd, edited, canonical_markdown)
 
         emit_state_event(
             sess_dir,
@@ -186,7 +187,7 @@ def install_spec_review_routes(
         view = _build_view(
             session_id=session_id,
             spec=edited,
-            markdown=payload.markdown,
+            markdown=canonical_markdown,
             lifecycle=lifecycle,
             updated_at=_mtime_iso(sd / SPEC_JSON_FILENAME),
         )

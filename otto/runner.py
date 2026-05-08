@@ -465,6 +465,23 @@ async def run_pipeline(
     # would burn $0.50–$2 to reproduce a known answer.
     if resume_plan is not None and resume_plan.audit_finished:
         audit_result = _audit_result_from_resume_plan(resume_plan)
+    elif _structural_blocked_ids(build_result, merge_result):
+        blocked_ids = _structural_blocked_ids(build_result, merge_result)
+        audit_result = _audit_result_from_structural_blocks(blocked_ids)
+        try:
+            emit(
+                session_dir,
+                "audit.started",
+                detail="skipped: structural build/merge blockers",
+            )
+            emit(
+                session_dir,
+                "audit.finished",
+                detail=audit_result.narrative,
+                verdict=audit_result.verdict.value,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("emit structural audit skip failed: %s", exc)
     else:
         audit_result = await run_audit(
             spec,
@@ -1572,6 +1589,47 @@ def _audit_result_from_resume_plan(plan: ResumePlan) -> AuditResult:
             f"{plan.session_id} already produced verdict={verdict.value}. "
             "See the prior session's audit artifacts for evidence."
         ),
+    )
+
+
+def _structural_blocked_ids(
+    build_result: BuildResult | None,
+    merge_result: MergeQueueResult | None,
+) -> list[str]:
+    """Return units that cannot be audited as a complete product.
+
+    A blocked build or merge means part of the approved spec did not
+    land. Running the expensive product judge in that state has repeatedly
+    produced slow, low-signal retries and can mask the real root blocker.
+    """
+    blocked: list[str] = []
+    for unit_id in (
+        *list(getattr(build_result, "blocked_ids", []) or []),
+        *list(getattr(build_result, "blocked_component_ids", []) or []),
+        *list(getattr(merge_result, "blocked_ids", []) or []),
+    ):
+        text = str(unit_id or "").strip()
+        if text and text not in blocked:
+            blocked.append(text)
+    return blocked
+
+
+def _audit_result_from_structural_blocks(blocked_ids: list[str]) -> AuditResult:
+    detail = ", ".join(blocked_ids)
+    return AuditResult(
+        verdict=AuditVerdict.BLOCKED,
+        narrative=(
+            "Audit skipped because the integrated product is structurally "
+            f"incomplete. Blocked units: {detail}."
+        ),
+        contract_test_passed=False,
+        contract_test_detail=(
+            "Product audit was not run because build/merge left blocked units: "
+            f"{detail}."
+        ),
+        verdict_cap_reasons=[
+            "structural build/merge blockers prevent a complete-product audit"
+        ],
     )
 
 

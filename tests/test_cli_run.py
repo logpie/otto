@@ -1322,6 +1322,28 @@ def test_build_review_gate_flag_threads_into_orchestrate_run(
     assert captured.get("review_gate") is True
 
 
+def test_i2p_build_legacy_spec_review_flags_map_to_review_gate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Queued Mission Control tasks from older clients must still pause."""
+    _init_project(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate_run(**kwargs):
+        captured.update(kwargs)
+        import sys
+        sys.exit(0)
+
+    monkeypatch.setattr("otto.cli_run.orchestrate_run", fake_orchestrate_run)
+    code, out = _run(
+        ["build", "--i2p", "--spec", "--spec-review-mode", "web", "intent"],
+        cwd=tmp_path,
+    )
+    assert code == 0, out
+    assert captured.get("review_gate") is True
+    assert "--spec" not in out
+
+
 def test_run_help_lists_review_gate_options() -> None:
     """`otto run --help` exposes both --review-gate and --auto-approve."""
     runner = CliRunner()

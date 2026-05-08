@@ -428,6 +428,62 @@ def test_web_as_user_honors_scenario_returned_failure(monkeypatch, tmp_path: Pat
     assert outcome.note == "scenario-specific failure"
 
 
+def test_needs_product_verification_requires_product_browser_step(
+    monkeypatch, tmp_path: Path
+) -> None:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    class DummyBackend:
+        port = 12345
+        url = "http://127.0.0.1:12345"
+
+        def stop(self) -> None:
+            return None
+
+    @contextmanager
+    def fake_project() -> Iterator[Path]:
+        project = tmp_path / "project"
+        project.mkdir()
+        yield project
+
+    monkeypatch.setattr(web_as_user, "DEFAULT_ARTIFACT_ROOT", tmp_path / "artifacts")
+    monkeypatch.setattr(web_as_user, "_throwaway_project", fake_project)
+    monkeypatch.setattr(
+        web_as_user,
+        "_start_otto_web_in_process",
+        lambda _project, _artifact, **_kwargs: DummyBackend(),
+    )
+    monkeypatch.setattr(web_as_user, "artifact_mine_pass", lambda _project, _failures: None)
+
+    scenario = web_as_user.Scenario(
+        id="WX",
+        description="missing product verification regression",
+        tier="nightly",
+        estimated_cost=0.0,
+        estimated_seconds=0,
+        needs_product_verification=True,
+        target_recordings=[],
+        run_fn=lambda _ctx: web_as_user.ScenarioRunResult("PASS", "ok", 0.0),
+    )
+
+    outcome = web_as_user.run_one_scenario(
+        scenario,
+        run_id="test-run",
+        provider="claude",
+        dry_run=False,
+        user_behavior="off",
+        user_seed=None,
+    )
+
+    assert outcome.outcome == "FAIL"
+    assert "never ran the generated-product browser verification" in outcome.note
+
+
 def test_web_as_user_summary_treats_infra_as_nonzero(tmp_path: Path) -> None:
     """INFRA is not a green test run unless the caller handles it explicitly."""
     sys.path.insert(0, str(SCRIPTS_DIR))

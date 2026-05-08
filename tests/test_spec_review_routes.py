@@ -141,6 +141,31 @@ def test_post_edit_round_trip_archives_prior_version(
     assert md_render["name"] == "MD rendering (renamed)"
 
 
+def test_post_edit_canonicalizes_markdown_to_active_spec(
+    project_with_spec: tuple[Path, str, Spec],
+) -> None:
+    """The UI must show the persisted active spec, not stale raw Markdown."""
+    project, sid, spec = project_with_spec
+    client = _client(project)
+    md = render_spec_md(spec).replace(
+        "<!-- planned-checks: group editor -->\n[]",
+        "<!-- planned-checks: group editor -->\nnot json",
+    )
+
+    resp = client.post(
+        f"/api/specs/{sid}/edit",
+        json={"intent_hash": spec.intent_hash, "markdown": md},
+    )
+
+    assert resp.status_code == 200, resp.text
+    returned = resp.json()["view"]["markdown"]
+    saved = (
+        project / "otto_logs" / "sessions" / sid / "spec" / "spec.md"
+    ).read_text(encoding="utf-8")
+    assert "not json" not in returned
+    assert returned == saved
+
+
 def test_post_edit_stale_intent_hash_returns_409(
     project_with_spec: tuple[Path, str, Spec],
 ) -> None:

@@ -4173,11 +4173,24 @@ def _action_key(action: str) -> str:
 
 def _normalize_web_build_spec_args(extra_args: list[str]) -> list[str]:
     args = list(extra_args)
+    if "--review-gate" in args or "--auto-approve" in args:
+        return args
     if "--spec" not in args:
         return args
-    if "--yes" in args or "--spec-review-mode" in args:
-        return args
-    return [*args, "--spec-review-mode", "web"]
+    auto_approve = "--yes" in args
+    normalized: list[str] = ["--auto-approve" if auto_approve else "--review-gate"]
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in {"--spec", "--yes"}:
+            continue
+        if arg == "--spec-review-mode":
+            skip_next = True
+            continue
+        normalized.append(arg)
+    return normalized
 
 
 def _event_action_name(key: str, *, label: str | None = None, domain: str | None = None) -> str:

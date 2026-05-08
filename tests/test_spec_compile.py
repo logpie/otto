@@ -24,6 +24,7 @@ from otto.spec_compile import (
     load_spec,
     parse_spec,
     persist_spec,
+    render_spec_md,
     spec_content_sha256,
     spec_from_dict,
     spec_to_dict,
@@ -415,6 +416,7 @@ def test_persist_spec_initial_write_requires_allow_initial(tmp_path: Path) -> No
         persist_spec(spec, target)
     persist_spec(spec, target, allow_initial=True)
     assert target.exists()
+    assert (tmp_path / "spec.md").read_text(encoding="utf-8") == render_spec_md(spec)
 
 
 def test_persist_spec_allow_initial_overwrites_pre_existing_file(tmp_path: Path) -> None:

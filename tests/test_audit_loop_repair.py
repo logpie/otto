@@ -345,7 +345,7 @@ def test_repair_loop_preserves_unattempted_failures_when_reaudit_is_scoped() -> 
 # ---------------------------------------------------------------------------
 
 
-def test_audit_passes_cap_skips_re_audit() -> None:
+def test_audit_passes_cap_skips_fix_and_re_audit() -> None:
     spec = _spec("f1")
     fix_agent, fix_calls = _make_fix_agent(succeed=True)
     re_audit, re_audit_calls = _make_re_audit({"f1": "passed"})
@@ -361,11 +361,10 @@ def test_audit_passes_cap_skips_re_audit() -> None:
             audit_passes_so_far=1,
         )
     )
-    # Fix attempted but re-audit skipped due to cap
-    assert len(result.attempts) == 1
-    assert fix_calls == [("f1", "g")]
+    # No hidden fix without a verification pass left.
+    assert result.attempts == []
+    assert fix_calls == []
     assert re_audit_calls == []  # never called
-    assert result.attempts[0].new_verdict is None
     assert result.halted_reason == "audit_passes_cap_exhausted"
 
 

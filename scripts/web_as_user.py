@@ -8655,6 +8655,14 @@ def run_one_scenario(
                 for failure in result.failures:
                     if failure not in failures.failures:
                         failures.fail(failure)
+                if (
+                    scenario.needs_product_verification
+                    and not (artifact_dir / "product-verification").exists()
+                ):
+                    failures.fail(
+                        "scenario is marked needs_product_verification but never ran "
+                        "the generated-product browser verification step"
+                    )
             else:
                 note = "backend unavailable; scenario not run"
         except NotImplementedError as exc:
