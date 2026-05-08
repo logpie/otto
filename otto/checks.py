@@ -477,6 +477,9 @@ def _browser_journey_preflight(
     cwd: Path,
     browser_env: Mapping[str, str],
 ) -> str | None:
+    recursion_error = _browser_journey_self_recursion_preflight(check, cwd)
+    if recursion_error:
+        return recursion_error
     agent_browser_error = validate_agent_browser_command(check.command)
     if agent_browser_error:
         return agent_browser_error
@@ -485,6 +488,58 @@ def _browser_journey_preflight(
 
 def _agent_browser_journey_preflight(command: tuple[str, ...] | list[str]) -> str | None:
     return validate_agent_browser_command(command)
+
+
+def _browser_journey_self_recursion_preflight(
+    check: BrowserJourney,
+    cwd: Path,
+) -> str | None:
+    """Catch generated journey files that recursively invoke themselves.
+
+    A feature journey file may be the declared check command, e.g.
+    ``python3 tests/browser/test_transactions.py``. If that same file then
+    shells out to ``npm run browser -- tests/browser/test_transactions.py``,
+    the browser command runs itself again instead of a shared bootstrapper.
+    """
+    for path in _command_existing_file_paths(check.command, cwd):
+        rel = path.relative_to(cwd).as_posix()
+        text = _read_text(path)
+        if rel not in text:
+            continue
+        if not re.search(r"\bnpm\b.+\brun\b.+\b(?:browser|test:browser)\b", text, re.DOTALL):
+            continue
+        return (
+            "BrowserJourney preflight failed: journey file "
+            f"`{rel}` appears to invoke the repo browser script with itself "
+            "as the target. That recursively runs the same journey instead of "
+            "bootstrapping the app. Put browser boot/server orchestration in a "
+            "separate shared runner, or make the declared check command call "
+            "the shared runner with a pure interaction journey file."
+        )
+    return None
+
+
+def _command_existing_file_paths(command: tuple[str, ...] | list[str], cwd: Path) -> list[Path]:
+    paths: list[Path] = []
+    for part in command:
+        if not part or part.startswith("-"):
+            continue
+        candidate = Path(part)
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        try:
+            resolved = candidate.resolve()
+            cwd_resolved = cwd.resolve()
+        except OSError:
+            continue
+        if not resolved.is_file():
+            continue
+        try:
+            resolved.relative_to(cwd_resolved)
+        except ValueError:
+            continue
+        paths.append(resolved)
+    return paths
 
 
 def _playwright_browser_journey_preflight(

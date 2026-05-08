@@ -703,6 +703,28 @@ def test_browser_journey_preflights_agent_browser_without_unique_session(
     assert "AGENT_BROWSER_SOCKET_DIR" in evidence.raw["browser_env"]
 
 
+def test_browser_journey_preflights_self_recursive_npm_browser_script(tmp_path: Path) -> None:
+    journey = tmp_path / "tests" / "browser" / "test_transactions.py"
+    journey.parent.mkdir(parents=True)
+    journey.write_text(
+        "import subprocess\n"
+        "subprocess.run(['npm', 'run', 'browser', '--', "
+        "'tests/browser/test_transactions.py'], check=True)\n",
+        encoding="utf-8",
+    )
+    check = BrowserJourney(
+        command=("python3", "tests/browser/test_transactions.py"),
+        evidence_globs=("otto_artifacts/browser/transactions/*.png",),
+        timeout_s=15,
+    )
+
+    evidence = run_check(check, project_dir=tmp_path, cwd=tmp_path)
+
+    assert evidence.passed is False
+    assert evidence.detail == "browser journey preflight failed artifacts=0"
+    assert "recursively runs the same journey" in evidence.raw["preflight_error"]
+
+
 def test_browser_journey_preflights_overbroad_playwright_suite(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text(
         json.dumps({"scripts": {"browser": "playwright test"}}),
