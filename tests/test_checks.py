@@ -725,6 +725,62 @@ def test_browser_journey_preflights_self_recursive_npm_browser_script(tmp_path: 
     assert "recursively runs the same journey" in evidence.raw["preflight_error"]
 
 
+def test_browser_journey_preflights_agent_browser_without_server_boot(tmp_path: Path) -> None:
+    journey = tmp_path / "tests" / "browser" / "full_workflow.py"
+    journey.parent.mkdir(parents=True)
+    journey.write_text(
+        "import os, subprocess\n"
+        "base_url = os.environ['OTTO_BROWSER_BASE_URL']\n"
+        "subprocess.run(['agent-browser', '--session', 'ab12345', 'open', base_url], check=True)\n",
+        encoding="utf-8",
+    )
+
+    evidence = run_check(
+        BrowserJourney(
+            command=("python3", "tests/browser/full_workflow.py"),
+            evidence_globs=("otto_artifacts/browser/full-workflow/*.png",),
+            timeout_s=15,
+        ),
+        project_dir=tmp_path,
+        cwd=tmp_path,
+    )
+
+    assert evidence.passed is False
+    assert evidence.detail == "browser journey preflight failed artifacts=0"
+    assert "does not appear to start or delegate product-server boot" in evidence.raw["preflight_error"]
+    assert "does not imply a server is already listening" in evidence.raw["preflight_error"]
+
+
+def test_browser_journey_allows_agent_browser_with_server_boot(tmp_path: Path) -> None:
+    journey = tmp_path / "tests" / "browser" / "full_workflow.py"
+    journey.parent.mkdir(parents=True)
+    journey.write_text(
+        "import os, subprocess\n"
+        "from pathlib import Path\n"
+        "base_url = os.environ['OTTO_BROWSER_BASE_URL']\n"
+        "if False:\n"
+        "    server = subprocess.Popen(['npm', 'run', 'dev', '--', '--port', os.environ['OTTO_BROWSER_PORT']])\n"
+        "    subprocess.run(['agent-browser', '--session', 'ab12345', 'open', base_url], check=True)\n"
+        "out = Path('otto_artifacts/browser/full-workflow/ok.png')\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_bytes(b'png')\n",
+        encoding="utf-8",
+    )
+
+    evidence = run_check(
+        BrowserJourney(
+            command=("python3", "tests/browser/full_workflow.py"),
+            evidence_globs=("otto_artifacts/browser/full-workflow/*.png",),
+            timeout_s=15,
+        ),
+        project_dir=tmp_path,
+        cwd=tmp_path,
+    )
+
+    assert evidence.raw.get("preflight_error") is None
+    assert "does not appear to start" not in evidence.detail
+
+
 def test_browser_journey_preflights_overbroad_playwright_suite(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text(
         json.dumps({"scripts": {"browser": "playwright test"}}),

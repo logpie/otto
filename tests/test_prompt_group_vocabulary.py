@@ -143,6 +143,8 @@ def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -
     assert "use.baseURL" in text
     assert "OTTO_BROWSER_PORT" in text
     assert "OTTO_BROWSER_BASE_URL" in text
+    assert "not proof\nthat a product server is already running" in text
+    assert "wait until\n`OTTO_BROWSER_BASE_URL` accepts connections" in text
     assert "agent-browser --session" in text
     assert "do not import\nPlaywright or launch Chromium directly" in text
     assert "specific missing `agent-browser` capability" in text

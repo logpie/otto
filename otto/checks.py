@@ -480,6 +480,9 @@ def _browser_journey_preflight(
     recursion_error = _browser_journey_self_recursion_preflight(check, cwd)
     if recursion_error:
         return recursion_error
+    server_boot_error = _agent_browser_server_boot_preflight(check, cwd)
+    if server_boot_error:
+        return server_boot_error
     agent_browser_error = validate_agent_browser_command(check.command)
     if agent_browser_error:
         return agent_browser_error
@@ -517,6 +520,61 @@ def _browser_journey_self_recursion_preflight(
             "the shared runner with a pure interaction journey file."
         )
     return None
+
+
+def _agent_browser_server_boot_preflight(
+    check: BrowserJourney,
+    cwd: Path,
+) -> str | None:
+    """Require Python agent-browser journeys to own server boot.
+
+    Otto assigns ``OTTO_BROWSER_BASE_URL``/``OTTO_BROWSER_PORT`` so generated
+    journeys can choose a conflict-free local port. The check runner does not
+    start a product server for arbitrary browser scripts. A script that opens
+    the assigned URL without starting or explicitly delegating server boot fails
+    as connection refused, which is a runner contract bug rather than product
+    evidence.
+    """
+    for path in _browser_command_python_script_paths(check.command, cwd):
+        text = _read_text(path)
+        if "agent-browser" not in text:
+            continue
+        if "OTTO_BROWSER_BASE_URL" not in text and "OTTO_BROWSER_PORT" not in text:
+            continue
+        if not re.search(r"\bopen\b.*(?:base_url|OTTO_BROWSER_BASE_URL)", text, re.DOTALL):
+            continue
+        if _agent_browser_script_boots_or_delegates_server(text):
+            continue
+        rel = path.relative_to(cwd).as_posix()
+        return (
+            "BrowserJourney preflight failed: agent-browser journey "
+            f"`{rel}` opens Otto's assigned `OTTO_BROWSER_BASE_URL` but does "
+            "not appear to start or delegate product-server boot. Otto assigns "
+            "a free URL/port for the journey; it does not imply a server is "
+            "already listening. Start the app on `OTTO_BROWSER_PORT`, wait for "
+            "the URL to accept connections, then call `agent-browser open`."
+        )
+    return None
+
+
+def _agent_browser_script_boots_or_delegates_server(text: str) -> bool:
+    boot_patterns = (
+        r"\bsubprocess\.Popen\b",
+        r"\bPopen\b",
+        r"\bThreadingHTTPServer\b",
+        r"\bHTTPServer\b",
+        r"\bmake_server\b",
+        r"\bserve_forever\b",
+        r"\buvicorn\b",
+        r"\bnpm\b.+\brun\b.+\b(?:dev|start|preview|serve)\b",
+        r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:dev|start|preview|serve)\b",
+        r"\bvite\b.+(?:--host|--port)",
+        r"\bpython(?:3)?\b.+-m\s+http\.server\b",
+        r"\bstart_(?:backend|server|dev_server|app)\b",
+        r"\blaunch_(?:backend|server|dev_server|app)\b",
+        r"\bwith_server\b",
+    )
+    return any(re.search(pattern, text, re.DOTALL) for pattern in boot_patterns)
 
 
 def _command_existing_file_paths(command: tuple[str, ...] | list[str], cwd: Path) -> list[Path]:

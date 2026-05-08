@@ -121,6 +121,14 @@ run(["agent-browser", "--session", session, "screenshot", "otto_artifacts/browse
 run(["agent-browser", "--session", session, "close"])
 ```
 
+`OTTO_BROWSER_BASE_URL` is an assigned URL/port for this journey, not proof
+that a product server is already running. A Python or shell `agent-browser`
+BrowserJourney must start the app on `OTTO_BROWSER_PORT`/`PORT` (for example
+`npm run dev -- --host 127.0.0.1 --port $OTTO_BROWSER_PORT`), wait until
+`OTTO_BROWSER_BASE_URL` accepts connections, then call `agent-browser open`.
+Opening the assigned URL without booting the product server is a runner bug and
+will fail preflight as connection-refused prone.
+
 Use the real `agent-browser` command surface. Semantic `find` supports
 `click`, `fill`, and `check` subactions only. For dropdowns/selects, first run
 `snapshot -i`, identify the select control ref, then use
