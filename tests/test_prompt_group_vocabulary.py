@@ -152,6 +152,7 @@ def test_build_agent_policy_requires_playwright_base_url_for_relative_routes() -
     assert "AGENT_BROWSER_SOCKET_DIR" in text
     assert "Long session names derived from product titles" in text
     assert "/Users/*/.agents/**" in text
+    assert "Do not invoke Codex skills, read `SKILL.md`, or open user-level" in text
     assert "do not import\nPlaywright or launch Chromium directly" in text
     assert "specific missing `agent-browser` capability" in text
     assert "Semantic `find` supports" in text

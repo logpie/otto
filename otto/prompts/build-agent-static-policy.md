@@ -125,6 +125,12 @@ worktree directory names, or feature prose exceed Unix socket path limits on
 macOS and are runner bugs. Put path isolation in `AGENT_BROWSER_SOCKET_DIR`,
 not in the session name. Example runner calls:
 
+This prompt is the complete BrowserJourney authoring contract for build
+agents. Do not invoke Codex skills, read `SKILL.md`, or open user-level
+`agent-browser` skill files to learn browser syntax. If the example below is
+insufficient, use `agent-browser --help` or report the specific missing CLI
+capability instead of reading operator skill/memory files.
+
 ```python
 import os
 import re
