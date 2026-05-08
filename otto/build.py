@@ -44,6 +44,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Callable, Protocol
 
 from otto.checks import Evidence, run_checks
+from otto.prompts import render_prompt
 from otto.setup_gitignore import (
     is_common_build_artifact_path,
     is_otto_owned_path,
@@ -53,6 +54,13 @@ from otto.spec_compile import CheckKind, Component, Feature, Group, Spec
 from otto.spec_state import emit, is_group_aborted_by_user
 
 logger = logging.getLogger("otto.build")
+
+
+def _append_prompt_snippet(lines: list[str], prompt_name: str) -> None:
+    """Append a persistent prompt snippet as individual lines."""
+    snippet = render_prompt(prompt_name).strip()
+    if snippet:
+        lines.extend(snippet.splitlines())
 
 
 # ---------------------------------------------------------------------------
@@ -2512,36 +2520,7 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     lines.append("")
 
     if agent_input.merge_repair:
-        lines.append("## Merge repair mode")
-        lines.append("")
-        lines.append(
-            "You are repairing this slice so it integrates cleanly with the "
-            "current target branch. Treat this as an integration task, not a "
-            "branch-winner choice."
-        )
-        lines.append("")
-        lines.append(
-            "- Understand both the slice behavior and the already-landed target "
-            "behavior before editing."
-        )
-        lines.append(
-            "- Do not resolve by blindly choosing one side, the newer side, or "
-            "the larger diff."
-        )
-        lines.append(
-            "- Compose both sides where compatible so this slice's accepted "
-            "tasks and already-integrated product behavior both survive."
-        )
-        lines.append(
-            "- If this worktree has conflict markers or unmerged paths, resolve "
-            "them directly in the files. Otto will stage and commit the repair; "
-            "do not run git mutation commands yourself."
-        )
-        lines.append(
-            "- If the conflict is an incompatible product decision, make the "
-            "smallest safe integration and call out the remaining decision in "
-            "your final response instead of silently erasing behavior."
-        )
+        _append_prompt_snippet(lines, "build-merge-repair.md")
         if agent_input.last_failure_narrative:
             lines.append("")
             lines.append("**Integration failure detail:**")
@@ -2604,29 +2583,7 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
                 lines.append("**Previous audit detail (why it failed)**:")
                 lines.append(agent_input.last_failure_narrative)
             lines.append("")
-            lines.append("**Regression-test requirement**:")
-            lines.append(
-                "If this repo has a test suite or contract test surface, add "
-                "the smallest repo-native regression test that would fail "
-                "before your repair and pass after it, unless doing so is "
-                "genuinely impossible. Cover the exact acceptance examples "
-                "and edge/error cases named in the audit detail or original "
-                "intent. If you touch parsing, normalization, validation, or "
-                "error handling, include an invalid/error input that exercises "
-                "the same changed path, not only a generic invalid value. When "
-                "the audit or intent says invalid input should be preserved, "
-                "assert the result is exactly equal to the original input, "
-                "including punctuation/separators. Run the targeted test or "
-                "explain why it could not be run."
-            )
-            lines.append(
-                "Do NOT change expected test values to match your current "
-                "implementation when that would contradict the user intent or "
-                "audit detail. Existing repo test files are in scope for focused "
-                "regression tests unless the repository itself forbids editing "
-                "tests; docstring examples are not a substitute unless the native "
-                "test command runs doctests."
-            )
+            _append_prompt_snippet(lines, "build-layer2-regression-requirement.md")
     lines.append("")
 
     # === SLICE FRAMING (primary, slice-narrow) ===
@@ -2722,147 +2679,7 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         "silently over-reaching."
     )
     lines.append("")
-    # V16b: entry points are high-contention files, but the compiler may
-    # intentionally classify one as a slice-owned or shared-scaffold path
-    # for brownfield apps where the only honest implementation is a small
-    # route/bootstrap edit. Avoid the old blanket "never edit app.py" rule:
-    # it contradicted the Scope section and pushed agents into template-only
-    # workarounds that hid real route/data changes.
-    lines.append(
-        "**Entry-point files need extra care.** Files such as "
-        "`app.py`, `app/__init__.py`, `wsgi.py`, `main.py`, `cli.py`, "
-        "`models.py`, `db/__init__.py`, `routes.py`, `urls.py`, "
-        "`server.py`, `index.ts`, `index.js`, `cmd/main.go` are often "
-        "merge hot spots. If one is listed under **Yours** or **Shared "
-        "scaffold** above and your slice's tasks/checks require it, you "
-        "may make the smallest necessary edit there. If an entry-point "
-        "file appears only through **Dep-owned**, prefer the dependency's "
-        "registration point (auto-discovery loop or explicit list) and add "
-        "new slice-local files such as `routes/<your_slice>.py`, "
-        "`blueprints/<your_slice>.py`, or `app/<your_feature>.py`. If no "
-        "registration point exists and the task cannot be implemented "
-        "honestly, request an amendment via `.otto/amendment_request.json`."
-    )
-    lines.append("")
-    # V8 fix: build agents had unrestricted git/bash and one slice in
-    # P2 ran `git merge other-slice-branch` to grab files from another
-    # slice. That breaks branch isolation: the slice's own contribution
-    # gets entangled with another's, downstream merges conflict, and
-    # Otto's merge attribution is wrong. Forbid git mutations explicitly.
-    lines.append("**Git is read-only for slice agents.**")
-    lines.append(
-        "You MAY run `git log`, `git show`, `git diff`, `git status`, "
-        "`git ls-files` to inspect history. You MUST NOT run `git "
-        "commit`, `git merge`, `git checkout`, `git rebase`, `git "
-        "reset`, `git push`, `git stash`, `git cherry-pick`, `git "
-        "branch -f/-D`, `git tag`, `git rm`, or any other command "
-        "that mutates the repo's state. Otto manages branches, commits, "
-        "and merges automatically. If you think you need a file that "
-        "doesn't exist on your branch (e.g. another slice's source), "
-        "create the file yourself within your scope OR request an "
-        "amendment via `.otto/amendment_request.json` to widen your "
-        "scope. Do NOT pull in another slice's branch via git merge."
-    )
-    lines.append("")
-    lines.append("**Test discovery must stay inside the product project.**")
-    lines.append(
-        "If you create or edit test runner config/scripts (Playwright, "
-        "Vitest, Jest, Pytest, etc.), restrict discovery to product test "
-        "paths and exclude Otto/runtime/generated directories: "
-        "`otto_logs/**`, `.worktrees/**`, `_otto_build_logs/**`, "
-        "`.otto/**`, `otto_artifacts/**`, `node_modules/**`, `dist/**`, "
-        "`test-results/**`. Never let project tests recurse into Otto "
-        "session or worktree artifacts."
-    )
-    lines.append(
-        "When exploring source, run searches from your slice worktree and keep "
-        "them scoped to product files. Do not search or dump parent Otto session "
-        "directories, `otto_logs/**`, `_otto_build_logs/**`, or `messages.jsonl` "
-        "transcripts. If you need prior failure context, use the prompt's failure "
-        "narrative, the compact context packet, the full spec, and specific check "
-        "logs named by Otto instead of grepping broad runtime logs."
-    )
-    lines.append("")
-    lines.append("**BrowserJourney checks must stay behavioral.**")
-    lines.append(
-        "If a check is `browser_journey`, its command must launch and drive "
-        "a real browser against the product. If browser launch is unavailable "
-        "or blocked, fail the check honestly and report that blocker. Do NOT "
-        "replace the browser journey with source scanning, built-asset token "
-        "checks, mocked DOM checks, synthetic screenshots, or a "
-        "`browser unavailable` success fallback."
-    )
-    lines.append(
-        "Keep browser-environment diagnosis bounded. After a browser check "
-        "fails with a clear environment-level blocker such as blocked local "
-        "ports, macOS Mach/TCC permission errors, missing browser executables, "
-        "or missing uncached browser dependencies, stop after at most two "
-        "targeted fixes/probes and report the blocker. Do NOT keep probing "
-        "system apps or automation backends with `open -a`, AppleScript/"
-        "`osascript`, SafariDriver, random remote-debugging ports, or repeated "
-        "Chrome/Firefox launch variants. Otto's deterministic check runner "
-        "will rerun the declared browser journey after your slice returns."
-    )
-    lines.append(
-        "If a browser journey launches the app and then fails on product "
-        "behavior, treat that as a real user-facing bug. Before changing CSS, "
-        "locators, or tests, inspect the Playwright error context, screenshot, "
-        "trace path, and any saved artifacts. For responsive/layout failures, "
-        "use DOM measurements when possible (for example document "
-        "scrollWidth/clientWidth and the widest overflowing elements) so the "
-        "fix targets the offending element instead of guessing. If local "
-        "browser launch is blocked on retry, make the source fix from the "
-        "existing artifacts and report the exact browser blocker; do not claim "
-        "the browser journey passed until a real browser run verifies it."
-    )
-    lines.append(
-        "Write BrowserJourney Playwright locators like a durable user test. "
-        "Scope short/common controls and text to named forms, regions, "
-        "landmarks, lists, tables, or cards before interacting or asserting. "
-        "Use exact accessible names for short labels and buttons such as "
-        "`Status`, `Comment`, `List`, `Done`, `Import`, and `Export`; avoid "
-        "global `page.getByText(...)` for strings that can also appear in JSON "
-        "previews, logs, hidden templates, repeated cards, or select options. "
-        "Prefer stable unique anchors (`data-testid`, named regions/forms, "
-        "table rows, cards, or explicit live-status labels) for assertions "
-        "that mention common domain words. Headings and table/card contents "
-        "must use `exact: true` or be scoped to the specific row/card when "
-        "their text can be a substring of an empty state, helper text, or "
-        "button label (for example `Transactions` versus `No transactions "
-        "yet`, or a row title versus `Edit <title>` / `Delete <title>`). "
-        "Status assertions must target the intended feedback/live region, not "
-        "a global `getByRole('status')` that can match empty-state regions. "
-        "After reload, import/export, route changes, or view switches, re-query "
-        "the control from its visible container instead of reusing a locator "
-        "that may have unmounted. A BrowserJourney test should fail on product "
-        "behavior, not on avoidable strict-mode ambiguity."
-    )
-    lines.append("")
-    lines.append("**Project commands must be self-contained and bounded.**")
-    lines.append(
-        "If you create native scripts such as `npm test`, `npm run build`, "
-        "`npm run dev`, or browser-journey runners, make them work from a "
-        "fresh checkout/worktree without relying on ambient `node_modules`, "
-        "global binaries, or state left by an earlier slice. Use repo-native "
-        "dependency bootstrap where appropriate, and make check/dev commands "
-        "fail clearly when required dependencies cannot be installed."
-    )
-    lines.append(
-        "The product deliverable is the source checkout, not generated output. "
-        "Do not rely on `dist/`, `node_modules/`, Playwright reports, or other "
-        "built artifacts as the only runnable result. If the product is a web "
-        "app, commit the source, native scripts/config, and tests needed for a "
-        "fresh checkout to run the declared commands, such as `package.json`, "
-        "lockfiles when present, `src/**`, test files, Vite/Vitest/Playwright "
-        "config, and `index.html`."
-    )
-    lines.append(
-        "Do not use broad process cleanup commands (`pkill`, `killall`, "
-        "`lsof | xargs kill`, or arbitrary `kill <pid>`) to recover from a "
-        "hung package-manager or dev-server command. Prefer bounded command "
-        "timeouts, foreground processes that exit on their own, or PID handles "
-        "created by the script itself."
-    )
+    _append_prompt_snippet(lines, "build-agent-static-policy.md")
     lines.append("")
 
     # === SLICE ACCEPTANCE CHECKS (primary, narrow) ===
@@ -2984,13 +2801,7 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     # Final instruction — reinforces narrowness.
     lines.append("---")
     lines.append("")
-    lines.append(
-        "**Final instruction**: Implement ONLY the tasks under `## What "
-        "you must do` above, writing ONLY to paths under `## Scope`. "
-        "If a whole-product feature in the context block isn't in your "
-        "tasks, another slice will deliver it. When your slice's tasks "
-        "are done and your acceptance checks pass, confirm completion."
-    )
+    _append_prompt_snippet(lines, "build-final-instruction.md")
     return "\n".join(lines)
 
 

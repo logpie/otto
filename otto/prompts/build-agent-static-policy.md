@@ -1,0 +1,105 @@
+**Entry-point files need extra care.** Files such as `app.py`,
+`app/__init__.py`, `wsgi.py`, `main.py`, `cli.py`, `models.py`,
+`db/__init__.py`, `routes.py`, `urls.py`, `server.py`, `index.ts`,
+`index.js`, `cmd/main.go` are often merge hot spots.
+If one is listed under **Yours** or **Shared scaffold** above and your group's
+tasks/checks require it, you may make the smallest necessary edit there. If an entry-point file
+appears only through **Dep-owned**, prefer the dependency's registration point
+(auto-discovery loop or explicit list) and add new group-local files such as
+`routes/<your_group>.py`, `blueprints/<your_group>.py`, or
+`app/<your_feature>.py`. If no registration point exists and the task cannot
+be implemented honestly, request an amendment via `.otto/amendment_request.json`.
+
+**Git is read-only for group agents.**
+
+You MAY run `git log`, `git show`, `git diff`, `git status`, `git ls-files` to
+inspect history. You MUST NOT run `git commit`, `git merge`, `git checkout`,
+`git rebase`, `git reset`, `git push`, `git stash`, `git cherry-pick`,
+`git branch -f/-D`, `git tag`, `git rm`, or any other command that mutates the
+repo's state. Otto manages branches, commits, and merges automatically. If you
+think you need a file that doesn't exist on your branch (e.g. another group's
+source), create the file yourself within your scope OR request an amendment via
+`.otto/amendment_request.json` to widen your scope. Do NOT pull in another
+group's branch via git merge.
+
+**Test discovery must stay inside the product project.**
+
+If you create or edit test runner config/scripts (Playwright, Vitest, Jest,
+Pytest, etc.), restrict discovery to product test paths and exclude
+Otto/runtime/generated directories: `otto_logs/**`, `.worktrees/**`,
+`_otto_build_logs/**`, `.otto/**`, `otto_artifacts/**`, `node_modules/**`,
+`dist/**`, `test-results/**`. Never let project tests recurse into Otto
+session or worktree artifacts.
+
+When exploring source, run searches from your group worktree and keep them
+scoped to product files. Do not search or dump parent Otto session directories,
+`otto_logs/**`, `_otto_build_logs/**`, or `messages.jsonl` transcripts. If you
+need prior failure context, use the prompt's failure narrative, the compact
+context packet, the full spec, and specific check logs named by Otto instead of
+grepping broad runtime logs.
+
+**BrowserJourney checks must stay behavioral.**
+
+If a check is `browser_journey`, its command must launch and drive a real
+browser against the product. If browser launch is unavailable or blocked, fail
+the check honestly and report that blocker. Do NOT replace the browser journey
+with source scanning, built-asset token checks, mocked DOM checks, synthetic
+screenshots, or a `browser unavailable` success fallback.
+
+Keep browser-environment diagnosis bounded. After a browser check fails with a
+clear environment-level blocker such as blocked local ports, macOS Mach/TCC
+permission errors, missing browser executables, or missing uncached browser
+dependencies, stop after at most two targeted fixes/probes and report the
+blocker. Do NOT keep probing system apps or automation backends with `open -a`,
+AppleScript/`osascript`, SafariDriver, random remote-debugging ports, or
+repeated Chrome/Firefox launch variants. Otto's deterministic check runner will
+rerun the declared browser journey after your group returns.
+
+If a browser journey launches the app and then fails on product behavior, treat
+that as a real user-facing bug. Before changing CSS, locators, or tests,
+inspect the Playwright error context, screenshot, trace path, and any saved
+artifacts. For responsive/layout failures, use DOM measurements when possible
+(for example document scrollWidth/clientWidth and the widest overflowing
+elements) so the fix targets the offending element instead of guessing. If
+local browser launch is blocked on retry, make the source fix from the existing
+artifacts and report the exact browser blocker; do not claim the browser
+journey passed until a real browser run verifies it.
+
+Write BrowserJourney Playwright locators like a durable user test. Scope
+short/common controls and text to named forms, regions, landmarks, lists,
+tables, or cards before interacting or asserting. Use exact accessible names for
+short labels and buttons such as `Status`, `Comment`, `List`, `Done`, `Import`,
+and `Export`; avoid global `page.getByText(...)` for strings that can also
+appear in JSON previews, logs, hidden templates, repeated cards, or select
+options. Prefer stable unique anchors (`data-testid`, named regions/forms,
+table rows, cards, or explicit live-status labels) for assertions that mention
+common domain words. Headings and table/card contents must use `exact: true` or
+be scoped to the specific row/card when their text can be a substring of an
+empty state, helper text, or button label (for example `Transactions` versus
+`No transactions yet`, or a row title versus `Edit <title>` /
+`Delete <title>`). Status assertions must target the intended feedback/live
+region, not a global `getByRole('status')` that can match empty-state regions.
+After reload, import/export, route changes, or view switches, re-query the
+control from its visible container instead of reusing a locator that may have
+unmounted. A BrowserJourney test should fail on product behavior, not on
+avoidable strict-mode ambiguity.
+
+**Project commands must be self-contained and bounded.**
+
+If you create native scripts such as `npm test`, `npm run build`, `npm run dev`,
+or browser-journey runners, make them work from a fresh checkout/worktree
+without relying on ambient `node_modules`, global binaries, or state left by an
+earlier group. Use repo-native dependency bootstrap where appropriate, and make
+check/dev commands fail clearly when required dependencies cannot be installed.
+
+The product deliverable is the source checkout, not generated output. Do not
+rely on `dist/`, `node_modules/`, Playwright reports, or other built artifacts
+as the only runnable result. If the product is a web app, commit the source,
+native scripts/config, and tests needed for a fresh checkout to run the declared
+commands, such as `package.json`, lockfiles when present, `src/**`, test files,
+Vite/Vitest/Playwright config, and `index.html`.
+
+Do not use broad process cleanup commands (`pkill`, `killall`, `lsof | xargs
+kill`, or arbitrary `kill <pid>`) to recover from a hung package-manager or
+dev-server command. Prefer bounded command timeouts, foreground processes that
+exit on their own, or PID handles created by the script itself.

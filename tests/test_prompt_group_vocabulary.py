@@ -110,3 +110,27 @@ def test_prompt_files_referenced_by_module_render_clean() -> None:
         rendered = render_prompt(prompt_path.name)
         assert isinstance(rendered, str)
         assert len(rendered) > 0, f"{prompt_path.name} rendered empty"
+
+
+def test_runtime_agent_prompt_policy_snippets_are_persistent_files() -> None:
+    """Large reusable agent instructions live in otto/prompts, not Python literals."""
+    expected = {
+        "build.py": (
+            "build-merge-repair.md",
+            "build-layer2-regression-requirement.md",
+            "build-agent-static-policy.md",
+            "build-final-instruction.md",
+        ),
+        "audit.py": ("audit-final-task.md",),
+        "spec_compile.py": (
+            "compile-spec-brownfield-baseline-guidance.md",
+            "compile-spec-brownfield-target-guidance.md",
+            "compile-spec-structured-output.md",
+        ),
+    }
+
+    for source_name, prompt_names in expected.items():
+        source = (PROMPTS_DIR.parent / source_name).read_text(encoding="utf-8")
+        for prompt_name in prompt_names:
+            assert (PROMPTS_DIR / prompt_name).exists()
+            assert prompt_name in source

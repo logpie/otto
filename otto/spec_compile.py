@@ -4009,23 +4009,12 @@ def _structured_spec_payload_from_breakdown(
 
 
 def _brownfield_mode_guidance(mode: str) -> str:
+    from otto.prompts import render_prompt
+
     if mode == "baseline":
-        return (
-            "You are compiling a **baseline verification Spec** for an existing "
-            "product. Your job is NOT to design new work; it is to document what "
-            "is already there as a structured Spec so the audit pipeline has "
-            "concrete current-state behavior to verify."
-        )
+        return render_prompt("compile-spec-brownfield-baseline-guidance.md")
     if mode == "target":
-        return (
-            "You are compiling a **target repair Spec** for an existing product. "
-            "Read the current project, then turn the user's requested improvement "
-            "into the desired post-run product contract. Include existing behavior "
-            "that must be preserved, and include requested additions or fixes as "
-            "Features/acceptance criteria even when the current code is missing "
-            "them. A missing requested behavior is a target Feature, not a "
-            "non_goal."
-        )
+        return render_prompt("compile-spec-brownfield-target-guidance.md")
     raise ValueError(
         f"brownfield_mode must be one of {BROWNFIELD_MODES}; got {mode!r}"
     )
@@ -4120,12 +4109,9 @@ async def compile_spec(
             spec_path=str(spec_path),
             project_context=f"project_kind={project_kind}",
         )
-    prompt += (
-        "\n\n## Structured output channel\n"
-        "If your runtime provides a structured output field named `spec_json`, "
-        "put the complete Spec JSON object in that field as a serialized JSON "
-        f"string. Otherwise write `{spec_path}` and use the `<spec_json>` "
-        "fallback exactly as instructed above."
+    prompt += "\n\n" + render_prompt(
+        "compile-spec-structured-output.md",
+        spec_path=str(spec_path),
     )
     prompt_entry = save_rendered_prompt(
         run_dir.parent / "prompts",
