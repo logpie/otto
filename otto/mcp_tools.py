@@ -43,6 +43,47 @@ def _intent_hash(parent_task_id: str | None, intent: str) -> str:
     return hashlib.sha256(f"{parent}::{intent}".encode("utf-8")).hexdigest()[:16]
 
 
+def _coerce_id_list(raw: Any) -> list[str]:
+    """Coerce LLM-supplied id list to clean list[str].
+
+    Accepts:
+      - list/tuple of strings
+      - JSON-encoded list string ("[]", '["a","b"]')
+      - comma-joined string ("a,b")
+      - single task id ("a")
+      - None / falsy
+
+    Drops empty strings and obvious JSON literals (\"[]\", \"{}\", \"null\").
+    """
+    if raw is None:
+        return []
+    items: list[str] = []
+    if isinstance(raw, (list, tuple)):
+        items = [str(s) for s in raw]
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text or text in {"[]", "{}", "null", "None"}:
+            return []
+        # Try JSON first.
+        try:
+            import json as _json
+            parsed = _json.loads(text)
+            if isinstance(parsed, list):
+                items = [str(s) for s in parsed]
+            elif isinstance(parsed, str):
+                items = [parsed]
+            else:
+                items = []
+        except Exception:  # noqa: BLE001
+            items = [s.strip() for s in text.split(",")]
+    else:
+        return []
+    # Filter out empties and obvious JSON noise.
+    cleaned = [s.strip() for s in items if s and str(s).strip()]
+    cleaned = [s for s in cleaned if s not in {"[]", "{}", "null", "None"}]
+    return cleaned
+
+
 def create_otto_mcp_server(
     *,
     task_id: str,
@@ -87,16 +128,10 @@ def create_otto_mcp_server(
     )
     async def submit_subtask(args: dict[str, Any]) -> dict[str, Any]:
         intent = (args.get("intent") or "").strip()
-        # depends_on may be a list, a comma-joined string, or a single task id.
-        # Don't iterate strings as if they were lists (the LLM frequently
-        # passes the raw id instead of [id]).
-        raw_deps = args.get("depends_on") or []
-        if isinstance(raw_deps, str):
-            depends_on = [s.strip() for s in raw_deps.split(",") if s.strip()]
-        elif isinstance(raw_deps, (list, tuple)):
-            depends_on = [str(s).strip() for s in raw_deps if str(s).strip()]
-        else:
-            depends_on = []
+        # depends_on may arrive as a list, a JSON-encoded list string, a
+        # comma-joined string, a single task id, or a JSON literal like "[]".
+        # Coerce all shapes to a clean list of plausible task ids.
+        depends_on = _coerce_id_list(args.get("depends_on"))
         if not intent:
             return _err("submit_subtask: 'intent' is required and must be non-empty.")
 
@@ -174,15 +209,7 @@ def create_otto_mcp_server(
         },
     )
     async def verify(args: dict[str, Any]) -> dict[str, Any]:
-        # Some Claude calls pass scope ids as a comma-joined string instead of
-        # a list. Normalise both shapes; fall back to empty (= all journeys).
-        raw = args.get("feature_scope_ids") or []
-        if isinstance(raw, str):
-            scope_ids = [s.strip() for s in raw.split(",") if s.strip()]
-        elif isinstance(raw, (list, tuple)):
-            scope_ids = [str(s).strip() for s in raw if str(s).strip()]
-        else:
-            scope_ids = []
+        scope_ids = _coerce_id_list(args.get("feature_scope_ids"))
         try:
             from otto.lead_verify import run_verify_for_lead
 
