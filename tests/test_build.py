@@ -1191,6 +1191,53 @@ def test_run_build_does_not_retry_obvious_browser_harness_noise(
     assert "check infrastructure failed" in result.group_results[0].failure_narrative
 
 
+def test_run_build_does_not_retry_missing_browser_evidence_contract(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="browser artifacts",
+                dependencies=[],
+                owned_paths=["feature.txt"],
+                feature_ids=[],
+                checks=[
+                    BrowserJourney(
+                        command=("python", "-c", "pass"),
+                        evidence_globs=("otto_artifacts/browser/shell/*.png",),
+                        timeout_s=10,
+                    )
+                ],
+            ),
+        ]
+    )
+    attempts: list[int] = []
+
+    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        attempts.append(input_.attempt)
+        (input_.worktree / "feature.txt").write_text("usable app diff", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True)
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+            budget=BuildBudget(per_slice_retries_hard_cap=3),
+        )
+    )
+
+    assert attempts == [1]
+    assert result.group_results[0].status == GroupStatus.DEGRADED
+    assert "missing declared evidence" in result.group_results[0].failure_narrative
+
+
 def test_run_build_blocks_structural_repo_check_failure_even_with_diff(
     tmp_path: Path,
 ) -> None:
