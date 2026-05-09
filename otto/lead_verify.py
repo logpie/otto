@@ -55,6 +55,20 @@ async def run_verify_for_lead(
     log_dir = session_dir / "verify"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # If this Lead has a worktree (`<session_dir>/worktree` symlink, set up
+    # by v5_runner._run_child), verify against the worktree. Otherwise verify
+    # against project_dir directly. This matters because child Leads write
+    # into their per-task worktree, not into project_dir.
+    verify_dir = project_dir
+    worktree_link = session_dir / "worktree"
+    try:
+        if worktree_link.is_symlink() or worktree_link.is_dir():
+            target = worktree_link.resolve()
+            if target.exists():
+                verify_dir = target
+    except OSError:
+        pass
+
     spec = _load_flat_spec_for_session(session_dir)
     if spec is None:
         return _unverified("no flat spec at session_dir/spec/spec.json")
@@ -73,7 +87,7 @@ async def run_verify_for_lead(
 
     # ---- Layer 1: native test runner (npm test / pytest / cargo test / ...) ----
     test_outcome = await _run_native_tests(
-        project_dir=project_dir, log_dir=log_dir, timeout_s=timeout_s,
+        project_dir=verify_dir, log_dir=log_dir, timeout_s=timeout_s,
     )
     test_evidence_path = log_dir / "test-output.log"
     if test_outcome["log_path"]:
@@ -81,10 +95,10 @@ async def run_verify_for_lead(
 
     # ---- Layer 2: browser journey runner if applicable ----
     browser_outcome: dict[str, Any] | None = None
-    browser_runner = _detect_browser_runner(project_dir)
+    browser_runner = _detect_browser_runner(verify_dir)
     if browser_runner is not None:
         browser_outcome = await _run_browser_journey(
-            project_dir=project_dir,
+            project_dir=verify_dir,
             runner=browser_runner,
             log_dir=log_dir,
             timeout_s=timeout_s,
