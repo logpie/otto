@@ -66,6 +66,16 @@ from otto.spec_state import emit
 
 logger = logging.getLogger("otto.audit")
 
+_AUDIT_CHECK_INFRA_FAILURE_PATTERNS: tuple[str, ...] = (
+    "browser journey preflight failed",
+    "no browser journey module found",
+    "missing declared evidence",
+    "machportrendezvousserver",
+    "permission denied (1100)",
+    "unsupported agent-browser command",
+    "unknown command",
+)
+
 _AUDIT_RIPGREP_EXCLUDED_GLOBS: tuple[str, ...] = (
     "**/otto_logs/**",
     "**/_otto_build_logs/**",
@@ -564,6 +574,27 @@ def default_walkthrough_from_spec(
             cwd=project_dir,
             raw_log_path=log_dir / "browser-journey.log",
         )
+        if (
+            not evidence.passed
+            and (spec.project_kind or "").lower() == "webapp"
+            and _evidence_is_check_infrastructure_noise(evidence)
+        ):
+            fallback_log_dir = log_dir / "synthesized-fallback"
+            fallback = _synthesized_webapp_walkthrough(spec, base_url=base_url)(
+                project_dir,
+                fallback_log_dir,
+                _timeout_s,
+            )
+            detail = (
+                f"declared BrowserJourney could not produce product evidence "
+                f"because check infrastructure failed: {evidence.detail}; "
+                f"synthesized fallback: {fallback.detail}"
+            )
+            return WalkthroughResult(
+                succeeded=fallback.succeeded,
+                detail=detail,
+                artifacts=list(fallback.artifacts),
+            )
         return WalkthroughResult(
             succeeded=evidence.passed,
             detail=evidence.detail,
@@ -902,6 +933,49 @@ def _write_synthesized_walkthrough_jsonl(
     )
 
 
+def _evidence_text_for_classification(evidence: Evidence) -> str:
+    parts = [evidence.detail or ""]
+    raw = evidence.raw if isinstance(evidence.raw, dict) else {}
+    for key in (
+        "preflight_error",
+        "stdout",
+        "stderr",
+        "bootstrap_stdout",
+        "bootstrap_stderr",
+        "error",
+    ):
+        value = raw.get(key)
+        if value:
+            parts.append(str(value))
+    return "\n".join(parts).lower()
+
+
+def _evidence_is_check_infrastructure_noise(evidence: Evidence) -> bool:
+    text = _evidence_text_for_classification(evidence)
+    return any(pattern in text for pattern in _AUDIT_CHECK_INFRA_FAILURE_PATTERNS)
+
+
+def _annotate_cross_slice_check_infrastructure(
+    evidence_pairs: list[tuple[Any, Evidence]],
+) -> list[tuple[Any, Evidence]]:
+    annotated: list[tuple[Any, Evidence]] = []
+    for check, evidence in evidence_pairs:
+        if (
+            not evidence.passed
+            and type(check).__name__ == "BrowserJourney"
+            and _evidence_is_check_infrastructure_noise(evidence)
+        ):
+            raw = dict(evidence.raw or {})
+            raw["classification"] = "check_infrastructure"
+            detail = (
+                "check_infrastructure: browser/check harness failed before "
+                f"producing reliable product evidence: {evidence.detail}"
+            )
+            evidence = dataclasses.replace(evidence, detail=detail, raw=raw)
+        annotated.append((check, evidence))
+    return annotated
+
+
 def _feature_ids_observed_in_html(spec: Spec, html_text: str) -> list[str]:
     """Best-effort Feature tagging for synthesized home-page evidence.
 
@@ -1031,6 +1105,7 @@ async def run_audit(
             base_url=base_url,
             raw_log_dir=attempt_dir / "cross-slice",
         )
+        cross_pairs = _annotate_cross_slice_check_infrastructure(cross_pairs)
         cross_evidence = [ev for _check, ev in cross_pairs]
 
         # 1b: project contract — if otto.yaml declares a `test_command`,
@@ -1836,6 +1911,7 @@ def _write_audit_evidence_packet(agent_input: AuditAgentInput) -> None:
             "Read this packet first, then inspect referenced artifacts as needed.",
             "Prefer deterministic contract/cross-slice results and browser artifacts over provider transcript text.",
             "A failed deterministic contract is a blocker or partial cap unless direct evidence proves the oracle is invalid.",
+            "Cross-slice evidence with raw.classification=check_infrastructure is harness/test wiring noise, not product failure.",
             "Avoid bulk-reading messages.jsonl; if needed, inspect bounded relevant excerpts only.",
             "Do not inspect node_modules, dist/assets bundles, coverage, or test-results unless a named evidence artifact points there.",
         ],
@@ -1850,7 +1926,15 @@ def _write_audit_evidence_packet(agent_input: AuditAgentInput) -> None:
 def _compact_evidence(evidence: Evidence) -> dict[str, Any]:
     raw = evidence.raw if isinstance(evidence.raw, dict) else {}
     compact_raw: dict[str, Any] = {}
-    for key in ("exit_code", "status_code", "stdout_match", "stderr_match", "timeout", "command"):
+    for key in (
+        "exit_code",
+        "status_code",
+        "stdout_match",
+        "stderr_match",
+        "timeout",
+        "command",
+        "classification",
+    ):
         if key in raw:
             compact_raw[key] = raw[key]
     for key in ("stdout", "stderr", "response_text", "error"):
@@ -2264,12 +2348,29 @@ def _compose_verdict(
     failed_cross_evidence = [
         ev for ev in (cross_slice_evidence or [])
         if not getattr(ev, "passed", False)
+        and not (
+            isinstance(getattr(ev, "raw", None), dict)
+            and ev.raw.get("classification") == "check_infrastructure"
+        )
+    ]
+    infra_cross_evidence = [
+        ev for ev in (cross_slice_evidence or [])
+        if not getattr(ev, "passed", False)
+        and isinstance(getattr(ev, "raw", None), dict)
+        and ev.raw.get("classification") == "check_infrastructure"
     ]
     if failed_cross_evidence:
         verdict = _strictest(verdict, AuditVerdict.PARTIAL)
         sections.append(
             f"[cross-slice deterministic checks FAILED: {len(failed_cross_evidence)}]\n"
             + "\n".join(f"  - {ev.detail}" for ev in failed_cross_evidence[:10])
+        )
+    if infra_cross_evidence:
+        sections.append(
+            f"[cross-slice check infrastructure ignored: {len(infra_cross_evidence)}]\n"
+            "These failures happened in browser/check wiring before reliable "
+            "product evidence was produced, so they do not cap the product verdict:\n"
+            + "\n".join(f"  - {ev.detail}" for ev in infra_cross_evidence[:10])
         )
 
     # Amendment chain cap.

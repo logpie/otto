@@ -3409,6 +3409,7 @@ _CHECK_INFRA_FAILURE_PATTERNS: tuple[str, ...] = (
     "browser journey preflight failed",
     "unsupported agent-browser command",
     "unknown command",
+    "no browser journey module found",
     "missing declared evidence",
     "machportrendezvousserver",
     "permission denied (1100)",

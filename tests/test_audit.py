@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,6 +29,7 @@ from otto.audit import (
     GroupVerdict,
     WalkthroughResult,
     _audit_prompt,
+    _compose_verdict,
     _fallback_contract_test_argv,
     _parse_audit_output,
     _run_project_contract_test,
@@ -35,6 +37,7 @@ from otto.audit import (
     default_walkthrough_from_spec,
     run_audit,
 )
+from otto.checks import Evidence
 from otto.build import (
     BuildAgentInput,
     BuildAgentOutput,
@@ -47,6 +50,7 @@ from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
 from otto.spec_compile import (
     BehaviorJourney,
     BehaviorStep,
+    BrowserJourney,
     Feature,
     Group,
     SharedContract,
@@ -2342,6 +2346,53 @@ def test_default_walkthrough_picks_cross_slice_journey_first(tmp_path: Path) -> 
     assert "cross" in log_path.read_text(encoding="utf-8")
 
 
+def test_default_walkthrough_falls_back_when_cross_journey_is_harness_noise(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    runner = tests_dir / "run_browser_journey.py"
+    runner.write_text(
+        "import sys\n"
+        "print(\"No browser journey module found for 'main-workflow'.\", file=sys.stderr)\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "index.html").write_text(
+        "<main><h1>Personal finance dashboard</h1></main>",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("otto.audit._capture_playwright_page", _fake_playwright_capture)
+
+    spec = Spec(
+        intent="build finance dashboard",
+        project_kind="webapp",
+        features=[Feature(id="dashboard", name="Personal finance dashboard")],
+        cross_group_checks=[
+            BrowserJourney(
+                command=(
+                    sys.executable,
+                    "tests/run_browser_journey.py",
+                    "--journey",
+                    "main-workflow",
+                ),
+                evidence_globs=("otto_artifacts/browser/main-workflow/*.png",),
+            )
+        ],
+    )
+
+    callable_ = default_walkthrough_from_spec(spec)
+    result = callable_(tmp_path, tmp_path / "log", 60)
+
+    assert result.succeeded is True
+    assert "declared BrowserJourney could not produce product evidence" in result.detail
+    assert "No browser journey module found" in (tmp_path / "log" / "browser-journey.log").read_text(
+        encoding="utf-8"
+    )
+    assert (tmp_path / "log" / "synthesized-fallback" / "screenshot-home.png").exists()
+
+
 def test_default_walkthrough_falls_back_to_slice_journey(tmp_path: Path) -> None:
     """No cross-slice BrowserJourney → first slice's BrowserJourney is used."""
     from otto.spec_compile import BrowserJourney
@@ -2357,6 +2408,37 @@ def test_default_walkthrough_falls_back_to_slice_journey(tmp_path: Path) -> None
     log_path = tmp_path / "log" / "browser-journey.log"
     assert log_path.exists()
     assert "slice" in log_path.read_text(encoding="utf-8")
+
+
+def test_compose_verdict_does_not_cap_cross_slice_check_infra_noise() -> None:
+    evidence = Evidence(
+        passed=False,
+        started_at="2026-05-09T00:00:00Z",
+        duration_s=0.1,
+        detail=(
+            "check_infrastructure: browser/check harness failed before producing "
+            "reliable product evidence: No browser journey module found"
+        ),
+        raw={"classification": "check_infrastructure"},
+    )
+    output = AuditAgentOutput(
+        verdict=AuditVerdict.PASSED,
+        narrative="product passed",
+        group_verdicts=[],
+        feature_audits=[],
+        quality_score=5,
+    )
+
+    verdict, narrative = _compose_verdict(
+        agent_output=output,
+        contract_passed=True,
+        contract_detail="ok",
+        chain_review=SimpleNamespace(verdict_cap="passed", findings=[]),
+        cross_slice_evidence=[evidence],
+    )
+
+    assert verdict is AuditVerdict.PASSED
+    assert "cross-slice check infrastructure ignored" in narrative
 
 
 # ---------------------------------------------------------------------------
