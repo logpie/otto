@@ -50,6 +50,7 @@ def queue_session_log_candidates(
         # Split improve may produce only certify/narrative.log when the first
         # evaluation fails before a fix phase. Agentic improve uses improve/.
         "improve": ("improve", "certify", "build"),
+        "v5": ("build", "certify", "improve"),
     }.get(command, ("build", "certify", "improve"))
     candidates = [by_phase[phase] for phase in order]
     generic = session_dir / "narrative.log"

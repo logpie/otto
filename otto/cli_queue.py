@@ -424,6 +424,42 @@ def register_queue_commands(main: click.Group) -> None:
             resumable=True,
         )
 
+    # ---- enqueue: v5 ----
+    @queue.command(
+        context_settings={**CONTEXT_SETTINGS, "ignore_unknown_options": True, "allow_extra_args": True},
+        name="v5",
+    )
+    @click.argument("intent", required=True)
+    @click.option("--tier", type=click.Choice(["auto", "solo", "lead", "modular"]),
+                  default="auto", help="Decomposition tier (default: auto)")
+    @click.option("--after", multiple=True, help="Task ID(s) this depends on")
+    @click.option("--as", "explicit_as", default=None, help="Explicit task ID")
+    @click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
+    def queue_v5(intent: str, tier: str, after: tuple[str, ...],
+                 explicit_as: str | None, extra_args: tuple[str, ...]) -> None:
+        """Enqueue an `otto v5 run` task.
+
+        \b
+            otto queue v5 "Build a TODO app"
+            otto queue v5 "Multi-subsystem chat" --tier modular
+            otto queue v5 "Add CSV export" --as csv -- --max-parallel 2
+
+        Intent must come before `--`. Anything after `--` is passed through
+        to `otto v5 run`.
+        """
+        # raw_args becomes the watcher's argv after the leading `v5` token,
+        # so it must include `run` plus the user-visible flags.
+        raw = ["run", intent, "--tier", tier, *extra_args]
+        _enqueue(
+            command="v5",
+            raw_args=raw,
+            intent=intent,
+            explicit_intent=intent,
+            after=list(after),
+            explicit_as=explicit_as,
+            resumable=False,  # v5 resume is a v6 item
+        )
+
     # ---- enqueue: improve ----
     @queue.command(
         context_settings={**CONTEXT_SETTINGS, "ignore_unknown_options": True, "allow_extra_args": True},

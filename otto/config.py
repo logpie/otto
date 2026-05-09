@@ -136,13 +136,14 @@ SUPPORTED_CERTIFIER_MODES = PUBLIC_CERTIFIER_MODES + INTERNAL_CERTIFIER_MODES
 PROVIDER_AGENT_MODEL_DEFAULTS: dict[str, dict[str, str]] = {
     # Claude's SDK/provider default can drift to a very expensive model. Otto
     # keeps explicit safe defaults while still letting otto.yaml or CLI flags
-    # override them per phase.
+    # override them per phase. Every phase defaults to Sonnet — Haiku has
+    # repeatedly under-performed on Otto's spec compile and certify workloads.
     "claude": {
         "_default": "sonnet",
         "build": "sonnet",
         "fix": "sonnet",
-        "certifier": "haiku",
-        "spec": "haiku",
+        "certifier": "sonnet",
+        "spec": "sonnet",
     },
 }
 PROVIDER_DEFAULT_MODEL_OVERRIDE = "__otto_provider_default_model__"
@@ -385,6 +386,25 @@ def agent_effort(config: dict[str, Any], agent_type: str | None = None) -> str |
             return str(per_agent["effort"])
     return config.get("effort") or None
 
+
+def resolved_agent_routing(config: dict[str, Any]) -> dict[str, dict[str, str | None]]:
+    """Snapshot the effective provider/model/effort for every agent phase.
+
+    Used by observability artifacts (summary.json, checkpoint.json,
+    build context packets) so that "what provider actually ran" is
+    durable evidence rather than something readers have to infer from
+    token-cost shapes.
+    """
+    phases = ("global", "spec", "build", "certifier", "fix")
+    routing: dict[str, dict[str, str | None]] = {}
+    for phase in phases:
+        agent_type = None if phase == "global" else phase
+        routing[phase] = {
+            "provider": agent_provider(config, agent_type),
+            "model": effective_agent_model(config, agent_type),
+            "effort": agent_effort(config, agent_type),
+        }
+    return routing
 
 
 def get_run_budget(config: dict[str, Any]) -> int:

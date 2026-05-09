@@ -1429,6 +1429,9 @@ register_cleanup_command(main)
 from otto.cli_run import register_run_command  # noqa: E402
 register_run_command(main)
 
+from otto.cli_v5 import register_v5_command  # noqa: E402
+register_v5_command(main)
+
 
 if __name__ == "__main__":
     main()

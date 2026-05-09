@@ -1098,6 +1098,7 @@ def orchestrate_run(
         command="build",
         project_kind=project_kind,
         run_result=run_result,
+        config=config,
     )
 
     _print_run_result(run_result)
@@ -1158,6 +1159,7 @@ def _persist_session_summary(
     command: str,
     project_kind: str,
     run_result: RunResult,
+    config: dict[str, Any] | None = None,
 ) -> None:
     """Emit the canonical ``summary.json`` for a completed i2p session.
 
@@ -1190,6 +1192,13 @@ def _persist_session_summary(
 
     status = "halted" if run_result.halted_reason else "completed"
 
+    agent_routing: dict[str, dict[str, str | None]] | None = None
+    try:
+        from otto.config import resolved_agent_routing
+        agent_routing = resolved_agent_routing(config or {})
+    except Exception as exc:  # noqa: BLE001 — bookkeeping must not mask verdict
+        logger.warning("agent routing snapshot failed: %s: %s", type(exc).__name__, exc)
+
     try:
         _write_session_summary(
             project_dir,
@@ -1204,6 +1213,7 @@ def _persist_session_summary(
             status=status,
             intent=intent_text,
             command=command,
+            agent_routing=agent_routing,
         )
     except Exception as exc:  # noqa: BLE001 — bookkeeping must not mask verdict
         logger.warning(
@@ -1380,6 +1390,7 @@ def _drive_brownfield_pipeline(
         command=command,
         project_kind=project_kind,
         run_result=run_result,
+        config=config,
     )
 
     _print_run_result(run_result)

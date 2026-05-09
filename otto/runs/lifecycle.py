@@ -72,6 +72,7 @@ def _write_session_summary(
     command: str = "build",
     breakdown: dict[str, dict[str, Any]] | None = None,
     runtime_path: str = "",
+    agent_routing: dict[str, dict[str, str | None]] | None = None,
 ) -> None:
     """Write the canonical summary artifact for a completed session.
 
@@ -83,7 +84,7 @@ def _write_session_summary(
     from otto.observability import write_json_file
 
     # Full precision preserved in JSON; round at display time only.
-    summary = {
+    summary: dict[str, Any] = {
         "run_id": session_id,
         "command": command,
         "intent": intent,
@@ -108,6 +109,13 @@ def _write_session_summary(
         summary["head_sha"] = head_sha
     if runtime_path:
         summary["runtime_path"] = runtime_path
+    if agent_routing:
+        summary["agent_routing"] = agent_routing
+        global_routing = agent_routing.get("global") or {}
+        if global_routing.get("provider"):
+            summary["provider"] = global_routing["provider"]
+        if global_routing.get("model"):
+            summary["model"] = global_routing["model"]
     message_phase_usage = phase_breakdown_from_messages(paths.session_dir(project_dir, session_id))
     if breakdown is not None or message_phase_usage:
         if breakdown is None:

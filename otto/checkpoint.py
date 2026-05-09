@@ -502,6 +502,7 @@ def write_checkpoint(
     last_round_failures: list[str] | None = None,
     last_diagnosis: str | None = None,
     dirty_files: list[str] | None = None,
+    agent_routing: dict[str, dict[str, str | None]] | None = None,
 ) -> None:
     """Write checkpoint to disk. Called after each round.
 
@@ -588,6 +589,19 @@ def write_checkpoint(
     }
     if split_mode_value is not None:
         data["split_mode"] = split_mode_value
+    if agent_routing is not None:
+        data["agent_routing"] = agent_routing
+        global_routing = agent_routing.get("global") or {}
+        if global_routing.get("provider"):
+            data["provider"] = global_routing["provider"]
+        if global_routing.get("model"):
+            data["model"] = global_routing["model"]
+    elif prior and prior.get("agent_routing"):
+        data["agent_routing"] = prior.get("agent_routing")
+        if prior.get("provider"):
+            data["provider"] = prior.get("provider")
+        if prior.get("model"):
+            data["model"] = prior.get("model")
     if status == "completed":
         data = _prune_checkpoint_defaults(data)
 

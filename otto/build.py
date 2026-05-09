@@ -2862,6 +2862,14 @@ def _write_build_context_packet(
         c for c in spec_dict.get("components", [])
         if isinstance(c, dict) and c.get("id") in dependency_ids
     ]
+    routing_snapshot: dict[str, dict[str, str | None]] | None = None
+    try:
+        from otto.config import resolved_agent_routing
+
+        routing_snapshot = resolved_agent_routing(agent_input.config or {})
+    except Exception:  # noqa: BLE001 — observability must not block the build
+        routing_snapshot = None
+    build_routing = (routing_snapshot or {}).get("build") or {}
     packet = {
         "schema_version": 1,
         "kind": "build_context_packet",
@@ -2869,6 +2877,10 @@ def _write_build_context_packet(
         "worktree": str(agent_input.worktree),
         "branch": agent_input.branch,
         "attempt": agent_input.attempt,
+        "provider": build_routing.get("provider"),
+        "model": build_routing.get("model"),
+        "effort": build_routing.get("effort"),
+        "agent_routing": routing_snapshot,
         "repair_feature_ids": list(agent_input.related_feature_ids),
         "full_spec_path": str(agent_input.full_spec_path or ""),
         "group": group,

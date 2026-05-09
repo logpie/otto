@@ -111,12 +111,12 @@ def _json_fingerprint(value: Any) -> str:
 
 def _task_success_requires_clean_worktree(manifest: dict[str, Any]) -> bool:
     command = str(manifest.get("command") or "").strip().lower()
-    return command in {"build", "improve", "certify"}
+    return command in {"build", "improve", "certify", "v5"}
 
 
 def _task_success_can_commit_generated_lockfiles(manifest: dict[str, Any]) -> bool:
     command = str(manifest.get("command") or "").strip().lower()
-    return command in {"build", "improve"}
+    return command in {"build", "improve", "v5"}
 
 
 def _summary_indicates_product_success(summary: dict[str, Any]) -> bool:
@@ -124,9 +124,10 @@ def _summary_indicates_product_success(summary: dict[str, Any]) -> bool:
         return True
     verdict = str(summary.get("verdict") or "").strip().lower()
     if verdict:
-        return verdict == "passed"
+        # v4 uses "passed"; v5 uses "pass". Both mean success.
+        return verdict in {"passed", "pass"}
     status = str(summary.get("status") or "").strip().lower()
-    return status in {"success", "done", "passed"}
+    return status in {"success", "done", "passed", "pass"}
 
 
 def _porcelain_status_path(line: str) -> str:

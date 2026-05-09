@@ -1120,10 +1120,16 @@ def test_make_agent_options_phase_cli_overrides_beat_global_cli(tmp_path):
 def test_make_agent_options_uses_safe_claude_defaults_when_model_omitted(tmp_path):
     build_options = make_agent_options(tmp_path, {"provider": "claude"}, agent_type="build")
     certifier_options = make_agent_options(tmp_path, {"provider": "claude"}, agent_type="certifier")
+    spec_options = make_agent_options(tmp_path, {"provider": "claude"}, agent_type="spec")
+    fix_options = make_agent_options(tmp_path, {"provider": "claude"}, agent_type="fix")
     codex_options = make_agent_options(tmp_path, {"provider": "codex"}, agent_type="build")
 
+    # Every Claude phase defaults to Sonnet — Haiku has under-performed on
+    # spec compile / certify and needs an explicit opt-in.
     assert build_options.model == "sonnet"
-    assert certifier_options.model == "haiku"
+    assert certifier_options.model == "sonnet"
+    assert spec_options.model == "sonnet"
+    assert fix_options.model == "sonnet"
     assert codex_options.model is None
 
 

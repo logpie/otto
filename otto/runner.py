@@ -292,6 +292,7 @@ async def run_pipeline(
         session_dir=session_dir,
         command=command,
         intent=spec.intent or intent,
+        config=config,
     )
 
     # ---- 1.5. Review gate (A13, optional) ----
@@ -1181,6 +1182,7 @@ def _mark_i2p_run_active(
     session_dir: Path,
     command: str,
     intent: str,
+    config: dict[str, Any] | None = None,
 ) -> None:
     """Persist the paused pointer/checkpoint consumed by i2p ``--resume``."""
     session_id = _managed_session_id(project_dir, session_dir)
@@ -1191,6 +1193,14 @@ def _mark_i2p_run_active(
     try:
         from otto.checkpoint import write_checkpoint
 
+        agent_routing: dict[str, dict[str, str | None]] | None = None
+        try:
+            from otto.config import resolved_agent_routing
+            agent_routing = resolved_agent_routing(config or {})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "agent routing snapshot failed: %s: %s", type(exc).__name__, exc
+            )
         write_checkpoint(
             project_dir,
             run_id=session_id,
@@ -1200,6 +1210,7 @@ def _mark_i2p_run_active(
             intent=intent,
             spec_path=str(spec_path) if spec_path.exists() else "",
             spec_hash=spec_hash,
+            agent_routing=agent_routing,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("i2p checkpoint write failed for %s: %s", session_id, exc)

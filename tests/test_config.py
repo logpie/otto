@@ -26,6 +26,7 @@ from otto.config import (
     resolve_intent_for_enqueue,
     resolve_project_dir,
     resolve_intent,
+    resolved_agent_routing,
     resolve_certifier_mode,
     validate_certifier_mode,
 )
@@ -987,3 +988,61 @@ class TestSetupCommandExistingConfig:
 
         assert result.exit_code == 0
         assert claude_md.read_text(encoding="utf-8") == "# Existing\n"
+
+
+class TestResolvedAgentRouting:
+    """resolved_agent_routing snapshots provider/model/effort per agent phase
+    so observability artifacts (summary.json, checkpoint.json,
+    build context-packet.json) record what actually ran."""
+
+    def test_default_returns_codex_app_server_for_all_phases(self):
+        config: dict = {}
+        routing = resolved_agent_routing(config)
+        for phase in ("global", "spec", "build", "certifier", "fix"):
+            assert routing[phase]["provider"] == "codex-app-server"
+            assert routing[phase]["model"] is None
+            assert routing[phase]["effort"] is None
+
+    def test_global_provider_override_propagates_to_every_phase(self):
+        config: dict = {"provider": "claude"}
+        routing = resolved_agent_routing(config)
+        for phase in ("global", "spec", "build", "certifier", "fix"):
+            assert routing[phase]["provider"] == "claude", phase
+
+    def test_per_agent_override_takes_precedence_over_global(self):
+        config: dict = {
+            "provider": "claude",
+            "agents": {
+                "certifier": {"provider": "codex-app-server", "model": "gpt-5", "effort": "high"},
+            },
+        }
+        routing = resolved_agent_routing(config)
+        assert routing["global"]["provider"] == "claude"
+        assert routing["spec"]["provider"] == "claude"
+        assert routing["build"]["provider"] == "claude"
+        assert routing["certifier"]["provider"] == "codex-app-server"
+        assert routing["certifier"]["model"] == "gpt-5"
+        assert routing["certifier"]["effort"] == "high"
+        assert routing["fix"]["provider"] == "claude"
+
+    def test_cli_override_beats_per_agent_config(self):
+        config: dict = {
+            "provider": "codex-app-server",
+            "agents": {"build": {"provider": "codex"}},
+            "_cli_overrides": {"provider": "claude"},
+        }
+        routing = resolved_agent_routing(config)
+        assert routing["global"]["provider"] == "claude"
+        assert routing["build"]["provider"] == "claude"
+
+    def test_phase_cli_override_only_affects_that_phase(self):
+        config: dict = {
+            "provider": "claude",
+            "_cli_overrides": {
+                "provider": "claude",
+                "agents": {"certifier": {"provider": "codex-app-server"}},
+            },
+        }
+        routing = resolved_agent_routing(config)
+        assert routing["build"]["provider"] == "claude"
+        assert routing["certifier"]["provider"] == "codex-app-server"
