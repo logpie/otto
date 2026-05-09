@@ -123,6 +123,20 @@ MC_EVIDENCE_PANEL_SELECTORS: dict[str, list[str]] = {
     ],
 }
 
+PROVIDER_INFRA_FAILURE_PATTERNS: tuple[str, ...] = (
+    "usagelimitexceeded",
+    "usage limit",
+    "purchase more credits",
+    "rate limit",
+    "rate_limit",
+    "429",
+    "throttle",
+    "not logged in",
+    "please run /login",
+    "provider capacity",
+    "provider infrastructure",
+)
+
 
 # ---------------------------------------------------------------------------
 # Tier mappings (Phase 5C)
@@ -175,6 +189,59 @@ class RunFailures:
         )
 
 
+def _text_is_provider_infra_failure(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(pattern in lowered for pattern in PROVIDER_INFRA_FAILURE_PATTERNS)
+
+
+def _session_provider_infra_failure_reason(session_dir: Path | None) -> str:
+    """Return a bounded provider-infra reason from crash artifacts, if present."""
+    if session_dir is None or not session_dir.exists():
+        return ""
+    crash_paths = sorted(session_dir.glob("*/crash.json")) + sorted(session_dir.glob("crash.json"))
+    for crash_path in crash_paths[:8]:
+        try:
+            payload = json.loads(crash_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        text = json.dumps(payload, default=str)
+        if not _text_is_provider_infra_failure(text):
+            continue
+        message = (
+            str(payload.get("exception_message") or "")
+            or str(payload.get("message") or "")
+            or str(payload.get("phase") or "provider infrastructure failure")
+        )
+        return " ".join(message.split())[:500]
+    return ""
+
+
+def _queue_task_provider_infra_failure(project_dir: Path, task_state: dict[str, Any]) -> str:
+    session_text = str(task_state.get("session_dir") or "").strip()
+    session_dir = Path(session_text) if session_text else None
+    reason = _session_provider_infra_failure_reason(session_dir)
+    if reason:
+        return reason
+    checkpoint_text = str(task_state.get("checkpoint_path") or "").strip()
+    if checkpoint_text:
+        reason = _session_provider_infra_failure_reason(Path(checkpoint_text).parent)
+        if reason:
+            return reason
+    ready_path = task_state.get("ready_path")
+    if ready_path:
+        try:
+            ready_payload = json.loads(Path(str(ready_path)).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            ready_payload = {}
+        if isinstance(ready_payload, dict):
+            ready_session = ready_payload.get("session_dir")
+            if ready_session:
+                reason = _session_provider_infra_failure_reason(Path(str(ready_session)))
+                if reason:
+                    return reason
+    return ""
+
+
 def artifact_mine_pass(project_dir: Path, failures: RunFailures) -> None:
     """Post-run on-disk invariant scan (Phase 5H).
 
@@ -215,6 +282,12 @@ def artifact_mine_pass(project_dir: Path, failures: RunFailures) -> None:
             if status not in {"done", "failed", "cancelled", "removed"}:
                 continue
             if not manifest.is_file():
+                if (
+                    status == "failed"
+                    and isinstance(task_state, dict)
+                    and _queue_task_provider_infra_failure(project_dir, task_state)
+                ):
+                    continue
                 failures.fail(
                     f"queue task {task_id!r} listed in state but has no manifest at {manifest}"
                 )
@@ -3251,6 +3324,7 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
     submitted_task: dict[str, Any] | None = None
     submitted_task_id: Optional[str] = None
     submitted_run_id: Optional[str] = None
+    terminal_provider_infra_reason = ""
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -3594,7 +3668,19 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
                     terminal_outcome=terminal_outcome,
                     log_fn=_log,
                 )
-                failures.fail(f"build terminal_outcome={terminal_outcome!r} (expected success)")
+                session_dir = _find_session_dir_for_run(
+                    ctx,
+                    submitted_run_id,
+                    queue_task_id=submitted_task_id,
+                )
+                terminal_provider_infra_reason = _session_provider_infra_failure_reason(session_dir)
+                if terminal_provider_infra_reason:
+                    failures.fail(
+                        "provider infrastructure failure before product build: "
+                        f"{terminal_provider_infra_reason}"
+                    )
+                else:
+                    failures.fail(f"build terminal_outcome={terminal_outcome!r} (expected success)")
             _safe_screenshot(page, artifact_dir, "07-build-terminal")
             _mc_user_probe(
                 page,
@@ -3623,6 +3709,12 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
             # ---------- Step 10: walk inspector tabs ----------
             _log("Step 10: walk inspector tabs")
             try:
+                if terminal_provider_infra_reason:
+                    failures.note(
+                        "final evidence controls skipped because provider infrastructure "
+                        "failed before product build"
+                    )
+                    raise StopIteration
                 if terminal_outcome is None:
                     failures.note("skipping final evidence controls because the build never reached terminal")
                     raise StopIteration
@@ -3694,13 +3786,19 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
 
             # ---------- Step 12: group concurrency evidence ----------
             _log("Step 12: group concurrency evidence")
-            _assert_group_concurrency_observed(
-                ctx,
-                run_id=submitted_run_id,
-                queue_task_id=submitted_task_id,
-                log_fn=_log,
-                failures=failures,
-            )
+            if terminal_provider_infra_reason:
+                failures.note(
+                    "group concurrency evidence skipped because provider infrastructure "
+                    "failed during spec compile"
+                )
+            else:
+                _assert_group_concurrency_observed(
+                    ctx,
+                    run_id=submitted_run_id,
+                    queue_task_id=submitted_task_id,
+                    log_fn=_log,
+                    failures=failures,
+                )
 
             # Final state snapshot
             try:
@@ -3741,7 +3839,11 @@ def _run_w1(ctx: ScenarioContext) -> ScenarioRunResult:
 
     debug.close()
     return ScenarioRunResult(
-        outcome="PASS" if not failures.failures else "FAIL",
+        outcome=(
+            "PASS"
+            if not failures.failures
+            else ("INFRA" if terminal_provider_infra_reason else "FAIL")
+        ),
         note=failures.summary(),
         duration_s=time.monotonic() - started,
         failures=list(failures.failures),
@@ -8732,9 +8834,7 @@ def _teardown_scenario_runtime(
 def classify_failure(failures: RunFailures) -> FailureClassification:
     """Classify whether a run's failures are INFRA or genuine FAIL."""
     text = "\n".join(failures.failures).lower()
-    if "rate limit" in text or "429" in text or "throttle" in text:
-        return "INFRA"
-    if "not logged in" in text or "please run /login" in text:
+    if _text_is_provider_infra_failure(text):
         return "INFRA"
     return "FAIL"
 

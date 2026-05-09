@@ -608,6 +608,66 @@ def test_artifact_mine_does_not_require_manifest_for_interrupted_queue_task(
     assert failures.failures == []
 
 
+def test_artifact_mine_treats_compile_usage_limit_as_infra_not_manifest_failure(
+    tmp_path: Path,
+) -> None:
+    """Provider quota failure before manifest write should not become artifact noise."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    project = tmp_path / "project"
+    session = project / ".worktrees" / "build-app" / "otto_logs" / "sessions" / "run-1"
+    (session / "spec").mkdir(parents=True)
+    (session / "spec" / "crash.json").write_text(
+        json.dumps(
+            {
+                "phase": "spec_compile",
+                "exception_message": "You've hit your usage limit. Try again later.",
+                "last_n_events": [
+                    {"event": "provider_error", "codexErrorInfo": "usageLimitExceeded"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (project / ".otto-queue-state.json").write_text(
+        json.dumps(
+            {
+                "tasks": {
+                    "build-app": {
+                        "status": "failed",
+                        "session_dir": str(session),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    failures = web_as_user.RunFailures()
+
+    web_as_user.artifact_mine_pass(project, failures)
+
+    assert failures.failures == []
+
+
+def test_web_as_user_classifies_usage_limit_as_infra() -> None:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import web_as_user  # type: ignore[import-not-found]
+    finally:
+        if str(SCRIPTS_DIR) in sys.path:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    failures = web_as_user.RunFailures()
+    failures.fail("provider infrastructure failure before product build: usageLimitExceeded")
+
+    assert web_as_user.classify_failure(failures) == "INFRA"
+
+
 def test_artifact_mine_flags_missing_otto_artifacts_gitignore_after_evidence(tmp_path: Path) -> None:
     sys.path.insert(0, str(SCRIPTS_DIR))
     try:
