@@ -33,6 +33,20 @@ v5_pending.jsonl write-coordination is unverified at high concurrency.
 
 **v6 work:** stress test 4+ concurrent submitters; harden any race seen.
 
+### Lead orchestrator-only enforcement leaks via Bash
+**State:** Lead's `disallowed_tools` blocks Write/Edit/MultiEdit/NotebookEdit
+(verified live), but the Lead can still write files via Bash heredoc
+(`cat > tests/foo.py << 'EOF' ... EOF`). The URL-shortener API child Lead
+took this path to write tests instead of dispatching the test subagent.
+
+**Impact:** moderate. Build/test code separation isn't enforced — same
+LLM may write app and tests, defeating the cross-check intent. Verify
+gate still catches false pass claims.
+
+**v6 work:** either (a) PreToolUse hook that rejects Bash commands
+matching `>\s*(tests/|.*\.test\.|.*\.spec\.)`, or (b) richer prompt
+language with concrete examples that nudge to Task.
+
 ### Per-task isolation under conflict resolution
 **State:** when a child's branch fails to merge into the parent's
 integration branch, v5 marks `merge_blocked` and continues. Plan-v5 §3
